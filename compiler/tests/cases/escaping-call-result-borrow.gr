@@ -1,0 +1,13 @@
+identity(value: &i32) -> &i32 {
+    value
+}
+
+bad() -> &i32 {
+    let local: i32 = 42;
+    let returned: &i32 = identity(&local);
+    returned
+}
+
+main() -> i32 {
+    42
+}

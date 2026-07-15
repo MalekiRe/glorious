@@ -1,0 +1,7 @@
+impl Drop for i32 {
+    drop(&mut self) -> { () }
+}
+
+main() -> i32 {
+    0
+}

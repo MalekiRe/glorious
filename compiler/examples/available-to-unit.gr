@@ -1,0 +1,20 @@
+struct OptionalEnvironment {}
+
+impl Use<[0, 1]> for OptionalEnvironment {}
+
+discard_when_optional<E>(value: E) -> ()
+where E: Use<[0, 0]> {
+    ()
+}
+
+discard_environment(value: OptionalEnvironment) -> () {
+    discard_when_optional(value)
+}
+
+close_available(available: Available<OptionalEnvironment>) -> () {
+    available_to_unit(available)
+}
+
+main() -> i32 {
+    42
+}

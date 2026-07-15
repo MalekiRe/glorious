@@ -1,0 +1,11 @@
+struct Resource {}
+
+impl Use<[0,0]> for Resource {}
+
+impl Drop for Resource {
+    drop(&mut self) -> { () }
+}
+
+main() -> i32 {
+    0
+}

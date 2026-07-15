@@ -1,0 +1,7 @@
+main() -> i32 {
+    let value: i32 = 42;
+    let parent: &mut i32 = &mut value;
+    let child: &mut i32 = &mut *parent;
+    let copied: i32 = *parent;
+    *child + copied - 42
+}

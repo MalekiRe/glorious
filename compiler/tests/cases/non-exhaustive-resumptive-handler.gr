@@ -1,0 +1,18 @@
+enum Choice {
+    First,
+    Second
+}
+
+effect Select {
+    [1, 1] select(choice: Choice) -> i32;
+}
+
+selected(choice: Choice) -> i32 / {Select} {
+    perform Select::select(choice)
+}
+
+main() -> i32 {
+    handle (selected(Choice::First)) {
+        Select::select(Choice::First) with k => resume(k, 42)
+    }
+}

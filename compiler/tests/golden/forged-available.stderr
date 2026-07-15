@@ -1,0 +1,11 @@
+[GRC1850] Error: availability evidence cannot be constructed
+   ╭─[ <repo>/compiler/tests/cases/forged-available.gr:6:5 ]
+   │
+ 6 │     Available {}
+   │     ──────┬─────  
+   │           ╰─────── `Available<E>` witnesses are created only by checked post-environment lowering
+   │ 
+   │ Help: receive an `Available<E>` from an incremental ownership operation instead of constructing one
+   │ 
+   │ Note: the witness proves that an owned environment transition has not occurred on this runtime path
+───╯

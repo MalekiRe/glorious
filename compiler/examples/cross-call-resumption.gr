@@ -1,0 +1,22 @@
+effect Ask {
+    [1, 1] ask(seed: i32) -> i32;
+}
+
+ask_value(seed: i32) -> i32 / {Ask} {
+    perform Ask::ask(seed)
+}
+
+ask_plus(seed: i32, delta: i32) -> i32 / {Ask} {
+    let value: i32 = ask_value(seed);
+    value + delta
+}
+
+finish(value: i32) -> i32 {
+    value + 2
+}
+
+main() -> i32 {
+    handle (ask_plus(40, 0)) {
+        Ask::ask(seed) with k => finish(resume(k, seed))
+    }
+}

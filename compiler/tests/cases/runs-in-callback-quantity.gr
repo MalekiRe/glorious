@@ -1,0 +1,20 @@
+effect Choose {
+    [1, 1] choose() -> i32;
+}
+
+twice<F, R>(body: F) -> R
+where F: Fn<(), Output = R> {
+    let ignored: R = body();
+    body()
+}
+
+main() -> i32 {
+    handle {
+        let selected: i32 = perform Choose::choose();
+        selected + 1
+    } {
+        Choose::choose() with k => twice() {
+            resume(k, 41)
+        }
+    }
+}

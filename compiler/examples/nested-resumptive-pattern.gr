@@ -1,0 +1,30 @@
+enum Inner {
+    Zero,
+    Number(i32)
+}
+
+enum Outer {
+    Empty,
+    Wrapped(Inner)
+}
+
+effect Inspect {
+    [1, 1] inspect(value: Outer) -> i32;
+}
+
+selected(value: Outer) -> i32 / {Inspect} {
+    perform Inspect::inspect(value)
+}
+
+run(value: Outer) -> i32 {
+    handle (selected(value)) {
+        Inspect::inspect(Outer::Wrapped(Inner::Number(inner))) with k =>
+            resume(k, inner),
+        Inspect::inspect(Outer::Wrapped(_)) with k => resume(k, 0),
+        Inspect::inspect(Outer::Empty) with k => resume(k, 0)
+    }
+}
+
+main() -> i32 {
+    run(Outer::Wrapped(Inner::Number(42)))
+}

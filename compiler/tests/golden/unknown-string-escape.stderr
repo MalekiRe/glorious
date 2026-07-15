@@ -1,0 +1,11 @@
+[GRC0103] Error: unknown string escape
+   ╭─[ <repo>/compiler/tests/cases/unknown-string-escape.gr:2:31 ]
+   │
+ 2 │     let message: String = "bad\qescape";
+   │                               ─┬  
+   │                                ╰── `\q` is not a Grandiose string escape
+   │ 
+   │ Help: replace this escape with a supported one
+   │ 
+   │ Note: valid escapes are `\n`, `\r`, `\t`, `\"`, and `\\`
+───╯

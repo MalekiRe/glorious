@@ -1,0 +1,13 @@
+struct Resource {}
+
+impl Drop for Resource {
+    drop(&mut self) -> { () }
+}
+
+drop_hook_struct_Resource() -> () {
+    ()
+}
+
+main() -> i32 {
+    0
+}

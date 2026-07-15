@@ -1,0 +1,41 @@
+struct Resource {
+    value: i32,
+}
+
+impl Use<[0,1]> for Resource {}
+
+impl Drop for Resource {
+    drop(&mut self) -> { () }
+}
+
+effect Send {
+    [0,1] take(resource: Resource) -> i32;
+}
+
+run(resource: Resource) -> i32 / {Send} {
+    let answer: i32 = perform Send::take(resource);
+    answer + 1000
+}
+
+bound_payload() -> i32 {
+    handle (run(Resource { value: 42 })) {
+        Send::take(resource) with k => {
+            destroy(resource);
+            cancel(k);
+            42
+        }
+    }
+}
+
+discarded_payload() -> i32 {
+    handle (run(Resource { value: 7 })) {
+        Send::take(_) with k => {
+            cancel(k);
+            42
+        }
+    }
+}
+
+main() -> i32 {
+    bound_payload() + discarded_payload() - 42
+}

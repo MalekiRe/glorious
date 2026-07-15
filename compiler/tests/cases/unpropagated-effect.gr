@@ -1,0 +1,11 @@
+effect Trace {
+    emit(value: i32) -> ();
+}
+
+answer() -> i32 / {Trace} {
+    42
+}
+
+main() -> i32 {
+    answer()
+}

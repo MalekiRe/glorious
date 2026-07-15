@@ -1,0 +1,11 @@
+[GRC1826] Error: effect escapes callable without appearing in its row
+    ╭─[ <repo>/compiler/tests/cases/unpropagated-effect.gr:10:5 ]
+    │
+ 10 │     answer()
+    │     ────┬───  
+    │         ╰───── call to `answer` requires effect `Trace`
+    │ 
+    │ Help: add `Trace` to the callable effect row or handle it here
+    │ 
+    │ Note: every performed or called outward protocol must be declared or eliminated by an exhaustive handler
+────╯

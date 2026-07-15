@@ -1,0 +1,11 @@
+[GRC0101] Error: unexpected character
+   ╭─[ <repo>/compiler/tests/cases/invalid-character.gr:2:5 ]
+   │
+ 2 │     @
+   │     ┬  
+   │     ╰── this character is not valid in the bootstrap grammar
+   │ 
+   │ Help: remove the character or replace it with valid Grandiose syntax
+   │ 
+   │ Note: the lexer reports Unicode characters on their complete UTF-8 span
+───╯

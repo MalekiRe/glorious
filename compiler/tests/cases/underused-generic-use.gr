@@ -1,0 +1,8 @@
+forget<E>(value: E) -> ()
+where E: Use<[1, 1]> {
+    ()
+}
+
+main() -> i32 {
+    42
+}

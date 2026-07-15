@@ -1,0 +1,14 @@
+[GRC1864] Error: unique reborrow requires unique access
+   ╭─[ <repo>/compiler/tests/cases/unique-reborrow-from-shared.gr:2:28 ]
+   │
+ 1 │ invalid(value: &i32) -> i32 {
+   │                ──┬─  
+   │                  ╰─── this source reference is shared
+ 2 │     let unique: &mut i32 = &mut *value;
+   │                            ─────┬─────  
+   │                                 ╰─────── a shared reference cannot produce `&mut` access
+   │ 
+   │ Help: use `&*value` for a shared reborrow or accept `&mut` input
+   │ 
+   │ Note: unique access may be reborrowed only from an existing unique reference
+───╯

@@ -1,0 +1,32 @@
+effect Ask {
+    [1, 1] value(seed: i32) -> i32;
+}
+
+effect Extra {
+    [1, 1] value(seed: i32) -> i32;
+}
+
+ask(seed: i32) -> i32 / {Ask} {
+    perform Ask::value(seed)
+}
+
+extra(seed: i32) -> i32 / {Extra} {
+    perform Extra::value(seed)
+}
+
+run() -> i32 / {Extra} {
+    let inner: i32 = handle (ask(20) + 2) {
+        Ask::value(seed) with k => resume(k, seed)
+    };
+    inner + extra(0)
+}
+
+main() -> i32 {
+    let direct: i32 = handle (ask(0) + 2) {
+        Ask::value(seed) with k => resume(k, seed)
+    };
+    let stepped: i32 = handle (run()) {
+        Extra::value(seed) with k => resume(k, seed + 18)
+    };
+    direct + stepped
+}

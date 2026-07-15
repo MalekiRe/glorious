@@ -1,0 +1,13 @@
+effect Ask {
+    [1,1] ask(value: i32) -> i32;
+}
+
+main() -> i32 {
+    handle {
+        let first: i32 = perform Ask::ask(1);
+        let second: i32 = perform Ask::ask(first);
+        second + 1
+    } {
+        Ask::ask(value) with k => resume(k, value + 20)
+    }
+}

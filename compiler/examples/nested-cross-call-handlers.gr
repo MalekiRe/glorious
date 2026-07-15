@@ -1,0 +1,26 @@
+effect Outer {
+    [1, 1] outer(seed: i32) -> i32;
+}
+
+effect Inner {
+    [1, 1] inner(value: i32) -> i32;
+}
+
+outer_value(seed: i32) -> i32 / {Outer} {
+    perform Outer::outer(seed)
+}
+
+inner_value(value: i32) -> i32 / {Inner} {
+    perform Inner::inner(value)
+}
+
+main() -> i32 {
+    handle (outer_value(20)) {
+        Outer::outer(seed) with outer_k => {
+            let base: i32 = resume(outer_k, seed);
+            handle (inner_value(base)) {
+                Inner::inner(value) with inner_k => resume(inner_k, value + 22)
+            }
+        }
+    }
+}

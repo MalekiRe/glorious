@@ -1,0 +1,7 @@
+read(value: &i32) -> i32 {
+    *value
+}
+
+main() -> i32 {
+    read(&(40 + 2))
+}

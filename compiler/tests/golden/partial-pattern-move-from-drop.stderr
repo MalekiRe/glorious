@@ -1,0 +1,15 @@
+[GRC1870] Error: cannot partially move from a `Drop` type
+    ╭─[ <repo>/compiler/tests/cases/partial-pattern-move-from-drop.gr:24:20 ]
+    │
+ 15 │     [0,1] take(packet: Packet) -> i32;
+    │                        ───┬──  
+    │                           ╰──── this value has a custom `Drop` hook
+    │ 
+ 24 │         Send::take(Packet::Full(ticket)) with k => {
+    │                    ──────────┬─────────  
+    │                              ╰─────────── this variant pattern binds a restricted payload from `Packet`
+    │ 
+    │ Help: bind the complete value or borrow its payload instead
+    │ 
+    │ Note: the hook must observe a fully initialized value before structural destruction
+────╯

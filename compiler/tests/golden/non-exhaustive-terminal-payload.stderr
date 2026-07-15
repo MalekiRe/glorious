@@ -1,0 +1,17 @@
+[GRC1813] Error: non-exhaustive terminal payload patterns
+    ╭─[ <repo>/compiler/tests/cases/non-exhaustive-terminal-payload.gr:15:5 ]
+    │
+  7 │         Wrapped(Inner)
+    │         ───┬───  
+    │            ╰───── this variant's payload must have a fallback path
+    │ 
+ 15 │ ╭─▶     handle perform OuterCase::inspect(Outer::Wrapped(Inner::Number(42))) {
+    ┆ ┆   
+ 17 │ ├─▶     }
+    │ │           
+    │ ╰─────────── ordered clauses for `Outer::Wrapped` do not include a total payload pattern
+    │     
+    │     Help: add a final `Outer::Wrapped(...)` clause using bindings or `_` for every payload
+    │     
+    │     Note: nested literal and variant patterns are tested in source order within each outer enum tag
+────╯

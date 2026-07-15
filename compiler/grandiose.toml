@@ -1,0 +1,9 @@
+[project]
+name = "grandiose-compiler"
+version = "0.1.0"
+entry = "src/main.gr"
+
+[backend]
+kind = "llvm"
+minimum-version = 18
+

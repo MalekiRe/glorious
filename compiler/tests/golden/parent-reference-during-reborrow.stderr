@@ -1,0 +1,14 @@
+[GRC1863] Error: parent reference used during reborrow
+   ╭─[ <repo>/compiler/tests/cases/parent-reference-during-reborrow.gr:5:23 ]
+   │
+ 4 │     let child: &mut i32 = &mut *parent;
+   │                           ──────┬─────  
+   │                                 ╰─────── this reborrow remains live through its final use
+ 5 │     let copied: i32 = *parent;
+   │                       ───┬───  
+   │                          ╰───── `parent` is used while its child reborrow is live
+   │ 
+   │ Help: use the child reference or end its final use before reusing the parent
+   │ 
+   │ Note: a unique reborrow temporarily suspends access through its parent reference
+───╯

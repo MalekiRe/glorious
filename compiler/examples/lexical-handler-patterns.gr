@@ -1,0 +1,21 @@
+effect Select {
+    [1, 1] select(value: i32) -> i32;
+}
+
+selected(value: i32) -> i32 / {Select} {
+    perform Select::select(value)
+}
+
+run(value: i32) -> i32 {
+    handle ({
+        let chosen: i32 = selected(value);
+        chosen
+    }) {
+        Select::select(0) with k => resume(k, 40),
+        Select::select(other) with k => resume(k, other)
+    }
+}
+
+main() -> i32 {
+    run(0) + run(2)
+}

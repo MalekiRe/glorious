@@ -1,0 +1,22 @@
+enum CleanupSignal {
+    Finish,
+}
+
+effect Cleanup {
+    finish(signal: CleanupSignal) -> !;
+}
+
+struct Resource {}
+
+impl Drop for Resource {
+    drop(&mut self) -> {
+        handle perform Cleanup::finish(CleanupSignal::Finish) {
+            Cleanup::finish(CleanupSignal::Finish) => ()
+        }
+    }
+}
+
+main() -> i32 {
+    destroy(Resource {});
+    42
+}

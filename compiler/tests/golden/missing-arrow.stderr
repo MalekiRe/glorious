@@ -1,0 +1,11 @@
+[GRC0202] Error: unexpected token
+   ╭─[ <repo>/compiler/tests/cases/missing-arrow.gr:1:8 ]
+   │
+ 1 │ main() i64 {
+   │        ─┬─  
+   │         ╰─── expected `->` here
+   │ 
+   │ Help: write `main() -> i64 { 42 }`
+   │ 
+   │ Note: the bootstrap parser follows the callable grammar, not textual brace searching
+───╯

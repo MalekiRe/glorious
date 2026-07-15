@@ -1,0 +1,21 @@
+effect Ask {
+    [1, 1] ask(value: i32) -> i32;
+}
+
+ask(value: i32) -> i32 / {Ask} {
+    perform Ask::ask(value)
+}
+
+twice(seed: i32) -> i32 / {Ask} {
+    let offset: i32 = seed + 1;
+    let first: i32 = ask(offset);
+    let between: i32 = first + 1;
+    let second: i32 = ask(between);
+    between + second
+}
+
+main() -> i32 {
+    handle (twice(19)) {
+        Ask::ask(value) with k => resume(k, value)
+    }
+}

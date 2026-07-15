@@ -1,0 +1,11 @@
+[GRC1301] Error: unknown callable
+   ╭─[ <repo>/compiler/tests/cases/unknown-callable.gr:2:5 ]
+   │
+ 2 │     ansewr() + 2
+   │     ────┬───  
+   │         ╰───── no callable named `ansewr` is declared in this module
+   │ 
+   │ Help: declare `ansewr() -> i64 { ... }` or correct the call name
+   │ 
+   │ Note: name resolution runs before LLVM symbols are emitted
+───╯

@@ -1,0 +1,11 @@
+[GRC1862] Error: borrowed place escapes its lifetime
+   ╭─[ <repo>/compiler/tests/cases/escaping-parameter-borrow.gr:2:5 ]
+   │
+ 2 │     &value
+   │     ───┬──  
+   │        ╰──── this returned reference points into call-local place `value`
+   │ 
+   │ Help: return an incoming reference or an owned value instead
+   │ 
+   │ Note: call-local storage ends when its enclosing scope exits
+───╯

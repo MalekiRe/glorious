@@ -1,0 +1,15 @@
+effect Stop {
+    [0,1] stop() -> i32;
+}
+
+main() -> i32 {
+    handle {
+        let ignored: i32 = perform Stop::stop();
+        ignored + 1000
+    } {
+        Stop::stop() with k => {
+            cancel(k);
+            42
+        }
+    }
+}

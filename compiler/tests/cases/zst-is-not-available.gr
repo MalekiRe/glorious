@@ -1,0 +1,7 @@
+wrong(value: ()) -> () {
+    available_to_unit(value)
+}
+
+main() -> i32 {
+    42
+}

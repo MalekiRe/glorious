@@ -1,0 +1,15 @@
+struct Ticket {
+    value: i32,
+}
+
+impl Use<[1, 1]> for Ticket {}
+
+struct Envelope {
+    ticket: Ticket,
+}
+
+impl Use<[0, 1]> for Envelope {}
+
+main() -> i32 {
+    42
+}

@@ -1,0 +1,15 @@
+effect Log {
+    write() -> ();
+}
+
+struct Resource {}
+
+impl Drop for Resource {
+    drop(&mut self) -> / {Log} {
+        perform Log::write()
+    }
+}
+
+main() -> i32 {
+    0
+}

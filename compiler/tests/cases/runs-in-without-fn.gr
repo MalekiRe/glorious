@@ -1,0 +1,10 @@
+invalid<E, S, F, R>(body: F) -> R
+where E: Environment,
+      S: Environment,
+      F: RunsIn<E, (), After = S> {
+    body()
+}
+
+main() -> i32 {
+    42
+}

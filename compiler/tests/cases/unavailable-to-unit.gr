@@ -1,0 +1,11 @@
+struct LinearEnvironment {}
+
+impl Use<[1, 1]> for LinearEnvironment {}
+
+close_available(available: Available<LinearEnvironment>) -> () {
+    available_to_unit(available)
+}
+
+main() -> i32 {
+    42
+}

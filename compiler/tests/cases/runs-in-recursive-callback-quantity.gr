@@ -1,0 +1,19 @@
+effect Choose {
+    [1, 1] choose() -> i32;
+}
+
+again<F, R>(body: F) -> R
+where F: Fn<(), Output = R> {
+    again(body)
+}
+
+main() -> i32 {
+    handle {
+        let selected: i32 = perform Choose::choose();
+        selected + 1
+    } {
+        Choose::choose() with k => again() {
+            resume(k, 41)
+        }
+    }
+}

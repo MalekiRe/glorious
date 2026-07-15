@@ -1,0 +1,17 @@
+[GRC1832] Error: non-exhaustive resumptive handler
+    ╭─[ <repo>/compiler/tests/cases/non-exhaustive-resumptive-handler.gr:15:5 ]
+    │
+  7 │         [1, 1] select(choice: Choice) -> i32;
+    │                ───┬──  
+    │                   ╰──── the handled operation is declared here
+    │ 
+ 15 │ ╭─▶     handle (selected(Choice::First)) {
+    ┆ ┆   
+ 17 │ ├─▶     }
+    │ │           
+    │ ╰─────────── no clause accepts every operation argument
+    │     
+    │     Help: add a clause using bindings or `_` for every operation argument
+    │     
+    │     Note: partial inline handlers forward uncovered operations and therefore cannot remove the protocol
+────╯

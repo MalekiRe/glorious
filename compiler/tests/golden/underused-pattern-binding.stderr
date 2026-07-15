@@ -1,0 +1,15 @@
+[GRC1840] Error: owned value may be left unused
+    ╭─[ <repo>/compiler/tests/cases/underused-pattern-binding.gr:13:29 ]
+    │
+  8 │     inspect(value: Ticket) -> !;
+    │                    ───┬──  
+    │                       ╰──── this type determines the permitted owned-use interval
+    │ 
+ 13 │         TicketCase::inspect(ticket) => 42
+    │                             ───┬──  
+    │                                ╰──── `ticket` is used [0,0], but its principal interval is [1,1]
+    │ 
+    │ Help: consume the value on every normal path
+    │ 
+    │ Note: sequential uses add while mutually exclusive branches join their possible counts
+────╯

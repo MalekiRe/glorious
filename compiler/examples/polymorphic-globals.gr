@@ -1,0 +1,14 @@
+enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+let None = Result::Err(());
+
+classify(value: Result<i64, ()>) -> i64 {
+    42
+}
+
+main() -> i64 {
+    classify(None)
+}

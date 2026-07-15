@@ -1,0 +1,13 @@
+[GRC1201] Error: division by zero
+   ╭─[ <repo>/compiler/tests/cases/division-by-zero.gr:2:11 ]
+   │
+ 2 │     42 / (0)
+   │     ───┬──┬  
+   │        ╰───── in this division expression
+   │           │  
+   │           ╰── this expression is statically known to be zero
+   │ 
+   │ Help: change the divisor to a non-zero expression
+   │ 
+   │ Note: LLVM integer division by zero has undefined behavior
+───╯

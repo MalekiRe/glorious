@@ -1,0 +1,12 @@
+struct Pair {
+    left: i32,
+    right: i32
+}
+
+read(pair: Pair) -> i32 {
+    pair.middle
+}
+
+main() -> i32 {
+    0
+}

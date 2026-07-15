@@ -1,0 +1,14 @@
+effect Ask {
+    [1, 1] value() -> i32;
+}
+
+run<R, F>(body: F) -> R
+where F: Fn<(), Output = R> {
+    body()
+}
+
+main() -> i32 {
+    run() {
+        perform Ask::value()
+    }
+}

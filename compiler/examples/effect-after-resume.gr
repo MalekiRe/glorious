@@ -1,0 +1,31 @@
+effect Outer {
+    [1, 1] value() -> i32;
+}
+
+effect Inner {
+    [1, 1] value() -> i32;
+}
+
+inner_value() -> i32 / {Outer, Inner} {
+    perform Inner::value()
+}
+
+outer_value() -> i32 / {Outer} {
+    perform Outer::value()
+}
+
+run() -> i32 / {Outer} {
+    handle (inner_value()) {
+        Inner::value() with k => {
+            let resumed: i32 = resume(k, 20);
+            let extra: i32 = outer_value();
+            resumed + extra
+        }
+    }
+}
+
+main() -> i32 {
+    handle (run()) {
+        Outer::value() with k => resume(k, 22)
+    }
+}

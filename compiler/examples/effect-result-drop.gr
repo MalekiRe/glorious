@@ -1,0 +1,25 @@
+struct Resource {
+    value: i32,
+}
+
+impl Use<[0,1]> for Resource {}
+
+impl Drop for Resource {
+    drop(&mut self) -> { () }
+}
+
+effect Make {
+    [1,1] make() -> Resource;
+}
+
+run() -> i32 / {Make} {
+    let resource: Resource = perform Make::make();
+    destroy(resource);
+    42
+}
+
+main() -> i32 {
+    handle (run()) {
+        Make::make() with k => resume(k, Resource { value: 42 })
+    }
+}

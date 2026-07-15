@@ -1,0 +1,14 @@
+[GRC1701] Error: local binding declared more than once
+   ╭─[ <repo>/compiler/tests/cases/duplicate-local.gr:3:9 ]
+   │
+ 2 │     let answer: i32 = 40;
+   │         ───┬──  
+   │            ╰──── the previous binding is here
+ 3 │     let answer: i32 = 2;
+   │         ───┬──  
+   │            ╰──── `answer` is already in lexical scope
+   │ 
+   │ Help: rename this local binding
+   │ 
+   │ Note: this bootstrap scope keeps one SSA identity per source name
+───╯

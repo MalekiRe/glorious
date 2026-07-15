@@ -1,0 +1,13 @@
+[GRC1846] Error: manual `Use` implementation widens structural capability
+    ╭─[ <repo>/compiler/tests/cases/widened-structural-use.gr:11:10 ]
+    │
+ 11 │ impl Use<[0, 1]> for Envelope {}
+    │          ───┬──      ────┬───  
+    │             ╰────────────────── requested [0,1], but fields support only [1,1]
+    │                          │     
+    │                          ╰───── this nominal type derives its structural capability from its fields
+    │ 
+    │ Help: choose a subset of the structurally derived interval
+    │ 
+    │ Note: a manual principal interval may raise the lower bound or lower the upper bound, never widen either side
+────╯

@@ -1,0 +1,9 @@
+main() -> i32 {
+    let value: i32 = 42;
+    let result: i32 = {
+        let unique: &mut i32 = &mut value;
+        let copied: i32 = value;
+        *unique + copied - 42
+    };
+    result
+}

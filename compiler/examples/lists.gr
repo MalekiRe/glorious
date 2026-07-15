@@ -1,0 +1,5 @@
+main() -> i64 {
+    let initial: List<i64> = [40];
+    let values: List<i64> = core::list_push(initial, 2);
+    core::list_get(values, 0) + core::list_get(values, 1)
+}

@@ -1,0 +1,14 @@
+effect CharacterCase {
+    inspect(value: String) -> !;
+}
+
+classify(value: String) -> i64 {
+    handle perform CharacterCase::inspect(value) {
+        CharacterCase::inspect("(") => 42,
+        CharacterCase::inspect(_) => 0
+    }
+}
+
+main() -> i64 {
+    classify("(")
+}

@@ -1,0 +1,40 @@
+effect Outer {
+    [1, 1] ask() -> i32;
+}
+
+effect Inner {
+    [1, 1] ping() -> i32;
+}
+
+overdeclared() -> i32 / {Outer, Inner} {
+    perform Outer::ask()
+}
+
+overdeclared_inner() -> i32 / {Outer, Inner} {
+    perform Inner::ping()
+}
+
+forward_outer() -> i32 / {Outer} {
+    handle (overdeclared()) {
+        Inner::ping() with k => resume(k, 0)
+    }
+}
+
+forward_inner() -> i32 / {Outer} {
+    handle (overdeclared_inner()) {
+        Inner::ping() with k => {
+            let resumed: i32 = resume(k, 0);
+            resumed + 2
+        }
+    }
+}
+
+main() -> i32 {
+    let outer: i32 = handle (forward_outer()) {
+        Outer::ask() with k => resume(k, 40)
+    };
+    let inner: i32 = handle (forward_inner()) {
+        Outer::ask() with k => resume(k, 0)
+    };
+    outer + inner
+}

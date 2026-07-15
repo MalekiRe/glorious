@@ -1,0 +1,14 @@
+[GRC1401] Error: type mismatch
+   ╭─[ <repo>/compiler/tests/cases/type-mismatch.gr:6:5 ]
+   │
+ 5 │ main() -> i32 {
+   │           ─┬─  
+   │            ╰─── the expected type is declared here
+ 6 │     wide()
+   │     ───┬──  
+   │        ╰──── call to `wide` has type `i64`, but `i32` is required
+   │ 
+   │ Help: make the source types agree explicitly
+   │ 
+   │ Note: Grandiose does not implicitly narrow or widen integer values
+───╯

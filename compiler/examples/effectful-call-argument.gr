@@ -1,0 +1,21 @@
+effect Ask {
+    [1, 1] ask(value: i32) -> i32;
+}
+
+ask(value: i32) -> i32 / {Ask} {
+    perform Ask::ask(value)
+}
+
+finish(value: i32) -> i32 {
+    value + 2
+}
+
+answer() -> i32 / {Ask} {
+    finish(ask(40))
+}
+
+main() -> i32 {
+    handle (answer()) {
+        Ask::ask(value) with k => resume(k, value)
+    }
+}

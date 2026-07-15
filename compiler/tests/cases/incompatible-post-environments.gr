@@ -1,0 +1,40 @@
+struct Ticket {
+    value: i32,
+}
+
+impl Use<[0, 1]> for Ticket {}
+
+enum Bool {
+    True,
+    False,
+}
+
+effect BoolCase {
+    inspect(value: Bool) -> !;
+}
+
+choose<E, S, F, G, R>(condition: Bool, first: F, second: G) -> R
+where F: Fn<(), Output = R>,
+      G: Fn<(), Output = R>,
+      E: Environment,
+      S: Environment,
+      F: RunsIn<E, (), After = S>,
+      G: RunsIn<E, (), After = S> {
+    handle perform BoolCase::inspect(condition) {
+        BoolCase::inspect(Bool::True) => first(),
+        BoolCase::inspect(Bool::False) => second()
+    }
+}
+
+select(condition: Bool) -> i32 {
+    let ticket: Ticket = Ticket { value: 42 };
+    choose(
+        condition,
+        { ticket.value },
+        { 0 }
+    )
+}
+
+main() -> i32 {
+    select(Bool::True)
+}

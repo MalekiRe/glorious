@@ -1,0 +1,8 @@
+bad() -> &i32 {
+    let local: i32 = 42;
+    &local
+}
+
+main() -> i32 {
+    42
+}

@@ -1,0 +1,15 @@
+[GRC1501] Error: missing struct field
+   ╭─[ <repo>/compiler/tests/cases/missing-struct-field.gr:7:5 ]
+   │
+ 3 │     right: i32
+   │     ──┬──  
+   │       ╰──── the required field is declared here
+   │ 
+ 7 │     Pair { left: 40 }
+   │     ────────┬────────  
+   │             ╰────────── construction of `Pair` omits field `right`
+   │ 
+   │ Help: add `right: <expression>` to this value
+   │ 
+   │ Note: nominal construction must initialize every declared field exactly once
+───╯

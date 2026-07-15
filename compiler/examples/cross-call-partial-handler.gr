@@ -1,0 +1,25 @@
+enum Choice {
+    First(i32),
+    Second(i32)
+}
+
+effect Select {
+    [1, 1] select(choice: Choice) -> i32;
+}
+
+selected(choice: Choice) -> i32 / {Select} {
+    perform Select::select(choice)
+}
+
+partial_run(choice: Choice) -> i32 / {Select} {
+    handle (selected(choice)) {
+        Select::select(Choice::First(value)) with k => resume(k, value)
+    }
+}
+
+main() -> i32 {
+    handle (partial_run(Choice::Second(40))) {
+        Select::select(Choice::First(value)) with k => resume(k, value),
+        Select::select(Choice::Second(value)) with k => resume(k, value + 2)
+    }
+}

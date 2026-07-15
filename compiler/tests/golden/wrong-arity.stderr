@@ -1,0 +1,15 @@
+[GRC1305] Error: wrong number of arguments
+   ╭─[ <repo>/compiler/tests/cases/wrong-arity.gr:6:5 ]
+   │
+ 1 │ add(lhs: i64, rhs: i64) -> i64 {
+   │ ─┬─  
+   │  ╰─── the callable is declared here
+   │ 
+ 6 │     add(40)
+   │     ───┬───  
+   │        ╰───── `add` expects 2 argument(s), but this call supplies 1
+   │ 
+   │ Help: supply exactly one expression for each declared parameter
+   │ 
+   │ Note: call arity is checked before LLVM lowering
+───╯

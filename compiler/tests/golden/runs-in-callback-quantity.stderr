@@ -1,0 +1,17 @@
+[GRC1833] Error: handler clause violates its resumption quantity
+    ╭─[ <repo>/compiler/tests/cases/runs-in-callback-quantity.gr:16:9 ]
+    │
+  2 │         [1, 1] choose() -> i32;
+    │                ───┬──  
+    │                   ╰──── the operation quantity is declared here
+    │ 
+ 16 │ ╭─▶         Choose::choose() with k => twice() {
+    ┆ ┆   
+ 18 │ ├─▶         }
+    │ │               
+    │ ╰─────────────── `k` is used [2,2], but the operation permits [1,1]
+    │     
+    │     Help: resume or cancel the continuation within its declared quantity
+    │     
+    │     Note: resumption use intervals compose sequential paths, alternatives, and transitive `Fn` callback invocation counts
+────╯

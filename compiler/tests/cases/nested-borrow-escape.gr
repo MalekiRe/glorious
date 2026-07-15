@@ -1,0 +1,7 @@
+main() -> i32 {
+    let borrowed: &i32 = {
+        let local: i32 = 42;
+        &local
+    };
+    *borrowed
+}

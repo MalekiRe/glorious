@@ -1,0 +1,14 @@
+[GRC1861] Error: overlapping incompatible borrows
+   ╭─[ <repo>/compiler/tests/cases/overlapping-borrows.gr:4:28 ]
+   │
+ 3 │     let shared: &i32 = &value;
+   │                        ───┬──  
+   │                           ╰──── the earlier shared borrow remains live through its last use
+ 4 │     let unique: &mut i32 = &mut value;
+   │                            ─────┬────  
+   │                                 ╰────── this unique borrow overlaps an active borrow of `value`
+   │ 
+   │ Help: end the earlier reference use before taking this borrow
+   │ 
+   │ Note: nonlexical loans end after the final use of their reference binding
+───╯

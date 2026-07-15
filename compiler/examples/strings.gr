@@ -1,0 +1,9 @@
+identity(value: String) -> String {
+    value
+}
+
+main() -> i32 {
+    let message: String = "Grandiose\n\"LLVM\"";
+    let copied: String = identity(message);
+    42
+}

@@ -1,0 +1,13 @@
+[GRC1870] Error: cannot partially move from a `Drop` type
+    ╭─[ <repo>/compiler/tests/cases/partial-move-from-drop.gr:12:24 ]
+    │
+ 12 │     let moved: Field = resource.field;
+    │                        ────┬──┬──────  
+    │                            ╰─────────── this value has a custom `Drop` hook
+    │                               │        
+    │                               ╰──────── field `field` is not unrestricted and would leave the value partially initialized
+    │ 
+    │ Help: borrow the field or move the complete value instead
+    │ 
+    │ Note: the hook must observe a fully initialized value before structural destruction
+────╯

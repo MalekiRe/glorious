@@ -1,0 +1,11 @@
+[GRC1822] Error: unknown effect in callable row
+   ╭─[ <repo>/compiler/tests/cases/unknown-effect-row.gr:1:20 ]
+   │
+ 1 │ helper() -> i32 / {MissingEffect} {
+   │                    ──────┬──────  
+   │                          ╰──────── effect `MissingEffect` is not declared in this module
+   │ 
+   │ Help: declare the effect or correct its name
+   │ 
+   │ Note: outward effects resolve through nominal effect declarations
+───╯

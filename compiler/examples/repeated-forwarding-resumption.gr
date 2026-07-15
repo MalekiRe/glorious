@@ -1,0 +1,28 @@
+effect Outer {
+    [1, 1] value() -> i32;
+}
+
+effect Choose {
+    [2, 2] choose() -> i32;
+}
+
+choose_value() -> i32 / {Outer, Choose} {
+    let selected: i32 = perform Choose::choose();
+    selected + 1
+}
+
+run() -> i32 / {Outer} {
+    handle (choose_value()) {
+        Choose::choose() with k => {
+            let first: i32 = resume(k, 19);
+            let second: i32 = resume(k, 41);
+            second
+        }
+    }
+}
+
+main() -> i32 {
+    handle (run()) {
+        Outer::value() with k => resume(k, 0)
+    }
+}

@@ -1,0 +1,11 @@
+[GRC0301] Error: unknown type
+   ╭─[ <repo>/compiler/tests/cases/unknown-type.gr:1:11 ]
+   │
+ 1 │ main() -> Number {
+   │           ───┬──  
+   │              ╰──── `Number` is not declared as a source type
+   │ 
+   │ Help: declare a `struct`, `enum`, type alias, or use a known type
+   │ 
+   │ Note: type names resolve after the complete module has been parsed
+───╯

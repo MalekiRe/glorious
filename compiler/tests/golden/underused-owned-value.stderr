@@ -1,0 +1,13 @@
+[GRC1840] Error: owned value may be left unused
+   ╭─[ <repo>/compiler/tests/cases/underused-owned-value.gr:7:9 ]
+   │
+ 7 │ discard(ticket: Ticket) -> i32 {
+   │         ───┬──  ───┬──  
+   │            ╰──────────── `ticket` is used [0,0], but its principal interval is [1,1]
+   │                    │    
+   │                    ╰──── this type determines the permitted owned-use interval
+   │ 
+   │ Help: consume the value on every normal path
+   │ 
+   │ Note: sequential uses add while mutually exclusive branches join their possible counts
+───╯

@@ -1,0 +1,6 @@
+type First = Second;
+type Second = First;
+
+main() -> i32 {
+    42
+}

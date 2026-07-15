@@ -1,0 +1,11 @@
+[GRC1304] Error: unknown value
+   ╭─[ <repo>/compiler/tests/cases/invalid-integer.gr:2:5 ]
+   │
+ 2 │     definitely_not_an_integer
+   │     ────────────┬────────────  
+   │                 ╰────────────── no parameter named `definitely_not_an_integer` is in scope
+   │ 
+   │ Help: declare `definitely_not_an_integer` as a callable parameter or correct the name
+   │ 
+   │ Note: the bootstrap compiler currently resolves local parameter bindings
+───╯

@@ -1,0 +1,38 @@
+enum Result<T, E> {
+    Ok(T),
+    Err(E),
+}
+
+type Bool = Result<(), ()>;
+
+effect ResultCase<T, E> {
+    inspect(value: Result<T, E>) -> !;
+}
+
+score(value: Bool) -> i64 {
+    handle perform ResultCase::inspect(value) {
+        ResultCase::inspect(Result::Ok(_)) => 14,
+        ResultCase::inspect(Result::Err(_)) => 0
+    }
+}
+
+greater_equal(left: i64, right: i64) -> Bool {
+    left >= right
+}
+
+less_equal(left: i64, right: i64) -> Bool {
+    left <= right
+}
+
+not_equal(left: i64, right: i64) -> Bool {
+    left != right
+}
+
+main() -> i64 {
+    score(greater_equal(2, 1)) +
+        score(less_equal(1, 2)) +
+        score(not_equal(1, 2)) +
+        score(greater_equal(1, 2)) +
+        score(less_equal(2, 1)) +
+        score(not_equal(1, 1))
+}

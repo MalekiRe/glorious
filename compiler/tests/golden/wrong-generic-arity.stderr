@@ -1,0 +1,15 @@
+[GRC0315] Error: wrong number of type arguments
+   ╭─[ <repo>/compiler/tests/cases/wrong-generic-arity.gr:7:17 ]
+   │
+ 1 │ enum Result<T, E> {
+   │      ───┬──  
+   │         ╰──── the generic type is declared here
+   │ 
+ 7 │     let result: Result<i32> = Result::Ok(42);
+   │                 ─────┬─────  
+   │                      ╰─────── `Result` expects 2 type argument(s), but receives 1
+   │ 
+   │ Help: supply exactly one type argument for each generic parameter
+   │ 
+   │ Note: generic arity is fixed by the declaration
+───╯

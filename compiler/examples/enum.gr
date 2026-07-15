@@ -1,0 +1,17 @@
+enum Message {
+    Quit,
+    Move(i32, i32),
+    Write(i64)
+}
+
+make_message() -> Message {
+    Message::Move(40, 2)
+}
+
+consume(message: Message) -> i32 {
+    42
+}
+
+main() -> i32 {
+    consume(make_message())
+}

@@ -1,0 +1,12 @@
+[GRC2001] Warning: exit value will be truncated
+   ╭─[ <repo>/compiler/tests/cases/truncated-exit.gr:2:5 ]
+   │
+ 2 │     9223372036854775807
+   │     ─────────┬─────────  
+   │              ╰─────────── this i64 value does not fit in the native i32 `main` result
+   │ 
+   │ Help: use a value no greater than 2147483647 to preserve the native exit value
+   │ 
+   │ Note: `grandiose_main` still returns the complete i64 value
+───╯
+glorious: wrote non-zero LLVM entry point to <tmp>/truncated.ll

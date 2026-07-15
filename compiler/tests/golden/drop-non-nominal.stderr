@@ -1,0 +1,11 @@
+[GRC1866] Error: `Drop` requires a nominal type
+   ╭─[ <repo>/compiler/tests/cases/drop-non-nominal.gr:1:15 ]
+   │
+ 1 │ impl Drop for i32 {
+   │               ─┬─  
+   │                ╰─── `i32` cannot receive a custom destruction hook
+   │ 
+   │ Help: implement `Drop` for a struct or enum
+   │ 
+   │ Note: the intrinsic hook belongs to one concrete struct or enum layout
+───╯

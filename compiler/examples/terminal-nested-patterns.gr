@@ -1,0 +1,46 @@
+enum Inner {
+    Zero,
+    Number(i32)
+}
+
+enum Outer {
+    Empty,
+    Wrapped(Inner)
+}
+
+effect OuterCase {
+    inspect(value: Outer) -> !;
+}
+
+effect Ask {
+    [1, 1] value(seed: i32) -> i32;
+}
+
+classify(value: Outer) -> i32 {
+    handle perform OuterCase::inspect(value) {
+        OuterCase::inspect(Outer::Wrapped(Inner::Number(42))) => 40,
+        OuterCase::inspect(Outer::Wrapped(Inner::Number(_))) => 1,
+        OuterCase::inspect(Outer::Wrapped(_)) => 2,
+        OuterCase::inspect(Outer::Empty) => 3
+    }
+}
+
+program(value: Outer) -> i32 / {Ask} {
+    handle perform OuterCase::inspect(value) {
+        OuterCase::inspect(Outer::Wrapped(Inner::Number(42))) =>
+            perform Ask::value(40),
+        OuterCase::inspect(Outer::Wrapped(Inner::Number(_))) => 1,
+        OuterCase::inspect(Outer::Wrapped(_)) => 2,
+        OuterCase::inspect(Outer::Empty) => 3
+    }
+}
+
+main() -> i32 {
+    let pure: i32 = classify(Outer::Wrapped(Inner::Number(7)));
+    let effectful: i32 = handle (program(
+        Outer::Wrapped(Inner::Number(42))
+    )) {
+        Ask::value(seed) with k => resume(k, seed + 1)
+    };
+    pure + effectful
+}

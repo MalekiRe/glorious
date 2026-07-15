@@ -1,0 +1,24 @@
+effect Outer {
+    [1, 1] ask() -> i32;
+}
+
+effect Optional {
+    [0, 1] value() -> i32;
+}
+
+optional_value() -> i32 / {Outer, Optional} {
+    let ignored: i32 = perform Optional::value();
+    ignored + 1000
+}
+
+drop_inside_outward_handler() -> i32 / {Outer} {
+    handle (optional_value()) {
+        Optional::value() with k => 42
+    }
+}
+
+main() -> i32 {
+    handle (drop_inside_outward_handler()) {
+        Outer::ask() with k => resume(k, 0)
+    }
+}

@@ -1,0 +1,18 @@
+effect Choose {
+    [2, 2] choose(seed: i32) -> i32;
+}
+
+choose_value(seed: i32) -> i32 / {Choose} {
+    perform Choose::choose(seed)
+}
+
+choose_plus(seed: i32, delta: i32) -> i32 / {Choose} {
+    let value: i32 = choose_value(seed);
+    value + delta
+}
+
+main() -> i32 {
+    handle (choose_plus(40, 1)) {
+        Choose::choose(seed) with k => resume(k, seed) + resume(k, 0)
+    }
+}
