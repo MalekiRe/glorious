@@ -5,15 +5,19 @@
 (lifetime) @variable.special
 (label) @label
 [(type_identifier)
- (struct_expression type: (identifier))
- (effect_reference (identifier))] @type
+ (struct_expression type: (identifier))] @type
 
 (struct_declaration name: (type_identifier) @type)
-(enum_declaration name: (type_identifier) @type)
 (trait_declaration name: (type_identifier) @type)
-(effect_declaration name: (type_identifier) @type)
+(enum_declaration name: (type_identifier) @type @enum)
+
+(effect_identifier) @type @tag
+(effect_operation_identifier) @function @variant
 
 (enum_variant name: (variant_identifier) @constructor)
+(variant_pattern
+  type: (identifier) @type
+  variant: (variant_identifier) @constructor)
 
 (field_declaration name: (identifier) @property)
 (field_initializer name: (identifier) @property)
@@ -26,7 +30,6 @@
 
 (function_declaration name: (identifier) @function)
 (function_signature name: (identifier) @function)
-(effect_operation name: (identifier) @function)
 
 (call_expression
   function: (path_expression . (identifier) @function.call .))
@@ -35,8 +38,6 @@
     (identifier) @function.method .
     (#match? @function.method "^[a-z_]")))
 
-(handler_clause operation: (identifier) @function.method)
-(perform_expression operation: (identifier) @function.method)
 
 ; Qualified uppercase values such as `Result::Ok` and
 ; `Instruction::MoveRight` are enum constructors. A qualified call is instead

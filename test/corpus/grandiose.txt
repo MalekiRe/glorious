@@ -27,11 +27,11 @@ map<T, E: EffectRow>(value: T) -> T / { Read<T> | E } { move value }
       (type_path name: (type_identifier (type_identifier))))
     (enum_variant name: (variant_identifier (variant_identifier))))
   (effect_declaration
-    name: (type_identifier (type_identifier))
+    name: (effect_identifier (effect_identifier))
     (generic_parameters (generic_parameter (identifier)))
     (effect_operation
       (quantity (integer_literal))
-      name: (identifier)
+      name: (effect_operation_identifier (effect_operation_identifier))
       (parameters
         (parameter
           name: (identifier)
@@ -96,22 +96,22 @@ run(value: Result<u8, Error>) -> u8 {
       (handle_expression
         computation: (perform_expression
           effect: (effect_reference
-            (identifier)
+            (effect_identifier (effect_identifier))
             (generic_arguments
               (generic_argument
                 (type_path name: (type_identifier (type_identifier))))))
-          operation: (identifier)
+          operation: (effect_operation_identifier (effect_operation_identifier))
           (arguments (path_expression (identifier))))
         (handler_clause
           effect: (effect_reference
-            (identifier)
+            (effect_identifier (effect_identifier))
             (generic_arguments
               (generic_argument
                 (type_path name: (type_identifier (type_identifier))))))
-          operation: (identifier)
+          operation: (effect_operation_identifier (effect_operation_identifier))
           (variant_pattern
-            (identifier)
-            (identifier)
+            type: (identifier)
+            variant: (variant_identifier (variant_identifier))
             (identifier))
           resumption: (identifier)
           body: (resumption_expression
@@ -121,14 +121,14 @@ run(value: Result<u8, Error>) -> u8 {
                 operand: (path_expression (identifier))))))
         (handler_clause
           effect: (effect_reference
-            (identifier)
+            (effect_identifier (effect_identifier))
             (generic_arguments
               (generic_argument
                 (type_path name: (type_identifier (type_identifier))))))
-          operation: (identifier)
+          operation: (effect_operation_identifier (effect_operation_identifier))
           (variant_pattern
-            (identifier)
-            (identifier)
+            type: (identifier)
+            variant: (variant_identifier (variant_identifier))
             (identifier))
           resumption: (identifier)
           body: (resumption_expression

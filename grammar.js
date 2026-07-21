@@ -79,8 +79,8 @@ module.exports = grammar({
     impl_declaration: $ => seq(optional($.visibility_modifier), 'impl', optional($.generic_parameters), optional('!'), $.trait_reference, 'for', $._type, optional($.where_clause), '{', repeat(choice($.associated_type_definition, $.function_declaration)), '}'),
     associated_type_definition: $ => seq('type', field('name', $.type_identifier), optional($.generic_parameters), '=', choice($._type, $.effect_row), ';'),
 
-    effect_declaration: $ => seq(optional($.visibility_modifier), 'effect', field('name', $.type_identifier), optional($.generic_parameters), '{', repeat($.effect_operation), '}'),
-    effect_operation: $ => prec.right(seq(optional($.quantity), field('name', $.identifier), $.parameters, '->', optional($._type), optional(';'))),
+    effect_declaration: $ => seq(optional($.visibility_modifier), 'effect', field('name', $.effect_identifier), optional($.generic_parameters), '{', repeat($.effect_operation), '}'),
+    effect_operation: $ => prec.right(seq(optional($.quantity), field('name', $.effect_operation_identifier), $.parameters, '->', optional($._type), optional(';'))),
     quantity: $ => seq('[', $.integer_literal, ',', choice($.integer_literal, 'infinity', '*'), ']'),
 
     function_declaration: $ => seq(optional($.visibility_modifier), field('name', $.identifier), optional($.generic_parameters), $.parameters, '->', optional($._type), optional(seq('/', $.effect_row)), optional($.where_clause), field('body', $.block)),
@@ -173,9 +173,9 @@ module.exports = grammar({
     binary_expression: $ => prec.left(5, seq(field('left', $._expression), field('operator', choice($.operator_sequence, $.word_operator)), field('right', $._expression))),
     pattern_test_expression: $ => prec.left(3, seq(field('value', $._expression), 'is', field('pattern', $._pattern))),
     handle_expression: $ => prec.right(seq('handle', field('computation', $._expression), '{', repeat($.handler_clause), '}')),
-    effect_reference: $ => seq($.identifier, optional($.generic_arguments)),
-    handler_clause: $ => seq(field('effect', $.effect_reference), '::', field('operation', $.identifier), '(', commaSep($._pattern), ')', optional(seq('with', field('resumption', $.identifier))), '=>', field('body', $._expression), optional(choice(',', ';'))),
-    perform_expression: $ => seq('perform', field('effect', $.effect_reference), '::', field('operation', $.identifier), $.arguments),
+    effect_reference: $ => seq($.effect_identifier, optional($.generic_arguments)),
+    handler_clause: $ => seq(field('effect', $.effect_reference), '::', field('operation', $.effect_operation_identifier), '(', commaSep($._pattern), ')', optional(seq('with', field('resumption', $.identifier))), '=>', field('body', $._expression), optional(choice(',', ';'))),
+    perform_expression: $ => seq('perform', field('effect', $.effect_reference), '::', field('operation', $.effect_operation_identifier), $.arguments),
     resumption_expression: $ => seq(choice('resume', 'cancel', 'tail'), $.arguments),
     label_expression: $ => choice(seq('label', $.label), seq($.label, ':', $.block)),
     leave_expression: $ => prec.right(seq('leave', optional($.label), optional($._expression))),
@@ -184,7 +184,15 @@ module.exports = grammar({
     path_pattern: $ => prec(9, seq($.identifier, '::', $.identifier, repeat(seq('::', $.identifier)))),
     literal_pattern: $ => $.literal,
     tuple_pattern: $ => seq('(', commaSep($._pattern), ')'),
-    variant_pattern: $ => prec(10, seq(path($), '(', commaSep($._pattern), ')')),
+    variant_pattern: $ => prec(10, seq(
+      field('type', $.identifier),
+      repeat(seq('::', $.identifier)),
+      '::',
+      field('variant', $.variant_identifier),
+      '(',
+      commaSep($._pattern),
+      ')',
+    )),
     struct_pattern: $ => prec(20, seq($.identifier, '{', commaSep(choice('..', seq($.identifier, optional(seq(':', $._pattern))))), '}')),
     deconstruction_pattern: $ => choice($.tuple_pattern, $.struct_pattern),
 
@@ -201,6 +209,8 @@ module.exports = grammar({
     identifier: _ => /[A-Za-z_][A-Za-z0-9_]*/,
     type_identifier: $ => alias($.identifier, $.type_identifier),
     variant_identifier: $ => alias($.identifier, $.variant_identifier),
+    effect_identifier: $ => alias($.identifier, $.effect_identifier),
+    effect_operation_identifier: $ => alias($.identifier, $.effect_operation_identifier),
     // Word operators are contextual in the compiler. Tree-sitter cannot alter
     // its lexer from a file-local fixity table, so this names the operators in
     // the distributed library while symbolic operators remain fully open.
