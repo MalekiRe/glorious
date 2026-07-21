@@ -72,7 +72,7 @@ module.exports = grammar({
     field_declaration: $ => seq(optional($.field_visibility_modifier), field('name', $.identifier), ':', field('type', $._type), optional(choice(',', ';'))),
 
     enum_declaration: $ => seq(optional($.visibility_modifier), 'enum', field('name', $.type_identifier), optional($.generic_parameters), '{', repeat($.enum_variant), '}'),
-    enum_variant: $ => seq(field('name', $.type_identifier), optional(seq('(', commaSep($._type), ')')), optional(choice(',', ';'))),
+    enum_variant: $ => seq(field('name', $.variant_identifier), optional(seq('(', commaSep($._type), ')')), optional(choice(',', ';'))),
 
     trait_declaration: $ => seq(optional($.visibility_modifier), 'trait', field('name', $.type_identifier), optional($.generic_parameters), optional(seq(':', sep1($.trait_reference, '+'))), '{', repeat(choice($.associated_type_declaration, $.function_signature)), '}'),
     associated_type_declaration: $ => seq('type', field('name', $.type_identifier), optional($.generic_parameters), optional(seq(':', 'EffectRow')), ';'),
@@ -200,6 +200,7 @@ module.exports = grammar({
     label: _ => token(seq('@', /[A-Za-z_][A-Za-z0-9_]*/)),
     identifier: _ => /[A-Za-z_][A-Za-z0-9_]*/,
     type_identifier: $ => alias($.identifier, $.type_identifier),
+    variant_identifier: $ => alias($.identifier, $.variant_identifier),
     // Word operators are contextual in the compiler. Tree-sitter cannot alter
     // its lexer from a file-local fixity table, so this names the operators in
     // the distributed library while symbolic operators remain fully open.

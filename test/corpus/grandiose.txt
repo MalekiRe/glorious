@@ -23,9 +23,9 @@ map<T, E: EffectRow>(value: T) -> T / { Read<T> | E } { move value }
     name: (type_identifier (type_identifier))
     (generic_parameters (generic_parameter (identifier)))
     (enum_variant
-      name: (type_identifier (type_identifier))
+      name: (variant_identifier (variant_identifier))
       (type_path name: (type_identifier (type_identifier))))
-    (enum_variant name: (type_identifier (type_identifier))))
+    (enum_variant name: (variant_identifier (variant_identifier))))
   (effect_declaration
     name: (type_identifier (type_identifier))
     (generic_parameters (generic_parameter (identifier)))

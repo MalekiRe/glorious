@@ -722,7 +722,7 @@
           "name": "name",
           "content": {
             "type": "SYMBOL",
-            "name": "type_identifier"
+            "name": "variant_identifier"
           }
         },
         {
@@ -4292,6 +4292,15 @@
       },
       "named": true,
       "value": "type_identifier"
+    },
+    "variant_identifier": {
+      "type": "ALIAS",
+      "content": {
+        "type": "SYMBOL",
+        "name": "identifier"
+      },
+      "named": true,
+      "value": "variant_identifier"
     },
     "word_operator": {
       "type": "CHOICE",
