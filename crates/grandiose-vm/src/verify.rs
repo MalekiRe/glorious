@@ -1795,6 +1795,7 @@ fn analyze_borrowed_receiver_resume_deltas(
     a: &Artifact,
     function_id: u32,
     summaries: &[Option<Vec<u64>>],
+    relaxed: bool,
 ) -> Option<Vec<u64>> {
     let function = a.functions.get(function_id as usize)?;
     if !matches!(function.receiver_mode, Some(0 | 1)) {
@@ -1924,26 +1925,17 @@ fn analyze_borrowed_receiver_resume_deltas(
                     let origin = origin.as_ref().copied()?;
                     deltas[origin] = deltas[origin].checked_add(*delta)?;
                 }
-                if returned.as_ref().is_some_and(|known| known != &deltas) {
-                    return None;
-                }
-                returned = Some(deltas);
+                merge_borrowed_receiver_deltas(&mut returned, deltas, relaxed)?;
                 continue;
             }
             Instruction::Return { src: None } => {
-                if returned.as_ref().is_some_and(|known| known != &deltas) {
-                    return None;
-                }
-                returned = Some(deltas);
+                merge_borrowed_receiver_deltas(&mut returned, deltas, relaxed)?;
                 continue;
             }
             Instruction::Return { src: Some(src) }
                 if quantity_leaf_types(a, function.register_types[*src as usize]).is_empty() =>
             {
-                if returned.as_ref().is_some_and(|known| known != &deltas) {
-                    return None;
-                }
-                returned = Some(deltas);
+                merge_borrowed_receiver_deltas(&mut returned, deltas, relaxed)?;
                 continue;
             }
             Instruction::Const { dst, .. }
@@ -1980,7 +1972,21 @@ fn analyze_borrowed_receiver_resume_deltas(
         for successor in successors {
             let incoming = (origins.clone(), deltas.clone());
             match states.get_mut(successor)? {
-                Some(existing) if existing != &incoming => return None,
+                Some(existing) if existing != &incoming => {
+                    if !relaxed || existing.0 != incoming.0 || existing.1.len() != incoming.1.len()
+                    {
+                        return None;
+                    }
+                    let mut changed = false;
+                    for (old, new) in existing.1.iter_mut().zip(incoming.1) {
+                        let joined = (*old).max(new);
+                        changed |= joined != *old;
+                        *old = joined;
+                    }
+                    if changed {
+                        work.push_back(successor);
+                    }
+                }
                 Some(_) => {}
                 slot @ None => {
                     *slot = Some(incoming);
@@ -1992,6 +1998,26 @@ fn analyze_borrowed_receiver_resume_deltas(
     returned
 }
 
+fn merge_borrowed_receiver_deltas(
+    returned: &mut Option<Vec<u64>>,
+    incoming: Vec<u64>,
+    relaxed: bool,
+) -> Option<()> {
+    match returned {
+        Some(known) if known != &incoming => {
+            if !relaxed || known.len() != incoming.len() {
+                return None;
+            }
+            for (old, new) in known.iter_mut().zip(incoming) {
+                *old = (*old).max(new);
+            }
+        }
+        Some(_) => {}
+        slot @ None => *slot = Some(incoming),
+    }
+    Some(())
+}
+
 fn borrowed_receiver_resume_delta_summaries(a: &Artifact) -> Vec<Option<Vec<u64>>> {
     let mut summaries = a
         .functions
@@ -1999,7 +2025,15 @@ fn borrowed_receiver_resume_delta_summaries(a: &Artifact) -> Vec<Option<Vec<u64>
         .map(|function| {
             matches!(function.receiver_mode, Some(0 | 1)).then(|| {
                 let leaves = function_receiver_quantity_leaf_types(a, function);
-                (!leaves.is_empty()).then(|| vec![0; leaves.len()])
+                (!leaves.is_empty()).then(|| {
+                    leaves
+                        .iter()
+                        .map(|leaf| match a.types[*leaf as usize].representation() {
+                            Type::Resumption { lower_uses, .. } => u64::from(*lower_uses),
+                            _ => unreachable!(),
+                        })
+                        .collect()
+                })
             })?
         })
         .collect::<Vec<_>>();
@@ -2014,7 +2048,22 @@ fn borrowed_receiver_resume_delta_summaries(a: &Artifact) -> Vec<Option<Vec<u64>
             .iter()
             .enumerate()
             .map(|(function, _)| {
-                analyze_borrowed_receiver_resume_deltas(a, function as u32, &summaries)
+                analyze_borrowed_receiver_resume_deltas(a, function as u32, &summaries, true)
+            })
+            .collect::<Vec<_>>();
+        if next == summaries {
+            summaries = next;
+            break;
+        }
+        summaries = next;
+    }
+    for _ in 0..iterations {
+        let next = a
+            .functions
+            .iter()
+            .enumerate()
+            .map(|(function, _)| {
+                analyze_borrowed_receiver_resume_deltas(a, function as u32, &summaries, false)
             })
             .collect::<Vec<_>>();
         if next == summaries {
@@ -2022,14 +2071,7 @@ fn borrowed_receiver_resume_delta_summaries(a: &Artifact) -> Vec<Option<Vec<u64>
         }
         summaries = next;
     }
-    a.functions
-        .iter()
-        .enumerate()
-        .map(|(function, _)| {
-            let next = analyze_borrowed_receiver_resume_deltas(a, function as u32, &summaries);
-            (next == summaries[function]).then(|| summaries[function].clone())?
-        })
-        .collect()
+    vec![None; a.functions.len()]
 }
 
 fn borrowed_receiver_resume_deltas(a: &Artifact, function: u32) -> Option<Vec<u64>> {
@@ -4124,14 +4166,59 @@ fn verify_resumption_quantities_for_variants(
             {
                 return Err(VerifyError::InvalidFunction(fid));
             }
+            Instruction::CallSelf { dst, args }
+                if !leaf_types[0].is_empty()
+                    || dst.is_some_and(|dst| !leaf_types[dst as usize].is_empty())
+                    || args
+                        .iter()
+                        .any(|&register| !leaf_types[register as usize].is_empty()) =>
+            {
+                if dst.is_some_and(|dst| !leaf_types[dst as usize].is_empty()) {
+                    return Err(VerifyError::InvalidFunction(fid));
+                }
+                let deltas = borrowed_receiver_resume_deltas(a, fid)
+                    .ok_or(VerifyError::InvalidFunction(fid))?;
+                if deltas.len() != state.registers[0].len() {
+                    return Err(VerifyError::InvalidFunction(fid));
+                }
+                for ((slot, &delta), &leaf_ty) in state.registers[0]
+                    .iter_mut()
+                    .zip(&deltas)
+                    .zip(&leaf_types[0])
+                {
+                    let group = slot.ok_or(VerifyError::UseOfEmpty {
+                        function: fid,
+                        instruction: pc,
+                        register: 0,
+                    })?;
+                    let count = state.counts[group]
+                        .as_mut()
+                        .ok_or(VerifyError::InvalidFunction(fid))?;
+                    count.min = count.min.saturating_add(delta);
+                    count.max = count.max.saturating_add(delta);
+                    let Type::Resumption { upper_uses, .. } =
+                        a.types[leaf_ty as usize].representation()
+                    else {
+                        unreachable!()
+                    };
+                    if upper_uses.is_some_and(|upper| count.max > u64::from(upper)) {
+                        return Err(VerifyError::InvalidFunction(fid));
+                    }
+                    // A returning unique self-call has moved a one-shot leaf
+                    // from the same receiver object that the parent frame
+                    // observes after the call.
+                    if upper_uses == &Some(1) && delta == 1 {
+                        *slot = None;
+                    }
+                }
+                transfer_pristine(&mut state, args)?;
+            }
             Instruction::Call { dst, args, .. }
-            | Instruction::CallSelf { dst, args }
             | Instruction::CallKnownReceiver { dst, args, .. } => {
                 if let Some(dst) = dst.filter(|dst| !leaf_types[*dst as usize].is_empty()) {
                     let function = match instruction {
                         Instruction::Call { function, .. }
                         | Instruction::CallKnownReceiver { function, .. } => *function,
-                        Instruction::CallSelf { .. } => fid,
                         _ => unreachable!(),
                     };
                     let summary = transport_summaries

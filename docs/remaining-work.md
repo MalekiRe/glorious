@@ -21,10 +21,21 @@ order. Remove an item when its production behavior, adversarial tests, and
 relevant strict gates are complete; then promote the next hardest remaining
 item from the backlog.
 
-1. Support recursive, indirect, and control-divergent array-write summaries,
-   non-root aggregate paths, and richer generic or closure reference-origin
-   relations. Dynamic, opaque, or ambiguous selection must continue to fail
-   closed.
+### Effects completion gate
+
+Do not remove this gate until all four production paths and their hostile,
+O0-O3, VM, formatting, and strict-Clippy gates are complete:
+
+1. bounded recursive/SCC effect reference-origin summaries;
+2. closure-origin joins across resume and handler exits;
+3. late recursive generic resumption environments;
+4. owned cyclic receiver and runtime ownership support.
+
+1. Complete richer closure reference-origin relations across resume and
+   handler exits. Exact direct/indirect calls, statically divergent arms,
+   non-root aggregate paths, generic effect payload/result routing, bounded
+   recursive SCCs, and equal-effect multi-arm joins are implemented; dynamic,
+   opaque, or ambiguous selection remains fail closed.
 2. Support higher-order lifetime substitution through executable callback
    control-flow joins, opaque calls, recursive or multiple wrapper edges,
    nominal projections, and a general symbolic lifetime environment.
@@ -63,27 +74,21 @@ item from the backlog.
 
 ### 3.2 Reference payload/result breadth
 
-- recursive, indirect, or control-divergent array-write summaries and
-  non-root aggregate reference-origin paths;
-- richer generic and closure origin relations.
+- richer closure origin relations across resume and handler-result joins.
 
-### 3.3 Handler inference and nesting
+### 3.3 Handler optimizer specialization
 
-- infer handler results by joining normal completion and clause results;
-- remove cases requiring an externally expected result;
-- nested handlers in every capture/lowering context;
-- richer clause computations;
 - partial and forwarded handlers in optimizer specialization.
 
 ### 3.4 Resumption closure and quantity breadth
 
 - late recursive generic resumption combinations;
 - reference-bearing escaping environments;
-- quantity inference beyond finite supported receiver modes.
 
-Arbitrary intervals or unbounded resumptions require generalized runtime
-representation, use tracking, copy-glue policy, and verifier summaries; absent
-that decision, they remain a deliberate G1 limitation.
+Every finite bounded `u32` resumption interval is supported. Unbounded
+resumptions still require generalized runtime representation, use tracking,
+copy-glue policy, and verifier summaries; absent that decision, they remain a
+deliberate G1 limitation with a structured source diagnostic.
 
 ## 4. Generics, traits, and lifetimes
 
@@ -135,13 +140,6 @@ that decision, they remain a deliberate G1 limitation.
 - symbolic normalization before grounding;
 - field/payload shapes beyond the finite supported grammar;
 - general finite recursion proofs and binder substitution in alias impl heads.
-
-### 4.9 Generic effect instances
-
-- normalized tuple, reference, and application arguments where representable;
-- const and brand arguments;
-- associated-projection arguments;
-- stable protocol identity over all normalized argument kinds.
 
 ## 5. MIR and bytecode backend
 

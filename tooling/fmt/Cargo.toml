@@ -1,0 +1,10 @@
+[package]
+name = "grandfmt"
+version = "0.1.0"
+edition = "2021"
+description = "Auto-formatter for the Grandiose language"
+
+# Standalone like its siblings: the root workspace belongs to the compiler.
+[workspace]
+
+[dependencies]

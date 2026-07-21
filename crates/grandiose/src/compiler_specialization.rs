@@ -127,11 +127,10 @@ pub(crate) struct LateClosurePlan {
 
 impl ClosureRequest {
     pub(crate) fn receiver_mode(&self) -> u32 {
-        // A first-class shared-reference environment is deliberately
-        // single-shot in this bounded slice. Moving the environment into the
-        // call exposes its stored reference as an ordinary local, so the
-        // existing verifier need not copy a reference value through a borrowed
-        // environment (`&&T -> &T`) without provenance evidence.
+        // Reference-bearing environments remain owned receivers unless the
+        // verifier can prove a projected reborrow contract for every call.
+        // Moving the environment exposes the stored reference as an ordinary
+        // local and keeps escaping reference provenance explicit.
         if self
             .captures
             .iter()
@@ -5439,8 +5438,16 @@ impl<'a> Walker<'a> {
                 computation,
                 clauses,
             } => {
+                let outer_locals = self.locals.clone();
+                let outer_bindings = self.bindings.clone();
                 let computation_result = self.expression(computation, expected);
-                let handler_result = expected.or(computation_result.as_ref());
+                self.locals = outer_locals.clone();
+                self.bindings = outer_bindings.clone();
+                let mut handler_result = expected.cloned().or_else(|| {
+                    computation_result.filter(|candidate| {
+                        candidate != &ProvisionalType::Predefined("Never".into())
+                    })
+                });
                 for clause in clauses.iter() {
                     let saved = self.locals.clone();
                     let saved_bindings = self.bindings.clone();
@@ -5459,7 +5466,7 @@ impl<'a> Walker<'a> {
                     }
                     if let Some(resumption) = &clause.resumption {
                         if let (Some(operation), Some(handler_result)) =
-                            (operation.as_ref(), handler_result)
+                            (operation.as_ref(), handler_result.as_ref())
                         {
                             self.locals.insert(
                                 resumption.clone(),
@@ -5476,11 +5483,17 @@ impl<'a> Walker<'a> {
                         }
                         self.bindings.insert(resumption.clone());
                     }
-                    self.expression(&clause.body, handler_result);
+                    let clause_result = self.expression(&clause.body, handler_result.as_ref());
+                    if handler_result.is_none()
+                        && let Some(candidate) = clause_result
+                        && candidate != ProvisionalType::Predefined("Never".into())
+                    {
+                        handler_result = Some(candidate);
+                    }
                     self.locals = saved;
                     self.bindings = saved_bindings;
                 }
-                handler_result.cloned()
+                handler_result
             }
             ExprKind::Closure { .. } => {
                 let expected = expected.and_then(|expected| match expected {

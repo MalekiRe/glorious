@@ -237,6 +237,10 @@ pub(crate) struct OwnState {
     pub(crate) conditional_fields: BTreeMap<Register, Vec<bool>>,
     /// Sparse runtime-array slot summaries keyed by the owned array register.
     pub(crate) array_slots: BTreeMap<Register, ArraySlotState>,
+    /// Exact origins of reference leaves stored inside aggregate registers.
+    /// Paths are runtime field indices from the aggregate root.
+    pub(crate) aggregate_reference_origins:
+        BTreeMap<Register, BTreeMap<Vec<u32>, StoredReferenceOrigin>>,
     /// Exact integer constants used as array indices and lengths.
     pub(crate) constants: Vec<Option<u64>>,
     /// Proven active enum variant for each register. A fact is introduced by
@@ -287,6 +291,7 @@ impl OwnState {
             && self.loans == other.loans
             && self.conditional_fields == other.conditional_fields
             && self.array_slots == other.array_slots
+            && self.aggregate_reference_origins == other.aggregate_reference_origins
             && self.constants == other.constants
             && self.quantity_groups == other.quantity_groups
             && self.labels == other.labels
@@ -340,16 +345,22 @@ pub(crate) fn loan_table(function: &Function, types: &[Type]) -> LoanTable {
 #[derive(Clone, Debug)]
 enum ArraySummarySymbol {
     Unknown,
-    Parameter(u32),
+    Parameter { parameter: u32, path: Vec<u32> },
     Constant(u64),
     Fresh(ArrayResultSummary),
+    Callable(u32),
 }
 
 fn summary_index_of(symbol: &ArraySummarySymbol) -> ArrayIndexSummary {
     match symbol {
         ArraySummarySymbol::Constant(value) => ArrayIndexSummary::Constant(*value),
-        ArraySummarySymbol::Parameter(parameter) => ArrayIndexSummary::Parameter(*parameter),
-        ArraySummarySymbol::Unknown | ArraySummarySymbol::Fresh(_) => ArrayIndexSummary::Dynamic,
+        ArraySummarySymbol::Parameter { parameter, path } if path.is_empty() => {
+            ArrayIndexSummary::Parameter(*parameter)
+        }
+        ArraySummarySymbol::Unknown
+        | ArraySummarySymbol::Parameter { .. }
+        | ArraySummarySymbol::Fresh(_)
+        | ArraySummarySymbol::Callable(_) => ArrayIndexSummary::Dynamic,
     }
 }
 
@@ -379,10 +390,139 @@ fn translate_index(
     }
 }
 
+fn compose_array_call_summary(
+    callee: &ArrayCallSummary,
+    args: &[Operand],
+    symbols: &[ArraySummarySymbol],
+    effects: &mut Vec<ArrayCallEffect>,
+) -> Option<ArraySummarySymbol> {
+    for effect in &callee.effects {
+        let owner = args.get(effect.owner_parameter as usize)?;
+        let ArraySummarySymbol::Parameter {
+            parameter: owner_parameter,
+            path: owner_path,
+        } = &symbols[owner.register as usize]
+        else {
+            return None;
+        };
+        if !owner_path.is_empty() {
+            return None;
+        }
+        let value_source = effect.value_parameter.and_then(|parameter| {
+            let value = args.get(parameter as usize)?;
+            match &symbols[value.register as usize] {
+                ArraySummarySymbol::Parameter { parameter, path } => {
+                    Some((*parameter, path.clone()))
+                }
+                _ => None,
+            }
+        });
+        if effect.value_parameter.is_some() && value_source.is_none() {
+            return None;
+        }
+        let mut value_path = value_source
+            .as_ref()
+            .map(|(_, path)| path.clone())
+            .unwrap_or_default();
+        value_path.extend(&effect.value_path);
+        effects.push(ArrayCallEffect {
+            owner_parameter: *owner_parameter,
+            kind: effect.kind,
+            index: effect
+                .index
+                .as_ref()
+                .map(|index| translate_index(index, args, symbols)),
+            value_parameter: value_source.map(|(parameter, _)| parameter),
+            value_path,
+        });
+    }
+    Some(match callee.result.as_ref() {
+        Some(ArrayResultSummary::Empty) => ArraySummarySymbol::Fresh(ArrayResultSummary::Empty),
+        Some(ArrayResultSummary::Filled(length)) => ArraySummarySymbol::Fresh(
+            ArrayResultSummary::Filled(translate_index(length, args, symbols)),
+        ),
+        Some(ArrayResultSummary::Parameter(parameter)) => args
+            .get(*parameter as usize)
+            .map(|operand| symbols[operand.register as usize].clone())
+            .unwrap_or(ArraySummarySymbol::Unknown),
+        None => ArraySummarySymbol::Unknown,
+    })
+}
+
+fn summary_edge_statically_diverges(
+    blocks: &BTreeMap<u32, &BasicBlock>,
+    edge: &Edge,
+    visiting: &mut BTreeSet<u32>,
+) -> bool {
+    if !visiting.insert(edge.target) {
+        return false;
+    }
+    let result = blocks
+        .get(&edge.target)
+        .is_some_and(|block| match &block.terminator {
+            Terminator::Unreachable => true,
+            Terminator::Goto(next) if block.statements.is_empty() => {
+                summary_edge_statically_diverges(blocks, next, visiting)
+            }
+            _ => false,
+        });
+    visiting.remove(&edge.target);
+    result
+}
+
+fn summary_edge_is_effectless_recursive_forwarder(
+    blocks: &BTreeMap<u32, &BasicBlock>,
+    edge: &Edge,
+    function: &Function,
+    recursive_group: &BTreeSet<u32>,
+    types: &[Type],
+    symbols: &[ArraySummarySymbol],
+) -> bool {
+    let Some(block) = blocks.get(&edge.target) else {
+        return false;
+    };
+    if !block.statements.is_empty() {
+        return false;
+    }
+    let args = match &block.terminator {
+        Terminator::TailCallSelf { args } if recursive_group.contains(&function.declaration) => {
+            args
+        }
+        Terminator::TailCall {
+            function: callee,
+            args,
+        } if recursive_group.contains(callee) => args,
+        _ => return false,
+    };
+    args.iter().enumerate().all(|(parameter, argument)| {
+        let tracked = function.params.get(parameter).is_some_and(|ty| {
+            matches!(
+                types[*ty as usize].representation(),
+                Type::Array { .. } | Type::RefShared { .. } | Type::RefUnique { .. }
+            )
+        });
+        if !tracked {
+            return true;
+        }
+        match &symbols[argument.register as usize] {
+            ArraySummarySymbol::Parameter {
+                parameter: source,
+                path,
+            } if *source == parameter as u32 && path.is_empty() => true,
+            ArraySummarySymbol::Unknown
+            | ArraySummarySymbol::Constant(_)
+            | ArraySummarySymbol::Parameter { .. }
+            | ArraySummarySymbol::Fresh(_)
+            | ArraySummarySymbol::Callable(_) => false,
+        }
+    })
+}
+
 fn infer_array_call_summary(
     function: &Function,
     types: &[Type],
     known: &BTreeMap<u32, ArrayCallSummary>,
+    recursive_group: &BTreeSet<u32>,
 ) -> Option<ArrayCallSummary> {
     if function.receiver_mode.is_some() {
         return None;
@@ -396,7 +536,10 @@ fn infer_array_call_summary(
     for parameter in 0..function.params.len() {
         let register = parameter + 1;
         if register < symbols.len() {
-            symbols[register] = ArraySummarySymbol::Parameter(parameter as u32);
+            symbols[register] = ArraySummarySymbol::Parameter {
+                parameter: parameter as u32,
+                path: Vec::new(),
+            };
         }
     }
     let mut effects = Vec::new();
@@ -450,28 +593,42 @@ fn infer_array_call_summary(
                     };
                     if let Some((kind, index)) = effect {
                         let owner = args.first()?;
-                        let ArraySummarySymbol::Parameter(owner_parameter) =
-                            symbols[owner.register as usize]
+                        let ArraySummarySymbol::Parameter {
+                            parameter: owner_parameter,
+                            path: owner_path,
+                        } = &symbols[owner.register as usize]
                         else {
                             // Projected, aliased, or locally synthesized owners
                             // deliberately do not acquire a transport summary.
                             return None;
                         };
+                        if !owner_path.is_empty() {
+                            return None;
+                        }
                         let value = match primitive {
                             Primitive::ArraySetMove => args.get(2),
                             Primitive::ArrayPushMove => args.get(1),
                             _ => None,
                         };
                         let value_parameter = match value {
-                            Some(value) => match symbols[value.register as usize] {
-                                ArraySummarySymbol::Parameter(parameter)
-                                    if matches!(
-                                        types[function.params[parameter as usize] as usize]
-                                            .representation(),
-                                        Type::RefShared { .. } | Type::RefUnique { .. }
-                                    ) =>
+                            Some(value) => match &symbols[value.register as usize] {
+                                ArraySummarySymbol::Parameter { parameter, path }
+                                    if (path.is_empty()
+                                        && matches!(
+                                            types[function.params[*parameter as usize] as usize]
+                                                .representation(),
+                                            Type::RefShared { .. } | Type::RefUnique { .. }
+                                        ))
+                                        || (!path.is_empty()
+                                            && matches!(
+                                                types[function.register_types
+                                                    [value.register as usize]
+                                                    as usize]
+                                                    .representation(),
+                                                Type::RefShared { .. } | Type::RefUnique { .. }
+                                            )) =>
                                 {
-                                    Some(parameter)
+                                    Some((*parameter, path.clone()))
                                 }
                                 _ if matches!(
                                     types
@@ -487,12 +644,14 @@ fn infer_array_call_summary(
                             None => None,
                         };
                         effects.push(ArrayCallEffect {
-                            owner_parameter,
+                            owner_parameter: *owner_parameter,
                             kind,
                             index: index
                                 .map(|index| summary_index_of(&symbols[index.register as usize])),
-                            value_parameter,
-                            value_path: Vec::new(),
+                            value_parameter: value_parameter
+                                .as_ref()
+                                .map(|(parameter, _)| *parameter),
+                            value_path: value_parameter.map(|(_, path)| path).unwrap_or_default(),
                         });
                     }
                     symbols[*dst as usize] = match primitive {
@@ -514,36 +673,45 @@ fn infer_array_call_summary(
                         _ => ArraySummarySymbol::Unknown,
                     };
                 }
-                InstructionKind::ProjectBorrow { dst, .. }
-                | InstructionKind::DerefCopy { dst, .. }
+                InstructionKind::ProjectBorrow {
+                    dst, src, field, ..
+                } => {
+                    symbols[*dst as usize] = match &symbols[*src as usize] {
+                        ArraySummarySymbol::Parameter { parameter, path } => {
+                            let mut path = path.clone();
+                            path.push(*field);
+                            ArraySummarySymbol::Parameter {
+                                parameter: *parameter,
+                                path,
+                            }
+                        }
+                        _ => ArraySummarySymbol::Unknown,
+                    };
+                }
+                InstructionKind::ProjectCopy { dst, src, field }
+                | InstructionKind::ProjectMove { dst, src, field } => {
+                    symbols[*dst as usize] = match &symbols[src.register as usize] {
+                        ArraySummarySymbol::Parameter { parameter, path } => {
+                            let mut path = path.clone();
+                            path.push(*field);
+                            ArraySummarySymbol::Parameter {
+                                parameter: *parameter,
+                                path,
+                            }
+                        }
+                        _ => ArraySummarySymbol::Unknown,
+                    };
+                }
+                InstructionKind::DerefCopy { dst, .. }
                 | InstructionKind::DerefMove { dst, .. }
                 | InstructionKind::Construct { dst, .. }
-                | InstructionKind::ProjectCopy { dst, .. }
                 | InstructionKind::EnumTag { dst, .. }
-                | InstructionKind::MakeCallable { dst, .. }
                 | InstructionKind::MakeHandler { dst, .. }
                 | InstructionKind::MakeHandlerShared { dst, .. } => {
                     symbols[*dst as usize] = ArraySummarySymbol::Unknown;
                 }
-                InstructionKind::ProjectMove { dst, src, .. } => {
-                    symbols[*dst as usize] = if matches!(
-                        types[function.register_types[*dst as usize] as usize].representation(),
-                        Type::Array { .. }
-                    ) && matches!(
-                        symbols[src.register as usize],
-                        ArraySummarySymbol::Parameter(_)
-                    ) {
-                        // Moving an array shell out of an aggregate parameter
-                        // yields a dense array of unknown length. Aggregate
-                        // storage cannot carry a direct array-slot summary;
-                        // the move establishes a fresh, independently tracked
-                        // shell for subsequent exact effects.
-                        ArraySummarySymbol::Fresh(ArrayResultSummary::Filled(
-                            ArrayIndexSummary::Dynamic,
-                        ))
-                    } else {
-                        ArraySummarySymbol::Unknown
-                    };
+                InstructionKind::MakeCallable { dst, function, .. } => {
+                    symbols[*dst as usize] = ArraySummarySymbol::Callable(*function);
                 }
                 InstructionKind::DerefStore { .. }
                 | InstructionKind::EndBorrow { .. }
@@ -555,6 +723,56 @@ fn infer_array_call_summary(
         }
         match &block.terminator {
             Terminator::Goto(edge) => {
+                let target = *blocks.get(&edge.target)?;
+                for (argument, parameter) in edge.args.iter().zip(&target.params) {
+                    symbols[parameter.register as usize] =
+                        symbols[argument.register as usize].clone();
+                }
+                block_id = edge.target;
+            }
+            Terminator::Switch {
+                cases, otherwise, ..
+            } => {
+                let continuing = cases
+                    .iter()
+                    .map(|(_, edge)| edge)
+                    .chain(std::iter::once(otherwise))
+                    .filter(|edge| {
+                        !summary_edge_statically_diverges(&blocks, edge, &mut BTreeSet::new())
+                            && !summary_edge_is_effectless_recursive_forwarder(
+                                &blocks,
+                                edge,
+                                function,
+                                recursive_group,
+                                types,
+                                &symbols,
+                            )
+                    })
+                    .collect::<Vec<_>>();
+                let edge = if let Some(first) = continuing.first()
+                    && continuing.iter().all(|edge| *edge == *first)
+                {
+                    *first
+                } else if let Some(first) = continuing.first()
+                    && continuing.iter().all(|edge| {
+                        let Some(first_block) = blocks.get(&first.target) else {
+                            return false;
+                        };
+                        let Some(candidate) = blocks.get(&edge.target) else {
+                            return false;
+                        };
+                        first_block
+                            .statements
+                            .iter()
+                            .map(|statement| &statement.kind)
+                            .eq(candidate.statements.iter().map(|statement| &statement.kind))
+                            && first_block.terminator == candidate.terminator
+                    })
+                {
+                    *first
+                } else {
+                    return None;
+                };
                 let target = *blocks.get(&edge.target)?;
                 for (argument, parameter) in edge.args.iter().zip(&target.params) {
                     symbols[parameter.register as usize] =
@@ -581,7 +799,7 @@ fn infer_array_call_summary(
                     is_array
                         && matches!(
                             symbols[argument.register as usize],
-                            ArraySummarySymbol::Parameter(_) | ArraySummarySymbol::Fresh(_)
+                            ArraySummarySymbol::Parameter { .. } | ArraySummarySymbol::Fresh(_)
                         )
                 });
                 let callee = known.get(callee);
@@ -592,30 +810,42 @@ fn infer_array_call_summary(
                 if let Some(callee) = callee {
                     for effect in &callee.effects {
                         let owner = args.get(effect.owner_parameter as usize)?;
-                        let ArraySummarySymbol::Parameter(owner_parameter) =
-                            symbols[owner.register as usize]
+                        let ArraySummarySymbol::Parameter {
+                            parameter: owner_parameter,
+                            path: owner_path,
+                        } = &symbols[owner.register as usize]
                         else {
                             return None;
                         };
-                        let value_parameter = effect.value_parameter.and_then(|parameter| {
+                        if !owner_path.is_empty() {
+                            return None;
+                        }
+                        let value_source = effect.value_parameter.and_then(|parameter| {
                             let value = args.get(parameter as usize)?;
-                            match symbols[value.register as usize] {
-                                ArraySummarySymbol::Parameter(parameter) => Some(parameter),
+                            match &symbols[value.register as usize] {
+                                ArraySummarySymbol::Parameter { parameter, path } => {
+                                    Some((*parameter, path.clone()))
+                                }
                                 _ => None,
                             }
                         });
-                        if effect.value_parameter.is_some() && value_parameter.is_none() {
+                        if effect.value_parameter.is_some() && value_source.is_none() {
                             return None;
                         }
+                        let mut value_path = value_source
+                            .as_ref()
+                            .map(|(_, path)| path.clone())
+                            .unwrap_or_default();
+                        value_path.extend(&effect.value_path);
                         effects.push(ArrayCallEffect {
-                            owner_parameter,
+                            owner_parameter: *owner_parameter,
                             kind: effect.kind,
                             index: effect
                                 .index
                                 .as_ref()
                                 .map(|index| translate_index(index, args, &symbols)),
-                            value_parameter,
-                            value_path: effect.value_path.clone(),
+                            value_parameter: value_source.map(|(parameter, _)| parameter),
+                            value_path,
                         });
                     }
                     result_symbol = match callee.result.as_ref() {
@@ -637,6 +867,49 @@ fn infer_array_call_summary(
                 }
                 block_id = normal.target;
             }
+            Terminator::CallIndirect {
+                result,
+                callable,
+                known_function,
+                args,
+                normal,
+                ..
+            } => {
+                let target =
+                    (*known_function).or_else(|| match symbols[callable.register as usize] {
+                        ArraySummarySymbol::Callable(function) => Some(function),
+                        _ => None,
+                    });
+                let symbolic_array_argument = args.iter().any(|argument| {
+                    let ty = function.register_types[argument.register as usize];
+                    let is_array = match types[ty as usize].representation() {
+                        Type::Array { .. } => true,
+                        Type::RefShared { referent } | Type::RefUnique { referent } => matches!(
+                            types[*referent as usize].representation(),
+                            Type::Array { .. }
+                        ),
+                        _ => false,
+                    };
+                    is_array
+                        && matches!(
+                            symbols[argument.register as usize],
+                            ArraySummarySymbol::Parameter { .. } | ArraySummarySymbol::Fresh(_)
+                        )
+                });
+                let callee = target.and_then(|target| known.get(&target));
+                if symbolic_array_argument && callee.is_none() {
+                    return None;
+                }
+                let result_symbol = callee
+                    .and_then(|callee| {
+                        compose_array_call_summary(callee, args, &symbols, &mut effects)
+                    })
+                    .unwrap_or(ArraySummarySymbol::Unknown);
+                if let Some(result) = result {
+                    symbols[*result as usize] = result_symbol;
+                }
+                block_id = normal.target;
+            }
             Terminator::Return { value } => {
                 let result = if matches!(
                     types[function.result as usize].representation(),
@@ -646,10 +919,15 @@ fn infer_array_call_summary(
                         .as_ref()
                         .and_then(|value| match &symbols[value.register as usize] {
                             ArraySummarySymbol::Fresh(result) => Some(result.clone()),
-                            ArraySummarySymbol::Parameter(parameter) => {
+                            ArraySummarySymbol::Parameter { parameter, path }
+                                if path.is_empty() =>
+                            {
                                 Some(ArrayResultSummary::Parameter(*parameter))
                             }
-                            ArraySummarySymbol::Unknown | ArraySummarySymbol::Constant(_) => None,
+                            ArraySummarySymbol::Unknown
+                            | ArraySummarySymbol::Parameter { .. }
+                            | ArraySummarySymbol::Constant(_)
+                            | ArraySummarySymbol::Callable(_) => None,
                         })
                 } else {
                     None
@@ -664,30 +942,42 @@ fn infer_array_call_summary(
                 let callee = known.get(callee)?;
                 for effect in &callee.effects {
                     let owner = args.get(effect.owner_parameter as usize)?;
-                    let ArraySummarySymbol::Parameter(owner_parameter) =
-                        symbols[owner.register as usize]
+                    let ArraySummarySymbol::Parameter {
+                        parameter: owner_parameter,
+                        path: owner_path,
+                    } = &symbols[owner.register as usize]
                     else {
                         return None;
                     };
-                    let value_parameter = effect.value_parameter.and_then(|parameter| {
+                    if !owner_path.is_empty() {
+                        return None;
+                    }
+                    let value_source = effect.value_parameter.and_then(|parameter| {
                         let value = args.get(parameter as usize)?;
-                        match symbols[value.register as usize] {
-                            ArraySummarySymbol::Parameter(parameter) => Some(parameter),
+                        match &symbols[value.register as usize] {
+                            ArraySummarySymbol::Parameter { parameter, path } => {
+                                Some((*parameter, path.clone()))
+                            }
                             _ => None,
                         }
                     });
-                    if effect.value_parameter.is_some() && value_parameter.is_none() {
+                    if effect.value_parameter.is_some() && value_source.is_none() {
                         return None;
                     }
+                    let mut value_path = value_source
+                        .as_ref()
+                        .map(|(_, path)| path.clone())
+                        .unwrap_or_default();
+                    value_path.extend(&effect.value_path);
                     effects.push(ArrayCallEffect {
-                        owner_parameter,
+                        owner_parameter: *owner_parameter,
                         kind: effect.kind,
                         index: effect
                             .index
                             .as_ref()
                             .map(|index| translate_index(index, args, &symbols)),
-                        value_parameter,
-                        value_path: effect.value_path.clone(),
+                        value_parameter: value_source.map(|(parameter, _)| parameter),
+                        value_path,
                     });
                 }
                 let result = match callee.result.as_ref() {
@@ -698,11 +988,16 @@ fn infer_array_call_summary(
                     Some(ArrayResultSummary::Parameter(parameter)) => {
                         let argument = args.get(*parameter as usize)?;
                         match &symbols[argument.register as usize] {
-                            ArraySummarySymbol::Parameter(parameter) => {
+                            ArraySummarySymbol::Parameter { parameter, path }
+                                if path.is_empty() =>
+                            {
                                 Some(ArrayResultSummary::Parameter(*parameter))
                             }
                             ArraySummarySymbol::Fresh(result) => Some(result.clone()),
-                            ArraySummarySymbol::Unknown | ArraySummarySymbol::Constant(_) => None,
+                            ArraySummarySymbol::Unknown
+                            | ArraySummarySymbol::Parameter { .. }
+                            | ArraySummarySymbol::Constant(_)
+                            | ArraySummarySymbol::Callable(_) => None,
                         }
                     }
                     None => None,
@@ -715,24 +1010,123 @@ fn infer_array_call_summary(
     }
 }
 
-/// Infer a least fixed point of bounded array effects through direct ordinary
-/// calls. Only linear, statically named wrapper bodies participate; every
-/// opaque, recursive, projected, indirect, or control-dependent boundary is
-/// intentionally absent and therefore rejected when it receives tracked
-/// array state.
+fn bounded_recursive_groups(program: &crate::compiler_mir::Program) -> Vec<BTreeSet<u32>> {
+    fn reaches(
+        graph: &BTreeMap<u32, BTreeSet<u32>>,
+        from: u32,
+        target: u32,
+        visiting: &mut BTreeSet<u32>,
+    ) -> bool {
+        if from == target {
+            return true;
+        }
+        visiting.insert(from)
+            && graph.get(&from).is_some_and(|next| {
+                next.iter()
+                    .any(|next| reaches(graph, *next, target, visiting))
+            })
+    }
+
+    let declarations = program
+        .functions
+        .iter()
+        .map(|function| function.declaration)
+        .collect::<BTreeSet<_>>();
+    let graph = program
+        .functions
+        .iter()
+        .map(|function| {
+            let edges = function
+                .blocks
+                .iter()
+                .filter(|block| block.statements.is_empty())
+                .filter_map(|block| match block.terminator {
+                    Terminator::TailCallSelf { .. } => Some(function.declaration),
+                    Terminator::TailCall { function, .. } if declarations.contains(&function) => {
+                        Some(function)
+                    }
+                    _ => None,
+                })
+                .collect();
+            (function.declaration, edges)
+        })
+        .collect::<BTreeMap<_, BTreeSet<_>>>();
+    let mut assigned = BTreeSet::<u32>::new();
+    let mut groups = Vec::new();
+    for declaration in declarations {
+        if assigned.contains(&declaration) {
+            continue;
+        }
+        let group = graph
+            .keys()
+            .copied()
+            .filter(|candidate| {
+                reaches(&graph, declaration, *candidate, &mut BTreeSet::new())
+                    && reaches(&graph, *candidate, declaration, &mut BTreeSet::new())
+            })
+            .collect::<BTreeSet<_>>();
+        let cyclic = group.len() > 1
+            || graph
+                .get(&declaration)
+                .is_some_and(|edges| edges.contains(&declaration));
+        if cyclic {
+            assigned.extend(&group);
+            groups.push(group);
+        }
+    }
+    groups
+}
+
+/// Infer a least fixed point of exact bounded array effects through direct
+/// calls. A recursive SCC participates only when every member has the same
+/// finite normal-path summary and every recursive edge forwards tracked array
+/// and reference parameters unchanged. Repeated or path-dependent recursive
+/// writes, opaque calls, and ambiguous control-flow joins remain absent.
 pub(crate) fn array_call_summaries(
     program: &crate::compiler_mir::Program,
     types: &[Type],
 ) -> BTreeMap<u32, ArrayCallSummary> {
     let mut summaries = BTreeMap::new();
-    for _ in 0..=program.functions.len() {
+    let recursive_groups = bounded_recursive_groups(program);
+    for _ in 0..=program.functions.len() * 2 {
         let mut changed = false;
         for function in &program.functions {
             if summaries.contains_key(&function.declaration) {
                 continue;
             }
-            if let Some(summary) = infer_array_call_summary(function, types, &summaries) {
+            if let Some(summary) =
+                infer_array_call_summary(function, types, &summaries, &BTreeSet::new())
+            {
                 summaries.insert(function.declaration, summary);
+                changed = true;
+            }
+        }
+        for group in &recursive_groups {
+            if group
+                .iter()
+                .any(|declaration| summaries.contains_key(declaration))
+            {
+                continue;
+            }
+            let candidates = group
+                .iter()
+                .map(|declaration| {
+                    let function = program
+                        .functions
+                        .iter()
+                        .find(|function| function.declaration == *declaration)?;
+                    infer_array_call_summary(function, types, &summaries, group)
+                        .map(|summary| (*declaration, summary))
+                })
+                .collect::<Option<Vec<_>>>();
+            let Some(candidates) = candidates else {
+                continue;
+            };
+            let Some((_, expected)) = candidates.first() else {
+                continue;
+            };
+            if candidates.iter().all(|(_, summary)| summary == expected) {
+                summaries.extend(candidates);
                 changed = true;
             }
         }
@@ -896,6 +1290,7 @@ impl<'a> FlowContext<'a> {
             regs: vec![RegState::Undefined; count],
             conditional_fields: BTreeMap::new(),
             array_slots: BTreeMap::new(),
+            aggregate_reference_origins: BTreeMap::new(),
             constants: vec![None; count],
             active_variants: vec![None; count],
             enum_tag_sources: vec![None; count],
@@ -990,9 +1385,19 @@ impl Interpreter<'_> {
             return Ok(None);
         };
         if !value_path.is_empty() {
-            return Err(self.error(format!(
-                "{action} uses an aggregate reference path that this ownership pass cannot transport exactly"
-            )));
+            return self
+                .state
+                .aggregate_reference_origins
+                .get(&operand.register)
+                .and_then(|origins| origins.get(value_path))
+                .cloned()
+                .map(Some)
+                .ok_or_else(|| {
+                    self.error(format!(
+                        "{action} cannot identify aggregate reference origin path {value_path:?} in r{}",
+                        operand.register
+                    ))
+                });
         }
         if !self
             .context
@@ -1647,6 +2052,8 @@ impl Interpreter<'_> {
         *slot = RegState::Live;
         self.state.conditional_fields.remove(&register);
         self.state.array_slots.remove(&register);
+        self.state.aggregate_reference_origins.remove(&register);
+        self.state.aggregate_reference_origins.remove(&register);
         self.state.constants[register as usize] = None;
         self.state.active_variants[register as usize] = None;
         self.state.enum_tag_sources[register as usize] = None;
@@ -1810,6 +2217,11 @@ impl Interpreter<'_> {
                 let tag_source = self.state.enum_tag_sources[src.register as usize];
                 let active_variant = self.state.active_variants[src.register as usize];
                 let constant = self.state.constants[src.register as usize];
+                let aggregate_origins = self
+                    .state
+                    .aggregate_reference_origins
+                    .get(&src.register)
+                    .cloned();
                 let source = Operand {
                     register: src.register,
                     mode: UseMode::Copy,
@@ -1824,6 +2236,9 @@ impl Interpreter<'_> {
                 self.state.enum_tag_sources[*dst as usize] = tag_source;
                 self.state.active_variants[*dst as usize] = active_variant;
                 self.state.constants[*dst as usize] = constant;
+                if let Some(origins) = aggregate_origins {
+                    self.state.aggregate_reference_origins.insert(*dst, origins);
+                }
                 Ok(())
             }
             InstructionKind::Move { dst, src } => {
@@ -1879,6 +2294,10 @@ impl Interpreter<'_> {
                 }
                 if let Some(slots) = self.state.array_slots.remove(&src.register) {
                     self.state.array_slots.insert(*dst, slots);
+                }
+                if let Some(origins) = self.state.aggregate_reference_origins.remove(&src.register)
+                {
+                    self.state.aggregate_reference_origins.insert(*dst, origins);
                 }
                 self.state.constants[destination] = self.state.constants[source].take();
                 self.state.uses[destination] = self.state.uses[source];
@@ -2113,6 +2532,31 @@ impl Interpreter<'_> {
                         }
                     }
                 }
+                let mut aggregate_origins = BTreeMap::new();
+                for (field, operand) in fields.iter().enumerate() {
+                    if let Some(loan) = self.state.loans.get(&operand.register) {
+                        aggregate_origins.insert(
+                            vec![field as u32],
+                            StoredReferenceOrigin {
+                                unique: loan.unique,
+                                external: loan.external,
+                                borrowed: loan.borrowed.clone(),
+                            },
+                        );
+                    }
+                    if let Some(nested) = self
+                        .state
+                        .aggregate_reference_origins
+                        .get(&operand.register)
+                    {
+                        for (path, origin) in nested {
+                            let mut projected = Vec::with_capacity(path.len() + 1);
+                            projected.push(field as u32);
+                            projected.extend(path);
+                            aggregate_origins.insert(projected, origin.clone());
+                        }
+                    }
+                }
                 for field in fields {
                     self.operand(field, "Construct")?;
                 }
@@ -2129,6 +2573,11 @@ impl Interpreter<'_> {
                     self.state.regs[*dst as usize] = RegState::Consumed;
                 }
                 self.define(*dst, "Construct")?;
+                if !aggregate_origins.is_empty() {
+                    self.state
+                        .aggregate_reference_origins
+                        .insert(*dst, aggregate_origins);
+                }
                 if matches!(self.context.representation(*ty), Type::Enum { .. }) {
                     let variant = variant.expect("enum variant validated above");
                     self.state.active_variants[*dst as usize] = Some(variant);
@@ -3607,6 +4056,19 @@ fn join_states(
             },
         );
     }
+    if joined.aggregate_reference_origins != incoming.aggregate_reference_origins {
+        if context.strict {
+            return Err(flow_error(
+                block,
+                "block join has conflicting aggregate reference-origin paths",
+            ));
+        }
+        joined
+            .aggregate_reference_origins
+            .retain(|register, origins| {
+                incoming.aggregate_reference_origins.get(register) == Some(origins)
+            });
+    }
     for (slot, incoming_uses) in joined.uses.iter_mut().zip(&incoming.uses) {
         *slot = slot.hull(*incoming_uses);
     }
@@ -5051,6 +5513,11 @@ mod ownership_engine_tests {
         });
         let unique_array = types.len() as grandiose_vm::TypeId;
         types.push(Type::RefUnique { referent: array });
+        let reference_pair = types.len() as grandiose_vm::TypeId;
+        types.push(Type::Tuple {
+            fields: vec![I64, shared_i64],
+            copy: false,
+        });
 
         let mut leaf = exported_function(
             vec![UNIT, unique_array, shared_i64, UNIT],
@@ -5093,15 +5560,398 @@ mod ownership_engine_tests {
         relay.declaration = 12;
         relay.name = "relay_push_reference".into();
 
+        let mut indirect = exported_function(
+            vec![UNIT, unique_array, shared_i64, UNIT, UNIT],
+            2,
+            vec![
+                block(
+                    0,
+                    vec![statement(InstructionKind::MakeCallable {
+                        dst: 4,
+                        callable_type: UNIT,
+                        function: 11,
+                        captures: vec![],
+                    })],
+                    Terminator::CallIndirect {
+                        result: Some(3),
+                        callable: move_operand(4),
+                        known_function: None,
+                        receiver_mode: 0,
+                        cleanup_callable: true,
+                        args: vec![move_operand(1), move_operand(2)],
+                        normal: Edge {
+                            target: 1,
+                            args: vec![],
+                        },
+                    },
+                ),
+                block(1, vec![], Terminator::Return { value: None }),
+            ],
+            &types,
+        );
+        indirect.declaration = 14;
+        indirect.name = "indirect_push_reference".into();
+
+        let mut aggregate_leaf = exported_function(
+            vec![UNIT, unique_array, reference_pair, shared_i64, UNIT],
+            2,
+            vec![block(
+                0,
+                vec![
+                    statement(InstructionKind::ProjectMove {
+                        dst: 3,
+                        src: move_operand(2),
+                        field: 1,
+                    }),
+                    statement(InstructionKind::Primitive {
+                        dst: 4,
+                        primitive: grandiose_vm::Primitive::ArrayPushMove,
+                        args: vec![move_operand(1), move_operand(3)],
+                    }),
+                ],
+                Terminator::Return { value: None },
+            )],
+            &types,
+        );
+        aggregate_leaf.declaration = 15;
+        aggregate_leaf.name = "push_aggregate_reference".into();
+
+        let mut divergent = exported_function(
+            vec![UNIT, grandiose_vm::U32, unique_array, shared_i64, UNIT],
+            3,
+            vec![
+                block(
+                    0,
+                    vec![],
+                    Terminator::Switch {
+                        discr: Operand {
+                            register: 1,
+                            mode: UseMode::Copy,
+                        },
+                        cases: vec![(
+                            grandiose_vm::Constant::U32(1),
+                            Edge {
+                                target: 1,
+                                args: vec![],
+                            },
+                        )],
+                        otherwise: Edge {
+                            target: 2,
+                            args: vec![],
+                        },
+                    },
+                ),
+                block(
+                    1,
+                    vec![statement(InstructionKind::Primitive {
+                        dst: 4,
+                        primitive: grandiose_vm::Primitive::ArrayPushMove,
+                        args: vec![move_operand(2), move_operand(3)],
+                    })],
+                    Terminator::Return { value: None },
+                ),
+                block(2, vec![], Terminator::Unreachable),
+            ],
+            &types,
+        );
+        divergent.declaration = 16;
+        divergent.name = "control_divergent_push_reference".into();
+
+        let equal_push = || {
+            vec![statement(InstructionKind::Primitive {
+                dst: 4,
+                primitive: grandiose_vm::Primitive::ArrayPushMove,
+                args: vec![move_operand(2), move_operand(3)],
+            })]
+        };
+        let mut equal_arms = exported_function(
+            vec![UNIT, grandiose_vm::U32, unique_array, shared_i64, UNIT],
+            3,
+            vec![
+                block(
+                    0,
+                    vec![],
+                    Terminator::Switch {
+                        discr: Operand {
+                            register: 1,
+                            mode: UseMode::Copy,
+                        },
+                        cases: vec![(
+                            grandiose_vm::Constant::U32(1),
+                            Edge {
+                                target: 1,
+                                args: vec![],
+                            },
+                        )],
+                        otherwise: Edge {
+                            target: 2,
+                            args: vec![],
+                        },
+                    },
+                ),
+                block(
+                    1,
+                    equal_push(),
+                    Terminator::Goto(Edge {
+                        target: 3,
+                        args: vec![],
+                    }),
+                ),
+                block(
+                    2,
+                    equal_push(),
+                    Terminator::Goto(Edge {
+                        target: 3,
+                        args: vec![],
+                    }),
+                ),
+                block(3, vec![], Terminator::Return { value: None }),
+            ],
+            &types,
+        );
+        equal_arms.declaration = 17;
+        equal_arms.name = "equal_arm_push_reference".into();
+
+        let mut ambiguous_arms = exported_function(
+            vec![
+                UNIT,
+                grandiose_vm::U32,
+                unique_array,
+                shared_i64,
+                shared_i64,
+                UNIT,
+            ],
+            4,
+            vec![
+                block(
+                    0,
+                    vec![],
+                    Terminator::Switch {
+                        discr: Operand {
+                            register: 1,
+                            mode: UseMode::Copy,
+                        },
+                        cases: vec![(
+                            grandiose_vm::Constant::U32(1),
+                            Edge {
+                                target: 1,
+                                args: vec![],
+                            },
+                        )],
+                        otherwise: Edge {
+                            target: 2,
+                            args: vec![],
+                        },
+                    },
+                ),
+                block(
+                    1,
+                    vec![statement(InstructionKind::Primitive {
+                        dst: 5,
+                        primitive: grandiose_vm::Primitive::ArrayPushMove,
+                        args: vec![move_operand(2), move_operand(3)],
+                    })],
+                    Terminator::Return { value: None },
+                ),
+                block(
+                    2,
+                    vec![statement(InstructionKind::Primitive {
+                        dst: 5,
+                        primitive: grandiose_vm::Primitive::ArrayPushMove,
+                        args: vec![move_operand(2), move_operand(4)],
+                    })],
+                    Terminator::Return { value: None },
+                ),
+            ],
+            &types,
+        );
+        ambiguous_arms.declaration = 18;
+        ambiguous_arms.name = "ambiguous_arm_push_reference".into();
+
+        let recursive_blocks = |recursive_statements| {
+            vec![
+                block(
+                    0,
+                    vec![],
+                    Terminator::Switch {
+                        discr: Operand {
+                            register: 1,
+                            mode: UseMode::Copy,
+                        },
+                        cases: vec![(
+                            grandiose_vm::Constant::U32(0),
+                            Edge {
+                                target: 1,
+                                args: vec![],
+                            },
+                        )],
+                        otherwise: Edge {
+                            target: 2,
+                            args: vec![],
+                        },
+                    },
+                ),
+                block(
+                    1,
+                    vec![statement(InstructionKind::Primitive {
+                        dst: 4,
+                        primitive: grandiose_vm::Primitive::ArrayPushMove,
+                        args: vec![move_operand(2), move_operand(3)],
+                    })],
+                    Terminator::Return { value: None },
+                ),
+                block(
+                    2,
+                    recursive_statements,
+                    Terminator::TailCallSelf {
+                        args: vec![
+                            Operand {
+                                register: 1,
+                                mode: UseMode::Copy,
+                            },
+                            move_operand(2),
+                            move_operand(3),
+                        ],
+                    },
+                ),
+            ]
+        };
+        let recursive_registers = vec![UNIT, grandiose_vm::U32, unique_array, shared_i64, UNIT];
+        let mut bounded_recursive = exported_function(
+            recursive_registers.clone(),
+            3,
+            recursive_blocks(vec![]),
+            &types,
+        );
+        bounded_recursive.declaration = 19;
+        bounded_recursive.name = "bounded_recursive_push_reference".into();
+        let mut unbounded_recursive = exported_function(
+            recursive_registers,
+            3,
+            recursive_blocks(vec![statement(InstructionKind::Primitive {
+                dst: 4,
+                primitive: grandiose_vm::Primitive::ArrayPushMove,
+                args: vec![move_operand(2), move_operand(3)],
+            })]),
+            &types,
+        );
+        unbounded_recursive.declaration = 20;
+        unbounded_recursive.name = "unbounded_recursive_push_reference".into();
+
+        let mutually_recursive_blocks = |callee, value_register| {
+            vec![
+                block(
+                    0,
+                    vec![],
+                    Terminator::Switch {
+                        discr: Operand {
+                            register: 1,
+                            mode: UseMode::Copy,
+                        },
+                        cases: vec![(
+                            grandiose_vm::Constant::U32(0),
+                            Edge {
+                                target: 1,
+                                args: vec![],
+                            },
+                        )],
+                        otherwise: Edge {
+                            target: 2,
+                            args: vec![],
+                        },
+                    },
+                ),
+                block(
+                    1,
+                    vec![statement(InstructionKind::Primitive {
+                        dst: 5,
+                        primitive: grandiose_vm::Primitive::ArrayPushMove,
+                        args: vec![move_operand(2), move_operand(value_register)],
+                    })],
+                    Terminator::Return { value: None },
+                ),
+                block(
+                    2,
+                    vec![],
+                    Terminator::TailCall {
+                        function: callee,
+                        args: vec![
+                            Operand {
+                                register: 1,
+                                mode: UseMode::Copy,
+                            },
+                            move_operand(2),
+                            move_operand(3),
+                            move_operand(4),
+                        ],
+                    },
+                ),
+            ]
+        };
+        let mutual_registers = vec![
+            UNIT,
+            grandiose_vm::U32,
+            unique_array,
+            shared_i64,
+            shared_i64,
+            UNIT,
+        ];
+        let mut mutual_equal_left = exported_function(
+            mutual_registers.clone(),
+            4,
+            mutually_recursive_blocks(22, 3),
+            &types,
+        );
+        mutual_equal_left.declaration = 21;
+        mutual_equal_left.name = "mutual_equal_left".into();
+        let mut mutual_equal_right = exported_function(
+            mutual_registers.clone(),
+            4,
+            mutually_recursive_blocks(21, 3),
+            &types,
+        );
+        mutual_equal_right.declaration = 22;
+        mutual_equal_right.name = "mutual_equal_right".into();
+        let mut mutual_ambiguous_left = exported_function(
+            mutual_registers.clone(),
+            4,
+            mutually_recursive_blocks(24, 3),
+            &types,
+        );
+        mutual_ambiguous_left.declaration = 23;
+        mutual_ambiguous_left.name = "mutual_ambiguous_left".into();
+        let mut mutual_ambiguous_right = exported_function(
+            mutual_registers,
+            4,
+            mutually_recursive_blocks(23, 4),
+            &types,
+        );
+        mutual_ambiguous_right.declaration = 24;
+        mutual_ambiguous_right.name = "mutual_ambiguous_right".into();
+
         // Reverse dependency order exercises the least fixed point rather
         // than accidentally relying on declaration order.
         let summaries = array_call_summaries(
             &crate::compiler_mir::Program {
-                functions: vec![relay, leaf],
+                functions: vec![
+                    mutual_ambiguous_right,
+                    mutual_ambiguous_left,
+                    mutual_equal_right,
+                    mutual_equal_left,
+                    ambiguous_arms,
+                    unbounded_recursive,
+                    bounded_recursive,
+                    equal_arms,
+                    divergent,
+                    aggregate_leaf,
+                    indirect,
+                    relay,
+                    leaf,
+                ],
             },
             &types,
         );
-        for declaration in [11, 12] {
+        for declaration in [11, 12, 14] {
             let summary = &summaries[&declaration];
             assert_eq!(summary.effects.len(), 1);
             assert_eq!(summary.effects[0].kind, ArrayEffectKind::Push);
@@ -5109,6 +5959,93 @@ mod ownership_engine_tests {
             assert_eq!(summary.effects[0].value_parameter, Some(1));
             assert!(summary.effects[0].value_path.is_empty());
         }
+        let aggregate_summary = &summaries[&15];
+        assert_eq!(aggregate_summary.effects[0].value_parameter, Some(1));
+        assert_eq!(aggregate_summary.effects[0].value_path, [1]);
+        let divergent_summary = &summaries[&16];
+        assert_eq!(divergent_summary.effects[0].owner_parameter, 1);
+        assert_eq!(divergent_summary.effects[0].value_parameter, Some(2));
+        let equal_summary = &summaries[&17];
+        assert_eq!(equal_summary.effects[0].owner_parameter, 1);
+        assert_eq!(equal_summary.effects[0].value_parameter, Some(2));
+        assert!(!summaries.contains_key(&18));
+        let recursive_summary = &summaries[&19];
+        assert_eq!(recursive_summary.effects[0].owner_parameter, 1);
+        assert_eq!(recursive_summary.effects[0].value_parameter, Some(2));
+        assert!(!summaries.contains_key(&20));
+        for declaration in [21, 22] {
+            let summary = &summaries[&declaration];
+            assert_eq!(summary.effects.len(), 1);
+            assert_eq!(summary.effects[0].owner_parameter, 1);
+            assert_eq!(summary.effects[0].value_parameter, Some(2));
+        }
+        assert!(!summaries.contains_key(&23));
+        assert!(!summaries.contains_key(&24));
+
+        let aggregate_caller = exported_function(
+            vec![
+                UNIT,
+                shared_i64,
+                I64,
+                reference_pair,
+                array,
+                unique_array,
+                UNIT,
+            ],
+            1,
+            vec![
+                block(
+                    0,
+                    vec![
+                        statement(InstructionKind::Const {
+                            dst: 2,
+                            value: grandiose_vm::Constant::I64(7),
+                        }),
+                        statement(InstructionKind::Construct {
+                            dst: 3,
+                            ty: reference_pair,
+                            variant: None,
+                            fields: vec![move_operand(2), move_operand(1)],
+                        }),
+                        statement(InstructionKind::Primitive {
+                            dst: 4,
+                            primitive: grandiose_vm::Primitive::ArrayEmpty,
+                            args: vec![],
+                        }),
+                        statement(InstructionKind::Borrow {
+                            dst: 5,
+                            src: 4,
+                            unique: true,
+                        }),
+                    ],
+                    Terminator::Call {
+                        result: Some(6),
+                        function: 15,
+                        args: vec![move_operand(5), move_operand(3)],
+                        normal: Edge {
+                            target: 1,
+                            args: vec![],
+                        },
+                    },
+                ),
+                block(1, vec![], Terminator::Unreachable),
+            ],
+            &types,
+        );
+        let aggregate_solution = solve(&FlowContext {
+            function: &aggregate_caller,
+            types: &types,
+            locals: &aggregate_caller.flow.locals,
+            loans: loan_table(&aggregate_caller, &types),
+            array_calls: &summaries,
+            strict: true,
+        })
+        .expect("aggregate reference path is installed in the array slot");
+        let aggregate_slots = &aggregate_solution.entries[&1].array_slots[&4];
+        assert_eq!(
+            aggregate_slots.reference_origins[&0].borrowed,
+            Place::local(1)
+        );
 
         let caller = exported_function(
             vec![UNIT, shared_i64, array, unique_array, UNIT],

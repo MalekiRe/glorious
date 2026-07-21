@@ -840,19 +840,15 @@ fn deferred_resumptive_forms_have_stable_source_diagnostics() {
     let cases = [
         (
             "effect Ask { ask() -> i64 } main() -> { () }",
-            "must declare `[0,1]` or an exact finite `[n,n]`",
+            "must declare a finite bounded",
         ),
         (
             "effect Ask { [0,0] ask() -> i64 } main() -> { () }",
-            "must declare `[0,1]` or an exact finite `[n,n]`",
-        ),
-        (
-            "effect Ask { [1,2] ask() -> i64 } main() -> { () }",
-            "must declare `[0,1]` or an exact finite `[n,n]`",
+            "must declare a finite bounded",
         ),
         (
             "effect Ask { [1,infinity] ask() -> i64 } main() -> { () }",
-            "must declare `[0,1]` or an exact finite `[n,n]`",
+            "arbitrary unbounded intervals require a future runtime representation",
         ),
         (
             "effect Ask { [1,1] ask() -> i64 } bad() -> i64 { handle perform Ask::ask() { Ask::ask() with k => 42 } } main() -> { () }",

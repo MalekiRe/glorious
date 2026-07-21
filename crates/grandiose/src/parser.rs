@@ -916,7 +916,6 @@ impl Parser {
         let start = self.bump().span;
         let (name, _) = self.ident("expected an effect name")?;
         let generics = self.generic_params()?;
-        self.reject_const_params(&generics, "effect declarations")?;
         let generic_span = generics.as_ref().map(|generics| generics.span);
         self.expect(TokenKind::LBrace, "expected `{` after the effect name")?;
         let mut operations = Vec::new();
@@ -2873,8 +2872,42 @@ impl Parser {
             ));
         }
         let mut arguments = Vec::new();
+        let mut lifetime_arguments = Vec::new();
+        let mut const_arguments = Vec::new();
+        let mut position = 0usize;
         loop {
-            arguments.push(self.type_syntax()?);
+            if let TokenKind::Lifetime(lifetime) = &self.peek().kind {
+                let name = lifetime.clone();
+                let span = self.bump().span;
+                lifetime_arguments.push(crate::ast::GenericLifetimeArgumentSyntax {
+                    position,
+                    lifetime: LifetimeSyntax { name, span },
+                });
+            } else if self.at(&TokenKind::LBracket) {
+                const_arguments.push(ConstAssociatedArgumentSyntax {
+                    position,
+                    value: ConstArgumentValueSyntax::Quantity(self.quantity()?),
+                });
+            } else if let TokenKind::Number(literal) = &self.peek().kind {
+                if literal.is_float() {
+                    return Err(self.error(
+                        "invalid const effect argument",
+                        "effect const arguments must be integer or quantity literals",
+                    ));
+                }
+                let literal = literal.clone();
+                let span = self.bump().span;
+                const_arguments.push(ConstAssociatedArgumentSyntax {
+                    position,
+                    value: ConstArgumentValueSyntax::U32 {
+                        value: literal.as_u64(span)?,
+                        span,
+                    },
+                });
+            } else {
+                arguments.push(self.type_syntax()?);
+            }
+            position += 1;
             if !self.eat(&TokenKind::Comma) || self.at(&TokenKind::Gt) {
                 break;
             }
@@ -2882,17 +2915,22 @@ impl Parser {
         let end = self
             .expect(TokenKind::Gt, "expected `>` after effect type arguments")?
             .span;
-        Ok((
-            name,
-            TypeSyntax {
-                span: span.join(end),
-                kind: TypeSyntaxKind::Application {
-                    constructor: Box::new(base),
-                    arguments,
-                    lifetime_arguments: vec![],
-                },
+        let application = TypeSyntax {
+            span: span.join(end),
+            kind: TypeSyntaxKind::Application {
+                constructor: Box::new(base),
+                arguments,
+                lifetime_arguments,
             },
-        ))
+        };
+        if !const_arguments.is_empty() {
+            self.type_const_arguments
+                .push(crate::ast::TypeConstApplicationSyntax {
+                    application: application.span,
+                    arguments: const_arguments,
+                });
+        }
+        Ok((name, application))
     }
 
     fn type_syntax(&mut self) -> Result<TypeSyntax, Diagnostic> {

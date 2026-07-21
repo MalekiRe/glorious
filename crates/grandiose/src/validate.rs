@@ -1919,14 +1919,26 @@ fn validate_effect_application<'a>(
         .iter()
         .flat_map(|generics| &generics.params)
         .collect::<Vec<_>>();
-    if parameters.len() != arguments.len() {
+    let const_arguments = syntax
+        .map(|syntax| program.type_const_arguments(syntax.span))
+        .unwrap_or(&[]);
+    let lifetime_arguments = syntax
+        .and_then(|syntax| match &syntax.kind {
+            TypeSyntaxKind::Application {
+                lifetime_arguments, ..
+            } => Some(lifetime_arguments.as_slice()),
+            _ => None,
+        })
+        .unwrap_or(&[]);
+    let supplied_arguments = arguments.len() + const_arguments.len() + lifetime_arguments.len();
+    if parameters.len() != supplied_arguments {
         errors.push(
             Diagnostic::error(
                 "wrong number of effect arguments",
                 format!(
                     "effect `{name}` expects {} generic argument(s), but this application supplies {}",
                     parameters.len(),
-                    arguments.len()
+                    supplied_arguments
                 ),
                 application_span,
             )
@@ -1935,7 +1947,11 @@ fn validate_effect_application<'a>(
         );
         return Some(name);
     }
-    for (parameter, argument) in parameters.iter().zip(arguments) {
+    for (parameter, argument) in parameters
+        .iter()
+        .filter(|parameter| parameter.kind == GenericParamKind::Type)
+        .zip(arguments)
+    {
         // Effect applications currently use the ordinary type-argument grammar.
         // A named non-type binder must not silently cross this kind boundary.
         if parameter.kind != GenericParamKind::Type {
@@ -1965,6 +1981,30 @@ fn validate_effect_application<'a>(
                 .with_related(parameter.span, "a type argument is required here"),
             );
         }
+    }
+    if parameters
+        .iter()
+        .filter(|parameter| matches!(parameter.kind, GenericParamKind::Const(_)))
+        .count()
+        != const_arguments.len()
+        || parameters
+            .iter()
+            .filter(|parameter| parameter.kind == GenericParamKind::Lifetime)
+            .count()
+            != lifetime_arguments.len()
+    {
+        errors.push(
+            Diagnostic::error(
+                "effect argument kind mismatch",
+                "effect type, const, and brand arguments must match their declared binder kinds",
+                application_span,
+            )
+            .with_code("G0112")
+            .with_related(
+                declaration.span,
+                "the effect binder kinds are declared here",
+            ),
+        );
     }
     Some(name)
 }

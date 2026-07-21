@@ -7,6 +7,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
+use grandiose_vm::bytecode::NEVER;
 use grandiose_vm::{BYTES, CHAR, F32, F64, I64, TEXT, TypeId, U8, UNIT};
 
 use crate::ast::{
@@ -721,6 +722,41 @@ pub(crate) enum TypedExprKind {
 }
 
 impl TypedProgram {
+    pub(crate) fn expression_type_at(
+        &self,
+        declaration: &DeclarationKey,
+        span: Span,
+    ) -> Option<&ProvisionalType> {
+        fn find(expression: &TypedExpr, span: Span) -> Option<&ProvisionalType> {
+            if expression.span == span {
+                return expression.ty.as_ref();
+            }
+            let children: Vec<&TypedExpr> = match &expression.kind {
+                TypedExprKind::Call { args, .. }
+                | TypedExprKind::Tuple(args)
+                | TypedExprKind::Primitive(args)
+                | TypedExprKind::EffectBoundary(args)
+                | TypedExprKind::Unsupported(args) => args.iter().collect(),
+                TypedExprKind::Construct { fields, .. } => {
+                    fields.iter().map(|(_, value)| value).collect()
+                }
+                TypedExprKind::Project { subject, .. } => vec![subject],
+                TypedExprKind::Block { values, tail } => values
+                    .iter()
+                    .chain(std::iter::once(tail.as_ref()))
+                    .collect(),
+                TypedExprKind::Leaf
+                | TypedExprKind::Local(_)
+                | TypedExprKind::Global(_)
+                | TypedExprKind::Borrow { .. } => Vec::new(),
+            };
+            children.into_iter().find_map(|child| find(child, span))
+        }
+        self.bodies
+            .get(declaration)
+            .and_then(|body| find(body, span))
+    }
+
     /// Exposes declaration evidence for the region-compatibility phase once
     /// reference types carry explicit regions.
     #[allow(dead_code)]
@@ -1263,6 +1299,7 @@ fn predefined(id: TypeId) -> ProvisionalType {
         CHAR => "Char".into(),
         U8 => "u8".into(),
         BYTES => "Bytes".into(),
+        NEVER => "Never".into(),
         _ => unreachable!("the provisional expression typer only defaults literal leaf types"),
     })
 }
@@ -2078,12 +2115,27 @@ impl<'a> Typer<'a> {
                 computation,
                 clauses,
             } => {
+                let outer_locals = self.locals.clone();
+                let outer_next_local = self.next_local;
                 let computation = self.expression(computation, expected);
-                let handler_result = expected.cloned().or_else(|| computation.ty.clone());
+                // The handled computation is emitted as its own synthetic
+                // callable. Its lexical locals must not shift identities in
+                // the enclosing function after the handler expression.
+                self.locals = outer_locals.clone();
+                self.next_local = outer_next_local;
+                let never = predefined(NEVER);
+                let mut handler_result = expected.cloned().or_else(|| {
+                    computation
+                        .ty
+                        .clone()
+                        .filter(|candidate| candidate != &never)
+                });
                 let mut children = vec![computation];
                 for clause in clauses.iter() {
-                    let saved = self.locals.clone();
-                    let saved_next_local = self.next_local;
+                    let saved = outer_locals.clone();
+                    let saved_next_local = outer_next_local;
+                    self.locals = saved.clone();
+                    self.next_local = saved_next_local;
                     if let Some(shape) = self
                         .tables
                         .operation_sites
@@ -2122,6 +2174,17 @@ impl<'a> Typer<'a> {
                     // function's local arena. Do not let their shadow-typing
                     // ordinals shift locals declared after the handler.
                     self.next_local = saved_next_local;
+                }
+                if handler_result.is_none() {
+                    let mut inferred = children
+                        .iter()
+                        .filter_map(|child| child.ty.clone())
+                        .filter(|ty| ty != &never);
+                    if let Some(first) = inferred.next()
+                        && inferred.all(|candidate| candidate == first)
+                    {
+                        handler_result = Some(first);
+                    }
                 }
                 self.node(
                     source,

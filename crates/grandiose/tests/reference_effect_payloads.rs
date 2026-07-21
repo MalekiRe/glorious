@@ -132,6 +132,57 @@ fn shared_reference_origin_survives_a_deep_resume_that_performs_again() {
 }
 
 #[test]
+fn generic_effect_payload_and_result_preserve_reference_origin_relations() {
+    let source = r#"
+        effect Echo<T> { [1,1] echo(value: T) -> T }
+        echoed<T>(value: T) -> T {
+            handle perform Echo<T>::echo(value) {
+                Echo<T>::echo(selected) with continuation =>
+                    resume(continuation, selected)
+            }
+        }
+        selected() -> i64 {
+            let value = 42;
+            let returned = echoed(&value);
+            *returned
+        }
+        main() -> { () }
+    "#;
+    run_selected_at_every_level(
+        "generic-reference-effect-relation.gr",
+        source,
+        Value::I64(42),
+    );
+}
+
+#[test]
+fn closure_projection_routes_an_effect_result_origin_through_resume() {
+    let source = r#"
+        effect Select<T, R> { [1,1] select(value: T) -> R }
+        apply<F, T, R>(value: T, body: F) -> R
+            where F: Fn<(T), Output=R> { body(value) }
+        select_right<'a>(pair: (&'a i64, &'a i64)) -> &'a i64 {
+            handle perform Select<(&'a i64, &'a i64), &'a i64>::select(pair) {
+                Select<(&'a i64, &'a i64), &'a i64>::select(payload) with continuation =>
+                    resume(continuation, apply(payload,
+                        (projected: (&'a i64, &'a i64)) -> &'a i64 { projected.1 }))
+            }
+        }
+        selected() -> i64 {
+            let left = 7;
+            let right = 42;
+            *select_right((&left, &right))
+        }
+        main() -> { () }
+    "#;
+    run_selected_at_every_level(
+        "closure-reference-effect-relation.gr",
+        source,
+        Value::I64(42),
+    );
+}
+
+#[test]
 fn unique_reference_payload_remains_rejected_for_multishot_resumption() {
     let source = r#"
         effect Replay { [2,2] replay(value: &mut i64) -> i64 }

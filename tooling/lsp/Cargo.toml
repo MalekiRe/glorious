@@ -1,0 +1,19 @@
+[package]
+name = "grand-lsp"
+version = "0.1.0"
+edition = "2024" # matches the vendored frontend (let-chains)
+description = "Language server for the Grandiose language"
+
+# Standalone like ../grand: the repo's root workspace belongs to the compiler.
+[workspace]
+
+[dependencies]
+anyhow = "1"
+ariadne = "0.5"
+grand = { path = "../grand" }
+grandfmt = { path = "../fmt" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

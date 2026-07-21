@@ -359,7 +359,43 @@ type EffectOperationMap = BTreeMap<(String, String), EffectOperationInfo>;
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct EffectInstanceKey {
     declaration: String,
+    /// Runtime-erased arguments which still participate in protocol identity.
+    static_arguments: Vec<EffectStaticArgument>,
     arguments: Vec<TypeId>,
+}
+
+struct EffectTypeResolution<'a> {
+    ids: &'a BTreeMap<&'a str, TypeId>,
+    aliases: &'a BTreeMap<String, ResolvedType>,
+    array_name: Option<&'a str>,
+    reference_types: &'a ReferenceTypes,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum EffectStaticArgument {
+    ConstU32(u32),
+    ConstQuantity(u32, Option<u32>),
+    Brand(String),
+}
+
+fn effect_protocol_display_name(key: &EffectInstanceKey) -> String {
+    if key.static_arguments.is_empty() {
+        return key.declaration.clone();
+    }
+    let arguments = key
+        .static_arguments
+        .iter()
+        .map(|argument| match argument {
+            EffectStaticArgument::ConstU32(value) => format!("const-u32:{value}"),
+            EffectStaticArgument::ConstQuantity(lower, upper) => format!(
+                "const-quantity:{lower}:{}",
+                upper.map_or_else(|| "infinity".to_owned(), |upper| upper.to_string())
+            ),
+            EffectStaticArgument::Brand(brand) => format!("brand:{brand}"),
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("{}<{arguments}>", key.declaration)
 }
 #[derive(Clone)]
 enum GeneratedArgument {
@@ -503,6 +539,7 @@ impl EffectLowering {
                     (0, Some(1)) => "optional one-shot".to_owned(),
                     (1, Some(1)) => "one-shot".to_owned(),
                     (lower, Some(upper)) if lower == upper => format!("exact {lower}-shot"),
+                    (lower, Some(upper)) => format!("bounded [{lower},{upper}]-shot"),
                     _ => unreachable!("unsupported resumption quantity reached lowering"),
                 }
             ),
@@ -1261,7 +1298,9 @@ struct CoreLowerer<'a> {
     reference_return_summaries: &'a BTreeMap<u32, ReferenceReturnSummary>,
     reference_return_plans: &'a BTreeMap<u32, ReferenceReturnPlan>,
     active_reference_return_plan: Option<ReferenceReturnPlan>,
+    defer_perform_reference_result: bool,
     label_evidence: &'a BTreeMap<typeck::DeclarationKey, Vec<typeck::LabelEvidence>>,
+    provisional_types: &'a typeck::TypedProgram,
     body_instance: Option<specialization::BodyInstanceKey>,
     environment_capture_modes: BTreeMap<String, specialization::CaptureMode>,
     expression_ordinals: BTreeMap<usize, u32>,
@@ -1342,6 +1381,7 @@ struct CoreTables<'a> {
     reference_return_summaries: &'a BTreeMap<u32, ReferenceReturnSummary>,
     reference_return_plans: &'a BTreeMap<u32, ReferenceReturnPlan>,
     label_evidence: &'a BTreeMap<typeck::DeclarationKey, Vec<typeck::LabelEvidence>>,
+    provisional_types: &'a typeck::TypedProgram,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1581,6 +1621,7 @@ fn generic_ast_reference_return_plans(
         environment: &BTreeMap<String, ReferenceReturnPlan>,
         known: &BTreeMap<typeck::DeclarationKey, ReferenceReturnPlan>,
         nominal_fields: &BTreeMap<String, BTreeMap<String, u32>>,
+        callback_wrappers: &BTreeMap<String, (usize, usize)>,
     ) -> Option<ReferenceReturnPlan> {
         match &expression.kind {
             ExprKind::Variable(path) if path.len() == 1 => Some(
@@ -1589,11 +1630,19 @@ fn generic_ast_reference_return_plans(
                     .cloned()
                     .unwrap_or_default(),
             ),
-            ExprKind::Move(value) => expression_plan(value, environment, known, nominal_fields),
+            ExprKind::Move(value) => {
+                expression_plan(value, environment, known, nominal_fields, callback_wrappers)
+            }
             ExprKind::Tuple(fields) => {
                 let mut result = Vec::new();
                 for (field, value) in fields.iter().enumerate() {
-                    for mut route in expression_plan(value, environment, known, nominal_fields)? {
+                    for mut route in expression_plan(
+                        value,
+                        environment,
+                        known,
+                        nominal_fields,
+                        callback_wrappers,
+                    )? {
                         route.result_prefix.insert(0, field as u32);
                         result.push(route);
                     }
@@ -1606,7 +1655,13 @@ fn generic_ast_reference_return_plans(
                 let mut result = Vec::new();
                 for (field, value) in fields.iter() {
                     let index = *indices.get(field)?;
-                    for mut route in expression_plan(value, environment, known, nominal_fields)? {
+                    for mut route in expression_plan(
+                        value,
+                        environment,
+                        known,
+                        nominal_fields,
+                        callback_wrappers,
+                    )? {
                         route.result_prefix.insert(0, index);
                         result.push(route);
                     }
@@ -1616,7 +1671,13 @@ fn generic_ast_reference_return_plans(
             ExprKind::Field(subject, field) => {
                 let index = field.parse::<u32>().ok()?;
                 Some(project_plan(
-                    expression_plan(subject, environment, known, nominal_fields)?,
+                    expression_plan(
+                        subject,
+                        environment,
+                        known,
+                        nominal_fields,
+                        callback_wrappers,
+                    )?,
                     index,
                 ))
             }
@@ -1624,21 +1685,80 @@ fn generic_ast_reference_return_plans(
                 let ExprKind::Variable(path) = &callee.kind else {
                     return None;
                 };
-                let declaration = typeck::DeclarationKey::Function(path.last()?.to_string());
-                let callee = known.get(&declaration)?;
-                let arguments = arguments
-                    .iter()
-                    .map(|argument| expression_plan(argument, environment, known, nominal_fields))
-                    .collect::<Option<Vec<_>>>()?;
-                let mut result = Vec::new();
-                for output in callee {
-                    for input in arguments.get(output.source.parameter)? {
-                        if let Some(route) = compose_reference_routes(output, input) {
-                            result.push(route);
+                let name = path.last()?.as_ref();
+                // The compatibility parser still lowers `resume(k, value)`
+                // to an ordinary call at this boundary.  A resume's result
+                // origin is exactly its value's origin; the resumption itself
+                // cannot contribute a reference to the result.
+                if name == "resume" && path.len() == 1 {
+                    let [_, value] = arguments.as_slice() else {
+                        return None;
+                    };
+                    return expression_plan(
+                        value,
+                        environment,
+                        known,
+                        nominal_fields,
+                        callback_wrappers,
+                    );
+                }
+                let declaration = typeck::DeclarationKey::Function(name.to_string());
+                if let Some(callee) = known.get(&declaration) {
+                    let arguments = arguments
+                        .iter()
+                        .map(|argument| {
+                            expression_plan(
+                                argument,
+                                environment,
+                                known,
+                                nominal_fields,
+                                callback_wrappers,
+                            )
+                        })
+                        .collect::<Option<Vec<_>>>()?;
+                    let mut result = Vec::new();
+                    for output in callee {
+                        for input in arguments.get(output.source.parameter)? {
+                            if let Some(route) = compose_reference_routes(output, input) {
+                                result.push(route);
+                            }
                         }
                     }
+                    return Some(result);
                 }
-                Some(result)
+                let &(value_argument, callback_argument) = callback_wrappers.get(name)?;
+                let callback = arguments.get(callback_argument)?;
+                let (params, body) = match &callback.kind {
+                    ExprKind::Closure { params, body } => (
+                        params.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                        body.as_ref(),
+                    ),
+                    ExprKind::TypedClosure { params, body, .. } => (
+                        params
+                            .iter()
+                            .map(|param| param.name.clone())
+                            .collect::<Vec<_>>(),
+                        body.as_ref(),
+                    ),
+                    _ => return None,
+                };
+                let captures = environment.keys().cloned().collect::<BTreeSet<_>>();
+                let selected = direct_closure_reference_route(&params, &captures, body)?;
+                let mut plan = match selected.source {
+                    ClosureReferenceSource::Parameter(0) => expression_plan(
+                        arguments.get(value_argument)?,
+                        environment,
+                        known,
+                        nominal_fields,
+                        callback_wrappers,
+                    )?,
+                    ClosureReferenceSource::Parameter(_) => return None,
+                    ClosureReferenceSource::Capture(name) => environment.get(&name)?.clone(),
+                };
+                for field in selected.path {
+                    plan = project_plan(plan, field);
+                }
+                Some(plan)
             }
             ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
                 let mut environment = environment.clone();
@@ -1646,17 +1766,74 @@ fn generic_ast_reference_return_plans(
                 for statement in statements.iter() {
                     match statement {
                         Stmt::Let { name, value, .. } => {
-                            let value =
-                                expression_plan(value, &environment, known, nominal_fields)?;
+                            let value = expression_plan(
+                                value,
+                                &environment,
+                                known,
+                                nominal_fields,
+                                callback_wrappers,
+                            )?;
                             environment.insert(name.clone(), value);
                         }
                         Stmt::Expr(value) => {
-                            tail = expression_plan(value, &environment, known, nominal_fields)?;
+                            tail = expression_plan(
+                                value,
+                                &environment,
+                                known,
+                                nominal_fields,
+                                callback_wrappers,
+                            )?;
                         }
                         Stmt::Deconstruct { .. } | Stmt::Assign { .. } => return None,
                     }
                 }
                 Some(tail)
+            }
+            ExprKind::Resume {
+                value: Some(value), ..
+            } => expression_plan(value, environment, known, nominal_fields, callback_wrappers),
+            ExprKind::Handle {
+                computation,
+                clauses,
+            } => {
+                // A direct performed computation with one lexical clause has
+                // an exact result route when that clause resumes it. Keep the
+                // shape deliberately narrow: additional computation after the
+                // perform, multiple clauses, or nested/destructuring patterns
+                // require a real handler-exit route join and remain absent.
+                let ExprKind::Perform { args, .. } = &computation.kind else {
+                    return None;
+                };
+                let [clause] = clauses.as_slice() else {
+                    return None;
+                };
+                if clause.patterns.len() != args.len() {
+                    return None;
+                }
+                let mut clause_environment = environment.clone();
+                for (pattern, argument) in clause.patterns.iter().zip(args.iter()) {
+                    let argument = expression_plan(
+                        argument,
+                        environment,
+                        known,
+                        nominal_fields,
+                        callback_wrappers,
+                    )?;
+                    match &pattern.kind {
+                        PatternKind::Binding(name) => {
+                            clause_environment.insert(name.clone(), argument);
+                        }
+                        PatternKind::Wildcard => {}
+                        _ => return None,
+                    }
+                }
+                expression_plan(
+                    &clause.body,
+                    &clause_environment,
+                    known,
+                    nominal_fields,
+                    callback_wrappers,
+                )
             }
             ExprKind::Unit
             | ExprKind::Int(_)
@@ -1673,12 +1850,11 @@ fn generic_ast_reference_return_plans(
             | ExprKind::LabelReference(_)
             | ExprKind::LabelDestination { .. }
             | ExprKind::Leave { .. }
-            | ExprKind::Resume { .. }
+            | ExprKind::Resume { value: None, .. }
             | ExprKind::Cancel { .. }
             | ExprKind::TailResume { .. }
             | ExprKind::Is { .. }
             | ExprKind::Perform { .. }
-            | ExprKind::Handle { .. }
             | ExprKind::Unary { .. }
             | ExprKind::Binary { .. } => None,
         }
@@ -1699,13 +1875,56 @@ fn generic_ast_reference_return_plans(
             )
         })
         .collect::<BTreeMap<_, _>>();
+    fn tail(expression: &Expr) -> &Expr {
+        match &expression.kind {
+            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => statements
+                .last()
+                .and_then(|statement| match statement {
+                    Stmt::Expr(value) => Some(tail(value)),
+                    Stmt::Let { .. } | Stmt::Deconstruct { .. } | Stmt::Assign { .. } => None,
+                })
+                .unwrap_or(expression),
+            ExprKind::Move(value) => tail(value),
+            _ => expression,
+        }
+    }
+    let callback_wrappers = program
+        .functions
+        .iter()
+        .filter_map(|function| {
+            let ExprKind::Call(callee, arguments) = &tail(&function.body).kind else {
+                return None;
+            };
+            let ExprKind::Variable(callee) = &callee.kind else {
+                return None;
+            };
+            let [callee] = callee.as_ref() else {
+                return None;
+            };
+            let callback = function
+                .params
+                .iter()
+                .position(|parameter| parameter.name == callee.as_ref())?;
+            let [argument] = arguments.as_slice() else {
+                return None;
+            };
+            let ExprKind::Variable(argument) = &argument.kind else {
+                return None;
+            };
+            let [argument] = argument.as_ref() else {
+                return None;
+            };
+            let value = function
+                .params
+                .iter()
+                .position(|parameter| parameter.name == argument.as_ref())?;
+            Some((function.name.clone(), (value, callback)))
+        })
+        .collect::<BTreeMap<_, _>>();
     let mut known = seed.clone();
     loop {
         let before = known.len();
         for function in &program.functions {
-            if function.generics.is_none() {
-                continue;
-            }
             let owner = typeck::DeclarationKey::Function(function.name.clone());
             if known.contains_key(&owner) {
                 continue;
@@ -1727,9 +1946,14 @@ fn generic_ast_reference_return_plans(
                     )
                 })
                 .collect();
-            if let Some(mut plan) =
-                expression_plan(&function.body, &environment, &known, &nominal_fields)
-            {
+            let inferred = expression_plan(
+                &function.body,
+                &environment,
+                &known,
+                &nominal_fields,
+                &callback_wrappers,
+            );
+            if let Some(mut plan) = inferred {
                 plan.sort_by(|left, right| {
                     (
                         &left.result_prefix,
@@ -3619,6 +3843,7 @@ fn compile_program_with_phases(
         &nominal_ids,
         &alias_shapes,
         runtime_bindings.array_name(),
+        &reference_types,
     )?;
     let provisional_tables = provisional_tables(
         &nominal_ids,
@@ -4474,12 +4699,16 @@ fn compile_program_with_phases(
             }
             Emission::Function(function) => {
                 let outward_protocols = match resolve_callable_effect_row(
+                    program,
                     function,
                     &resolved_effects.instances,
                     &resolved_effect_rows,
-                    &nominal_ids,
-                    &alias_shapes,
-                    runtime_bindings.array_name(),
+                    &EffectTypeResolution {
+                        ids: &nominal_ids,
+                        aliases: &alias_shapes,
+                        array_name: runtime_bindings.array_name(),
+                        reference_types: &reference_types,
+                    },
                 ) {
                     Ok(row) => row,
                     Err(mut row_errors) => {
@@ -4515,6 +4744,7 @@ fn compile_program_with_phases(
                 let substitutions =
                     specialization::substitutions_for_key(template, specialization_key);
                 let mut outward_protocols = match resolve_specialized_callable_effect_row(
+                    program,
                     function,
                     template,
                     &substitutions,
@@ -4523,6 +4753,7 @@ fn compile_program_with_phases(
                     &nominal_ids,
                     &alias_shapes,
                     runtime_bindings.array_name(),
+                    &reference_types,
                 ) {
                     Ok(row) => row,
                     Err(mut row_errors) => {
@@ -4564,6 +4795,7 @@ fn compile_program_with_phases(
                             resolved_effects.instances.get(&EffectInstanceKey {
                                 declaration: effect.declaration.0.clone(),
                                 arguments,
+                                static_arguments: vec![],
                             })
                         }) else {
                             errors.push(type_error(
@@ -4646,6 +4878,7 @@ fn compile_program_with_phases(
                         resolved_effects.instances.get(&EffectInstanceKey {
                             declaration: effect.declaration.0.clone(),
                             arguments,
+                            static_arguments: vec![],
                         })
                     }) else {
                         errors.push(type_error(
@@ -4796,6 +5029,7 @@ fn compile_program_with_phases(
         &resolved_effects,
         &nominal_ids,
         runtime_bindings.array_name(),
+        &reference_types,
     );
     let mut artifact = Artifact {
         required_features: 1,
@@ -5259,6 +5493,7 @@ fn compile_program_with_phases(
         reference_return_summaries: &reference_return_summaries,
         reference_return_plans: &reference_return_plans,
         label_evidence: &provisional.labels,
+        provisional_types: &provisional,
     };
     let mut core_functions = Vec::new();
     for (wire_name, emission_key, emission) in ordered {
@@ -5541,6 +5776,11 @@ fn compile_program_with_phases(
         lowerer.body_instance = synthetic.body_instance.clone();
         lowerer.expression_ordinals = synthetic.expression_ordinals.clone();
         lowerer.recursive_receiver = synthetic.recursive_receiver.clone();
+        lowerer.defer_perform_reference_result = matches!(
+            &synthetic.body,
+            SyntheticBody::Expr { .. }
+        ) && synthetic.name.starts_with("$handler$")
+            && synthetic.name.ends_with("$body");
         match &synthetic.body {
             SyntheticBody::Expr { body, root_ordinal } => {
                 if let Some(ordinal) = root_ordinal {
@@ -6525,6 +6765,13 @@ fn normalize_ground_projections(
         {
             apply(field, trait_db, &mut solver_budget, &mut errors);
         }
+    }
+    // Effect paths are a side table rather than expression-owned syntax. They
+    // must be normalized alongside signatures so protocol lookup sees the
+    // same canonical associated type as payload checking.
+    for path in &mut normalized.effect_paths {
+        solver_budget.begin_declaration();
+        apply(&mut path.effect, trait_db, &mut solver_budget, &mut errors);
     }
     for effect in &mut normalized.effects {
         solver_budget.begin_declaration();
@@ -11946,6 +12193,50 @@ fn resolve_source_type(
     }
 }
 
+fn effect_static_arguments(
+    program: &Program,
+    syntax: &TypeSyntax,
+) -> Result<Vec<EffectStaticArgument>, Diagnostic> {
+    let lifetime_arguments = match &syntax.kind {
+        TypeSyntaxKind::Application {
+            lifetime_arguments, ..
+        } => lifetime_arguments.as_slice(),
+        _ => &[],
+    };
+    let mut positioned = program
+        .type_const_arguments(syntax.span)
+        .iter()
+        .map(|argument| {
+            let value = match &argument.value {
+                crate::ast::ConstArgumentValueSyntax::U32 { value, .. } => {
+                    EffectStaticArgument::ConstU32(u32::try_from(*value).map_err(|_| {
+                        type_error(argument.value.span(), "const effect argument exceeds u32")
+                    })?)
+                }
+                crate::ast::ConstArgumentValueSyntax::Quantity(quantity) => {
+                    EffectStaticArgument::ConstQuantity(
+                        u32::try_from(quantity.lower).map_err(|_| {
+                            type_error(quantity.span, "effect quantity lower bound exceeds u32")
+                        })?,
+                        quantity.upper.map(u32::try_from).transpose().map_err(|_| {
+                            type_error(quantity.span, "effect quantity upper bound exceeds u32")
+                        })?,
+                    )
+                }
+            };
+            Ok((argument.position, value))
+        })
+        .collect::<Result<Vec<_>, Diagnostic>>()?;
+    positioned.extend(lifetime_arguments.iter().map(|argument| {
+        (
+            argument.position,
+            EffectStaticArgument::Brand(argument.lifetime.name.clone()),
+        )
+    }));
+    positioned.sort_by_key(|(position, _)| *position);
+    Ok(positioned.into_iter().map(|(_, value)| value).collect())
+}
+
 fn resolve_effects(
     program: &Program,
     discovery: &specialization::Discovery,
@@ -11954,6 +12245,35 @@ fn resolve_effects(
     array_name: Option<&str>,
     reference_types: &mut ReferenceTypes,
 ) -> Result<ResolvedEffects, Vec<Diagnostic>> {
+    let direct_effect_arguments = program
+        .effect_paths
+        .iter()
+        .map(|path| &path.effect)
+        .chain(
+            program
+                .functions
+                .iter()
+                .flat_map(|function| function.outward_effects.iter())
+                .flat_map(|row| &row.effects),
+        )
+        .chain(
+            program
+                .effect_row_aliases
+                .iter()
+                .flat_map(|alias| &alias.row.effects),
+        )
+        .filter_map(|effect| match &effect.kind {
+            TypeSyntaxKind::Application { arguments, .. } => Some(arguments.as_slice()),
+            _ => None,
+        })
+        .flatten()
+        .filter_map(|argument| resolve_source_type(argument, ids, aliases, array_name).ok())
+        .collect::<Vec<_>>();
+    // Assign structural ids from a canonical set before source-order walks
+    // request protocols. Reordering declarations therefore cannot renumber
+    // otherwise identical protocol arguments.
+    reference_types.extend(direct_effect_arguments);
+
     fn provisional_for_id(
         ty: TypeId,
         ids: &BTreeMap<&str, TypeId>,
@@ -12022,18 +12342,22 @@ fn resolve_effects(
     }
 
     fn instance(
+        program: &Program,
         syntax: &TypeSyntax,
         declarations: &BTreeMap<&str, &crate::ast::EffectDecl>,
         ids: &BTreeMap<&str, TypeId>,
         aliases: &BTreeMap<String, ResolvedType>,
         array_name: Option<&str>,
+        reference_types: &mut ReferenceTypes,
     ) -> Result<Option<EffectInstanceKey>, Diagnostic> {
-        let (name, arguments) = match &syntax.kind {
-            TypeSyntaxKind::Path(path) if path.len() == 1 => (path[0].name.as_str(), &[][..]),
+        let (name, arguments, lifetime_arguments) = match &syntax.kind {
+            TypeSyntaxKind::Path(path) if path.len() == 1 => {
+                (path[0].name.as_str(), &[][..], &[][..])
+            }
             TypeSyntaxKind::Application {
                 constructor,
                 arguments,
-                ..
+                lifetime_arguments,
             } => {
                 let Some(name) = constructor.simple_name() else {
                     return Err(type_error(
@@ -12041,7 +12365,7 @@ fn resolve_effects(
                         "effect constructor must be unqualified",
                     ));
                 };
-                (name, arguments.as_slice())
+                (name, arguments.as_slice(), lifetime_arguments.as_slice())
             }
             _ => return Ok(None),
         };
@@ -12052,32 +12376,28 @@ fn resolve_effects(
             .generics
             .as_ref()
             .map_or(0, |generics| generics.params.len());
-        if arguments.len() != arity {
+        let const_arguments = program.type_const_arguments(syntax.span);
+        let supplied = arguments.len() + const_arguments.len() + lifetime_arguments.len();
+        if supplied != arity {
             return Err(type_error(
                 syntax.span,
                 format!(
                     "effect `{name}` expects {arity} type argument(s), got {}",
-                    arguments.len()
+                    supplied
                 ),
             ));
         }
         let mut resolved = Vec::with_capacity(arguments.len());
         for argument in arguments {
             match resolve_source_type(argument, ids, aliases, array_name) {
-                Ok(ResolvedType::Concrete(ty)) => resolved.push(ty),
-                Ok(_) => {
-                    return Err(unsupported(
-                        argument.span,
-                        "structural generic effect argument",
-                        "generic effect arguments must currently resolve to one concrete runtime type",
-                    ));
-                }
+                Ok(ty) => resolved.push(reference_types.intern(&ty)),
                 Err(_) => return Ok(None),
             }
         }
         Ok(Some(EffectInstanceKey {
             declaration: name.to_owned(),
             arguments: resolved,
+            static_arguments: effect_static_arguments(program, syntax)?,
         }))
     }
 
@@ -12181,6 +12501,7 @@ fn resolve_effects(
         requested.insert(EffectInstanceKey {
             declaration: effect.name.clone(),
             arguments: vec![],
+            static_arguments: vec![],
         });
     }
     let belongs_to_generic_function = |span: Span| {
@@ -12197,7 +12518,15 @@ fn resolve_effects(
         if belongs_to_generic_function(path.site) {
             continue;
         }
-        match instance(&path.effect, &declarations, ids, aliases, array_name) {
+        match instance(
+            program,
+            &path.effect,
+            &declarations,
+            ids,
+            aliases,
+            array_name,
+            reference_types,
+        ) {
             Ok(Some(instance)) => {
                 requested.insert(instance);
             }
@@ -12211,7 +12540,15 @@ fn resolve_effects(
         }
         if let Some(row) = &function.outward_effects {
             for effect in &row.effects {
-                match instance(effect, &declarations, ids, aliases, array_name) {
+                match instance(
+                    program,
+                    effect,
+                    &declarations,
+                    ids,
+                    aliases,
+                    array_name,
+                    reference_types,
+                ) {
                     Ok(Some(instance)) => {
                         requested.insert(instance);
                     }
@@ -12223,7 +12560,15 @@ fn resolve_effects(
     }
     for alias in &program.effect_row_aliases {
         for effect in &alias.row.effects {
-            match instance(effect, &declarations, ids, aliases, array_name) {
+            match instance(
+                program,
+                effect,
+                &declarations,
+                ids,
+                aliases,
+                array_name,
+                reference_types,
+            ) {
                 Ok(Some(instance)) => {
                     requested.insert(instance);
                 }
@@ -12280,16 +12625,21 @@ fn resolve_effects(
                         &typeck::ProvisionalType::Param((*binder).clone()),
                         &substitutions,
                     )?;
-                    match provisional_to_resolved(&ty, ids, array_name)? {
-                        ResolvedType::Concrete(ty) => Some(ty),
-                        _ => None,
-                    }
+                    let resolved = provisional_to_resolved(&ty, ids, array_name)?;
+                    Some(reference_types.intern(&resolved))
                 })
                 .collect::<Option<Vec<_>>>();
             if let Some(arguments) = arguments {
                 requested.insert(EffectInstanceKey {
                     declaration: declaration.to_owned(),
                     arguments,
+                    static_arguments: match effect_static_arguments(program, &path.effect) {
+                        Ok(arguments) => arguments,
+                        Err(error) => {
+                            errors.push(error);
+                            continue;
+                        }
+                    },
                 });
             }
         }
@@ -12308,6 +12658,7 @@ fn resolve_effects(
             .as_ref()
             .into_iter()
             .flat_map(|generics| &generics.params)
+            .filter(|parameter| parameter.kind == GenericParamKind::Type)
             .zip(&key.arguments)
             .map(|(param, argument)| (param.name.as_str(), *argument))
             .collect::<BTreeMap<_, _>>();
@@ -12318,14 +12669,14 @@ fn resolve_effects(
                     .resumption_upper
                     .and_then(|upper| u32::try_from(upper).ok()),
             );
-            let supported_resumption = matches!(finite_quantity, Some((0, 1)))
-                || matches!(finite_quantity, Some((lower, upper)) if lower >= 1 && lower == upper);
+            let supported_resumption =
+                matches!(finite_quantity, Some((lower, upper)) if lower <= upper && upper >= 1);
             if !operation.terminal && (!operation.has_resumption_quantity || !supported_resumption)
             {
                 errors.push(unsupported(
                     operation.span,
                     "unsupported resumption quantity",
-                    "resumptive operations must declare `[0,1]` or an exact finite `[n,n]` quantity with `n >= 1` in the u32 domain",
+                    "resumptive operations must declare a finite bounded `[lower,upper]` quantity with `lower <= upper`, `upper >= 1`, and both bounds in the u32 domain; arbitrary unbounded intervals require a future runtime representation",
                 ));
                 continue;
             }
@@ -12439,7 +12790,7 @@ fn resolve_effects(
             }
         }
         protocols.push(Protocol {
-            display_name: effect.name.clone(),
+            display_name: effect_protocol_display_name(&key),
             type_arguments: key.arguments.clone(),
             operations: bytecode_operations,
         });
@@ -12450,8 +12801,15 @@ fn resolve_effects(
     }
     let mut operation_sites = BTreeMap::new();
     for path in &program.effect_paths {
-        let Ok(Some(instance)) = instance(&path.effect, &declarations, ids, aliases, array_name)
-        else {
+        let Ok(Some(instance)) = instance(
+            program,
+            &path.effect,
+            &declarations,
+            ids,
+            aliases,
+            array_name,
+            reference_types,
+        ) else {
             continue;
         };
         let site = (path.site.start, path.site.end);
@@ -12712,12 +13070,11 @@ fn resolve_effect_row_alias(
 }
 
 fn resolve_callable_effect_row(
+    program: &Program,
     function: &Function,
     instances: &BTreeMap<EffectInstanceKey, u32>,
     effect_rows: &BTreeMap<String, Vec<u32>>,
-    ids: &BTreeMap<&str, TypeId>,
-    aliases: &BTreeMap<String, ResolvedType>,
-    array_name: Option<&str>,
+    types: &EffectTypeResolution<'_>,
 ) -> Result<Vec<u32>, Vec<Diagnostic>> {
     let Some(row) = &function.outward_effects else {
         return Ok(vec![]);
@@ -12731,7 +13088,14 @@ fn resolve_callable_effect_row(
             resolved.extend(protocols);
             continue;
         }
-        match ground_effect_instance_key(effect, ids, aliases, array_name) {
+        match ground_effect_instance_key(
+            program,
+            effect,
+            types.ids,
+            types.aliases,
+            types.array_name,
+            types.reference_types,
+        ) {
             Ok(key) => match instances.get(&key) {
                 Some(protocol) => {
                     resolved.insert(*protocol);
@@ -12753,6 +13117,7 @@ fn resolve_callable_effect_row(
 
 #[allow(clippy::too_many_arguments)]
 fn resolve_specialized_callable_effect_row(
+    program: &Program,
     function: &Function,
     template: &specialization::FunctionTemplate,
     substitutions: &BTreeMap<typeck::GenericParamKey, specialization::SpecializationArgument>,
@@ -12761,6 +13126,7 @@ fn resolve_specialized_callable_effect_row(
     ids: &BTreeMap<&str, TypeId>,
     aliases: &BTreeMap<String, ResolvedType>,
     array_name: Option<&str>,
+    reference_types: &ReferenceTypes,
 ) -> Result<Vec<u32>, Vec<Diagnostic>> {
     let Some(row) = &function.outward_effects else {
         return Ok(vec![]);
@@ -12809,8 +13175,8 @@ fn resolve_specialized_callable_effect_row(
                         })
                         .and_then(|argument| provisional_to_resolved(&argument, ids, array_name))
                         .or_else(|| resolve_source_type(argument, ids, aliases, array_name).ok());
-                    match ty {
-                        Some(ResolvedType::Concrete(ty)) => grounded.push(ty),
+                    match ty.and_then(|ty| reference_types.get_id(&ty)) {
+                        Some(ty) => grounded.push(ty),
                         _ => {
                             errors.push(type_error(
                                 argument.span,
@@ -12826,15 +13192,31 @@ fn resolve_specialized_callable_effect_row(
                 EffectInstanceKey {
                     declaration: declaration.to_owned(),
                     arguments: grounded,
+                    static_arguments: match effect_static_arguments(program, effect) {
+                        Ok(arguments) => arguments,
+                        Err(error) => {
+                            errors.push(error);
+                            continue;
+                        }
+                    },
                 }
             }
-            _ => match ground_effect_instance_key(effect, ids, aliases, array_name) {
-                Ok(key) => key,
-                Err(error) => {
-                    errors.push(error);
-                    continue;
+            _ => {
+                match ground_effect_instance_key(
+                    program,
+                    effect,
+                    ids,
+                    aliases,
+                    array_name,
+                    reference_types,
+                ) {
+                    Ok(key) => key,
+                    Err(error) => {
+                        errors.push(error);
+                        continue;
+                    }
                 }
-            },
+            }
         };
         match instances.get(&key) {
             Some(protocol) => {
@@ -12862,6 +13244,7 @@ fn resolve_specialized_effect_operation_sites(
     effects: &ResolvedEffects,
     ids: &BTreeMap<&str, TypeId>,
     array_name: Option<&str>,
+    reference_types: &ReferenceTypes,
 ) -> BTreeMap<(specialization::SpecializationKey, usize, usize), EffectOperationInfo> {
     fn symbolic_effect_argument(
         syntax: &TypeSyntax,
@@ -12953,10 +13336,8 @@ fn resolve_specialized_effect_operation_sites(
                 .map(|argument| {
                     let symbolic = symbolic_effect_argument(argument, &binders)?;
                     let ty = specialization::substitute(&symbolic, &substitutions)?;
-                    match provisional_to_resolved(&ty, ids, array_name)? {
-                        ResolvedType::Concrete(ty) => Some(ty),
-                        _ => None,
-                    }
+                    let resolved = provisional_to_resolved(&ty, ids, array_name)?;
+                    reference_types.get_id(&resolved)
                 })
                 .collect::<Option<Vec<_>>>();
             let Some(arguments) = arguments else {
@@ -12965,6 +13346,10 @@ fn resolve_specialized_effect_operation_sites(
             let instance = EffectInstanceKey {
                 declaration: declaration.to_owned(),
                 arguments,
+                static_arguments: match effect_static_arguments(program, &path.effect) {
+                    Ok(arguments) => arguments,
+                    Err(_) => continue,
+                },
             };
             let site = (path.site.start, path.site.end);
             let Some(operation) = effects.site_operations.get(&site) else {
@@ -12983,10 +13368,12 @@ fn resolve_specialized_effect_operation_sites(
 }
 
 fn ground_effect_instance_key(
+    program: &Program,
     syntax: &TypeSyntax,
     ids: &BTreeMap<&str, TypeId>,
     aliases: &BTreeMap<String, ResolvedType>,
     array_name: Option<&str>,
+    reference_types: &ReferenceTypes,
 ) -> Result<EffectInstanceKey, Diagnostic> {
     let (declaration, arguments) = match &syntax.kind {
         TypeSyntaxKind::Path(path) if path.len() == 1 => (path[0].name.clone(), &[][..]),
@@ -13013,13 +13400,15 @@ fn ground_effect_instance_key(
     let mut resolved = Vec::with_capacity(arguments.len());
     for argument in arguments {
         match resolve_source_type(argument, ids, aliases, array_name) {
-            Ok(ResolvedType::Concrete(ty)) => resolved.push(ty),
-            Ok(_) => {
-                return Err(type_error(
-                    argument.span,
-                    "generic effect argument must be a concrete runtime type",
-                ));
-            }
+            Ok(ty) => match reference_types.get_id(&ty) {
+                Some(ty) => resolved.push(ty),
+                None => {
+                    return Err(type_error(
+                        argument.span,
+                        "generic effect argument was not assigned a canonical runtime type",
+                    ));
+                }
+            },
             Err(TypeResolutionError::Unknown(name)) => {
                 return Err(type_error(
                     argument.span,
@@ -13037,6 +13426,7 @@ fn ground_effect_instance_key(
     Ok(EffectInstanceKey {
         declaration,
         arguments: resolved,
+        static_arguments: effect_static_arguments(program, syntax)?,
     })
 }
 
@@ -13046,15 +13436,18 @@ fn resolve_ground_effect_row_aliases(
     ids: &BTreeMap<&str, TypeId>,
     aliases: &BTreeMap<String, ResolvedType>,
     array_name: Option<&str>,
+    reference_types: &ReferenceTypes,
 ) -> Result<BTreeMap<String, Vec<u32>>, Vec<Diagnostic>> {
     #[allow(clippy::too_many_arguments)]
     fn resolve_one(
+        program: &Program,
         name: &str,
         declarations: &BTreeMap<&str, &crate::ast::EffectRowAliasDecl>,
         instances: &BTreeMap<EffectInstanceKey, u32>,
         ids: &BTreeMap<&str, TypeId>,
         aliases: &BTreeMap<String, ResolvedType>,
         array_name: Option<&str>,
+        reference_types: &ReferenceTypes,
         resolved: &mut BTreeMap<String, Vec<u32>>,
         visiting: &mut BTreeSet<String>,
         errors: &mut Vec<Diagnostic>,
@@ -13078,12 +13471,14 @@ fn resolve_ground_effect_row_aliases(
                 .filter(|member_name| declarations.contains_key(member_name))
             {
                 match resolve_one(
+                    program,
                     nested,
                     declarations,
                     instances,
                     ids,
                     aliases,
                     array_name,
+                    reference_types,
                     resolved,
                     visiting,
                     errors,
@@ -13093,7 +13488,14 @@ fn resolve_ground_effect_row_aliases(
                 }
                 continue;
             }
-            match ground_effect_instance_key(member, ids, aliases, array_name) {
+            match ground_effect_instance_key(
+                program,
+                member,
+                ids,
+                aliases,
+                array_name,
+                reference_types,
+            ) {
                 Ok(key) => match instances.get(&key) {
                     Some(protocol) => {
                         row.insert(*protocol);
@@ -13132,12 +13534,14 @@ fn resolve_ground_effect_row_aliases(
     let mut errors = Vec::new();
     for name in declarations.keys().copied() {
         resolve_one(
+            program,
             name,
             &declarations,
             instances,
             ids,
             aliases,
             array_name,
+            reference_types,
             &mut resolved,
             &mut visiting,
             &mut errors,
@@ -15539,6 +15943,7 @@ fn prove_resumption_consumption(
     expression: &Expr,
     binder: &str,
     lower_uses: u32,
+    upper_uses: u32,
     operation_span: Span,
     functions: &[Function],
     terminally_diverges: &impl Fn(&Expr) -> bool,
@@ -16200,15 +16605,12 @@ fn prove_resumption_consumption(
         }
     }
 
-    let expected_uses = lower_uses as usize;
-    let quantity = if lower_uses == 0 {
-        "[0,1]".to_owned()
-    } else {
-        format!("[{lower_uses},{lower_uses}]")
-    };
+    let minimum_uses = lower_uses as usize;
+    let maximum_uses = upper_uses as usize;
+    let quantity = format!("[{lower_uses},{upper_uses}]");
     let mut aliases = BTreeSet::from([binder.to_owned()]);
     collect_aliases(expression, &mut aliases);
-    if lower_uses > 1 && named_calls(expression, "tail") > 0 {
+    if upper_uses > 1 && named_calls(expression, "tail") > 0 {
         return Err(vec![
             type_error(
                 expression.span,
@@ -16269,25 +16671,23 @@ fn prove_resumption_consumption(
     let effective_uses = direct_uses.saturating_add(adjustment).max(0) as usize;
     let counted: Result<usize, Diagnostic> = Ok(effective_uses);
     match counted {
-        Ok(uses) if allow_cancel && uses <= 1 => {
+        Ok(uses) if allow_cancel && uses <= maximum_uses => {
             Ok(uses == 1 && named_calls(expression, "cancel") == 0)
         }
-        Ok(uses) if uses == expected_uses => Ok(false),
-        Ok(uses) if uses < expected_uses => Err(vec![
+        Ok(uses) if (minimum_uses..=maximum_uses).contains(&uses) => Ok(false),
+        Ok(uses) if uses < minimum_uses => Err(vec![
             type_error(
                 expression.span,
                 if allow_cancel {
-                    format!(
-                        "resumption `{binder}` must be consumed exactly once by `resume` or `cancel`"
-                    )
-                } else if expected_uses == 1 {
+                    format!("resumption `{binder}` must be consumed within {quantity}")
+                } else if minimum_uses == maximum_uses && minimum_uses == 1 {
                     format!("resumption `{binder}` must be resumed exactly once")
-                } else if expected_uses == 2 {
+                } else if minimum_uses == maximum_uses && minimum_uses == 2 {
                     format!("resumption `{binder}` must be resumed exactly twice")
+                } else if minimum_uses == maximum_uses {
+                    format!("resumption `{binder}` must be resumed exactly {minimum_uses} time(s)")
                 } else {
-                    format!(
-                        "resumption `{binder}` must be resumed exactly {expected_uses} time(s)"
-                    )
+                    format!("resumption `{binder}` must be resumed at least {minimum_uses} time(s)")
                 },
             )
             .with_related(
@@ -16299,15 +16699,13 @@ fn prove_resumption_consumption(
             type_error(
                 expression.span,
                 if allow_cancel {
-                    format!("resumption `{binder}` is consumed more than once")
-                } else if expected_uses == 1 {
+                    format!("resumption `{binder}` is consumed more than {maximum_uses} time(s)")
+                } else if minimum_uses == maximum_uses && maximum_uses == 1 {
                     format!("resumption `{binder}` is resumed more than once")
-                } else if expected_uses == 2 {
+                } else if minimum_uses == maximum_uses && maximum_uses == 2 {
                     format!("resumption `{binder}` is resumed more than twice")
                 } else {
-                    format!(
-                        "resumption `{binder}` is resumed more than {expected_uses} time(s)"
-                    )
+                    format!("resumption `{binder}` is resumed more than {maximum_uses} time(s)")
                 },
             )
             .with_related(
@@ -16672,7 +17070,9 @@ impl<'a> CoreLowerer<'a> {
                 reference_return_summaries: tables.reference_return_summaries,
                 reference_return_plans: tables.reference_return_plans,
                 active_reference_return_plan: None,
+                defer_perform_reference_result: false,
                 label_evidence: tables.label_evidence,
+                provisional_types: tables.provisional_types,
                 body_instance: Some(body_instance),
                 environment_capture_modes,
                 expression_ordinals,
@@ -16856,7 +17256,9 @@ impl<'a> CoreLowerer<'a> {
                 reference_return_summaries: tables.reference_return_summaries,
                 reference_return_plans: tables.reference_return_plans,
                 active_reference_return_plan: None,
+                defer_perform_reference_result: false,
                 label_evidence: tables.label_evidence,
+                provisional_types: tables.provisional_types,
                 body_instance: None,
                 environment_capture_modes: BTreeMap::new(),
                 expression_ordinals: BTreeMap::new(),
@@ -17117,10 +17519,16 @@ impl<'a> CoreLowerer<'a> {
             let mut created = Vec::new();
             let mut patterns = Vec::with_capacity(payload_count);
             for (pattern, param) in clause.patterns.iter().zip(&params[..payload_count]) {
+                let reference_fields = self
+                    .locals
+                    .values()
+                    .find(|local| local.local == param.local)
+                    .map_or_else(BTreeMap::new, |local| local.reference_fields.clone());
                 patterns.push(self.typed_handler_pattern(
                     pattern,
                     param.ty,
                     param.local,
+                    reference_fields,
                     &mut created,
                 )?);
             }
@@ -17467,17 +17875,33 @@ impl<'a> CoreLowerer<'a> {
         pattern: &crate::ast::Pattern,
         ty: TypeId,
         subject: core::LocalId,
+        reference_fields: BTreeMap<Vec<u32>, core::ReferenceOrigin>,
         created: &mut Vec<core::LocalId>,
     ) -> Result<TypedPattern, Vec<Diagnostic>> {
+        fn projected_reference_fields(
+            fields: &BTreeMap<Vec<u32>, core::ReferenceOrigin>,
+            prefix: &[u32],
+        ) -> BTreeMap<Vec<u32>, core::ReferenceOrigin> {
+            fields
+                .iter()
+                .filter_map(|(path, origin)| {
+                    path.strip_prefix(prefix)
+                        .map(|path| (path.to_vec(), origin.clone()))
+                })
+                .collect()
+        }
         let kind = match &pattern.kind {
             PatternKind::Binding(name) => {
+                let reference = (reference_fields.len() == 1)
+                    .then(|| reference_fields.values().next().cloned())
+                    .flatten();
                 self.locals.insert(
                     name.clone(),
                     CoreLocal {
                         local: subject,
                         ty,
-                        reference: None,
-                        reference_fields: BTreeMap::new(),
+                        reference,
+                        reference_fields,
                         owns_loan: false,
                     },
                 );
@@ -17606,7 +18030,13 @@ impl<'a> CoreLowerer<'a> {
                     created.push(local);
                     match supplied[index] {
                         Some(element) => typed_fields
-                            .push(self.typed_handler_pattern(element, *field_ty, local, created)?),
+                            .push(self.typed_handler_pattern(
+                                element,
+                                *field_ty,
+                                local,
+                                projected_reference_fields(&reference_fields, &[index as u32]),
+                                created,
+                            )?),
                         None => {
                             let interval = self.use_interval(*field_ty);
                             if interval.lower != 0 {
@@ -17735,7 +18165,7 @@ impl<'a> CoreLowerer<'a> {
                 self.actual_uses.insert(subject, required);
                 self.moved.insert(subject);
                 let mut typed_fields = Vec::with_capacity(declared.len());
-                for (field_name, field_ty) in &declared {
+                for (field_index, (field_name, field_ty)) in declared.iter().enumerate() {
                     let local = self.next_local;
                     self.next_local += 1;
                     self.owner_types.insert(local, *field_ty);
@@ -17745,6 +18175,10 @@ impl<'a> CoreLowerer<'a> {
                             &field.pattern,
                             *field_ty,
                             local,
+                            projected_reference_fields(
+                                &reference_fields,
+                                &[field_index as u32],
+                            ),
                             created,
                         )?),
                         None => {
@@ -17831,13 +18265,24 @@ impl<'a> CoreLowerer<'a> {
                 self.actual_uses.insert(subject, required);
                 self.moved.insert(subject);
                 let mut typed_fields = Vec::with_capacity(fields.len());
-                for (field, field_ty) in fields.iter().zip(field_types) {
+                for (field_index, (field, field_ty)) in
+                    fields.iter().zip(field_types).enumerate()
+                {
                     let local = self.next_local;
                     self.next_local += 1;
                     self.owner_types.insert(local, *field_ty);
                     created.push(local);
                     typed_fields
-                        .push(self.typed_handler_pattern(field, *field_ty, local, created)?);
+                        .push(self.typed_handler_pattern(
+                            field,
+                            *field_ty,
+                            local,
+                            projected_reference_fields(
+                                &reference_fields,
+                                &[u32::MAX - variant as u32, field_index as u32],
+                            ),
+                            created,
+                        )?);
                 }
                 TypedPatternKind::Variant {
                     variant: variant as u32,
@@ -18397,6 +18842,7 @@ impl<'a> CoreLowerer<'a> {
                 "specialization discovery did not retain a runtime closure plan for this handler-site callable environment",
             )]);
         };
+        let recursive_self = plan.recursive_self;
         let request = plan.request;
         if parameter_names.len() != request.shape.params.len() {
             return Err(vec![type_error(
@@ -18497,7 +18943,16 @@ impl<'a> CoreLowerer<'a> {
             };
             self.effects.allocate_type(descriptor)
         };
-        let receiver_mode = request.receiver_mode();
+        // A recursive closure which owns a noncopy environment cannot make a
+        // non-tail mode-2 self call: that would duplicate ownership between
+        // live frames. Route it through one stack-disciplined unique receiver
+        // instead. Parent frames are suspended while the child holds the same
+        // capability, so exactly one deepest path may move each capture.
+        let receiver_mode = if recursive_self.is_some() && request.receiver_mode() == 2 {
+            1
+        } else {
+            request.receiver_mode()
+        };
         let receiver_type = match receiver_mode {
             0 => self.effects.allocate_type(Type::RefShared {
                 referent: capture_type,
@@ -18535,7 +18990,18 @@ impl<'a> CoreLowerer<'a> {
             copy: callable_copy,
             zero_use_allowed: environment_zero_use,
         });
-        let declaration = self.effects.allocate_function(SyntheticFunction {
+        let declaration =
+            self.effects.first_synthetic_function + self.effects.synthetics.len() as u32;
+        let recursive_receiver = recursive_self.map(|recursive| RecursiveReceiverContext {
+            binding: recursive.binding,
+            target: declaration,
+            receiver_mode,
+            receiver_type,
+            capture_name: None,
+        });
+        let owned_body = body.clone();
+        let body_ordinals = specialization::expression_ordinals(&owned_body);
+        let allocated = self.effects.allocate_function(SyntheticFunction {
             id: 0,
             name: format!("$late$closure${identity}"),
             params: parameter_names
@@ -18552,13 +19018,14 @@ impl<'a> CoreLowerer<'a> {
             noncancelling_operations: BTreeSet::new(),
             no_return: result == NEVER,
             body: SyntheticBody::Expr {
-                body: body.clone(),
+                body: owned_body,
                 root_ordinal: None,
             },
             body_instance: Some(specialization::BodyInstanceKey::Closure(request)),
-            expression_ordinals: specialization::expression_ordinals(body),
-            recursive_receiver: None,
+            expression_ordinals: body_ordinals,
+            recursive_receiver,
         });
+        debug_assert_eq!(allocated, declaration);
         self.check(expression.span, expected, callable_type)?;
         let mut expression = self.typed(
             expression.span,
@@ -21898,8 +22365,20 @@ impl<'a> CoreLowerer<'a> {
                 self.enum_construct(expression, path, &[], expected)
             }
             ExprKind::Move(operand) => {
+                let direct_late_callable = match &operand.kind {
+                    ExprKind::Call(callee, _) => match &callee.kind {
+                        ExprKind::Variable(path) if path.len() == 1 => self
+                            .locals
+                            .get(path[0].as_ref())
+                            .and_then(|local| self.effects.extra_type(local.ty))
+                            .is_some_and(|ty| matches!(ty.representation(), Type::Callable { .. })),
+                        _ => false,
+                    },
+                    _ => false,
+                };
                 if matches!(operand.kind, ExprKind::Call(_, _))
                     && self.planned_indirect_call(operand).is_some()
+                    && !direct_late_callable
                 {
                     let mut call = self.expression(operand, expected)?;
                     call.span = span;
@@ -23846,6 +24325,95 @@ impl<'a> CoreLowerer<'a> {
                     }
                     return Ok(self.typed(span, result, core::ExprKind::CallSelf { args }));
                 }
+                if let Some(context) = self
+                    .recursive_receiver
+                    .clone()
+                    .filter(|context| context.binding == name)
+                {
+                    let target = self
+                        .effects
+                        .synthetics
+                        .iter()
+                        .find(|function| function.id == context.target)
+                        .cloned()
+                        .ok_or_else(|| {
+                            vec![type_error(
+                                span,
+                                "recursive callable runtime signature is unavailable",
+                            )]
+                        })?;
+                    if arguments.len() != target.params.len() {
+                        return Err(vec![type_error(
+                            span,
+                            format!(
+                                "recursive callable `{name}` expects {} arguments, got {}",
+                                target.params.len(),
+                                arguments.len()
+                            ),
+                        )]);
+                    }
+                    self.check(span, expected, target.result)?;
+                    let mut args = Vec::with_capacity(arguments.len());
+                    for (argument, (_, ty, _)) in arguments.iter().zip(&target.params) {
+                        let argument = self.expression(argument, Some(*ty))?;
+                        self.validate_anonymous_use(
+                            &argument,
+                            1,
+                            "recursive self-call argument temporary",
+                        )?;
+                        args.push(argument);
+                    }
+                    if let Some(capture_name) = context.capture_name {
+                        let receiver =
+                            self.locals.get(&capture_name).cloned().ok_or_else(|| {
+                                vec![type_error(
+                                    span,
+                                    "recursive receiver is unavailable in the generated callable",
+                                )]
+                            })?;
+                        self.record_local_use(receiver.local, span)?;
+                        let receiver = self.typed(
+                            span,
+                            context.receiver_type,
+                            core::ExprKind::Local {
+                                local: receiver.local,
+                                copy: true,
+                            },
+                        );
+                        return Ok(self.typed(
+                            span,
+                            target.result,
+                            core::ExprKind::CallKnownReceiver {
+                                declaration: context.target,
+                                receiver: Box::new(receiver),
+                                args,
+                            },
+                        ));
+                    }
+                    if context.receiver_mode == 1 {
+                        let consumed = target
+                            .captures
+                            .iter()
+                            .filter(|(_, ty, _)| {
+                                self.effects.extra_type(*ty).is_some_and(|descriptor| {
+                                    matches!(
+                                        descriptor.representation(),
+                                        Type::Resumption {
+                                            upper_uses: Some(1),
+                                            ..
+                                        }
+                                    )
+                                })
+                            })
+                            .filter_map(|(name, _, _)| self.locals.get(name).cloned())
+                            .collect::<Vec<_>>();
+                        for capture in consumed {
+                            self.record_local_use(capture.local, span)?;
+                            self.moved.insert(capture.local);
+                        }
+                    }
+                    return Ok(self.typed(span, target.result, core::ExprKind::CallSelf { args }));
+                }
                 let transports_late_identity = arguments.first().is_some_and(|argument| {
                     if matches!(
                         argument.kind,
@@ -25045,9 +25613,19 @@ impl<'a> CoreLowerer<'a> {
                             "a reference-result effect must have one unambiguous payload or live-frame origin",
                         ));
                     };
-                    let fields =
-                        self.map_reference_result_fields(info.result, source_fields, span)?;
-                    Self::set_expression_reference_fields(&mut expression, fields);
+                    match self.map_reference_result_fields(info.result, source_fields, span) {
+                        Ok(fields) => {
+                            Self::set_expression_reference_fields(&mut expression, fields)
+                        }
+                        Err(_) if self.defer_perform_reference_result => {
+                            // A handled operation's result origin is chosen by
+                            // its clause/resume exit, not structurally by the
+                            // payload alone. The enclosing handler installs an
+                            // exact joined route; absence of that route remains
+                            // fail-closed at the callable boundary.
+                        }
+                        Err(errors) => return Err(errors),
+                    }
                 }
                 Ok(expression)
             }
@@ -25548,6 +26126,80 @@ impl<'a> CoreLowerer<'a> {
         }
     }
 
+    fn provisional_handler_result(&mut self, span: Span) -> Option<TypeId> {
+        let declaration = match self.body_instance.as_ref()? {
+            specialization::BodyInstanceKey::Root(declaration) => declaration,
+            specialization::BodyInstanceKey::Closure(request) => &request.site.owner,
+            specialization::BodyInstanceKey::Specialization(key) => &key.template,
+            specialization::BodyInstanceKey::Drop(_) => return None,
+        };
+        let provisional = self
+            .provisional_types
+            .expression_type_at(declaration, span)
+            .cloned();
+        provisional
+            .as_ref()
+            .and_then(|ty| self.late_closure_type_id(ty))
+    }
+
+    fn active_reference_result_fields(
+        &self,
+        result: TypeId,
+    ) -> Option<BTreeMap<Vec<u32>, core::ReferenceOrigin>> {
+        let plan = self.active_reference_return_plan.as_ref()?;
+        let leaves = self.reference_leaf_paths(result);
+        if leaves.is_empty() {
+            return Some(BTreeMap::new());
+        }
+        let mut joined = BTreeMap::new();
+        for (result_path, unique) in leaves {
+            let mut candidates = plan
+                .iter()
+                .filter(|route| result_path.starts_with(&route.result_prefix))
+                .filter_map(|route| {
+                    let local = self
+                        .locals
+                        .values()
+                        .find(|local| local.local as usize == route.source.parameter)?;
+                    let mut source_path = route.source.path.clone();
+                    source_path.extend_from_slice(&result_path[route.result_prefix.len()..]);
+                    local
+                        .reference_fields
+                        .get(&source_path)
+                        .cloned()
+                        .map(|origin| (source_path, origin))
+                })
+                .collect::<Vec<_>>();
+            candidates.sort_by(|left, right| {
+                (
+                    &left.0,
+                    left.1.region,
+                    left.1.root,
+                    &left.1.path,
+                    left.1.unique,
+                )
+                    .cmp(&(
+                        &right.0,
+                        right.1.region,
+                        right.1.root,
+                        &right.1.path,
+                        right.1.unique,
+                    ))
+            });
+            candidates.dedup();
+            let [(_, origin)] = candidates.as_slice() else {
+                return None;
+            };
+            let mut origin = origin.clone();
+            if origin.unique != unique {
+                return None;
+            }
+            origin.unique = unique;
+            joined.insert(result_path, origin);
+        }
+        Some(joined)
+    }
+
     fn handle(
         &mut self,
         computation: &Expr,
@@ -25562,14 +26214,17 @@ impl<'a> CoreLowerer<'a> {
                 "handlers are not nested in this capture-free slice",
             )]);
         }
-        let Some(result) = expected.or_else(|| self.handler_result_hint(computation)) else {
+        let Some(result) = expected
+            .or_else(|| self.provisional_handler_result(span))
+            .or_else(|| self.handler_result_hint(computation))
+        else {
             return Err(vec![
                 type_error(
                     span,
-                    "a handler requires an expected result type in this slice",
+                    "handler result cannot be inferred from normal completion or any clause",
                 )
                 .with_help(
-                    "return the handler directly or place it where its result type is known",
+                    "give one reachable exit a ground result type or place the handler in an explicitly typed context",
                 ),
             ]);
         };
@@ -25666,6 +26321,8 @@ impl<'a> CoreLowerer<'a> {
                     &clause.body,
                     resumption,
                     info.resumption_lower,
+                    info.resumption_upper
+                        .expect("validated finite resumption upper"),
                     info.span,
                     self.function_templates,
                     &|argument| {
@@ -29556,14 +30213,21 @@ impl MirLowerer {
                     return MirFlow::Value(Some(dst));
                 }
                 if let Some(&(field, _)) = self.unique_receiver_captures.get(local) {
-                    debug_assert!(*copy, "a mutable receiver capture can only be read by copy");
                     let dst = self.allocate(expression.ty);
                     self.push(
                         expression.span,
-                        mir::InstructionKind::ProjectCopy {
-                            dst,
-                            src: Self::operand(0, mir::UseMode::Copy),
-                            field,
+                        if *copy {
+                            mir::InstructionKind::ProjectCopy {
+                                dst,
+                                src: Self::operand(0, mir::UseMode::Copy),
+                                field,
+                            }
+                        } else {
+                            mir::InstructionKind::ProjectMove {
+                                dst,
+                                src: Self::operand(0, mir::UseMode::Copy),
+                                field,
+                            }
                         },
                     );
                     return MirFlow::Value(Some(dst));
@@ -29601,6 +30265,18 @@ impl MirLowerer {
                 MirFlow::Value(Some(dst))
             }
             core::ExprKind::Move { local } => {
+                if let Some(&(field, _)) = self.unique_receiver_captures.get(local) {
+                    let dst = self.allocate(expression.ty);
+                    self.push(
+                        expression.span,
+                        mir::InstructionKind::ProjectMove {
+                            dst,
+                            src: Self::operand(0, mir::UseMode::Copy),
+                            field,
+                        },
+                    );
+                    return MirFlow::Value(Some(dst));
+                }
                 let src = self.locals[local];
                 let dst = self.allocate(expression.ty);
                 self.push(
@@ -33143,6 +33819,7 @@ fn is_integer(ty: TypeId) -> bool {
 fn type_name(ty: TypeId) -> &'static str {
     match ty {
         UNIT => "Unit",
+        NEVER => "Never",
         U8 => "u8",
         U16 => "u16",
         U32 => "u32",
@@ -33156,6 +33833,10 @@ fn type_name(ty: TypeId) -> &'static str {
         I128 => "i128",
         ISIZE => "isize",
         TEXT => "Text",
+        BYTES => "Bytes",
+        CHAR => "Char",
+        F32 => "f32",
+        F64 => "f64",
         _ => "unsupported type",
     }
 }

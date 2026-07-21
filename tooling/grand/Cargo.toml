@@ -1,0 +1,24 @@
+[package]
+name = "grand"
+version = "0.1.0"
+edition = "2021"
+description = "Build tool for the Grandiose language"
+
+# Deliberately its own workspace root: the repo's root workspace belongs to the
+# compiler effort and grand must not require edits to it.
+[workspace]
+
+[dependencies]
+anyhow = "1"
+blake3 = "1"
+clap = { version = "4", features = ["derive"] }
+grandfmt = { path = "../fmt" }
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+toml_edit = "0.22"
+walkdir = "2"
+
+[dev-dependencies]
+tempfile = "3"

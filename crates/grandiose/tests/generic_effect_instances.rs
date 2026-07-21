@@ -1,4 +1,7 @@
-use grandiose::compile_source_to_bytecode;
+use grandiose::{
+    CompileOptions, OptimizationLevel, compile_source_to_bytecode,
+    compile_source_to_bytecode_with_options,
+};
 use grandiose_vm::{I64, TEXT, Type, Value, Vm, verify};
 
 fn function_id(artifact: &grandiose_vm::Artifact, name: &str) -> u32 {
@@ -14,6 +17,178 @@ fn run(artifact: grandiose_vm::Artifact, name: &str) -> Value {
     Vm::new(verify(artifact).unwrap())
         .run(function, vec![])
         .unwrap()
+}
+
+const LEVELS: [OptimizationLevel; 4] = [
+    OptimizationLevel::O0,
+    OptimizationLevel::O1,
+    OptimizationLevel::O2,
+    OptimizationLevel::O3,
+];
+
+fn artifact_at(
+    source_name: &str,
+    source: &str,
+    level: OptimizationLevel,
+) -> grandiose_vm::Artifact {
+    compile_source_to_bytecode_with_options(
+        source_name,
+        source,
+        CompileOptions {
+            optimization_level: level,
+        },
+    )
+    .unwrap_or_else(|errors| panic!("{level:?}: {errors:#?}"))
+}
+
+#[test]
+fn const_effect_instances_are_distinct_and_nested_handlers_match_exactly() {
+    let source = r#"
+        effect Pick<const N: u32> { pick() -> ! }
+        selected() -> i64 {
+            handle {
+                handle perform Pick<1>::pick() {
+                    Pick<2>::pick() => 0
+                }
+            } {
+                Pick<1>::pick() => 42
+            }
+        }
+        main() -> { () }
+    "#;
+    for level in LEVELS {
+        let artifact = artifact_at("const-effect-instances.gr", source, level);
+        assert_eq!(
+            artifact
+                .protocols
+                .iter()
+                .filter(|protocol| protocol.display_name.starts_with("Pick<"))
+                .count(),
+            2,
+            "{level:?}"
+        );
+        assert_eq!(run(artifact, "selected"), Value::I64(42), "{level:?}");
+    }
+}
+
+#[test]
+fn brand_effect_instances_are_distinct_and_match_exactly() {
+    let source = r#"
+        effect Pick<'brand> { pick() -> ! }
+        selected<'red, 'blue>() -> i64 {
+            handle {
+                handle perform Pick<'red>::pick() {
+                    Pick<'blue>::pick() => 0
+                }
+            } {
+                Pick<'red>::pick() => 42
+            }
+        }
+        main() -> { () }
+    "#;
+    for level in LEVELS {
+        let artifact = artifact_at("brand-effect-instances.gr", source, level);
+        assert_eq!(
+            artifact
+                .protocols
+                .iter()
+                .filter(|protocol| protocol.display_name.starts_with("Pick<brand:"))
+                .count(),
+            2,
+            "{level:?}"
+        );
+    }
+}
+
+#[test]
+fn associated_projection_effect_arguments_normalize_before_identity_selection() {
+    let source = r#"
+        trait Value { type Item; }
+        impl Value for Text { type Item = i64; }
+        effect Fail<T> { fail(value: T) -> ! }
+        selected() -> i64 {
+            handle perform Fail<<Text as Value>::Item>::fail(42) {
+                Fail<i64>::fail(value) => value
+            }
+        }
+        main() -> { () }
+    "#;
+    for level in LEVELS {
+        let artifact = artifact_at("projected-effect-instance.gr", source, level);
+        assert_eq!(run(artifact, "selected"), Value::I64(42), "{level:?}");
+    }
+}
+
+#[test]
+fn unresolved_projection_effect_arguments_are_structured_and_never_guess() {
+    let source = r#"
+        trait Value { type Item; }
+        effect Fail<T> { fail(value: T) -> ! }
+        bad() -> i64 {
+            handle perform Fail<<Text as Value>::Item>::fail(42) {
+                Fail<i64>::fail(value) => value
+            }
+        }
+        main() -> { () }
+    "#;
+    let diagnostics = compile_source_to_bytecode("ungrounded-projected-effect.gr", source)
+        .expect_err("an ungrounded associated projection selected a protocol");
+    assert!(
+        diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code.is_some())
+    );
+    assert!(diagnostics.iter().any(|diagnostic| {
+        diagnostic.span.is_some()
+            && (diagnostic.message.contains("projection")
+                || diagnostic.message.contains("associated"))
+    }));
+}
+
+#[test]
+fn static_effect_protocol_identity_is_canonical_across_source_reordering() {
+    let first = r#"
+        effect Pick<const N: u32> { pick() -> ! }
+        one() -> / {Pick<1>} { () }
+        two() -> / {Pick<2>} { () }
+        main() -> { () }
+    "#;
+    let reordered = r#"
+        main() -> { () }
+        two() -> / {Pick<2>} { () }
+        one() -> / {Pick<1>} { () }
+        effect Pick<const N: u32> { pick() -> ! }
+    "#;
+    for level in LEVELS {
+        assert_eq!(
+            artifact_at("static-effect-order-a.gr", first, level).encode(),
+            artifact_at("static-effect-order-b.gr", reordered, level).encode(),
+            "{level:?}"
+        );
+    }
+}
+
+#[test]
+fn structural_effect_protocol_identity_is_canonical_across_source_reordering() {
+    let first = r#"
+        effect Observe<T> { observe(value: T) -> ! }
+        integer() -> / {Observe<&i64>} { () }
+        text() -> / {Observe<&Text>} { () }
+        main() -> { () }
+    "#;
+    let reordered = r#"
+        main() -> { () }
+        text() -> / {Observe<&Text>} { () }
+        integer() -> / {Observe<&i64>} { () }
+        effect Observe<T> { observe(value: T) -> ! }
+    "#;
+    for level in LEVELS {
+        assert_eq!(
+            artifact_at("structural-effect-order-a.gr", first, level).encode(),
+            artifact_at("structural-effect-order-b.gr", reordered, level).encode(),
+            "{level:?}"
+        );
+    }
 }
 
 #[test]
