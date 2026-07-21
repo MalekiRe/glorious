@@ -1,85 +1,372 @@
 # Grandiose
 
-Grandiose is being rebuilt as a compact, self-hosting compiler and portable
-bytecode VM. The target system is:
+Grandiose is an experimental systems language built around quantitative
+ownership, algebraic effects, source-defined control flow, and portable verified
+bytecode. It aims to make resource usage and non-local control explicit without
+giving up higher-order functions, Rust-style borrowing, traits, or generics.
 
-- `grvm`, a safe Rust bytecode decoder, verifier, VM, host-capability adapter,
-  and supervisor;
-- `grc`, a Grandiose compiler distributed as verified `.grbc` bytecode;
-- `std-lib.glorious`, the source-defined control and compiler-building library
-  prepended to every generation-1 compilation.
+The project is pre-alpha. Source and artifact compatibility are not stable yet,
+but the Rust compiler, verifier, VM, package tool, formatter, language server,
+and editor extension are usable today.
 
-The normative design starts with [the architecture](docs/architecture.md), the
-[bytecode contract](docs/bytecode.md), the
-[standard-library contract](docs/std-lib.md), and the
-[language core](glorious-branded-environment-core-spec.md). The live,
-completed-work-pruned backlog is [docs/remaining-work.md](docs/remaining-work.md).
+## What makes the language different?
 
-## Repository status
+### Values describe how many times they may be used
 
-This repository is pre-alpha. The Rust implementation is the authoritative
-generation-1 compiler and VM under construction. The old compiler under
-`compiler/` is retained only as historical/bootstrap material and is excluded
-from implementation progress, porting plans, and self-hosting estimates.
+Grandiose generalizes affine and linear ownership with `Use<[lower, upper]>`.
+The interval is part of the type's evidence:
 
-`crates/grandiose-vm` implements the canonical G1 container and codec, hostile
-input verification, typed register VM, deterministic cleanup and custom drop,
-references and loans, labels and `leave`, deep handlers, finite multi-shot
-resumptions, host capabilities, supervision, and deterministic reclamation of
-cyclic runtime environments.
+```rust
+struct Ticket { serial: i64 }
 
-`crates/grandiose` implements the source frontend, recovery interpreter, trait
-and generic solver, typed Core, ownership-aware MIR, optimizer, bytecode
-emission, and artifact verification pipeline. Accepted programs compile through
-the same verified Core/MIR/bytecode path at O0 through O3.
+impl Use<[1,1]> for Ticket {}
 
-### Completed ownership checkpoint
+redeem(ticket: Ticket) -> i64 {
+    let Ticket { serial } = move ticket;
+    serial
+}
+```
 
-The supported G1 ownership surface is implemented and independently validated
-by PlaceFlow:
+`Use<[1,1]>` means that a `Ticket` must be transferred or deconstructed exactly
+once. `Use<[0,1]>` describes an affine value, `[0,infinity]` a conventionally
+reusable value, and `[0,0]` a value that may be destroyed without being used.
+The compiler tracks these quantities through branches, loops, calls, closures,
+partial moves, cancellation, and continuation replay.
 
-- exact `Use<[lower, upper]>` obligations, must-move values, transfers,
-  structural deconstruction, and zero-use destruction;
-- arbitrary supported CFG joins, loops, handlers, cancellation, tail transfer,
-  and unreachable predecessors;
-- nested partial moves, reconstruction, enum variant replacement, conditional
-  initialization, reverse cleanup, and exact residual-shell accounting;
-- shared and unique loans, NLL, nested projections, temporary projected
-  reborrows, reference-origin transport, and escape/alias rejection;
-- reference-bearing struct/tuple deconstruction and reference-to-enum payload
-  projection under a dominating variant proof;
-- partial residual aggregates across direct and indirect suspension, optional
-  cancellation, and exact finite multi-shot replay;
-- transitive validation of pure custom `Drop` bodies; and
-- canonical exported join, indirect-effect, capture, cancellation, and cleanup
-  facts that MIR import recomputes and rejects when hostile or inconsistent.
+Cleanup is not a loophole: destroying a value contributes zero uses and cannot
+satisfy a positive lower bound.
 
-Memoized globals with restricted `Use` intervals are a deliberate G1 exclusion:
-their reads are not source-bounded ownership events. Restricted global results
-therefore receive a structured compile-time diagnostic.
+### Private representation controls who may finish consuming a value
 
-### Effects checkpoint
+There is no universal `destroy` intrinsic for escaping an ownership obligation.
+A must-move value must be transferred, or its representation must eventually be
+deconstructed by code with authority to see it. Private fields make that
+authority explicit:
 
-The compiler and VM already support closed effect rows, generic effect
-instances, terminal and resumptive handlers, deep resume, explicit
-cancellation, outward effect propagation, exact finite resumption quantities,
-nested suspension, handler environments, reference payloads/results, and
-mixed one-shot/multi-shot environments. Handler-result inference and nesting,
-bounded recursive/SCC reference-origin summaries, structural closure origins
-across handler exits, late recursive generic resumption environments, owned
-cyclic receiver reclamation, and interprocedural dynamic-array quantity
-summaries are implemented. Remaining effect work in the live backlog is
-optimizer specialization; unbounded resumption quantities are a deliberate G1
-exclusion.
+```rust
+struct Secret {
+    private payload: Bytes,
+}
+```
 
-### Verification gates
+Code outside the defining module can move a `Secret`, but cannot destructure its
+private field. It must pass the value to an authorized function that can finish
+consuming it. This makes opaque resource APIs and must-move types work together
+naturally.
 
-The repository uses deterministic unit, hostile-artifact, source-to-VM, and
-O0-O3 acceptance tests. The current checkpoint includes 308 compiler-library
-tests, 318 VM-library tests, 12 reference-effect cases, 21 resumptive-effect
-cases, four resumption-quantity breadth cases, and strict workspace formatting
-and Clippy gates.
+### Effects and resumptions are part of ordinary typed control flow
 
-These counts are checkpoints, not a promise of source or artifact stability.
-The compiler CLI, standard-library breadth, tooling, release hardening, and the
-eventual wholesale source port/self-hosting convergence remain separate work.
+Effects are nominal and effect rows are checked. Operations state how many times
+their continuation may be resumed:
+
+```rust
+effect Ask {
+    [1,1] ask() -> i64
+}
+
+answer() -> i64 {
+    handle perform Ask::ask() {
+        Ask::ask() with continuation => resume(continuation, 42)
+    }
+}
+```
+
+Grandiose supports terminal effects, one-shot and finite multi-shot resumptions,
+deep handlers, explicit cancellation, nested suspension, effectful closures,
+and reference-bearing payloads. Resumption quantities participate in the same
+ownership arithmetic as ordinary values, so replaying a continuation also
+accounts for every captured owner.
+
+### Familiar control is library code
+
+The compiler understands structural calls, labels, effects, handlers, and
+patterns. It does not give special semantic status to names such as `if`,
+`match`, `loop`, `return`, `yield`, `await`, or operators such as `+` and `==`.
+Those are ordinary declarations, fixities, traits, and effects supplied by the
+standard library.
+
+This keeps the trusted language core small and lets control abstractions compose
+with effects, ownership, and user-defined operators instead of living in a
+separate compiler-only world.
+
+### Rust-shaped static reasoning, explicit lowered invariants
+
+The static system includes shared and unique references, non-lexical lifetime
+reasoning, reborrowing, variance, traits, associated types and effect rows,
+GATs, higher-ranked bounds, const generics, closures, and partial moves.
+Compilation lowers accepted programs into ownership-aware CFG MIR with explicit
+cleanup, cancellation, handler, and resumption edges.
+
+The final `.grbc` artifact is decoded and verified before the VM executes it.
+Bytecode verification checks register types, ownership modes, references,
+cleanup, and control-flow invariants independently of the source compiler.
+
+## Toolchain overview
+
+- `grc` compiles `.glorious` source into verified G1 bytecode.
+- `grvm` verifies and executes `.grbc` artifacts.
+- `grand` manages packages, dependencies, builds, tests, formatting, docs, and
+  the language server.
+- `grandfmt` is the formatter library used by `grand fmt` and the LSP. It does
+  not install a separate command.
+- `grand-lsp` provides diagnostics, formatting, symbols, completion, hover,
+  definitions, references, and rename over standard input/output.
+- `editors/vscode` contains the VS Code extension and TextMate grammar.
+
+The canonical source suffix is `.glorious`. The older `.gr` suffix remains a
+compatibility alias.
+
+## Install from this checkout
+
+Install a stable Rust toolchain with Cargo first. Then run:
+
+```sh
+cargo install --path crates/grandiose --bin grc
+cargo install --path crates/grandiose-vm --bin grvm
+cargo install --path tooling/grand --bin grand
+cargo install --path tooling/lsp --bin grand-lsp
+```
+
+Cargo normally installs these commands into `~/.cargo/bin`; ensure that
+directory is on `PATH`.
+
+To build without installing:
+
+```sh
+cargo build --release --workspace --bins
+cargo build --release --manifest-path tooling/grand/Cargo.toml --bin grand
+cargo build --release --locked --manifest-path tooling/lsp/Cargo.toml --bin grand-lsp
+
+export GRAND_COMPILER="$PWD/target/release/grc"
+export GRAND_VM="$PWD/target/release/grvm"
+export PATH="$PWD/tooling/grand/target/release:$PWD/tooling/lsp/target/release:$PATH"
+```
+
+`grand` otherwise discovers `grc` and `grvm` on `PATH`. `GRAND_COMPILER` and
+`GRAND_VM` are useful when testing a particular checkout build.
+
+System `git` is required for Git dependencies. LLVM tools (`clang`, `llvm-as`,
+and `lli`) are needed only for the legacy `interp`/`native` target paths, not
+for the canonical bytecode VM workflow.
+
+## Create and run a project
+
+```sh
+grand new hello
+cd hello
+
+grand check
+grand run
+grand build -O2
+grand fmt
+grand test
+```
+
+`grand new hello` creates `./hello`. To choose a different destination:
+
+```sh
+grand new hello --path ./projects/my-hello
+```
+
+Use `grand init` to scaffold the current directory. A new executable contains:
+
+```text
+hello/
+├── grandiose.toml
+└── src/
+    └── main.glorious
+```
+
+Build artifacts go under `target/grand/`; the VM artifact for the example is
+`target/grand/hello.grbc`.
+
+## Packages, workspaces, and modules
+
+An executable manifest names its entry point:
+
+```toml
+[project]
+name = "hello"
+version = "0.1.0"
+entry = "src/main.glorious"
+```
+
+A library package omits `entry` and may set `sources = ["src"]`. A workspace
+lists member directories:
+
+```toml
+[workspace]
+members = ["app", "libs/parser"]
+```
+
+Select a member by package name or directory:
+
+```sh
+grand -p app check
+grand -p libs/parser test
+```
+
+The source module layout is a hybrid of Rust's inline and directory module
+styles. From `src/main.glorious`:
+
+```rust
+mod parser;
+use crate::parser::parse;
+```
+
+the external module lives at:
+
+```text
+src/parser/parser.glorious
+```
+
+Inline modules advance the same logical directory. For example,
+`mod syntax { pub mod tokens; }` resolves the external module at
+`src/syntax/tokens/tokens.glorious`. Named module items are private by default;
+use `pub` to export them.
+
+## Everyday `grand` commands
+
+```text
+grand new <name> [--path <dir>]  create a package
+grand init                       create a package in the current directory
+grand check                      type-check and verify without an artifact
+grand build [-O 0..3]            compile the package
+grand run [-O 0..3] -- <args>    compile and execute
+grand test [filter]              run source and compile-fail tests
+grand fmt [--check] [paths...]   format sources, or check formatting
+grand fmt --stdin                format standard input to standard output
+grand fix                        apply machine-applicable diagnostics
+grand doc [--open]               write API docs to target/grand/doc
+grand clean [--cache]            remove outputs and optionally shared cache
+grand lsp                        run grand-lsp over stdio
+```
+
+`grand test` executes `tests/**/*.glorious` and treats exit status zero as a
+pass. Files under `tests/compile-fail/` are compared with matching `.stderr`
+goldens; update them deliberately with `grand test --bless`.
+
+The target selector accepts `auto`, `vm`, `interp`, or `native`:
+
+```sh
+grand build --target vm -O3
+grand run --target vm -- first-argument second-argument
+```
+
+The current Rust compiler emits G1 bytecode, so `auto` selects the verified VM.
+The `interp` and `native` choices exist for the retained legacy LLVM toolchain.
+
+Lint levels can be stored in the manifest's `[lints]` table or overridden with
+`-A/--allow`, `-W/--warn`, and `-D/--deny` using a diagnostic code or
+`warnings`.
+
+## Dependencies and reproducible builds
+
+```sh
+grand add util --path ../util
+grand add parser --github user/repository --tag v1.0.0
+grand add codec --git https://example.com/codec.git --rev <commit>
+
+grand lock
+grand update parser
+grand vendor
+```
+
+Git dependencies require exactly one of `--tag`, `--rev`, or `--branch`.
+Commit `grandiose.lock` for reproducible resolution. Set `GRAND_LOCKED=1` to
+reject lockfile changes and `GRAND_OFFLINE=1` to forbid network access.
+`grand vendor` copies resolved Git dependencies into `./vendor` for offline
+builds.
+
+## Use the compiler and VM directly
+
+`grand` is the recommended interface, but the lower-level tools are useful for
+compiler development and automation:
+
+```sh
+grc -O2 --emit bytecode src/main.glorious -o app.grbc
+grc --check src/main.glorious
+grc --phase resolve src/main.glorious
+grc --emit mir src/main.glorious -o app.mir
+grc --diagnostics json src/main.glorious
+grc --dependency util=../util src/main.glorious
+
+grvm verify app.grbc
+grvm run app.grbc -- argument
+```
+
+`grc --phase` supports `lex`, `scan`, `resolve`, and `check`. Its structured
+emit surface includes bytecode, MIR, Core, provisional typing, and interface
+JSON. Run `grc --help` or `grc --capabilities` for the machine contract.
+
+The VM runner also supports supervision and capability options such as
+`--time-limit`, `--memory-limit`, and repeated `--allow` flags. Invoke `grvm`
+without arguments to print its complete command syntax.
+
+## Formatting, LSP, and editors
+
+Format a package with `grand fmt`; use `grand fmt --check` in CI. The same
+formatter backs `textDocument/formatting` in `grand-lsp`.
+
+Run the language server directly:
+
+```sh
+grand-lsp
+```
+
+or through the build tool:
+
+```sh
+grand lsp
+```
+
+Both speak ordinary LSP over stdin/stdout. Configuration examples for Neovim,
+Helix, Zed, and other clients are in [editors/README.md](editors/README.md).
+
+For VS Code development or local installation:
+
+```sh
+cd editors/vscode
+npm ci --ignore-scripts
+
+# Press F5 in VS Code for an Extension Development Host, or package it:
+npm run package
+code --install-extension grandiose-0.1.0.vsix
+```
+
+The extension needs Node.js 22 or newer for packaging; CI currently uses Node
+24. Set `grandiose.serverPath` to an absolute `grand-lsp` path, or to `grand`
+to launch `grand lsp`. Syntax highlighting works without the language server.
+See [editors/vscode/README.md](editors/vscode/README.md) for details.
+
+To produce a locked VSIX, host-native language-server archive, and checksums:
+
+```sh
+editors/package-local.sh /path/to/new-empty-output-directory
+```
+
+## Developing the toolchain
+
+The compiler and VM form the root Cargo workspace. The formatter, package tool,
+and language server are deliberately separate workspaces, so their commands use
+explicit manifests:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
+
+cargo test --manifest-path tooling/fmt/Cargo.toml --all-targets
+cargo test --manifest-path tooling/grand/Cargo.toml --all-targets
+cargo test --manifest-path tooling/lsp/Cargo.toml --all-targets
+```
+
+Useful design references:
+
+- [language core specification](glorious-branded-environment-core-spec.md)
+- [compiler and VM architecture](docs/architecture.md)
+- [frontend design](docs/frontend-design.md)
+- [MIR design](docs/mir-design.md)
+- [bytecode format and verifier contract](docs/bytecode.md)
+- [standard-library contract](docs/std-lib.md)
+- [live remaining-work list](docs/remaining-work.md)
