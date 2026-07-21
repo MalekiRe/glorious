@@ -8,23 +8,25 @@
 
 (type_identifier) @type
 (struct_declaration name: (type_identifier) @type)
-(enum_declaration name: (type_identifier) @type)
+(enum_declaration name: (type_identifier) @type @enum)
 (trait_declaration name: (type_identifier) @type)
-(effect_declaration name: (type_identifier) @type)
 
 (enum_variant name: (variant_identifier) @constructor)
+(variant_pattern
+  type: (identifier) @type
+  variant: (variant_identifier) @constructor)
 (struct_expression type: (identifier) @type)
-(effect_reference (identifier) @type)
+(effect_identifier) @type @tag
+(effect_operation_identifier) @function @variant
 
 (function_declaration name: (identifier) @function)
 (function_signature name: (identifier) @function)
-(effect_operation name: (identifier) @function)
 (call_expression
-  function: (path_expression . (identifier) @function.call .))
+  function: (path_expression . (identifier) @function .))
 (call_expression
   function: (path_expression
-    (identifier) @function.method .
-    (#match? @function.method "^[a-z_]")))
+    (identifier) @function .
+    (#match? @function "^[a-z_]")))
 (path_expression
   (identifier) @type
   (identifier) @constructor .
@@ -37,8 +39,6 @@
 (generic_parameter (identifier) @variable.parameter)
 (let_statement (identifier) @variable)
 
-(handler_clause operation: (identifier) @function.method)
-(perform_expression operation: (identifier) @function.method)
 
 [
  "mod" "use" "as" "self" "type" "cases" "let"

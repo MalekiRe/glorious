@@ -15,7 +15,7 @@ version = "0.7.0"
 [grammars.grandiose]
 repository = "https://github.com/MalekiRe/glorious"
 # First immutable revision containing the root Grandiose grammar.
-rev = "9f7f63026f9863da8a01ab817fd76353aa5a2df9"
+rev = "447ce5a6b3556addc8ccde577e6aa8084e145f10"
 
 [language_servers.grand-lsp]
 name = "Grandiose Language Server"
