@@ -1,0 +1,23 @@
+id = "grandiose"
+name = "Grandiose"
+version = "0.1.0"
+schema_version = 1
+authors = ["Grandiose contributors"]
+description = "Grandiose language support backed by grand-lsp."
+repository = "https://github.com/grandiose-lang/grandiose"
+languages = ["languages/grandiose"]
+capabilities = []
+
+[lib]
+kind = "Rust"
+version = "0.7.0"
+
+[grammars.grandiose]
+repository = "https://github.com/grandiose-lang/grandiose"
+# Replace this marker with the first commit containing the root grammar, then
+# commit that pin before installing or publishing the extension.
+rev = "PUBLISH_COMMIT"
+
+[language_servers.grand-lsp]
+name = "Grandiose Language Server"
+language = "Grandiose"
