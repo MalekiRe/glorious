@@ -4,11 +4,9 @@ This extension associates `*.glorious` files with Grandiose and starts
 `grand-lsp` over stdio. Its real Tree-sitter grammar lives at the repository
 root; it is not a Rust grammar alias.
 
-Zed requires a grammar repository and an immutable revision. The checked-in
-`PUBLISH_COMMIT` marker in `extension.toml` must be replaced, in a follow-up
-commit, with the first Grandiose commit that contains the root grammar. Until
-that pin is made, Zed's development-extension installer will reject the grammar
-source as expected.
+Zed requires a grammar repository and an immutable revision. The extension
+pins the first Grandiose commit containing the root grammar, so development
+extension installs fetch the native Grandiose parser reproducibly.
 
 The server path may be overridden in Zed settings:
 

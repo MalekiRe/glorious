@@ -14,9 +14,8 @@ version = "0.7.0"
 
 [grammars.grandiose]
 repository = "https://github.com/grandiose-lang/grandiose"
-# Replace this marker with the first commit containing the root grammar, then
-# commit that pin before installing or publishing the extension.
-rev = "PUBLISH_COMMIT"
+# First immutable revision containing the root Grandiose grammar.
+rev = "ac14afde5ab9c86d8a355ef63262cfd909cf0a86"
 
 [language_servers.grand-lsp]
 name = "Grandiose Language Server"
