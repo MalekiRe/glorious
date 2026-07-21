@@ -1,9 +1,0 @@
-effect Ask {
-    ask() -> i32;
-}
-
-main() -> i32 {
-    handle perform Ask::ask() {
-        Ask::ask() => 42
-    }
-}

@@ -1,7 +1,0 @@
-effect Stop {
-    [1,1] stop() -> !;
-}
-
-main() -> i32 {
-    42
-}

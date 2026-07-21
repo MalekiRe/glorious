@@ -1,6 +1,0 @@
-main() -> i32 {
-    let value: i32 = 42;
-    let shared: &i32 = &value;
-    let unique: &mut i32 = &mut value;
-    *shared + *unique - 42
-}

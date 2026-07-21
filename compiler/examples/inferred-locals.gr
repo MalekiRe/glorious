@@ -1,9 +1,0 @@
-forty() -> i64 {
-    40
-}
-
-main() -> i64 {
-    let base = forty();
-    let offset = 2;
-    base + offset
-}

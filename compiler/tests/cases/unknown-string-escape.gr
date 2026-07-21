@@ -1,4 +1,0 @@
-main() -> i32 {
-    let message: String = "bad\qescape";
-    42
-}

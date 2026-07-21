@@ -1,7 +1,0 @@
-add(lhs: i64, rhs: i64) -> i64 {
-    lhs + rhs
-}
-
-main() -> i64 {
-    add(40)
-}

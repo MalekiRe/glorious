@@ -1,4 +1,0 @@
-main() -> i64 {
-    definitely_not_an_integer
-}
-

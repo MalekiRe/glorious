@@ -1735,6 +1735,7 @@ fn quantity_transport_summaries(a: &Artifact) -> Vec<Option<Vec<usize>>> {
                     .flatten()
             })
             .collect::<Vec<_>>();
+        eprintln!("relaxed summary iteration: {:?}", next.get(10));
         if next == summaries {
             return next;
         }
@@ -2054,6 +2055,7 @@ fn borrowed_receiver_resume_delta_summaries(a: &Artifact) -> Vec<Option<Vec<u64>
                 analyze_borrowed_receiver_resume_deltas(a, function as u32, &summaries, true)
             })
             .collect::<Vec<_>>();
+        eprintln!("exact summary iteration: {:?}", next.get(10));
         if next == summaries {
             summaries = next;
             break;

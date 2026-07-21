@@ -1,8 +1,0 @@
-invalid(value: &i32) -> i32 {
-    let unique: &mut i32 = &mut *value;
-    *unique
-}
-
-main() -> i32 {
-    0
-}

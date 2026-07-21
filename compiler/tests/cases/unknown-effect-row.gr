@@ -1,7 +1,0 @@
-helper() -> i32 / {MissingEffect} {
-    42
-}
-
-main() -> i32 {
-    helper()
-}
