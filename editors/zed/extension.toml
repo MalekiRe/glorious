@@ -4,7 +4,7 @@ version = "0.1.0"
 schema_version = 1
 authors = ["Grandiose contributors"]
 description = "Grandiose language support backed by grand-lsp."
-repository = "https://github.com/grandiose-lang/grandiose"
+repository = "https://github.com/MalekiRe/glorious"
 languages = ["languages/grandiose"]
 capabilities = []
 
@@ -13,7 +13,7 @@ kind = "Rust"
 version = "0.7.0"
 
 [grammars.grandiose]
-repository = "https://github.com/grandiose-lang/grandiose"
+repository = "https://github.com/MalekiRe/glorious"
 # First immutable revision containing the root Grandiose grammar.
 rev = "ac14afde5ab9c86d8a355ef63262cfd909cf0a86"
 

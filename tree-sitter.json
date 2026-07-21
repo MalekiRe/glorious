@@ -12,7 +12,7 @@
     "license": "MIT",
     "description": "Tree-sitter grammar for Grandiose",
     "authors": [{"name": "Grandiose contributors"}],
-    "links": {"repository": "https://github.com/grandiose-lang/grandiose"}
+    "links": {"repository": "https://github.com/MalekiRe/glorious"}
   },
   "bindings": {"c": false, "go": false, "node": false, "python": false, "rust": false, "swift": false}
 }
