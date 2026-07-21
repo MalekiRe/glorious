@@ -528,19 +528,11 @@ fn two_shot_snapshots_clone_only_initialized_residual_fields() {
 }
 
 #[test]
-fn deferred_multishot_shapes_have_stable_source_diagnostics() {
+fn invalid_and_unsupported_multishot_shapes_have_stable_source_diagnostics() {
     let cases = [
         (
-            "effect Choose { [0,2] choose() -> i64 } main() -> { () }",
-            "must declare `[0,1]` or an exact finite `[n,n]`",
-        ),
-        (
-            "effect Choose { [1,2] choose() -> i64 } main() -> { () }",
-            "must declare `[0,1]` or an exact finite `[n,n]`",
-        ),
-        (
             "effect Choose { [2,infinity] choose() -> i64 } main() -> { () }",
-            "must declare `[0,1]` or an exact finite `[n,n]`",
+            "arbitrary unbounded intervals require a future runtime representation",
         ),
         (
             "effect Choose { [2,2] choose() -> i64 } bad() -> i64 { handle perform Choose::choose() { Choose::choose() with k => 42 } } main() -> { () }",

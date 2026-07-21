@@ -261,6 +261,12 @@ pub enum ExprKind {
     /// replaced at their call site; retaining this declaration slot preserves
     /// stable function numbering without requesting an unused capability.
     HostLeafStub,
+    /// Trusted standard-library terminal abort. This is neither a user
+    /// intrinsic nor an effect and therefore has no continuation or cleanup
+    /// edge.
+    Abort {
+        message: Option<String>,
+    },
     Perform {
         protocol: u32,
         operation: u32,
@@ -699,6 +705,7 @@ impl Expr {
                 args.iter().for_each(|arg| arg.write(output, depth + 1));
             }
             ExprKind::HostLeafStub => writeln!(output, "host-leaf-stub").unwrap(),
+            ExprKind::Abort { message } => writeln!(output, "abort {message:?}").unwrap(),
             ExprKind::Perform {
                 protocol,
                 operation,

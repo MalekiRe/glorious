@@ -165,6 +165,7 @@ fn full_session() {
     let mut session = Session::start(&root);
     let (result, _) = session.request("initialize", json!({"rootUri": uri(&root)}));
     assert_eq!(result["capabilities"]["textDocumentSync"], 1);
+    assert_eq!(result["capabilities"]["inlayHintProvider"], true);
     assert_eq!(result["serverInfo"]["name"], "grand-lsp");
     session.notify("initialized", json!({}));
 
@@ -290,10 +291,7 @@ fn full_session() {
         json!({"textDocument": {"uri": uri(&main_path)}, "position": {"line": 2, "character": 5}}),
     );
     assert!(
-        hover["contents"]["value"]
-            .as_str()
-            .unwrap()
-            .contains("let binding"),
+        hover["contents"]["value"].as_str().unwrap().contains("()"),
         "local hover: {hover}"
     );
 
@@ -601,6 +599,197 @@ fn malformed_revision_keeps_last_good_semantic_identities_transactionally() {
         }),
     );
     assert_eq!(rename["changes"].as_object().unwrap().len(), 2);
+}
+
+#[test]
+fn compiler_local_tables_preserve_shadowing_utf16_and_last_good_rename() {
+    let temporary = TempDir::new().unwrap();
+    let root = temporary.path().join("app");
+    let source = "selected(seed: i64) -> i64 {\n    let chosen = seed;\n    {\n        /* 😀 */ let chosen = 2;\n        /* 😀 */ chosen\n    }\n}\nmain() -> () { () }\n";
+    let main = project(&root, "app", source);
+    let mut session = Session::start(&root);
+    session.request("initialize", json!({"rootUri": uri(&root)}));
+    session.notify("initialized", json!({}));
+    session.notify(
+        "textDocument/didOpen",
+        json!({"textDocument": {
+            "uri": uri(&main), "languageId": "grandiose", "version": 1, "text": source
+        }}),
+    );
+    assert!(session.diagnostics_for("main.gr").is_empty());
+
+    let use_line = "        /* 😀 */ chosen";
+    let use_character = use_line[..use_line.find("chosen").unwrap()]
+        .encode_utf16()
+        .count()
+        + 2;
+    let request = || {
+        json!({
+            "textDocument": {"uri": uri(&main)},
+            "position": {"line": 4, "character": use_character}
+        })
+    };
+    let (definition, _) = session.request("textDocument/definition", request());
+    assert_eq!(definition["range"]["start"]["line"], 3, "{definition}");
+    let (hover, _) = session.request("textDocument/hover", request());
+    assert!(
+        hover["contents"]["value"].as_str().unwrap().contains("i64"),
+        "{hover}"
+    );
+    let (hints, _) = session.request(
+        "textDocument/inlayHint",
+        json!({
+            "textDocument": {"uri": uri(&main)},
+            "range": {
+                "start": {"line": 0, "character": 0},
+                "end": {"line": 7, "character": 0}
+            }
+        }),
+    );
+    let inner_hint = hints
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|hint| hint["position"]["line"] == 3)
+        .expect("inner binding type hint");
+    assert_eq!(inner_hint["label"], ": i64");
+    let definition_line = "        /* 😀 */ let chosen = 2;";
+    let expected_hint_character = definition_line[..definition_line.find("chosen").unwrap()]
+        .encode_utf16()
+        .count()
+        + "chosen".len();
+    assert_eq!(inner_hint["position"]["character"], expected_hint_character);
+    let (references, _) = session.request(
+        "textDocument/references",
+        json!({
+            "textDocument": {"uri": uri(&main)},
+            "position": {"line": 4, "character": use_character},
+            "context": {"includeDeclaration": true}
+        }),
+    );
+    assert_eq!(references.as_array().unwrap().len(), 2, "{references}");
+    let (uses_only, _) = session.request(
+        "textDocument/references",
+        json!({
+            "textDocument": {"uri": uri(&main)},
+            "position": {"line": 4, "character": use_character},
+            "context": {"includeDeclaration": false}
+        }),
+    );
+    assert_eq!(uses_only.as_array().unwrap().len(), 1, "{uses_only}");
+    let (rename, _) = session.request(
+        "textDocument/rename",
+        json!({
+            "textDocument": {"uri": uri(&main)},
+            "position": {"line": 4, "character": use_character},
+            "newName": "inner"
+        }),
+    );
+    let edits = rename["changes"][uri(&main)].as_array().unwrap();
+    assert_eq!(edits.len(), 2, "outer shadow must not be renamed: {rename}");
+
+    let malformed = format!("{source}broken( -> i64 {{\n");
+    session.notify(
+        "textDocument/didChange",
+        json!({"textDocument": {"uri": uri(&main), "version": 2},
+               "contentChanges": [{"text": malformed}]}),
+    );
+    assert!(!session.diagnostics_for("main.gr").is_empty());
+    let (definition, _) = session.request("textDocument/definition", request());
+    assert_eq!(definition["range"]["start"]["line"], 3, "{definition}");
+
+    let shifted = format!("broken( -> i64 {{\n{source}");
+    session.notify(
+        "textDocument/didChange",
+        json!({"textDocument": {"uri": uri(&main), "version": 3},
+               "contentChanges": [{"text": shifted}]}),
+    );
+    assert!(!session.diagnostics_for("main.gr").is_empty());
+    let (stale, _) = session.request(
+        "textDocument/definition",
+        json!({
+            "textDocument": {"uri": uri(&main)},
+            "position": {"line": 5, "character": use_character}
+        }),
+    );
+    assert!(
+        stale.is_null(),
+        "shifted stale offsets must fail closed: {stale}"
+    );
+}
+
+#[test]
+fn dependency_navigation_uses_compiler_package_identities() {
+    let temporary = TempDir::new().unwrap();
+    let app = temporary.path().join("app");
+    let dependency = temporary.path().join("math-lib");
+    std::fs::create_dir_all(app.join("src")).unwrap();
+    std::fs::create_dir_all(dependency.join("src/values")).unwrap();
+    std::fs::write(
+        app.join("grandiose.toml"),
+        "[project]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.glorious\"\n\n[dependencies]\nmath-lib = { path = \"../math-lib\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dependency.join("grandiose.toml"),
+        "[project]\nname = \"math-lib\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let source = "use math_lib::answer;\nprobe() -> i64 {\n    answer()\n}\nmain() -> () { () }\n";
+    let main = app.join("src/main.glorious");
+    std::fs::write(&main, source).unwrap();
+    let dependency_root = dependency.join("src/lib.glorious");
+    std::fs::write(
+        &dependency_root,
+        "pub mod values; pub answer() -> i64 { crate::values::answer() }",
+    )
+    .unwrap();
+    std::fs::write(
+        dependency.join("src/values/values.glorious"),
+        "pub answer() -> i64 { 42 }",
+    )
+    .unwrap();
+
+    let mut session = Session::start(&app);
+    session.request("initialize", json!({"rootUri": uri(&app)}));
+    session.notify("initialized", json!({}));
+    session.notify(
+        "textDocument/didOpen",
+        json!({"textDocument": {
+            "uri": uri(&main), "languageId": "grandiose", "version": 1, "text": source
+        }}),
+    );
+    assert!(session.diagnostics_for("main.glorious").is_empty());
+    let request = json!({
+        "textDocument": {"uri": uri(&main)},
+        "position": {"line": 2, "character": 6}
+    });
+    let (definition, _) = session.request("textDocument/definition", request.clone());
+    assert_eq!(definition["uri"], uri(&dependency_root), "{definition}");
+    let (hover, _) = session.request("textDocument/hover", request.clone());
+    assert!(
+        hover["contents"]["value"]
+            .as_str()
+            .unwrap()
+            .contains("answer() -> i64"),
+        "{hover}"
+    );
+    let (references, _) = session.request(
+        "textDocument/references",
+        json!({
+            "textDocument": request["textDocument"],
+            "position": request["position"],
+            "context": {"includeDeclaration": true}
+        }),
+    );
+    assert!(
+        references
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|location| location["uri"] == uri(&dependency_root)),
+        "{references}"
+    );
 }
 
 #[test]

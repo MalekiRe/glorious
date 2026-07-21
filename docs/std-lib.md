@@ -460,10 +460,13 @@ the call transfers `value` and records one owned use before the body can destroy
 it. A source-facing disposal helper therefore requires `T: Use<[0,0]>` and a
 special compiler disposal argument mode, or is omitted. `assert`,
 `assert_eq`, `unreachable`, and `abort` terminate through the VM abort operation
-and are for failed internal invariants, never malformed user input. `Slot<T>` is
-the ordinary `Empty | Full(T)` enum used when a source collection needs visible
-uninitialized storage; no `MaybeUninit`, raw pointer, or unsafe operation is
-exposed.
+and are for failed internal invariants, never malformed user input. `Slot<T>`
+uses a private zero-or-one-element `Vec<T>` and is accessed through
+`slot_empty`, `slot_filled`, `slot_take`, `slot_replace`, and
+`slot_into_option`. User code cannot destructure its storage, while each
+operation either transfers the element obligation or leaves the slot visibly
+initialized and empty. No `MaybeUninit`, raw pointer, intrinsic destroy, or
+unsafe operation is exposed.
 
 ## 8. Text, bytes, and formatting
 
@@ -510,9 +513,10 @@ and pretty printing must use this builder rather than repeated immutable
 concatenation.
 
 The current integer surface provides allocation-free decimal `append_u64` and
-`append_i64`. Digits are emitted directly into the owned byte vector; signed
-formatting works from negative quotients and remainders so `i64::MIN` never
-requires an unrepresentable positive intermediate.
+`append_i64`, plus lowercase hexadecimal `append_hex_u64` and
+`append_hex_u128`. Digits are emitted directly into the owned byte vector;
+signed formatting works from negative quotients and remainders so `i64::MIN`
+never requires an unrepresentable positive intermediate.
 
 The numeric text surface includes parsing every source integer base with checked
 range conversion, parsing the generation-1 floating literal grammar to the
@@ -553,8 +557,11 @@ truncation likewise returns `None` without advancing its private cursor.
 `Formatter` is a thin policy wrapper around `StringBuilder`. It tracks indentation
 and exposes literal, character, integer, escaped-string, newline, indent, and
 dedent operations. `Display` and `Debug` append to it and do not allocate an
-intermediate string. `format` is an ordinary function accepting a formatting
-callable; generation 1 has no compiler-known format-string macro.
+intermediate string. The ordinary generic `format<T>(&T)` and
+`format_debug<T>(&T)` functions dispatch through those traits and validate the
+finished builder once; `Formatter::display` and `Formatter::debug` provide the
+corresponding nested-value operations. Generation 1 has no compiler-known
+format-string macro.
 
 The current foundation emits four spaces per indentation level lazily before
 the next nonempty literal or integer. Newlines therefore never gain trailing
@@ -562,9 +569,13 @@ spaces, including consecutive blank lines. Indent growth is checked, dedenting
 at level zero returns false without mutation, and finishing delegates to the
 builder's single UTF-8 validation pass.
 
-The diagnostic renderer uses `SourceMap`, line starts, spans, labels, severities,
-and notes defined in ordinary source. It renders deterministically and emits one
-finished `String` through the diagnostic host capability.
+The diagnostic renderer uses `SourceMap`, line starts, spans, primary/secondary
+labels, severities, and notes defined in ordinary source. `SourceDiagnostic`
+builds annotations and notes and renders one deterministic finished `String`;
+the caller may emit that string through the diagnostic host capability. The
+compact generation-1 renderer locates an annotation by `span.start` and retains
+`span.end` as metadata for a future underline renderer. Invalid starts render
+the stable `<unknown>:0:0` location rather than trapping.
 
 ## 9. Collections and algorithms
 
@@ -581,6 +592,9 @@ push, pop, truncate, resize, swap, reverse
 get, get_mut, first, last
 insert, remove, swap_remove
 as_slice, as_mut_slice, append, extend_from_slice
+iter -> SliceIter<'a,T>
+split_off -> Result<Vec<T>, ()>
+drain(Range<usize>) -> Result<Vec<T>, ()>
 ```
 
 Safe access returns `Option<&T>` or `Option<&mut T>`. Explicit `index` methods
@@ -605,11 +619,14 @@ elements: destroying a nonempty vector, `clear`, shrinking `truncate`/`resize`,
 and any overwrite API that does not return the previous value require
 `T: Use<[0,0]>`. `pop`, `remove`, and
 `swap_remove` return the removed `T` and transfer its obligation instead.
-`drain` and `into_iter`/by-value iteration likewise transfer each element; their
-iterator state retains ownership of every not-yet-yielded element, so it may be
-destroyed early only when `T: Use<[0,0]>`. Otherwise it must be exhausted or
-transferred. Once an ownership-moving operation has emptied every machine-array
-slot, the private layer-1 implementation consumes the exhausted shell with
+`split_off` and `drain` validate their complete index/range before mutation and
+move the selected elements into a returned vector, so they preserve obligations
+for restricted `T`; reversed or out-of-bounds ranges leave the source unchanged.
+`into_iter`/by-value iteration likewise transfers each element. Its iterator
+state retains ownership of every not-yet-yielded element, so it may be destroyed
+early only when `T: Use<[0,0]>`. Otherwise it must be exhausted or transferred.
+Once an ownership-moving operation has emptied every machine-array slot, the
+private layer-1 implementation consumes the exhausted shell with
 `array.finish_drained`; this transition runs no element destruction and requires
 no zero-use evidence for `T`.
 
@@ -624,6 +641,12 @@ drained Array with `array.finish_drained`. `VecIntoIter<T>` has an affine
 must be exhausted or transferred. The representation field is private, so user
 code cannot forge a partially drained state or reach the Array shell.
 
+`Vec::iter(&Vec<T>)` directly constructs the same checked `SliceIter<'a,T>`
+state as `Slice::iter(Vec::as_slice(value))`. It adds no mutable iterator or
+second representation: the iterator retains the shared backing-array loan and
+threads its monotonically advancing index through
+`SliceIter::next(&mut iterator) -> Option<usize>`.
+
 `Slice<'a,T>` and `SliceMut<'a,T>` are range-checked views over a vector and
 carry ordinary shared/unique lifetimes. They support length, splitting, checked
 sub-slicing, iteration, and indexed access. The representation is a base array
@@ -637,16 +660,13 @@ fields. `Vec::as_slice` is the public source constructor and establishes
 returns `None` unless `start <= view.length` and
 `length <= view.length - start`; the subtraction-first check prevents overflow.
 `Slice::get` and `Slice::first` return `Option<&'a T>`, while `Slice::len` and
-`Slice::is_empty` inspect only the validated window. Splitting, mutable slices,
-and mutable iterators build on this invariant but are separate implementation
-tranches. Shared iteration currently uses the private ownership-threaded
-`SliceIter<'a,T>` state. `Slice::iter` constructs it and consuming
-`SliceIter::next` returns `Option<(usize,SliceIter<'a,T>)>`, where the index is
-relative to the original slice. The caller retains the duplicable `Slice` and
-uses `Slice::get` to obtain the corresponding reference. The tuple and iterator
-carry the backing loan's stored-reference provenance through ordinary aggregate
-construction and deconstruction; direct reference-yielding iterator results
-remain a separate API and ownership tranche.
+`Slice::is_empty` inspect only the validated window. Splitting and mutable slices
+build on this invariant but are separate implementation tranches. Shared
+iteration uses private `SliceIter<'a,T>` state. `Slice::iter` constructs it and
+`SliceIter::next(&mut iterator)` returns `Option<usize>` while advancing its
+private cursor in place; the index is relative to the original slice. The caller
+retains the duplicable `Slice` and uses `Slice::get` to obtain the corresponding
+reference. The iterator retains the backing loan's stored-reference provenance.
 
 `SliceMut<'a,T>` stores the corresponding private `&'a mut Array<T>` plus the
 same validated start and length. It is linear and cannot be copied. The current
@@ -697,7 +717,9 @@ the table and lookup borrows a key. Its required surface is:
 new, with_capacity, len, capacity, is_empty, clear, reserve
 contains_key, get, get_mut
 insert -> Option<V>
-remove -> Option<V>
+remove -> Option<V>, remove_entry -> Option<(K,V)>
+raw_get(&K, cached_hash) -> Option<&V>
+reserve_additional -> Bool
 entry, keys, values, iter
 ```
 
@@ -716,11 +738,19 @@ zero-use evidence. `HashSet::remove` requires `T: Use<[0,0]>`, while
 zero-use evidence or must return the uninserted value.
 
 The `entry` API provides occupied/vacant lookup and insert-or-get in one probe.
-It also exposes a checked raw-entry lookup by precomputed hash and equality
-callable. `Interner<String>` uses that operation to probe with a `TextView` and
-allocates a standalone `String` only on an actual miss.
+`HashMapEntry::or_insert(V) -> &mut V` returns the existing or newly inserted
+resident directly; its private completed-probe invariant makes an empty result
+unrepresentable. The map also exposes a checked raw lookup by precomputed hash;
+a stale or forged hash returns `None`. `Interner<String>` uses deterministic
+hash probing and allocates a standalone `String` only on an actual miss.
 `HashSet<T>` is the zero-sized-value specialization with insert, contains,
-remove, union/intersection iteration, and length operations.
+remove, `union_with`, materializing `intersection`, iteration, and length
+operations.
+
+Borrowed map/set iterators retain one shared owner loan and a private cursor.
+Their `next(&mut iterator)` methods advance that cursor in place and return only
+the borrowed item (`(&K,&V)`, `&K`, or `&V`), so no continuation owner is hidden
+inside an optional payload.
 
 Iteration order is unspecified and must never determine emitted bytecode or
 diagnostic order. The compiler sorts externally observable results. Collection
@@ -818,12 +848,11 @@ Only the four internal leaves lower to the exact
 `(capability, symbol, signature)` import tuples defined by `bytecode.md`. Their
 bytecode signatures have empty outward protocol lists; a host call is nevertheless
 an observable, potentially trapping MIR operation and is never treated as pure.
-G1 has no module namespace or file-local name lookup: these implementation names
-are technically resolvable throughout the bundle. Private struct fields are the
-one source-entry boundary. A nominal definition containing such a field is
-deconstructible only from the `SourceBundle` entry that declared it; public
-fields remain bundle-wide, and manifest-opaque layouts remain
-non-deconstructible. Direct host-leaf use is unsupported but remains
+These implementation names live in the private standard-library module and are
+not importable by ordinary source. A nominal definition containing a private
+field is deconstructible only inside its declaring module's privacy domain;
+public fields follow ordinary item visibility, and manifest-opaque layouts remain
+non-deconstructible. Direct host-leaf use is unsupported and remains
 capability-checked and observable. Security never relies on source-name privacy.
 Host faults terminate as specified by the VM and cannot be caught by a
 Grandiose handler.
@@ -847,7 +876,7 @@ input and output paths.
 
 ## 12. Deliberate omissions
 
-The bootstrap standard library has no general module/package API, reflection,
+The bootstrap standard library has no runtime module/package API, reflection,
 macros, derive system, garbage-collected pointer, shared mutable reference
 counting, threading, async executor, networking, tree collection, regular
 expression engine, locale, date/time, arbitrary-precision number, or general
@@ -856,25 +885,29 @@ serialization framework. None is needed to build the compiler.
 Application libraries may later implement additional facilities in ordinary
 source, but generation 1 does not automatically locate or concatenate them.
 
-## 13. Source-bundle model
+## 13. Source-bundle and module model
 
-Generation 1 has no module, import, include, package, or general source-dependency
-system. A compilation unit is one UTF-8 source stream assembled by textual
-concatenation.
+A generation-1 compilation unit is an application package plus explicitly
+designated dependency package roots assembled as a deterministic `SourceBundle`.
+Source modules and package bindings are compile-time structure; they are not
+runtime objects and do not perform runtime dependency discovery.
 
 The canonical bundle order is:
 
 ```text
 std-lib.glorious
-primary input, commonly compiler.glorious
-additional .glorious inputs in command-line order
+compiler-designated crate root
+declared external modules in canonical module-path order
+explicit dependency package roots and each declared module closure
 ```
 
 The bundler inserts exactly one newline between adjacent files so tokens and line
-comments cannot fuse across a boundary. The resulting stream is parsed and
-compiled as one program. Declarations share one global set of namespaces,
-interfaces are collected across the entire stream, and standard-library fixities
-apply to every body.
+comments cannot fuse across a boundary. `mod child;` in logical directory `D`
+resolves only to `D/child/child.glorious`; an inline `mod child { ... }` advances
+the same logical directory for its nested external declarations. The selected
+crate root is exempt from the self-named-folder rule. Module discovery and
+interface collection are deterministic and independent of filesystem traversal
+order.
 
 Typical bundles are:
 
@@ -882,22 +915,34 @@ Typical bundles are:
 self-host compiler = std-lib.glorious + compiler.glorious
 application        = std-lib.glorious + application.glorious
 test program       = std-lib.glorious + fixture.glorious
-multi-file fixture = std-lib.glorious + first.glorious + second.glorious
+module crate       = std-lib.glorious + root + declared module closure
 ```
 
 The compiler source is included only when the compiler itself is the primary
 program being built. Compiling an application does not append
 `compiler.glorious` to the application.
 
-A source segment table retains original file names and byte ranges. Segment
-identity has language semantics as the authority for `private` struct fields and
-for manifest-bound layer-1 leaves. A runtime leaf is authoritative only when its
+A source segment table retains original file names and byte ranges. Structured
+module identity has language semantics as the authority for private items and
+`private` struct fields; segment identity still anchors manifest-bound layer-1
+leaves and diagnostics. A runtime leaf is authoritative only when its
 validated declaration identity belongs to the explicitly trusted first standard-
 library entry; repeating that entry's display name does not reproduce its
-identity. This does not create general file-private declarations, per-file lookup
-scopes, imports, exports, initialization units, or dependency ordering.
-Duplicate declarations across concatenated files are ordinary duplicate-global
-errors.
+identity. Named module items are private by default and `pub` exports them.
+Imports support `crate`, `self`, `super`, explicit names, aliases, groups, globs,
+and `self`; deterministic fixed-point resolution permits benign re-export cycles.
+There are no initialization units or source-order dependencies.
+
+The hermetic library API never reads the filesystem: all segments must be
+supplied. Dependency roots carry an explicit manifest name; `-` normalizes to
+`_` for their public package-module alias, and invalid or colliding aliases are
+diagnosed. Each dependency is a separate parentless root, so `crate` remains
+package-local. Positional/unmarked additional segments never become dependencies.
+A missing declared module, duplicate physical module, or orphan segment
+in a module-bearing crate is a structured diagnostic. The path-aware CLI may
+recursively load the same declared closure before invoking that API. For legacy
+programs containing no module edge, explicitly supplied additional segments are
+crate-root fragments.
 
 The canonical distribution bundle is paired atomically with the distribution
 runtime manifest. Raw conformance bundles—even when a test explicitly grants
@@ -909,10 +954,11 @@ not combine custom authority with the embedded distribution source implicitly.
 ## 14. Important generation-1 notes
 
 - `std-lib.glorious` is the only automatically supplied source dependency.
-- There is no source syntax for requesting another file.
-- The compiler does not recursively discover, load, or resolve dependencies.
-- Additional `.glorious` files are included only because the invoking build
-  command explicitly concatenates them in its given order.
+- `mod name;` is the only source syntax requesting another file inside a package;
+  dependency roots are driver-supplied manifest inputs.
+- The path-aware compiler driver recursively discovers only declared modules;
+  the hermetic compiler library performs no filesystem I/O.
+- Undeclared files are never included by directory scanning.
 - The standard library is always first and cannot be shadowed by a second global
   declaration with the same name.
 - The standard-library path/version is selected by the compiler distribution,
@@ -920,9 +966,9 @@ not combine custom authority with the embedded distribution source implicitly.
 - Source programs cannot opt into alternative standard libraries in generation 1.
 - Runtime file I/O through an explicitly granted effect/capability is not a source
   dependency and does not change this model.
-- Bootstrap reproducibility hashes or compares the final concatenated bytes; no
+- Bootstrap reproducibility hashes or compares the canonical crate bundle; no
   module cache, dependency cache, or lockfile participates.
 - The canonical source extension is `.glorious`.
 
-This concatenation scheme is intentionally temporary. A future module design must
-be additive and must not make generation-1 source bundles ambiguous.
+Package/dependency selection remains a build-tool concern and must not make the
+generation-1 crate bundle ambiguous.

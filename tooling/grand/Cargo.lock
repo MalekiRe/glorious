@@ -233,6 +233,7 @@ dependencies = [
  "blake3",
  "clap",
  "grandfmt",
+ "grandiose",
  "libc",
  "serde",
  "serde_json",

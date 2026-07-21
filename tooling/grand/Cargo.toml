@@ -13,6 +13,7 @@ anyhow = "1"
 blake3 = "1"
 clap = { version = "4", features = ["derive"] }
 grandfmt = { path = "../fmt" }
+grandiose = { path = "../../crates/grandiose" }
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

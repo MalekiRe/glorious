@@ -1050,6 +1050,7 @@ pub(crate) enum RuntimeLeaf {
     },
     FloatPrimitive(FloatRuntimeLeaf),
     HostImport(HostImportRole),
+    Abort,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -4189,6 +4190,7 @@ impl Evaluator<'_> {
                         RuntimeLeaf::Primitive(_)
                             | RuntimeLeaf::IntegerConversion { .. }
                             | RuntimeLeaf::FloatPrimitive(_)
+                            | RuntimeLeaf::Abort
                     ) && !self.runtime_leaves.authorizes_call(span)
                     {
                         return Err(runtime(
@@ -4207,6 +4209,9 @@ impl Evaluator<'_> {
                             eval_runtime_float_primitive(leaf, &args, span)?
                         }
                         RuntimeLeaf::HostImport(role) => self.eval_host_import(role, args, span)?,
+                        RuntimeLeaf::Abort => {
+                            return Err(runtime(span, "explicit source abort"));
+                        }
                     };
                     return Ok(Control::Value(value));
                 }

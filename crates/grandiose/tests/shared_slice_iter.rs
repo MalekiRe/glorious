@@ -57,7 +57,7 @@ const SHARED_SLICE_ITER_SURFACE: &str = r#"
         let iterator = Slice::iter(view);
         let remaining = SliceIter::len(&iterator);
         let _empty = SliceIter::is_empty(&iterator);
-        let _step = SliceIter::next(iterator);
+        let _step = SliceIter::next(&mut iterator);
         remaining
     }
 
@@ -65,7 +65,7 @@ const SHARED_SLICE_ITER_SURFACE: &str = r#"
         let values = values();
         let view = Vec::as_slice(&values);
         let iterator = Slice::iter(view);
-        let _step = SliceIter::next(iterator);
+        let _step = SliceIter::next(&mut iterator);
         Slice::len(view)
     }
 
@@ -128,7 +128,13 @@ fn shared_slice_iterator_orders_and_exhausts_at_every_optimization_level() {
         let answer = function_id(&phases.artifact, "answer");
         let empty_answer = function_id(&phases.artifact, "empty_answer");
         let next = function_id(&phases.artifact, "__g1_slice_iter_next");
-        let iter_ty = phases.artifact.functions[next as usize].params[0];
+        let Type::RefUnique { referent: iter_ty } = phases.artifact.types
+            [phases.artifact.functions[next as usize].params[0] as usize]
+            .representation()
+        else {
+            panic!("SliceIter::next parameter is not a unique state reference")
+        };
+        let iter_ty = *iter_ty;
         let vm = Vm::new(verify(phases.artifact.clone()).unwrap());
 
         assert_eq!(vm.run(answer, vec![]).unwrap(), Value::U64(3));
@@ -136,21 +142,22 @@ fn shared_slice_iterator_orders_and_exhausts_at_every_optimization_level() {
 
         for (index, expected_next) in [(0, 1), (1, 2)] {
             let iterator = iter_value(&phases.artifact, iter_ty, 1, 2, index);
-            let Value::Aggregate(some) = vm.run(next, vec![iterator]).unwrap() else {
+            let Value::Aggregate(state) = iterator else {
+                panic!("SliceIter fixture is not aggregate state")
+            };
+            let reference = Value::Reference {
+                referent_type: iter_ty,
+                unique: true,
+                target: ReferenceTarget::Aggregate(state.clone()),
+            };
+            let Value::Aggregate(some) = vm.run(next, vec![reference]).unwrap() else {
                 panic!("{optimization_level:?}: next did not return Option::Some")
             };
             let some = some.borrow();
             assert_eq!(some.variant, Some(0), "{optimization_level:?}");
-            let Some(Value::Aggregate(pair)) = some.fields[0].as_ref() else {
-                panic!("{optimization_level:?}: Some payload is not the index/state pair")
-            };
-            let pair = pair.borrow();
-            assert_eq!(pair.fields[0], Some(Value::U64(index)));
-            let Some(Value::Aggregate(next_state)) = pair.fields[1].as_ref() else {
-                panic!("{optimization_level:?}: pair did not retain SliceIter state")
-            };
+            assert_eq!(some.fields[0], Some(Value::U64(index)));
             assert_eq!(
-                next_state.borrow().fields[3],
+                state.borrow().fields[3],
                 Some(Value::U64(expected_next)),
                 "{optimization_level:?}"
             );
@@ -158,14 +165,30 @@ fn shared_slice_iterator_orders_and_exhausts_at_every_optimization_level() {
 
         for index in [2, 3] {
             let iterator = iter_value(&phases.artifact, iter_ty, 1, 2, index);
-            let Value::Aggregate(none) = vm.run(next, vec![iterator]).unwrap() else {
+            let Value::Aggregate(state) = iterator else {
+                panic!("SliceIter fixture is not aggregate state")
+            };
+            let reference = Value::Reference {
+                referent_type: iter_ty,
+                unique: true,
+                target: ReferenceTarget::Aggregate(state),
+            };
+            let Value::Aggregate(none) = vm.run(next, vec![reference]).unwrap() else {
                 panic!("{optimization_level:?}: exhausted next did not return Option::None")
             };
             assert_eq!(none.borrow().variant, Some(1), "{optimization_level:?}");
         }
 
         let empty = iter_value(&phases.artifact, iter_ty, 0, 0, 0);
-        let Value::Aggregate(none) = vm.run(next, vec![empty]).unwrap() else {
+        let Value::Aggregate(state) = empty else {
+            panic!("SliceIter fixture is not aggregate state")
+        };
+        let reference = Value::Reference {
+            referent_type: iter_ty,
+            unique: true,
+            target: ReferenceTarget::Aggregate(state),
+        };
+        let Value::Aggregate(none) = vm.run(next, vec![reference]).unwrap() else {
             panic!("{optimization_level:?}: empty next did not return Option::None")
         };
         assert_eq!(none.borrow().variant, Some(1), "{optimization_level:?}");

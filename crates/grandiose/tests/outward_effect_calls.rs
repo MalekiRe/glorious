@@ -31,27 +31,28 @@ impl Host for NoHost {
 fn terminal_outward_callable_is_closed_by_a_lexical_handler() {
     let source = r#"
         effect Stop { stop(value: i64) -> ! }
-        abort(value: i64) -> i64 / {Stop} { perform Stop::stop(value) }
+        stop_with(value: i64) -> i64 / {Stop} { perform Stop::stop(value) }
         test() -> i64 {
-            handle { abort(42) } { Stop::stop(value) => value }
+            handle { stop_with(42) } { Stop::stop(value) => value }
         }
         main() -> { () }
     "#;
     let artifact = compile_source_to_bytecode("terminal-call.gr", source).unwrap();
-    let abort = artifact
+    let stop_with = artifact
         .functions
         .iter()
-        .find(|function| function.name == "abort")
+        .find(|function| function.name == "stop_with")
         .unwrap();
     let stop = artifact
         .protocols
         .iter()
         .position(|protocol| protocol.display_name == "Stop")
         .unwrap() as u32;
-    assert_eq!(abort.outward_protocols, [stop]);
-    assert_eq!(abort.flags, NO_RETURN);
+    assert_eq!(stop_with.outward_protocols, [stop]);
+    assert_eq!(stop_with.flags, NO_RETURN);
     assert!(
-        artifact.code[abort.code_start as usize..(abort.code_start + abort.code_len) as usize]
+        artifact.code
+            [stop_with.code_start as usize..(stop_with.code_start + stop_with.code_len) as usize]
             .iter()
             .any(|instruction| matches!(instruction, Instruction::Perform { dst: None, .. }))
     );
@@ -94,15 +95,15 @@ fn terminal_outward_callable_is_closed_by_a_lexical_handler() {
 fn transparent_row_alias_closes_terminal_outward_call_and_emits_no_metadata() {
     let explicit = r#"
         effect Stop { stop(value: i64) -> ! }
-        abort(value: i64) -> i64 / {Stop} { perform Stop::stop(value) }
-        test() -> i64 { handle { abort(42) } { Stop::stop(value) => value } }
+        stop_with(value: i64) -> i64 / {Stop} { perform Stop::stop(value) }
+        test() -> i64 { handle { stop_with(42) } { Stop::stop(value) => value } }
         main() -> { () }
     "#;
     let aliased = r#"
         cases Stops = {Stop};
         effect Stop { stop(value: i64) -> ! }
-        abort(value: i64) -> i64 / {Stops} { perform Stop::stop(value) }
-        test() -> i64 { handle { abort(42) } { Stop::stop(value) => value } }
+        stop_with(value: i64) -> i64 / {Stops} { perform Stop::stop(value) }
+        test() -> i64 { handle { stop_with(42) } { Stop::stop(value) => value } }
         main() -> { () }
     "#;
     let explicit = compile_source_to_phases("explicit-row.gr", explicit).unwrap();
@@ -871,12 +872,12 @@ fn invalid_named_effect_rows_and_calls_have_stable_diagnostics() {
             "effect-row parameter",
         ),
         (
-            "effect Stop { stop() -> ! } abort() -> i64 / {Stop} { perform Stop::stop() } bad() -> i64 { abort() } main() -> { () }",
+            "effect Stop { stop() -> ! } stop_with() -> i64 / {Stop} { perform Stop::stop() } bad() -> i64 { stop_with() } main() -> { () }",
             "requires outward effect protocol(s) not declared here",
         ),
         (
             "effect First { stop() -> ! } effect Second { stop() -> ! } bad() -> i64 / {First} { perform Second::stop() } main() -> { () }",
-            "perform is accepted only inside its supported lexical handler",
+            "perform must be covered by a lexical handler or declared",
         ),
         (
             "effect Stop { stop() -> ! } main() -> / {Stop} { () }",

@@ -1,4 +1,4 @@
-use grandiose::compiler_mir::CleanupAction;
+use grandiose::compiler_mir::{CleanupAction, Terminator};
 use grandiose::{
     CompileOptions, OptimizationLevel, compile_source_to_bytecode,
     compile_source_to_phases_with_options,
@@ -494,7 +494,7 @@ fn one_sided_positive_owner_cannot_be_retired_at_the_join() {
 }
 
 #[test]
-fn conditional_zero_use_field_survives_join_and_suspension() {
+fn conditional_zero_use_field_is_retired_before_join_and_suspension() {
     let source = r#"
         enum Route { Left, Right }
         struct Resource { marker: i64 }
@@ -543,8 +543,8 @@ fn conditional_zero_use_field_survives_join_and_suspension() {
             .functions
             .iter()
             .flat_map(|function| &function.flow.drop_flags)
-            .any(|flag| flag.field == Some(0)),
-        "compiler emits the per-field conditional fact"
+            .all(|flag| flag.field != Some(0)),
+        "the disposable zero-use residual retires on its branch edge"
     );
     assert!(
         phases
@@ -553,8 +553,21 @@ fn conditional_zero_use_field_survives_join_and_suspension() {
             .iter()
             .flat_map(|function| &function.flow.cleanup_plans)
             .flat_map(|plan| &plan.actions)
-            .any(|action| matches!(action, CleanupAction::DestroyResidual { .. })),
-        "cleanup serialization retains residual destruction"
+            .all(|action| !matches!(action, CleanupAction::DestroyResidual { .. })),
+        "suspension cleanup does not retain an already retired residual"
+    );
+    assert!(
+        phases
+            .mir
+            .functions
+            .iter()
+            .flat_map(|function| &function.blocks)
+            .filter_map(|block| match &block.terminator {
+                Terminator::Perform { capture, .. } => Some(capture),
+                _ => None,
+            })
+            .all(|capture| capture.captured_residuals.is_empty()),
+        "suspension does not capture an already retired residual"
     );
 }
 

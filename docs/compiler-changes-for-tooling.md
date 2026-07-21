@@ -3,12 +3,11 @@
 `tooling/grand` now drives the versioned G1 compiler contract: ordered
 `.glorious` inputs, JSON diagnostics, check-only compilation, `.grbc` output,
 and execution through `grvm`. Legacy `.gr`, fake-compiler, and LLVM paths are
-retained as compatibility seams. The numbered list records both completed
-contract pieces and the remaining interface/session work.
+retained as compatibility seams. The numbered list records the completed compiler
+surfaces on which the tooling depends.
 
-**Status: items 1–5 and 7–9 are real and integration-tested. The remaining
-phase-3 work is retained per-body inference and compiler local/type side tables,
-not the session transport.**
+**Status: items 1–9, per-body incremental inference, and compiler-owned local/type
+side tables are real and integration-tested.**
 `tooling/grand/src/contract.rs` is the normative spec (capabilities probe,
 CLI shapes, JSON schemas); grand already implements both sides of every
 capability with graceful legacy fallback, verified by
@@ -20,7 +19,7 @@ optional path on that response. The current probe contract is:
 
 ```
 $ grc --capabilities
-{"grc":"0.1.0","contract":1,"multi-file":true,
+{"grc":"0.1.0","contract":1,"multi-file":true,"modules":true,
  "artifact-major":1,"artifact-minor":0,
  "seed-identity-version":1,
  "seed-identity":"grandiose-seed-v1;grc-contract=1;grvm-contract=1;artifact=1.0;features=00000000000000ff",
@@ -49,12 +48,13 @@ monotonic last-good `generation`, `transaction` (`committed`, `unchanged`, or
 other method. Protocol, request, argument, input-count, and aggregate source
 limits are checked before compilation.
 
-1. **Multiple source inputs + a segment table.**
-   `grc SOURCE... -o OUT` concatenating in argument order (the architecture.md
-   §7 contract), with diagnostics reporting original file/line via a segment
-   map. **Implemented:** `grc` owns canonical bundle ordering and maps every
-   independently located diagnostic back to its original input. Grand passes
-   files individually when the capability is present.
+1. **Multiple source inputs, package roots, and a segment table.**
+   `grc SOURCE... -o OUT` accepts an application root plus hermetic additional
+   inputs; repeatable `--dependency NAME=PATH` marks separate dependency package
+   roots. **Implemented:** `grc` discovers each root's declared module closure,
+   validates the hybrid module layout, owns canonical bundle ordering, and maps
+   every diagnostic back to its original file. Grand passes the application root
+   and explicit dependency roots when the capability is present.
 
 2. **`--emit diagnostics-json`.**
    One JSON object per diagnostic: code, severity, title, labels as
@@ -74,11 +74,12 @@ limits are checked before compilation.
 4. **`--emit interfaces-json`.**
    Declaration-scan products (callables + signatures, types, effects,
    fixities, spans, doc comments) without body elaboration. Powers grand's
-   cross-package name-collision preflight (flat namespace!) and LSP phase 2.
+   cross-package/module identity preflight and LSP navigation.
    **Implemented:** the real parser supplies ordered file/line/signature/doc
    metadata plus stable namespace-qualified identities and exact file-local
-   declaration/name byte spans. The LSP consumes these directly; grand retains
-   its warning-only heuristic only for legacy compilers.
+   declaration/name byte spans. The LSP consumes these directly, including module
+   paths and explicitly marked dependency package roots; grand retains its
+   compiler-owned in-process scan as a warning-only legacy-contract fallback.
 
 5. **A real `grc` binary with `--version`.**
    **Implemented:** the native Rust bootstrap ships a real `grc` binary
@@ -118,7 +119,7 @@ limits are checked before compilation.
    The LLVM interpreter/native paths remain compatibility targets.
 
 9. **Session mode (`grc --serve`).**
-   **Transport implemented:** one long-lived process accepts repeated resolve,
+   **Implemented:** one long-lived process accepts repeated resolve,
    check, interface, and compile requests through the versioned JSON-line
    protocol above. Every request revalidates the complete ordered source bundle;
    successful snapshots commit atomically, failed requests retain the previous
@@ -127,10 +128,14 @@ limits are checked before compilation.
    so diagnostics and artifacts are identical. Oversized and malformed requests
    fail without poisoning the process, and process restart begins with empty
    state. Grand validates the advertised protocol but remains a batch client;
-   spawning a session for one build would add no benefit. The Rust LSP separately
-   retains per-root last-good definition snapshots. Retained post-scan inference,
-   per-body re-elaboration, and local/type side tables remain phase-3 work in
-   `docs/tooling-plan.md` §4.4.
+   spawning a session for one build would add no benefit. The Rust LSP maintains
+   one `IncrementalCompilerSession` per workspace root. The session reuses unchanged
+   body inference results when the declaration context fingerprint is unchanged and
+   transactionally restores its cache after failure. Compiler-owned semantic side
+   tables expose exact local definitions/references, scope ranges, inferred local
+   types, and expression types. The LSP uses them for local hover, definition,
+   references, rename, completion, and inferred-type inlay hints, while last-good
+   snapshots fail closed across edited or shifted source.
 
 `GRAND_COMPILER=fake` remains useful for hermetic build-tool tests; contract
 tests also exercise bytecode selection and VM invocation, while the real

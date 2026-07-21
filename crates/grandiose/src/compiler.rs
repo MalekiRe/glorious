@@ -65,6 +65,7 @@ const ARRAY_FINISH_DRAINED_G1: u64 = 1 << 7;
 #[derive(Clone, Debug)]
 struct PrivacyDomains {
     ranges: Vec<(SegmentId, std::ops::Range<usize>)>,
+    modules: Option<(SourceBundle, crate::modules::ModuleResolution)>,
 }
 
 impl PrivacyDomains {
@@ -82,10 +83,25 @@ impl PrivacyDomains {
                     )
                 })
                 .collect(),
+            modules: None,
         }
     }
 
+    fn with_modules(
+        mut self,
+        bundle: &SourceBundle,
+        modules: crate::modules::ModuleResolution,
+    ) -> Self {
+        self.modules = Some((bundle.clone(), modules));
+        self
+    }
+
     fn same_domain(&self, declaration: Span, use_site: Span) -> bool {
+        if let Some((bundle, modules)) = &self.modules {
+            return modules
+                .owner(bundle, declaration)
+                .is_some_and(|declaration| modules.owner(bundle, use_site) == Some(declaration));
+        }
         self.domain(declaration)
             .is_some_and(|declaration| self.domain(use_site) == Some(declaration))
     }
@@ -117,6 +133,7 @@ struct RuntimeBindings {
     array_name: Option<String>,
     leaves: BTreeMap<String, Primitive>,
     host_leaves: BTreeMap<String, HostImportRole>,
+    abort_leaf: Option<String>,
     trusted_domain: Option<SegmentId>,
 }
 
@@ -133,8 +150,12 @@ impl RuntimeBindings {
         self.host_leaves.get(name).copied()
     }
 
+    fn is_abort_leaf(&self, name: &str) -> bool {
+        self.abort_leaf.as_deref() == Some(name)
+    }
+
     fn call_is_authorized(&self, name: &str, span: Span, domains: &PrivacyDomains) -> bool {
-        self.leaf(name).is_none()
+        (self.leaf(name).is_none() && !self.is_abort_leaf(name))
             || self
                 .trusted_domain
                 .is_some_and(|authority| domains.domain(span) == Some(authority))
@@ -230,6 +251,9 @@ fn source_region_contract(program: &Program, function: &crate::ast::Function) ->
     }
     if let Some(where_clause) = &function.where_clause {
         for constraint in &where_clause.lifetime_outlives {
+            if !constraint.higher_ranked_lifetimes.is_empty() {
+                continue;
+            }
             names.insert(constraint.longer.name.clone());
             names.insert(constraint.shorter.name.clone());
         }
@@ -280,6 +304,9 @@ fn source_region_contract(program: &Program, function: &crate::ast::Function) ->
     }
     if let Some(where_clause) = &function.where_clause {
         for constraint in &where_clause.lifetime_outlives {
+            if !constraint.higher_ranked_lifetimes.is_empty() {
+                continue;
+            }
             let longer = ids[&constraint.longer.name];
             let shorter = ids[&constraint.shorter.name];
             if longer != shorter {
@@ -1480,6 +1507,60 @@ fn artifact_reference_paths(artifact: &Artifact, ty: TypeId) -> Vec<Vec<u32>> {
     leaves
 }
 
+fn region_source_reference_paths(
+    artifact: &Artifact,
+    parameter: TypeId,
+    result: TypeId,
+    result_path: &[u32],
+) -> Vec<Vec<u32>> {
+    fn type_at_path(artifact: &Artifact, mut ty: TypeId, mut path: &[u32]) -> Option<TypeId> {
+        while let Some((&field, rest)) = path.split_first() {
+            match artifact.types.get(ty as usize)?.representation() {
+                Type::Tuple { fields, .. } => ty = *fields.get(field as usize)?,
+                Type::Struct { fields, .. } => ty = fields.get(field as usize)?.ty,
+                Type::Enum { variants, .. } => {
+                    let variant = usize::try_from(u32::MAX.checked_sub(field)?).ok()?;
+                    let (&field, next) = rest.split_first()?;
+                    ty = variants.get(variant)?.fields.get(field as usize)?.ty;
+                    path = next;
+                    continue;
+                }
+                _ => return None,
+            }
+            path = rest;
+        }
+        Some(ty)
+    }
+
+    let outer = artifact_reference_paths(artifact, parameter);
+    let Some(
+        Type::RefShared {
+            referent: outer_referent,
+        }
+        | Type::RefUnique {
+            referent: outer_referent,
+        },
+    ) = artifact
+        .types
+        .get(parameter as usize)
+        .map(Type::representation)
+    else {
+        return outer;
+    };
+    let result_referent =
+        type_at_path(artifact, result, result_path).and_then(|ty| {
+            match artifact.types.get(ty as usize)?.representation() {
+                Type::RefShared { referent } | Type::RefUnique { referent } => Some(*referent),
+                _ => None,
+            }
+        });
+    if result_referent == Some(*outer_referent) {
+        return outer;
+    }
+    let nested = artifact_reference_paths(artifact, *outer_referent);
+    if nested.len() == 1 { nested } else { outer }
+}
+
 fn region_aggregate_reference_plan(
     artifact: &Artifact,
     signature: &Signature,
@@ -1509,11 +1590,14 @@ fn region_aggregate_reference_plan(
         return None;
     };
     let result_paths = artifact_reference_paths(artifact, signature.result);
+    let [result_path] = result_paths.as_slice() else {
+        return None;
+    };
     let source_paths = signature
         .params
         .get(*parameter)
-        .map(|ty| artifact_reference_paths(artifact, *ty))?;
-    let ([result_path], [source_path]) = (result_paths.as_slice(), source_paths.as_slice()) else {
+        .map(|ty| region_source_reference_paths(artifact, *ty, signature.result, result_path))?;
+    let [source_path] = source_paths.as_slice() else {
         return None;
     };
     Some(vec![ReferenceReturnRoute {
@@ -1740,6 +1824,7 @@ fn generic_ast_reference_return_plans(
         known: &BTreeMap<typeck::DeclarationKey, ReferenceReturnPlan>,
         nominal_fields: &BTreeMap<String, BTreeMap<String, u32>>,
         callback_wrappers: &BTreeMap<String, (usize, usize)>,
+        single_reference_parameters: &BTreeSet<usize>,
     ) -> Option<ReferenceReturnPlan> {
         match &expression.kind {
             ExprKind::Variable(path) if path.len() == 1 => Some(
@@ -1755,6 +1840,7 @@ fn generic_ast_reference_return_plans(
                 known,
                 nominal_fields,
                 callback_wrappers,
+                single_reference_parameters,
             ),
             ExprKind::Tuple(fields) => {
                 let mut result = Vec::new();
@@ -1766,6 +1852,7 @@ fn generic_ast_reference_return_plans(
                         known,
                         nominal_fields,
                         callback_wrappers,
+                        single_reference_parameters,
                     )? {
                         route.result_prefix.insert(0, field as u32);
                         result.push(route);
@@ -1786,6 +1873,7 @@ fn generic_ast_reference_return_plans(
                         known,
                         nominal_fields,
                         callback_wrappers,
+                        single_reference_parameters,
                     )? {
                         route.result_prefix.insert(0, index);
                         result.push(route);
@@ -1794,7 +1882,13 @@ fn generic_ast_reference_return_plans(
                 Some(result)
             }
             ExprKind::Field(subject, field) => {
-                let index = field.parse::<u32>().ok()?;
+                let index = field.parse::<u32>().ok().or_else(|| {
+                    let indices = nominal_fields
+                        .values()
+                        .filter_map(|fields| fields.get(field).copied())
+                        .collect::<BTreeSet<_>>();
+                    (indices.len() == 1).then(|| *indices.iter().next().unwrap())
+                })?;
                 Some(project_plan(
                     expression_plan(
                         program,
@@ -1803,6 +1897,7 @@ fn generic_ast_reference_return_plans(
                         known,
                         nominal_fields,
                         callback_wrappers,
+                        single_reference_parameters,
                     )?,
                     index,
                 ))
@@ -1827,6 +1922,7 @@ fn generic_ast_reference_return_plans(
                         known,
                         nominal_fields,
                         callback_wrappers,
+                        single_reference_parameters,
                     );
                 }
                 let declaration = typeck::DeclarationKey::Function(name.to_string());
@@ -1841,6 +1937,7 @@ fn generic_ast_reference_return_plans(
                                 known,
                                 nominal_fields,
                                 callback_wrappers,
+                                single_reference_parameters,
                             )
                         })
                         .collect::<Option<Vec<_>>>()?;
@@ -1881,6 +1978,7 @@ fn generic_ast_reference_return_plans(
                         known,
                         nominal_fields,
                         callback_wrappers,
+                        single_reference_parameters,
                     )?,
                     ClosureReferenceSource::Parameter(_) => return None,
                     ClosureReferenceSource::Capture(name) => environment.get(&name)?.clone(),
@@ -1903,7 +2001,23 @@ fn generic_ast_reference_return_plans(
                                 known,
                                 nominal_fields,
                                 callback_wrappers,
+                                single_reference_parameters,
                             )?;
+                            // A stored scalar reference selected from a
+                            // multi-leaf parameter no longer carries the
+                            // projection proof available on the selecting
+                            // expression itself. Do not turn that local alias
+                            // into a whole-function return route. Whole-value
+                            // aliases and aggregate routes retain their exact
+                            // structural paths and remain composable.
+                            if matches!(value.as_slice(), [route]
+                                if route.result_prefix.is_empty()
+                                    && !route.source.path.is_empty()
+                                    && !single_reference_parameters
+                                        .contains(&route.source.parameter))
+                            {
+                                return None;
+                            }
                             environment.insert(name.clone(), value);
                         }
                         Stmt::Expr(value) => {
@@ -1914,6 +2028,7 @@ fn generic_ast_reference_return_plans(
                                 known,
                                 nominal_fields,
                                 callback_wrappers,
+                                single_reference_parameters,
                             )?;
                         }
                         Stmt::Deconstruct {
@@ -1926,6 +2041,7 @@ fn generic_ast_reference_return_plans(
                                 known,
                                 nominal_fields,
                                 callback_wrappers,
+                                single_reference_parameters,
                             )?;
                             let declaration_fields = ty.as_ref().and_then(|name| {
                                 nominal_fields.get(name.rsplit("::").next().unwrap_or(name))
@@ -1959,6 +2075,7 @@ fn generic_ast_reference_return_plans(
                 known,
                 nominal_fields,
                 callback_wrappers,
+                single_reference_parameters,
             ),
             ExprKind::Handle {
                 computation,
@@ -1987,6 +2104,7 @@ fn generic_ast_reference_return_plans(
                         known,
                         nominal_fields,
                         callback_wrappers,
+                        single_reference_parameters,
                     )?;
                     match &pattern.kind {
                         PatternKind::Binding(name) => {
@@ -2003,6 +2121,7 @@ fn generic_ast_reference_return_plans(
                     known,
                     nominal_fields,
                     callback_wrappers,
+                    single_reference_parameters,
                 )
             }
             ExprKind::Unit
@@ -2091,6 +2210,58 @@ fn generic_ast_reference_return_plans(
             Some((function.name.clone(), (value, callback)))
         })
         .collect::<BTreeMap<_, _>>();
+    fn source_reference_leaf_count(
+        program: &Program,
+        ty: &TypeSyntax,
+        visiting: &mut BTreeSet<String>,
+    ) -> Option<usize> {
+        match &ty.kind {
+            TypeSyntaxKind::SharedReference(_) | TypeSyntaxKind::UniqueReference(_) => Some(1),
+            TypeSyntaxKind::Tuple(elements) => elements.iter().try_fold(0usize, |count, ty| {
+                count.checked_add(source_reference_leaf_count(program, ty, visiting)?)
+            }),
+            TypeSyntaxKind::Path(path) => {
+                let name = path.last()?.name.as_str();
+                if !visiting.insert(name.to_string()) {
+                    return None;
+                }
+                let count =
+                    if let Some(declaration) = program.structs.iter().find(|declaration| {
+                        declaration.name == name && declaration.generics.is_none()
+                    }) {
+                        declaration.fields.iter().try_fold(0usize, |count, field| {
+                            count.checked_add(source_reference_leaf_count(
+                                program, &field.ty, visiting,
+                            )?)
+                        })
+                    } else if let Some(declaration) = program.enums.iter().find(|declaration| {
+                        declaration.name == name && declaration.generics.is_none()
+                    }) {
+                        declaration
+                            .variants
+                            .iter()
+                            .flat_map(|variant| &variant.fields)
+                            .try_fold(0usize, |count, field| {
+                                count.checked_add(source_reference_leaf_count(
+                                    program, field, visiting,
+                                )?)
+                            })
+                    } else if let Some(alias) = program
+                        .type_aliases
+                        .iter()
+                        .find(|alias| alias.name == name && alias.generics.is_none())
+                    {
+                        source_reference_leaf_count(program, &alias.target, visiting)
+                    } else {
+                        Some(0)
+                    };
+                visiting.remove(name);
+                count
+            }
+            TypeSyntaxKind::Never => Some(0),
+            TypeSyntaxKind::Application { .. } | TypeSyntaxKind::Projection { .. } => None,
+        }
+    }
     let mut known = seed.clone();
     loop {
         let before = known.len();
@@ -2116,6 +2287,16 @@ fn generic_ast_reference_return_plans(
                     )
                 })
                 .collect();
+            let single_reference_parameters = function
+                .params
+                .iter()
+                .enumerate()
+                .filter_map(|(parameter, param)| {
+                    (source_reference_leaf_count(program, &param.ty, &mut BTreeSet::new())
+                        == Some(1))
+                    .then_some(parameter)
+                })
+                .collect::<BTreeSet<_>>();
             let inferred = expression_plan(
                 program,
                 &function.body,
@@ -2123,6 +2304,7 @@ fn generic_ast_reference_return_plans(
                 &known,
                 &nominal_fields,
                 &callback_wrappers,
+                &single_reference_parameters,
             );
             if let Some(mut plan) = inferred {
                 plan.sort_by(|left, right| {
@@ -3381,34 +3563,86 @@ pub fn compile_bundle_to_phases_with_manifest_and_options(
 ) -> Result<CompiledPhases, Vec<Diagnostic>> {
     let domains = PrivacyDomains::bundle(bundle);
     compile_stream_phases_with_manifest_and_domains(
-        bundle.source(),
+        bundle,
         manifest,
         &domains,
         bundle.trusted_standard_segment_id(),
         options,
+        None,
+    )
+}
+
+pub(crate) fn compile_bundle_to_phases_incremental(
+    bundle: &SourceBundle,
+    options: CompileOptions,
+    session: &mut crate::compiler_session::IncrementalCompilerSession,
+) -> Result<CompiledPhases, Vec<Diagnostic>> {
+    let manifest = if bundle.is_canonical_distribution() {
+        TrustedTraitManifest::trusted_distribution()
+    } else {
+        TrustedTraitManifest::trusted_default()
+    };
+    let domains = PrivacyDomains::bundle(bundle);
+    compile_stream_phases_with_manifest_and_domains(
+        bundle,
+        &manifest,
+        &domains,
+        bundle.trusted_standard_segment_id(),
+        options,
+        Some(session),
     )
 }
 
 fn compile_stream_phases_with_manifest_and_domains(
-    source: &str,
+    bundle: &SourceBundle,
     manifest: &TrustedTraitManifest,
     domains: &PrivacyDomains,
     trusted_standard_library_domain: Option<SegmentId>,
     options: CompileOptions,
+    mut incremental: Option<&mut crate::compiler_session::IncrementalCompilerSession>,
 ) -> Result<CompiledPhases, Vec<Diagnostic>> {
-    let tokens = crate::lexer::lex(source).map_err(|error| vec![error.with_code(PARSE_CODE)])?;
-    let program = {
-        let (program, diagnostics) = crate::parser::parse_recovering(tokens);
-        if !diagnostics.is_empty() {
-            return Err(diagnostics
-                .into_iter()
-                .map(|error| error.with_code(PARSE_CODE))
-                .collect());
-        }
-        program
-    };
+    let program = crate::modules::parse_bundle(bundle).map_err(|diagnostics| {
+        diagnostics
+            .into_iter()
+            .map(|error| error.with_code(PARSE_CODE))
+            .collect::<Vec<_>>()
+    })?;
     let program = crate::parser::normalize_for_legacy_consumers(program);
+    let has_modules = !program.modules.is_empty();
+    let resolved = crate::modules::resolve_program(bundle, program)?;
+    let domains = if has_modules {
+        domains
+            .clone()
+            .with_modules(bundle, resolved.resolution.clone())
+    } else {
+        domains.clone()
+    };
+    let program = resolved.program;
+    let incremental_fingerprints = incremental
+        .as_ref()
+        .map(|_| crate::compiler_session::fingerprints(bundle, &program));
     crate::validate::validate(&program)?;
+    let compiled = match (incremental.as_mut(), incremental_fingerprints.as_ref()) {
+        (Some(session), Some(fingerprints)) => compile_program_with_phases(
+            &program,
+            manifest,
+            &domains,
+            trusted_standard_library_domain,
+            options,
+            Some((&mut session.type_cache, fingerprints)),
+        ),
+        _ => compile_program_with_phases(
+            &program,
+            manifest,
+            &domains,
+            trusted_standard_library_domain,
+            options,
+            None,
+        ),
+    };
+    if let Some(session) = incremental {
+        session.publish_stats();
+    }
     let (
         artifact,
         core,
@@ -3417,13 +3651,7 @@ fn compile_stream_phases_with_manifest_and_domains(
         provisional_text,
         provisional_fingerprint,
         diagnostics,
-    ) = compile_program_with_phases(
-        &program,
-        manifest,
-        domains,
-        trusted_standard_library_domain,
-        options,
-    )?;
+    ) = compiled?;
     Ok(CompiledPhases {
         artifact,
         core,
@@ -4103,11 +4331,37 @@ fn bind_runtime_manifest(
         }
         host_leaves.insert(function.name.clone(), leaf.role);
     }
+    let abort_leaf = program
+        .functions
+        .iter()
+        .find(|function| function.name == "__g1_abort")
+        .map(|function| {
+            let authorized = trusted_standard_library_domain
+                .is_some_and(|authority| domains.domain(function.span) == Some(authority));
+            let exact = authorized
+                && function.params.is_empty()
+                && function
+                    .return_type
+                    .as_ref()
+                    .is_some_and(|ty| matches!(ty.kind, TypeSyntaxKind::Never))
+                && function.generics.is_none()
+                && function.where_clause.is_none()
+                && function.outward_effects.is_none()
+                && !function.effectful;
+            if !exact {
+                errors.push(type_error(
+                    function.span,
+                    "trusted abort leaf `__g1_abort` must be a non-generic, effect-free `() -> !` declaration in the trusted standard-library segment",
+                ));
+            }
+            function.name.clone()
+        });
     if errors.is_empty() {
         Ok(RuntimeBindings {
             array_name,
             leaves,
             host_leaves,
+            abort_leaf,
             trusted_domain: trusted_standard_library_domain,
         })
     } else {
@@ -4121,6 +4375,10 @@ fn compile_program_with_phases(
     privacy_domains: &PrivacyDomains,
     trusted_standard_library_domain: Option<SegmentId>,
     options: CompileOptions,
+    incremental: Option<(
+        &mut typeck::IncrementalTypeCache,
+        &crate::compiler_session::IncrementalFingerprints,
+    )>,
 ) -> Result<CompiledProgramOutput, Vec<Diagnostic>> {
     // Source lifetime binders are statically validated before this phase and
     // deliberately erased from runtime generic identity. A callable whose only
@@ -4582,7 +4840,15 @@ fn compile_program_with_phases(
             | specialization::BodyInstanceKey::Closure(_) => None,
         })
         .collect();
-    let provisional = typeck::type_program(program, &provisional_tables, &construction_types);
+    let provisional = match incremental {
+        Some((cache, fingerprints)) => typeck::type_program_incremental(
+            program,
+            &provisional_tables,
+            &construction_types,
+            Some((cache, fingerprints.context, &fingerprints.bodies)),
+        ),
+        None => typeck::type_program(program, &provisional_tables, &construction_types),
+    };
     let provisional_text = provisional.canonical_text();
     let provisional_fingerprint = provisional.fingerprint() ^ trait_db.fingerprint().rotate_left(1);
     let expression_reference_types = provisional
@@ -6463,6 +6729,12 @@ fn compile_program_with_phases(
                 None
             }
         };
+        let abort_leaf = match &emission {
+            Emission::Function(function) => runtime_bindings.is_abort_leaf(&function.name),
+            Emission::Specialization { .. } | Emission::Global(_) | Emission::Closure { .. } => {
+                false
+            }
+        };
         let (
             signature,
             body,
@@ -6601,6 +6873,14 @@ fn compile_program_with_phases(
             lowerer.primitive_leaf_body(primitive, &core_params, signature.result, body.span)?
         } else if host_leaf.is_some() {
             lowerer.typed(body.span, NEVER, core::ExprKind::HostLeafStub)
+        } else if abort_leaf {
+            lowerer.typed(
+                body.span,
+                NEVER,
+                core::ExprKind::Abort {
+                    message: Some("explicit source abort".into()),
+                },
+            )
         } else {
             lowerer.expression(body, Some(signature.result))?
         };
@@ -6613,6 +6893,7 @@ fn compile_program_with_phases(
         lowerer.form_direct_tail_call(&mut body, signature.result);
         if primitive_leaf.is_none()
             && host_leaf.is_none()
+            && !abort_leaf
             && let Some(key) = provisional_key
             && !provisional.agrees_with_core(
                 &key,
@@ -7232,13 +7513,15 @@ fn compile_program_with_phases(
             continue;
         };
         let result_paths = artifact_reference_paths(&artifact, signature.result);
+        let [result_path] = result_paths.as_slice() else {
+            continue;
+        };
         let source_paths = signature
             .params
             .get(*parameter)
-            .map(|ty| artifact_reference_paths(&artifact, *ty))
+            .map(|ty| region_source_reference_paths(&artifact, *ty, signature.result, result_path))
             .unwrap_or_default();
-        let ([result_path], [source_path]) = (result_paths.as_slice(), source_paths.as_slice())
-        else {
+        let [source_path] = source_paths.as_slice() else {
             continue;
         };
         emitted_reference_return_plans.insert(
@@ -7358,6 +7641,19 @@ fn compile_program_with_phases(
                 .with_code("G1BC999"),
             ]
         })?;
+    // Validate MIR-derived cleanup identities before the final dense rename:
+    // the latter is a representation-only bijection and intentionally has no
+    // source-level register identity to compare against.
+    cross_validate_cleanup_maps(&artifact, &mir_program, &peephole_pc_maps).map_err(|error| {
+        vec![
+            Diagnostic::plain(format!(
+                "bytecode cleanup maps disagree with the MIR ownership facts: {error}"
+            ))
+            .with_code("G1BC999"),
+        ]
+    })?;
+    let registers_compacted_after_peephole =
+        compact_artifact_registers_after_peephole(&mut artifact);
 
     let constants_before_canonicalization = artifact.constants.clone();
     canonicalize_constants(&mut artifact);
@@ -7365,7 +7661,9 @@ fn compile_program_with_phases(
         .passes
         .push(mir::OptimizationPassReport {
             pass: mir::OptimizationPass::LayoutAndPeephole,
-            outcome: if peephole_changed || artifact.constants != constants_before_canonicalization
+            outcome: if peephole_changed
+                || registers_compacted_after_peephole
+                || artifact.constants != constants_before_canonicalization
             {
                 mir::OptimizationPassOutcome::Changed
             } else {
@@ -7508,17 +7806,6 @@ fn compile_program_with_phases(
                 .with_code("G1BC999"),
             ]
         })?;
-    // The serialized cleanup maps come from the verifier oracle; MIR cleanup
-    // facts are the compiler-side source of truth and the two must agree at
-    // every MIR statement boundary before the artifact is released.
-    cross_validate_cleanup_maps(&artifact, &mir_program, &peephole_pc_maps).map_err(|error| {
-        vec![
-            Diagnostic::plain(format!(
-                "bytecode cleanup maps disagree with the MIR ownership facts: {error}"
-            ))
-            .with_code("G1BC999"),
-        ]
-    })?;
     optimization_report
         .passes
         .push(mir::OptimizationPassReport {
@@ -8471,7 +8758,9 @@ fn reject_declarations_outside_subset(
                     || error.message.contains("Effects row")));
         let runtime_leaf = match &error.owner {
             typeck::DeclarationKey::Function(name) => {
-                runtime_bindings.leaf(name).is_some() || runtime_bindings.host_leaf(name).is_some()
+                runtime_bindings.leaf(name).is_some()
+                    || runtime_bindings.host_leaf(name).is_some()
+                    || runtime_bindings.is_abort_leaf(name)
             }
             typeck::DeclarationKey::Global(_) => false,
         };
@@ -8511,6 +8800,7 @@ fn reject_declarations_outside_subset(
     for function in &program.functions {
         if runtime_bindings.leaf(&function.name).is_some()
             || runtime_bindings.host_leaf(&function.name).is_some()
+            || runtime_bindings.is_abort_leaf(&function.name)
         {
             continue;
         }
@@ -8698,6 +8988,16 @@ pub(crate) fn normalize_ground_trait_methods(
                         crate::ast::ConstArgumentValueSyntax::U32 { value, .. } => {
                             format!("u{value}")
                         }
+                        crate::ast::ConstArgumentValueSyntax::Expression(expression) => {
+                            match crate::ast::evaluate_const_expression(expression, |_| None)
+                                .ok()?
+                            {
+                                crate::ast::EvaluatedConst::U32(value) => format!("u{value}"),
+                                crate::ast::EvaluatedConst::Quantity { lower, upper } => {
+                                    format!("q{lower}..{upper:?}")
+                                }
+                            }
+                        }
                     };
                     complete.insert(
                         argument.position.min(complete.len()),
@@ -8758,7 +9058,10 @@ pub(crate) fn normalize_ground_trait_methods(
             receiver => receiver,
         };
         if let ReceiverType::Tuple(elements) = &receiver {
-            return field.parse::<usize>().ok().and_then(|index| elements.get(index).cloned());
+            return field
+                .parse::<usize>()
+                .ok()
+                .and_then(|index| elements.get(index).cloned());
         }
         let (name, arguments) = match &receiver {
             ReceiverType::Name(name) => (name.as_str(), &[][..]),
@@ -8928,14 +9231,22 @@ pub(crate) fn normalize_ground_trait_methods(
                     .map(|element| expand_receiver_alias(program, element, visiting))
                     .collect(),
             ),
-            ReceiverType::Shared(referent) => ReceiverType::Shared(Box::new(
-                expand_receiver_alias(program, referent, visiting),
-            )),
-            ReceiverType::Unique(referent) => ReceiverType::Unique(Box::new(
-                expand_receiver_alias(program, referent, visiting),
-            )),
+            ReceiverType::Shared(referent) => {
+                ReceiverType::Shared(Box::new(expand_receiver_alias(program, referent, visiting)))
+            }
+            ReceiverType::Unique(referent) => {
+                ReceiverType::Unique(Box::new(expand_receiver_alias(program, referent, visiting)))
+            }
             _ => ty.clone(),
         })
+    }
+
+    fn canonical_source_receiver_type(
+        program: &Program,
+        syntax: &TypeSyntax,
+    ) -> Option<ReceiverType> {
+        let ty = source_receiver_type(program, syntax)?;
+        Some(expand_receiver_alias(program, &ty, &mut BTreeSet::new()))
     }
 
     fn bind_refinement_pattern(
@@ -9073,7 +9384,8 @@ pub(crate) fn normalize_ground_trait_methods(
         {
             continue;
         }
-        let Some(receiver_type) = source_receiver_type(program, &implementation.self_ty) else {
+        let Some(receiver_type) = canonical_source_receiver_type(program, &implementation.self_ty)
+        else {
             continue;
         };
         let receiver = receiver_key(&receiver_type);
@@ -9107,7 +9419,7 @@ pub(crate) fn normalize_ground_trait_methods(
                 && let Some(result) = method
                     .return_type
                     .as_ref()
-                    .and_then(|result| source_receiver_type(program, result))
+                    .and_then(|result| canonical_source_receiver_type(program, result))
             {
                 receiverless_methods
                     .entry((
@@ -9131,7 +9443,7 @@ pub(crate) fn normalize_ground_trait_methods(
                     result: method
                         .return_type
                         .as_ref()
-                        .and_then(|result| source_receiver_type(program, result)),
+                        .and_then(|result| canonical_source_receiver_type(program, result)),
                     binders: impl_binders.clone(),
                     target: wire_name.clone(),
                 });
@@ -9402,6 +9714,8 @@ pub(crate) fn normalize_ground_trait_methods(
                             _ => None,
                         };
                         let receiver = receiver_subject_type(receiver);
+                        let canonical_receiver =
+                            expand_receiver_alias(program, receiver, &mut BTreeSet::new());
                         dot_methods
                             .iter()
                             .filter(|candidate| {
@@ -9417,7 +9731,7 @@ pub(crate) fn normalize_ground_trait_methods(
                                     }
                                     && matches_receiver(
                                         &candidate.receiver,
-                                        receiver,
+                                        &canonical_receiver,
                                         &candidate.binders,
                                         &mut BTreeMap::new(),
                                     )
@@ -9554,10 +9868,9 @@ pub(crate) fn normalize_ground_trait_methods(
                                     .fields
                                     .iter()
                                     .map(|field| {
-                                        source_receiver_type(program, field)
-                                            .map(|field| {
-                                                substitute_receiver(&field, &substitutions)
-                                            })
+                                        source_receiver_type(program, field).map(|field| {
+                                            substitute_receiver(&field, &substitutions)
+                                        })
                                     })
                                     .collect::<Option<Vec<_>>>()
                             })
@@ -9590,14 +9903,17 @@ pub(crate) fn normalize_ground_trait_methods(
                     }
                     _ => None,
                 };
-                if let Some((trait_name, method)) = qualified
-                    && (methods
-                        .keys()
-                        .any(|(candidate, item, _)| candidate == &trait_name && item == &method)
-                        || generic_methods.iter().any(|candidate| {
-                            candidate.trait_name == trait_name && candidate.method == method
-                        }))
-                {
+                let qualified_trait_call =
+                    qualified.as_ref().is_some_and(|(trait_name, method)| {
+                        methods
+                            .keys()
+                            .any(|(candidate, item, _)| candidate == trait_name && item == method)
+                            || generic_methods.iter().any(|candidate| {
+                                candidate.trait_name.as_str() == trait_name.as_str()
+                                    && candidate.method.as_str() == method.as_str()
+                            })
+                    });
+                if let Some((trait_name, method)) = qualified.filter(|_| qualified_trait_call) {
                     let receiver = argument_types.first().cloned().flatten();
                     let deferred_receiver = receiver
                         .as_ref()
@@ -9610,8 +9926,10 @@ pub(crate) fn normalize_ground_trait_methods(
                         .flatten()
                         .and_then(|receiver| {
                             let receiver = receiver_subject_type(receiver);
+                            let receiver =
+                                expand_receiver_alias(program, receiver, &mut BTreeSet::new());
                             methods
-                                .get(&(trait_name.clone(), method.clone(), receiver_key(receiver)))
+                                .get(&(trait_name.clone(), method.clone(), receiver_key(&receiver)))
                                 .cloned()
                                 .or_else(|| {
                                     let matches = generic_methods
@@ -9621,7 +9939,7 @@ pub(crate) fn normalize_ground_trait_methods(
                                                 && candidate.method == method
                                                 && matches_receiver(
                                                     &candidate.receiver,
-                                                    receiver,
+                                                    &receiver,
                                                     &candidate.binders,
                                                     &mut BTreeMap::new(),
                                                 )
@@ -9678,11 +9996,8 @@ pub(crate) fn normalize_ground_trait_methods(
                                 "use it where one concrete result type is required",
                             ),
                             Some(expected) => {
-                                let canonical_expected = expand_receiver_alias(
-                                    program,
-                                    expected,
-                                    &mut BTreeSet::new(),
-                                );
+                                let canonical_expected =
+                                    expand_receiver_alias(program, expected, &mut BTreeSet::new());
                                 let matches = receiverless_targets(
                                     &trait_name,
                                     &method,
@@ -9733,7 +10048,7 @@ pub(crate) fn normalize_ground_trait_methods(
                         errors,
                     );
                 }
-                None
+                qualified_trait_call.then(|| expected.cloned()).flatten()
             }
             ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
                 let saved = locals.clone();
@@ -10517,9 +10832,14 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
         .filter(|declaration| declaration.generics.is_some())
         .map(|declaration| (declaration.name.as_str(), declaration))
         .collect::<BTreeMap<_, _>>();
-    if aliases.is_empty() {
-        return Ok(program.clone());
-    }
+    let nominal_params = program
+        .structs
+        .iter()
+        .filter_map(|declaration| Some((declaration.name.as_str(), declaration.generics.as_ref()?)))
+        .chain(program.enums.iter().filter_map(|declaration| {
+            Some((declaration.name.as_str(), declaration.generics.as_ref()?))
+        }))
+        .collect::<BTreeMap<_, _>>();
     let generic_nominals = program
         .structs
         .iter()
@@ -10584,9 +10904,228 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
         syntax
     }
 
+    fn lower_const_defaults_and_fixed_arrays(
+        syntax: &mut TypeSyntax,
+        program: &Program,
+        nominal_params: &BTreeMap<&str, &crate::ast::GenericParams>,
+        generated_consts: &std::cell::RefCell<Vec<crate::ast::TypeConstApplicationSyntax>>,
+    ) -> Result<(), Diagnostic> {
+        match &mut syntax.kind {
+            TypeSyntaxKind::SharedReference(referent)
+            | TypeSyntaxKind::UniqueReference(referent) => {
+                lower_const_defaults_and_fixed_arrays(
+                    referent,
+                    program,
+                    nominal_params,
+                    generated_consts,
+                )?;
+            }
+            TypeSyntaxKind::Tuple(elements) => {
+                for element in elements {
+                    lower_const_defaults_and_fixed_arrays(
+                        element,
+                        program,
+                        nominal_params,
+                        generated_consts,
+                    )?;
+                }
+            }
+            TypeSyntaxKind::Application {
+                constructor,
+                arguments,
+                lifetime_arguments,
+            } => {
+                lower_const_defaults_and_fixed_arrays(
+                    constructor,
+                    program,
+                    nominal_params,
+                    generated_consts,
+                )?;
+                for argument in arguments.iter_mut() {
+                    lower_const_defaults_and_fixed_arrays(
+                        argument,
+                        program,
+                        nominal_params,
+                        generated_consts,
+                    )?;
+                }
+                let Some(name) = constructor.simple_name() else {
+                    return Ok(());
+                };
+                let Some(params) = nominal_params.get(name) else {
+                    return Ok(());
+                };
+                let generated = generated_consts
+                    .borrow()
+                    .iter()
+                    .rev()
+                    .find(|entry| entry.application == syntax.span)
+                    .cloned();
+                let mut const_arguments = generated
+                    .or_else(|| {
+                        program
+                            .type_const_arguments
+                            .iter()
+                            .find(|entry| entry.application == syntax.span)
+                            .cloned()
+                    })
+                    .unwrap_or(crate::ast::TypeConstApplicationSyntax {
+                        application: syntax.span,
+                        arguments: Vec::new(),
+                    });
+                fn argument_expression(
+                    value: &crate::ast::ConstArgumentValueSyntax,
+                ) -> crate::ast::ConstExprSyntax {
+                    let kind = match value {
+                        crate::ast::ConstArgumentValueSyntax::U32 { value, .. } => {
+                            crate::ast::ConstExprSyntaxKind::U32(*value)
+                        }
+                        crate::ast::ConstArgumentValueSyntax::Quantity(quantity) => {
+                            crate::ast::ConstExprSyntaxKind::Quantity(quantity.clone())
+                        }
+                        crate::ast::ConstArgumentValueSyntax::Expression(expression) => {
+                            return expression.clone();
+                        }
+                    };
+                    crate::ast::ConstExprSyntax {
+                        kind,
+                        span: value.span(),
+                    }
+                }
+                fn substitute_default(
+                    expression: &crate::ast::ConstExprSyntax,
+                    known: &BTreeMap<String, crate::ast::ConstExprSyntax>,
+                ) -> crate::ast::ConstExprSyntax {
+                    use crate::ast::ConstExprSyntaxKind;
+                    if let ConstExprSyntaxKind::Path(path) = &expression.kind
+                        && let [name] = path.as_slice()
+                        && let Some(value) = known.get(&name.name)
+                    {
+                        return value.clone();
+                    }
+                    let mut expression = expression.clone();
+                    expression.kind = match &expression.kind {
+                        ConstExprSyntaxKind::Neg(value) => {
+                            ConstExprSyntaxKind::Neg(Box::new(substitute_default(value, known)))
+                        }
+                        ConstExprSyntaxKind::Binary { op, lhs, rhs } => {
+                            ConstExprSyntaxKind::Binary {
+                                op: *op,
+                                lhs: Box::new(substitute_default(lhs, known)),
+                                rhs: Box::new(substitute_default(rhs, known)),
+                            }
+                        }
+                        other => other.clone(),
+                    };
+                    expression
+                }
+                let const_by_position = const_arguments
+                    .arguments
+                    .iter()
+                    .map(|argument| (argument.position, &argument.value))
+                    .collect::<BTreeMap<_, _>>();
+                let lifetime_positions = lifetime_arguments
+                    .iter()
+                    .map(|argument| argument.position)
+                    .collect::<BTreeSet<_>>();
+                let mut source_types = arguments.iter();
+                let mut known = BTreeMap::new();
+                let initially_supplied =
+                    arguments.len() + lifetime_arguments.len() + const_arguments.arguments.len();
+                for (position, parameter) in params.params.iter().enumerate() {
+                    if position >= initially_supplied {
+                        break;
+                    }
+                    if lifetime_positions.contains(&position) {
+                        continue;
+                    }
+                    if let Some(value) = const_by_position.get(&position) {
+                        known.insert(parameter.name.clone(), argument_expression(value));
+                        continue;
+                    }
+                    let Some(source) = source_types.next() else {
+                        continue;
+                    };
+                    if matches!(parameter.kind, crate::ast::GenericParamKind::Const(_))
+                        && let TypeSyntaxKind::Path(path) = &source.kind
+                    {
+                        known.insert(
+                            parameter.name.clone(),
+                            crate::ast::ConstExprSyntax {
+                                kind: crate::ast::ConstExprSyntaxKind::Path(path.clone()),
+                                span: source.span,
+                            },
+                        );
+                    }
+                }
+                let mut supplied =
+                    arguments.len() + lifetime_arguments.len() + const_arguments.arguments.len();
+                while supplied < params.params.len() {
+                    let parameter = &params.params[supplied];
+                    let Some(default) = &parameter.const_default else {
+                        break;
+                    };
+                    let default = substitute_default(default, &known);
+                    known.insert(parameter.name.clone(), default.clone());
+                    const_arguments
+                        .arguments
+                        .push(crate::ast::ConstAssociatedArgumentSyntax {
+                            position: supplied,
+                            value: crate::ast::ConstArgumentValueSyntax::Expression(default),
+                        });
+                    supplied += 1;
+                }
+                if !const_arguments.arguments.is_empty() {
+                    let mut generated = generated_consts.borrow_mut();
+                    if let Some(existing) = generated
+                        .iter_mut()
+                        .find(|entry| entry.application == syntax.span)
+                    {
+                        *existing = const_arguments;
+                    } else {
+                        generated.push(const_arguments);
+                    }
+                }
+            }
+            TypeSyntaxKind::Never | TypeSyntaxKind::Path(_) | TypeSyntaxKind::Projection { .. } => {
+            }
+        }
+        if let Some(array) = program.fixed_array(syntax.span) {
+            let crate::ast::EvaluatedConst::U32(length) =
+                crate::ast::evaluate_const_expression(&array.length, |_| None).map_err(
+                    |message| {
+                        type_error(
+                            array.length.span,
+                            format!("invalid fixed-array length: {message}"),
+                        )
+                    },
+                )?
+            else {
+                return Err(type_error(
+                    array.length.span,
+                    "fixed-array lengths must be u32 const expressions",
+                ));
+            };
+            if length > 1024 {
+                return Err(type_error(
+                    array.length.span,
+                    format!("fixed-array length {length} exceeds the 1024-element layout limit"),
+                ));
+            }
+            let element = match &syntax.kind {
+                TypeSyntaxKind::Tuple(elements) if elements.len() == 1 => elements[0].clone(),
+                _ => array.element.clone(),
+            };
+            syntax.kind = TypeSyntaxKind::Tuple(vec![element; length as usize]);
+        }
+        Ok(())
+    }
+
     fn expand(
         syntax: &TypeSyntax,
         aliases: &BTreeMap<&str, &crate::ast::TypeAliasDecl>,
+        const_applications: &[crate::ast::TypeConstApplicationSyntax],
+        generated_consts: &std::cell::RefCell<Vec<crate::ast::TypeConstApplicationSyntax>>,
         visiting: &mut Vec<String>,
     ) -> Result<TypeSyntax, Diagnostic> {
         if let Some(name) = syntax.simple_name()
@@ -10600,14 +11139,24 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
         match &syntax.kind {
             TypeSyntaxKind::SharedReference(referent) => {
                 let mut expanded = syntax.clone();
-                expanded.kind =
-                    TypeSyntaxKind::SharedReference(Box::new(expand(referent, aliases, visiting)?));
+                expanded.kind = TypeSyntaxKind::SharedReference(Box::new(expand(
+                    referent,
+                    aliases,
+                    const_applications,
+                    generated_consts,
+                    visiting,
+                )?));
                 return Ok(expanded);
             }
             TypeSyntaxKind::UniqueReference(referent) => {
                 let mut expanded = syntax.clone();
-                expanded.kind =
-                    TypeSyntaxKind::UniqueReference(Box::new(expand(referent, aliases, visiting)?));
+                expanded.kind = TypeSyntaxKind::UniqueReference(Box::new(expand(
+                    referent,
+                    aliases,
+                    const_applications,
+                    generated_consts,
+                    visiting,
+                )?));
                 return Ok(expanded);
             }
             TypeSyntaxKind::Tuple(elements) => {
@@ -10615,7 +11164,15 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                 expanded.kind = TypeSyntaxKind::Tuple(
                     elements
                         .iter()
-                        .map(|element| expand(element, aliases, visiting))
+                        .map(|element| {
+                            expand(
+                                element,
+                                aliases,
+                                const_applications,
+                                generated_consts,
+                                visiting,
+                            )
+                        })
                         .collect::<Result<Vec<_>, _>>()?,
                 );
                 return Ok(expanded);
@@ -10642,7 +11199,15 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
         };
         let expanded_arguments = arguments
             .iter()
-            .map(|argument| expand(argument, aliases, visiting))
+            .map(|argument| {
+                expand(
+                    argument,
+                    aliases,
+                    const_applications,
+                    generated_consts,
+                    visiting,
+                )
+            })
             .collect::<Result<Vec<_>, _>>()?;
         let Some(declaration) = aliases.get(name).copied() else {
             let mut syntax = syntax.clone();
@@ -10660,13 +11225,22 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
             ));
         }
         let params = &declaration.generics.as_ref().unwrap().params;
-        if params.len() != expanded_arguments.len() {
+        let supplied_consts = const_applications
+            .iter()
+            .find(|application| application.application == syntax.span)
+            .map_or(&[][..], |application| application.arguments.as_slice());
+        let supplied = expanded_arguments.len() + lifetime_arguments.len() + supplied_consts.len();
+        let required = params
+            .iter()
+            .rposition(|parameter| parameter.const_default.is_none())
+            .map_or(0, |position| position + 1);
+        if supplied < required || supplied > params.len() {
             return Err(type_error(
                 syntax.span,
                 format!(
-                    "generic alias `{name}` expects {} type argument(s), got {}",
+                    "generic alias `{name}` expects {} generic argument(s), got {}",
                     params.len(),
-                    expanded_arguments.len()
+                    supplied
                 ),
             ));
         }
@@ -10712,18 +11286,97 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                 "generic alias arguments must be finite ground-capable scalar, nominal, tuple, reference, or Never types",
             ));
         }
-        let values = params
+        let const_by_position = supplied_consts
             .iter()
-            .zip(expanded_arguments)
-            .map(|(param, argument)| (param.name.as_str(), argument))
+            .map(|argument| (argument.position, argument.value.clone()))
             .collect::<BTreeMap<_, _>>();
+        let mut source_types = expanded_arguments.into_iter();
+        let mut values = BTreeMap::new();
+        let mut const_values = BTreeMap::new();
+        for (position, param) in params.iter().enumerate() {
+            match param.kind {
+                crate::ast::GenericParamKind::Type => {
+                    let argument = source_types.next().ok_or_else(|| {
+                        type_error(syntax.span, format!("missing type argument {position}"))
+                    })?;
+                    values.insert(param.name.as_str(), argument);
+                }
+                crate::ast::GenericParamKind::Const(_) => {
+                    if let Some(value) = const_by_position.get(&position) {
+                        const_values.insert(param.name.as_str(), value.clone());
+                    } else if source_types.len()
+                        == params[position + 1..]
+                            .iter()
+                            .filter(|parameter| {
+                                matches!(parameter.kind, crate::ast::GenericParamKind::Type)
+                            })
+                            .count()
+                        && let Some(default) = &param.const_default
+                    {
+                        const_values.insert(
+                            param.name.as_str(),
+                            crate::ast::ConstArgumentValueSyntax::Expression(default.clone()),
+                        );
+                    } else {
+                        let argument = source_types.next().ok_or_else(|| {
+                            type_error(syntax.span, format!("missing const argument {position}"))
+                        })?;
+                        values.insert(param.name.as_str(), argument);
+                    }
+                }
+                crate::ast::GenericParamKind::Lifetime => {}
+                crate::ast::GenericParamKind::EffectRow => {
+                    return Err(type_error(
+                        param.span,
+                        "effect-row parameters are not valid on type aliases",
+                    ));
+                }
+            }
+        }
         visiting.push(name.to_owned());
-        let expanded = expand(&substitute(&declaration.target, &values), aliases, visiting);
+        let mut substituted = substitute(&declaration.target, &values);
+        if !const_values.is_empty()
+            && let TypeSyntaxKind::Application { arguments, .. } = &mut substituted.kind
+        {
+            let mut retained = Vec::new();
+            let mut generated = Vec::new();
+            for (position, argument) in std::mem::take(arguments).into_iter().enumerate() {
+                if let Some(value) = argument
+                    .simple_name()
+                    .and_then(|name| const_values.get(name))
+                {
+                    generated.push(crate::ast::ConstAssociatedArgumentSyntax {
+                        position,
+                        value: value.clone(),
+                    });
+                } else {
+                    retained.push(argument);
+                }
+            }
+            *arguments = retained;
+            substituted.span = syntax.span;
+            if !generated.is_empty() {
+                generated_consts
+                    .borrow_mut()
+                    .push(crate::ast::TypeConstApplicationSyntax {
+                        application: syntax.span,
+                        arguments: generated,
+                    });
+            }
+        }
+        let expanded = expand(
+            &substituted,
+            aliases,
+            const_applications,
+            generated_consts,
+            visiting,
+        );
         visiting.pop();
         expanded
     }
 
     let mut errors = Vec::new();
+    let generated_consts = std::cell::RefCell::new(Vec::new());
     for declaration in aliases.values() {
         let params = declaration
             .generics
@@ -10736,6 +11389,8 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
         let expanded = expand(
             &declaration.target,
             &aliases,
+            &program.type_const_arguments,
+            &generated_consts,
             &mut vec![declaration.name.clone()],
         );
         match expanded {
@@ -10849,8 +11504,24 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
         return Err(errors);
     }
     let mut normalized = program.clone();
-    let mut rewrite = |syntax: &mut TypeSyntax| match expand(syntax, &aliases, &mut Vec::new()) {
-        Ok(expanded) => *syntax = expanded,
+    let mut rewrite = |syntax: &mut TypeSyntax| match expand(
+        syntax,
+        &aliases,
+        &program.type_const_arguments,
+        &generated_consts,
+        &mut Vec::new(),
+    ) {
+        Ok(expanded) => {
+            *syntax = expanded;
+            if let Err(error) = lower_const_defaults_and_fixed_arrays(
+                syntax,
+                program,
+                &nominal_params,
+                &generated_consts,
+            ) {
+                errors.push(error);
+            }
+        }
         Err(error) => errors.push(error),
     };
     fn rewrite_trait_ref_types(
@@ -10910,13 +11581,20 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
     fn rewrite_expression_alias_types(
         expression: &mut Expr,
         aliases: &BTreeMap<&str, &crate::ast::TypeAliasDecl>,
+        const_applications: &[crate::ast::TypeConstApplicationSyntax],
+        generated_consts: &std::cell::RefCell<Vec<crate::ast::TypeConstApplicationSyntax>>,
         errors: &mut Vec<Diagnostic>,
     ) {
-        let mut rewrite_type =
-            |syntax: &mut TypeSyntax| match expand(syntax, aliases, &mut Vec::new()) {
-                Ok(expanded) => *syntax = expanded,
-                Err(error) => errors.push(error),
-            };
+        let mut rewrite_type = |syntax: &mut TypeSyntax| match expand(
+            syntax,
+            aliases,
+            const_applications,
+            generated_consts,
+            &mut Vec::new(),
+        ) {
+            Ok(expanded) => *syntax = expanded,
+            Err(error) => errors.push(error),
+        };
         match &mut expression.kind {
             ExprKind::TypedClosure {
                 params,
@@ -10930,38 +11608,80 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                 if let Some(result) = return_type {
                     rewrite_type(Rc::make_mut(result));
                 }
-                rewrite_expression_alias_types(Rc::make_mut(body), aliases, errors);
+                rewrite_expression_alias_types(
+                    Rc::make_mut(body),
+                    aliases,
+                    const_applications,
+                    generated_consts,
+                    errors,
+                );
             }
             ExprKind::LabelDestination { ty, body, .. } => {
                 if let Some(ty) = ty {
                     rewrite_type(Rc::make_mut(ty));
                 }
-                rewrite_expression_alias_types(Rc::make_mut(body), aliases, errors);
+                rewrite_expression_alias_types(
+                    Rc::make_mut(body),
+                    aliases,
+                    const_applications,
+                    generated_consts,
+                    errors,
+                );
             }
             ExprKind::Move(value)
             | ExprKind::Field(value, _)
             | ExprKind::Closure { body: value, .. }
             | ExprKind::Labeled { body: value, .. }
             | ExprKind::Unary { operand: value, .. } => {
-                rewrite_expression_alias_types(Rc::make_mut(value), aliases, errors);
+                rewrite_expression_alias_types(
+                    Rc::make_mut(value),
+                    aliases,
+                    const_applications,
+                    generated_consts,
+                    errors,
+                );
             }
             ExprKind::Leave { value, .. }
             | ExprKind::Resume { value, .. }
             | ExprKind::TailResume { value, .. } => {
                 if let Some(value) = value {
-                    rewrite_expression_alias_types(Rc::make_mut(value), aliases, errors);
+                    rewrite_expression_alias_types(
+                        Rc::make_mut(value),
+                        aliases,
+                        const_applications,
+                        generated_consts,
+                        errors,
+                    );
                 }
                 if let ExprKind::Resume { resumption, .. }
                 | ExprKind::TailResume { resumption, .. } = &mut expression.kind
                 {
-                    rewrite_expression_alias_types(Rc::make_mut(resumption), aliases, errors);
+                    rewrite_expression_alias_types(
+                        Rc::make_mut(resumption),
+                        aliases,
+                        const_applications,
+                        generated_consts,
+                        errors,
+                    );
                 }
             }
             ExprKind::Cancel { resumption } => {
-                rewrite_expression_alias_types(Rc::make_mut(resumption), aliases, errors);
+                rewrite_expression_alias_types(
+                    Rc::make_mut(resumption),
+                    aliases,
+                    const_applications,
+                    generated_consts,
+                    errors,
+                );
             }
             ExprKind::Is { subject, .. } => {
-                rewrite_expression_alias_types(Rc::make_mut(subject), aliases, errors);
+                rewrite_expression_alias_types(
+                    Rc::make_mut(subject),
+                    aliases,
+                    const_applications,
+                    generated_consts,
+                    errors,
+                );
             }
             ExprKind::ContextBlock(statements) | ExprKind::Block(statements) => {
                 for statement in Rc::make_mut(statements) {
@@ -10981,45 +11701,111 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                             },
                         ),
                     };
-                    rewrite_expression_alias_types(value, aliases, errors);
+                    rewrite_expression_alias_types(
+                        value,
+                        aliases,
+                        const_applications,
+                        generated_consts,
+                        errors,
+                    );
                     if let Some(reference) = reference {
-                        rewrite_expression_alias_types(reference, aliases, errors);
+                        rewrite_expression_alias_types(
+                            reference,
+                            aliases,
+                            const_applications,
+                            generated_consts,
+                            errors,
+                        );
                     }
                 }
             }
             ExprKind::List(values) | ExprKind::Tuple(values) => {
                 for value in Rc::make_mut(values) {
-                    rewrite_expression_alias_types(value, aliases, errors);
+                    rewrite_expression_alias_types(
+                        value,
+                        aliases,
+                        const_applications,
+                        generated_consts,
+                        errors,
+                    );
                 }
             }
             ExprKind::Struct { fields, .. } => {
                 for (_, value) in Rc::make_mut(fields) {
-                    rewrite_expression_alias_types(value, aliases, errors);
+                    rewrite_expression_alias_types(
+                        value,
+                        aliases,
+                        const_applications,
+                        generated_consts,
+                        errors,
+                    );
                 }
             }
             ExprKind::Call(callee, arguments) => {
-                rewrite_expression_alias_types(Rc::make_mut(callee), aliases, errors);
+                rewrite_expression_alias_types(
+                    Rc::make_mut(callee),
+                    aliases,
+                    const_applications,
+                    generated_consts,
+                    errors,
+                );
                 for argument in Rc::make_mut(arguments) {
-                    rewrite_expression_alias_types(argument, aliases, errors);
+                    rewrite_expression_alias_types(
+                        argument,
+                        aliases,
+                        const_applications,
+                        generated_consts,
+                        errors,
+                    );
                 }
             }
             ExprKind::Perform { args, .. } => {
                 for argument in Rc::make_mut(args) {
-                    rewrite_expression_alias_types(argument, aliases, errors);
+                    rewrite_expression_alias_types(
+                        argument,
+                        aliases,
+                        const_applications,
+                        generated_consts,
+                        errors,
+                    );
                 }
             }
             ExprKind::Handle {
                 computation,
                 clauses,
             } => {
-                rewrite_expression_alias_types(Rc::make_mut(computation), aliases, errors);
+                rewrite_expression_alias_types(
+                    Rc::make_mut(computation),
+                    aliases,
+                    const_applications,
+                    generated_consts,
+                    errors,
+                );
                 for clause in Rc::make_mut(clauses) {
-                    rewrite_expression_alias_types(&mut clause.body, aliases, errors);
+                    rewrite_expression_alias_types(
+                        &mut clause.body,
+                        aliases,
+                        const_applications,
+                        generated_consts,
+                        errors,
+                    );
                 }
             }
             ExprKind::Binary { lhs, rhs, .. } => {
-                rewrite_expression_alias_types(Rc::make_mut(lhs), aliases, errors);
-                rewrite_expression_alias_types(Rc::make_mut(rhs), aliases, errors);
+                rewrite_expression_alias_types(
+                    Rc::make_mut(lhs),
+                    aliases,
+                    const_applications,
+                    generated_consts,
+                    errors,
+                );
+                rewrite_expression_alias_types(
+                    Rc::make_mut(rhs),
+                    aliases,
+                    const_applications,
+                    generated_consts,
+                    errors,
+                );
             }
             ExprKind::Unit
             | ExprKind::Int(_)
@@ -11123,20 +11909,44 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
     #[allow(clippy::drop_non_drop)]
     drop(rewrite);
     for function in &mut normalized.functions {
-        rewrite_expression_alias_types(&mut function.body, &aliases, &mut errors);
+        rewrite_expression_alias_types(
+            &mut function.body,
+            &aliases,
+            &program.type_const_arguments,
+            &generated_consts,
+            &mut errors,
+        );
     }
     for global in &mut normalized.globals {
-        rewrite_expression_alias_types(&mut global.value, &aliases, &mut errors);
+        rewrite_expression_alias_types(
+            &mut global.value,
+            &aliases,
+            &program.type_const_arguments,
+            &generated_consts,
+            &mut errors,
+        );
     }
     for implementation in &mut normalized.impls {
         for method in &mut implementation.methods {
             if let Some(body) = &mut method.body {
-                rewrite_expression_alias_types(body, &aliases, &mut errors);
+                rewrite_expression_alias_types(
+                    body,
+                    &aliases,
+                    &program.type_const_arguments,
+                    &generated_consts,
+                    &mut errors,
+                );
             }
         }
     }
     for declaration in &mut normalized.drops {
-        rewrite_expression_alias_types(&mut declaration.body, &aliases, &mut errors);
+        rewrite_expression_alias_types(
+            &mut declaration.body,
+            &aliases,
+            &program.type_const_arguments,
+            &generated_consts,
+            &mut errors,
+        );
     }
     if !errors.is_empty() {
         return Err(errors);
@@ -11284,6 +12094,17 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
     normalized
         .type_aliases
         .retain(|declaration| !composed_monomorphic_aliases.contains(&declaration.name));
+    for generated in generated_consts.into_inner() {
+        if let Some(existing) = normalized
+            .type_const_arguments
+            .iter_mut()
+            .find(|application| application.application == generated.application)
+        {
+            *existing = generated;
+        } else {
+            normalized.type_const_arguments.push(generated);
+        }
+    }
     Ok(normalized)
 }
 
@@ -11751,6 +12572,27 @@ fn normalize_capture_free_function_items(program: &Program) -> Program {
                 }
             }
             ExprKind::Call(callee, arguments) => {
+                if let ExprKind::Variable(else_path) = &callee.kind
+                    && else_path.len() == 1
+                    && else_path[0].as_ref() == "else"
+                    && let [if_expression, negative] = Rc::make_mut(arguments).as_mut_slice()
+                    && let ExprKind::Call(if_callee, if_arguments) = &mut if_expression.kind
+                    && let ExprKind::Variable(if_path) = &if_callee.kind
+                    && if_path.len() == 1
+                    && if_path[0].as_ref() == "if"
+                    && let [condition, positive] = Rc::make_mut(if_arguments).as_mut_slice()
+                    && let ExprKind::Is { subject, pattern } = &mut condition.kind
+                {
+                    rewrite(Rc::make_mut(callee), functions, bound, true);
+                    rewrite(Rc::make_mut(if_callee), functions, bound, true);
+                    rewrite(Rc::make_mut(subject), functions, bound, false);
+
+                    let mut positive_bound = bound.clone();
+                    pattern_bindings(pattern, &mut positive_bound);
+                    rewrite(positive, functions, &positive_bound, false);
+                    rewrite(negative, functions, bound, false);
+                    return;
+                }
                 rewrite(Rc::make_mut(callee), functions, bound, true);
                 for argument in Rc::make_mut(arguments) {
                     rewrite(argument, functions, bound, false);
@@ -12000,6 +12842,15 @@ fn const_nominal_identity(
                 .ok()?
                 .map_or_else(|| "infinity".to_owned(), |upper| upper.to_string());
             format!("$const$quantity${lower}${upper}")
+        }
+        crate::ast::ConstArgumentValueSyntax::Expression(expression) => {
+            match crate::ast::evaluate_const_expression(expression, |_| None).ok()? {
+                crate::ast::EvaluatedConst::U32(value) => format!("$const$u32${value}"),
+                crate::ast::EvaluatedConst::Quantity { lower, upper } => format!(
+                    "$const$quantity${lower}${}",
+                    upper.map_or_else(|| "infinity".to_owned(), |upper| upper.to_string())
+                ),
+            }
         }
     };
     Some(typeck::ProvisionalType::Predefined(name))
@@ -15389,6 +16240,18 @@ fn effect_static_arguments(
                         })?,
                     )
                 }
+                crate::ast::ConstArgumentValueSyntax::Expression(expression) => {
+                    match crate::ast::evaluate_const_expression(expression, |_| None)
+                        .map_err(|message| type_error(expression.span, message))?
+                    {
+                        crate::ast::EvaluatedConst::U32(value) => {
+                            EffectStaticArgument::ConstU32(value)
+                        }
+                        crate::ast::EvaluatedConst::Quantity { lower, upper } => {
+                            EffectStaticArgument::ConstQuantity(lower, upper)
+                        }
+                    }
+                }
             };
             Ok((argument.position, value))
         })
@@ -17496,6 +18359,13 @@ fn provisional_to_resolved(
                 .as_str(),
             )
             .copied()
+            .or_else(|| {
+                nominal_ids.iter().find_map(|(name, id)| {
+                    decode_nominal_instance(name)
+                        .is_some_and(|decoded| decoded == *key)
+                        .then_some(*id)
+                })
+            })
             .map(ResolvedType::Concrete),
         typeck::ProvisionalType::Shared(referent) => Some(ResolvedType::Shared(Box::new(
             provisional_to_resolved(referent, nominal_ids, array_name)?,
@@ -17763,40 +18633,49 @@ fn generated_shapes(
                         arguments,
                     })
                 });
-        let resolve_specialized =
-            |ty: &typeck::ProvisionalType| {
-                if matches!(ty, typeck::ProvisionalType::Callable(_)) {
-                    retained_request
-                        .as_ref()
-                        .or_else(|| {
-                            let mut requests =
-                                retained_nominal.as_ref()?.arguments.iter().filter_map(
-                                    |argument| match argument {
-                                        specialization::ClosureTupleField::Closure(request) => {
-                                            Some(request)
-                                        }
-                                        specialization::ClosureTupleField::ClosureSet(requests) => {
-                                            requests.first()
-                                        }
-                                        specialization::ClosureTupleField::Type(_) => None,
-                                    },
-                                );
-                            let request = requests.next()?;
-                            requests.next().is_none().then_some(request)
-                        })
-                        .and_then(|request| reserved_callable_types.get(request).copied())
-                        .map(ResolvedType::Concrete)
-                } else if matches!(ty, typeck::ProvisionalType::Nominal(_))
-                    && retained_nominal.is_some()
-                {
-                    retained_nominal
-                        .as_ref()
-                        .and_then(|instance| reserved_closure_nominal_types.get(instance).copied())
-                        .map(ResolvedType::Concrete)
-                } else {
-                    provisional_to_resolved(ty, nominal_ids, array_name)
-                }
-            };
+        let retained_callable_nominal = retained_nominal.as_ref().is_some_and(|instance| {
+            instance.arguments.iter().any(|argument| {
+                matches!(
+                    argument,
+                    specialization::ClosureTupleField::Closure(_)
+                        | specialization::ClosureTupleField::ClosureSet(_)
+                )
+            })
+        });
+        let resolve_specialized = |ty: &typeck::ProvisionalType| {
+            if matches!(ty, typeck::ProvisionalType::Callable(_)) {
+                retained_request
+                    .as_ref()
+                    .or_else(|| {
+                        let mut requests =
+                            retained_nominal
+                                .as_ref()?
+                                .arguments
+                                .iter()
+                                .filter_map(|argument| match argument {
+                                    specialization::ClosureTupleField::Closure(request) => {
+                                        Some(request)
+                                    }
+                                    specialization::ClosureTupleField::ClosureSet(requests) => {
+                                        requests.first()
+                                    }
+                                    specialization::ClosureTupleField::Type(_) => None,
+                                });
+                        let request = requests.next()?;
+                        requests.next().is_none().then_some(request)
+                    })
+                    .and_then(|request| reserved_callable_types.get(request).copied())
+                    .map(ResolvedType::Concrete)
+            } else if matches!(ty, typeck::ProvisionalType::Nominal(_)) && retained_callable_nominal
+            {
+                retained_nominal
+                    .as_ref()
+                    .and_then(|instance| reserved_closure_nominal_types.get(instance).copied())
+                    .map(ResolvedType::Concrete)
+            } else {
+                provisional_to_resolved(ty, nominal_ids, array_name)
+            }
+        };
         let resolved_params = params
             .iter()
             .map(&resolve_specialized)
@@ -21164,6 +22043,53 @@ impl<'a> CoreLowerer<'a> {
             .iter()
             .filter(|(path, _)| path.starts_with(prefix))
             .map(|(path, origin)| (path[prefix.len()..].to_vec(), origin.clone()))
+            .collect()
+    }
+
+    /// Project reference leaves stored in the referent of an external
+    /// reference parameter. Ordinary aggregate owners already carry exact
+    /// per-field origins, but a reference parameter enters Core with only the
+    /// outer reference origin. Its declared referent type and source path are
+    /// nevertheless sufficient to retain the nested carrier route.
+    fn projected_reference_fields_through_external_reference(
+        &self,
+        local: &CoreLocal,
+        prefix: &[u32],
+        result: TypeId,
+    ) -> BTreeMap<Vec<u32>, core::ReferenceOrigin> {
+        let projected = local
+            .reference
+            .as_ref()
+            .and_then(|origin| {
+                self.locals
+                    .values()
+                    .find(|candidate| candidate.local == origin.root)
+            })
+            .map(|owner| {
+                Self::projected_reference_path(&Self::local_reference_fields(owner), prefix)
+            })
+            .unwrap_or_default();
+        if !projected.is_empty() {
+            return projected;
+        }
+
+        let Some(parent) = local
+            .reference
+            .as_ref()
+            .filter(|origin| origin.external && origin.root == local.local)
+        else {
+            return projected;
+        };
+        self.reference_leaf_paths(result)
+            .into_iter()
+            .map(|(result_path, unique)| {
+                let mut origin = parent.clone();
+                origin.path.extend_from_slice(prefix);
+                origin.path.extend_from_slice(&result_path);
+                origin.unique = unique;
+                origin.parent = None;
+                (result_path, origin)
+            })
             .collect()
     }
 
@@ -25473,9 +26399,9 @@ impl<'a> CoreLowerer<'a> {
                                     .find_map(|(name, ty)| (name == field).then_some(*ty))
                             })
                         }),
-                    ResolvedType::Array(_)
-                    | ResolvedType::Shared(_)
-                    | ResolvedType::Unique(_) => None,
+                    ResolvedType::Array(_) | ResolvedType::Shared(_) | ResolvedType::Unique(_) => {
+                        None
+                    }
                 }
             }
             ExprKind::Unary {
@@ -27588,24 +28514,11 @@ impl<'a> CoreLowerer<'a> {
                             "an observed environment may project only duplicable fields; use an owned `move` capture to transfer a field",
                         )]);
                     }
-                    let projected_references = local
-                        .reference
-                        .as_ref()
-                        .and_then(|origin| {
-                            self.locals
-                                .values()
-                                .find(|candidate| candidate.local == origin.root)
-                        })
-                        .map(|owner| {
-                            let prefix = projected_variant
-                                .map(|variant| vec![u32::MAX - variant, field_id])
-                                .unwrap_or_else(|| vec![field_id]);
-                            Self::projected_reference_path(
-                                &Self::local_reference_fields(owner),
-                                &prefix,
-                            )
-                        })
-                        .unwrap_or_default();
+                    let prefix = projected_variant
+                        .map(|variant| vec![u32::MAX - variant, field_id])
+                        .unwrap_or_else(|| vec![field_id]);
+                    let projected_references = self
+                        .projected_reference_fields_through_external_reference(&local, &prefix, ty);
                     if self.contains_reference(ty, &mut BTreeSet::new())
                         && projected_references.is_empty()
                     {
@@ -28432,7 +29345,15 @@ impl<'a> CoreLowerer<'a> {
                                     },
                                 )
                         };
-                        if (!positive_paths.is_empty() || !negative_paths.is_empty())
+                        // Retiring a residual shell only disposes the fields
+                        // which remain initialized. A partial move on every
+                        // edge counts as the aggregate use, but an untouched
+                        // edge cannot discharge a positive lower-use
+                        // obligation by merely dropping the value at the
+                        // join.
+                        if (self.use_interval(binding.ty).lower == 0
+                            || (!positive_paths.is_empty() && !negative_paths.is_empty()))
+                            && (!positive_paths.is_empty() || !negative_paths.is_empty())
                             && (positive_paths.is_empty() || positive_residual_disposable())
                             && (negative_paths.is_empty() || negative_residual_disposable())
                         {
@@ -32701,7 +33622,7 @@ struct MirLowerer {
     /// Types whose structural destruction can transitively execute custom
     /// drop glue in an owned child. These are optimizer-observable even when
     /// the outer aggregate has no direct hook.
-    observable_drop_types: BTreeSet<TypeId>,
+    custom_drop_types: BTreeSet<TypeId>,
     callable_outward_protocols: BTreeMap<TypeId, Vec<u32>>,
     /// Live loan identity per reference register, tracked at issue time so
     /// reborrows and chained projections record their parent loans.
@@ -32862,40 +33783,6 @@ impl MirLowerer {
         types: &[Type],
         custom_drop_types: &BTreeSet<TypeId>,
     ) -> Self {
-        let mut observable_drop_types = custom_drop_types.clone();
-        loop {
-            let before = observable_drop_types.len();
-            for (id, descriptor) in types.iter().enumerate() {
-                let contains_observable_child = match descriptor.representation() {
-                    Type::Array { element } => observable_drop_types.contains(element),
-                    Type::Callable { capture_type, .. } | Type::Handler { capture_type, .. } => {
-                        observable_drop_types.contains(capture_type)
-                    }
-                    Type::BindingPack { payload_type, .. } => {
-                        observable_drop_types.contains(payload_type)
-                    }
-                    Type::Tuple { fields, .. } => fields
-                        .iter()
-                        .any(|field| observable_drop_types.contains(field)),
-                    Type::Struct { fields, .. } => fields
-                        .iter()
-                        .any(|field| observable_drop_types.contains(&field.ty)),
-                    Type::Enum { variants, .. } => variants.iter().any(|variant| {
-                        variant
-                            .fields
-                            .iter()
-                            .any(|field| observable_drop_types.contains(&field.ty))
-                    }),
-                    _ => false,
-                };
-                if contains_observable_child {
-                    observable_drop_types.insert(id as TypeId);
-                }
-            }
-            if observable_drop_types.len() == before {
-                break;
-            }
-        }
         let mut register_types = vec![UNIT];
         register_types[0] = receiver_type;
         register_types.extend(params.iter().map(|param| param.ty));
@@ -32982,7 +33869,7 @@ impl MirLowerer {
                     descriptor.claimed_duplicable().then_some(ty as TypeId)
                 })
                 .collect(),
-            observable_drop_types,
+            custom_drop_types: custom_drop_types.clone(),
             callable_outward_protocols: types
                 .iter()
                 .enumerate()
@@ -33091,8 +33978,13 @@ impl MirLowerer {
             lowerer.owned.iter().rev().copied().collect::<Vec<_>>()
         };
         if let MirFlow::Value(value) = flow {
+            let returning_reference = lowerer.reference_types.contains(&function.result);
             for register in &return_cleanup {
-                lowerer.destroy(*register, function.body.span);
+                if returning_reference && lowerer.borrowed.contains(register) {
+                    lowerer.retire_reference_handle(*register, function.body.span);
+                } else {
+                    lowerer.destroy(*register, function.body.span);
+                }
             }
             if function.result == UNIT {
                 if let Some(register) = value {
@@ -33155,8 +34047,13 @@ impl MirLowerer {
         );
         let return_cleanup = lowerer.owned.iter().rev().copied().collect::<Vec<_>>();
         if let MirFlow::Value(value) = flow {
+            let returning_reference = lowerer.reference_types.contains(&function.result);
             for register in &return_cleanup {
-                lowerer.destroy(*register, function.span);
+                if returning_reference && lowerer.borrowed.contains(register) {
+                    lowerer.retire_reference_handle(*register, function.span);
+                } else {
+                    lowerer.destroy(*register, function.span);
+                }
             }
             if function.result == UNIT {
                 if let Some(register) = value {
@@ -33228,7 +34125,7 @@ impl MirLowerer {
                     Some(1)
                 },
             },
-            drop_glue: if self.observable_drop_types.contains(&ty) {
+            drop_glue: if self.custom_drop_types.contains(&ty) {
                 mir::DropGlueKind::Custom
             } else {
                 mir::DropGlueKind::Structural
@@ -33547,6 +34444,65 @@ impl MirLowerer {
                     owner: Self::operand(register, mir::UseMode::Move),
                 },
             );
+        }
+    }
+
+    fn retire_reference_handle(&mut self, register: u32, span: Span) {
+        self.borrowed.remove(&register);
+        self.borrow_parents.remove(&register);
+        self.borrow_parents.retain(|_, parent| *parent != register);
+        self.push(
+            span,
+            mir::InstructionKind::Drop {
+                owner: Self::operand(register, mir::UseMode::Move),
+            },
+        );
+    }
+
+    fn tracked_borrow_parent(&self, register: u32) -> Option<u32> {
+        self.borrow_parents.get(&register).copied().or_else(|| {
+            let loan = self.loan_of.get(&register)?;
+            let fact = self.flow.loans.get(loan.index())?;
+            fact.parent
+                .and_then(|parent| self.flow.loans.get(parent.index()))
+                .map(|loan| loan.reference)
+                .or_else(|| {
+                    self.reference_types
+                        .contains(&self.register_types[fact.borrowed.base as usize])
+                        .then_some(fact.borrowed.base)
+                })
+        })
+    }
+
+    fn borrow_ancestor_position(&self, mut register: u32, sources: &[u32]) -> Option<usize> {
+        let mut seen = BTreeSet::new();
+        while let Some(parent) = self.tracked_borrow_parent(register) {
+            if !seen.insert(parent) {
+                return None;
+            }
+            if let Some(position) = sources.iter().position(|source| *source == parent) {
+                return Some(position);
+            }
+            register = parent;
+        }
+        None
+    }
+
+    fn retire_intermediate_borrow_parents(
+        &mut self,
+        mut register: u32,
+        survivors: &BTreeSet<u32>,
+        span: Span,
+    ) {
+        let mut seen = BTreeSet::new();
+        while let Some(parent) = self.tracked_borrow_parent(register) {
+            if !seen.insert(parent) || survivors.contains(&parent) {
+                break;
+            }
+            if self.borrowed.contains(&parent) {
+                self.retire_reference_handle(parent, span);
+            }
+            register = parent;
         }
     }
 
@@ -34905,6 +35861,7 @@ impl MirLowerer {
                 let mut join_owned = Vec::new();
                 let mut join_borrowed = Vec::new();
                 let mut join_partial = Vec::new();
+                let mut join_result_parent = None;
                 let mut joined_uninitialized = BTreeSet::new();
                 let mut positive_reaches_join = false;
                 if let MirFlow::Value(value) = self.expression(positive) {
@@ -34937,6 +35894,8 @@ impl MirLowerer {
                         )
                         .collect::<Vec<_>>();
                     let survivors = sources.iter().copied().collect::<BTreeSet<_>>();
+                    join_result_parent = self.borrow_ancestor_position(value, &sources);
+                    self.retire_intermediate_borrow_parents(value, &survivors, positive.span);
                     for source in &sources {
                         join_registers.push(self.allocate(self.register_types[*source as usize]));
                         join_owned.push(self.owned.contains(source));
@@ -35044,6 +36003,13 @@ impl MirLowerer {
                         debug_assert_eq!(join_detached_keys, negative_detached_keys);
                     }
                     let survivors = sources.iter().copied().collect::<BTreeSet<_>>();
+                    let negative_result_parent = self.borrow_ancestor_position(value, &sources);
+                    if positive_reaches_join && join_result_parent != negative_result_parent {
+                        join_result_parent = None;
+                    } else if !positive_reaches_join {
+                        join_result_parent = negative_result_parent;
+                    }
+                    self.retire_intermediate_borrow_parents(value, &survivors, negative.span);
                     debug_assert_eq!(join_registers.len(), sources.len());
                     debug_assert_eq!(
                         joined_uninitialized,
@@ -35147,6 +36113,11 @@ impl MirLowerer {
                     .collect();
                 self.borrow_parents.clear();
                 self.loan_of.clear();
+                if let Some(parent) =
+                    join_result_parent.and_then(|position| join_registers.get(position).copied())
+                {
+                    self.borrow_parents.insert(result, parent);
+                }
                 MirFlow::Value(Some(result))
             }
             core::ExprKind::Local { local, copy } => {
@@ -36281,6 +37252,12 @@ impl MirLowerer {
                 self.terminate(mir::Terminator::Unreachable);
                 MirFlow::Diverged
             }
+            core::ExprKind::Abort { message } => {
+                self.terminate(mir::Terminator::Abort {
+                    message: message.clone(),
+                });
+                MirFlow::Diverged
+            }
             core::ExprKind::Perform {
                 protocol,
                 operation,
@@ -36846,12 +37823,42 @@ impl MirLowerer {
                     self.locals = saved;
                     return MirFlow::Diverged;
                 }
+                let mut escaping_borrow_parents = BTreeSet::new();
+                if let MirFlow::Value(Some(mut register)) = value {
+                    loop {
+                        let parent = self.borrow_parents.get(&register).copied().or_else(|| {
+                            let loan = self.loan_of.get(&register)?;
+                            let parent = self.flow.loans.get(loan.index())?.parent?;
+                            self.flow
+                                .loans
+                                .get(parent.index())
+                                .map(|loan| loan.reference)
+                        });
+                        let Some(parent) = parent.filter(|parent| self.borrowed.contains(parent))
+                        else {
+                            break;
+                        };
+                        if !escaping_borrow_parents.insert(parent) {
+                            break;
+                        }
+                        register = parent;
+                    }
+                }
                 let lexical_borrows = block_owned
                     .into_iter()
                     .filter(|register| self.borrowed.contains(register))
                     .collect::<Vec<_>>();
                 for register in lexical_borrows.into_iter().rev() {
-                    self.destroy(register, expression.span);
+                    if escaping_borrow_parents.contains(&register) {
+                        // The block result is a reborrow of this lexical
+                        // reference. Retire only the handle: EndBorrow would
+                        // end the underlying loan before its escaping child,
+                        // while Drop intentionally detaches the parent and
+                        // leaves that external-place loan alive in the child.
+                        self.retire_reference_handle(register, expression.span);
+                    } else {
+                        self.destroy(register, expression.span);
+                    }
                     self.transfer_owner(register);
                 }
                 self.locals = saved;
@@ -37403,7 +38410,17 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
             .iter()
             .enumerate()
             .map(|(pc, instruction)| {
-                matches!(instruction, Instruction::Jump { target } if *target == pc as u32 + 1)
+                matches!(instruction, Instruction::Jump { target }
+                if *target == pc as u32 + 1
+                    // A move bundle followed by a jump is the authenticated
+                    // parallel-edge relocation shape consumed by the loan
+                    // verifier. Keep the otherwise-redundant fallthrough
+                    // marker so optimization cannot turn a valid transport
+                    // of an owner plus its escaping reborrow into an
+                    // unauthenticated sequence of ordinary moves.
+                    && !pc.checked_sub(1).is_some_and(|previous| {
+                        matches!(folded[previous], Instruction::Move { .. })
+                    }))
                     || matches!(instruction, Instruction::Nop)
             })
             .collect::<Vec<_>>();
@@ -37504,6 +38521,329 @@ fn layout_and_peephole_with_maps(artifact: &mut Artifact) -> (bool, Vec<Option<P
         maps.push(map);
     }
     (changed, maps)
+}
+
+/// Remove register slots made dead by late bytecode peepholes. MIR edge
+/// lowering appends snapshot temporaries after the compact MIR namespace; a
+/// folded transfer chain can erase every instruction mentioning one of those
+/// temporaries. Register types are reconstructed from instructions when an
+/// artifact is decoded, so retaining such a hole would make an otherwise
+/// valid artifact impossible to deserialize.
+fn compact_artifact_registers_after_peephole(artifact: &mut Artifact) -> bool {
+    fn visit(instruction: &Instruction, mut register: impl FnMut(u32)) {
+        match instruction {
+            Instruction::Nop
+            | Instruction::Jump { .. }
+            | Instruction::Abort { .. }
+            | Instruction::LabelPop { .. }
+            | Instruction::Unreachable => {}
+            Instruction::Const { dst, .. } => register(*dst),
+            Instruction::Move { dst, src }
+            | Instruction::Copy { dst, src }
+            | Instruction::BorrowShared { dst, src }
+            | Instruction::BorrowUnique { dst, src }
+            | Instruction::ReborrowShared { dst, src }
+            | Instruction::ReborrowUnique { dst, src }
+            | Instruction::DerefCopy { dst, src }
+            | Instruction::DerefMove { dst, src }
+            | Instruction::DerefStore { dst, src }
+            | Instruction::ProjectMove { dst, src, .. }
+            | Instruction::ProjectCopy { dst, src, .. }
+            | Instruction::ProjectBorrowShared { dst, src, .. }
+            | Instruction::ProjectBorrowUnique { dst, src, .. }
+            | Instruction::EnumTag { dst, src } => {
+                register(*dst);
+                register(*src);
+            }
+            Instruction::EndBorrow { reference } => register(*reference),
+            Instruction::Construct { dst, fields, .. } => {
+                register(*dst);
+                fields.iter().copied().for_each(&mut register);
+            }
+            Instruction::Drop { register: value } => register(*value),
+            Instruction::Deconstruct { src } => register(*src),
+            Instruction::Primitive { dst, args, .. } => {
+                register(*dst);
+                args.iter().copied().for_each(&mut register);
+            }
+            Instruction::Switch { discr, .. } => register(*discr),
+            Instruction::Call { dst, args, .. }
+            | Instruction::CallSelf { dst, args }
+            | Instruction::HostCall { dst, args, .. } => {
+                dst.iter().copied().for_each(&mut register);
+                args.iter().copied().for_each(&mut register);
+            }
+            Instruction::TailCall { args, .. } | Instruction::TailCallSelf { args } => {
+                args.iter().copied().for_each(&mut register);
+            }
+            Instruction::CallKnownReceiver {
+                dst,
+                receiver,
+                args,
+                ..
+            } => {
+                dst.iter().copied().for_each(&mut register);
+                register(*receiver);
+                args.iter().copied().for_each(&mut register);
+            }
+            Instruction::TailCallKnownReceiver { receiver, args, .. } => {
+                register(*receiver);
+                args.iter().copied().for_each(&mut register);
+            }
+            Instruction::MakeCallable { dst, captures, .. } => {
+                register(*dst);
+                captures.iter().copied().for_each(&mut register);
+            }
+            Instruction::MakeHandler { dst, clauses, .. } => {
+                register(*dst);
+                clauses.iter().copied().for_each(&mut register);
+            }
+            Instruction::MakeHandlerShared { dst, captures, .. } => {
+                register(*dst);
+                captures.iter().copied().for_each(&mut register);
+            }
+            Instruction::MakeBindingPack { dst, payloads, .. } => {
+                register(*dst);
+                payloads.iter().copied().for_each(&mut register);
+            }
+            Instruction::CallIndirect {
+                dst,
+                callable,
+                args,
+                ..
+            } => {
+                dst.iter().copied().for_each(&mut register);
+                register(*callable);
+                args.iter().copied().for_each(&mut register);
+            }
+            Instruction::TailCallIndirect { callable, args, .. } => {
+                register(*callable);
+                args.iter().copied().for_each(&mut register);
+            }
+            Instruction::Handle {
+                dst,
+                handler,
+                body,
+                args,
+            } => {
+                register(*dst);
+                register(*handler);
+                register(*body);
+                args.iter().copied().for_each(&mut register);
+            }
+            Instruction::Perform { dst, payloads, .. } => {
+                dst.iter().copied().for_each(&mut register);
+                payloads.iter().copied().for_each(&mut register);
+            }
+            Instruction::Resume {
+                dst,
+                resumption,
+                value,
+                ..
+            } => {
+                register(*dst);
+                register(*resumption);
+                register(*value);
+            }
+            Instruction::TailResume {
+                resumption, value, ..
+            } => {
+                register(*resumption);
+                register(*value);
+            }
+            Instruction::Cancel { dst, resumption } => {
+                register(*dst);
+                register(*resumption);
+            }
+            Instruction::LabelPush {
+                result_register, ..
+            } => register(*result_register),
+            Instruction::Leave { value, .. } => register(*value),
+            Instruction::Return { src } => src.iter().copied().for_each(&mut register),
+        }
+    }
+
+    fn remap(instruction: &mut Instruction, registers: &[Option<u32>]) {
+        visit(instruction, |_| {});
+        let map = |register: &mut u32| {
+            *register = registers[*register as usize]
+                .expect("every emitted instruction register is retained")
+        };
+        match instruction {
+            Instruction::Nop
+            | Instruction::Jump { .. }
+            | Instruction::Abort { .. }
+            | Instruction::LabelPop { .. }
+            | Instruction::Unreachable => {}
+            Instruction::Const { dst, .. } => map(dst),
+            Instruction::Move { dst, src }
+            | Instruction::Copy { dst, src }
+            | Instruction::BorrowShared { dst, src }
+            | Instruction::BorrowUnique { dst, src }
+            | Instruction::ReborrowShared { dst, src }
+            | Instruction::ReborrowUnique { dst, src }
+            | Instruction::DerefCopy { dst, src }
+            | Instruction::DerefMove { dst, src }
+            | Instruction::DerefStore { dst, src }
+            | Instruction::ProjectMove { dst, src, .. }
+            | Instruction::ProjectCopy { dst, src, .. }
+            | Instruction::ProjectBorrowShared { dst, src, .. }
+            | Instruction::ProjectBorrowUnique { dst, src, .. }
+            | Instruction::EnumTag { dst, src } => {
+                map(dst);
+                map(src);
+            }
+            Instruction::EndBorrow { reference } => map(reference),
+            Instruction::Construct { dst, fields, .. } => {
+                map(dst);
+                fields.iter_mut().for_each(&map);
+            }
+            Instruction::Drop { register } => map(register),
+            Instruction::Deconstruct { src } => map(src),
+            Instruction::Primitive { dst, args, .. } => {
+                map(dst);
+                args.iter_mut().for_each(&map);
+            }
+            Instruction::Switch { discr, .. } => map(discr),
+            Instruction::Call { dst, args, .. }
+            | Instruction::CallSelf { dst, args }
+            | Instruction::HostCall { dst, args, .. } => {
+                dst.iter_mut().for_each(&map);
+                args.iter_mut().for_each(&map);
+            }
+            Instruction::TailCall { args, .. } | Instruction::TailCallSelf { args } => {
+                args.iter_mut().for_each(&map);
+            }
+            Instruction::CallKnownReceiver {
+                dst,
+                receiver,
+                args,
+                ..
+            } => {
+                dst.iter_mut().for_each(&map);
+                map(receiver);
+                args.iter_mut().for_each(&map);
+            }
+            Instruction::TailCallKnownReceiver { receiver, args, .. } => {
+                map(receiver);
+                args.iter_mut().for_each(&map);
+            }
+            Instruction::MakeCallable { dst, captures, .. } => {
+                map(dst);
+                captures.iter_mut().for_each(&map);
+            }
+            Instruction::MakeHandler { dst, clauses, .. } => {
+                map(dst);
+                clauses.iter_mut().for_each(&map);
+            }
+            Instruction::MakeHandlerShared { dst, captures, .. } => {
+                map(dst);
+                captures.iter_mut().for_each(&map);
+            }
+            Instruction::MakeBindingPack { dst, payloads, .. } => {
+                map(dst);
+                payloads.iter_mut().for_each(&map);
+            }
+            Instruction::CallIndirect {
+                dst,
+                callable,
+                args,
+                ..
+            } => {
+                dst.iter_mut().for_each(&map);
+                map(callable);
+                args.iter_mut().for_each(&map);
+            }
+            Instruction::TailCallIndirect { callable, args, .. } => {
+                map(callable);
+                args.iter_mut().for_each(&map);
+            }
+            Instruction::Handle {
+                dst,
+                handler,
+                body,
+                args,
+            } => {
+                map(dst);
+                map(handler);
+                map(body);
+                args.iter_mut().for_each(&map);
+            }
+            Instruction::Perform { dst, payloads, .. } => {
+                dst.iter_mut().for_each(&map);
+                payloads.iter_mut().for_each(&map);
+            }
+            Instruction::Resume {
+                dst,
+                resumption,
+                value,
+                ..
+            } => {
+                map(dst);
+                map(resumption);
+                map(value);
+            }
+            Instruction::TailResume {
+                resumption, value, ..
+            } => {
+                map(resumption);
+                map(value);
+            }
+            Instruction::Cancel { dst, resumption } => {
+                map(dst);
+                map(resumption);
+            }
+            Instruction::LabelPush {
+                result_register, ..
+            } => map(result_register),
+            Instruction::Leave { value, .. } => map(value),
+            Instruction::Return { src } => src.iter_mut().for_each(&map),
+        }
+    }
+
+    let mut changed = false;
+    for (function_id, function) in artifact.functions.iter_mut().enumerate() {
+        let mut used = BTreeSet::from_iter(0..function.params.len() as u32 + 1);
+        let start = function.code_start as usize;
+        let end = start + function.code_len as usize;
+        for instruction in &artifact.code[start..end] {
+            visit(instruction, |register| {
+                used.insert(register);
+            });
+        }
+        for cleanup in artifact
+            .cleanups
+            .iter()
+            .filter(|cleanup| cleanup.function == function_id as u32)
+        {
+            used.extend(cleanup.registers.iter().copied());
+        }
+        let mut registers = vec![None; function.register_types.len()];
+        let mut register_types = Vec::with_capacity(used.len());
+        for old in used {
+            registers[old as usize] = Some(register_types.len() as u32);
+            register_types.push(function.register_types[old as usize]);
+        }
+        if register_types.len() == function.register_types.len() {
+            continue;
+        }
+        for instruction in &mut artifact.code[start..end] {
+            remap(instruction, &registers);
+        }
+        for cleanup in artifact
+            .cleanups
+            .iter_mut()
+            .filter(|cleanup| cleanup.function == function_id as u32)
+        {
+            cleanup.registers.iter_mut().for_each(|register| {
+                *register = registers[*register as usize]
+                    .expect("every serialized cleanup register is retained")
+            });
+        }
+        function.register_types = register_types;
+        changed = true;
+    }
+    changed
 }
 
 fn edge_len(edge: &mir::Edge) -> u32 {
@@ -38306,12 +39646,67 @@ mod mir_edge_emission_tests {
     use grandiose_vm::{I64, Type, U32, UNIT, Value, Vm, verify};
 
     use super::{
-        Constant, Instruction, MirLowerer, Primitive, Span, constant_key, emit_mir_function,
+        Constant, Instruction, MirLowerer, Primitive, Span,
+        compact_artifact_registers_after_peephole, constant_key, emit_mir_function,
         layout_and_peephole, layout_mir_blocks, mir, serialize_mir_cleanup_plans,
     };
 
     #[test]
-    fn mir_local_facts_preserve_transitive_observable_child_drop() {
+    fn post_peephole_register_compaction_removes_serialization_holes() {
+        let mut artifact = Artifact::default();
+        artifact.constants.push(Constant::I64(7));
+        artifact.code = vec![
+            Instruction::Const {
+                dst: 3,
+                constant: 0,
+            },
+            Instruction::Return { src: Some(3) },
+        ];
+        artifact.functions.push(BytecodeFunction {
+            name: "peephole_gap".into(),
+            flags: 0,
+            params: vec![],
+            return_type: I64,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64, I64, I64],
+            code_start: 0,
+            code_len: 2,
+            label_slot_count: 0,
+        });
+        artifact.cleanups.push(grandiose_vm::bytecode::CleanupPlan {
+            function: 0,
+            first_instruction: 0,
+            end_instruction: 1,
+            registers: vec![],
+        });
+        artifact.cleanups.push(grandiose_vm::bytecode::CleanupPlan {
+            function: 0,
+            first_instruction: 1,
+            end_instruction: 2,
+            registers: vec![3],
+        });
+
+        assert!(compact_artifact_registers_after_peephole(&mut artifact));
+        assert_eq!(artifact.functions[0].register_types, [UNIT, I64]);
+        assert_eq!(artifact.cleanups[1].registers, [1]);
+        assert_eq!(
+            artifact.code,
+            [
+                Instruction::Const {
+                    dst: 1,
+                    constant: 0,
+                },
+                Instruction::Return { src: Some(1) },
+            ]
+        );
+        let encoded = artifact.encode();
+        let decoded = Artifact::decode(&encoded).unwrap();
+        verify(decoded).unwrap();
+    }
+
+    #[test]
+    fn mir_local_facts_distinguish_structural_child_drop_from_a_direct_custom_hook() {
         let mut types = Type::predefined();
         let child = types.len() as u32;
         types.push(Type::Struct {
@@ -38338,7 +39733,7 @@ mod mir_edge_emission_tests {
                     mir::StorageClass::Ssa,
                 )
                 .drop_glue,
-            mir::DropGlueKind::Custom
+            mir::DropGlueKind::Structural
         );
     }
 
@@ -40000,7 +41395,8 @@ fn drop_body_reaches_unsafe_control(expression: &core::Expr, unsafe_calls: &BTre
         | core::ExprKind::Resume { .. }
         | core::ExprKind::TailResume { .. }
         | core::ExprKind::Cancel { .. }
-        | core::ExprKind::Handle { .. } => true,
+        | core::ExprKind::Handle { .. }
+        | core::ExprKind::Abort { .. } => true,
         core::ExprKind::PatternTest { subject, .. } | core::ExprKind::Project { subject, .. } => {
             drop_body_reaches_unsafe_control(subject, unsafe_calls)
         }
@@ -40084,7 +41480,8 @@ fn validate_drop_core(
             | core::ExprKind::Handle { .. }
             | core::ExprKind::LabelDestination { .. }
             | core::ExprKind::Leave { .. }
-            | core::ExprKind::HostCall { .. } => Err(vec![unsupported(
+            | core::ExprKind::HostCall { .. }
+            | core::ExprKind::Abort { .. } => Err(vec![unsupported(
                 expression.span,
                 "effect or nonlocal control in Drop::drop",
                 "Drop hooks must be pure, non-suspending, and locally returning",

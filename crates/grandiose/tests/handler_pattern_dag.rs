@@ -365,11 +365,11 @@ fn terminal_pattern_miss_forwards_exact_linear_payload_to_an_outer_handler() {
         impl Use<[1,1]> for Choice {}
         effect Stop { stop(choice: Choice) -> ! }
 
-        abort() -> i64 / {Stop} {
+        trigger_stop() -> i64 / {Stop} {
             perform Stop::stop(Choice::Full(Token { marker: 42 }))
         }
         inner() -> i64 / {Stop} {
-            handle { abort() } {
+            handle { trigger_stop() } {
                 Stop::stop(Choice::Empty) => 0
             }
         }
@@ -395,9 +395,9 @@ fn absent_operation_in_partial_handler_forwards_to_outer_delimiter() {
     let source = r#"
         enum State { Cold, Hot }
         effect Stop { stop(state: State) -> ! reset() -> ! }
-        abort() -> i64 / {Stop} { perform Stop::reset() }
+        trigger_stop() -> i64 / {Stop} { perform Stop::reset() }
         inner() -> i64 / {Stop} {
-            handle { abort() } {
+            handle { trigger_stop() } {
                 Stop::stop(State::Cold) => 0,
                 Stop::stop(State::Hot) => 1
             }

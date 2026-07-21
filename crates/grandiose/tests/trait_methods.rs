@@ -240,6 +240,62 @@ fn receiverless_default_selection_uses_the_expected_result_type() {
 }
 
 #[test]
+fn trait_method_selection_canonicalizes_alias_impl_heads_and_results() {
+    let source = r#"
+        type AliasText = Text;
+
+        trait AliasDefault { make() -> Self; }
+        impl AliasDefault for AliasText {
+            make() -> AliasText { "canonical" }
+        }
+
+        trait AliasRead { read(self: &Self) -> i64; }
+        impl AliasRead for AliasText {
+            read(self: &AliasText) -> i64 { 42 }
+        }
+
+        selected_default() -> Text { AliasDefault::make() }
+        selected_read(value: AliasText) -> i64 { AliasRead::read(&value) }
+        main() -> () { () }
+    "#;
+    for optimization_level in [
+        OptimizationLevel::O0,
+        OptimizationLevel::O1,
+        OptimizationLevel::O2,
+        OptimizationLevel::O3,
+    ] {
+        let artifact = compile_source_to_bytecode_with_options(
+            "alias-trait-method-selection.glorious",
+            source,
+            CompileOptions { optimization_level },
+        )
+        .unwrap_or_else(|errors| panic!("{optimization_level:?}: {errors:#?}"));
+        let function = |name: &str| {
+            artifact
+                .functions
+                .iter()
+                .position(|function| function.name == name)
+                .unwrap() as u32
+        };
+        let vm = Vm::new(verify(artifact.clone()).unwrap());
+        assert_eq!(
+            vm.run(function("selected_default"), vec![]).unwrap(),
+            Value::Text("canonical".into()),
+            "{optimization_level:?}",
+        );
+        assert_eq!(
+            vm.run(
+                function("selected_read"),
+                vec![Value::Text("ignored".into())],
+            )
+            .unwrap(),
+            Value::I64(42),
+            "{optimization_level:?}",
+        );
+    }
+}
+
+#[test]
 fn receiverless_associated_method_reports_missing_result_evidence() {
     let source = r#"
         struct Missing { marker: i64 }
@@ -253,10 +309,9 @@ fn receiverless_associated_method_reports_missing_result_evidence() {
     .unwrap_err();
     assert!(
         errors.iter().any(|error| {
-            error
-                .message
-                .contains("no `Default::default` implementation produces the expected result `Missing`")
-                && error.span.is_some()
+            error.message.contains(
+                "no `Default::default` implementation produces the expected result `Missing`",
+            ) && error.span.is_some()
         }),
         "{errors:#?}"
     );
@@ -270,10 +325,9 @@ fn receiverless_associated_method_reports_missing_result_evidence() {
     .unwrap_err();
     assert!(
         recovery_errors.iter().any(|error| {
-            error
-                .message
-                .contains("no `Default::default` implementation produces the expected result `Missing`")
-                && error.span.is_some()
+            error.message.contains(
+                "no `Default::default` implementation produces the expected result `Missing`",
+            ) && error.span.is_some()
         }),
         "{recovery_errors:#?}"
     );

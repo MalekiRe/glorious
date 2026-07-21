@@ -48,8 +48,14 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Create a new package in a new directory
-    New { name: String },
+    /// Create a new package
+    New {
+        /// Package name (and default destination directory)
+        name: String,
+        /// Destination directory (defaults to ./<name>)
+        #[arg(long)]
+        path: Option<std::path::PathBuf>,
+    },
     /// Create a package in the current directory
     Init,
     /// Compile the current package and its dependencies
@@ -161,7 +167,7 @@ fn main() {
 fn dispatch(cli: Cli) -> Result<i32> {
     ops::select_package(cli.package.clone());
     match cli.command {
-        Command::New { name } => ops::new(&name).map(|()| 0),
+        Command::New { name, path } => ops::new(&name, path.as_deref()).map(|()| 0),
         Command::Init => ops::init().map(|()| 0),
         Command::Build { target, opt, lints } => {
             ops::build(Target::parse(&target)?, opt, &lints.levels()).map(|()| 0)

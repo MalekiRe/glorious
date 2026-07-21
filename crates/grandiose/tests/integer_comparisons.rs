@@ -255,3 +255,67 @@ fn mixed_integer_types_are_rejected() {
             || diagnostic.message.contains("same-typed integer operands")
     }));
 }
+
+#[test]
+fn refinement_binders_shadow_function_items_only_in_the_positive_branch() {
+    let source = r#"
+        left() -> i64 { 99 }
+        ok() -> Result<i64, ()> { Result::Ok(7) }
+        err() -> Result<i64, ()> { Result::Err(()) }
+        positive() -> i64 {
+            let selected = ok();
+            if(selected is Result::Ok(left)) { left } else { left() }
+        }
+        negative() -> i64 {
+            let selected = err();
+            if(selected is Result::Ok(left)) { left } else { left() }
+        }
+        main() -> () { () }
+    "#;
+
+    for optimization_level in [
+        OptimizationLevel::O0,
+        OptimizationLevel::O1,
+        OptimizationLevel::O2,
+        OptimizationLevel::O3,
+    ] {
+        let artifact = compile_source_to_bytecode_with_options(
+            "refinement-function-item-shadowing.glorious",
+            source,
+            CompileOptions { optimization_level },
+        )
+        .unwrap_or_else(|errors| panic!("{optimization_level:?}: {errors:#?}"));
+        let vm = Vm::new(verify(artifact.clone()).unwrap());
+        assert_eq!(
+            vm.run(function(&artifact, "positive"), vec![]).unwrap(),
+            Value::I64(7),
+            "{optimization_level:?}"
+        );
+        assert_eq!(
+            vm.run(function(&artifact, "negative"), vec![]).unwrap(),
+            Value::I64(99),
+            "{optimization_level:?}"
+        );
+    }
+
+    let diagnostics = compile_source_to_bytecode(
+        "negative-refinement-scope.glorious",
+        r#"
+        bad(selected: Result<i64, ()>) -> i64 {
+            if(selected is Result::Ok(found)) { 0 } else { found }
+        }
+        main() -> () { () }
+        "#,
+    )
+    .unwrap_err();
+    assert!(
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some("G1BC001")
+                && diagnostic.message.contains("`found`")
+                && diagnostic
+                    .message
+                    .contains("not a parameter, local, or immutable global")
+        }),
+        "{diagnostics:#?}"
+    );
+}

@@ -29,6 +29,7 @@ pub struct Segment {
     global_range: Range<usize>,
     id: Option<SegmentId>,
     role: SegmentRole,
+    package_root: Option<String>,
 }
 
 impl Segment {
@@ -40,7 +41,16 @@ impl Segment {
             source,
             id: None,
             role: SegmentRole::User,
+            package_root: None,
         }
+    }
+
+    /// Marks an additional segment as the root of a named dependency package.
+    /// Unmarked additional segments remain ordinary module fragments and must
+    /// be claimed by an external `mod` declaration.
+    pub fn with_package_root(mut self, package: impl Into<String>) -> Self {
+        self.package_root = Some(package.into());
+        self
     }
 
     fn distributed_standard() -> Self {
@@ -50,6 +60,7 @@ impl Segment {
             global_range: 0..DISTRIBUTED_STANDARD_LIBRARY_SOURCE.len(),
             id: None,
             role: SegmentRole::TrustedDistributedStandard,
+            package_root: None,
         }
     }
 
@@ -67,6 +78,10 @@ impl Segment {
 
     pub fn id(&self) -> Option<SegmentId> {
         self.id
+    }
+
+    pub fn package_root(&self) -> Option<&str> {
+        self.package_root.as_deref()
     }
 }
 

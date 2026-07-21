@@ -17,7 +17,7 @@ use grandiose::interface::DeclarationKind;
 use grandiose::lossless::{LosslessKind, lex_lossless};
 use serde_json::{Value, json};
 
-use crate::analysis::{Local, SemanticDeclaration, Workspace, identifiers, locals_at};
+use crate::analysis::{Local, SemanticDeclaration, Workspace};
 use crate::position::LineIndex;
 use crate::rpc::{path_to_uri, read_message, uri_to_path, write_message};
 
@@ -39,7 +39,7 @@ struct Server {
 /// What the cursor resolves to, in scope order: local, workspace declaration,
 /// std declaration.
 enum Target {
-    Local(PathBuf, Local),
+    Local(Local),
     Decl(SemanticDeclaration),
     Std(SemanticDeclaration),
 }
@@ -162,6 +162,7 @@ impl Server {
                             "documentSymbolProvider": true,
                             "definitionProvider": true,
                             "hoverProvider": true,
+                            "inlayHintProvider": true,
                             "completionProvider": {},
                             "signatureHelpProvider": {"triggerCharacters": ["(", ","]},
                             "semanticTokensProvider": {
@@ -264,12 +265,12 @@ impl Server {
             }
             "textDocument/definition" => {
                 let result = match self.lookup(&params)? {
-                    Some(Target::Local(path, local)) => {
+                    Some(Target::Local(local)) => {
+                        let path = local.file.clone();
                         let text = self.workspace.text(&path).unwrap_or_default();
                         let index = LineIndex::new(&text);
-                        let (line, col) = index.position(&text, local.def_offset);
-                        let (end_line, end_col) =
-                            index.position(&text, local.def_offset + local.name.len());
+                        let (line, col) = index.position(&text, local.definition_start_byte);
+                        let (end_line, end_col) = index.position(&text, local.definition_end_byte);
                         json!({
                             "uri": path_to_uri(&path),
                             "range": {
@@ -298,13 +299,26 @@ impl Server {
             }
             "textDocument/hover" => {
                 let result = match self.lookup(&params)? {
-                    Some(Target::Local(_, local)) => json!({"contents": {
+                    Some(Target::Local(local)) => json!({"contents": {
                         "kind": "markdown",
-                        "value": format!("`{}` — {}", local.name, local.detail),
+                        "value": format!("`{}`: `{}`", local.name, local.inferred_type),
                     }}),
                     Some(Target::Decl(declaration)) => hover_markdown(&declaration, false),
                     Some(Target::Std(declaration)) => hover_markdown(&declaration, true),
-                    None => Value::Null,
+                    None => {
+                        let path = doc_path(&params)?;
+                        let text = self.workspace.text(&path).unwrap_or_default();
+                        let offset = cursor_offset(&params, &text);
+                        self.workspace
+                            .analyze()
+                            .expression_at(&path, offset)
+                            .map_or(Value::Null, |expression| {
+                                json!({"contents": {
+                                    "kind": "markdown",
+                                    "value": format!("`{}`", expression.inferred_type),
+                                }})
+                            })
+                    }
                 };
                 self.respond(&id, result)?;
             }
@@ -331,17 +345,73 @@ impl Server {
                 });
                 self.respond(&id, result)?;
             }
+            "textDocument/inlayHint" => {
+                let path = doc_path(&params)?;
+                let result = self.workspace.text(&path).map_or(Value::Null, |text| {
+                    let index = LineIndex::new(&text);
+                    let start = params["range"]["start"]["line"].as_u64().map_or(0, |line| {
+                        index.offset(
+                            &text,
+                            line as u32,
+                            params["range"]["start"]["character"].as_u64().unwrap_or(0) as u32,
+                        )
+                    });
+                    let end = params["range"]["end"]["line"]
+                        .as_u64()
+                        .map_or(text.len(), |line| {
+                            index.offset(
+                                &text,
+                                line as u32,
+                                params["range"]["end"]["character"].as_u64().unwrap_or(0) as u32,
+                            )
+                        });
+                    let hints = self
+                        .workspace
+                        .analyze()
+                        .inlay_locals(&path, start, end)
+                        .into_iter()
+                        .filter(|local| {
+                            !text[local.definition_end_byte.min(text.len())..]
+                                .trim_start()
+                                .starts_with(':')
+                        })
+                        .map(|local| {
+                            let (line, character) =
+                                index.position(&text, local.definition_end_byte);
+                            json!({
+                                "position": {"line": line, "character": character},
+                                "label": format!(": {}", local.inferred_type),
+                                "kind": 1,
+                                "paddingRight": true,
+                            })
+                        })
+                        .collect::<Vec<_>>();
+                    json!(hints)
+                });
+                self.respond(&id, result)?;
+            }
             "textDocument/references" => {
                 let path = doc_path(&params)?;
+                let include_declaration = params["context"]["includeDeclaration"]
+                    .as_bool()
+                    .unwrap_or(true);
                 let locations = match self.lookup(&params)? {
                     Some(Target::Decl(declaration)) => {
-                        json!(self.find_references(&declaration.identity, &path))
+                        json!(self.find_references(
+                            &declaration.identity,
+                            &path,
+                            include_declaration,
+                        ))
                     }
                     Some(Target::Std(declaration)) => {
-                        json!(self.find_references(&declaration.identity, &path))
+                        json!(self.find_references(
+                            &declaration.identity,
+                            &path,
+                            include_declaration,
+                        ))
                     }
-                    Some(Target::Local(_, local)) => {
-                        json!(self.find_local_references(&local, &path))
+                    Some(Target::Local(local)) => {
+                        json!(self.find_local_references(&local, &path, include_declaration,))
                     }
                     None => json!([]),
                 };
@@ -368,7 +438,7 @@ impl Server {
                     Some(Target::Decl(declaration)) | Some(Target::Std(declaration)) => {
                         let mut changes: serde_json::Map<String, Value> = Default::default();
                         let path = doc_path(&params)?;
-                        for location in self.find_references(&declaration.identity, &path) {
+                        for location in self.find_references(&declaration.identity, &path, true) {
                             let uri = location["uri"].as_str().unwrap().to_string();
                             let edit = json!({"range": location["range"], "newText": new_name});
                             changes
@@ -380,10 +450,10 @@ impl Server {
                         }
                         json!({"changes": changes})
                     }
-                    Some(Target::Local(_, local)) => {
+                    Some(Target::Local(local)) => {
                         let mut changes: serde_json::Map<String, Value> = Default::default();
                         let path = doc_path(&params)?;
-                        for location in self.find_local_references(&local, &path) {
+                        for location in self.find_local_references(&local, &path, true) {
                             let uri = location["uri"].as_str().unwrap().to_string();
                             let edit = json!({"range": location["range"], "newText": new_name});
                             changes
@@ -428,11 +498,11 @@ impl Server {
                     && let Some(text) = self.workspace.text(path)
                 {
                     let offset = cursor_offset(&params, &text);
-                    for local in locals_at(&text, offset) {
+                    for local in analysis.locals_at(path, offset) {
                         items.push(json!({
                             "label": local.name,
                             "kind": 6, // Variable
-                            "detail": local.detail,
+                            "detail": local.inferred_type,
                         }));
                     }
                 }
@@ -569,16 +639,12 @@ impl Server {
             return Ok(None);
         };
         let offset = cursor_offset(params, &text);
-        let Some(word) = word_at(&text, offset) else {
-            return Ok(None);
-        };
-        if let Some(local) = locals_at(&text, offset)
-            .into_iter()
-            .find(|l| l.name == word)
-        {
-            return Ok(Some(Target::Local(path, local)));
-        }
         let analysis = self.workspace.analyze();
+        if let Some(occurrence) = analysis.local_occurrence_at(&path, offset)
+            && let Some(local) = analysis.local(&occurrence.identity)
+        {
+            return Ok(Some(Target::Local(local.clone())));
+        }
         if let Some(occurrence) = analysis.occurrence_at(&path, offset)
             && let Some(declaration) = analysis.declaration(&occurrence.identity)
         {
@@ -594,10 +660,18 @@ impl Server {
 
     /// Every compiler-bound occurrence of one declaration identity within the
     /// originating compilation root.
-    fn find_references(&self, identity: &str, origin: &std::path::Path) -> Vec<Value> {
+    fn find_references(
+        &self,
+        identity: &str,
+        origin: &std::path::Path,
+        include_declaration: bool,
+    ) -> Vec<Value> {
         let analysis = self.workspace.analyze();
         let mut locations = Vec::new();
         for occurrence in analysis.references(identity) {
+            if occurrence.definition && !include_declaration {
+                continue;
+            }
             if !analysis.same_root(origin, &occurrence.file) {
                 continue;
             }
@@ -618,24 +692,33 @@ impl Server {
         locations
     }
 
-    fn find_local_references(&self, target: &Local, path: &std::path::Path) -> Vec<Value> {
-        let Some(text) = self.workspace.text(path) else {
-            return Vec::new();
-        };
-        let index = LineIndex::new(&text);
-        identifiers(&text)
-            .into_iter()
-            .filter(|(word, offset)| {
-                *word == target.name
-                    && locals_at(&text, *offset)
-                        .iter()
-                        .any(|local| local.def_offset == target.def_offset)
-            })
-            .map(|(word, offset)| {
-                json!({
-                    "uri": path_to_uri(path),
-                    "range": byte_range(&index, &text, offset, offset + word.len()),
-                })
+    fn find_local_references(
+        &self,
+        target: &Local,
+        path: &std::path::Path,
+        include_declaration: bool,
+    ) -> Vec<Value> {
+        let analysis = self.workspace.analyze();
+        analysis
+            .local_references(&target.identity)
+            .filter_map(|occurrence| {
+                if occurrence.definition && !include_declaration {
+                    return None;
+                }
+                if !analysis.same_root(path, &occurrence.file) {
+                    return None;
+                }
+                let text = self.workspace.text(&occurrence.file)?;
+                let index = LineIndex::new(&text);
+                Some(json!({
+                    "uri": path_to_uri(&occurrence.file),
+                    "range": byte_range(
+                        &index,
+                        &text,
+                        occurrence.start_byte,
+                        occurrence.end_byte,
+                    ),
+                }))
             })
             .collect()
     }
@@ -964,21 +1047,6 @@ fn hover_markdown(declaration: &SemanticDeclaration, std: bool) -> Value {
         markdown.push_str(docs);
     }
     json!({"contents": {"kind": "markdown", "value": markdown}})
-}
-
-fn word_at(text: &str, offset: usize) -> Option<&str> {
-    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-    let bytes = text.as_bytes();
-    let offset = offset.min(text.len());
-    let mut start = offset;
-    while start > 0 && is_ident(bytes[start - 1]) {
-        start -= 1;
-    }
-    let mut end = offset;
-    while end < bytes.len() && is_ident(bytes[end]) {
-        end += 1;
-    }
-    (start < end).then(|| &text[start..end])
 }
 
 fn byte_range(index: &LineIndex, text: &str, start: usize, end: usize) -> Value {

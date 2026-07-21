@@ -160,6 +160,82 @@ fn mock_grc_multi_file_and_check_phase() {
 }
 
 #[test]
+fn module_aware_grc_receives_only_ordered_crate_roots_and_watches_children() {
+    let sandbox = Sandbox::new();
+    let grc = sandbox.install_mock_grc(
+        r#"{"grc":"9.9.9","contract":1,"multi-file":true,"modules":true,"phases":["check"],"emit":[],"diagnostics-json":true}"#,
+    );
+    let app = sandbox.app();
+    add_path_dep(&app, "util", "mod detail;\nutil_value() -> i64 { 3 }\n");
+    write(
+        &app.join("src/main.glorious"),
+        "mod helper;\nmain() -> i64 { helper_value() }\n",
+    );
+    write(
+        &app.join("src/helper.glorious"),
+        "helper_value() -> i64 { 1 }\n",
+    );
+    write(
+        &app.parent().unwrap().join("util/src/detail.glorious"),
+        "detail_value() -> i64 { 2 }\n",
+    );
+
+    let run = || sandbox.grand(&app, grc.to_str().unwrap(), "", &["check"]);
+    let first = run();
+    assert!(first.status.success(), "{}", stderr(&first));
+    let log = sandbox.args_log();
+    let compile = log.lines().last().unwrap();
+    let main = compile.find("main.glorious").unwrap();
+    let library = compile.find("lib.glorious").unwrap();
+    assert!(main < library, "root entry was not first: {compile}");
+    assert!(
+        compile.contains("--dependency util="),
+        "dependency root metadata was not explicit: {compile}"
+    );
+    assert!(!compile.contains("helper.glorious"), "{compile}");
+    assert!(!compile.contains("detail.glorious"), "{compile}");
+
+    assert!(run().status.success());
+    assert_eq!(
+        sandbox.args_log().lines().count(),
+        3,
+        "fresh check recompiled"
+    );
+    write(
+        &app.join("src/helper.glorious"),
+        "helper_value() -> i64 { 9 }\n",
+    );
+    assert!(run().status.success());
+    assert_eq!(
+        sandbox.args_log().lines().count(),
+        5,
+        "child module edit did not invalidate the fingerprint"
+    );
+}
+
+#[test]
+fn module_aware_dependency_root_ambiguity_is_diagnosed() {
+    let sandbox = Sandbox::new();
+    let grc = sandbox.install_mock_grc(
+        r#"{"grc":"9.9.9","contract":1,"multi-file":true,"modules":true,"phases":["check"],"emit":[],"diagnostics-json":true}"#,
+    );
+    let app = sandbox.app();
+    add_path_dep(&app, "util", "util_value() -> i64 { 3 }\n");
+    write(
+        &app.parent().unwrap().join("util/src/lib.gr"),
+        "other() -> i64 { 4 }\n",
+    );
+    let output = sandbox.grand(&app, grc.to_str().unwrap(), "", &["check"]);
+    let log = stderr(&output);
+    assert!(!output.status.success(), "ambiguous roots were accepted");
+    assert!(
+        log.contains("dependency `util` has ambiguous crate roots"),
+        "{log}"
+    );
+    assert!(log.contains("set `[project].entry` explicitly"), "{log}");
+}
+
+#[test]
 fn bytecode_capability_switches_build_output_and_runtime_to_g1() {
     let sandbox = Sandbox::new();
     let grc = sandbox.install_mock_grc(
@@ -533,22 +609,41 @@ fn fake_multi_file_points_at_real_files_directly() {
 }
 
 #[test]
-fn collision_preflight_warns_heuristically_and_errors_authoritatively() {
+fn fake_modules_capability_keeps_recursive_compatibility_inputs() {
+    let sandbox = Sandbox::new();
+    let app = sandbox.app();
+    write(
+        &app.join("src/helpers.glorious"),
+        "helper() -> i64 { FAKE_ERROR }\n",
+    );
+    let output = sandbox.grand(
+        &app,
+        "fake",
+        "multi-file,modules,check,diagnostics",
+        &["check"],
+    );
+    let log = stderr(&output);
+    assert!(!output.status.success());
+    assert!(log.contains("src/helpers.glorious:1"), "{log}");
+}
+
+#[test]
+fn collision_preflight_warns_for_legacy_and_errors_authoritatively() {
     let sandbox = Sandbox::new();
     let app = sandbox.app();
     add_path_dep(&app, "util", "shared() -> i64 { 3 }\n");
     write(&app.join("src/helpers.glorious"), "shared() -> i64 { 4 }\n");
 
-    // Heuristic scanner (no interfaces capability): warning, build proceeds.
+    // Legacy fallback (no interfaces capability): warning, build proceeds.
     let output = sandbox.grand(&app, "fake", "", &["check"]);
     let log = stderr(&output);
     assert!(
         output.status.success(),
-        "heuristic finding must not block: {log}"
+        "legacy fallback finding must not block: {log}"
     );
     assert!(
         log.contains("warning[GRAND001]: `shared` is defined by both `util` and `app`"),
-        "missing heuristic collision warning: {log}"
+        "missing legacy collision warning: {log}"
     );
 
     // Authoritative interface scan: hard error before compiling.
@@ -572,7 +667,7 @@ fn lint_levels_allow_and_deny() {
     add_path_dep(&app, "util", "shared() -> i64 { 3 }\n");
     write(&app.join("src/helpers.glorious"), "shared() -> i64 { 4 }\n");
 
-    // Deny escalates the heuristic collision warning to a build-stopping error.
+    // Deny escalates the legacy collision warning to a build-stopping error.
     let output = sandbox.grand(&app, "fake", "", &["check", "--deny", "GRAND001"]);
     assert!(
         !output.status.success(),

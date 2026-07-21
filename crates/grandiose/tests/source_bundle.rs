@@ -930,7 +930,7 @@ fn vec_pop_transfers_an_exact_linear_element_obligation() {
         struct PopResult { popped: Option<Ticket>, remainder: Vec<Ticket> }
         impl Use<[1,1]> for Ticket {}
         empty_tickets() -> Vec<Ticket> { Vec::new() }
-        take() -> PopResult {
+        pop_ticket_bundle() -> PopResult {
             let values = empty_tickets();
             Vec::push(&mut values, Ticket { serial: 42 });
             let popped = Vec::pop(&mut values);
@@ -939,13 +939,13 @@ fn vec_pop_transfers_an_exact_linear_element_obligation() {
         main() -> () { () }
     "#;
     let artifact = compile_source_to_bytecode("linear-vec-pop.glorious", source).unwrap();
-    let take = artifact
+    let pop_ticket_bundle = artifact
         .functions
         .iter()
-        .position(|function| function.name == "take")
+        .position(|function| function.name == "pop_ticket_bundle")
         .unwrap() as u32;
     let result = Vm::new(verify(artifact).unwrap())
-        .run(take, vec![])
+        .run(pop_ticket_bundle, vec![])
         .unwrap();
     let VmValue::Aggregate(result) = result else {
         panic!("linear pop did not return its result tuple")

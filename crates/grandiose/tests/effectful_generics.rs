@@ -36,9 +36,9 @@ fn terminal_specialization_inside_a_handler_has_the_ground_row_and_executes() {
     let source = r#"
         cases Stops = {Stop};
         effect Stop { stop() -> ! }
-        abort<T>(fallback: T) -> T / {Stops} { perform Stop::stop() }
+        fixture_abort<T>(fallback: T) -> T / {Stops} { perform Stop::stop() }
         selected() -> i64 {
-            handle { abort(0) } { Stop::stop() => 42 }
+            handle { fixture_abort(0) } { Stop::stop() => 42 }
         }
         main() -> { () }
     "#;
@@ -47,7 +47,7 @@ fn terminal_specialization_inside_a_handler_has_the_ground_row_and_executes() {
         .artifact
         .functions
         .iter()
-        .find(|function| function.name.starts_with("$specialization$abort#"))
+        .find(|function| function.name.starts_with("$specialization$fixture_abort#"))
         .unwrap();
     let stop = phases
         .artifact
@@ -421,19 +421,19 @@ fn nested_row_aliases_and_two_ground_instances_are_order_deterministic() {
         cases Stops = {Stop};
         cases Control = {Stops};
         effect Stop { stop() -> ! }
-        abort<T>(fallback: T) -> T / {Control} { perform Stop::stop() }
+        fixture_abort<T>(fallback: T) -> T / {Control} { perform Stop::stop() }
     "#;
     let first = format!(
         r#"{declarations}
-            int_value() -> i64 {{ handle {{ abort(0) }} {{ Stop::stop() => 42 }} }}
-            text_value() -> Text {{ handle {{ abort("") }} {{ Stop::stop() => "stopped" }} }}
+            int_value() -> i64 {{ handle {{ fixture_abort(0) }} {{ Stop::stop() => 42 }} }}
+            text_value() -> Text {{ handle {{ fixture_abort("") }} {{ Stop::stop() => "stopped" }} }}
             main() -> {{ () }}
         "#
     );
     let reordered = format!(
         r#"{declarations}
-            text_value() -> Text {{ handle {{ abort("") }} {{ Stop::stop() => "stopped" }} }}
-            int_value() -> i64 {{ handle {{ abort(0) }} {{ Stop::stop() => 42 }} }}
+            text_value() -> Text {{ handle {{ fixture_abort("") }} {{ Stop::stop() => "stopped" }} }}
+            int_value() -> i64 {{ handle {{ fixture_abort(0) }} {{ Stop::stop() => 42 }} }}
             main() -> {{ () }}
         "#
     );
@@ -445,7 +445,7 @@ fn nested_row_aliases_and_two_ground_instances_are_order_deterministic() {
         first_artifact
             .functions
             .iter()
-            .filter(|function| function.name.starts_with("$specialization$abort#"))
+            .filter(|function| function.name.starts_with("$specialization$fixture_abort#"))
             .count(),
         2
     );
@@ -463,8 +463,8 @@ fn nested_row_aliases_and_two_ground_instances_are_order_deterministic() {
 fn caller_of_an_effectful_ground_specialization_requires_the_complete_row() {
     let source = r#"
         effect Stop { stop() -> ! }
-        abort<T>(fallback: T) -> T / {Stop} { perform Stop::stop() }
-        missing() -> i64 { abort(0) }
+        fixture_abort<T>(fallback: T) -> T / {Stop} { perform Stop::stop() }
+        missing() -> i64 { fixture_abort(0) }
         main() -> { () }
     "#;
     assert_rejected(
@@ -480,11 +480,11 @@ fn terminal_generic_call_transfers_an_exact_linear_payload_once() {
         struct Ticket { serial: i64 }
         impl Use<[1,1]> for Ticket {}
         effect Consume { take(ticket: Ticket) -> ! }
-        abort<T>(fallback: T, ticket: Ticket) -> T / {Consume} {
+        fixture_abort<T>(fallback: T, ticket: Ticket) -> T / {Consume} {
             perform Consume::take(ticket)
         }
         selected() -> i64 {
-            handle { abort(0, Ticket { serial: 91 }) } {
+            handle { fixture_abort(0, Ticket { serial: 91 }) } {
                 Consume::take(ticket) => {
                     let Ticket { serial } = ticket;
                     serial

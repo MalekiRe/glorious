@@ -635,27 +635,30 @@ pub(crate) fn validate_program(
                                 && (1..=function.params.len() as Register).contains(&place)
                                 && function.register_types[place as usize] == ty
                     );
-                    if reconstructs_parameter_place {
-                        continue;
+                    let exempt_definition = reconstructs_parameter_place
+                        || lowered_backedge_assignments.is_some_and(|start| index >= start);
+                    if !exempt_definition {
+                        if expected_phase == MirPhase::Lowered
+                            && physically_empty.remove(&dst)
+                            && definition_blocks.get(&dst) == Some(&block.id)
+                        {
+                            definitions.remove(&dst);
+                        }
+                        record_definition(
+                            function,
+                            block.id,
+                            &mut definitions,
+                            dst,
+                            format!("{:?} destination in block {}", statement.kind, block.id),
+                        )?;
+                        definition_blocks.insert(dst, block.id);
                     }
-                    if lowered_backedge_assignments.is_some_and(|start| index >= start) {
-                        continue;
-                    }
-                    if expected_phase == MirPhase::Lowered
-                        && physically_empty.remove(&dst)
-                        && definition_blocks.get(&dst) == Some(&block.id)
-                    {
-                        definitions.remove(&dst);
-                    }
-                    record_definition(
-                        function,
-                        block.id,
-                        &mut definitions,
-                        dst,
-                        format!("{:?} destination in block {}", statement.kind, block.id),
-                    )?;
-                    definition_blocks.insert(dst, block.id);
                 }
+                // Even definition-exempt stores can consume their inputs. In
+                // particular, reconstructing a pattern-test parameter shell
+                // moves every projected field back into that place; those
+                // now-empty slots are then eligible for verified physical
+                // reuse by later constants and temporaries in the same block.
                 physically_empty.extend(instruction_consumed_registers(&statement.kind));
             }
             validate_statements(function, block, program, types)?;
@@ -4782,10 +4785,21 @@ fn local_forward_moves(function: &mut Function, budget: u64) -> (PassOutcome, u6
 /// destruction order. Cleanup actions and now-dead flag facts are updated in
 /// the same transaction so the mandatory cleanup checkpoint can rederive the
 /// exact result.
-fn structurally_empty_drop_type(types: &[Type], ty: TypeId) -> bool {
-    fn descriptor(types: &[Type], ty: &Type, visiting: &mut BTreeSet<TypeId>) -> bool {
+fn structurally_empty_drop_type(
+    types: &[Type],
+    direct_custom_drop_types: &BTreeSet<TypeId>,
+    ty: TypeId,
+) -> bool {
+    fn descriptor(
+        types: &[Type],
+        direct_custom_drop_types: &BTreeSet<TypeId>,
+        ty: &Type,
+        visiting: &mut BTreeSet<TypeId>,
+    ) -> bool {
         match ty {
-            Type::Restricted { base, .. } => descriptor(types, base, visiting),
+            Type::Restricted { base, .. } => {
+                descriptor(types, direct_custom_drop_types, base, visiting)
+            }
             Type::Unit
             | Type::Never
             | Type::U8
@@ -4803,15 +4817,17 @@ fn structurally_empty_drop_type(types: &[Type], ty: TypeId) -> bool {
             | Type::F32
             | Type::F64
             | Type::Char => true,
-            Type::Tuple { fields, .. } => fields.iter().all(|field| by_id(types, *field, visiting)),
-            Type::Struct { fields, .. } => {
-                fields.iter().all(|field| by_id(types, field.ty, visiting))
-            }
+            Type::Tuple { fields, .. } => fields
+                .iter()
+                .all(|field| by_id(types, direct_custom_drop_types, *field, visiting)),
+            Type::Struct { fields, .. } => fields
+                .iter()
+                .all(|field| by_id(types, direct_custom_drop_types, field.ty, visiting)),
             Type::Enum { variants, .. } => variants.iter().all(|variant| {
                 variant
                     .fields
                     .iter()
-                    .all(|field| by_id(types, field.ty, visiting))
+                    .all(|field| by_id(types, direct_custom_drop_types, field.ty, visiting))
             }),
             Type::Text
             | Type::Bytes
@@ -4825,23 +4841,32 @@ fn structurally_empty_drop_type(types: &[Type], ty: TypeId) -> bool {
             | Type::Available { .. } => false,
         }
     }
-    fn by_id(types: &[Type], ty: TypeId, visiting: &mut BTreeSet<TypeId>) -> bool {
+    fn by_id(
+        types: &[Type],
+        direct_custom_drop_types: &BTreeSet<TypeId>,
+        ty: TypeId,
+        visiting: &mut BTreeSet<TypeId>,
+    ) -> bool {
+        if direct_custom_drop_types.contains(&ty) {
+            return false;
+        }
         let Some(value) = types.get(ty as usize) else {
             return false;
         };
         if !visiting.insert(ty) {
             return false;
         }
-        let empty = descriptor(types, value, visiting);
+        let empty = descriptor(types, direct_custom_drop_types, value, visiting);
         visiting.remove(&ty);
         empty
     }
-    by_id(types, ty, &mut BTreeSet::new())
+    by_id(types, direct_custom_drop_types, ty, &mut BTreeSet::new())
 }
 
 fn remove_proven_empty_drops(
     function: &mut Function,
     types: &[Type],
+    direct_custom_drop_types: &BTreeSet<TypeId>,
     budget: u64,
 ) -> (bool, u64, bool) {
     if function.flow.provenance != FlowProvenance::Exported
@@ -4904,7 +4929,7 @@ fn remove_proven_empty_drops(
                 && fact.use_interval.admits_zero_use()
                 && (fact.drop_glue == DropGlueKind::None
                     || (fact.drop_glue != DropGlueKind::Custom
-                        && structurally_empty_drop_type(types, fact.ty))
+                        && structurally_empty_drop_type(types, direct_custom_drop_types, fact.ty))
                     || (fact.drop_glue != DropGlueKind::Custom
                         && empty_residuals.contains(&register))))
             .then_some(register)
@@ -4967,7 +4992,12 @@ fn remove_proven_empty_drops(
 /// match. The normative cleanup graph may share actions from different source
 /// locations only while retaining each incoming operation's source info; this
 /// compact MIR cannot encode that per-edge provenance yet.
-fn simplify_cleanup(function: &mut Function, types: &[Type], budget: u64) -> (PassOutcome, u64) {
+fn simplify_cleanup(
+    function: &mut Function,
+    types: &[Type],
+    direct_custom_drop_types: &BTreeSet<TypeId>,
+    budget: u64,
+) -> (PassOutcome, u64) {
     if !function.features.contains(FeatureBits::DROPS) {
         return (PassOutcome::Unchanged, 0);
     }
@@ -4977,7 +5007,7 @@ fn simplify_cleanup(function: &mut Function, types: &[Type], budget: u64) -> (Pa
     let mut changed = false;
 
     let (removed_empty, empty_work, exhausted) =
-        remove_proven_empty_drops(&mut scratch, types, budget);
+        remove_proven_empty_drops(&mut scratch, types, direct_custom_drop_types, budget);
     work = work.saturating_add(empty_work);
     if exhausted {
         return (PassOutcome::BudgetExhausted, work);
@@ -5231,7 +5261,14 @@ fn specialize_cleanup(function: &mut Function, types: &[Type], budget: u64) -> (
     }
 
     let remaining = budget.saturating_sub(work);
-    let (merge_outcome, merge_work) = simplify_cleanup(&mut scratch, types, remaining);
+    let direct_custom_drop_types = scratch
+        .flow
+        .locals
+        .iter()
+        .filter_map(|fact| (fact.drop_glue == DropGlueKind::Custom).then_some(fact.ty))
+        .collect::<BTreeSet<_>>();
+    let (merge_outcome, merge_work) =
+        simplify_cleanup(&mut scratch, types, &direct_custom_drop_types, remaining);
     work = work.saturating_add(merge_work);
     if merge_outcome == PassOutcome::BudgetExhausted {
         return (PassOutcome::BudgetExhausted, work);
@@ -7589,32 +7626,31 @@ pub(crate) fn compact_live_registers_for_emission(
             }
         }
         for loan in &mut scratch.flow.loans {
-            loan.borrowed.base = remap_register(loan.borrowed.base, registers).ok_or_else(|| {
-                error(
-                    function,
-                    Some(loan.issued_block),
-                    "register compaction lost a live exported borrowed place",
-                )
-            })?;
+            loan.borrowed.base =
+                remap_register(loan.borrowed.base, registers).ok_or_else(|| {
+                    error(
+                        function,
+                        Some(loan.issued_block),
+                        "register compaction lost a live exported borrowed place",
+                    )
+                })?;
             loan.parent = match loan.parent {
-                Some(parent) => Some(
-                    loan_ids
-                        .get(parent.index())
-                        .copied()
-                        .flatten()
-                        .ok_or_else(|| {
-                            error(
-                                function,
-                                Some(loan.issued_block),
-                                "register compaction lost a live parent-loan identity",
-                            )
-                        })?,
-                ),
+                Some(parent) => Some(loan_ids.get(parent.index()).copied().flatten().ok_or_else(
+                    || {
+                        error(
+                            function,
+                            Some(loan.issued_block),
+                            "register compaction lost a live parent-loan identity",
+                        )
+                    },
+                )?),
                 None => None,
             };
-            loan.region = RegionId(loan_ids[loan.region.index()].expect(
-                "retained loan has a compacted one-to-one region identity",
-            ).0);
+            loan.region = RegionId(
+                loan_ids[loan.region.index()]
+                    .expect("retained loan has a compacted one-to-one region identity")
+                    .0,
+            );
         }
         for scope in &mut scratch.flow.scopes {
             scope.owners.retain_mut(|owner| {
@@ -9612,10 +9648,52 @@ fn inline_weight(function: &Function) -> u64 {
         .sum()
 }
 
-fn inline_leaf_legal(target: &Function) -> bool {
+fn type_carries_reference(types: &[Type], ty: TypeId) -> bool {
+    fn visit(types: &[Type], ty: TypeId, visiting: &mut BTreeSet<TypeId>) -> bool {
+        if !visiting.insert(ty) {
+            return false;
+        }
+        let carries = match types.get(ty as usize).map(Type::representation) {
+            Some(Type::RefShared { .. } | Type::RefUnique { .. }) => true,
+            Some(Type::Array { element }) => visit(types, *element, visiting),
+            Some(Type::Callable { capture_type, .. } | Type::Handler { capture_type, .. }) => {
+                visit(types, *capture_type, visiting)
+            }
+            Some(Type::BindingPack { payload_type, .. }) => visit(types, *payload_type, visiting),
+            Some(Type::Tuple { fields, .. }) => {
+                fields.iter().any(|field| visit(types, *field, visiting))
+            }
+            Some(Type::Struct { fields, .. }) => {
+                fields.iter().any(|field| visit(types, field.ty, visiting))
+            }
+            Some(Type::Enum { variants, .. }) => variants.iter().any(|variant| {
+                variant
+                    .fields
+                    .iter()
+                    .any(|field| visit(types, field.ty, visiting))
+            }),
+            // An invalid type is rejected by MIR validation. Refuse to use it
+            // as proof for an ownership-sensitive inline in the meantime.
+            None => true,
+            _ => false,
+        };
+        visiting.remove(&ty);
+        carries
+    }
+
+    visit(types, ty, &mut BTreeSet::new())
+}
+
+fn inline_leaf_legal(target: &Function, types: &[Type]) -> bool {
     if target.receiver_mode.is_some()
         || target.no_return
         || !target.outward_protocols.is_empty()
+        // A reference-returning call is an ownership boundary: its return
+        // contract transfers a loan rooted in one argument. Compact MIR does
+        // not yet encode that route on Primitive instructions, so cloning a
+        // trusted reference leaf would manufacture a result without
+        // transplanting its owner dependency.
+        || type_carries_reference(types, target.result)
         || target.features.contains(FeatureBits::LOANS)
         || target.features.contains(FeatureBits::HANDLERS)
         || target.features.contains(FeatureBits::RESUMPTIONS)
@@ -9710,10 +9788,14 @@ fn inline_survivor_region_is_closed(
 /// state except the value moved into the caller continuation. This admits pure
 /// branching/forwarding CFGs while keeping cleanup, loans, labels, handlers,
 /// resumptions, and callee-owned survivors as hard barriers.
-fn inline_multiblock_exit_survivors(target: &Function) -> Option<BTreeSet<Register>> {
+fn inline_multiblock_exit_survivors(
+    target: &Function,
+    types: &[Type],
+) -> Option<BTreeSet<Register>> {
     if target.receiver_mode.is_some()
         || target.no_return
         || !target.outward_protocols.is_empty()
+        || type_carries_reference(types, target.result)
         || target.blocks.len() < 2
         || !target.return_cleanup.is_empty()
         || target.features.contains(FeatureBits::HANDLERS)
@@ -9788,8 +9870,8 @@ fn inline_multiblock_exit_survivors(target: &Function) -> Option<BTreeSet<Regist
     saw_return.then(|| common_survivors.unwrap_or_default())
 }
 
-fn inline_multiblock_legal(target: &Function) -> bool {
-    inline_multiblock_exit_survivors(target).is_some()
+fn inline_multiblock_legal(target: &Function, types: &[Type]) -> bool {
+    inline_multiblock_exit_survivors(target, types).is_some()
 }
 
 #[derive(Clone, Debug)]
@@ -10042,11 +10124,18 @@ fn inline_by_cost(
     level: OptimizationLevel,
     budget: u64,
 ) -> (PassOutcome, u64) {
-    inline_by_cost_with_policy(program, level, budget, &mut InlinePolicyState::default())
+    inline_by_cost_with_policy(
+        program,
+        &Type::predefined(),
+        level,
+        budget,
+        &mut InlinePolicyState::default(),
+    )
 }
 
 fn inline_by_cost_with_policy(
     program: &mut Program,
+    types: &[Type],
     level: OptimizationLevel,
     budget: u64,
     policy: &mut InlinePolicyState,
@@ -10096,7 +10185,9 @@ fn inline_by_cost_with_policy(
         let targets = scratch
             .functions
             .iter()
-            .filter(|function| inline_leaf_legal(function) && inline_weight(function) <= threshold)
+            .filter(|function| {
+                inline_leaf_legal(function, types) && inline_weight(function) <= threshold
+            })
             .map(|function| function.declaration)
             .collect::<BTreeSet<_>>();
         let exit_survivors = scratch
@@ -10287,7 +10378,7 @@ fn inline_by_cost_with_policy(
             .functions
             .iter()
             .filter(|function| {
-                inline_multiblock_legal(function) && inline_weight(function) <= threshold
+                inline_multiblock_legal(function, types) && inline_weight(function) <= threshold
             })
             .map(|function| function.declaration)
             .collect::<BTreeSet<_>>();
@@ -10298,7 +10389,7 @@ fn inline_by_cost_with_policy(
             .map(|function| {
                 (
                     function.declaration,
-                    inline_multiblock_exit_survivors(function)
+                    inline_multiblock_exit_survivors(function, types)
                         .expect("inline-legal multi-block body has proven exits"),
                 )
             })
@@ -10562,6 +10653,15 @@ fn run_transactional_pass(
     types: &[Type],
     global_remaining: &mut u64,
 ) -> PassReport {
+    // Direct custom-hook identity is distinct from structural destruction,
+    // but cleanup simplification must still see those hooks recursively when
+    // deciding whether an otherwise scalar-only container is observable.
+    let direct_custom_drop_types = program
+        .functions
+        .iter()
+        .flat_map(|function| &function.flow.locals)
+        .filter_map(|fact| (fact.drop_glue == DropGlueKind::Custom).then_some(fact.ty))
+        .collect::<BTreeSet<_>>();
     let mut outcome = PassOutcome::Unchanged;
     let mut total_work = 0_u64;
     for function in &mut program.functions {
@@ -10572,7 +10672,9 @@ fn run_transactional_pass(
             PassId::NormalizeCfg => normalize_cfg(function, limit),
             PassId::SparseSimplify => sparse_simplify(function, types, limit),
             PassId::ScalarizeLocals => scalarize_locals(function, types, limit),
-            PassId::SimplifyCleanup => simplify_cleanup(function, types, limit),
+            PassId::SimplifyCleanup => {
+                simplify_cleanup(function, types, &direct_custom_drop_types, limit)
+            }
             PassId::GlobalSimplify => global_simplify_exact_callables(function, types, limit),
             PassId::SpecializeCleanup => specialize_cleanup(function, types, limit),
             PassId::EraseLoanProofsAndScalarizedReferences => erase_loan_proofs(function, limit),
@@ -10628,9 +10730,13 @@ fn run_transactional_whole_program_pass(
             tables.handler_defs,
             *global_remaining,
         ),
-        PassId::InlineByCost => {
-            inline_by_cost_with_policy(program, level, *global_remaining, inline_policy)
-        }
+        PassId::InlineByCost => inline_by_cost_with_policy(
+            program,
+            tables.types,
+            level,
+            *global_remaining,
+            inline_policy,
+        ),
         _ => (PassOutcome::SkippedUnavailable, 0),
     };
     if outcome == PassOutcome::Changed {
@@ -12170,7 +12276,7 @@ pub(crate) fn optimize_program_with_control_tables(
 
 #[cfg(test)]
 mod tests {
-    use grandiose_vm::bytecode::{EnumVariant, Signature};
+    use grandiose_vm::bytecode::{EnumVariant, Field, Signature};
     use grandiose_vm::{I64, Type, UNIT};
 
     use crate::span::Span;
@@ -15805,6 +15911,57 @@ mod tests {
     }
 
     #[test]
+    fn cleanup_simplification_preserves_structural_containers_with_custom_children() {
+        let mut types = Type::predefined();
+        let child = types.len() as TypeId;
+        types.push(Type::Struct {
+            name: "CustomChild".into(),
+            fields: vec![Field {
+                name: "marker".into(),
+                ty: I64,
+            }],
+            copy: true,
+        });
+        let parent = types.len() as TypeId;
+        types.push(Type::Struct {
+            name: "StructuralParent".into(),
+            fields: vec![Field {
+                name: "child".into(),
+                ty: child,
+            }],
+            copy: true,
+        });
+        let mut entry = block(0, Terminator::Return { value: None });
+        entry.statements.push(instruction(InstructionKind::Drop {
+            owner: move_operand(1),
+        }));
+        let mut body = function(vec![entry], vec![UNIT, parent, child]);
+        body.params = vec![parent];
+        body.flow.provenance = FlowProvenance::Exported;
+        let receiver = LocalFact::conservative(UNIT, &types[UNIT as usize]);
+        let mut parent_fact = LocalFact::conservative(parent, &types[parent as usize]);
+        parent_fact.kind = crate::compiler_mir::LocalKind::Parameter(0);
+        parent_fact.initial = crate::compiler_mir::InitAtEntry::Initialized;
+        parent_fact.drop_glue = DropGlueKind::Structural;
+        parent_fact.use_interval = crate::compiler_mir::UseInterval::UNRESTRICTED;
+        let mut child_fact = LocalFact::conservative(child, &types[child as usize]);
+        child_fact.drop_glue = DropGlueKind::Custom;
+        body.flow.locals = vec![receiver, parent_fact, child_fact];
+        let mut candidate = program(body);
+
+        optimize_program(&mut candidate, &types, OptimizationLevel::O2).unwrap();
+        assert!(matches!(
+            candidate.functions[0].blocks[0].statements[0].kind,
+            InstructionKind::Drop { .. }
+        ));
+        assert_eq!(
+            candidate.functions[0].flow.locals[1].drop_glue,
+            DropGlueKind::Structural,
+            "the container remains structurally destructible rather than becoming a direct hook"
+        );
+    }
+
+    #[test]
     fn cleanup_optimization_does_not_mask_drop_after_move_malformed_flow() {
         let types = Type::predefined();
         let mut candidate = empty_drop_fixture(DropGlueKind::None);
@@ -15865,7 +16022,8 @@ mod tests {
         );
         body.entry = 1;
         body.features = infer_feature_bits(&body);
-        let (outcome, _) = simplify_cleanup(&mut body, &Type::predefined(), u64::MAX);
+        let (outcome, _) =
+            simplify_cleanup(&mut body, &Type::predefined(), &BTreeSet::new(), u64::MAX);
 
         assert_eq!(outcome, PassOutcome::Unchanged);
         assert_eq!(body.blocks.len(), 4);
@@ -15903,7 +16061,8 @@ mod tests {
         body.entry = 1;
         body.features = infer_feature_bits(&body);
 
-        let (outcome, _) = simplify_cleanup(&mut body, &Type::predefined(), u64::MAX);
+        let (outcome, _) =
+            simplify_cleanup(&mut body, &Type::predefined(), &BTreeSet::new(), u64::MAX);
 
         assert_eq!(outcome, PassOutcome::Unchanged);
         assert_eq!(body.blocks.len(), 2);
@@ -16216,6 +16375,96 @@ mod tests {
     }
 
     #[test]
+    fn inline_by_cost_preserves_reference_return_call_boundaries() {
+        fn set_result_type(program: &mut Program, ty: TypeId) {
+            let caller = &mut program.functions[0];
+            caller.result = ty;
+            caller.register_types[3] = ty;
+            caller.blocks[1].params[0].ty = ty;
+            let callee = &mut program.functions[1];
+            callee.result = ty;
+            callee.register_types[3] = ty;
+        }
+
+        let (mut scalar, scalar_types) = inline_leaf_fixture();
+        assert_eq!(
+            inline_by_cost_with_policy(
+                &mut scalar,
+                &scalar_types,
+                OptimizationLevel::O2,
+                u64::MAX,
+                &mut InlinePolicyState::default(),
+            )
+            .0,
+            PassOutcome::Changed,
+            "a reference-free leaf must remain inlineable",
+        );
+
+        let (mut direct, mut direct_types) = inline_leaf_fixture();
+        let direct_reference = direct_types.len() as TypeId;
+        direct_types.push(Type::RefShared { referent: I64 });
+        set_result_type(&mut direct, direct_reference);
+        assert_eq!(
+            inline_by_cost_with_policy(
+                &mut direct,
+                &direct_types,
+                OptimizationLevel::O2,
+                u64::MAX,
+                &mut InlinePolicyState::default(),
+            )
+            .0,
+            PassOutcome::Unchanged,
+            "a direct reference result carries a call-boundary loan route",
+        );
+
+        let (mut nested, mut nested_types) = inline_leaf_fixture();
+        let nested_reference = nested_types.len() as TypeId;
+        nested_types.push(Type::RefUnique { referent: I64 });
+        let tuple = nested_types.len() as TypeId;
+        nested_types.push(Type::Tuple {
+            fields: vec![I64, nested_reference],
+            copy: false,
+        });
+        let structure = nested_types.len() as TypeId;
+        nested_types.push(Type::Struct {
+            name: "ReferenceCarrier".into(),
+            fields: vec![Field {
+                name: "tuple".into(),
+                ty: tuple,
+            }],
+            copy: false,
+        });
+        let restricted_enum = nested_types.len() as TypeId;
+        nested_types.push(
+            Type::Enum {
+                name: "MaybeReferenceCarrier".into(),
+                variants: vec![EnumVariant {
+                    name: "Some".into(),
+                    fields: vec![Field {
+                        name: "value".into(),
+                        ty: structure,
+                    }],
+                }],
+                copy: false,
+            }
+            .restricted(false, false),
+        );
+        set_result_type(&mut nested, restricted_enum);
+        assert_eq!(
+            inline_by_cost_with_policy(
+                &mut nested,
+                &nested_types,
+                OptimizationLevel::O2,
+                u64::MAX,
+                &mut InlinePolicyState::default(),
+            )
+            .0,
+            PassOutcome::Unchanged,
+            "nested references remain visible through restricted aggregates",
+        );
+    }
+
+    #[test]
     fn inline_by_cost_clones_a_branching_cfg_with_a_closed_cleanup_free_survivor() {
         let types = Type::predefined();
         let mut entry = block(
@@ -16506,8 +16755,16 @@ mod tests {
         let scan = operation_count(&budgeted);
         let mut policy = InlinePolicyState::default();
         let before_policy = policy.clone();
+        let types = Type::predefined();
         assert_eq!(
-            inline_by_cost_with_policy(&mut budgeted, OptimizationLevel::O2, scan, &mut policy,).0,
+            inline_by_cost_with_policy(
+                &mut budgeted,
+                &types,
+                OptimizationLevel::O2,
+                scan,
+                &mut policy,
+            )
+            .0,
             PassOutcome::BudgetExhausted
         );
         assert_eq!(budgeted, raw);
@@ -16655,9 +16912,11 @@ mod tests {
 
         let mut persistent = inline_many_callers(20);
         let mut persistent_policy = InlinePolicyState::default();
+        let types = Type::predefined();
         assert_eq!(
             inline_by_cost_with_policy(
                 &mut persistent,
+                &types,
                 OptimizationLevel::O2,
                 u64::MAX,
                 &mut persistent_policy,
@@ -16668,6 +16927,7 @@ mod tests {
         assert_eq!(
             inline_by_cost_with_policy(
                 &mut persistent,
+                &types,
                 OptimizationLevel::O2,
                 u64::MAX,
                 &mut persistent_policy,
@@ -16683,8 +16943,14 @@ mod tests {
             ..InlinePolicyState::default()
         };
         assert_eq!(
-            inline_by_cost_with_policy(&mut limited, OptimizationLevel::O2, u64::MAX, &mut policy,)
-                .0,
+            inline_by_cost_with_policy(
+                &mut limited,
+                &types,
+                OptimizationLevel::O2,
+                u64::MAX,
+                &mut policy,
+            )
+            .0,
             PassOutcome::Changed
         );
         assert_eq!(policy.cloned_bodies_remaining, 0);

@@ -10,6 +10,43 @@ use crate::{
     span::Span,
 };
 
+fn const_expression_kind(
+    expression: &crate::ast::ConstExprSyntax,
+    scope: &HashMap<&str, crate::ast::ConstKind>,
+) -> Result<crate::ast::ConstKind, String> {
+    use crate::ast::{ConstExprSyntaxKind, ConstKind};
+    match &expression.kind {
+        ConstExprSyntaxKind::U32(_) => Ok(ConstKind::U32),
+        ConstExprSyntaxKind::Quantity(_) => Ok(ConstKind::Quantity),
+        ConstExprSyntaxKind::Path(path) => {
+            let [name] = path.as_slice() else {
+                return Err("const paths must name one lexical const parameter".to_owned());
+            };
+            scope
+                .get(name.name.as_str())
+                .copied()
+                .ok_or_else(|| format!("unbound const parameter `{}`", name.name))
+        }
+        ConstExprSyntaxKind::Neg(value) => {
+            let kind = const_expression_kind(value, scope)?;
+            if kind == ConstKind::U32 {
+                Ok(kind)
+            } else {
+                Err("quantity const values cannot be negated".to_owned())
+            }
+        }
+        ConstExprSyntaxKind::Binary { lhs, rhs, .. } => {
+            let left = const_expression_kind(lhs, scope)?;
+            let right = const_expression_kind(rhs, scope)?;
+            if left == ConstKind::U32 && right == ConstKind::U32 {
+                Ok(ConstKind::U32)
+            } else {
+                Err("const arithmetic currently requires u32 operands".to_owned())
+            }
+        }
+    }
+}
+
 pub fn validate(program: &Program) -> Result<(), Vec<Diagnostic>> {
     let mut errors = Vec::new();
     // A declaration-only collection is syntactically valid; requiring an entry
@@ -18,6 +55,117 @@ pub fn validate(program: &Program) -> Result<(), Vec<Diagnostic>> {
         errors.push(Diagnostic::plain(
             "program has no callables; expected at least a `main() -> { ... }` declaration",
         ));
+    }
+    for array in &program.fixed_array_types {
+        match crate::ast::evaluate_const_expression(&array.length, |_| None) {
+            Ok(crate::ast::EvaluatedConst::U32(length)) if length <= 1024 => {}
+            Ok(crate::ast::EvaluatedConst::U32(length)) => errors.push(
+                Diagnostic::error(
+                    "fixed-array length exceeds the layout limit",
+                    format!(
+                        "fixed arrays may contain at most 1024 elements, but this length is {length}"
+                    ),
+                    array.length.span,
+                )
+                .with_code("G0131"),
+            ),
+            Ok(crate::ast::EvaluatedConst::Quantity { .. }) => errors.push(
+                Diagnostic::error(
+                    "fixed-array length has the wrong const kind",
+                    "fixed-array lengths must be u32 const expressions",
+                    array.length.span,
+                )
+                .with_code("G0131"),
+            ),
+            Err(message) => errors.push(
+                Diagnostic::error("invalid fixed-array length", message, array.length.span)
+                    .with_code("G0131"),
+            ),
+        }
+    }
+    let mut generic_lists = Vec::new();
+    generic_lists.extend(
+        program
+            .type_aliases
+            .iter()
+            .filter_map(|item| item.generics.as_ref()),
+    );
+    generic_lists.extend(
+        program
+            .structs
+            .iter()
+            .filter_map(|item| item.generics.as_ref()),
+    );
+    generic_lists.extend(
+        program
+            .enums
+            .iter()
+            .filter_map(|item| item.generics.as_ref()),
+    );
+    generic_lists.extend(
+        program
+            .traits
+            .iter()
+            .filter_map(|item| item.generics.as_ref()),
+    );
+    generic_lists.extend(
+        program
+            .impls
+            .iter()
+            .filter_map(|item| item.generics.as_ref()),
+    );
+    generic_lists.extend(
+        program
+            .uses
+            .iter()
+            .filter_map(|item| item.generics.as_ref()),
+    );
+    generic_lists.extend(
+        program
+            .drops
+            .iter()
+            .filter_map(|item| item.generics.as_ref()),
+    );
+    generic_lists.extend(
+        program
+            .effects
+            .iter()
+            .filter_map(|item| item.generics.as_ref()),
+    );
+    generic_lists.extend(
+        program
+            .functions
+            .iter()
+            .filter_map(|item| item.generics.as_ref()),
+    );
+    for generics in generic_lists {
+        let mut const_scope = HashMap::new();
+        for parameter in &generics.params {
+            if let Some(default) = &parameter.const_default {
+                let expected = match parameter.kind {
+                    GenericParamKind::Const(kind) => kind,
+                    _ => continue,
+                };
+                match const_expression_kind(default, &const_scope) {
+                    Ok(actual) if actual == expected => {}
+                    Ok(actual) => errors.push(
+                        Diagnostic::error(
+                            "const generic default kind mismatch",
+                            format!("default has kind {actual:?}, expected {expected:?}"),
+                            default.span,
+                        )
+                        .with_code("G0008"),
+                    ),
+                    Err(message) => errors.push(
+                        Diagnostic::error("invalid const generic default", message, default.span)
+                            .with_code("G0008"),
+                    ),
+                }
+            }
+            if let GenericParamKind::Const(kind) = parameter.kind {
+                const_scope.insert(parameter.name.as_str(), kind);
+            }
+        }
     }
     let mut type_declarations = program
         .type_aliases
@@ -614,9 +762,30 @@ fn validate_trait_methods(
                     .iter()
                     .enumerate()
                     .find(|(index, actual)| {
-                        !matched_outlives[*index]
-                            && mapped_name(&template.longer.name, binders) == actual.longer.name
-                            && mapped_name(&template.shorter.name, binders) == actual.shorter.name
+                        if matched_outlives[*index]
+                            || template.higher_ranked_lifetimes.len()
+                                != actual.higher_ranked_lifetimes.len()
+                            || !template
+                                .higher_ranked_lifetimes
+                                .iter()
+                                .zip(&actual.higher_ranked_lifetimes)
+                                .all(|(template, actual)| template.kind == actual.kind)
+                        {
+                            return false;
+                        }
+                        let mut outlives_binders = binders.clone();
+                        outlives_binders.extend(
+                            template
+                                .higher_ranked_lifetimes
+                                .iter()
+                                .zip(&actual.higher_ranked_lifetimes)
+                                .map(|(template, actual)| {
+                                    (template.name.as_str(), actual.name.as_str())
+                                }),
+                        );
+                        mapped_name(&template.longer.name, &outlives_binders) == actual.longer.name
+                            && mapped_name(&template.shorter.name, &outlives_binders)
+                                == actual.shorter.name
                     })
             else {
                 return false;
@@ -1094,6 +1263,12 @@ fn validate_source_lifetimes(program: &Program, errors: &mut Vec<Diagnostic>) {
                 .iter()
                 .map(|declaration| (declaration.name.as_str(), declaration.generics.as_ref())),
         )
+        .chain(
+            program
+                .type_aliases
+                .iter()
+                .map(|declaration| (declaration.name.as_str(), declaration.generics.as_ref())),
+        )
         .collect::<HashMap<_, _>>();
 
     fn validate_nominal_arguments(
@@ -1118,7 +1293,12 @@ fn validate_source_lifetimes(program: &Program, errors: &mut Vec<Diagnostic>) {
                         .map_or(&[][..], |entry| entry.arguments.as_slice());
                     let supplied =
                         arguments.len() + lifetime_arguments.len() + const_arguments.len();
-                    if supplied != declared.params.len() {
+                    let required = declared
+                        .params
+                        .iter()
+                        .rposition(|parameter| parameter.const_default.is_none())
+                        .map_or(0, |position| position + 1);
+                    if supplied < required || supplied > declared.params.len() {
                         errors.push(
                             Diagnostic::error(
                                 "wrong number of nominal arguments",
@@ -1202,6 +1382,50 @@ fn validate_source_lifetimes(program: &Program, errors: &mut Vec<Diagnostic>) {
                                         );
                                     }
                                     crate::ast::ConstKind::U32
+                                }
+                                crate::ast::ConstArgumentValueSyntax::Expression(expression) => {
+                                    let const_scope = scope
+                                        .iter()
+                                        .flat_map(|generics| &generics.params)
+                                        .filter_map(|parameter| match parameter.kind {
+                                            GenericParamKind::Const(kind) => {
+                                                Some((parameter.name.as_str(), kind))
+                                            }
+                                            _ => None,
+                                        })
+                                        .collect::<HashMap<_, _>>();
+                                    match const_expression_kind(expression, &const_scope) {
+                                        Ok(kind) => {
+                                            if let Err(message) =
+                                                crate::ast::evaluate_const_expression(
+                                                    expression,
+                                                    |_| None,
+                                                )
+                                                && !message.contains("unresolved parameter")
+                                            {
+                                                errors.push(
+                                                    Diagnostic::error(
+                                                        "invalid const expression",
+                                                        message,
+                                                        expression.span,
+                                                    )
+                                                    .with_code("G0008"),
+                                                );
+                                            }
+                                            kind
+                                        }
+                                        Err(message) => {
+                                            errors.push(
+                                                Diagnostic::error(
+                                                    "invalid const expression",
+                                                    message,
+                                                    expression.span,
+                                                )
+                                                .with_code("G0008"),
+                                            );
+                                            continue;
+                                        }
+                                    }
                                 }
                             };
                             if parameter.kind != GenericParamKind::Const(actual_kind) {
@@ -1563,6 +1787,25 @@ fn validate_source_lifetimes(program: &Program, errors: &mut Vec<Diagnostic>) {
         }
         if let Some(where_clause) = &function.where_clause {
             for constraint in &where_clause.lifetime_outlives {
+                let scoped_lifetimes = constraint
+                    .higher_ranked_lifetimes
+                    .iter()
+                    .filter_map(|parameter| {
+                        if parameter.kind == GenericParamKind::Lifetime {
+                            Some(parameter.name.as_str())
+                        } else {
+                            errors.push(
+                                Diagnostic::error(
+                                    "invalid higher-ranked outlives binder",
+                                    "an outlives predicate may quantify only lifetime binders",
+                                    parameter.span,
+                                )
+                                .with_code("G0008"),
+                            );
+                            None
+                        }
+                    })
+                    .collect::<HashSet<_>>();
                 for lifetime in [&constraint.longer, &constraint.shorter] {
                     if lifetime.name == "'_" {
                         errors.push(
@@ -1574,7 +1817,9 @@ fn validate_source_lifetimes(program: &Program, errors: &mut Vec<Diagnostic>) {
                             .with_code("G0008")
                             .with_help("use a named lifetime binder in this constraint"),
                         );
-                    } else if !known(&lifetime.name) {
+                    } else if !known(&lifetime.name)
+                        && !scoped_lifetimes.contains(lifetime.name.as_str())
+                    {
                         errors.push(
                             Diagnostic::error(
                                 "unbound lifetime in outlives constraint",
@@ -1593,6 +1838,19 @@ fn validate_source_lifetimes(program: &Program, errors: &mut Vec<Diagnostic>) {
                         Diagnostic::error(
                             "invalid static outlives constraint",
                             "only `'static` can be proven to outlive `'static`",
+                            constraint.span,
+                        )
+                        .with_code("G0008"),
+                    );
+                }
+                if !constraint.higher_ranked_lifetimes.is_empty()
+                    && constraint.longer.name != "'static"
+                    && constraint.longer.name != constraint.shorter.name
+                {
+                    errors.push(
+                        Diagnostic::error(
+                            "unprovable higher-ranked outlives constraint",
+                            "a universally quantified lifetime can only be proven to outlive itself; use `'static` as the longer lifetime for a universal bound",
                             constraint.span,
                         )
                         .with_code("G0008"),
@@ -2318,7 +2576,7 @@ fn validate_expr(
         }
         ExprKind::Is { subject, pattern } => {
             validate_expr(program, subject, effects, generic_kinds, errors);
-            validate_pattern(program, pattern, errors);
+            validate_refinement_pattern(program, pattern, errors);
         }
         ExprKind::Unit
         | ExprKind::Int(_)
@@ -2339,6 +2597,23 @@ fn validate_pattern(
     pattern: &crate::ast::Pattern,
     errors: &mut Vec<Diagnostic>,
 ) {
+    validate_pattern_with_context(program, pattern, false, errors);
+}
+
+fn validate_refinement_pattern(
+    program: &Program,
+    pattern: &crate::ast::Pattern,
+    errors: &mut Vec<Diagnostic>,
+) {
+    validate_pattern_with_context(program, pattern, true, errors);
+}
+
+fn validate_pattern_with_context(
+    program: &Program,
+    pattern: &crate::ast::Pattern,
+    exact_implicit_variant_arity: bool,
+    errors: &mut Vec<Diagnostic>,
+) {
     match &pattern.kind {
         PatternKind::Wildcard
         | PatternKind::Binding(_)
@@ -2348,7 +2623,7 @@ fn validate_pattern(
         | PatternKind::Char(_)
         | PatternKind::Byte(_)
         | PatternKind::String(_) => {}
-        PatternKind::Variant { path, fields, .. } => {
+        PatternKind::Variant { path, fields, rest } => {
             if let [enum_name, variant_name] = path.as_slice() {
                 // Qualified value-subnamespace bindings may alias enum
                 // constructors through type-alias owners. Their canonical
@@ -2388,7 +2663,13 @@ fn validate_pattern(
                             .with_code("G0135")
                             .with_related(declaration.span, "the enum is declared here"),
                         ),
-                        Some(variant) if fields.len() > variant.fields.len() => errors.push(
+                        Some(variant)
+                            if fields.len() > variant.fields.len()
+                                || (exact_implicit_variant_arity
+                                    && rest.is_none()
+                                    && fields.len() != variant.fields.len()) =>
+                        {
+                            errors.push(
                             Diagnostic::error(
                                 "wrong enum pattern arity",
                                 format!(
@@ -2400,7 +2681,8 @@ fn validate_pattern(
                             )
                             .with_code("G0136")
                             .with_related(variant.span, "the variant is declared here"),
-                        ),
+                        )
+                        }
                         Some(_) => {}
                     },
                 }
@@ -2414,13 +2696,13 @@ fn validate_pattern(
                     .with_code("G0135"),
                 );
             }
-            fields
-                .iter()
-                .for_each(|field| validate_pattern(program, field, errors));
+            fields.iter().for_each(|field| {
+                validate_pattern_with_context(program, field, exact_implicit_variant_arity, errors)
+            });
         }
-        PatternKind::Tuple { elements, .. } => elements
-            .iter()
-            .for_each(|element| validate_pattern(program, element, errors)),
+        PatternKind::Tuple { elements, .. } => elements.iter().for_each(|element| {
+            validate_pattern_with_context(program, element, exact_implicit_variant_arity, errors)
+        }),
         PatternKind::Struct { name, fields, .. } => {
             if let Some(declaration) = program.structs.iter().find(|decl| decl.name == *name) {
                 for field in fields {
@@ -2450,9 +2732,14 @@ fn validate_pattern(
                     .with_code("G0135"),
                 );
             }
-            fields
-                .iter()
-                .for_each(|field| validate_pattern(program, &field.pattern, errors));
+            fields.iter().for_each(|field| {
+                validate_pattern_with_context(
+                    program,
+                    &field.pattern,
+                    exact_implicit_variant_arity,
+                    errors,
+                )
+            });
         }
     }
 }

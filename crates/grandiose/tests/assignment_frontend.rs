@@ -301,8 +301,8 @@ fn exact_moved_field_can_be_reinitialized_without_destroying_it_again() {
     let source = r#"
         struct Ticket {}
         impl Use<[1,infinity]> for Ticket {}
-        struct Slot { ticket: Ticket, marker: i64 }
-        replace_slot_field(slot: Slot, replacement: Ticket) -> (Ticket, Slot) {
+        struct TicketSlot { ticket: Ticket, marker: i64 }
+        replace_slot_field(slot: TicketSlot, replacement: Ticket) -> (Ticket, TicketSlot) {
             let old = move slot.ticket;
             slot.ticket = move replacement;
             (move old, move slot)

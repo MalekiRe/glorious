@@ -87,6 +87,24 @@ fn enum_pattern_arity_is_exact() {
         "G0136",
         "has 2 field(s)",
     );
+    assert_error(
+        r#"
+            enum Pair { Both(i64, i64) }
+            enum Outer { Wrap(Pair) }
+            test(value: Outer) -> Bool { value is Outer::Wrap(Pair::Both(one)) }
+            main() -> { () }
+        "#,
+        "G0136",
+        "has 2 field(s)",
+    );
+    frontend(
+        r#"
+            enum Pair { Both(i64, i64) }
+            test(value: Pair) -> Bool { value is Pair::Both(one, ..) }
+            main() -> { () }
+        "#,
+    )
+    .unwrap();
 }
 
 #[test]

@@ -811,6 +811,39 @@ enum ConstPattern {
     Value(ConstValue),
 }
 
+const HIGHER_RANKED_CONST_FLAG: u32 = 1 << 31;
+
+fn const_binder_pattern(binder: Binder, kind: ConstKind) -> ConstPattern {
+    ConstPattern::Bound(
+        binder.index
+            | if binder.higher_ranked {
+                HIGHER_RANKED_CONST_FLAG
+            } else {
+                0
+            },
+        kind,
+    )
+}
+
+fn instantiate_bound_const(
+    index: u32,
+    kind: ConstKind,
+    substitutions: &BTreeMap<u32, GenericArg>,
+    universe: u32,
+) -> Option<GenericArg> {
+    if index & HIGHER_RANKED_CONST_FLAG == 0 {
+        return substitutions
+            .get(&index)
+            .filter(|argument| generic_arg_has_const_kind(argument, kind))
+            .cloned();
+    }
+    let binder = index & !HIGHER_RANKED_CONST_FLAG;
+    Some(GenericArg::RigidConst(
+        HIGHER_RANKED_CONST_FLAG | ((universe & 0x7fff) << 16) | (binder & 0xffff),
+        kind,
+    ))
+}
+
 fn encode_const_value(value: &ConstValue) -> ProvisionalType {
     let name = match value {
         ConstValue::U32(value) => format!("$const$u32${value}"),
@@ -862,6 +895,19 @@ fn decode_const_argument(ty: &ProvisionalType) -> Option<GenericArg> {
         _ => return None,
     };
     Some(GenericArg::RigidConst(index.parse().ok()?, kind))
+}
+
+fn instantiate_ground_pattern(ty: &ProvisionalType, universe: u32) -> ProvisionalType {
+    match ty {
+        ProvisionalType::Param(GenericParamKey {
+            owner: DeclarationKey::Function(owner),
+            ordinal,
+        }) if owner == "$higher_ranked_universe_1" => ProvisionalType::Param(GenericParamKey {
+            owner: DeclarationKey::Function(format!("$higher_ranked_universe_{universe}")),
+            ordinal: *ordinal,
+        }),
+        _ => ty.clone(),
+    }
 }
 
 fn instantiate_const_pattern(
@@ -3028,7 +3074,7 @@ impl TraitDb {
                     | GenericArg::RigidConst(_, _) => None,
                 })
                 .ok_or(SolveResult::NoEvidence),
-            Pattern::Ground(ty) => Ok(ty.clone()),
+            Pattern::Ground(ty) => Ok(instantiate_ground_pattern(ty, depth as u32 + 1)),
             Pattern::Nominal(declaration, arguments) => {
                 Ok(ProvisionalType::Nominal(NominalInstanceKey {
                     declaration: declaration.clone(),
@@ -3228,11 +3274,10 @@ impl TraitDb {
             GenericArgPattern::Const(ConstPattern::Value(value)) => {
                 Ok(GenericArg::Const(value.clone()))
             }
-            GenericArgPattern::Const(ConstPattern::Bound(index, kind)) => substitutions
-                .get(index)
-                .filter(|argument| generic_arg_has_const_kind(argument, *kind))
-                .cloned()
-                .ok_or(SolveResult::NoEvidence),
+            GenericArgPattern::Const(ConstPattern::Bound(index, kind)) => {
+                instantiate_bound_const(*index, *kind, substitutions, depth as u32 + 1)
+                    .ok_or(SolveResult::NoEvidence)
+            }
         }
     }
 
@@ -3294,11 +3339,10 @@ impl TraitDb {
                     GenericArgPattern::Const(ConstPattern::Value(value)) => {
                         Ok(GenericArg::Const(value.clone()))
                     }
-                    GenericArgPattern::Const(ConstPattern::Bound(index, kind)) => substitutions
-                        .get(index)
-                        .filter(|argument| generic_arg_has_const_kind(argument, *kind))
-                        .cloned()
-                        .ok_or(SolveResult::NoEvidence),
+                    GenericArgPattern::Const(ConstPattern::Bound(index, kind)) => {
+                        instantiate_bound_const(*index, *kind, substitutions, depth as u32 + 1)
+                            .ok_or(SolveResult::NoEvidence)
+                    }
                 })
                 .collect::<Result<Vec<_>, _>>()?,
             bindings: pattern
@@ -3448,7 +3492,14 @@ fn effect_row_pattern(
                 "associated effect-row tail has the wrong kind",
             ));
         }
-        members.push(Pattern::Bound(binder.index));
+        members.push(if binder.higher_ranked {
+            Pattern::Ground(ProvisionalType::Param(GenericParamKey {
+                owner: DeclarationKey::Function("$higher_ranked_universe_1".into()),
+                ordinal: binder.index,
+            }))
+        } else {
+            Pattern::Bound(binder.index)
+        });
     }
     members.sort();
     members.dedup();
@@ -3692,12 +3743,7 @@ fn lower_impl(
                 GenericParamKind::Type => GenericParameterKind::Type,
                 GenericParamKind::Lifetime => GenericParameterKind::Lifetime,
                 GenericParamKind::Const(kind) => GenericParameterKind::Const(kind),
-                GenericParamKind::EffectRow => {
-                    return Err(error(
-                        parameter.span,
-                        "higher-ranked effect-row binders are not implemented",
-                    ));
-                }
+                GenericParamKind::EffectRow => GenericParameterKind::Type,
             };
             goal_binders.insert(
                 parameter.name.as_str(),
@@ -3746,12 +3792,9 @@ fn lower_impl(
             .relation
             .bindings
             .iter()
-            .filter_map(|binding| {
+            .map(|binding| {
                 let item = &schema.associated_items[&binding.name];
-                if item.kind == AssociatedItemKind::EffectRow {
-                    return None;
-                }
-                Some((|| {
+                (|| {
                     let expected_arity = item.parameters.len();
                     if binding.arguments.len() + binding.const_arguments.len() != expected_arity {
                         return Err(error(
@@ -3772,23 +3815,36 @@ fn lower_impl(
                             nominals,
                             traits,
                         )?,
-                        value: pattern(
-                            binding.value.as_type().ok_or_else(|| {
-                                error(
+                        value: match (&item.kind, &binding.value) {
+                            (
+                                AssociatedItemKind::Type,
+                                crate::ast::AssociatedBindingValue::Type(value),
+                            ) => pattern(value, &goal_binders, nominals, traits, false)?,
+                            (
+                                AssociatedItemKind::EffectRow,
+                                crate::ast::AssociatedBindingValue::EffectRow(row),
+                            ) => effect_row_pattern(row, &goal_binders, nominals, traits, effects)?,
+                            (AssociatedItemKind::Type, _) => {
+                                return Err(error(
                                     binding.span,
                                     format!(
                                         "associated type `{}` requires a type value",
                                         binding.name
                                     ),
-                                )
-                            })?,
-                            &goal_binders,
-                            nominals,
-                            traits,
-                            false,
-                        )?,
+                                ));
+                            }
+                            (AssociatedItemKind::EffectRow, _) => {
+                                return Err(error(
+                                    binding.span,
+                                    format!(
+                                        "associated effect row `{}` requires `{{...}}` row syntax",
+                                        binding.name
+                                    ),
+                                ));
+                            }
+                        },
                     })
-                })())
+                })()
             })
             .collect::<Result<Vec<_>, Diagnostic>>()?;
         bindings.sort();
@@ -4594,7 +4650,7 @@ fn lower_generic_arguments(
             if binder.kind != GenericParameterKind::Const(*kind) {
                 return Err(error(syntax.span, format!("const parameter `{name}` has the wrong kind")));
             }
-            Ok(GenericArgPattern::Const(ConstPattern::Bound(binder.index, *kind)))
+            Ok(GenericArgPattern::Const(const_binder_pattern(*binder, *kind)))
         }
         (_, GenericParameterKind::Lifetime) => Err(error(
             argument_span(argument),
@@ -4761,9 +4817,8 @@ fn lower_associated_arguments(
                         format!("const parameter `{name}` has the wrong kind"),
                     ));
                 }
-                Ok(GenericArgPattern::Const(ConstPattern::Bound(
-                    binder.index,
-                    *kind,
+                Ok(GenericArgPattern::Const(const_binder_pattern(
+                    *binder, *kind,
                 )))
             }
             (argument, expected) => Err(error(
@@ -4804,6 +4859,22 @@ fn const_pattern_value(
             quantity.span,
             format!("const argument has the wrong kind; expected {kind:?}"),
         )),
+        (crate::ast::ConstArgumentValueSyntax::Expression(expression), expected) => {
+            let value = crate::ast::evaluate_const_expression(expression, |_| None)
+                .map_err(|message| error(expression.span, message))?;
+            match (value, expected) {
+                (crate::ast::EvaluatedConst::U32(value), ConstKind::U32) => {
+                    Ok(ConstPattern::Value(ConstValue::U32(value)))
+                }
+                (crate::ast::EvaluatedConst::Quantity { lower, upper }, ConstKind::Quantity) => {
+                    Ok(ConstPattern::Value(ConstValue::Quantity { lower, upper }))
+                }
+                (_, kind) => Err(error(
+                    expression.span,
+                    format!("const expression has the wrong kind; expected {kind:?}"),
+                )),
+            }
+        }
     }
 }
 
@@ -4971,7 +5042,7 @@ fn pattern_with_const_arguments(
                                     format!("const parameter `{name}` has the wrong kind"),
                                 ));
                             }
-                            ConstPattern::Bound(binder.index, *kind)
+                            const_binder_pattern(*binder, *kind)
                         };
                         lowered.push(NominalPatternArg::Const(const_pattern));
                     }
@@ -5816,10 +5887,9 @@ fn instantiate_super_generic_pattern(
         GenericArgPattern::Const(ConstPattern::Value(value)) => {
             Some(GenericArg::Const(value.clone()))
         }
-        GenericArgPattern::Const(ConstPattern::Bound(index, kind)) => substitutions
-            .get(index)
-            .filter(|argument| generic_arg_has_const_kind(argument, *kind))
-            .cloned(),
+        GenericArgPattern::Const(ConstPattern::Bound(index, kind)) => {
+            instantiate_bound_const(*index, *kind, substitutions, 1)
+        }
     }
 }
 
@@ -7393,6 +7463,55 @@ mod tests {
             SolveResult::NoEvidence,
             "a higher-ranked placeholder must not leak into a preexisting associated equality"
         );
+    }
+
+    #[test]
+    fn nested_higher_ranked_type_goals_use_distinct_universes() {
+        let source = "trait Pair<A,B>{} trait Outer<A>{} trait Witness{} struct Local{} impl<X> Pair<X,X> for Text{} impl<U> Outer<U> for Text where for<V> Text:Pair<U,V>{} impl Witness for Local where for<T> Text:Outer<T>{} main()->{()}";
+        let program = crate::parser::parse(crate::lexer::lex(source).unwrap()).unwrap();
+        let db = TraitDb::build(&program).unwrap();
+        let local = ProvisionalType::Nominal(NominalInstanceKey {
+            declaration: NominalKey("Local".into()),
+            arguments: vec![],
+        });
+        let placeholder = ProvisionalType::Param(GenericParamKey {
+            owner: DeclarationKey::Function("$higher_ranked_universe_1".into()),
+            ordinal: 0,
+        });
+        let text = ProvisionalType::Predefined("Text".into());
+        assert_eq!(
+            db.solve_with_param_env_values(
+                &ParamEnv::default(),
+                GoalPolarity::Positive,
+                "Pair",
+                &text,
+                &[placeholder.clone(), placeholder.clone()],
+                &[],
+            ),
+            SolveResult::Proven,
+        );
+        assert_eq!(
+            db.solve_with_param_env_values(
+                &ParamEnv::default(),
+                GoalPolarity::Positive,
+                "Outer",
+                &text,
+                &[placeholder],
+                &[],
+            ),
+            SolveResult::NoEvidence,
+            "the nested universal must be fresh even when its ordinal equals the outer placeholder",
+        );
+        assert_eq!(
+            db.solve("Witness", &local),
+            SolveResult::NoEvidence,
+            "an inner higher-ranked binder must not alias an outer binder with the same ordinal"
+        );
+
+        let universal = "trait Pair<A,B>{} trait Outer<A>{} trait Witness{} struct Local{} impl<X,Y> Pair<X,Y> for Text{} impl<U> Outer<U> for Text where for<V> Text:Pair<U,V>{} impl Witness for Local where for<T> Text:Outer<T>{} main()->{()}";
+        let program = crate::parser::parse(crate::lexer::lex(universal).unwrap()).unwrap();
+        let db = TraitDb::build(&program).unwrap();
+        assert_eq!(db.solve("Witness", &local), SolveResult::Proven);
     }
 
     #[test]

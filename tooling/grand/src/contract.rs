@@ -52,6 +52,10 @@ pub struct Capabilities {
     pub serve: Option<ServeCapabilities>,
     #[serde(default, rename = "multi-file")]
     pub multi_file: bool,
+    /// The first input is a crate root and external `mod` declarations follow
+    /// the hybrid self-named-directory layout.
+    #[serde(default)]
+    pub modules: bool,
     #[serde(default)]
     pub phases: Vec<String>,
     #[serde(default)]
@@ -265,8 +269,16 @@ pub enum DeclarationKind {
 /// One top-level declaration from an interface scan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Declaration {
+    /// Compiler-owned namespace/module identity. Legacy compilers omit it;
+    /// callers then fall back to the unqualified spelling.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
     pub name: String,
     pub kind: DeclarationKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<String>,
     pub file: PathBuf,
     pub line: usize,
     #[serde(default, skip_serializing_if = "Option::is_none")]

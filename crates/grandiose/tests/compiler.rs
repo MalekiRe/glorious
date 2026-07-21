@@ -4084,12 +4084,12 @@ fn generic_aliases_are_transparent_in_use_and_drop_heads() {
     let diagnostics = compile_raw_source("alias-duplicate-drop-head.gr", duplicate)
         .expect_err("an alias installed a second Drop hook on one nominal head");
     assert!(
-        diagnostics
-            .iter()
-            .any(|diagnostic| {
-                diagnostic.code.as_deref() == Some("G1TR001")
-                    && diagnostic.message.contains("overlapping implementations of `Drop`")
-            }),
+        diagnostics.iter().any(|diagnostic| {
+            diagnostic.code.as_deref() == Some("G1TR001")
+                && diagnostic
+                    .message
+                    .contains("overlapping implementations of `Drop`")
+        }),
         "{diagnostics:#?}"
     );
 }
@@ -6859,10 +6859,6 @@ fn invalid_straight_line_loans_report_source_errors_before_artifact_verification
             "cannot escape",
         ),
         (
-            "struct Holder { value: &i64 } unpack(value: Holder) -> &i64 { let projected = value.value; projected } main() -> { () }",
-            "cannot escape",
-        ),
-        (
             "borrow_sink(value: &i64) -> { () } bad() -> { borrow_sink(&(1 + 2)); } main() -> { () }",
             "not a temporary expression",
         ),
@@ -6880,6 +6876,65 @@ fn invalid_straight_line_loans_report_source_errors_before_artifact_verification
                 .any(|error| error.code.as_deref() == Some("G1BC999"))
         );
     }
+}
+
+#[test]
+fn stored_reference_can_escape_an_owned_carrier() {
+    let source = r#"
+        struct Holder { value: &i64 }
+        unpack(value: Holder) -> &i64 {
+            let projected = value.value;
+            projected
+        }
+        read() -> i64 {
+            let value = 42;
+            let result = unpack(Holder { value: &value });
+            *result
+        }
+        main() -> { () }
+    "#;
+    let artifact = compile_raw_source("owned-reference-carrier.gr", source).unwrap();
+    verify(artifact.clone()).unwrap();
+
+    let unpack = artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "unpack")
+        .unwrap() as u32;
+    let contract = artifact
+        .reference_return_contracts
+        .iter()
+        .find(|contract| contract.function == unpack)
+        .unwrap();
+    assert_eq!(contract.routes.len(), 1);
+    assert_eq!(contract.routes[0].result_path, Vec::<u32>::new());
+    assert!(matches!(
+        &contract.routes[0].origin,
+        grandiose_vm::bytecode::ReferenceReturnOrigin::Parameter { parameter: 0, path }
+            if path == &[0]
+    ));
+}
+
+#[test]
+fn stored_reference_in_a_local_owned_carrier_cannot_escape() {
+    let source = r#"
+        struct Holder { value: &i64 }
+        bad() -> &i64 {
+            let value = 42;
+            let holder = Holder { value: &value };
+            let projected = holder.value;
+            projected
+        }
+        main() -> { () }
+    "#;
+    let errors = compile_raw_source("local-reference-carrier.gr", source)
+        .expect_err("a locally rooted stored reference must not escape");
+    assert!(
+        errors.iter().any(|error| {
+            error.code.as_deref() == Some("G1BC002") && error.message.contains("cannot escape")
+        }),
+        "{errors:#?}"
+    );
 }
 
 #[test]
@@ -7414,8 +7469,20 @@ fn ordinary_string_alias_resolves_to_text_through_calls_and_nominals() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(nominal_names.iter().filter(|name| **name == "Label").count(), 1);
-    assert_eq!(nominal_names.iter().filter(|name| **name == "Message").count(), 1);
+    assert_eq!(
+        nominal_names
+            .iter()
+            .filter(|name| **name == "Label")
+            .count(),
+        1
+    );
+    assert_eq!(
+        nominal_names
+            .iter()
+            .filter(|name| **name == "Message")
+            .count(),
+        1
+    );
     assert!(!nominal_names.contains(&"String"));
     let make = artifact
         .functions
@@ -7462,7 +7529,13 @@ fn aliases_resolve_forward_chains_and_nominal_targets_without_descriptors() {
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(nominal_names.iter().filter(|name| **name == "Boxed").count(), 1);
+    assert_eq!(
+        nominal_names
+            .iter()
+            .filter(|name| **name == "Boxed")
+            .count(),
+        1
+    );
     for alias in ["Count", "Later", "Wrapped"] {
         assert!(
             !nominal_names.contains(&alias),

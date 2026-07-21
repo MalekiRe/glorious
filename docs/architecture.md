@@ -37,8 +37,9 @@ matrix, deterministic collections, diagnostic/source-map support, and the
 compiler toolkit; mechanically repetitive APIs are reviewed for generation or
 generic expression but are not deleted merely to hit a line count.
 
-The implementation does not provide modules, packages, FFI, unsafe Grandiose,
-threads, distributed builds, or a native backend in generation 1. The compiler
+The compiler provides structured source modules and explicit package roots, but
+does not itself provide package acquisition/version selection, FFI, unsafe
+Grandiose, threads, distributed builds, or a native backend in generation 1. The compiler
 must not recognize source declarations named `if`, `match`, `loop`, `return`,
 `yield`, `await`, arithmetic operators, or any other standard-library control
 name.
@@ -464,7 +465,7 @@ encodings remain implemented. An older VM may reject a newer artifact cleanly.
 
 The bootstrap compiler is deliberately table driven and body local:
 
-- one source file, flat tagged records, and append-only arrays rather than a
+- one crate transaction, flat tagged records, and append-only arrays rather than a
   hierarchy of visitors, query objects, or per-node heap allocations;
 - open-addressed hash tables for lookup, followed by sorting only at diagnostic
   and bytecode boundaries;
@@ -483,8 +484,9 @@ The bootstrap compiler is deliberately table driven and body local:
 The compiler must not retain tokens, body AST, Typed Core, MIR, and emitted
 bytecode for the same monomorphic body simultaneously. At each phase boundary it
 keeps only the next representation plus compact source provenance. Abstract
-interface serialization is produced only by conformance/debug modes in G1,
-because there is no module loader in the normal compilation path.
+interface serialization is produced only by conformance/debug modes in G1; the
+module loader consumes compact in-session interface tables rather than a
+serialized intermediate format.
 
 ## 6. Delivery and acceptance gates
 
@@ -518,5 +520,7 @@ grc [-O0|-O1|-O2|-O3] [--emit mir|bytecode] SOURCE [SOURCE...] -o OUTPUT
 `grc` is the compiler bytecode invoked through `grvm`; a native `grc` executable,
 if supplied, is only a launcher and contains no compiler logic. The launcher or
 compiler driver prepends its distribution's `std-lib.glorious`; the first
-explicit source is primary and remaining sources are concatenated in argument
-order under the contract in `std-lib.md`.
+explicit source is the crate root. Its declared external modules are discovered
+recursively under the hybrid layout in `std-lib.md`. Explicit additional inputs
+remain a hermetic embedding API and must correspond to declared modules whenever
+the crate uses module syntax.

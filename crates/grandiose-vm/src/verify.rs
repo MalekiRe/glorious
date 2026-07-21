@@ -1623,9 +1623,9 @@ fn verify_function(
         .map(|register| register as u32)
         .collect::<Vec<_>>();
     let mut order_states: Vec<Option<Vec<u32>>> = vec![None; f.code_len as usize];
-    // A deconstructed shell may be reconstructed into the same storage place
-    // by compiler-generated observational pattern tests. Remember its owner
-    // age so reconstruction cannot perturb observable reverse-cleanup order.
+    // A deconstructed shell's compacted storage slot may be reinitialized by
+    // a later construct or projected field. Remember its logical owner age so
+    // physical register reuse cannot perturb observable reverse-cleanup order.
     let mut shell_age_states: Vec<Option<Vec<Option<usize>>>> = vec![None; f.code_len as usize];
     states[0] = Some(entry);
     order_states[0] = Some(std::mem::take(&mut order_entry));
@@ -1718,8 +1718,12 @@ fn verify_function(
         order.retain(|register| state[*register as usize]);
         for register in 0..state.len() {
             if state[register] && !before[register] && !order.contains(&(register as u32)) {
-                if matches!(ins, Instruction::Construct { dst, .. } if *dst as usize == register)
-                    && let Some(position) = shell_ages[register].take()
+                if matches!(
+                    ins,
+                    Instruction::Construct { dst, .. }
+                        | Instruction::ProjectMove { dst, .. }
+                        if *dst as usize == register
+                ) && let Some(position) = shell_ages[register].take()
                 {
                     order.insert(position.min(order.len()), register as u32);
                 } else {
@@ -2810,9 +2814,6 @@ fn terminal_effect_payload_summaries(a: &Artifact) -> Vec<Option<TerminalEffectP
             .map(|ty| quantity_leaf_types(a, *ty).len())
             .collect::<Vec<_>>();
         let input_count = shapes[..=function.params.len()].iter().sum::<usize>();
-        if input_count == 0 {
-            return None;
-        }
         let mut entry = shapes
             .iter()
             .map(|len| vec![None; *len])
@@ -3141,6 +3142,8 @@ fn owned_receiver_quantity_summaries(a: &Artifact) -> Vec<Option<OwnedReceiverQu
         terminal_summaries: &[Option<TerminalEffectPayloadSummary>],
         targets_at_pcs: &[Vec<CallableTargets>],
     ) -> Option<OwnedReceiverQuantitySummary> {
+        const BORROWED_RECEIVER_ORIGIN: usize = usize::MAX;
+
         let function = a.functions.get(fid as usize)?;
         let shapes = function
             .register_types
@@ -3180,6 +3183,9 @@ fn owned_receiver_quantity_summaries(a: &Artifact) -> Vec<Option<OwnedReceiverQu
                 .collect::<Vec<_>>();
             state.origins[register] = vec![None; shapes[register]];
             for origin in consumed.into_iter().flatten() {
+                if origin == BORROWED_RECEIVER_ORIGIN {
+                    continue;
+                }
                 let still_live = state
                     .origins
                     .iter()
@@ -3226,6 +3232,14 @@ fn owned_receiver_quantity_summaries(a: &Artifact) -> Vec<Option<OwnedReceiverQu
                     for field in fields {
                         state.origins[*field as usize].fill(None);
                     }
+                }
+                Instruction::ProjectCopy { dst, src: 0, .. }
+                    if matches!(function.receiver_mode, Some(0 | 1))
+                        && shapes[0] == 0
+                        && shapes[*dst as usize] != 0 =>
+                {
+                    state.origins[*dst as usize] =
+                        vec![Some(BORROWED_RECEIVER_ORIGIN); shapes[*dst as usize]];
                 }
                 Instruction::ProjectMove { dst, src, field }
                 | Instruction::ProjectCopy { dst, src, field } => {
@@ -3305,7 +3319,9 @@ fn owned_receiver_quantity_summaries(a: &Artifact) -> Vec<Option<OwnedReceiverQu
                     let [Some(origin)] = state.origins[*resumption as usize].as_slice() else {
                         return None;
                     };
-                    state.resumes[*origin] = state.resumes[*origin].checked_add(1)?;
+                    if *origin != BORROWED_RECEIVER_ORIGIN {
+                        state.resumes[*origin] = state.resumes[*origin].checked_add(1)?;
+                    }
                     if *receiver_mode == 2 {
                         consume(
                             &mut state,
@@ -8277,6 +8293,20 @@ fn aggregate_reference_return_origins_with(
                 .into_iter()
                 .map(|(path, unique)| (CarrierOrigin::Receiver { path }, unique, whole_carrier)),
         );
+        if let Ok(Type::RefShared { referent } | Type::RefUnique { referent }) =
+            type_at(a, function.register_types[0])
+        {
+            sources.extend(
+                reference_leaves(a, *referent)
+                    .into_iter()
+                    // An empty path is indistinguishable from the outer
+                    // reference leaf and would add a second candidate for a
+                    // plain `&&T -> &&T` forwarder. Nested carrier recovery is
+                    // only needed for an actual field path in the referent.
+                    .filter(|(path, _)| !path.is_empty())
+                    .map(|(path, unique)| (CarrierOrigin::Receiver { path }, unique, false)),
+            );
+        }
     }
     for (parameter, ty) in function.params.iter().enumerate() {
         let leaves = reference_leaves(a, *ty);
@@ -8288,6 +8318,16 @@ fn aggregate_reference_return_origins_with(
                 whole_carrier,
             )
         }));
+        if let Ok(Type::RefShared { referent } | Type::RefUnique { referent }) = type_at(a, *ty) {
+            sources.extend(
+                reference_leaves(a, *referent)
+                    .into_iter()
+                    .filter(|(path, _)| !path.is_empty())
+                    .map(|(path, unique)| {
+                        (CarrierOrigin::Parameter { parameter, path }, unique, false)
+                    }),
+            );
+        }
         if let Some(element) = array_element_type(a, *ty) {
             let element_leaves = reference_leaves(a, element);
             for (path, unique) in &element_leaves {
@@ -8512,21 +8552,46 @@ fn aggregate_reference_return_origins_inner(
                     .map(|(path, origin)| (path[prefix.len()..].to_vec(), origin.clone()))
                     .collect::<CarrierOrigins>();
                 if projected.is_empty()
-                    && *src == 0
-                    && matches!(f.receiver_mode, Some(0 | 1))
-                    && let [(carrier_path, CarrierOrigin::Receiver { path: root_path })] =
-                        state[*src as usize].as_slice()
+                    && matches!(
+                        type_at(a, f.register_types[*src as usize]),
+                        Ok(Type::RefShared { .. } | Type::RefUnique { .. })
+                    )
+                    && let [(carrier_path, carrier)] = state[*src as usize].as_slice()
                     && carrier_path.is_empty()
                 {
-                    projected = reference_leaves(a, f.register_types[*dst as usize])
-                        .into_iter()
-                        .map(|(result_path, _)| {
-                            let mut source_path = root_path.clone();
-                            source_path.push(*field);
-                            source_path.extend(result_path.iter().copied());
-                            (result_path, CarrierOrigin::Receiver { path: source_path })
-                        })
-                        .collect();
+                    let nested_origin = match carrier {
+                        CarrierOrigin::Receiver { path }
+                            if *src == 0 && matches!(f.receiver_mode, Some(0 | 1)) =>
+                        {
+                            Some((None, path.clone()))
+                        }
+                        CarrierOrigin::Parameter { parameter, path }
+                            if *src as usize == parameter + 1 =>
+                        {
+                            Some((Some(*parameter), path.clone()))
+                        }
+                        CarrierOrigin::Receiver { .. }
+                        | CarrierOrigin::Parameter { .. }
+                        | CarrierOrigin::Local => None,
+                    };
+                    if let Some((parameter, mut source_prefix)) = nested_origin {
+                        source_prefix.push(*field);
+                        projected = reference_leaves(a, f.register_types[*dst as usize])
+                            .into_iter()
+                            .map(|(result_path, _)| {
+                                let mut source_path = source_prefix.clone();
+                                source_path.extend(result_path.iter().copied());
+                                let origin = match parameter {
+                                    Some(parameter) => CarrierOrigin::Parameter {
+                                        parameter,
+                                        path: source_path,
+                                    },
+                                    None => CarrierOrigin::Receiver { path: source_path },
+                                };
+                                (result_path, origin)
+                            })
+                            .collect();
+                    }
                 }
                 state[*dst as usize] = projected;
             }
@@ -10085,6 +10150,7 @@ fn merge_exclusive_enum_carrier_loans(
 // No well-formed aggregate can have `u32::MAX` fields, so this marker makes
 // exact array slots unambiguous without extending the bytecode ABI.
 const ARRAY_SLOT_PATH: u32 = u32::MAX;
+const STORED_REFERENCE_DEREF: u32 = u32::MAX - 1;
 
 fn array_slot_path(index: u64, mut element_path: Vec<u32>) -> Option<Vec<u32>> {
     let index = u32::try_from(index).ok()?;
@@ -10379,9 +10445,13 @@ fn remap_carrier_loans(
         return Err(VerifyError::InvalidFunction(fid));
     }
     for (loan, (path, unique)) in carried.iter_mut().zip(leaves) {
-        if loan.loan.unique != unique {
+        // A unique origin may be safely exposed through a shared result (the
+        // callee's verified return contract proves the reborrow route), but a
+        // shared origin must never be upgraded to unique.
+        if unique && !loan.loan.unique {
             return Err(VerifyError::InvalidFunction(fid));
         }
+        loan.loan.unique = unique;
         loan.path = path;
     }
     Ok(carried)
@@ -10567,11 +10637,27 @@ fn single_reference_leaf(a: &Artifact, ty: TypeId) -> Option<bool> {
 }
 
 fn places_overlap(a: &BorrowedPlace, b: &BorrowedPlace) -> bool {
-    a.owner == b.owner
-        && a.projections
-            .iter()
-            .zip(&b.projections)
-            .all(|(left, right)| left == right)
+    if a.owner != b.owner {
+        return false;
+    }
+    let common = a
+        .projections
+        .iter()
+        .zip(&b.projections)
+        .take_while(|(left, right)| left == right)
+        .count();
+    if common < a.projections.len().min(b.projections.len()) {
+        return false;
+    }
+    let remainder = if a.projections.len() < b.projections.len() {
+        &b.projections[common..]
+    } else {
+        &a.projections[common..]
+    };
+    // A reference stored in an aggregate points outside the aggregate place.
+    // Crossing that indirection starts a distinct alias domain even though
+    // its symbolic return route remains rooted in the same parameter.
+    !remainder.contains(&STORED_REFERENCE_DEREF)
 }
 
 /// Identify the snapshot/commit move bundles emitted for MIR block edges.
@@ -11301,31 +11387,48 @@ fn verify_loans(
                     })
                     .collect::<Vec<_>>();
                 if projected.is_empty()
-                    && *src == 0
-                    && matches!(f.receiver_mode, Some(0 | 1))
+                    && matches!(
+                        type_at(a, f.register_types[*src as usize]),
+                        Ok(Type::RefShared { .. } | Type::RefUnique { .. })
+                    )
                     && let [root] = loans[*src as usize].as_slice()
                     && root.path.is_empty()
                 {
-                    // A borrowed receiver register carries the whole external
-                    // environment reference, while PROJECT_COPY addresses a
-                    // field inside its referent. Materialize the destination's
-                    // structural reference leaves from that authenticated root
-                    // instead of losing them merely because the carrier itself
-                    // has no aggregate field path.
+                    // A reference carrier names its referent as a whole, while
+                    // PROJECT_COPY addresses a stored reference inside that
+                    // referent. For local referents, recover the field's actual
+                    // loan (which may be rooted somewhere entirely different);
+                    // for external referents, retain the authenticated symbolic
+                    // descendant path for the callee's return contract.
                     projected = reference_leaves(a, f.register_types[*dst as usize])
                         .into_iter()
-                        .map(|(path, unique)| {
-                            let mut place = root.loan.place.clone();
-                            place.projections.push(*field);
-                            place.projections.extend(path.iter().copied());
-                            CarrierLoan {
-                                path,
-                                loan: Loan {
-                                    place,
-                                    unique,
-                                    suspended_parent: root.loan.suspended_parent,
-                                    referent_initialized: root.loan.referent_initialized,
-                                },
+                        .filter_map(|(path, unique)| {
+                            let mut source_path = root.loan.place.projections.clone();
+                            source_path.push(*field);
+                            source_path.extend(path.iter().copied());
+                            if (root.loan.place.owner as usize) < loans.len() {
+                                loans[root.loan.place.owner as usize]
+                                    .iter()
+                                    .find(|loan| loan.path == source_path)
+                                    .cloned()
+                                    .map(|mut loan| {
+                                        loan.path = path;
+                                        loan
+                                    })
+                            } else {
+                                let mut place = root.loan.place.clone();
+                                place.projections.push(STORED_REFERENCE_DEREF);
+                                place.projections.push(*field);
+                                place.projections.extend(path.iter().copied());
+                                Some(CarrierLoan {
+                                    path,
+                                    loan: Loan {
+                                        place,
+                                        unique,
+                                        suspended_parent: root.loan.suspended_parent,
+                                        referent_initialized: root.loan.referent_initialized,
+                                    },
+                                })
                             }
                         })
                         .collect();
@@ -11740,10 +11843,43 @@ fn verify_loans(
                         let argument = *args
                             .get(parameter)
                             .ok_or(VerifyError::InvalidFunction(*function))?;
-                        let mut loan = loans[argument as usize]
+                        let direct = loans[argument as usize]
                             .iter()
                             .find(|loan| loan.path == path)
-                            .cloned()
+                            .cloned();
+                        let nested = (|| {
+                            let [reference] = loans[argument as usize].as_slice() else {
+                                return None;
+                            };
+                            if !reference.path.is_empty()
+                                || !reference.loan.referent_initialized
+                                || !matches!(
+                                    type_at(a, f.register_types[argument as usize]),
+                                    Ok(Type::RefShared { .. } | Type::RefUnique { .. })
+                                )
+                            {
+                                return None;
+                            }
+                            let mut source_path = reference.loan.place.projections.clone();
+                            source_path.extend(path.iter().copied());
+                            if (reference.loan.place.owner as usize) < loans.len() {
+                                loans[reference.loan.place.owner as usize]
+                                    .iter()
+                                    .find(|loan| loan.path == source_path)
+                                    .cloned()
+                            } else {
+                                let mut loan = reference.clone();
+                                loan.loan.place.projections.push(STORED_REFERENCE_DEREF);
+                                loan.loan.place.projections.extend(path.iter().copied());
+                                loan.loan.unique = result_leaves
+                                    .iter()
+                                    .find(|(candidate, _)| candidate == &result_path)
+                                    .is_some_and(|(_, unique)| *unique);
+                                Some(loan)
+                            }
+                        })();
+                        let mut loan = direct
+                            .or(nested)
                             .ok_or(VerifyError::InvalidFunction(*function))?;
                         loan.path = result_path;
                         returned.push(loan);
@@ -27008,6 +27144,67 @@ mod tests {
             verify(wrong_source).unwrap_err(),
             VerifyError::InvalidFunction(0)
         );
+    }
+
+    #[test]
+    fn stored_reference_projection_through_reference_parameter_proves_nested_route() {
+        let mut types = Type::predefined();
+        let shared = types.len() as TypeId;
+        types.push(Type::RefShared { referent: I64 });
+        let cursor = types.len() as TypeId;
+        types.push(Type::Struct {
+            name: "Cursor".into(),
+            fields: vec![
+                Field {
+                    name: "value".into(),
+                    ty: shared,
+                },
+                Field {
+                    name: "index".into(),
+                    ty: USIZE,
+                },
+            ],
+            copy: false,
+        });
+        let cursor_reference = types.len() as TypeId;
+        types.push(Type::RefUnique { referent: cursor });
+        let artifact = Artifact {
+            required_features: 1 | (1 << 1),
+            types,
+            reference_return_contracts: vec![ReferenceReturnContract {
+                function: 0,
+                routes: vec![ReferenceReturnRoute {
+                    result_path: vec![],
+                    origin: ReferenceReturnOrigin::Parameter {
+                        parameter: 0,
+                        path: vec![0],
+                    },
+                }],
+            }],
+            functions: vec![Function {
+                name: "stored".into(),
+                flags: 0,
+                params: vec![cursor_reference],
+                return_type: shared,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, cursor_reference, shared],
+                code_start: 0,
+                code_len: 3,
+                label_slot_count: 0,
+            }],
+            code: vec![
+                Instruction::ProjectCopy {
+                    dst: 2,
+                    src: 1,
+                    field: 0,
+                },
+                Instruction::Drop { register: 1 },
+                Instruction::Return { src: Some(2) },
+            ],
+            ..Artifact::default()
+        };
+        verify(artifact).expect("the nested stored-reference route must be body-proved");
     }
 
     #[test]

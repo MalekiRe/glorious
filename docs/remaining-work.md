@@ -5,25 +5,8 @@ VM. Completed work is intentionally omitted. The legacy LLVM compiler, eventual
 wholesale port into Grandiose, and self-hosting convergence are excluded from
 current compiler-completion percentages and are tracked separately below.
 
-## Current gates
-
-Focused compiler, VM, optimizer, ownership, generic, handler, standard-library,
-formatter, LSP, and `grand` suites cover the implemented slices. Before the next
-release checkpoint, rerun formatting, strict workspace Clippy, all root and
-tooling-workspace tests, and hostile-artifact suites together. Any remaining
-failure must be reconciled as either a regression or an explicitly updated
-diagnostic expectation; no known failure is considered completed work.
-
-## Active hardest tranche
-
-These are the hardest currently active implementation tasks, in dependency
-order. Remove an item when its production behavior, adversarial tests, and
-relevant strict gates are complete; then promote the next hardest remaining
-item from the backlog.
-
-1. Complete the optimizer backlog after semantic breadth: cleanup/effect
-   specialization, CFG cloning, tail formation, scalar replacement, GVN,
-   register reuse, and related backend optimization infrastructure.
+Further VM hardening is out of the active product scope. Optimizer breadth is
+retained below but scheduled after the core language and tooling tranche.
 
 ## 3. Effects, handlers, and resumptions
 
@@ -33,22 +16,6 @@ item from the backlog.
   forwarded terminal fusion and canonical single-performance one-shot
   resume/cancel composition: deeper forwarding graphs, branching or repeated
   performances, captured continuations, and multishot/deep-reinstating cases.
-
-## 4. Generics, traits, and lifetimes
-
-### 4.2 Higher-ranked generics and universes
-
-- higher-ranked const and effect binders where permitted;
-- higher-ranked outlives constraints;
-- deeper nested-universe substitution beyond current trait, callable-marker,
-  and associated-equality evidence paths.
-
-### 4.3 Const generics
-
-- const-generic aliases;
-- const expressions, arithmetic, and defaults;
-- layout-level const consumers such as arrays rather than phantom identity;
-- non-`u32`/`Quantity` kinds if G1 intends any.
 
 ## 5. MIR and bytecode backend
 
@@ -163,83 +130,6 @@ item from the backlog.
 - loop normalization without a unique preheader;
 - more precise trap, alias, range, and trip-count proofs.
 
-## 8. Standard library
-
-### 8.1 Scalars and fundamental traits
-
-- exact runtime parsing of the generation-1 decimal float grammar;
-- complete the fundamental trait surface for `Option`, `Result`, and tuples;
-  close the remaining symbolic/provisional receiver-typing path for bounded
-  `Eq`, `Ord`, `Hash`, `Default`, `Display`, and `Debug` calls inside those
-  generic implementations (recovery execution is covered);
-
-### 8.2 Result, Option, ranges, and helpers
-
-- deliberately trapping conveniences if desired;
-- assertions, `assert_eq`, `unreachable`, abort wrappers, and an
-  ownership-aware `Slot<T>` if retained.
-
-### 8.3 Text, bytes, and formatting
-
-- byte/character/index iteration and view hashing;
-- escaped output beyond the implemented String `Debug` escapes and arbitrary
-  formatting values;
-- hex formatting and complete `Display`/`Debug` integration (signed and
-  unsigned decimal formatting through 128 bits is implemented);
-- ordinary `format` callable;
-- `SourceMap`, line tables, labels, severities, notes, and a deterministic
-  source-defined diagnostic renderer.
-
-### 8.4 Collections and algorithms
-
-- Vec split/drain APIs, additional iterator forms, restricted-element
-  abandonment tests, and unified-PlaceFlow validation;
-- extend the implemented private generic `HashMap`/`HashSet` core (deterministic
-  open addressing, growth, capacity budgets, insertion/replacement, lookup,
-  membership, bounded collision-cluster-repair removal, length/capacity/empty
-  queries, `get_mut`, one-probe occupied/vacant entry insertion, deterministic
-  exhaustive owning iteration, borrowed iterator representations, O0--O3 VM
-  execution, and recovery parity) with reference-returning insert-or-get and
-  borrowed-consumer specialization breadth, checked raw-entry probing,
-  `remove_entry`/general reserve and clear, and set union/intersection APIs;
-
-### 8.5 Compiler toolkit
-
-- Ordinary source now implements private, checked `Id<Tag>`, `IndexVec`, the
-  rollback-capable `Arena`, machine-word `BitSet`, `SparseSet`, a deduplicating
-  FIFO `WorkQueue`, arbitrary-key hash-backed `MultiMap<K,V>`, and line/column
-  `SourceMap`. Their
-  storage, rollback, set-algebra, queue, grouping, capacity, O0--O3 VM, and
-  recovery paths have focused coverage. The remaining collection-dependent
-  part is an optional borrowed-key raw-entry optimization for `MultiMap`.
-  `Interner<T>` is fully generic and hash-backed,
-  stores each canonical value once, preserves insertion-order IDs, and checks
-  equality within deterministic hash buckets; String and colliding non-String
-  heads have O0--O3/recovery coverage.
-- Checked counters, monotonic logical `StepBudget`s, and stable-field-order,
-  timer-free compiler statistics records are implemented and tested for atomic
-  overflow/limit rejection.
-
-## 9. Compiler CLI and tooling
-
-### 9.2 Formatter and LSP
-
-- extend the implemented persistent per-workspace-root document session (root
-  transactions, compiler-check diagnostics, and atomic last-good declaration /
-  definition snapshots are implemented) with per-body incremental elaboration
-  and retained transactional inference arenas;
-- add compiler-exported span-to-type and fully resolved local-definition side
-  tables (stable top-level identities, exact declaration/name spans, and
-  last-good top-level definition tables are implemented);
-- extend the authoritative compiler-interface-backed symbols, cross-file
-  definition, completion, references, rename, hover signatures/docs, and full
-  compiler diagnostics with inferred-type hover, hints, and dependency
-  navigation; authoritative callable signature help and semantic tokens for
-  compiler-bound declarations/occurrences plus compiler-lexed source classes
-  are implemented with UTF-16, multi-file, and transactional last-good
-  coverage. Replace the remaining lexical local-scope fallback once compiler
-  local-definition tables exist.
-
 ## 10. Testing and release hardening
 
 - coverage-guided hostile decoder/verifier/VM fuzz targets and broader runtime
@@ -248,9 +138,7 @@ item from the backlog.
   array-length, sparse extreme label namespaces, and supervised
   allocation-limit corpora are implemented);
 - determinism tests for optimizer caches/maps, statistics, and fingerprints;
-- resource-limit diagnostics and pass budget/fixed-point remarks;
-- self-compilation performance gate below 120 seconds and 4 GiB;
-- refresh stale documentation that describes completed work as missing.
+- resource-limit diagnostics and pass budget/fixed-point remarks.
 
 ## 11. Port and self-hosting tracked separately
 
@@ -267,12 +155,15 @@ These are not included in current compiler-completion percentages:
 
 These are not part of the completion backlog:
 
-- modules/import/package syntax inside the language;
+- package-manager syntax inside the language (source modules/imports are in scope);
 - FFI, unsafe Grandiose, reflection, macros, or derive;
 - threads, async executor, networking, or garbage collection;
 - shared mutable reference counting, tree maps, regex, locale/date/time,
   arbitrary-precision integers, general serialization, runtime dependency
   discovery;
+- borrowed-key raw-entry optimization for `MultiMap` (the deterministic
+  arbitrary-key implementation is complete without this performance-only
+  specialization);
 - compiler-known `if`, `match`, `loop`, or operator semantics;
 - unbounded resumption quantities without a generalized runtime
   representation, use tracking, copy-glue policy, and verifier summaries;
@@ -287,22 +178,5 @@ These are not part of the completion backlog:
   a handler, and outward-row mismatches;
 - optimizer transformations that weaken traps, `Use`, cleanup, or custom-`Drop`;
 - O3 legality rules different from O2;
-- associated type defaults, qualified module paths, and open effect-row aliases
-  unless explicitly added to product scope.
-
-## 13. Recommended dependency order
-
-1. Finish frontend PlaceFlow consolidation, move-path restoration, nested unique
-   projections, and generic borrowing/reference transport.
-2. Complete dynamic effect/capture/provenance summaries and handler/outward
-   effect breadth.
-3. Complete inferred and projection-based trait-method selection,
-   higher-ranked/effect-row generics, aliases, and blanket/intrinsic evidence.
-4. Add checked MIR mutation, reusable analyses, register allocation, block
-   layout, direct cleanup serialization, and bytecode-input validation.
-5. Complete nonlocal optimizer breadth: cleanup, scalar replacement, callable
-   and effect specialization, multi-block inlining, tail formation, and LICM.
-6. Finish continuation/effect-summary compaction.
-7. Complete the source standard library/toolkit, canonical CLI/build flow,
-   semantic tooling, editor distribution, and multi-workspace CI.
-8. Perform the separately tracked wholesale port and stage convergence.
+- associated type defaults and open effect-row aliases unless explicitly added
+  to product scope.

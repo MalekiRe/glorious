@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
-use crate::bundle::{assemble, input_files, package_sources};
+use crate::bundle::{assemble, input_files, module_input_files, package_sources};
 use crate::compiler::{discover_runtime, discover_vm, Compiler};
 use crate::contract::{Declaration, DeclarationKind, Diagnostic, Fix, Severity};
 use crate::lock::{Lockfile, LOCK_NAME};
@@ -199,7 +199,16 @@ fn compile(
             compiler.caps.contract
         );
     }
-    let files = input_files(resolution, entry)?;
+    let watched_files = input_files(resolution, entry)?;
+    let module_aware = compiler.caps.modules && compiler.caps.grc.as_deref() != Some("fake");
+    if module_aware && !compiler.caps.multi_file {
+        bail!("compiler advertises `modules` without the required `multi-file` capability");
+    }
+    let files = if module_aware {
+        module_input_files(resolution, entry)?
+    } else {
+        watched_files.clone()
+    };
     let mut diagnostics = preflight(compiler, &files)?;
     progress!(
         "  Collected {} file(s), {} package(s)",
@@ -216,18 +225,33 @@ fn compile(
     };
     let compiler_output = build_dir.join(format!("{stem}.{extension}"));
     let output = (want_ir || !compiler.caps.has_phase("check")).then_some(compiler_output);
-    let (inputs, bundle) = if compiler.caps.multi_file {
-        (
-            files
-                .iter()
+    let (inputs, dependency_roots, bundle) = if compiler.caps.multi_file {
+        if module_aware {
+            let primary = files
+                .first()
                 .map(|(_, file)| file.clone())
-                .collect::<Vec<_>>(),
-            None,
-        )
+                .into_iter()
+                .collect::<Vec<_>>();
+            let dependencies = files
+                .iter()
+                .skip(1)
+                .map(|(name, file)| (name.clone(), file.clone()))
+                .collect::<Vec<_>>();
+            (primary, dependencies, None)
+        } else {
+            (
+                files
+                    .iter()
+                    .map(|(_, file)| file.clone())
+                    .collect::<Vec<_>>(),
+                Vec::new(),
+                None,
+            )
+        }
     } else {
         let bundle = assemble(&files)?;
         let path = bundle.write(&build_dir, stem)?;
-        (vec![path], Some(bundle))
+        (vec![path], Vec::new(), Some(bundle))
     };
 
     // Freshness: skip the compiler when inputs + compiler identity are
@@ -241,9 +265,16 @@ fn compile(
                 hasher.update(bundle.text.as_bytes());
             }
             None => {
-                for input in &inputs {
+                let fingerprint_files = if module_aware { &watched_files } else { &files };
+                for (_, input) in fingerprint_files {
                     hasher.update(input.to_string_lossy().as_bytes());
                     hasher.update(&std::fs::read(input).unwrap_or_default());
+                }
+                if module_aware {
+                    for input in &inputs {
+                        hasher.update(input.to_string_lossy().as_bytes());
+                        hasher.update(&std::fs::read(input).unwrap_or_default());
+                    }
                 }
             }
         }
@@ -276,7 +307,7 @@ fn compile(
     }
 
     progress!("  Compiling {}", project.manifest.project.name);
-    let mut report = compiler.compile(&inputs, output.as_deref(), opt)?;
+    let mut report = compiler.compile(&inputs, &dependency_roots, output.as_deref(), opt)?;
     if report.success && report.diagnostics.is_empty() {
         let _ = std::fs::write(&fingerprint_path, &fingerprint);
     } else {
@@ -331,9 +362,9 @@ fn compile_ok(
 
 /// Cross-package name-collision preflight over the flat namespace, returned
 /// as diagnostics (lint-adjustable). Findings from the compiler's own
-/// interface scan are errors (GRAND001); findings from the heuristic scanner
-/// are warnings only, because it can misclassify. Shadowing the standard
-/// library warns (GRAND002).
+/// interface scan are errors (GRAND001); findings from the in-process fallback
+/// are warnings for compatibility with external legacy compilers. Shadowing
+/// the standard library warns (GRAND002).
 fn preflight(compiler: &Compiler, files: &[(String, PathBuf)]) -> Result<Vec<Diagnostic>> {
     let mut groups: Vec<(String, Vec<PathBuf>)> = Vec::new();
     for (package, file) in files {
@@ -371,6 +402,9 @@ fn preflight(compiler: &Compiler, files: &[(String, PathBuf)]) -> Result<Vec<Dia
             ) {
                 continue;
             }
+            if declaration.visibility.as_deref() == Some("private") {
+                continue;
+            }
             if std_declarations.iter().any(|s| s.name == declaration.name) {
                 findings.push(diagnostic(
                     Severity::Warning,
@@ -379,7 +413,11 @@ fn preflight(compiler: &Compiler, files: &[(String, PathBuf)]) -> Result<Vec<Dia
                     &[(&declaration, "shadowing declaration")],
                 ));
             }
-            match seen.get(&declaration.name) {
+            let identity = declaration
+                .identity
+                .clone()
+                .unwrap_or_else(|| declaration.name.clone());
+            match seen.get(&identity) {
                 Some((other_package, other)) if other_package != package => {
                     let severity = if authoritative {
                         Severity::Error
@@ -401,7 +439,7 @@ fn preflight(compiler: &Compiler, files: &[(String, PathBuf)]) -> Result<Vec<Dia
                 }
                 Some(_) => {} // same-package duplicates are the compiler's to report
                 None => {
-                    seen.insert(declaration.name.clone(), (package.clone(), declaration));
+                    seen.insert(identity, (package.clone(), declaration));
                 }
             }
         }
@@ -430,7 +468,7 @@ fn diagnostic(
                 message: Some((*message).into()),
             })
             .collect(),
-        note: Some("the flat namespace requires unique top-level names".into()),
+        note: Some("a qualified exported identity must be unique across packages".into()),
         help: None,
         fix: None,
     }
@@ -769,7 +807,8 @@ pub fn fix(cli_lints: &[(String, LintLevel)]) -> Result<()> {
 }
 
 /// Generate API documentation from interface scans (the compiler's when
-/// available, the heuristic scanner otherwise) into target/grand/doc.
+/// available, the compiler-owned in-process scanner otherwise) into
+/// target/grand/doc.
 pub fn doc(open: bool) -> Result<()> {
     let (project, resolution) = load_and_resolve(None)?;
     let compiler = Compiler::discover(&project.root)?;
@@ -945,17 +984,50 @@ fn escape(text: &str) -> String {
         .replace('>', "&gt;")
 }
 
-pub fn new(name: &str) -> Result<()> {
+pub fn new(name: &str, requested_root: Option<&Path>) -> Result<()> {
     if !valid_package_name(name) {
         bail!("`{name}` is not a valid package name (expected [a-z][a-z0-9-]*)");
     }
-    let root = PathBuf::from(name);
-    if root.exists() {
-        bail!("{} already exists", root.display());
+    let default_root = PathBuf::from(name);
+    let root = requested_root.unwrap_or(&default_root);
+    match std::fs::symlink_metadata(root) {
+        Ok(_) => bail!(
+            "destination `{}` already exists; use `grand init` to initialize an existing directory",
+            root.display()
+        ),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(error)
+                .with_context(|| format!("checking destination `{}`", root.display()));
+        }
     }
-    std::fs::create_dir_all(root.join("src"))?;
-    scaffold(&root, name)?;
-    eprintln!("    Created `{name}`");
+    let parent = root
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    if let Some(parent) = parent {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating parent directory `{}`", parent.display()))?;
+    }
+    // `create_dir`, rather than `create_dir_all`, makes the final existence
+    // check atomic and prevents a racing process from having files overwritten.
+    std::fs::create_dir(root)
+        .with_context(|| format!("creating destination `{}`", root.display()))?;
+    let result = (|| {
+        std::fs::create_dir(root.join("src"))?;
+        scaffold(root, name)
+    })();
+    if let Err(error) = result {
+        // Remove only the deterministic entries this invocation may have
+        // created. If another process added anything, the non-recursive final
+        // removals fail closed and leave that data intact.
+        let _ = std::fs::remove_file(root.join(MANIFEST_NAME));
+        let _ = std::fs::remove_file(root.join("src").join("main.glorious"));
+        let _ = std::fs::remove_file(root.join(".gitignore"));
+        let _ = std::fs::remove_dir(root.join("src"));
+        let _ = std::fs::remove_dir(root);
+        return Err(error).context("creating package scaffold");
+    }
+    eprintln!("    Created `{name}` at {}", root.display());
     Ok(())
 }
 

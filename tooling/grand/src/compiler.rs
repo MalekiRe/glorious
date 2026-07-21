@@ -1,5 +1,8 @@
-use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::{
+    ffi::OsString,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -76,7 +79,7 @@ pub struct Compiler {
 enum Kind {
     Executable(PathBuf),
     /// In-process stand-in (`GRAND_COMPILER=fake`): emits exit-0 modules,
-    /// fails on `FAKE_ERROR` markers, scans interfaces heuristically.
+    /// fails on `FAKE_ERROR` markers, scans interfaces in-process.
     /// `GRAND_FAKE_CAPS=multi-file,resolve,check,diagnostics,interfaces,std` selects
     /// which future capabilities it advertises (default: none = legacy).
     Fake,
@@ -134,7 +137,7 @@ impl Compiler {
     pub fn identity(&self) -> String {
         match &self.kind {
             Kind::Fake => format!(
-                "fake:{}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{}:{:?}:{:?}:{}",
+                "fake:{}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{:?}:{}:{}:{:?}:{:?}:{}",
                 self.caps.contract,
                 self.caps.contract_min,
                 self.caps.contract_max,
@@ -144,6 +147,7 @@ impl Compiler {
                 self.caps.seed_identity,
                 self.caps.serve,
                 self.caps.multi_file,
+                self.caps.modules,
                 self.caps.phases,
                 self.caps.emit,
                 self.caps.diagnostics_json
@@ -233,6 +237,7 @@ impl Compiler {
     pub fn compile(
         &self,
         inputs: &[PathBuf],
+        dependency_roots: &[(String, PathBuf)],
         output: Option<&Path>,
         opt: Option<u8>,
     ) -> Result<CompileReport> {
@@ -259,6 +264,12 @@ impl Compiler {
                         }
                     }
                     command.args(inputs);
+                    for (name, path) in dependency_roots {
+                        let mut specification = OsString::from(name);
+                        specification.push("=");
+                        specification.push(path);
+                        command.arg("--dependency").arg(specification);
+                    }
                 } else {
                     let [input] = inputs else {
                         bail!(
@@ -352,7 +363,8 @@ impl Compiler {
     }
 
     /// Authoritative interface scan, if the compiler offers one; `None` tells
-    /// the caller to fall back to the heuristic scanner (warnings only).
+    /// the caller to fall back to the in-process compiler scanner (warnings
+    /// only for compatibility with an external legacy compiler).
     pub fn interfaces(&self, inputs: &[PathBuf]) -> Result<Option<Vec<Declaration>>> {
         match &self.kind {
             Kind::Fake if self.caps.can_emit("interfaces-json") => Ok(Some(scan_files(inputs)?)),
@@ -397,6 +409,7 @@ fn fake_capabilities() -> Capabilities {
         seed_identity: None,
         serve: None,
         multi_file: has("multi-file"),
+        modules: has("modules"),
         phases: [
             has("resolve").then(|| "resolve".to_string()),
             has("check").then(|| "check".to_string()),
@@ -496,12 +509,15 @@ fn fake_std_interfaces() -> Vec<Declaration> {
     ["if", "else", "and", "or", "not", "Result", "Option", "Bool"]
         .into_iter()
         .map(|name| Declaration {
+            identity: None,
             name: name.into(),
             kind: if name.chars().next().is_some_and(char::is_uppercase) {
                 DeclarationKind::Type
             } else {
                 DeclarationKind::Callable
             },
+            module: None,
+            visibility: None,
             file: PathBuf::from("«std»"),
             line: 0,
             signature: None,

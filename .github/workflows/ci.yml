@@ -1,0 +1,77 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: Strict Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tooling formatting
+        run: |
+          cargo fmt --manifest-path tooling/fmt/Cargo.toml -- --check
+          cargo fmt --manifest-path tooling/grand/Cargo.toml -- --check
+          cargo fmt --manifest-path tooling/lsp/Cargo.toml -- --check
+      - name: Tooling strict Clippy
+        run: |
+          cargo clippy --manifest-path tooling/fmt/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --manifest-path tooling/grand/Cargo.toml --all-targets -- -D warnings
+          cargo clippy --manifest-path tooling/lsp/Cargo.toml --all-targets -- -D warnings
+      - name: Compiler and VM
+        run: cargo test --workspace --all-targets
+      - name: Formatter
+        run: cargo test --manifest-path tooling/fmt/Cargo.toml --all-targets
+      - name: Build tool
+        run: cargo test --manifest-path tooling/grand/Cargo.toml --all-targets
+      - name: Real grc-grand-grvm contract
+        run: |
+          cargo build --workspace --bins
+          cargo build --manifest-path tooling/grand/Cargo.toml --bin grand
+          integration_root="$(mktemp -d)"
+          cd "$integration_root"
+          "$GITHUB_WORKSPACE/tooling/grand/target/debug/grand" new app
+          cd app
+          export GRAND_COMPILER="$GITHUB_WORKSPACE/target/debug/grc"
+          export GRAND_VM="$GITHUB_WORKSPACE/target/debug/grvm"
+          "$GITHUB_WORKSPACE/tooling/grand/target/debug/grand" check
+          "$GITHUB_WORKSPACE/tooling/grand/target/debug/grand" build
+          "$GITHUB_WORKSPACE/tooling/grand/target/debug/grand" run
+          test -f target/grand/app.grbc
+      - name: Language server
+        run: cargo test --manifest-path tooling/lsp/Cargo.toml --all-targets
+
+  editor-metadata:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - name: Install locked extension dependencies
+        working-directory: editors/vscode
+        run: npm ci --ignore-scripts
+      - name: Validate VS Code manifest and package
+        working-directory: editors/vscode
+        run: |
+          npm run validate
+          version="$(node -p 'require("./package.json").version')"
+          mkdir -p dist
+          npm run package -- --out "dist/grandiose-$version.vsix"
+          unzip -Z1 "dist/grandiose-$version.vsix" > dist/contents.txt
+          grep -Fxq extension/extension.js dist/contents.txt
+          grep -Fxq extension/syntaxes/grandiose.tmLanguage.json dist/contents.txt
+          grep -Fxq extension/node_modules/vscode-languageclient/package.json dist/contents.txt

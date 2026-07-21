@@ -5,14 +5,16 @@ use crate::{
         AssignmentField, AssignmentPlace, AssignmentPlaceKind, AssociatedArgumentSyntax,
         AssociatedBinding, AssociatedBindingValue, AssociatedItemSyntaxKind, AssociatedTypeDecl,
         AssociatedTypeDefinition, Associativity, BinaryOp, ConstArgumentValueSyntax,
-        ConstAssociatedArgumentSyntax, ConstKind, DeconstructField, DropDecl, EffectDecl,
-        EffectOperationDecl, EffectPathSyntax, EffectRowAliasDecl, EffectRowSyntax, EnumDecl, Expr,
-        ExprKind, FieldDecl, FieldVisibility, FixityDecl, FixityKind, Function, GenericParam,
-        GenericParamKind, GenericParams, GlobalBinding, GoalArgument, GoalPolarity, HandlerClause,
-        ImplDecl, LabelSyntax, LifetimeOutlivesSyntax, LifetimeSyntax, Param, Pattern, PatternKind,
-        PatternRest, Program, QuantitySyntax, ReferenceLifetimeSyntax, Stmt, StructDecl,
-        StructFieldPattern, TraitDecl, TraitMethod, TraitRefSyntax, TypeAliasDecl, TypePathSegment,
-        TypeSyntax, TypeSyntaxKind, UnaryOp, UseDecl, VariantDecl, WhereClause, WhereGoal,
+        ConstAssociatedArgumentSyntax, ConstBinaryOp, ConstExprSyntax, ConstExprSyntaxKind,
+        ConstKind, DeconstructField, DropDecl, EffectDecl, EffectOperationDecl, EffectPathSyntax,
+        EffectRowAliasDecl, EffectRowSyntax, EnumDecl, Expr, ExprKind, FieldDecl, FieldVisibility,
+        FixityDecl, FixityKind, Function, GenericParam, GenericParamKind, GenericParams,
+        GlobalBinding, GoalArgument, GoalPolarity, HandlerClause, ImplDecl, ImportDecl, ImportTree,
+        ItemVisibility, LabelSyntax, LifetimeOutlivesSyntax, LifetimeSyntax, ModuleDecl,
+        ModuleKind, Param, Pattern, PatternKind, PatternRest, Program, QuantitySyntax,
+        ReferenceLifetimeSyntax, Stmt, StructDecl, StructFieldPattern, TraitDecl, TraitMethod,
+        TraitRefSyntax, TypeAliasDecl, TypePathSegment, TypeSyntax, TypeSyntaxKind, UnaryOp,
+        UseDecl, VariantDecl, Visibility, WhereClause, WhereGoal,
     },
     diagnostic::Diagnostic,
     lexer::{Kw, Token, TokenKind},
@@ -45,10 +47,47 @@ pub fn parse_recovering(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         tokens,
         cursor: 0,
         fixities,
+        fixity_regions: Vec::new(),
         reference_lifetimes: Vec::new(),
         effect_paths: Vec::new(),
         type_const_arguments: Vec::new(),
+        fixed_array_types: Vec::new(),
         numeric_literals: Vec::new(),
+        name_paths: Vec::new(),
+    }
+    .program(diagnostics)
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ScopedFixity {
+    pub kind: FixityKind,
+    pub precedence: u8,
+    pub declaration: Option<Span>,
+}
+
+#[derive(Clone, Debug)]
+pub struct FixityRegion {
+    pub span: Span,
+    pub fixities: HashMap<String, ScopedFixity>,
+}
+
+pub fn parse_recovering_with_fixity_regions(
+    tokens: Vec<Token>,
+    fixity_regions: Vec<FixityRegion>,
+) -> (Program, Vec<Diagnostic>) {
+    let mut diagnostics = Vec::new();
+    let fixities = collect_fixities(&tokens, &mut diagnostics);
+    Parser {
+        tokens,
+        cursor: 0,
+        fixities,
+        fixity_regions,
+        reference_lifetimes: Vec::new(),
+        effect_paths: Vec::new(),
+        type_const_arguments: Vec::new(),
+        fixed_array_types: Vec::new(),
+        numeric_literals: Vec::new(),
+        name_paths: Vec::new(),
     }
     .program(diagnostics)
 }
@@ -192,6 +231,9 @@ fn joined_operator_name(tokens: &[Token], start: usize) -> Option<(String, Span,
 /// declarations into these interface tables.
 #[derive(Default)]
 struct ProgramDraft {
+    modules: Vec<ModuleDecl>,
+    imports: Vec<ImportDecl>,
+    item_visibilities: Vec<ItemVisibility>,
     type_aliases: Vec<TypeAliasDecl>,
     effect_row_aliases: Vec<EffectRowAliasDecl>,
     globals: Vec<GlobalBinding>,
@@ -210,13 +252,40 @@ struct Parser {
     tokens: Vec<Token>,
     cursor: usize,
     fixities: HashMap<String, FixityEntry>,
+    fixity_regions: Vec<FixityRegion>,
     reference_lifetimes: Vec<ReferenceLifetimeSyntax>,
     effect_paths: Vec<EffectPathSyntax>,
     type_const_arguments: Vec<crate::ast::TypeConstApplicationSyntax>,
+    fixed_array_types: Vec<crate::ast::FixedArrayTypeSyntax>,
     numeric_literals: Vec<crate::ast::NumericLiteralSyntax>,
+    name_paths: Vec<crate::ast::NamePathSyntax>,
 }
 
 impl Parser {
+    fn fixity(&self, name: &str, span: Span) -> Option<FixityEntry> {
+        let region = self
+            .fixity_regions
+            .iter()
+            .filter(|region| region.span.start <= span.start && span.end <= region.span.end)
+            .min_by_key(|region| region.span.end.saturating_sub(region.span.start));
+        if let Some(region) = region {
+            return region
+                .fixities
+                .get(name)
+                .map(|entry| FixityEntry {
+                    kind: entry.kind,
+                    precedence: entry.precedence,
+                    declaration: entry.declaration,
+                })
+                .or_else(|| {
+                    self.fixities
+                        .get(name)
+                        .copied()
+                        .filter(|entry| entry.declaration.is_none())
+                });
+        }
+        self.fixities.get(name).copied()
+    }
     fn program(mut self, mut diagnostics: Vec<Diagnostic>) -> (Program, Vec<Diagnostic>) {
         let mut draft = ProgramDraft::default();
         while !self.at(&TokenKind::Eof) {
@@ -227,6 +296,9 @@ impl Parser {
             }
         }
         let program = Program {
+            modules: draft.modules,
+            imports: draft.imports,
+            item_visibilities: draft.item_visibilities,
             type_aliases: draft.type_aliases,
             effect_row_aliases: draft.effect_row_aliases,
             globals: draft.globals,
@@ -242,40 +314,219 @@ impl Parser {
             reference_lifetimes: self.reference_lifetimes,
             effect_paths: self.effect_paths,
             type_const_arguments: self.type_const_arguments,
+            fixed_array_types: self.fixed_array_types,
             numeric_literals: self.numeric_literals,
+            name_paths: self.name_paths,
         };
         (program, diagnostics)
     }
 
     fn declaration(&mut self, draft: &mut ProgramDraft) -> Result<(), Diagnostic> {
-        if self.at_kw(Kw::Type) {
-            draft.type_aliases.push(self.type_alias()?);
+        let visibility = if self.at_ident("pub") {
+            self.bump();
+            Visibility::Public
+        } else {
+            Visibility::Private
+        };
+        let declaration_span = if self.at_ident("mod") {
+            self.module_decl(draft, visibility)?
+        } else if self.at_import_decl() {
+            let declaration = self.import_decl(visibility)?;
+            let span = declaration.span;
+            draft.imports.push(declaration);
+            span
+        } else if self.at_kw(Kw::Type) {
+            let declaration = self.type_alias()?;
+            let span = declaration.span;
+            draft.type_aliases.push(declaration);
+            span
         } else if self.at_ident("cases") {
-            draft.effect_row_aliases.push(self.effect_row_alias()?);
+            let declaration = self.effect_row_alias()?;
+            let span = declaration.span;
+            draft.effect_row_aliases.push(declaration);
+            span
         } else if self.at_kw(Kw::Let) {
-            draft.globals.push(self.global_binding()?);
+            let declaration = self.global_binding()?;
+            let span = declaration.span;
+            draft.globals.push(declaration);
+            span
         } else if self.at_fixity_decl() {
-            draft.fixities.push(self.fixity_decl()?);
+            let declaration = self.fixity_decl()?;
+            let span = declaration.span;
+            draft.fixities.push(declaration);
+            span
         } else if self.at_kw(Kw::Effect) {
-            draft.effects.push(self.effect()?);
+            let declaration = self.effect()?;
+            let span = declaration.span;
+            draft.effects.push(declaration);
+            span
         } else if self.at_kw(Kw::Struct) {
-            draft.structs.push(self.struct_decl()?);
+            let declaration = self.struct_decl()?;
+            let span = declaration.span;
+            draft.structs.push(declaration);
+            span
         } else if self.at_kw(Kw::Enum) {
-            draft.enums.push(self.enum_decl()?);
+            let declaration = self.enum_decl()?;
+            let span = declaration.span;
+            draft.enums.push(declaration);
+            span
         } else if self.at_kw(Kw::Trait) {
-            draft.traits.push(self.trait_decl()?);
+            let declaration = self.trait_decl()?;
+            let span = declaration.span;
+            draft.traits.push(declaration);
+            span
         } else if self.at_kw(Kw::Impl) {
             if self.at_drop_impl() {
-                draft.drops.push(self.drop_impl()?);
+                let declaration = self.drop_impl()?;
+                let span = declaration.span;
+                draft.drops.push(declaration);
+                span
             } else if self.at_use_impl() {
-                draft.uses.push(self.use_impl()?);
+                let declaration = self.use_impl()?;
+                let span = declaration.span;
+                draft.uses.push(declaration);
+                span
             } else {
-                draft.impls.push(self.impl_decl()?);
+                let declaration = self.impl_decl()?;
+                let span = declaration.span;
+                draft.impls.push(declaration);
+                span
             }
         } else {
-            draft.functions.push(self.function()?);
-        }
+            let declaration = self.function()?;
+            let span = declaration.span;
+            draft.functions.push(declaration);
+            span
+        };
+        draft.item_visibilities.push(ItemVisibility {
+            declaration: declaration_span,
+            visibility,
+        });
         Ok(())
+    }
+
+    fn at_import_decl(&self) -> bool {
+        self.at_ident("use")
+            && !matches!(
+                self.peek_n(1).map(|token| &token.kind),
+                Some(TokenKind::LParen | TokenKind::Lt)
+            )
+    }
+
+    fn module_decl(
+        &mut self,
+        draft: &mut ProgramDraft,
+        visibility: Visibility,
+    ) -> Result<Span, Diagnostic> {
+        let start = self.expect_ident("mod", "expected `mod`")?.span;
+        let (name, name_span) = self.ident("expected a module name")?;
+        if self.eat(&TokenKind::Semicolon) {
+            let end = self.tokens[self.cursor - 1].span;
+            let span = start.join(end);
+            draft.modules.push(ModuleDecl {
+                name,
+                name_span,
+                visibility,
+                kind: ModuleKind::External,
+                span,
+            });
+            return Ok(span);
+        }
+        let open = self
+            .expect(
+                TokenKind::LBrace,
+                "expected `;` or `{` after the module name",
+            )?
+            .span;
+        let module_index = draft.modules.len();
+        draft.modules.push(ModuleDecl {
+            name,
+            name_span,
+            visibility,
+            kind: ModuleKind::Inline {
+                body: Span::new(open.end, open.end),
+            },
+            span: start,
+        });
+        while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+            self.declaration(draft)?;
+        }
+        let close = self
+            .expect(TokenKind::RBrace, "expected `}` after the inline module")?
+            .span;
+        let span = start.join(close);
+        draft.modules[module_index].kind = ModuleKind::Inline {
+            body: Span::new(open.end, close.start),
+        };
+        draft.modules[module_index].span = span;
+        Ok(span)
+    }
+
+    fn import_decl(&mut self, visibility: Visibility) -> Result<ImportDecl, Diagnostic> {
+        let start = self.expect_ident("use", "expected `use`")?.span;
+        let tree = self.import_tree()?;
+        let end = self
+            .expect(
+                TokenKind::Semicolon,
+                "expected `;` after the use declaration",
+            )?
+            .span;
+        Ok(ImportDecl {
+            tree,
+            visibility,
+            span: start.join(end),
+        })
+    }
+
+    fn import_tree(&mut self) -> Result<ImportTree, Diagnostic> {
+        if self.at(&TokenKind::LBrace) {
+            let open = self.bump().span;
+            let mut items = Vec::new();
+            while !self.at(&TokenKind::RBrace) {
+                items.push(self.import_tree()?);
+                if !self.eat(&TokenKind::Comma) {
+                    break;
+                }
+            }
+            let close = self
+                .expect(TokenKind::RBrace, "expected `}` after grouped imports")?
+                .span;
+            return Ok(ImportTree::Group {
+                items,
+                span: open.join(close),
+            });
+        }
+        if self.at(&TokenKind::Star) {
+            return Ok(ImportTree::Glob {
+                span: self.bump().span,
+            });
+        }
+        let (name, span) = self.ident("expected an import path, `self`, or `*`")?;
+        let segment = TypePathSegment { name, span };
+        if self.eat(&TokenKind::DoubleColon) {
+            return Ok(ImportTree::Path {
+                segment,
+                tree: Box::new(self.import_tree()?),
+            });
+        }
+        let alias = if self.at_ident("as") {
+            self.bump();
+            let (name, span) = self.ident("expected an import alias after `as`")?;
+            Some(TypePathSegment { name, span })
+        } else {
+            None
+        };
+        if segment.name == "self" {
+            Ok(ImportTree::SelfValue {
+                span: segment.span,
+                alias,
+            })
+        } else {
+            Ok(ImportTree::Name {
+                name: segment,
+                alias,
+            })
+        }
     }
 
     /// The fixity words stay contextual so ordinary bindings may be named
@@ -299,6 +550,14 @@ impl Parser {
                 Kw::Type | Kw::Let | Kw::Effect | Kw::Struct | Kw::Enum | Kw::Trait | Kw::Impl
             )
         ) || self.at_ident("cases")
+            || self.at_ident("mod")
+            || self.at_import_decl()
+            || self.at_ident("pub")
+            || (matches!(self.peek().kind, TokenKind::Ident(_))
+                && matches!(
+                    self.peek_n(1).map(|token| &token.kind),
+                    Some(TokenKind::LParen | TokenKind::Lt)
+                ))
             || self.at_fixity_decl()
     }
 
@@ -720,7 +979,6 @@ impl Parser {
         let start = self.bump().span;
         let (name, _) = self.ident("expected a type alias name")?;
         let generics = self.generic_params()?;
-        self.reject_const_params(&generics, "type aliases")?;
         let generic_span = generics.as_ref().map(|generics| generics.span);
         self.expect(TokenKind::Eq, "expected `=` in the type alias")?;
         let target = self.type_syntax()?;
@@ -1123,7 +1381,7 @@ impl Parser {
                     "higher-ranked `for<...>` binders are not implemented",
                 ));
             }
-            let (name, span, kind) = if let TokenKind::Lifetime(name) = &self.peek().kind {
+            let (name, mut span, kind) = if let TokenKind::Lifetime(name) = &self.peek().kind {
                 let name = name.clone();
                 let span = self.bump().span;
                 (name, span, GenericParamKind::Lifetime)
@@ -1157,6 +1415,20 @@ impl Parser {
                     (name, start, GenericParamKind::Type)
                 }
             };
+            let const_default = if self.eat(&TokenKind::Eq) {
+                if !matches!(kind, GenericParamKind::Const(_)) {
+                    return Err(Diagnostic::error(
+                        "unsupported generic default",
+                        "only const generic parameters may currently declare defaults",
+                        self.previous().span,
+                    ));
+                }
+                let default = self.const_expression()?;
+                span = span.join(default.span);
+                Some(default)
+            } else {
+                None
+            };
             if !names.insert(name.clone()) {
                 return Err(Diagnostic::error(
                     "duplicate generic parameter",
@@ -1164,7 +1436,12 @@ impl Parser {
                     span,
                 ));
             }
-            params.push(GenericParam { name, kind, span });
+            params.push(GenericParam {
+                name,
+                kind,
+                const_default,
+                span,
+            });
             if !self.eat(&TokenKind::Comma) {
                 break;
             }
@@ -1248,29 +1525,11 @@ impl Parser {
                         "expected a non-empty lifetime binder list after `for`",
                     ));
                 };
-                if let Some(parameter) = parameters.params.iter().find(|parameter| {
-                    !matches!(
-                        parameter.kind,
-                        GenericParamKind::Lifetime | GenericParamKind::Type
-                    )
-                }) {
-                    return Err(Diagnostic::error(
-                        "unsupported higher-ranked binder kind",
-                        "higher-ranked where goals currently bind types and lifetimes; const and effect-row universes are not implemented",
-                        parameter.span,
-                    ));
-                }
                 parameters.params
             } else {
                 vec![]
             };
             if let TokenKind::Lifetime(name) = &self.peek().kind {
-                if !higher_ranked_lifetimes.is_empty() {
-                    return Err(self.error(
-                        "unsupported higher-ranked outlives constraint",
-                        "higher-ranked lifetime outlives constraints are not implemented",
-                    ));
-                }
                 let longer = LifetimeSyntax {
                     name: name.clone(),
                     span: self.bump().span,
@@ -1288,6 +1547,7 @@ impl Parser {
                 };
                 let span = longer.span.join(shorter.span);
                 lifetime_outlives.push(LifetimeOutlivesSyntax {
+                    higher_ranked_lifetimes,
                     longer,
                     shorter,
                     span,
@@ -1739,7 +1999,7 @@ impl Parser {
     /// operator; the surrounding context reports the leftover tokens.
     fn peek_infix(&self) -> Option<InfixOccurrence> {
         if let TokenKind::Ident(name) = &self.peek().kind {
-            let entry = self.fixities.get(name)?;
+            let entry = self.fixity(name, self.peek().span)?;
             let FixityKind::Infix(associativity) = entry.kind else {
                 return None;
             };
@@ -1754,7 +2014,7 @@ impl Parser {
             });
         }
         let (spelling, span, token_count) = joined_operator_name(&self.tokens, self.cursor)?;
-        let entry = self.fixities.get(&spelling)?;
+        let entry = self.fixity(&spelling, span)?;
         let FixityKind::Infix(associativity) = entry.kind else {
             return None;
         };
@@ -1775,14 +2035,14 @@ impl Parser {
     /// consumed before this is consulted.
     fn peek_prefix_operator(&self) -> Option<(String, Span, usize, u8)> {
         if let TokenKind::Ident(name) = &self.peek().kind {
-            let entry = self.fixities.get(name)?;
+            let entry = self.fixity(name, self.peek().span)?;
             if entry.kind != FixityKind::Prefix {
                 return None;
             }
             return Some((name.clone(), self.peek().span, 1, entry.precedence));
         }
         let (spelling, span, count) = joined_operator_name(&self.tokens, self.cursor)?;
-        let entry = self.fixities.get(&spelling)?;
+        let entry = self.fixity(&spelling, span)?;
         (entry.kind == FixityKind::Prefix).then_some((spelling, span, count, entry.precedence))
     }
 
@@ -2650,6 +2910,8 @@ impl Parser {
                 ));
             }
         };
+        let named_path =
+            matches!(pattern.kind, PatternKind::Variant { .. }).then_some(pattern.span);
         if matches!(pattern.kind, PatternKind::Variant { .. }) && self.eat(&TokenKind::LParen) {
             let mut fields = Vec::new();
             let mut rest: Option<PatternRest> = None;
@@ -2685,6 +2947,12 @@ impl Parser {
                 kind: PatternKind::Variant { path, fields, rest },
                 span: pattern.span.join(end),
             };
+        }
+        if let Some(path) = named_path {
+            self.name_paths.push(crate::ast::NamePathSyntax {
+                site: pattern.span,
+                path,
+            });
         }
         Ok(pattern)
     }
@@ -2798,10 +3066,15 @@ impl Parser {
         let end = self
             .expect(TokenKind::RBrace, "expected `}` after the struct pattern")?
             .span;
-        Ok(Pattern {
+        let pattern = Pattern {
             kind: PatternKind::Struct { name, fields, rest },
             span: start.join(end),
-        })
+        };
+        self.name_paths.push(crate::ast::NamePathSyntax {
+            site: pattern.span,
+            path: start,
+        });
+        Ok(pattern)
     }
 
     /// Rejects one binder name owning two places anywhere across `patterns`
@@ -2885,12 +3158,28 @@ impl Parser {
     }
 
     fn effect_path_syntax(&mut self, message: &str) -> Result<(String, TypeSyntax), Diagnostic> {
-        let (name, span) = self.ident(message)?;
+        let (first, first_span) = self.ident(message)?;
+        let mut segments = vec![TypePathSegment {
+            name: first,
+            span: first_span,
+        }];
+        while self.at(&TokenKind::DoubleColon)
+            && matches!(
+                (
+                    self.peek_n(1).map(|token| &token.kind),
+                    self.peek_n(2).map(|token| &token.kind)
+                ),
+                (Some(TokenKind::Ident(_)), Some(TokenKind::DoubleColon))
+            )
+        {
+            self.bump();
+            let (name, span) = self.ident("expected an effect path segment")?;
+            segments.push(TypePathSegment { name, span });
+        }
+        let name = segments.last().unwrap().name.clone();
+        let span = first_span.join(segments.last().unwrap().span);
         let base = TypeSyntax {
-            kind: TypeSyntaxKind::Path(vec![TypePathSegment {
-                name: name.clone(),
-                span,
-            }]),
+            kind: TypeSyntaxKind::Path(segments),
             span,
         };
         if !self.eat(&TokenKind::Lt) {
@@ -2914,26 +3203,10 @@ impl Parser {
                     position,
                     lifetime: LifetimeSyntax { name, span },
                 });
-            } else if self.at(&TokenKind::LBracket) {
+            } else if self.starts_const_expression_argument() {
                 const_arguments.push(ConstAssociatedArgumentSyntax {
                     position,
-                    value: ConstArgumentValueSyntax::Quantity(self.quantity()?),
-                });
-            } else if let TokenKind::Number(literal) = &self.peek().kind {
-                if literal.is_float() {
-                    return Err(self.error(
-                        "invalid const effect argument",
-                        "effect const arguments must be integer or quantity literals",
-                    ));
-                }
-                let literal = literal.clone();
-                let span = self.bump().span;
-                const_arguments.push(ConstAssociatedArgumentSyntax {
-                    position,
-                    value: ConstArgumentValueSyntax::U32 {
-                        value: literal.as_u64(span)?,
-                        span,
-                    },
+                    value: self.const_argument_value()?,
                 });
             } else {
                 arguments.push(self.type_syntax()?);
@@ -2964,8 +3237,187 @@ impl Parser {
         Ok((name, application))
     }
 
+    fn const_argument_value(&mut self) -> Result<ConstArgumentValueSyntax, Diagnostic> {
+        if matches!(&self.peek().kind, TokenKind::Number(literal) if literal.is_float()) {
+            return Err(Diagnostic::error(
+                "invalid const argument",
+                "a const argument must be an integer, quantity, parameter, or arithmetic expression",
+                self.peek().span,
+            ));
+        }
+        let expression = self.const_expression()?;
+        Ok(match expression.kind {
+            ConstExprSyntaxKind::U32(value) => ConstArgumentValueSyntax::U32 {
+                value,
+                span: expression.span,
+            },
+            ConstExprSyntaxKind::Quantity(quantity) => ConstArgumentValueSyntax::Quantity(quantity),
+            _ => ConstArgumentValueSyntax::Expression(expression),
+        })
+    }
+
+    fn const_expression(&mut self) -> Result<ConstExprSyntax, Diagnostic> {
+        self.const_expression_bp(0)
+    }
+
+    fn const_expression_bp(
+        &mut self,
+        minimum_precedence: u8,
+    ) -> Result<ConstExprSyntax, Diagnostic> {
+        let mut lhs = if self.eat(&TokenKind::Minus) {
+            let start = self.previous().span;
+            let operand = self.const_expression_bp(3)?;
+            ConstExprSyntax {
+                span: start.join(operand.span),
+                kind: ConstExprSyntaxKind::Neg(Box::new(operand)),
+            }
+        } else if self.eat(&TokenKind::LParen) {
+            let start = self.previous().span;
+            let mut expression = self.const_expression()?;
+            let end = self
+                .expect(TokenKind::RParen, "expected `)` after the const expression")?
+                .span;
+            expression.span = start.join(end);
+            expression
+        } else if self.at(&TokenKind::LBracket) {
+            let quantity = self.quantity()?;
+            ConstExprSyntax {
+                span: quantity.span,
+                kind: ConstExprSyntaxKind::Quantity(quantity),
+            }
+        } else if let TokenKind::Number(literal) = &self.peek().kind {
+            if literal.is_float() {
+                return Err(self.error(
+                    "invalid const expression",
+                    "const expressions require integer or quantity values",
+                ));
+            }
+            let literal = literal.clone();
+            let span = self.bump().span;
+            ConstExprSyntax {
+                kind: ConstExprSyntaxKind::U32(literal.as_u64(span)?),
+                span,
+            }
+        } else {
+            let (name, span) =
+                self.ident("expected a const literal, parameter, or parenthesized expression")?;
+            let mut path = vec![TypePathSegment { name, span }];
+            while self.eat(&TokenKind::DoubleColon) {
+                let (name, span) = self.ident("expected a const path segment after `::`")?;
+                path.push(TypePathSegment { name, span });
+            }
+            ConstExprSyntax {
+                span: path.first().unwrap().span.join(path.last().unwrap().span),
+                kind: ConstExprSyntaxKind::Path(path),
+            }
+        };
+
+        loop {
+            let (op, precedence) = if self.at(&TokenKind::Plus) {
+                (ConstBinaryOp::Add, 1)
+            } else if self.at(&TokenKind::Minus) {
+                (ConstBinaryOp::Subtract, 1)
+            } else if self.at(&TokenKind::Star) {
+                (ConstBinaryOp::Multiply, 2)
+            } else if self.at(&TokenKind::Slash) {
+                (ConstBinaryOp::Divide, 2)
+            } else if self.at(&TokenKind::Percent) {
+                (ConstBinaryOp::Remainder, 2)
+            } else {
+                break;
+            };
+            if precedence < minimum_precedence {
+                break;
+            }
+            self.bump();
+            let rhs = self.const_expression_bp(precedence + 1)?;
+            let span = lhs.span.join(rhs.span);
+            lhs = ConstExprSyntax {
+                kind: ConstExprSyntaxKind::Binary {
+                    op,
+                    lhs: Box::new(lhs),
+                    rhs: Box::new(rhs),
+                },
+                span,
+            };
+        }
+        Ok(lhs)
+    }
+
+    fn starts_const_expression_argument(&self) -> bool {
+        if matches!(self.peek().kind, TokenKind::Number(_) | TokenKind::Minus) {
+            return true;
+        }
+        if self.at(&TokenKind::LBracket) {
+            return true;
+        }
+        if matches!(self.peek().kind, TokenKind::Ident(_)) {
+            return self.peek_n(1).is_some_and(|token| {
+                matches!(
+                    token.kind,
+                    TokenKind::Plus
+                        | TokenKind::Minus
+                        | TokenKind::Star
+                        | TokenKind::Slash
+                        | TokenKind::Percent
+                )
+            });
+        }
+        if !self.at(&TokenKind::LParen) {
+            return false;
+        }
+        let mut depth = 0usize;
+        for token in &self.tokens[self.cursor..] {
+            match token.kind {
+                TokenKind::LParen => depth += 1,
+                TokenKind::RParen => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                TokenKind::Plus
+                | TokenKind::Minus
+                | TokenKind::Star
+                | TokenKind::Slash
+                | TokenKind::Percent
+                    if depth > 0 =>
+                {
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
     fn type_syntax(&mut self) -> Result<TypeSyntax, Diagnostic> {
-        let mut ty = if self.at(&TokenKind::Lt) {
+        let mut ty = if self.at(&TokenKind::LBracket) {
+            let start = self.bump().span;
+            let element = self.type_syntax()?;
+            self.expect(
+                TokenKind::Semicolon,
+                "expected `;` between the array element type and length",
+            )?;
+            let length = self.const_expression()?;
+            let end = self
+                .expect(
+                    TokenKind::RBracket,
+                    "expected `]` after the fixed-array length",
+                )?
+                .span;
+            let span = start.join(end);
+            self.fixed_array_types
+                .push(crate::ast::FixedArrayTypeSyntax {
+                    array: span,
+                    element: element.clone(),
+                    length,
+                });
+            TypeSyntax {
+                kind: TypeSyntaxKind::Tuple(vec![element]),
+                span,
+            }
+        } else if self.at(&TokenKind::Lt) {
             let start = self.bump().span;
             let subject = self.type_syntax()?;
             self.expect_ident("as", "expected `as` in a fully qualified projection")?;
@@ -3102,27 +3554,10 @@ impl Parser {
                         position,
                         lifetime: LifetimeSyntax { name, span },
                     });
-                } else if self.at(&TokenKind::LBracket) {
+                } else if self.starts_const_expression_argument() {
                     const_arguments.push(ConstAssociatedArgumentSyntax {
                         position,
-                        value: ConstArgumentValueSyntax::Quantity(self.quantity()?),
-                    });
-                } else if let TokenKind::Number(literal) = &self.peek().kind {
-                    if literal.is_float() {
-                        return Err(Diagnostic::error(
-                            "invalid const argument",
-                            "generic const arguments must be integer or quantity literals",
-                            self.peek().span,
-                        ));
-                    }
-                    let literal = literal.clone();
-                    let span = self.bump().span;
-                    const_arguments.push(ConstAssociatedArgumentSyntax {
-                        position,
-                        value: ConstArgumentValueSyntax::U32 {
-                            value: literal.as_u64(span)?,
-                            span,
-                        },
+                        value: self.const_argument_value()?,
                     });
                 } else {
                     arguments.push(self.type_syntax()?);
@@ -3182,27 +3617,10 @@ impl Parser {
         let mut const_arguments = Vec::new();
         let mut position = 0usize;
         loop {
-            if self.at(&TokenKind::LBracket) {
+            if self.starts_const_expression_argument() {
                 const_arguments.push(ConstAssociatedArgumentSyntax {
                     position,
-                    value: ConstArgumentValueSyntax::Quantity(self.quantity()?),
-                });
-            } else if let TokenKind::Number(literal) = &self.peek().kind {
-                if literal.is_float() {
-                    return Err(Diagnostic::error(
-                        "invalid const argument",
-                        "a const argument must be an integer, a `[lower, upper]` quantity, or a const parameter name",
-                        self.peek().span,
-                    ));
-                }
-                let literal = literal.clone();
-                let span = self.bump().span;
-                const_arguments.push(ConstAssociatedArgumentSyntax {
-                    position,
-                    value: ConstArgumentValueSyntax::U32 {
-                        value: literal.as_u64(span)?,
-                        span,
-                    },
+                    value: self.const_argument_value()?,
                 });
             } else if let TokenKind::Lifetime(name) = &self.peek().kind {
                 let name = name.clone();
@@ -3582,6 +4000,11 @@ fn collect_fixities(
     tokens: &[Token],
     diagnostics: &mut Vec<Diagnostic>,
 ) -> HashMap<String, FixityEntry> {
+    let module_source = tokens.windows(3).any(|window| {
+        matches!(&window[0].kind, TokenKind::Ident(name) if name == "mod")
+            && matches!(window[1].kind, TokenKind::Ident(_))
+            && matches!(window[2].kind, TokenKind::Semicolon | TokenKind::LBrace)
+    });
     let mut fixities = default_fixities();
     let mut cursor = 0;
     while cursor < tokens.len() {
@@ -3641,7 +4064,9 @@ fn collect_fixities(
         if let Some(existing) = fixities.insert(name.clone(), entry) {
             // Overriding a sourceless migration default is the library taking
             // ownership of its operator; only two source declarations clash.
-            if let Some(original) = existing.declaration {
+            if let Some(original) = existing.declaration
+                && !module_source
+            {
                 diagnostics.push(
                     Diagnostic::error(
                         "operator fixity declared more than once",

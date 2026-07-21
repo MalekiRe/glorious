@@ -5,6 +5,7 @@ mod compiler;
 pub mod compiler_core;
 pub mod compiler_mir;
 mod compiler_regions;
+pub mod compiler_session;
 mod compiler_specialization;
 mod compiler_traits;
 mod compiler_typeck;
@@ -13,8 +14,10 @@ pub mod eval;
 pub mod interface;
 pub mod lexer;
 pub mod lossless;
+pub mod modules;
 pub mod parser;
 pub mod resolve;
+pub mod semantic;
 pub mod source_bundle;
 pub mod span;
 pub mod validate;
@@ -293,6 +296,10 @@ fn runtime_leaf_authority(
             .into_iter()
             .map(|(name, primitive)| (name.to_owned(), eval::RuntimeLeaf::Primitive(primitive))),
         )
+        .chain(std::iter::once((
+            "__g1_abort".to_owned(),
+            eval::RuntimeLeaf::Abort,
+        )))
         .collect::<Vec<_>>();
     // The Program is not available until `run_source_stream` has parsed it, so
     // preserve the finite table and trusted range in a deferred authority.

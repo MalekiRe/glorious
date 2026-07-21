@@ -16,6 +16,10 @@ __g1_bytes_from_array_move(value: Array<u8>) -> Bytes { () }
 __g1_bytes_to_array(value: Bytes) -> Array<u8> { () }
 __g1_char_from_u32_checked(value: u32) -> char { () }
 __g1_char_to_u32(value: char) -> u32 { () }
+// Exact trusted declaration identity lowers this terminal leaf directly to
+// the VM Abort instruction. Its source body is never executed by compiled or
+// recovery programs and copied user spellings have no authority.
+__g1_abort() -> ! { () }
 
 // Manifest-bound IEEE scalar leaves. Each concrete declaration identity fixes
 // the operand and result widths before lowering; these are not public source
@@ -254,8 +258,10 @@ let None = Result::Err(());
 
 type Bool = Option<()>;
 __g1_bool(value: Bool) -> Bool { value }
-let true = __g1_bool(Option::Some(()));
-let false = __g1_bool(None);
+__g1_bool_true() -> Bool { Result::Ok(()) }
+__g1_bool_false() -> Bool { Result::Err(()) }
+let true = __g1_bool_true();
+let false = __g1_bool_false();
 type String = Text;
 struct Range<T> { start: T, end: T }
 impl<T> Use<[0,infinity]> for Range<T> where T: Use<[0,infinity]> {}
@@ -265,6 +271,16 @@ enum CharFromU32Error { InvalidScalar }
 struct DecodedChar { value: char, next: usize }
 
 effect __CharBoolCase { inspect(value: Bool) -> !; }
+
+abort() -> ! { __g1_abort() }
+unreachable() -> ! { __g1_abort() }
+
+assert(condition: Bool) -> () {
+    handle perform __CharBoolCase::inspect(move condition) {
+        __CharBoolCase::inspect(Result::Ok(_)) => (),
+        __CharBoolCase::inspect(Result::Err(_)) => abort()
+    }
+}
 
 __g1_char_scalar_valid(value: u32) -> Bool {
     handle perform __CharBoolCase::inspect(value <= 1114111) {
@@ -3576,6 +3592,18 @@ __g1_slice_iter<'a, T>(value: Slice<'a, T>) -> SliceIter<'a, T> {
     }
 }
 
+// The direct Vec entry point retains exactly the same checked Array window as
+// `Vec::as_slice` followed by `Slice::iter`; it merely avoids requiring callers
+// to name and retain the intermediate Slice value.
+__g1_vec_iter<'a, T>(value: &'a Vec<T>) -> SliceIter<'a, T> {
+    SliceIter {
+        base: &value.storage,
+        start: 0,
+        length: __g1_array_len(&value.storage),
+        index: 0
+    }
+}
+
 __g1_slice_iter_len<'a, T>(value: &SliceIter<'a, T>) -> usize {
     value.length - value.index
 }
@@ -3586,19 +3614,15 @@ __g1_slice_iter_is_empty<'a, T>(value: &SliceIter<'a, T>) -> Bool {
 }
 
 __g1_slice_iter_next<'a, T>(
-    value: SliceIter<'a, T>
-) -> Option<(usize, SliceIter<'a, T>)> {
-    let SliceIter { base, start, length, index } = value;
+    value: &mut SliceIter<'a, T>
+) -> Option<usize> {
+    let length = value.length;
+    let index = value.index;
     handle perform __VecBoolCase::inspect(index < length) {
-        __VecBoolCase::inspect(Result::Ok(_)) => Option::Some((
-            index,
-            SliceIter {
-                base: base,
-                start: start,
-                length: length,
-                index: index + 1
-            }
-        )),
+        __VecBoolCase::inspect(Result::Ok(_)) => {
+            (*value).index = index + 1;
+            Option::Some(move index)
+        },
         __VecBoolCase::inspect(Result::Err(_)) => None
     }
 }
@@ -4430,6 +4454,69 @@ __g1_vec_append<T>(target: &mut Vec<T>, source: Vec<T>) -> () {
     __g1_vec_append_drain(target, move source)
 }
 
+__g1_vec_split_pop<T>(
+    value: &mut Vec<T>,
+    output: &mut Vec<T>,
+    remaining: usize
+) -> () {
+    handle perform __VecBoolCase::inspect(remaining == 0) {
+        __VecBoolCase::inspect(Result::Ok(_)) => (),
+        __VecBoolCase::inspect(Result::Err(_)) => {
+            Vec::push(&mut *output, __g1_array_pop_move(&mut value.storage));
+            __g1_vec_split_pop(
+                move value,
+                move output,
+                __g1_parse_usize_predecessor(move remaining)
+            )
+        }
+    }
+}
+
+__g1_vec_split_off_unchecked<T>(value: &mut Vec<T>, at: usize) -> Vec<T> {
+    let output = Vec::new();
+    let length = Vec::len(&*value);
+    __g1_vec_split_pop(
+        move value,
+        &mut output,
+        length - move at
+    );
+    __g1_vec_reverse(&mut output);
+    move output
+}
+
+__g1_vec_split_off<T>(value: &mut Vec<T>, at: usize) -> Result<Vec<T>, ()> {
+    let length = Vec::len(&*value);
+    handle perform __VecBoolCase::inspect(at <= length) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            Result::Ok(__g1_vec_split_off_unchecked(move value, move at)),
+        __VecBoolCase::inspect(Result::Err(_)) => Result::Err(())
+    }
+}
+
+__g1_vec_drain<T>(value: &mut Vec<T>, range: Range<usize>)
+    -> Result<Vec<T>, ()> {
+    let start = range.start;
+    let end = range.end;
+    let length = Vec::len(&*value);
+    handle perform __VecBoolCase::inspect(start <= end) {
+        __VecBoolCase::inspect(Result::Err(_)) => Result::Err(()),
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            handle perform __VecBoolCase::inspect(end <= length) {
+                __VecBoolCase::inspect(Result::Err(_)) => Result::Err(()),
+                __VecBoolCase::inspect(Result::Ok(_)) => {
+                    let drained_and_after =
+                        __g1_vec_split_off_unchecked(&mut *value, start);
+                    let after = __g1_vec_split_off_unchecked(
+                        &mut drained_and_after,
+                        end - start
+                    );
+                    Vec::append(move value, move after);
+                    Result::Ok(move drained_and_after)
+                }
+            }
+    }
+}
+
 __g1_vec_index<'a, T>(value: &'a Vec<T>, index: usize) -> &'a T {
     __g1_array_get_borrow_shared(&value.storage, index)
 }
@@ -4448,6 +4535,8 @@ let Vec::is_empty = __g1_vec_is_empty;
 let Vec::pop = __g1_vec_pop;
 let Vec::truncate = __g1_vec_truncate;
 let Vec::clear = __g1_vec_clear;
+let Vec::split_off = __g1_vec_split_off;
+let Vec::drain = __g1_vec_drain;
 let Vec::resize = __g1_vec_resize;
 let Vec::get = __g1_vec_get;
 let Vec::get_mut = __g1_vec_get_mut;
@@ -4463,8 +4552,44 @@ let Vec::swap_remove = __g1_vec_swap_remove;
 let Vec::insert = __g1_vec_insert;
 let Vec::append = __g1_vec_append;
 let Vec::extend_from_slice = __g1_vec_extend_from_slice;
+let Vec::iter = __g1_vec_iter;
 let Vec::index = __g1_vec_index;
 let Vec::index_mut = __g1_vec_index_mut;
+
+// A private-field ownership cell backed by a zero-or-one element Vec. External
+// code cannot destructure `Slot<T>`; it must use these transfers, so a moved
+// value is never hidden behind an opaque shell and there is no destroy escape.
+struct Slot<T> { private values: Vec<T> }
+
+slot_empty<T>() -> Slot<T> {
+    let values = Vec::new();
+    Slot { values: move values }
+}
+
+slot_filled<T>(value: T) -> Slot<T> {
+    let values = Vec::new();
+    Vec::push(&mut values, move value);
+    Slot { values: move values }
+}
+
+slot_take<T>(value: &mut Slot<T>) -> Option<T> {
+    let result = Vec::pop(&mut (*value).values);
+    move result
+}
+
+slot_replace<T>(value: &mut Slot<T>, incoming: T) -> Option<T> {
+    let previous = Vec::pop(&mut (*value).values);
+    Vec::push(&mut (*value).values, move incoming);
+    move previous
+}
+
+slot_into_option<T>(value: Slot<T>) -> Option<T> {
+    let Slot { values } = move value;
+    let result = Vec::pop(&mut values);
+    let Vec { storage } = move values;
+    __g1_array_finish_drained(move storage);
+    move result
+}
 
 let Slice::len = __g1_slice_len;
 let Slice::is_empty = __g1_slice_is_empty;
@@ -4841,6 +4966,27 @@ struct ByteView {
     private end: usize
 }
 
+// Small index-based iterators deliberately retain immutable handles rather
+// than materializing slices.  Their private cursors can only advance and every
+// read is preceded by a bound check in ordinary source.
+struct BytesIter {
+    private bytes: Bytes,
+    private index: usize,
+    private end: usize
+}
+
+struct Chars {
+    private bytes: Bytes,
+    private index: usize,
+    private end: usize
+}
+
+struct CharIndices {
+    private bytes: Bytes,
+    private index: usize,
+    private end: usize
+}
+
 __g1_text_view_ok(value: TextView) -> Result<TextView, TextRangeError> {
     Result::Ok(move value)
 }
@@ -5009,6 +5155,162 @@ __g1_byte_view_get(value: &ByteView, index: usize) -> Result<u8, BytesIndexError
     }
 }
 
+__g1_bytes_iter_range(bytes: Bytes, start: usize, end: usize) -> BytesIter {
+    BytesIter { bytes: move bytes, index: move start, end: move end }
+}
+
+__g1_bytes_iter(value: &Bytes) -> BytesIter {
+    __g1_bytes_iter_range(*value, 0, __g1_bytes_len(*value))
+}
+
+__g1_byte_view_iter(value: &ByteView) -> BytesIter {
+    __g1_bytes_iter_range(value.bytes, value.start, value.end)
+}
+
+__g1_bytes_iter_next(value: &mut BytesIter) -> Option<u8> {
+    let index = value.index;
+    let end = value.end;
+    let bytes = value.bytes;
+    handle perform __BytesBoolCase::inspect(index < end) {
+        __BytesBoolCase::inspect(Result::Ok(_)) => {
+            (*value).index = __g1_usize_successor(index);
+            Option::Some(__g1_bytes_get(move bytes, move index))
+        },
+        __BytesBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+__g1_string_chars(value: &String) -> Chars {
+    let bytes = __g1_text_as_bytes(*value);
+    Chars { bytes: move bytes, index: 0, end: __g1_string_byte_len(value) }
+}
+
+__g1_string_bytes(value: &String) -> BytesIter {
+    let bytes = __g1_text_as_bytes(*value);
+    __g1_bytes_iter_range(move bytes, 0, __g1_string_byte_len(value))
+}
+
+__g1_text_view_bytes(value: &TextView) -> BytesIter {
+    __g1_bytes_iter_range(
+        __g1_text_as_bytes(value.text),
+        value.start,
+        value.end
+    )
+}
+
+__g1_text_view_chars(value: &TextView) -> Chars {
+    Chars { bytes: __g1_text_as_bytes(value.text), index: value.start, end: value.end }
+}
+
+__g1_string_char_indices(value: &String) -> CharIndices {
+    let bytes = __g1_text_as_bytes(*value);
+    CharIndices { bytes: move bytes, index: 0, end: __g1_string_byte_len(value) }
+}
+
+__g1_text_view_char_indices(value: &TextView) -> CharIndices {
+    CharIndices {
+        bytes: __g1_text_as_bytes(value.text),
+        index: value.start,
+        end: value.end
+    }
+}
+
+__g1_chars_next(value: &mut Chars) -> Option<char> {
+    let index = value.index;
+    let end = value.end;
+    let bytes = value.bytes;
+    handle perform __BytesBoolCase::inspect(index < end) {
+        __BytesBoolCase::inspect(Result::Ok(_)) =>
+            handle perform __DebugDecodedCase::inspect(
+                __g1_char_decode_utf8(&bytes, move index)
+            ) {
+                __DebugDecodedCase::inspect(Result::Ok(decoded)) => {
+                    let DecodedChar { value: character, next } = move decoded;
+                    (*value).index = move next;
+                    Option::Some(move character)
+                },
+                // String and TextView construction prove UTF-8 validity; this
+                // arm is defensive and terminates iteration without trapping.
+                __DebugDecodedCase::inspect(Result::Err(_)) => {
+                    (*value).index = move end;
+                    None
+                }
+            },
+        __BytesBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+__g1_char_indices_next(value: &mut CharIndices) -> Option<(usize, char)> {
+    let index = value.index;
+    let end = value.end;
+    let bytes = value.bytes;
+    handle perform __BytesBoolCase::inspect(index < end) {
+        __BytesBoolCase::inspect(Result::Ok(_)) =>
+            handle perform __DebugDecodedCase::inspect(
+                __g1_char_decode_utf8(&bytes, index)
+            ) {
+                __DebugDecodedCase::inspect(Result::Ok(decoded)) => {
+                    let DecodedChar { value: character, next } = move decoded;
+                    (*value).index = move next;
+                    Option::Some((move index, move character))
+                },
+                __DebugDecodedCase::inspect(Result::Err(_)) => {
+                    (*value).index = move end;
+                    None
+                }
+            },
+        __BytesBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+// Numeric projections are useful to lexer/parser code that immediately needs
+// scalar arithmetic and also avoid an otherwise pointless char round-trip.
+__g1_chars_next_scalar(value: &mut Chars) -> Option<u32> {
+    let index = value.index;
+    let end = value.end;
+    let bytes = value.bytes;
+    handle perform __BytesBoolCase::inspect(index < end) {
+        __BytesBoolCase::inspect(Result::Ok(_)) =>
+            handle perform __DebugDecodedCase::inspect(
+                __g1_char_decode_utf8(&bytes, move index)
+            ) {
+                __DebugDecodedCase::inspect(Result::Ok(decoded)) => {
+                    let DecodedChar { value: character, next } = move decoded;
+                    (*value).index = move next;
+                    Option::Some(__g1_char_to_u32(move character))
+                },
+                __DebugDecodedCase::inspect(Result::Err(_)) => {
+                    (*value).index = move end;
+                    None
+                }
+            },
+        __BytesBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+__g1_char_indices_next_offset(value: &mut CharIndices) -> Option<usize> {
+    let index = value.index;
+    let end = value.end;
+    let bytes = value.bytes;
+    handle perform __BytesBoolCase::inspect(index < end) {
+        __BytesBoolCase::inspect(Result::Ok(_)) =>
+            handle perform __DebugDecodedCase::inspect(
+                __g1_char_decode_utf8(&bytes, index)
+            ) {
+                __DebugDecodedCase::inspect(Result::Ok(decoded)) => {
+                    let DecodedChar { value: _, next } = move decoded;
+                    (*value).index = move next;
+                    Option::Some(move index)
+                },
+                __DebugDecodedCase::inspect(Result::Err(_)) => {
+                    (*value).index = move end;
+                    None
+                }
+            },
+        __BytesBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
 let TextView::new = __g1_text_view_new;
 let TextView::all = __g1_text_view_all;
 let TextView::byte_len = __g1_text_view_byte_len;
@@ -5016,6 +5318,9 @@ let TextView::is_empty = __g1_text_view_is_empty;
 let TextView::as_bytes = __g1_text_view_as_bytes;
 let TextView::to_string = __g1_text_view_to_string;
 let TextView::eq = __g1_text_view_eq;
+let TextView::bytes = __g1_text_view_bytes;
+let TextView::chars = __g1_text_view_chars;
+let TextView::char_indices = __g1_text_view_char_indices;
 let ByteView::new = __g1_byte_view_new;
 let ByteView::all = __g1_byte_view_all;
 let ByteView::len = __g1_byte_view_len;
@@ -5023,6 +5328,16 @@ let ByteView::is_empty = __g1_byte_view_is_empty;
 let ByteView::get = __g1_byte_view_get;
 let ByteView::to_bytes = __g1_byte_view_to_bytes;
 let ByteView::eq = __g1_byte_view_eq;
+let ByteView::iter = __g1_byte_view_iter;
+let Bytes::iter = __g1_bytes_iter;
+let String::bytes = __g1_string_bytes;
+let String::chars = __g1_string_chars;
+let String::char_indices = __g1_string_char_indices;
+let BytesIter::next = __g1_bytes_iter_next;
+let Chars::next = __g1_chars_next;
+let Chars::next_scalar = __g1_chars_next_scalar;
+let CharIndices::next = __g1_char_indices_next;
+let CharIndices::next_offset = __g1_char_indices_next_offset;
 
 
 // The two compiler-facing builders own their byte vectors. Appending deep-copies
@@ -5168,6 +5483,66 @@ __g1_string_builder_append_u128(
     integer: u128
 ) -> () {
     __g1_string_builder_append_u128_digits(move value, move integer)
+}
+
+__g1_string_builder_push_hex_digit(
+    value: &mut StringBuilder,
+    digit: u8
+) -> () {
+    handle perform __VecBoolCase::inspect(digit < 10) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_string_builder_push_byte(
+                move value,
+                wrapping_convert_to_u8(wrapping_convert_to_u32(digit) + 48)
+            ),
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            __g1_string_builder_push_byte(
+                move value,
+                wrapping_convert_to_u8(wrapping_convert_to_u32(digit) + 87)
+            )
+    }
+}
+
+__g1_string_builder_append_hex_u128_digits(
+    value: &mut StringBuilder,
+    integer: u128
+) -> () {
+    handle perform __VecBoolCase::inspect(integer < 16) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_string_builder_push_hex_digit(
+                move value,
+                wrapping_convert_to_u8(move integer)
+            ),
+        __VecBoolCase::inspect(Result::Err(_)) => {
+            let quotient = integer / 16;
+            let remainder = integer % 16;
+            __g1_string_builder_append_hex_u128_digits(
+                &mut *value,
+                move quotient
+            );
+            __g1_string_builder_push_hex_digit(
+                move value,
+                wrapping_convert_to_u8(move remainder)
+            )
+        }
+    }
+}
+
+__g1_string_builder_append_hex_u64(
+    value: &mut StringBuilder,
+    integer: u64
+) -> () {
+    __g1_string_builder_append_hex_u128_digits(
+        move value,
+        wrapping_convert_to_u128(move integer)
+    )
+}
+
+__g1_string_builder_append_hex_u128(
+    value: &mut StringBuilder,
+    integer: u128
+) -> () {
+    __g1_string_builder_append_hex_u128_digits(move value, move integer)
 }
 
 __g1_string_builder_push_negative_digit(
@@ -5383,6 +5758,16 @@ __g1_formatter_append_u128(value: &mut Formatter, integer: u128) -> () {
 __g1_formatter_append_i128(value: &mut Formatter, integer: i128) -> () {
     __g1_formatter_prepare(&mut *value);
     __g1_string_builder_append_i128(&mut value.builder, move integer)
+}
+
+__g1_formatter_append_hex_u64(value: &mut Formatter, integer: u64) -> () {
+    __g1_formatter_prepare(&mut *value);
+    __g1_string_builder_append_hex_u64(&mut value.builder, move integer)
+}
+
+__g1_formatter_append_hex_u128(value: &mut Formatter, integer: u128) -> () {
+    __g1_formatter_prepare(&mut *value);
+    __g1_string_builder_append_hex_u128(&mut value.builder, move integer)
 }
 
 __g1_formatter_append_char(value: &mut Formatter, character: char) -> () {
@@ -5809,6 +6194,8 @@ let StringBuilder::append_u64 = __g1_string_builder_append_u64;
 let StringBuilder::append_i64 = __g1_string_builder_append_i64;
 let StringBuilder::append_u128 = __g1_string_builder_append_u128;
 let StringBuilder::append_i128 = __g1_string_builder_append_i128;
+let StringBuilder::append_hex_u64 = __g1_string_builder_append_hex_u64;
+let StringBuilder::append_hex_u128 = __g1_string_builder_append_hex_u128;
 let StringBuilder::finish = __g1_string_builder_finish;
 let Formatter::new = __g1_formatter_new;
 let Formatter::literal = __g1_formatter_literal;
@@ -5816,6 +6203,8 @@ let Formatter::append_u64 = __g1_formatter_append_u64;
 let Formatter::append_i64 = __g1_formatter_append_i64;
 let Formatter::append_u128 = __g1_formatter_append_u128;
 let Formatter::append_i128 = __g1_formatter_append_i128;
+let Formatter::append_hex_u64 = __g1_formatter_append_hex_u64;
+let Formatter::append_hex_u128 = __g1_formatter_append_hex_u128;
 let Formatter::append_char = __g1_formatter_append_char;
 let Formatter::newline = __g1_formatter_newline;
 let Formatter::indent = __g1_formatter_indent;
@@ -6116,9 +6505,11 @@ __g1_float_big_word(value: &__FloatBig, index: usize) -> u32 {
 }
 
 __g1_float_big_set(value: &mut __FloatBig, index: usize, word: u32) -> () {
-    *__g1_array_get_borrow_unique(&mut value.words.bytes.storage, index) =
-        wrapping_convert_to_u8(move word);
-    ()
+    __g1_byte_buf_replace_byte(
+        &mut value.words.bytes,
+        move index,
+        wrapping_convert_to_u8(move word)
+    )
 }
 
 __g1_float_big_effective_len_from(
@@ -6146,6 +6537,20 @@ __g1_float_big_is_zero(value: &__FloatBig) -> Bool {
     __g1_float_big_len(value) == 0
 }
 
+__g1_float_big_append_carry(value: &mut __FloatBig, carry: u64) -> () {
+    handle perform __VecBoolCase::inspect(carry == 0) {
+        __VecBoolCase::inspect(Result::Ok(_)) => (),
+        __VecBoolCase::inspect(Result::Err(_)) => {
+            __g1_byte_buf_push(
+                &mut value.words, wrapping_convert_to_u8(carry)
+            );
+            __g1_float_big_append_carry(
+                move value, shift_right(carry, 8)
+            )
+        }
+    }
+}
+
 __g1_float_big_mul_small_step(
     value: &mut __FloatBig,
     multiplier: u32,
@@ -6170,14 +6575,7 @@ __g1_float_big_mul_small_step(
             )
         },
         __VecBoolCase::inspect(Result::Err(_)) =>
-            handle perform __VecBoolCase::inspect(carry == 0) {
-                __VecBoolCase::inspect(Result::Ok(_)) => (),
-                __VecBoolCase::inspect(Result::Err(_)) =>
-                    __g1_byte_buf_push(
-                        &mut value.words,
-                        wrapping_convert_to_u8(move carry)
-                    )
-            }
+            __g1_float_big_append_carry(move value, move carry)
     }
 }
 
@@ -6188,56 +6586,20 @@ __g1_float_big_mul_small(value: &mut __FloatBig, multiplier: u32) -> () {
     )
 }
 
-__g1_float_big_add_small(value: &mut __FloatBig, addend: u32) -> () {
-    handle perform __VecBoolCase::inspect(__g1_byte_buf_len(&value.words) == 0) {
-        __VecBoolCase::inspect(Result::Ok(_)) =>
-            handle perform __VecBoolCase::inspect(addend == 0) {
-                __VecBoolCase::inspect(Result::Ok(_)) => (),
-                __VecBoolCase::inspect(Result::Err(_)) =>
-                    __g1_byte_buf_push(
-                        &mut value.words, wrapping_convert_to_u8(move addend)
-                    )
-            },
-        __VecBoolCase::inspect(Result::Err(_)) => {
-            let old = __g1_float_big_word(&*value, 0);
-            let sum = wrapping_convert_to_u64(old) + wrapping_convert_to_u64(addend);
-            __g1_float_big_set(
-                &mut *value, 0, wrapping_convert_to_u32(sum)
-            );
-            handle perform __VecBoolCase::inspect(shift_right(sum, 8) == 0) {
-                __VecBoolCase::inspect(Result::Ok(_)) => (),
-                __VecBoolCase::inspect(Result::Err(_)) =>
-                    __g1_float_big_add_carry(move value, 1)
-            }
-        }
-    }
-}
-
-__g1_float_big_add_carry(value: &mut __FloatBig, cursor: usize) -> () {
-    let length = __g1_byte_buf_len(&value.words);
-    handle perform __VecBoolCase::inspect(cursor < length) {
-        __VecBoolCase::inspect(Result::Ok(_)) => {
-            let old = __g1_float_big_word(&*value, cursor);
-            let next = old + 1;
-            __g1_float_big_set(&mut *value, cursor, next);
-            handle perform __VecBoolCase::inspect(next == 256) {
-                __VecBoolCase::inspect(Result::Ok(_)) =>
-                    __g1_float_big_add_carry(move value, cursor + 1),
-                __VecBoolCase::inspect(Result::Err(_)) => ()
-            }
-        },
-        __VecBoolCase::inspect(Result::Err(_)) =>
-            __g1_byte_buf_push(&mut value.words, 1)
-    }
-}
-
 __g1_float_big_mul_pow10(value: &mut __FloatBig, remaining: usize) -> () {
     handle perform __VecBoolCase::inspect(remaining == 0) {
         __VecBoolCase::inspect(Result::Ok(_)) => (),
-        __VecBoolCase::inspect(Result::Err(_)) => {
-            __g1_float_big_mul_small(&mut *value, 10);
-            __g1_float_big_mul_pow10(move value, remaining - 1)
-        }
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            handle perform __VecBoolCase::inspect(9 <= remaining) {
+                __VecBoolCase::inspect(Result::Ok(_)) => {
+                    __g1_float_big_mul_small(&mut *value, 1000000000);
+                    __g1_float_big_mul_pow10(move value, remaining - 9)
+                },
+                __VecBoolCase::inspect(Result::Err(_)) => {
+                    __g1_float_big_mul_small(&mut *value, 10);
+                    __g1_float_big_mul_pow10(move value, remaining - 1)
+                }
+            }
     }
 }
 
@@ -6458,10 +6820,13 @@ __g1_float_push_decimal_digit(
     magnitude: &mut __FloatBig,
     byte: u8
 ) -> () {
-    __g1_float_big_mul_small(&mut *magnitude, 10);
-    __g1_float_big_add_small(
+    let length = __g1_float_big_len(&*magnitude);
+    __g1_float_big_mul_small_step(
         move magnitude,
-        wrapping_convert_to_u32(byte) - 48
+        10,
+        0,
+        move length,
+        wrapping_convert_to_u64(byte - 48)
     )
 }
 
@@ -6477,9 +6842,9 @@ __g1_float_scan_integer(
     handle perform __VecBoolCase::inspect(cursor < length) {
         __VecBoolCase::inspect(Result::Ok(_)) => {
             let byte = __g1_bytes_get(bytes, cursor);
-            handle perform __VecBoolCase::inspect(48 <= byte) {
+            handle perform __VecBoolCase::inspect(byte <= 57) {
                 __VecBoolCase::inspect(Result::Ok(_)) =>
-                    handle perform __VecBoolCase::inspect(byte <= 57) {
+                    handle perform __VecBoolCase::inspect(48 <= byte) {
                         __VecBoolCase::inspect(Result::Ok(_)) => {
                             __g1_float_push_decimal_digit(
                                 &mut magnitude, move byte
@@ -6583,9 +6948,9 @@ __g1_float_scan_fraction(
     handle perform __VecBoolCase::inspect(cursor < length) {
         __VecBoolCase::inspect(Result::Ok(_)) => {
             let byte = __g1_bytes_get(bytes, cursor);
-            handle perform __VecBoolCase::inspect(48 <= byte) {
+            handle perform __VecBoolCase::inspect(byte <= 57) {
                 __VecBoolCase::inspect(Result::Ok(_)) =>
-                    handle perform __VecBoolCase::inspect(byte <= 57) {
+                    handle perform __VecBoolCase::inspect(48 <= byte) {
                         __VecBoolCase::inspect(Result::Ok(_)) => {
                             __g1_float_push_decimal_digit(
                                 &mut magnitude, move byte
@@ -6711,6 +7076,13 @@ __g1_float_exponent_push(
     }
 }
 
+__g1_float_is_decimal_digit(byte: u8) -> Bool {
+    handle perform __VecBoolCase::inspect(48 <= byte) {
+        __VecBoolCase::inspect(Result::Ok(_)) => byte <= 57,
+        __VecBoolCase::inspect(Result::Err(_)) => false
+    }
+}
+
 __g1_float_scan_exponent(
     bytes: Bytes,
     length: usize,
@@ -6732,38 +7104,32 @@ __g1_float_scan_exponent(
     handle perform __VecBoolCase::inspect(cursor < length) {
         __VecBoolCase::inspect(Result::Ok(_)) => {
             let byte = __g1_bytes_get(bytes, cursor);
-            handle perform __VecBoolCase::inspect(48 <= byte) {
-                __VecBoolCase::inspect(Result::Ok(_)) =>
-                    handle perform __VecBoolCase::inspect(byte <= 57) {
-                        __VecBoolCase::inspect(Result::Ok(_)) => {
-                            let digit = wrapping_convert_to_usize(byte - 48);
-                            let next = __g1_float_exponent_push(
-                                exponent_magnitude, move digit, cap
-                            );
-                            __g1_float_scan_exponent(
-                                move bytes,
-                                length,
-                                __FloatExponentScan {
-                                    cursor: cursor + 1,
-                                    exponent_magnitude: move next,
-                                    digits: digits + 1,
-                                    separator: move separator,
-                                    after_separator: false,
-                                    allow_sign: false,
-                                    cap: move cap,
-                                    value_magnitude: move value_magnitude,
-                                    negative: move negative,
-                                    fraction_digits: move fraction_digits,
-                                    exponent_negative: move exponent_negative
-                                }
-                            )
-                        },
-                        __VecBoolCase::inspect(Result::Err(_)) =>
-                            {
-                                value_magnitude;
-                                Result::Err(FloatParseError::InvalidDigit(cursor))
-                            }
-                    },
+            handle perform __VecBoolCase::inspect(
+                __g1_float_is_decimal_digit(byte)
+            ) {
+                __VecBoolCase::inspect(Result::Ok(_)) => {
+                    let digit = wrapping_convert_to_usize(byte - 48);
+                    let next = __g1_float_exponent_push(
+                        exponent_magnitude, move digit, cap
+                    );
+                    __g1_float_scan_exponent(
+                        move bytes,
+                        length,
+                        __FloatExponentScan {
+                            cursor: cursor + 1,
+                            exponent_magnitude: move next,
+                            digits: digits + 1,
+                            separator: move separator,
+                            after_separator: false,
+                            allow_sign: false,
+                            cap: move cap,
+                            value_magnitude: move value_magnitude,
+                            negative: move negative,
+                            fraction_digits: move fraction_digits,
+                            exponent_negative: move exponent_negative
+                        }
+                    )
+                },
                 __VecBoolCase::inspect(Result::Err(_)) =>
                     handle perform __VecBoolCase::inspect(byte == 43) {
                         __VecBoolCase::inspect(Result::Ok(_)) =>
@@ -6899,32 +7265,8 @@ __g1_float_exponent_initial_state(
     }
 }
 
-// Packs `2 * cursor + negative`; keeping this copy-only scan in one call also
-// leaves the owned decimal magnitude wholly in the caller until conversion.
-__g1_float_exponent_start(
-    bytes: Bytes,
-    cursor: usize,
-    length: usize
-) -> usize {
-    handle perform __VecBoolCase::inspect(cursor < length) {
-        __VecBoolCase::inspect(Result::Ok(_)) => {
-            let byte = __g1_bytes_get(bytes, cursor);
-            handle perform __VecBoolCase::inspect(byte == 43) {
-                __VecBoolCase::inspect(Result::Ok(_)) => (cursor + 1) * 2,
-                __VecBoolCase::inspect(Result::Err(_)) =>
-                    handle perform __VecBoolCase::inspect(byte == 45) {
-                        __VecBoolCase::inspect(Result::Ok(_)) =>
-                            (cursor + 1) * 2 + 1,
-                        __VecBoolCase::inspect(Result::Err(_)) => cursor * 2
-                    }
-            }
-        },
-        __VecBoolCase::inspect(Result::Err(_)) => cursor * 2
-    }
-}
-
 __g1_float_finish_components(
-    bytes: Bytes,
+    source: &String,
     length: usize,
     magnitude: __FloatBig,
     negative: Bool,
@@ -6942,11 +7284,11 @@ __g1_float_finish_components(
                 end: move cursor
             }),
         __VecBoolCase::inspect(Result::Err(_)) => {
-            let byte = __g1_bytes_get(bytes, cursor);
+            let byte = __g1_bytes_get(String::as_bytes(source), cursor);
             handle perform __VecBoolCase::inspect(byte == 101) {
                 __VecBoolCase::inspect(Result::Ok(_)) =>
                     __g1_float_scan_exponent(
-                        move bytes,
+                        String::as_bytes(source),
                         length,
                         __g1_float_exponent_initial_state(
                             length,
@@ -6960,7 +7302,7 @@ __g1_float_finish_components(
                     handle perform __VecBoolCase::inspect(byte == 69) {
                         __VecBoolCase::inspect(Result::Ok(_)) =>
                             __g1_float_scan_exponent(
-                                move bytes,
+                                String::as_bytes(source),
                                 length,
                                 __g1_float_exponent_initial_state(
                                     length,
@@ -6981,7 +7323,7 @@ __g1_float_finish_components(
 }
 
 __g1_float_parse_fraction_from(
-    bytes: Bytes,
+    source: &String,
     length: usize,
     integer: __FloatIntegerEnd,
     negative: Bool
@@ -6991,6 +7333,7 @@ __g1_float_parse_fraction_from(
         cursor: dot,
         digit_count
     } = move integer;
+    let bytes = String::as_bytes(source);
     handle perform __FloatFractionCase::inspect(
         __g1_float_scan_fraction(
             move bytes,
@@ -7011,7 +7354,7 @@ __g1_float_parse_fraction_from(
                 fraction_digits
             } = move fraction;
             __g1_float_finish_components(
-                move bytes,
+                source,
                 length,
                 move combined,
                 move negative,
@@ -7025,7 +7368,7 @@ __g1_float_parse_fraction_from(
 }
 
 __g1_float_finish_integer_component(
-    bytes: Bytes,
+    source: &String,
     length: usize,
     integer: __FloatIntegerEnd,
     negative: Bool
@@ -7034,11 +7377,11 @@ __g1_float_finish_integer_component(
     handle perform __VecBoolCase::inspect(cursor < length) {
         __VecBoolCase::inspect(Result::Ok(_)) =>
             handle perform __VecBoolCase::inspect(
-                __g1_bytes_get(bytes, cursor) == 46
+                __g1_bytes_get(String::as_bytes(source), cursor) == 46
             ) {
                 __VecBoolCase::inspect(Result::Ok(_)) =>
                     __g1_float_parse_fraction_from(
-                        move bytes, length, move integer, move negative
+                        source, length, move integer, move negative
                     ),
                 __VecBoolCase::inspect(Result::Err(_)) => {
                     let __FloatIntegerEnd {
@@ -7047,7 +7390,7 @@ __g1_float_finish_integer_component(
                         digit_count: _
                     } = move integer;
                     __g1_float_finish_components(
-                        move bytes,
+                        source,
                         length,
                         move magnitude,
                         move negative,
@@ -7063,7 +7406,7 @@ __g1_float_finish_integer_component(
                 digit_count: _
             } = move integer;
             __g1_float_finish_components(
-                move bytes,
+                source,
                 length,
                 move magnitude,
                 move negative,
@@ -7081,21 +7424,22 @@ __g1_float_parse_syntax(value: &String) -> Result<__FloatParsed, FloatParseError
         __VecBoolCase::inspect(Result::Ok(_)) =>
             Result::Err(FloatParseError::Empty),
         __VecBoolCase::inspect(Result::Err(_)) => {
-            let first = __g1_bytes_get(bytes, 0);
-            let negative = first == 45;
-            let signed = handle perform __VecBoolCase::inspect(first == 43) {
-                __VecBoolCase::inspect(Result::Ok(_)) => true,
-                __VecBoolCase::inspect(Result::Err(_)) => move negative
-            };
-            let start = handle perform __VecBoolCase::inspect(move signed) {
+            let first = __g1_bytes_get(String::as_bytes(value), 0);
+            let start = handle perform __VecBoolCase::inspect(first == 43) {
                 __VecBoolCase::inspect(Result::Ok(_)) =>
                     wrapping_convert_to_usize(1),
                 __VecBoolCase::inspect(Result::Err(_)) =>
-                    wrapping_convert_to_usize(0)
+                    handle perform __VecBoolCase::inspect(first == 45) {
+                        __VecBoolCase::inspect(Result::Ok(_)) =>
+                            wrapping_convert_to_usize(1),
+                        __VecBoolCase::inspect(Result::Err(_)) =>
+                            wrapping_convert_to_usize(0)
+                    }
             };
+            let negative = __g1_bytes_get(String::as_bytes(value), 0) == 45;
             handle perform __FloatIntegerCase::inspect(
                 __g1_float_scan_integer(
-                    move bytes,
+                    String::as_bytes(value),
                     start,
                     length,
                     __g1_float_big_zero(),
@@ -7106,7 +7450,7 @@ __g1_float_parse_syntax(value: &String) -> Result<__FloatParsed, FloatParseError
             ) {
                 __FloatIntegerCase::inspect(Result::Ok(integer)) =>
                     __g1_float_finish_integer_component(
-                        move bytes,
+                        value,
                         length,
                         move integer,
                         move negative
@@ -7168,7 +7512,7 @@ __g1_float_ratio(parsed: __FloatParsed) -> __FloatRatio {
     } = move parsed;
     let numerator = move magnitude;
     let denominator = __g1_float_big_zero();
-    __g1_float_big_add_small(&mut denominator, 1);
+    __g1_byte_buf_push(&mut denominator.words, 1);
     let numerator_power = __g1_float_numerator_decimal_power(
         fraction_digits, exponent_negative, exponent
     );
@@ -7279,7 +7623,10 @@ __g1_float_divide_bits_step(
                     __g1_float_big_sub(&mut reduced, &divisor);
                     let next_quotient = bit_or(
                         move quotient,
-                        shift_left(1, wrapping_convert_to_u32(bit))
+                        shift_left(
+                            wrapping_convert_to_u64(1),
+                            wrapping_convert_to_u32(bit)
+                        )
                     );
                     __g1_float_big_shift_right_one(&mut divisor);
                     __g1_float_divide_bits_step(
@@ -7448,6 +7795,43 @@ __g1_float_encode_nonzero(
     }
 }
 
+__g1_float_definitely_overflows_decimal(
+    fraction_digits: usize,
+    exponent_negative: Bool,
+    exponent: usize
+) -> Bool {
+    handle perform __VecBoolCase::inspect(move exponent_negative) {
+        __VecBoolCase::inspect(Result::Ok(_)) => false,
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            fraction_digits + 400 < exponent
+    }
+}
+
+__g1_float_definitely_underflows_decimal(
+    fraction_digits: usize,
+    exponent_negative: Bool,
+    exponent: usize,
+    source_end: usize
+) -> Bool {
+    handle perform __VecBoolCase::inspect(move exponent_negative) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            source_end + 400 < fraction_digits + exponent,
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            handle perform __VecBoolCase::inspect(exponent < fraction_digits) {
+                __VecBoolCase::inspect(Result::Ok(_)) =>
+                    source_end + 400 < fraction_digits - exponent,
+                __VecBoolCase::inspect(Result::Err(_)) => false
+            }
+    }
+}
+
+__g1_float_signed_zero_bits(negative: Bool, sign_mask: u64) -> u64 {
+    handle perform __VecBoolCase::inspect(move negative) {
+        __VecBoolCase::inspect(Result::Ok(_)) => move sign_mask,
+        __VecBoolCase::inspect(Result::Err(_)) => wrapping_convert_to_u64(0)
+    }
+}
+
 __g1_float_encode(
     parsed: __FloatParsed,
     precision: usize,
@@ -7478,23 +7862,54 @@ __g1_float_encode(
             zero_magnitude;
             Result::Ok(move bits)
         },
-        __FloatBigBranch::inspect(Result::Err(nonzero_magnitude)) =>
-            __g1_float_encode_nonzero(
-                __g1_float_ratio(__FloatParsed {
-                    magnitude: move nonzero_magnitude,
-                    negative: move negative,
-                    fraction_digits: move fraction_digits,
-                    exponent_negative: move exponent_negative,
-                    exponent: move exponent,
-                    end: move end
-                }),
-                move precision,
-                move fraction_bits,
-                move minimum_exponent,
-                move maximum_exponent,
-                move bias,
-                move sign_mask
-            )
+        __FloatBigBranch::inspect(Result::Err(nonzero_magnitude)) => {
+            let overflow = __g1_float_definitely_overflows_decimal(
+                fraction_digits, exponent_negative, exponent
+            );
+            handle perform __FloatBigBranch::inspect(
+                __g1_float_big_branch(move nonzero_magnitude, move overflow)
+            ) {
+                __FloatBigBranch::inspect(Result::Ok(too_large)) => {
+                    too_large;
+                    Result::Err(FloatParseError::Overflow(end - 1))
+                },
+                __FloatBigBranch::inspect(Result::Err(not_large)) => {
+                    let underflow = __g1_float_definitely_underflows_decimal(
+                        fraction_digits,
+                        exponent_negative,
+                        exponent,
+                        end
+                    );
+                    handle perform __FloatBigBranch::inspect(
+                        __g1_float_big_branch(move not_large, move underflow)
+                    ) {
+                        __FloatBigBranch::inspect(Result::Ok(too_small)) => {
+                            too_small;
+                            Result::Ok(__g1_float_signed_zero_bits(
+                                move negative, move sign_mask
+                            ))
+                        },
+                        __FloatBigBranch::inspect(Result::Err(exact)) =>
+                            __g1_float_encode_nonzero(
+                                __g1_float_ratio(__FloatParsed {
+                                    magnitude: move exact,
+                                    negative: move negative,
+                                    fraction_digits: move fraction_digits,
+                                    exponent_negative: move exponent_negative,
+                                    exponent: move exponent,
+                                    end: move end
+                                }),
+                                move precision,
+                                move fraction_bits,
+                                move minimum_exponent,
+                                move maximum_exponent,
+                                move bias,
+                                move sign_mask
+                            )
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -7840,6 +8255,38 @@ trait Hash { hash(self: &Self, state: &mut Hasher) -> (); }
 trait Default { default() -> Self; }
 trait Display { fmt(self: &Self, formatter: &mut Formatter) -> (); }
 trait Debug { fmt(self: &Self, formatter: &mut Formatter) -> (); }
+
+assert_eq<T>(left: &T, right: &T) -> () where T: Eq {
+    assert(Eq::eq(left, right))
+}
+
+// Formatting remains an ordinary generic library callable.  It dispatches
+// through Display, writes directly into the policy formatter, and validates
+// UTF-8 exactly once when the builder is finished.
+format<T>(value: &T) -> Result<String, Utf8Error> where T: Display {
+    let formatter = Formatter::new();
+    Display::fmt(value, &mut formatter);
+    Formatter::finish(move formatter)
+}
+
+format_debug<T>(value: &T) -> Result<String, Utf8Error> where T: Debug {
+    let formatter = Formatter::new();
+    Debug::fmt(value, &mut formatter);
+    Formatter::finish(move formatter)
+}
+
+__g1_formatter_display<T>(value: &mut Formatter, item: &T) -> ()
+    where T: Display {
+    Display::fmt(item, move value)
+}
+
+__g1_formatter_debug<T>(value: &mut Formatter, item: &T) -> ()
+    where T: Debug {
+    Debug::fmt(item, move value)
+}
+
+let Formatter::display = __g1_formatter_display;
+let Formatter::debug = __g1_formatter_debug;
 
 impl Default for i8 { default() -> i8 { 0 } }
 impl Default for i16 { default() -> i16 { 0 } }
@@ -8273,6 +8720,28 @@ impl Hash for Bytes {
         Hasher::write_bytes(move state, self)
     }
 }
+impl Eq for TextView {
+    eq(self: &TextView, other: &TextView) -> Bool {
+        TextView::eq(self, other)
+    }
+}
+impl Hash for TextView {
+    hash(self: &TextView, state: &mut Hasher) -> () {
+        let bytes = TextView::as_bytes(self);
+        Hasher::write_bytes(move state, &bytes)
+    }
+}
+impl Eq for ByteView {
+    eq(self: &ByteView, other: &ByteView) -> Bool {
+        ByteView::eq(self, other)
+    }
+}
+impl Hash for ByteView {
+    hash(self: &ByteView, state: &mut Hasher) -> () {
+        let bytes = ByteView::to_bytes(self);
+        Hasher::write_bytes(move state, &bytes)
+    }
+}
 impl Eq for u8 {
     eq(self: &u8, other: &u8) -> Bool { *self == *other }
 }
@@ -8535,16 +9004,22 @@ impl Hash for char {
 
 // Structural fundamental traits. Option<T> is the transparent Result<T, ()>
 // alias, so the Result implementations below are also its coherent evidence.
+__g1_structural_eq<T>(left: &T, right: &T) -> Bool where T: Eq {
+    Eq::eq(left, right)
+}
+__g1_structural_cmp<T>(left: &T, right: &T) -> Ordering where T: Ord {
+    Ord::cmp(left, right)
+}
 impl<T, E> Default for Result<T, E> where T: Default {
     default() -> Result<T, E> { Result::Ok(Default::default()) }
 }
 impl<T, E> Eq for Result<T, E> where T: Eq, E: Eq {
     eq(self: &Result<T, E>, other: &Result<T, E>) -> Bool {
         if(*self is Result::Ok(left)) {
-            if(*other is Result::Ok(right)) { Eq::eq(left, right) } else { false }
+            if(*other is Result::Ok(right)) { __g1_structural_eq(&left, &right) } else { false }
         } else {
             if(*other is Result::Err(right)) {
-                if(*self is Result::Err(left)) { Eq::eq(left, right) } else { false }
+                if(*self is Result::Err(left)) { __g1_structural_eq(&left, &right) } else { false }
             } else { false }
         }
     }
@@ -8552,11 +9027,11 @@ impl<T, E> Eq for Result<T, E> where T: Eq, E: Eq {
 impl<T, E> Ord for Result<T, E> where T: Ord, E: Ord {
     cmp(self: &Result<T, E>, other: &Result<T, E>) -> Ordering {
         if(*self is Result::Ok(left)) {
-            if(*other is Result::Ok(right)) { Ord::cmp(left, right) }
+            if(*other is Result::Ok(right)) { __g1_structural_cmp(&left, &right) }
             else { Ordering::Less }
         } else {
             if(*other is Result::Err(right)) {
-                if(*self is Result::Err(left)) { Ord::cmp(left, right) }
+                if(*self is Result::Err(left)) { __g1_structural_cmp(&left, &right) }
                 else { Ordering::Equal }
             } else { Ordering::Greater }
         }
@@ -8566,11 +9041,11 @@ impl<T, E> Hash for Result<T, E> where T: Hash, E: Hash {
     hash(self: &Result<T, E>, state: &mut Hasher) -> () {
         if(*self is Result::Ok(value)) {
             Hasher::write_u8(&mut *state, 0);
-            Hash::hash(value, move state)
+            Hash::hash(&value, move state)
         } else {
             if(*self is Result::Err(value)) {
                 Hasher::write_u8(&mut *state, 1);
-                Hash::hash(value, move state)
+                Hash::hash(&value, move state)
             } else { state; () }
         }
     }
@@ -8579,14 +9054,16 @@ impl<T, E> Display for Result<T, E> where T: Display, E: Display {
     fmt(self: &Result<T, E>, formatter: &mut Formatter) -> () {
         if(*self is Result::Ok(value)) {
             __g1_debug_literal(&mut *formatter, "Ok(");
-            Display::fmt(value, &mut *formatter);
+            Display::fmt(&value, &mut *formatter);
+            move self;
             __g1_debug_literal(move formatter, ")")
         } else {
             if(*self is Result::Err(value)) {
                 __g1_debug_literal(&mut *formatter, "Err(");
-                Display::fmt(value, &mut *formatter);
+                Display::fmt(&value, &mut *formatter);
+                move self;
                 __g1_debug_literal(move formatter, ")")
-            } else { formatter; () }
+            } else { move self; move formatter; () }
         }
     }
 }
@@ -8594,14 +9071,16 @@ impl<T, E> Debug for Result<T, E> where T: Debug, E: Debug {
     fmt(self: &Result<T, E>, formatter: &mut Formatter) -> () {
         if(*self is Result::Ok(value)) {
             __g1_debug_literal(&mut *formatter, "Ok(");
-            Debug::fmt(value, &mut *formatter);
+            Debug::fmt(&value, &mut *formatter);
+            move self;
             __g1_debug_literal(move formatter, ")")
         } else {
             if(*self is Result::Err(value)) {
                 __g1_debug_literal(&mut *formatter, "Err(");
-                Debug::fmt(value, &mut *formatter);
+                Debug::fmt(&value, &mut *formatter);
+                move self;
                 __g1_debug_literal(move formatter, ")")
-            } else { formatter; () }
+            } else { move self; move formatter; () }
         }
     }
 }
@@ -8625,10 +9104,10 @@ impl<A> Default for (A,) where A: Default {
     default() -> (A,) { (Default::default(),) }
 }
 impl<A> Eq for (A,) where A: Eq {
-    eq(self: &(A,), other: &(A,)) -> Bool { Eq::eq(&self.0, &other.0) }
+    eq(self: &(A,), other: &(A,)) -> Bool { __g1_structural_eq(&self.0, &other.0) }
 }
 impl<A> Ord for (A,) where A: Ord {
-    cmp(self: &(A,), other: &(A,)) -> Ordering { Ord::cmp(&self.0, &other.0) }
+    cmp(self: &(A,), other: &(A,)) -> Ordering { __g1_structural_cmp(&self.0, &other.0) }
 }
 impl<A> Hash for (A,) where A: Hash {
     hash(self: &(A,), state: &mut Hasher) -> () { Hash::hash(&self.0, move state) }
@@ -8649,17 +9128,21 @@ impl<A> Debug for (A,) where A: Debug {
 }
 
 impl<A, B> Default for (A, B) where A: Default, B: Default {
-    default() -> (A, B) { (Default::default(), Default::default()) }
+    default() -> (A, B) {
+        (Default::default(), Default::default())
+    }
 }
 impl<A, B> Eq for (A, B) where A: Eq, B: Eq {
     eq(self: &(A, B), other: &(A, B)) -> Bool {
-        Eq::eq(&self.0, &other.0) && Eq::eq(&self.1, &other.1)
+        let first = __g1_structural_eq(&self.0, &other.0);
+        let second = __g1_structural_eq(&self.1, &other.1);
+        if(first) { second } else { false }
     }
 }
 impl<A, B> Ord for (A, B) where A: Ord, B: Ord {
     cmp(self: &(A, B), other: &(A, B)) -> Ordering {
-        let first = Ord::cmp(&self.0, &other.0);
-        let second = Ord::cmp(&self.1, &other.1);
+        let first = __g1_structural_cmp(&self.0, &other.0);
+        let second = __g1_structural_cmp(&self.1, &other.1);
         if(first is Ordering::Equal) { second } else { first }
     }
 }
@@ -8690,21 +9173,24 @@ impl<A, B> Debug for (A, B) where A: Debug, B: Debug {
 impl<A, B, C> Default for (A, B, C)
     where A: Default, B: Default, C: Default {
     default() -> (A, B, C) {
-        (Default::default(), Default::default(), Default::default())
+        (
+            Default::default(), Default::default(), Default::default()
+        )
     }
 }
 impl<A, B, C> Eq for (A, B, C) where A: Eq, B: Eq, C: Eq {
     eq(self: &(A, B, C), other: &(A, B, C)) -> Bool {
-        Eq::eq(&self.0, &other.0)
-            && Eq::eq(&self.1, &other.1)
-            && Eq::eq(&self.2, &other.2)
+        let first = __g1_structural_eq(&self.0, &other.0);
+        let second = __g1_structural_eq(&self.1, &other.1);
+        let third = __g1_structural_eq(&self.2, &other.2);
+        if(first) { if(second) { third } else { false } } else { false }
     }
 }
 impl<A, B, C> Ord for (A, B, C) where A: Ord, B: Ord, C: Ord {
     cmp(self: &(A, B, C), other: &(A, B, C)) -> Ordering {
-        let first = Ord::cmp(&self.0, &other.0);
-        let second = Ord::cmp(&self.1, &other.1);
-        let third = Ord::cmp(&self.2, &other.2);
+        let first = __g1_structural_cmp(&self.0, &other.0);
+        let second = __g1_structural_cmp(&self.1, &other.1);
+        let third = __g1_structural_cmp(&self.2, &other.2);
         if(first is Ordering::Equal) {
             if(second is Ordering::Equal) { third } else { second }
         } else { first }
@@ -8751,18 +9237,21 @@ impl<A, B, C, D> Default for (A, B, C, D)
 }
 impl<A, B, C, D> Eq for (A, B, C, D) where A: Eq, B: Eq, C: Eq, D: Eq {
     eq(self: &(A, B, C, D), other: &(A, B, C, D)) -> Bool {
-        Eq::eq(&self.0, &other.0)
-            && Eq::eq(&self.1, &other.1)
-            && Eq::eq(&self.2, &other.2)
-            && Eq::eq(&self.3, &other.3)
+        let first = __g1_structural_eq(&self.0, &other.0);
+        let second = __g1_structural_eq(&self.1, &other.1);
+        let third = __g1_structural_eq(&self.2, &other.2);
+        let fourth = __g1_structural_eq(&self.3, &other.3);
+        if(first) {
+            if(second) { if(third) { fourth } else { false } } else { false }
+        } else { false }
     }
 }
 impl<A, B, C, D> Ord for (A, B, C, D) where A: Ord, B: Ord, C: Ord, D: Ord {
     cmp(self: &(A, B, C, D), other: &(A, B, C, D)) -> Ordering {
-        let first = Ord::cmp(&self.0, &other.0);
-        let second = Ord::cmp(&self.1, &other.1);
-        let third = Ord::cmp(&self.2, &other.2);
-        let fourth = Ord::cmp(&self.3, &other.3);
+        let first = __g1_structural_cmp(&self.0, &other.0);
+        let second = __g1_structural_cmp(&self.1, &other.1);
+        let third = __g1_structural_cmp(&self.2, &other.2);
+        let fourth = __g1_structural_cmp(&self.3, &other.3);
         if(first is Ordering::Equal) {
             if(second is Ordering::Equal) {
                 if(third is Ordering::Equal) { fourth } else { third }
@@ -9598,19 +10087,22 @@ __g1_hash_map_entry_insert<'a, K, V>(
 __g1_hash_map_entry_value_mut<'a, K, V>(
     value: &'a mut HashMap<K, V>,
     index: usize
-) -> Option<&'a mut V> {
+) -> &'a mut V {
     let bucket = __g1_vec_index_mut(&mut value.buckets, index);
     if(*bucket is Result::Ok(_)) {
-        Option::Some(&mut bucket.0.1)
+        &mut bucket.0.1
     } else {
-        None
+        // Entry's private completed probe is either already occupied or was
+        // populated immediately before this lookup. Reaching an empty bucket
+        // therefore signals a violated standard-library invariant.
+        abort()
     }
 }
 
 __g1_hash_map_entry_or_insert<'a, K, V>(
     entry: HashMapEntry<'a, K, V>,
     item: V
-) -> Option<&'a mut V> where K: Use<[0,0]>,
+) -> &'a mut V where K: Use<[0,0]>,
         V: Use<[0,0]> {
     let HashMapEntry { value, key, probe } = move entry;
     let index = probe.index;
@@ -9777,7 +10269,8 @@ __g1_hash_map_repair_after_remove<K, V>(
     }
 }
 
-__g1_hash_map_remove<K, V>(value: &mut HashMap<K, V>, key: &K) -> Option<V>
+__g1_hash_map_remove_entry<K, V>(value: &mut HashMap<K, V>, key: &K)
+    -> Option<(K, V)>
     where K: Eq, K: Hash, K: Use<[0,0]>,
         V: Use<[0,0]> {
     let capacity = Vec::len(&value.buckets);
@@ -9803,17 +10296,89 @@ __g1_hash_map_remove<K, V>(value: &mut HashMap<K, V>, key: &K) -> Option<V>
                     handle perform __ResultCase<(K, V), ()>::inspect(
                         move removed
                     ) {
-                        __ResultCase<(K, V), ()>::inspect(Result::Ok(pair)) => {
-                            let (removed_key, removed_value) = move pair;
-                            removed_key;
-                            Option::Some(move removed_value)
-                        },
+                        __ResultCase<(K, V), ()>::inspect(Result::Ok(pair)) =>
+                            Option::Some(move pair),
                         __ResultCase<(K, V), ()>::inspect(Result::Err(_)) =>
                             None
                     }
                 }
             }
         }
+    }
+}
+
+__g1_hash_map_remove<K, V>(value: &mut HashMap<K, V>, key: &K) -> Option<V>
+    where K: Eq, K: Hash, K: Use<[0,0]>, V: Use<[0,0]> {
+    handle perform __ResultCase<(K, V), ()>::inspect(
+        __g1_hash_map_remove_entry(move value, key)
+    ) {
+        __ResultCase<(K, V), ()>::inspect(Result::Ok(pair)) => {
+            let (removed_key, removed_value) = move pair;
+            removed_key;
+            Option::Some(move removed_value)
+        },
+        __ResultCase<(K, V), ()>::inspect(Result::Err(_)) => None
+    }
+}
+
+__g1_hash_map_clear<K, V>(value: &mut HashMap<K, V>) -> ()
+    where K: Use<[0,0]>, V: Use<[0,0]> {
+    let old = replace(move value, HashMap::new());
+    let HashMap { buckets, length } = move old;
+    buckets;
+    length;
+    ()
+}
+
+// A checked raw lookup accepts a caller-cached hash only when it matches the
+// canonical Hash stream for the borrowed key. A stale or forged hash returns
+// None without probing an unrelated cluster.
+__g1_hash_map_raw_get<'a, K, V>(
+    value: &'a HashMap<K, V>,
+    key: &K,
+    hash: u64
+) -> Option<&'a V> where K: Eq, K: Hash {
+    let capacity = Vec::len(&value.buckets);
+    handle perform __VecBoolCase::inspect(capacity == 0) {
+        __VecBoolCase::inspect(Result::Ok(_)) => None,
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            handle perform __VecBoolCase::inspect(
+                move hash == __g1_hash_map_hash(key)
+            ) {
+                __VecBoolCase::inspect(Result::Err(_)) => None,
+                __VecBoolCase::inspect(Result::Ok(_)) =>
+                    __g1_hash_map_get(value, key)
+            }
+    }
+}
+
+effect __HashReserveCase { inspect(value: Result<usize, ()>) -> !; }
+
+__g1_hash_map_reserve_additional_to<K, V>(
+    value: &mut HashMap<K, V>,
+    required: usize
+) -> Bool where K: Eq, K: Hash, K: Use<[0,0]>, V: Use<[0,0]> {
+    let capacity = Vec::len(&value.buckets);
+    let threshold = capacity - capacity / 4;
+    handle perform __VecBoolCase::inspect(required <= threshold) {
+        __VecBoolCase::inspect(Result::Ok(_)) => true,
+        __VecBoolCase::inspect(Result::Err(_)) => {
+            __g1_hash_map_grow(&mut *value);
+            __g1_hash_map_reserve_additional_to(move value, move required)
+        }
+    }
+}
+
+__g1_hash_map_reserve_additional<K, V>(
+    value: &mut HashMap<K, V>,
+    additional: usize
+) -> Bool where K: Eq, K: Hash, K: Use<[0,0]>, V: Use<[0,0]> {
+    let length = value.length;
+    let checked = checked_usize_add(move length, move additional);
+    handle perform __HashReserveCase::inspect(move checked) {
+        __HashReserveCase::inspect(Result::Ok(required)) =>
+            __g1_hash_map_reserve_additional_to(move value, move required),
+        __HashReserveCase::inspect(Result::Err(_)) => false
     }
 }
 
@@ -9843,6 +10408,12 @@ impl<K, V> Use<[0,1]> for HashMapIntoIter<K, V>
     where VecIntoIter<Result<(K, V), ()>>: Use<[0,1]>,
         K: Use<[0,0]>, V: Use<[0,0]> {}
 
+__g1_hash_iter_selected(index: usize) -> Option<usize> {
+    Option::Some(move index)
+}
+
+__g1_hash_iter_exhausted() -> Option<usize> { None }
+
 __g1_hash_map_next_occupied<K, V>(
     value: &HashMap<K, V>,
     index: usize,
@@ -9868,13 +10439,10 @@ __g1_hash_map_next_occupied<K, V>(
 __g1_hash_map_iter_bucket<'a, K, V>(
     value: &'a HashMap<K, V>,
     index: usize
-) -> Option<((&'a K, &'a V), HashMapIter<'a, K, V>)> {
+) -> Option<(&'a K, &'a V)> {
     let bucket = __g1_vec_index(&value.buckets, index);
     if(*bucket is Result::Ok(_)) {
-        Option::Some((
-            ((&bucket.0.0), (&bucket.0.1)),
-            HashMapIter { value: move value, index: index + 1 }
-        ))
+        Option::Some(((&bucket.0.0), (&bucket.0.1)))
     } else {
         None
     }
@@ -9883,13 +10451,10 @@ __g1_hash_map_iter_bucket<'a, K, V>(
 __g1_hash_map_keys_bucket<'a, K, V>(
     value: &'a HashMap<K, V>,
     index: usize
-) -> Option<(&'a K, HashMapKeys<'a, K, V>)> {
+) -> Option<&'a K> {
     let bucket = __g1_vec_index(&value.buckets, index);
     if(*bucket is Result::Ok(_)) {
-        Option::Some((
-            &bucket.0.0,
-            HashMapKeys { value: move value, index: index + 1 }
-        ))
+        Option::Some(&bucket.0.0)
     } else {
         None
     }
@@ -9898,16 +10463,31 @@ __g1_hash_map_keys_bucket<'a, K, V>(
 __g1_hash_map_values_bucket<'a, K, V>(
     value: &'a HashMap<K, V>,
     index: usize
-) -> Option<(&'a V, HashMapValues<'a, K, V>)> {
+) -> Option<&'a V> {
     let bucket = __g1_vec_index(&value.buckets, index);
     if(*bucket is Result::Ok(_)) {
-        Option::Some((
-            &bucket.0.1,
-            HashMapValues { value: move value, index: index + 1 }
-        ))
+        Option::Some(&bucket.0.1)
     } else {
         None
     }
+}
+
+__g1_hash_map_iter_none<'a, K, V>(value: &'a HashMap<K, V>)
+    -> Option<(&'a K, &'a V)> {
+    value;
+    None
+}
+
+__g1_hash_map_keys_none<'a, K, V>(value: &'a HashMap<K, V>)
+    -> Option<&'a K> {
+    value;
+    None
+}
+
+__g1_hash_map_values_none<'a, K, V>(value: &'a HashMap<K, V>)
+    -> Option<&'a V> {
+    value;
+    None
 }
 
 __g1_hash_map_iter<'a, K, V>(value: &'a HashMap<K, V>)
@@ -9925,40 +10505,55 @@ __g1_hash_map_values<'a, K, V>(value: &'a HashMap<K, V>)
     HashMapValues { value: move value, index: 0 }
 }
 
-__g1_hash_map_iter_next<'a, K, V>(iterator: HashMapIter<'a, K, V>)
-    -> Option<((&'a K, &'a V), HashMapIter<'a, K, V>)> {
-    let HashMapIter { value, index } = move iterator;
+__g1_hash_map_iter_next<'a, K, V>(iterator: &mut HashMapIter<'a, K, V>)
+    -> Option<(&'a K, &'a V)> {
+    let value = iterator.value;
+    let index = iterator.index;
     let capacity = Vec::len(&value.buckets);
     let occupied = __g1_hash_map_next_occupied(value, index, capacity);
-    handle perform __VecBoolCase::inspect(occupied < capacity) {
-        __VecBoolCase::inspect(Result::Err(_)) => { value; None },
+    let selected = handle perform __VecBoolCase::inspect(occupied < capacity) {
         __VecBoolCase::inspect(Result::Ok(_)) =>
-            __g1_hash_map_iter_bucket(move value, move occupied)
-    }
+            __g1_hash_iter_selected(move occupied),
+        __VecBoolCase::inspect(Result::Err(_)) => __g1_hash_iter_exhausted()
+    };
+    if(selected is Result::Ok(selected_index)) {
+        (*iterator).index = selected_index + 1;
+        __g1_hash_map_iter_bucket(move value, move selected_index)
+    } else { __g1_hash_map_iter_none(move value) }
 }
 
-__g1_hash_map_keys_next<'a, K, V>(iterator: HashMapKeys<'a, K, V>)
-    -> Option<(&'a K, HashMapKeys<'a, K, V>)> {
-    let HashMapKeys { value, index } = move iterator;
+__g1_hash_map_keys_next<'a, K, V>(iterator: &mut HashMapKeys<'a, K, V>)
+    -> Option<&'a K> {
+    let value = iterator.value;
+    let index = iterator.index;
     let capacity = Vec::len(&value.buckets);
     let occupied = __g1_hash_map_next_occupied(value, index, capacity);
-    handle perform __VecBoolCase::inspect(occupied < capacity) {
-        __VecBoolCase::inspect(Result::Err(_)) => { value; None },
+    let selected = handle perform __VecBoolCase::inspect(occupied < capacity) {
         __VecBoolCase::inspect(Result::Ok(_)) =>
-            __g1_hash_map_keys_bucket(move value, move occupied)
-    }
+            __g1_hash_iter_selected(move occupied),
+        __VecBoolCase::inspect(Result::Err(_)) => __g1_hash_iter_exhausted()
+    };
+    if(selected is Result::Ok(selected_index)) {
+        (*iterator).index = selected_index + 1;
+        __g1_hash_map_keys_bucket(move value, move selected_index)
+    } else { __g1_hash_map_keys_none(move value) }
 }
 
-__g1_hash_map_values_next<'a, K, V>(iterator: HashMapValues<'a, K, V>)
-    -> Option<(&'a V, HashMapValues<'a, K, V>)> {
-    let HashMapValues { value, index } = move iterator;
+__g1_hash_map_values_next<'a, K, V>(iterator: &mut HashMapValues<'a, K, V>)
+    -> Option<&'a V> {
+    let value = iterator.value;
+    let index = iterator.index;
     let capacity = Vec::len(&value.buckets);
     let occupied = __g1_hash_map_next_occupied(value, index, capacity);
-    handle perform __VecBoolCase::inspect(occupied < capacity) {
-        __VecBoolCase::inspect(Result::Err(_)) => { value; None },
+    let selected = handle perform __VecBoolCase::inspect(occupied < capacity) {
         __VecBoolCase::inspect(Result::Ok(_)) =>
-            __g1_hash_map_values_bucket(move value, move occupied)
-    }
+            __g1_hash_iter_selected(move occupied),
+        __VecBoolCase::inspect(Result::Err(_)) => __g1_hash_iter_exhausted()
+    };
+    if(selected is Result::Ok(selected_index)) {
+        (*iterator).index = selected_index + 1;
+        __g1_hash_map_values_bucket(move value, move selected_index)
+    } else { __g1_hash_map_values_none(move value) }
 }
 
 __g1_hash_map_into_iter<K, V>(value: HashMap<K, V>)
@@ -10016,16 +10611,19 @@ impl<K> Use<[0,1]> for HashSetIntoIter<K>
 __g1_hash_set_iter_bucket<'a, K>(
     value: &'a HashSet<K>,
     index: usize
-) -> Option<(&'a K, HashSetIter<'a, K>)> {
+) -> Option<&'a K> {
     let bucket = __g1_vec_index(&value.values.buckets, index);
     if(*bucket is Result::Ok(_)) {
-        Option::Some((
-            &bucket.0.0,
-            HashSetIter { value: move value, index: index + 1 }
-        ))
+        Option::Some(&bucket.0.0)
     } else {
         None
     }
+}
+
+__g1_hash_set_iter_none<'a, K>(value: &'a HashSet<K>)
+    -> Option<&'a K> {
+    value;
+    None
 }
 
 __g1_hash_set_new<K>() -> HashSet<K> {
@@ -10063,24 +10661,141 @@ __g1_hash_set_remove<K>(value: &mut HashSet<K>, key: &K) -> Bool
     }
 }
 
+__g1_hash_set_union_step<K>(
+    value: &mut HashSet<K>,
+    other: &HashSet<K>,
+    index: usize,
+    capacity: usize
+) -> () where K: Eq, K: Hash, K: Use<[0,infinity]> {
+    handle perform __VecBoolCase::inspect(index < capacity) {
+        __VecBoolCase::inspect(Result::Err(_)) => (),
+        __VecBoolCase::inspect(Result::Ok(_)) => {
+            // The loop guard proves `index < capacity`, and `capacity` is the
+            // exact backing length captured by union_with before recursion.
+            let bucket = __g1_array_get_borrow_shared(
+                &other.values.buckets.storage,
+                index
+            );
+            __g1_hash_set_union_bucket(&mut *value, bucket);
+            __g1_hash_set_union_step(
+                move value,
+                other,
+                index + 1,
+                move capacity
+            )
+        }
+    }
+}
+
+__g1_hash_set_union_bucket<K>(
+    value: &mut HashSet<K>,
+    bucket: &Result<(K, ()), ()>
+) -> () where K: Eq, K: Hash, K: Use<[0,infinity]> {
+    if(*bucket is Result::Ok(_)) {
+        let key = *(&bucket.0.0);
+        HashSet::insert(&mut *value, move key);
+        ()
+    } else {
+        ()
+    }
+}
+
+__g1_hash_set_union_with<K>(value: &mut HashSet<K>, other: &HashSet<K>) -> ()
+    where K: Eq, K: Hash, K: Use<[0,infinity]> {
+    __g1_hash_set_union_step(
+        move value,
+        other,
+        0,
+        Vec::len(&other.values.buckets)
+    )
+}
+
+__g1_hash_set_intersection_insert<K>(
+    fresh: &mut HashSet<K>,
+    right: &HashSet<K>,
+    key: &K
+) -> () where K: Eq, K: Hash, K: Use<[0,infinity]> {
+    let owned = *key;
+    handle perform __VecBoolCase::inspect(HashSet::contains(right, &owned)) {
+        __VecBoolCase::inspect(Result::Ok(_)) => {
+            HashSet::insert(&mut *fresh, move owned);
+            ()
+        },
+        __VecBoolCase::inspect(Result::Err(_)) => ()
+    }
+}
+
+__g1_hash_set_intersection_step<K>(
+    fresh: &mut HashSet<K>,
+    left: &HashSet<K>,
+    right: &HashSet<K>,
+    index: usize,
+    capacity: usize
+) -> () where K: Eq, K: Hash, K: Use<[0,infinity]> {
+    handle perform __VecBoolCase::inspect(index < capacity) {
+        __VecBoolCase::inspect(Result::Err(_)) => (),
+        __VecBoolCase::inspect(Result::Ok(_)) => {
+            // As above, the loop guard and exact backing length prove this
+            // trusted read in bounds. The copied key ends the bucket loan
+            // before the distinct result set is mutated.
+            let bucket = __g1_array_get_borrow_shared(
+                &left.values.buckets.storage,
+                index
+            );
+            if(*bucket is Result::Ok(_)) {
+                __g1_hash_set_intersection_insert(
+                    &mut *fresh,
+                    right,
+                    &bucket.0.0
+                )
+            } else { () };
+            __g1_hash_set_intersection_step(
+                move fresh,
+                left,
+                right,
+                index + 1,
+                move capacity
+            )
+        }
+    }
+}
+
+__g1_hash_set_intersection<K>(left: &HashSet<K>, right: &HashSet<K>)
+    -> HashSet<K> where K: Eq, K: Hash, K: Use<[0,infinity]> {
+    let result = HashSet::new();
+    __g1_hash_set_intersection_step(
+        &mut result,
+        left,
+        right,
+        0,
+        Vec::len(&left.values.buckets)
+    );
+    move result
+}
+
 __g1_hash_set_iter<'a, K>(value: &'a HashSet<K>) -> HashSetIter<'a, K> {
     HashSetIter { value: move value, index: 0 }
 }
 
-__g1_hash_set_iter_next<'a, K>(iterator: HashSetIter<'a, K>)
-    -> Option<(&'a K, HashSetIter<'a, K>)> {
-    let HashSetIter { value, index } = move iterator;
+__g1_hash_set_iter_next<'a, K>(iterator: &mut HashSetIter<'a, K>)
+    -> Option<&'a K> {
+    let value = iterator.value;
+    let index = iterator.index;
     let capacity = Vec::len(&value.values.buckets);
     let occupied = __g1_hash_map_next_occupied(
         &value.values,
         index,
         capacity
     );
-    handle perform __VecBoolCase::inspect(occupied < capacity) {
-        __VecBoolCase::inspect(Result::Err(_)) => { value; None },
+    let selected = handle perform __VecBoolCase::inspect(occupied < capacity) {
         __VecBoolCase::inspect(Result::Ok(_)) =>
-            __g1_hash_set_iter_bucket(move value, move occupied)
-    }
+            __g1_hash_iter_selected(move occupied),
+        __VecBoolCase::inspect(Result::Err(_)) => __g1_hash_iter_exhausted()
+    };
+    if(selected is Result::Ok(selected_index)) {
+        (*iterator).index = selected_index + 1;
+        __g1_hash_set_iter_bucket(move value, move selected_index)
+    } else { __g1_hash_set_iter_none(move value) }
 }
 
 __g1_hash_set_into_iter<K>(value: HashSet<K>) -> HashSetIntoIter<K> {
@@ -10115,6 +10830,7 @@ __g1_hash_set_into_iter_next<K>(iterator: HashSetIntoIter<K>)
 }
 let HashMap::new = __g1_hash_map_new;
 let HashMap::reserve = __g1_hash_map_reserve;
+let HashMap::reserve_additional = __g1_hash_map_reserve_additional;
 let HashMap::len = __g1_hash_map_len;
 let HashMap::capacity = __g1_hash_map_capacity;
 let HashMap::is_empty = __g1_hash_map_is_empty;
@@ -10125,6 +10841,9 @@ let HashMap::insert = __g1_hash_map_insert;
 let HashMap::try_insert = __g1_hash_map_try_insert;
 let HashMap::entry = __g1_hash_map_entry;
 let HashMap::remove = __g1_hash_map_remove;
+let HashMap::remove_entry = __g1_hash_map_remove_entry;
+let HashMap::clear = __g1_hash_map_clear;
+let HashMap::raw_get = __g1_hash_map_raw_get;
 let HashMap::iter = __g1_hash_map_iter;
 let HashMap::keys = __g1_hash_map_keys;
 let HashMap::values = __g1_hash_map_values;
@@ -10143,6 +10862,8 @@ let HashSet::is_empty = __g1_hash_set_is_empty;
 let HashSet::contains = __g1_hash_set_contains;
 let HashSet::insert = __g1_hash_set_insert;
 let HashSet::remove = __g1_hash_set_remove;
+let HashSet::union_with = __g1_hash_set_union_with;
+let HashSet::intersection = __g1_hash_set_intersection;
 let HashSet::iter = __g1_hash_set_iter;
 let HashSet::into_iter = __g1_hash_set_into_iter;
 let HashSetIter::next = __g1_hash_set_iter_next;
@@ -11306,6 +12027,173 @@ let SourceFile::name = __g1_source_file_name;
 let SourceFile::source = __g1_source_file_source;
 let SourceFile::start = __g1_source_file_start;
 let SourceFile::end = __g1_source_file_end;
+
+enum DiagnosticSeverity { Error, Warning, Note, Help }
+struct SourceDiagnosticLabel {
+    // Generation 1 locates the annotation by `span.start`; `span.end` remains
+    // metadata for a richer future underline renderer and is never indexed.
+    private span: Range<usize>,
+    private message: String,
+    private primary: Bool
+}
+struct SourceDiagnostic {
+    private severity: DiagnosticSeverity,
+    private message: String,
+    private labels: Vec<SourceDiagnosticLabel>,
+    private notes: Vec<String>
+}
+
+__g1_source_diagnostic_new(
+    severity: DiagnosticSeverity,
+    message: String
+) -> SourceDiagnostic {
+    SourceDiagnostic {
+        severity: move severity,
+        message: move message,
+        labels: Vec::new(),
+        notes: Vec::new()
+    }
+}
+
+__g1_source_diagnostic_label(
+    value: &mut SourceDiagnostic,
+    span: Range<usize>,
+    message: String,
+    primary: Bool
+) -> () {
+    Vec::push(
+        &mut value.labels,
+        SourceDiagnosticLabel {
+            span: move span,
+            message: move message,
+            primary: move primary
+        }
+    )
+}
+
+__g1_source_diagnostic_note(value: &mut SourceDiagnostic, note: String) -> () {
+    Vec::push(&mut value.notes, move note)
+}
+
+__g1_diagnostic_severity_text(value: &DiagnosticSeverity) -> String {
+    if(*value is DiagnosticSeverity::Error) { "error" }
+    else(if(*value is DiagnosticSeverity::Warning) { "warning" }
+    else(if(*value is DiagnosticSeverity::Note) { "note" }
+    else { "help" }))
+}
+
+effect __DiagnosticLocationCase {
+    inspect(value: Result<SourceLocation, ()>) -> !;
+}
+
+__g1_source_diagnostic_location(
+    formatter: &mut Formatter,
+    sources: &SourceMap,
+    offset: usize
+) -> () {
+    handle perform __DiagnosticLocationCase::inspect(
+        SourceMap::lookup(sources, move offset)
+    ) {
+        __DiagnosticLocationCase::inspect(Result::Ok(location)) => {
+            let file = __g1_source_map_file_at(
+                sources,
+                wrapping_convert_to_usize(location.file.raw)
+            );
+            Formatter::literal(&mut *formatter, &file.name);
+            __g1_debug_literal(&mut *formatter, ":");
+            Formatter::append_u64(
+                &mut *formatter,
+                wrapping_convert_to_u64(
+                    location.line + wrapping_convert_to_usize(1)
+                )
+            );
+            __g1_debug_literal(&mut *formatter, ":");
+            Formatter::append_u64(
+                move formatter,
+                wrapping_convert_to_u64(
+                    location.column + wrapping_convert_to_usize(1)
+                )
+            )
+        },
+        __DiagnosticLocationCase::inspect(Result::Err(_)) =>
+            __g1_debug_literal(move formatter, "<unknown>:0:0")
+    }
+}
+
+__g1_source_diagnostic_labels(
+    formatter: &mut Formatter,
+    sources: &SourceMap,
+    labels: &Vec<SourceDiagnosticLabel>,
+    index: usize
+) -> () {
+    handle perform __VecBoolCase::inspect(index < Vec::len(labels)) {
+        __VecBoolCase::inspect(Result::Err(_)) => (),
+        __VecBoolCase::inspect(Result::Ok(_)) => {
+            let annotation = Vec::index(labels, index);
+            Formatter::newline(&mut *formatter);
+            __g1_debug_literal(&mut *formatter, " --> ");
+            __g1_source_diagnostic_location(
+                &mut *formatter,
+                sources,
+                annotation.span.start
+            );
+            Formatter::newline(&mut *formatter);
+            handle perform __VecBoolCase::inspect(annotation.primary) {
+                __VecBoolCase::inspect(Result::Ok(_)) =>
+                    __g1_debug_literal(&mut *formatter, "  = primary: "),
+                __VecBoolCase::inspect(Result::Err(_)) =>
+                    __g1_debug_literal(&mut *formatter, "  = label: ")
+            };
+            Formatter::literal(&mut *formatter, &annotation.message);
+            __g1_source_diagnostic_labels(
+                move formatter,
+                sources,
+                labels,
+                index + 1
+            )
+        }
+    }
+}
+
+__g1_source_diagnostic_notes(
+    formatter: &mut Formatter,
+    notes: &Vec<String>,
+    index: usize
+) -> () {
+    handle perform __VecBoolCase::inspect(index < Vec::len(notes)) {
+        __VecBoolCase::inspect(Result::Err(_)) => (),
+        __VecBoolCase::inspect(Result::Ok(_)) => {
+            Formatter::newline(&mut *formatter);
+            __g1_debug_literal(&mut *formatter, "  = note: ");
+            Formatter::literal(&mut *formatter, Vec::index(notes, index));
+            __g1_source_diagnostic_notes(move formatter, notes, index + 1)
+        }
+    }
+}
+
+__g1_source_diagnostic_render(
+    value: &SourceDiagnostic,
+    sources: &SourceMap
+) -> Result<String, Utf8Error> {
+    let formatter = Formatter::new();
+    let severity = __g1_diagnostic_severity_text(&value.severity);
+    Formatter::literal(&mut formatter, &severity);
+    __g1_debug_literal(&mut formatter, ": ");
+    Formatter::literal(&mut formatter, &value.message);
+    __g1_source_diagnostic_labels(
+        &mut formatter,
+        sources,
+        &value.labels,
+        0
+    );
+    __g1_source_diagnostic_notes(&mut formatter, &value.notes, 0);
+    Formatter::finish(move formatter)
+}
+
+let SourceDiagnostic::new = __g1_source_diagnostic_new;
+let SourceDiagnostic::annotate = __g1_source_diagnostic_label;
+let SourceDiagnostic::note = __g1_source_diagnostic_note;
+let SourceDiagnostic::render = __g1_source_diagnostic_render;
 
 // Generic interners keep each canonical T exactly once. A deterministic hash
 // selects one of 64 ID buckets; equality is checked only within that bucket,

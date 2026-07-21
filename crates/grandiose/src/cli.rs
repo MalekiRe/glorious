@@ -1,0 +1,1348 @@
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    ffi::OsString,
+    io::{self, BufRead, Read, Write},
+    path::{Path, PathBuf},
+};
+
+use grandiose::{
+    CompileOptions, OptimizationLevel, compile_bundle_to_phases_with_options,
+    diagnostic::{Diagnostic, Severity},
+    eval::SystemHost,
+    interface::{InterfaceSelection, scan_interfaces},
+    lexer, run_source,
+    source_bundle::{Segment, SourceBundle},
+};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, json};
+
+const USAGE: &str = "usage:\n  grc [OPTIONS] <primary.glorious> [additional.glorious ...]\n  grc --serve\n  grandiose run <program.glorious> [-- <arguments>...]\n\ncompiler options:\n  -O0 | -O1 | -O2 | -O3  optimization level (default: -O0)\n  --check                  compile and verify without writing output\n  --phase PHASE            stop after lex, scan, resolve, or check\n  --emit KIND              emit bytecode, MIR/Core/provisional, or interfaces JSON\n  --dependency NAME=PATH   add a named dependency package root (repeatable)\n  --diagnostics json       emit one machine-readable diagnostic per line\n  --capabilities           print the versioned machine-readable contract\n  --serve                  serve versioned JSON-line compile requests\n  -o <path>                output path (default: primary input + kind suffix)\n  -h, --help               show this help\n";
+
+const SESSION_PROTOCOL: u32 = 1;
+const SESSION_MAX_LINE_BYTES: usize = 1024 * 1024;
+const SESSION_MAX_ARGUMENTS: usize = 128;
+const SESSION_MAX_INPUTS: usize = 64;
+const SESSION_MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StopPhase {
+    Lex,
+    Scan,
+    Resolve,
+    Check,
+}
+
+impl StopPhase {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "lex" => Ok(Self::Lex),
+            "scan" => Ok(Self::Scan),
+            "resolve" => Ok(Self::Resolve),
+            "check" => Ok(Self::Check),
+            _ => Err(format!(
+                "unsupported stop phase `{value}`; expected lex, scan, resolve, or check"
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EmitKind {
+    Bytecode,
+    Mir,
+    Core,
+    Provisional,
+    InterfacesJson,
+    StandardInterfacesJson,
+}
+
+impl EmitKind {
+    fn parse(value: &str) -> Result<Self, String> {
+        match value {
+            "bytecode" | "grbc" => Ok(Self::Bytecode),
+            "mir" => Ok(Self::Mir),
+            "core" => Ok(Self::Core),
+            "provisional" => Ok(Self::Provisional),
+            "interfaces-json" => Ok(Self::InterfacesJson),
+            "std-interfaces-json" => Ok(Self::StandardInterfacesJson),
+            _ => Err(format!(
+                "unsupported emission kind `{value}`; expected bytecode, grbc, mir, core, provisional, interfaces-json, or std-interfaces-json"
+            )),
+        }
+    }
+
+    fn extension(self) -> &'static str {
+        match self {
+            Self::Bytecode => "grbc",
+            Self::Mir => "mir",
+            Self::Core => "core",
+            Self::Provisional => "provisional",
+            Self::InterfacesJson | Self::StandardInterfacesJson => "json",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct CompileCommand {
+    inputs: Vec<PathBuf>,
+    dependencies: Vec<(String, PathBuf)>,
+    optimization_level: OptimizationLevel,
+    stop_phase: Option<StopPhase>,
+    output: Option<PathBuf>,
+    emit: Option<EmitKind>,
+    json_diagnostics: bool,
+}
+
+enum Command {
+    Compile(CompileCommand),
+    Run {
+        file: PathBuf,
+        arguments: Vec<String>,
+    },
+    Help,
+    Version,
+    Capabilities,
+    Serve,
+}
+
+fn parse_optimization(argument: &str) -> Option<OptimizationLevel> {
+    Some(match argument {
+        "-O0" => OptimizationLevel::O0,
+        "-O1" => OptimizationLevel::O1,
+        "-O2" => OptimizationLevel::O2,
+        "-O3" => OptimizationLevel::O3,
+        _ => return None,
+    })
+}
+
+fn parse(args: Vec<OsString>) -> Result<Command, String> {
+    let mut args = args.into_iter().peekable();
+    if args.peek().is_some_and(|argument| argument == "--serve") {
+        args.next();
+        if args.next().is_some() {
+            return Err("`--serve` does not accept other arguments".to_string());
+        }
+        return Ok(Command::Serve);
+    }
+    if args
+        .peek()
+        .is_some_and(|argument| argument == "--capabilities")
+    {
+        args.next();
+        if args.next().is_some() {
+            return Err("`--capabilities` does not accept other arguments".to_string());
+        }
+        return Ok(Command::Capabilities);
+    }
+    if args.peek().is_some_and(|argument| argument == "run") {
+        args.next();
+        let file = args
+            .next()
+            .ok_or_else(|| "`run` requires one source file".to_string())?;
+        let mut arguments = Vec::new();
+        if args.peek().is_some_and(|argument| argument == "--") {
+            args.next();
+        }
+        for argument in args {
+            arguments.push(
+                argument
+                    .into_string()
+                    .map_err(|_| "program arguments must be valid UTF-8".to_string())?,
+            );
+        }
+        return Ok(Command::Run {
+            file: PathBuf::from(file),
+            arguments,
+        });
+    }
+
+    let mut command = CompileCommand {
+        inputs: Vec::new(),
+        dependencies: Vec::new(),
+        optimization_level: OptimizationLevel::O0,
+        stop_phase: None,
+        output: None,
+        emit: None,
+        json_diagnostics: false,
+    };
+    let mut positional_only = false;
+    while let Some(argument) = args.next() {
+        let text = argument.to_string_lossy();
+        if !positional_only {
+            match text.as_ref() {
+                "-h" | "--help" => return Ok(Command::Help),
+                "--version" => return Ok(Command::Version),
+                "--check" => {
+                    if command.stop_phase.replace(StopPhase::Check).is_some() {
+                        return Err("a stop phase may be specified only once".to_string());
+                    }
+                    continue;
+                }
+                "--phase" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| "`--phase` requires a phase".to_string())?;
+                    let value = value
+                        .to_str()
+                        .ok_or_else(|| "stop phase must be valid UTF-8".to_string())?;
+                    let phase = StopPhase::parse(value)?;
+                    if command.stop_phase.replace(phase).is_some() {
+                        return Err("a stop phase may be specified only once".to_string());
+                    }
+                    continue;
+                }
+                "--diagnostics" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| "`--diagnostics` requires `json`".to_string())?;
+                    if value != "json" {
+                        return Err(format!(
+                            "unsupported diagnostic format `{}`; expected `json`",
+                            value.to_string_lossy()
+                        ));
+                    }
+                    if command.json_diagnostics {
+                        return Err("`--diagnostics` may be specified only once".to_string());
+                    }
+                    command.json_diagnostics = true;
+                    continue;
+                }
+                "--dependency" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| "`--dependency` requires `NAME=PATH`".to_string())?;
+                    let value = value
+                        .to_str()
+                        .ok_or_else(|| "dependency metadata must be valid UTF-8".to_string())?;
+                    let (name, path) = value.split_once('=').ok_or_else(|| {
+                        "`--dependency` requires `NAME=PATH` (including `=`)".to_string()
+                    })?;
+                    if name.is_empty() || path.is_empty() {
+                        return Err(
+                            "`--dependency` requires nonempty `NAME` and `PATH`".to_string()
+                        );
+                    }
+                    command
+                        .dependencies
+                        .push((name.to_string(), PathBuf::from(path)));
+                    continue;
+                }
+                "--emit" => {
+                    let value = args
+                        .next()
+                        .ok_or_else(|| "`--emit` requires an output kind".to_string())?;
+                    let value = value
+                        .to_str()
+                        .ok_or_else(|| "emission kind must be valid UTF-8".to_string())?;
+                    let kind = EmitKind::parse(value)?;
+                    if command.emit.replace(kind).is_some() {
+                        return Err("`--emit` may be specified only once".to_string());
+                    }
+                    continue;
+                }
+                "-o" => {
+                    let path = args
+                        .next()
+                        .ok_or_else(|| "`-o` requires an output path".to_string())?;
+                    if command.output.replace(PathBuf::from(path)).is_some() {
+                        return Err("`-o` may be specified only once".to_string());
+                    }
+                    continue;
+                }
+                "--" => {
+                    positional_only = true;
+                    continue;
+                }
+                _ => {}
+            }
+            if let Some(value) = text.strip_prefix("--emit=") {
+                let kind = EmitKind::parse(value)?;
+                if command.emit.replace(kind).is_some() {
+                    return Err("`--emit` may be specified only once".to_string());
+                }
+                continue;
+            }
+            if let Some(level) = parse_optimization(&text) {
+                command.optimization_level = level;
+                continue;
+            }
+            if text.starts_with('-') {
+                return Err(format!("unknown compiler option `{text}`"));
+            }
+        }
+        command.inputs.push(PathBuf::from(argument));
+    }
+
+    if command.inputs.is_empty() && command.emit != Some(EmitKind::StandardInterfacesJson) {
+        return Err("at least one `.glorious` input is required".to_string());
+    }
+    for input in &command.inputs {
+        if !matches!(
+            input.extension().and_then(|extension| extension.to_str()),
+            Some("glorious" | "gr")
+        ) {
+            return Err(format!(
+                "input `{}` must use the canonical `.glorious` extension (legacy `.gr` is also accepted)",
+                input.display()
+            ));
+        }
+    }
+    for (_, input) in &command.dependencies {
+        if !matches!(
+            input.extension().and_then(|extension| extension.to_str()),
+            Some("glorious" | "gr")
+        ) {
+            return Err(format!(
+                "dependency root `{}` must use the canonical `.glorious` extension (legacy `.gr` is also accepted)",
+                input.display()
+            ));
+        }
+    }
+    if command.stop_phase.is_some() && (command.output.is_some() || command.emit.is_some()) {
+        return Err("a stop phase cannot be combined with `--emit` or `-o`".to_string());
+    }
+    if command.emit == Some(EmitKind::StandardInterfacesJson) && !command.inputs.is_empty() {
+        return Err("`--emit std-interfaces-json` does not accept source inputs".to_string());
+    }
+    if matches!(
+        command.emit,
+        Some(EmitKind::InterfacesJson | EmitKind::StandardInterfacesJson)
+    ) && command.output.is_some()
+    {
+        return Err(
+            "interface JSON is written to stdout and cannot be combined with `-o`".to_string(),
+        );
+    }
+    Ok(Command::Compile(command))
+}
+
+fn read_segment(path: &Path) -> Result<Segment, String> {
+    let source = std::fs::read_to_string(path)
+        .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+    Ok(Segment::new(path.display().to_string(), source))
+}
+
+fn default_output(input: &Path, kind: EmitKind) -> PathBuf {
+    input.with_extension(kind.extension())
+}
+
+fn line_and_column(source: &str, offset: usize) -> (usize, usize) {
+    let offset = offset.min(source.len());
+    let prefix = &source[..offset];
+    let line = prefix.bytes().filter(|byte| *byte == b'\n').count() + 1;
+    let line_start = prefix.rfind('\n').map_or(0, |index| index + 1);
+    let column = source[line_start..offset].chars().count() + 1;
+    (line, column)
+}
+
+fn json_label(file: &str, source: &str, span: grandiose::span::Span, message: &str) -> Value {
+    let (line, col) = line_and_column(source, span.start);
+    json!({
+        "file": file,
+        "line": line,
+        "col": col,
+        "start_byte": span.start,
+        "end_byte": span.end,
+        "message": message,
+    })
+}
+
+fn write_json_diagnostic(
+    bundle: &SourceBundle,
+    diagnostic: &Diagnostic,
+    mut output: impl Write,
+) -> io::Result<()> {
+    let mapped = bundle.map_diagnostic(diagnostic);
+    let mut labels = Vec::new();
+    if let Some(primary) = mapped.span {
+        labels.push(json_label(
+            primary.segment.name(),
+            primary.segment.source(),
+            primary.span,
+            &diagnostic.message,
+        ));
+    }
+    labels.extend(mapped.related.into_iter().map(|(related, message)| {
+        json_label(
+            related.segment.name(),
+            related.segment.source(),
+            related.span,
+            message,
+        )
+    }));
+
+    let severity = match diagnostic.severity {
+        Severity::Error => "error",
+        Severity::Warning => "warning",
+        Severity::Advice => "advice",
+    };
+    let mut object = Map::new();
+    object.insert("severity".into(), json!(severity));
+    object.insert("title".into(), json!(&diagnostic.title));
+    object.insert("labels".into(), Value::Array(labels));
+    if let Some(code) = &diagnostic.code {
+        object.insert("code".into(), json!(code));
+    }
+    if let Some(note) = &diagnostic.note {
+        object.insert("note".into(), json!(note));
+    }
+    if let Some(help) = &diagnostic.help {
+        object.insert("help".into(), json!(help));
+    }
+    serde_json::to_writer(&mut output, &object).map_err(io::Error::other)?;
+    writeln!(output)
+}
+
+fn report_diagnostics(
+    bundle: &SourceBundle,
+    diagnostics: Vec<Diagnostic>,
+    json: bool,
+    stderr: &mut dyn Write,
+) -> u8 {
+    for diagnostic in diagnostics {
+        let written = if json {
+            write_json_diagnostic(bundle, &diagnostic, &mut *stderr)
+        } else {
+            bundle.write_diagnostic(&diagnostic, &mut *stderr)
+        };
+        if written.is_err() {
+            let _ = writeln!(stderr, "grc: error: failed to render a diagnostic");
+            break;
+        }
+    }
+    1
+}
+
+fn load_segments(command: &CompileCommand) -> Result<Vec<Segment>, String> {
+    let mut segments = Vec::with_capacity(command.inputs.len() + command.dependencies.len());
+    for input in &command.inputs {
+        segments.push(read_segment(input)?);
+    }
+    let Some(primary) = command.inputs.first() else {
+        return Ok(segments);
+    };
+
+    // The library compilation API is deliberately hermetic. The path-aware
+    // driver supplies that API with the complete declared module closure.
+    // Explicit additional inputs are retained so module-graph diagnostics can
+    // reject orphans and duplicate claims rather than silently hiding them.
+    let mut known = command
+        .inputs
+        .iter()
+        .cloned()
+        .zip(segments)
+        .collect::<BTreeMap<_, _>>();
+    let mut roots = vec![primary.clone()];
+    for (name, path) in &command.dependencies {
+        if known.contains_key(path) {
+            return Err(format!(
+                "dependency root {} is also supplied as an ordinary input",
+                path.display()
+            ));
+        }
+        known.insert(
+            path.clone(),
+            read_segment(path)?.with_package_root(name.clone()),
+        );
+        roots.push(path.clone());
+    }
+    let mut queue = VecDeque::from(roots);
+    let mut processed = BTreeSet::new();
+    while let Some(path) = queue.pop_front() {
+        if !processed.insert(path.clone()) {
+            continue;
+        }
+        let Some(segment) = known.get(&path) else {
+            continue;
+        };
+        for child in declared_external_module_paths(&path, segment.source()) {
+            let child = if child.is_file() {
+                child
+            } else {
+                let legacy = child.with_extension("gr");
+                if legacy.is_file() {
+                    legacy
+                } else {
+                    // Leave absence to the module graph, which has the source
+                    // declaration span needed for a structured diagnostic.
+                    continue;
+                }
+            };
+            if !known.contains_key(&child) {
+                if known.len() >= SESSION_MAX_INPUTS {
+                    return Err(format!(
+                        "declared module closure exceeds input-count limit of {SESSION_MAX_INPUTS}"
+                    ));
+                }
+                known.insert(child.clone(), read_segment(&child)?);
+            }
+            queue.push_back(child);
+        }
+    }
+
+    let primary = known
+        .remove(primary)
+        .expect("primary input was inserted before discovery");
+    let mut segments = Vec::with_capacity(known.len() + 1);
+    segments.push(primary);
+    segments.extend(known.into_values());
+    Ok(segments)
+}
+
+fn declared_external_module_paths(file: &Path, source: &str) -> Vec<PathBuf> {
+    use grandiose::ast::ModuleKind;
+
+    let Ok(tokens) = grandiose::lexer::lex(source) else {
+        return Vec::new();
+    };
+    let (program, diagnostics) = grandiose::parser::parse_recovering(tokens);
+    if !diagnostics.is_empty() {
+        return Vec::new();
+    }
+    let base = file.parent().unwrap_or_else(|| Path::new(""));
+    let mut paths = Vec::new();
+    for declaration in &program.modules {
+        if declaration.kind != ModuleKind::External {
+            continue;
+        }
+        let mut containers = program
+            .modules
+            .iter()
+            .filter_map(|candidate| match candidate.kind {
+                ModuleKind::Inline { body }
+                    if body.start <= declaration.span.start && declaration.span.end <= body.end =>
+                {
+                    Some((body, candidate.name.as_str()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        containers.sort_by_key(|(body, _)| (body.start, usize::MAX - body.end));
+        let mut directory = base.to_path_buf();
+        for (_, name) in containers {
+            directory.push(name);
+        }
+        directory.push(&declaration.name);
+        paths.push(directory.join(format!("{}.glorious", declaration.name)));
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn compile(command: CompileCommand, stdout: &mut dyn Write, stderr: &mut dyn Write) -> u8 {
+    let segments = match load_segments(&command) {
+        Ok(segments) => segments,
+        Err(error) => {
+            let _ = writeln!(stderr, "grc: error: {error}");
+            return 1;
+        }
+    };
+    compile_loaded(command, segments, stdout, stderr)
+}
+
+fn compile_loaded(
+    command: CompileCommand,
+    mut segments: Vec<Segment>,
+    stdout: &mut dyn Write,
+    stderr: &mut dyn Write,
+) -> u8 {
+    let bundle = if segments.is_empty() {
+        SourceBundle::distributed(Segment::new("<grc:interface-scan>", ""), [])
+    } else {
+        let primary = segments.remove(0);
+        SourceBundle::distributed(primary, segments)
+    };
+    if command.stop_phase == Some(StopPhase::Lex) {
+        return match lexer::lex(bundle.source()) {
+            Ok(_) => 0,
+            Err(diagnostic) => {
+                report_diagnostics(&bundle, vec![diagnostic], command.json_diagnostics, stderr)
+            }
+        };
+    }
+    if command.stop_phase == Some(StopPhase::Scan) {
+        return match scan_interfaces(&bundle, InterfaceSelection::User) {
+            Ok(_) => 0,
+            Err(diagnostics) => {
+                report_diagnostics(&bundle, diagnostics, command.json_diagnostics, stderr)
+            }
+        };
+    }
+    if command.stop_phase == Some(StopPhase::Resolve) {
+        return match grandiose::resolve::resolve_bundle(&bundle) {
+            Ok(()) => 0,
+            Err(diagnostics) => {
+                report_diagnostics(&bundle, diagnostics, command.json_diagnostics, stderr)
+            }
+        };
+    }
+    if let Some(kind @ (EmitKind::InterfacesJson | EmitKind::StandardInterfacesJson)) = command.emit
+    {
+        let selection = match kind {
+            EmitKind::InterfacesJson => InterfaceSelection::User,
+            EmitKind::StandardInterfacesJson => InterfaceSelection::StandardLibrary,
+            _ => unreachable!(),
+        };
+        return match scan_interfaces(&bundle, selection) {
+            Ok(declarations) => {
+                if serde_json::to_writer(&mut *stdout, &declarations).is_err()
+                    || writeln!(stdout).is_err()
+                {
+                    let _ = writeln!(stderr, "grc: error: failed to write interface JSON");
+                    1
+                } else {
+                    0
+                }
+            }
+            Err(diagnostics) => {
+                for diagnostic in diagnostics {
+                    let _ = bundle.write_diagnostic(&diagnostic, &mut *stderr);
+                }
+                1
+            }
+        };
+    }
+    let phases = match compile_bundle_to_phases_with_options(
+        &bundle,
+        CompileOptions {
+            optimization_level: command.optimization_level,
+        },
+    ) {
+        Ok(phases) => phases,
+        Err(diagnostics) => {
+            return report_diagnostics(&bundle, diagnostics, command.json_diagnostics, stderr);
+        }
+    };
+    for diagnostic in &phases.diagnostics {
+        let written = if command.json_diagnostics {
+            write_json_diagnostic(&bundle, diagnostic, &mut *stderr)
+        } else {
+            bundle.write_diagnostic(diagnostic, &mut *stderr)
+        };
+        if written.is_err() {
+            let _ = writeln!(stderr, "grc: error: failed to render a diagnostic");
+            return 1;
+        }
+    }
+    if command.stop_phase == Some(StopPhase::Check) {
+        return 0;
+    }
+    let kind = command.emit.unwrap_or(EmitKind::Bytecode);
+    let output = command
+        .output
+        .unwrap_or_else(|| default_output(&command.inputs[0], kind));
+    let bytes = match kind {
+        EmitKind::Bytecode => phases.artifact.encode(),
+        EmitKind::Mir => phases.mir.canonical_text().into_bytes(),
+        EmitKind::Core => phases.core.canonical_text().into_bytes(),
+        EmitKind::Provisional => phases.provisional_text().as_bytes().to_vec(),
+        EmitKind::InterfacesJson | EmitKind::StandardInterfacesJson => unreachable!(),
+    };
+    if let Err(error) = std::fs::write(&output, bytes) {
+        let _ = writeln!(
+            stderr,
+            "grc: error: could not write {}: {error}",
+            output.display()
+        );
+        return 1;
+    }
+    0
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionRequest {
+    protocol: u32,
+    id: u64,
+    method: String,
+    #[serde(default)]
+    arguments: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct SessionResponse<'a> {
+    protocol: u32,
+    id: Option<u64>,
+    status: u8,
+    stdout: &'a str,
+    stderr: &'a str,
+    generation: u64,
+    transaction: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    source_fingerprint: Option<&'a str>,
+}
+
+struct SessionSnapshot {
+    key: String,
+    source_fingerprint: String,
+    // Retaining the exact last-good bytes makes the transaction concrete and
+    // inspectable while the fixed source-byte limit bounds the cache.
+    sources: Vec<(PathBuf, String)>,
+}
+
+#[derive(Default)]
+struct SessionState {
+    generation: u64,
+    last_good: Option<SessionSnapshot>,
+}
+
+enum BoundedLine {
+    Eof,
+    Line(Vec<u8>),
+    TooLong,
+}
+
+fn read_bounded_line(input: &mut dyn BufRead, limit: usize) -> io::Result<BoundedLine> {
+    let mut line = Vec::new();
+    let mut too_long = false;
+    loop {
+        let available = input.fill_buf()?;
+        if available.is_empty() {
+            return if line.is_empty() && !too_long {
+                Ok(BoundedLine::Eof)
+            } else if too_long {
+                Ok(BoundedLine::TooLong)
+            } else {
+                Ok(BoundedLine::Line(line))
+            };
+        }
+        let end = available
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(available.len(), |index| index + 1);
+        if !too_long && line.len().saturating_add(end) <= limit {
+            line.extend_from_slice(&available[..end]);
+        } else {
+            too_long = true;
+        }
+        let ended = available[end - 1] == b'\n';
+        input.consume(end);
+        if ended {
+            return if too_long {
+                Ok(BoundedLine::TooLong)
+            } else {
+                Ok(BoundedLine::Line(line))
+            };
+        }
+    }
+}
+
+fn fingerprint_sources(sources: &[(PathBuf, String)]) -> String {
+    let mut hash = blake3::Hasher::new();
+    for (path, source) in sources {
+        let path = path.to_string_lossy();
+        hash.update(&(path.len() as u64).to_le_bytes());
+        hash.update(path.as_bytes());
+        hash.update(&(source.len() as u64).to_le_bytes());
+        hash.update(source.as_bytes());
+    }
+    hash.finalize().to_hex().to_string()
+}
+
+fn session_request_key(arguments: &[String], source_fingerprint: &str) -> String {
+    let mut hash = blake3::Hasher::new();
+    hash.update(source_fingerprint.as_bytes());
+    for argument in arguments {
+        hash.update(&(argument.len() as u64).to_le_bytes());
+        hash.update(argument.as_bytes());
+    }
+    hash.finalize().to_hex().to_string()
+}
+
+fn load_session_segments(
+    command: &CompileCommand,
+    arguments: &[String],
+) -> Result<(Vec<Segment>, SessionSnapshot), String> {
+    let declared_input_count = command.inputs.len() + command.dependencies.len();
+    if declared_input_count > SESSION_MAX_INPUTS {
+        return Err(format!(
+            "session input limit exceeded: {} files exceeds {SESSION_MAX_INPUTS}",
+            declared_input_count
+        ));
+    }
+    let mut total = 0usize;
+    let mut sources = Vec::with_capacity(command.inputs.len());
+    for path in &command.inputs {
+        let file = std::fs::File::open(path)
+            .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+        let remaining = SESSION_MAX_SOURCE_BYTES - total;
+        let mut bytes = Vec::new();
+        file.take(remaining as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+        if bytes.len() > remaining {
+            return Err(format!(
+                "session source-byte limit exceeded: more than {SESSION_MAX_SOURCE_BYTES} bytes"
+            ));
+        }
+        total += bytes.len();
+        let source = String::from_utf8(bytes)
+            .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+        sources.push((path.clone(), source));
+    }
+    for (_, path) in &command.dependencies {
+        if sources.iter().any(|(existing, _)| existing == path) {
+            return Err(format!(
+                "dependency root {} is also supplied as an ordinary input",
+                path.display()
+            ));
+        }
+        let file = std::fs::File::open(path)
+            .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+        let remaining = SESSION_MAX_SOURCE_BYTES - total;
+        let mut bytes = Vec::new();
+        file.take(remaining as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+        if bytes.len() > remaining {
+            return Err(format!(
+                "session source-byte limit exceeded: more than {SESSION_MAX_SOURCE_BYTES} bytes"
+            ));
+        }
+        total += bytes.len();
+        let source = String::from_utf8(bytes)
+            .map_err(|error| format!("could not read {}: {error}", path.display()))?;
+        sources.push((path.clone(), source));
+    }
+    let mut known = sources
+        .iter()
+        .enumerate()
+        .map(|(index, (path, _))| (path.clone(), index))
+        .collect::<BTreeMap<_, _>>();
+    let mut queue = command
+        .inputs
+        .first()
+        .cloned()
+        .into_iter()
+        .chain(command.dependencies.iter().map(|(_, path)| path.clone()))
+        .collect::<VecDeque<_>>();
+    let mut processed = BTreeSet::new();
+    while let Some(path) = queue.pop_front() {
+        if !processed.insert(path.clone()) {
+            continue;
+        }
+        let Some(index) = known.get(&path).copied() else {
+            continue;
+        };
+        let children = declared_external_module_paths(&path, &sources[index].1);
+        for child in children {
+            let child = if child.is_file() {
+                child
+            } else {
+                let legacy = child.with_extension("gr");
+                if legacy.is_file() {
+                    legacy
+                } else {
+                    continue;
+                }
+            };
+            if !known.contains_key(&child) {
+                if sources.len() >= SESSION_MAX_INPUTS {
+                    return Err(format!(
+                        "declared module closure exceeds input-count limit of {SESSION_MAX_INPUTS}"
+                    ));
+                }
+                let file = std::fs::File::open(&child)
+                    .map_err(|error| format!("could not read {}: {error}", child.display()))?;
+                let remaining = SESSION_MAX_SOURCE_BYTES - total;
+                let mut bytes = Vec::new();
+                file.take(remaining as u64 + 1)
+                    .read_to_end(&mut bytes)
+                    .map_err(|error| format!("could not read {}: {error}", child.display()))?;
+                if bytes.len() > remaining {
+                    return Err(format!(
+                        "session source-byte limit exceeded: more than {SESSION_MAX_SOURCE_BYTES} bytes"
+                    ));
+                }
+                total += bytes.len();
+                let source = String::from_utf8(bytes)
+                    .map_err(|error| format!("could not read {}: {error}", child.display()))?;
+                known.insert(child.clone(), sources.len());
+                sources.push((child.clone(), source));
+            }
+            queue.push_back(child);
+        }
+    }
+    let source_fingerprint = fingerprint_sources(&sources);
+    let key = session_request_key(arguments, &source_fingerprint);
+    let dependency_names = command
+        .dependencies
+        .iter()
+        .map(|(name, path)| (path, name))
+        .collect::<BTreeMap<_, _>>();
+    let segments = sources
+        .iter()
+        .map(|(path, source)| {
+            let segment = Segment::new(path.display().to_string(), source.clone());
+            if let Some(name) = dependency_names.get(path) {
+                segment.with_package_root((*name).clone())
+            } else {
+                segment
+            }
+        })
+        .collect();
+    Ok((
+        segments,
+        SessionSnapshot {
+            key,
+            source_fingerprint,
+            sources,
+        },
+    ))
+}
+
+fn write_session_response(
+    output: &mut dyn Write,
+    response: &SessionResponse<'_>,
+) -> io::Result<()> {
+    serde_json::to_writer(&mut *output, response).map_err(io::Error::other)?;
+    writeln!(output)?;
+    output.flush()
+}
+
+fn session_protocol_error(
+    output: &mut dyn Write,
+    state: &SessionState,
+    id: Option<u64>,
+    message: &str,
+) -> io::Result<()> {
+    write_session_response(
+        output,
+        &SessionResponse {
+            protocol: SESSION_PROTOCOL,
+            id,
+            status: 2,
+            stdout: "",
+            stderr: message,
+            generation: state.generation,
+            transaction: "retained",
+            source_fingerprint: state
+                .last_good
+                .as_ref()
+                .map(|snapshot| snapshot.source_fingerprint.as_str()),
+        },
+    )
+}
+
+fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
+    let mut state = SessionState::default();
+    loop {
+        let line = match read_bounded_line(input, SESSION_MAX_LINE_BYTES) {
+            Ok(BoundedLine::Eof) => return 0,
+            Ok(BoundedLine::TooLong) => {
+                if session_protocol_error(
+                    output,
+                    &state,
+                    None,
+                    "request exceeds session byte limit",
+                )
+                .is_err()
+                {
+                    return 1;
+                }
+                continue;
+            }
+            Ok(BoundedLine::Line(line)) => line,
+            Err(_) => return 1,
+        };
+        let request: SessionRequest = match serde_json::from_slice(&line) {
+            Ok(request) => request,
+            Err(error) => {
+                if session_protocol_error(
+                    output,
+                    &state,
+                    None,
+                    &format!("invalid session request: {error}"),
+                )
+                .is_err()
+                {
+                    return 1;
+                }
+                continue;
+            }
+        };
+        if request.protocol != SESSION_PROTOCOL {
+            if session_protocol_error(
+                output,
+                &state,
+                Some(request.id),
+                &format!(
+                    "session protocol {} is incompatible with {SESSION_PROTOCOL}",
+                    request.protocol
+                ),
+            )
+            .is_err()
+            {
+                return 1;
+            }
+            continue;
+        }
+        if request.method == "shutdown" {
+            let response = SessionResponse {
+                protocol: SESSION_PROTOCOL,
+                id: Some(request.id),
+                status: 0,
+                stdout: "",
+                stderr: "",
+                generation: state.generation,
+                transaction: "unchanged",
+                source_fingerprint: state
+                    .last_good
+                    .as_ref()
+                    .map(|snapshot| snapshot.source_fingerprint.as_str()),
+            };
+            return if write_session_response(output, &response).is_ok() {
+                0
+            } else {
+                1
+            };
+        }
+        if request.method != "compile" {
+            if session_protocol_error(
+                output,
+                &state,
+                Some(request.id),
+                &format!("unknown session method `{}`", request.method),
+            )
+            .is_err()
+            {
+                return 1;
+            }
+            continue;
+        }
+        if request.arguments.len() > SESSION_MAX_ARGUMENTS {
+            if session_protocol_error(
+                output,
+                &state,
+                Some(request.id),
+                "session argument-count limit exceeded",
+            )
+            .is_err()
+            {
+                return 1;
+            }
+            continue;
+        }
+        let parsed = parse(request.arguments.iter().map(OsString::from).collect());
+        let Command::Compile(command) = (match parsed {
+            Ok(command) => command,
+            Err(error) => {
+                if session_protocol_error(output, &state, Some(request.id), &error).is_err() {
+                    return 1;
+                }
+                continue;
+            }
+        }) else {
+            if session_protocol_error(
+                output,
+                &state,
+                Some(request.id),
+                "sessions accept compile, resolve, and check requests only",
+            )
+            .is_err()
+            {
+                return 1;
+            }
+            continue;
+        };
+        let (segments, snapshot) = match load_session_segments(&command, &request.arguments) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                let stderr = format!("grc: error: {error}\n");
+                let response = SessionResponse {
+                    protocol: SESSION_PROTOCOL,
+                    id: Some(request.id),
+                    status: 1,
+                    stdout: "",
+                    stderr: &stderr,
+                    generation: state.generation,
+                    transaction: "retained",
+                    source_fingerprint: state
+                        .last_good
+                        .as_ref()
+                        .map(|last| last.source_fingerprint.as_str()),
+                };
+                if write_session_response(output, &response).is_err() {
+                    return 1;
+                }
+                continue;
+            }
+        };
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let status = compile_loaded(command, segments, &mut stdout, &mut stderr);
+        let stdout = String::from_utf8_lossy(&stdout).into_owned();
+        let stderr = String::from_utf8_lossy(&stderr).into_owned();
+        let current_source_fingerprint = snapshot.source_fingerprint.clone();
+        let transaction = if status == 0 {
+            let unchanged = state
+                .last_good
+                .as_ref()
+                .is_some_and(|last| last.key == snapshot.key && last.sources == snapshot.sources);
+            if !unchanged {
+                state.generation = state.generation.saturating_add(1);
+                state.last_good = Some(snapshot);
+                "committed"
+            } else {
+                "unchanged"
+            }
+        } else {
+            "retained"
+        };
+        let source_fingerprint = if status == 0 {
+            state
+                .last_good
+                .as_ref()
+                .map(|last| last.source_fingerprint.as_str())
+        } else {
+            Some(current_source_fingerprint.as_str())
+        };
+        let response = SessionResponse {
+            protocol: SESSION_PROTOCOL,
+            id: Some(request.id),
+            status,
+            stdout: &stdout,
+            stderr: &stderr,
+            generation: state.generation,
+            transaction,
+            source_fingerprint,
+        };
+        if write_session_response(output, &response).is_err() {
+            return 1;
+        }
+    }
+}
+
+fn run(file: PathBuf, arguments: Vec<String>, stderr: &mut dyn Write) -> u8 {
+    let source = match std::fs::read_to_string(&file) {
+        Ok(source) => source,
+        Err(error) => {
+            let _ = writeln!(
+                stderr,
+                "grandiose: error: could not read {}: {error}",
+                file.display()
+            );
+            return 1;
+        }
+    };
+    let mut host = SystemHost::default();
+    match run_source(&file.display().to_string(), &source, arguments, &mut host) {
+        Ok(_) => 0,
+        Err(diagnostics) => {
+            for diagnostic in diagnostics {
+                if diagnostic
+                    .with_source(file.display().to_string())
+                    .write(&source, &mut *stderr)
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            1
+        }
+    }
+}
+
+pub(crate) fn execute(args: impl IntoIterator<Item = OsString>) -> u8 {
+    let mut stderr = io::stderr().lock();
+    match parse(args.into_iter().collect()) {
+        Ok(Command::Compile(command)) => {
+            let mut stdout = io::stdout().lock();
+            compile(command, &mut stdout, &mut stderr)
+        }
+        Ok(Command::Run { file, arguments }) => run(file, arguments, &mut stderr),
+        Ok(Command::Help) => {
+            print!("{USAGE}");
+            0
+        }
+        Ok(Command::Version) => {
+            println!("grc {}", env!("CARGO_PKG_VERSION"));
+            0
+        }
+        Ok(Command::Capabilities) => {
+            println!(
+                "{{\"grc\":\"{}\",\"contract\":1,\"contract-min\":1,\"contract-max\":1,\"artifact-major\":1,\"artifact-minor\":0,\"seed-identity-version\":{},\"seed-identity\":\"{}\",\"multi-file\":true,\"modules\":true,\"phases\":[\"lex\",\"scan\",\"resolve\",\"check\"],\"emit\":[\"bytecode\",\"grbc\",\"mir\",\"core\",\"provisional\",\"interfaces-json\",\"std-interfaces-json\"],\"diagnostics-json\":true,\"serve\":{{\"protocol\":{},\"transport\":\"json-lines\",\"max-request-bytes\":{},\"max-arguments\":{},\"max-inputs\":{},\"max-source-bytes\":{}}}}}",
+                env!("CARGO_PKG_VERSION"),
+                grandiose_vm::SEED_IDENTITY_VERSION,
+                grandiose_vm::RELEASED_SEED_IDENTITY,
+                SESSION_PROTOCOL,
+                SESSION_MAX_LINE_BYTES,
+                SESSION_MAX_ARGUMENTS,
+                SESSION_MAX_INPUTS,
+                SESSION_MAX_SOURCE_BYTES,
+            );
+            0
+        }
+        Ok(Command::Serve) => {
+            drop(stderr);
+            let stdin = io::stdin();
+            let stdout = io::stdout();
+            serve(&mut stdin.lock(), &mut stdout.lock())
+        }
+        Err(error) => {
+            let _ = writeln!(stderr, "grc: error: {error}\n\n{USAGE}");
+            2
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_inputs_in_argument_order_and_the_selected_level() {
+        let Command::Compile(command) = parse(
+            ["-O3", "first.glorious", "second.glorious", "-o", "out.grbc"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+        )
+        .unwrap() else {
+            panic!("expected a compile command")
+        };
+        assert_eq!(
+            command.inputs,
+            [
+                PathBuf::from("first.glorious"),
+                PathBuf::from("second.glorious")
+            ]
+        );
+        assert_eq!(command.optimization_level, OptimizationLevel::O3);
+        assert_eq!(command.output, Some(PathBuf::from("out.grbc")));
+        assert_eq!(command.emit, None);
+    }
+
+    #[test]
+    fn parses_named_dependency_roots_without_treating_them_as_fragments() {
+        let Command::Compile(command) = parse(
+            [
+                "--dependency",
+                "math-kit=deps/math/lib.glorious",
+                "app.glorious",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect(),
+        )
+        .unwrap() else {
+            panic!("expected a compile command")
+        };
+        assert_eq!(command.inputs, [PathBuf::from("app.glorious")]);
+        assert_eq!(
+            command.dependencies,
+            [(
+                "math-kit".to_string(),
+                PathBuf::from("deps/math/lib.glorious")
+            )]
+        );
+    }
+
+    #[test]
+    fn parses_all_deterministic_phase_emission_kinds() {
+        for (spelling, expected) in [
+            ("bytecode", EmitKind::Bytecode),
+            ("grbc", EmitKind::Bytecode),
+            ("mir", EmitKind::Mir),
+            ("core", EmitKind::Core),
+            ("provisional", EmitKind::Provisional),
+            ("interfaces-json", EmitKind::InterfacesJson),
+        ] {
+            let Command::Compile(command) = parse(
+                [format!("--emit={spelling}"), "input.glorious".to_string()]
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect(),
+            )
+            .unwrap() else {
+                panic!("expected a compile command")
+            };
+            assert_eq!(command.emit, Some(expected));
+        }
+        let Command::Compile(command) = parse(
+            ["--emit", "std-interfaces-json"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+        )
+        .unwrap() else {
+            panic!("expected a compile command")
+        };
+        assert_eq!(command.emit, Some(EmitKind::StandardInterfacesJson));
+        assert!(command.inputs.is_empty());
+    }
+
+    #[test]
+    fn check_only_rejects_output_requests() {
+        let error = parse(
+            ["--check", "input.glorious", "-o", "out.grbc"]
+                .into_iter()
+                .map(OsString::from)
+                .collect(),
+        )
+        .err()
+        .unwrap();
+        assert!(error.contains("cannot be combined"));
+    }
+
+    #[test]
+    fn parses_each_truthfully_advertised_stop_phase() {
+        for (spelling, expected) in [
+            ("lex", StopPhase::Lex),
+            ("scan", StopPhase::Scan),
+            ("resolve", StopPhase::Resolve),
+            ("check", StopPhase::Check),
+        ] {
+            let Command::Compile(command) = parse(
+                ["--phase", spelling, "input.glorious"]
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect(),
+            )
+            .unwrap() else {
+                panic!("expected a compile command")
+            };
+            assert_eq!(command.stop_phase, Some(expected));
+        }
+        assert!(
+            parse(
+                ["--phase", "lex", "--check", "input.glorious"]
+                    .into_iter()
+                    .map(OsString::from)
+                    .collect()
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn capabilities_is_a_standalone_machine_command() {
+        assert!(matches!(
+            parse(vec![OsString::from("--capabilities")]).unwrap(),
+            Command::Capabilities
+        ));
+        assert!(
+            parse(vec![
+                OsString::from("--capabilities"),
+                OsString::from("input.glorious")
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn serve_is_a_standalone_machine_command() {
+        assert!(matches!(
+            parse(vec![OsString::from("--serve")]).unwrap(),
+            Command::Serve
+        ));
+        assert!(
+            parse(vec![
+                OsString::from("--serve"),
+                OsString::from("input.glorious")
+            ])
+            .is_err()
+        );
+    }
+}

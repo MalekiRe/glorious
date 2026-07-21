@@ -156,6 +156,114 @@ pub fn input_files(
     Ok(files)
 }
 
+fn checked_root_entry(package: &ResolvedPackage, entry: Option<&Path>) -> Result<PathBuf> {
+    let entry = match entry {
+        Some(file) => file.to_path_buf(),
+        None => {
+            let declared = package.manifest.project.entry.as_ref().with_context(|| {
+                format!(
+                    "package `{}` has no entry point; only executables can be built",
+                    package.name
+                )
+            })?;
+            canonical_package_path(package, declared, "entry file")?
+        }
+    };
+    let canonical_root = package.root.canonicalize()?;
+    let entry = entry
+        .canonicalize()
+        .with_context(|| format!("entry file {} does not exist", entry.display()))?;
+    if !entry.starts_with(&canonical_root) {
+        bail!(
+            "entry file {} escapes package `{}`",
+            entry.display(),
+            package.name
+        );
+    }
+    if !entry.is_file() || !is_source_path(&entry) {
+        bail!(
+            "entry file {} is not a Grandiose source file",
+            entry.display()
+        );
+    }
+    Ok(entry)
+}
+
+fn dependency_crate_root(package: &ResolvedPackage) -> Result<PathBuf> {
+    if let Some(entry) = package.manifest.project.entry.as_deref() {
+        let root = canonical_package_path(package, entry, "crate root")?;
+        if !root.is_file() || !is_source_path(&root) {
+            bail!(
+                "dependency `{}`: crate root `{entry}` is not a Grandiose source file",
+                package.name
+            );
+        }
+        return Ok(root);
+    }
+    let sources = package
+        .manifest
+        .project
+        .sources
+        .clone()
+        .unwrap_or_else(|| vec!["src".into()]);
+    let mut candidates = Vec::new();
+    for source in sources {
+        let base = canonical_package_path(package, &source, "source path")?;
+        if base.is_file() {
+            if !is_source_path(&base) {
+                bail!(
+                    "dependency `{}`: source file `{source}` is not a Grandiose source file",
+                    package.name
+                );
+            }
+            candidates.push(base);
+            continue;
+        }
+        for conventional in ["lib.glorious", "lib.gr"] {
+            let candidate = base.join(conventional);
+            if candidate.is_file() {
+                candidates.push(candidate.canonicalize()?);
+            }
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
+    match candidates.as_slice() {
+        [root] => Ok(root.clone()),
+        [] => bail!(
+            "dependency `{}` has no unambiguous crate root; set `[project].entry`, select a source file, or provide exactly one `lib.glorious`/`lib.gr` under its source directories",
+            package.name
+        ),
+        roots => bail!(
+            "dependency `{}` has ambiguous crate roots: {}; set `[project].entry` explicitly",
+            package.name,
+            roots
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+/// Semantic roots for a module-aware compiler. The selected executable/test
+/// root is first, followed by dependency crate roots in resolved order. Child
+/// modules are deliberately absent: `grc` discovers only declarations
+/// reachable from each root.
+pub fn module_input_files(
+    resolution: &Resolution,
+    entry: Option<&Path>,
+) -> Result<Vec<(String, PathBuf)>> {
+    let root = resolution.root();
+    let mut files = vec![(root.name.clone(), checked_root_entry(root, entry)?)];
+    for package in &resolution.packages {
+        if package.source != "root" {
+            files.push((package.name.clone(), dependency_crate_root(package)?));
+        }
+    }
+    Ok(files)
+}
+
 /// Concatenate ordered inputs into a single compilation unit for compilers
 /// without multi-file support.
 pub fn assemble(files: &[(String, PathBuf)]) -> Result<Bundle> {

@@ -548,11 +548,11 @@ fn invalid_optional_resumption_consumption_has_stable_diagnostics() {
     let cases = [
         (
             "effect Stop { [0,1] stop() -> i64 } bad() -> i64 { handle perform Stop::stop() { Stop::stop() with k => { cancel(k); cancel(k); 42 } } } main() -> { () }",
-            "consumed more than once",
+            "consumed more than 1 time(s)",
         ),
         (
             "effect Stop { [0,1] stop() -> i64 } bad() -> i64 { handle perform Stop::stop() { Stop::stop() with k => { cancel(k); resume(k, 1) } } } main() -> { () }",
-            "consumed more than once",
+            "consumed more than 1 time(s)",
         ),
         (
             "effect Stop { [0,1] stop() -> i64 } bad() -> i64 { handle perform Stop::stop() { Stop::stop() with k => { cancel(k, k); 42 } } } main() -> { () }",

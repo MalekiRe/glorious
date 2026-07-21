@@ -118,6 +118,62 @@ fn scaffold_and_check() {
 }
 
 #[test]
+fn new_accepts_an_optional_destination_path_without_overwriting() {
+    let sandbox = Sandbox::new();
+    let destination = sandbox.root.join("nested").join("custom-directory");
+    let destination_arg = destination.to_str().unwrap();
+    sandbox.ok_in(&sandbox.root, &["new", "my-app", "--path", destination_arg]);
+
+    assert_eq!(
+        std::fs::read_to_string(destination.join("grandiose.toml")).unwrap(),
+        "[project]\nname = \"my-app\"\nversion = \"0.1.0\"\nentry = \"src/main.glorious\"\n\n\
+         [backend]\nkind = \"vm\"\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(destination.join("src/main.glorious")).unwrap(),
+        "main() -> () {\n    ()\n}\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(destination.join(".gitignore")).unwrap(),
+        "/target\n"
+    );
+
+    let existing = sandbox.root.join("existing");
+    std::fs::create_dir(&existing).unwrap();
+    write(&existing.join("keep.txt"), "do not replace\n");
+    let log = sandbox.fail_in(
+        &sandbox.root,
+        &["new", "renamed", "--path", existing.to_str().unwrap()],
+    );
+    assert!(log.contains("already exists"), "unexpected log: {log}");
+    assert_eq!(
+        std::fs::read_to_string(existing.join("keep.txt")).unwrap(),
+        "do not replace\n"
+    );
+    assert!(!existing.join("grandiose.toml").exists());
+
+    let default_path = sandbox.root.join("default-name");
+    sandbox.ok_in(&sandbox.root, &["new", "default-name"]);
+    let manifest = std::fs::read_to_string(default_path.join("grandiose.toml")).unwrap();
+    assert!(manifest.contains("name = \"default-name\""));
+}
+
+#[test]
+fn new_rejects_invalid_names_before_creating_the_target() {
+    let sandbox = Sandbox::new();
+    let invalid = sandbox.root.join("otherwise-valid");
+    let log = sandbox.fail_in(
+        &sandbox.root,
+        &["new", "Bad_Name", "--path", invalid.to_str().unwrap()],
+    );
+    assert!(
+        log.contains("not a valid package name"),
+        "unexpected log: {log}"
+    );
+    assert!(!invalid.exists());
+}
+
+#[test]
 fn path_dependencies_bundle_in_topological_order() {
     let sandbox = Sandbox::new();
     let deep = sandbox.root.join("deep");

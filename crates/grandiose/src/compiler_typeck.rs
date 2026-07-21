@@ -615,6 +615,27 @@ pub(crate) struct TypedProgram {
     assignment_reference_requirements: BTreeSet<ProvisionalType>,
 }
 
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub(crate) struct IncrementalTypeStats {
+    pub(crate) elaborated_bodies: usize,
+    pub(crate) reused_bodies: usize,
+}
+
+#[derive(Clone, Debug)]
+struct CachedTypedBody {
+    fingerprint: u64,
+    body: TypedExpr,
+    refinements: Vec<RefinementEvidence>,
+    assignment_reference_requirements: BTreeSet<ProvisionalType>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct IncrementalTypeCache {
+    context_fingerprint: Option<u64>,
+    bodies: BTreeMap<DeclarationKey, CachedTypedBody>,
+    pub(crate) stats: IncrementalTypeStats,
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct RefinementBrand {
     pub(crate) owner: DeclarationKey,
@@ -1538,6 +1559,27 @@ pub(crate) fn type_program(
     tables: &Tables,
     constructions: &BTreeMap<(DeclarationKey, u32), NominalInstanceKey>,
 ) -> TypedProgram {
+    type_program_incremental(program, tables, constructions, None)
+}
+
+pub(crate) fn type_program_incremental(
+    program: &Program,
+    tables: &Tables,
+    constructions: &BTreeMap<(DeclarationKey, u32), NominalInstanceKey>,
+    incremental: Option<(
+        &mut IncrementalTypeCache,
+        u64,
+        &BTreeMap<DeclarationKey, u64>,
+    )>,
+) -> TypedProgram {
+    let mut incremental = incremental;
+    if let Some((cache, context_fingerprint, _)) = incremental.as_mut() {
+        cache.stats = IncrementalTypeStats::default();
+        if cache.context_fingerprint != Some(*context_fingerprint) {
+            cache.context_fingerprint = Some(*context_fingerprint);
+            cache.bodies.clear();
+        }
+    }
     let mut tables = tables.clone();
     let mut bodies = BTreeMap::new();
     let mut refinements = BTreeMap::new();
@@ -1588,6 +1630,22 @@ pub(crate) fn type_program(
         let Some(shape) = tables.functions.get(&function.name) else {
             continue;
         };
+        let fingerprint = incremental
+            .as_ref()
+            .and_then(|(_, _, fingerprints)| fingerprints.get(&shape.declaration))
+            .copied();
+        if let Some((cache, _, _)) = incremental.as_mut()
+            && let Some(fingerprint) = fingerprint
+            && let Some(cached) = cache.bodies.get(&shape.declaration)
+            && cached.fingerprint == fingerprint
+        {
+            assignment_reference_requirements
+                .extend(cached.assignment_reference_requirements.iter().cloned());
+            refinements.insert(shape.declaration.clone(), cached.refinements.clone());
+            bodies.insert(shape.declaration.clone(), cached.body.clone());
+            cache.stats.reused_bodies += 1;
+            continue;
+        }
         let mut typer = Typer::new(
             shape.declaration.clone(),
             &tables,
@@ -1599,9 +1657,24 @@ pub(crate) fn type_program(
         }
         let body = typer.expression(&function.body, Some(&shape.result));
         let body_refinements = std::mem::take(&mut typer.refinements);
-        assignment_reference_requirements.extend(typer.assignment_reference_requirements);
-        refinements.insert(shape.declaration.clone(), body_refinements);
-        bodies.insert(shape.declaration.clone(), body);
+        let body_requirements = typer.assignment_reference_requirements.clone();
+        assignment_reference_requirements.extend(body_requirements.iter().cloned());
+        refinements.insert(shape.declaration.clone(), body_refinements.clone());
+        bodies.insert(shape.declaration.clone(), body.clone());
+        if let Some((cache, _, _)) = incremental.as_mut()
+            && let Some(fingerprint) = fingerprint
+        {
+            cache.bodies.insert(
+                shape.declaration.clone(),
+                CachedTypedBody {
+                    fingerprint,
+                    body,
+                    refinements: body_refinements,
+                    assignment_reference_requirements: body_requirements,
+                },
+            );
+            cache.stats.elaborated_bodies += 1;
+        }
     }
     TypedProgram {
         bodies,

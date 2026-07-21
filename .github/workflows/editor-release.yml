@@ -1,0 +1,95 @@
+name: Editor release artifacts
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "editor-v*"
+
+permissions:
+  contents: read
+
+jobs:
+  vscode:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: editors/vscode/package-lock.json
+      - name: Install locked extension dependencies
+        working-directory: editors/vscode
+        run: npm ci --ignore-scripts
+      - name: Validate and package VSIX
+        working-directory: editors/vscode
+        run: |
+          version="$(node -p 'require("./package.json").version')"
+          mkdir -p dist
+          npm run package -- --out "dist/grandiose-$version.vsix"
+          unzip -Z1 "dist/grandiose-$version.vsix" > dist/contents.txt
+          grep -Fxq extension/extension.js dist/contents.txt
+          grep -Fxq extension/syntaxes/grandiose.tmLanguage.json dist/contents.txt
+          grep -Fxq extension/node_modules/vscode-languageclient/package.json dist/contents.txt
+          (cd dist && sha256sum "grandiose-$version.vsix" > "grandiose-$version.vsix.sha256")
+      - uses: actions/upload-artifact@v6
+        with:
+          name: grandiose-vscode
+          path: |
+            editors/vscode/dist/*.vsix
+            editors/vscode/dist/*.sha256
+          if-no-files-found: error
+
+  language-server:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            binary: grand-lsp
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            binary: grand-lsp
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            binary: grand-lsp.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build locked standalone server
+        shell: bash
+        run: cargo build --release --locked --manifest-path tooling/lsp/Cargo.toml --target "${{ matrix.target }}"
+      - name: Package standalone server
+        shell: bash
+        run: |
+          version="$(sed -n 's/^version = "\([^"]*\)"/\1/p' tooling/lsp/Cargo.toml | head -1)"
+          name="grand-lsp-$version-${{ matrix.target }}"
+          mkdir -p dist "$name"
+          cp "tooling/lsp/target/${{ matrix.target }}/release/${{ matrix.binary }}" "$name/${{ matrix.binary }}"
+          cp editors/README.md "$name/README.md"
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            powershell -NoProfile -Command "Compress-Archive -Path '$name/*' -DestinationPath 'dist/$name.zip'"
+            artifact="dist/$name.zip"
+          else
+            tar -czf "dist/$name.tar.gz" "$name"
+            artifact="dist/$name.tar.gz"
+          fi
+          artifact_name="$(basename "$artifact")"
+          if command -v sha256sum >/dev/null; then
+            (cd dist && sha256sum "$artifact_name" > "$artifact_name.sha256")
+          else
+            (cd dist && shasum -a 256 "$artifact_name" > "$artifact_name.sha256")
+          fi
+      - uses: actions/upload-artifact@v6
+        with:
+          name: grand-lsp-${{ matrix.target }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error

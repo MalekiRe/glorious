@@ -4,6 +4,12 @@ use crate::{lexer::NumberLiteral, span::Span};
 
 #[derive(Clone, Debug)]
 pub struct Program {
+    /// Rust-like source modules. Inline module contents remain flattened into
+    /// the ordinary declaration vectors; their body spans retain lexical
+    /// ownership until module resolution assigns structured identities.
+    pub modules: Vec<ModuleDecl>,
+    pub imports: Vec<ImportDecl>,
+    pub item_visibilities: Vec<ItemVisibility>,
     pub type_aliases: Vec<TypeAliasDecl>,
     pub effect_row_aliases: Vec<EffectRowAliasDecl>,
     pub globals: Vec<GlobalBinding>,
@@ -28,12 +34,32 @@ pub struct Program {
     /// complete application span. Type/lifetime arguments remain in the
     /// legacy `TypeSyntaxKind::Application` vectors.
     pub type_const_arguments: Vec<TypeConstApplicationSyntax>,
+    /// Fixed-array source forms keyed by the complete type span. The
+    /// compatibility type tree stores the element as a one-element tuple until
+    /// layout lowering consumes this side table.
+    pub fixed_array_types: Vec<FixedArrayTypeSyntax>,
     /// Exact numeric token payloads keyed by expression/pattern span. The
     /// legacy scalar enum payloads remain compatibility shadows only.
     pub numeric_literals: Vec<NumericLiteralSyntax>,
+    /// Exact source path spans for syntax nodes whose compatibility AST stores
+    /// only path spellings (not per-segment spans), currently named patterns.
+    pub name_paths: Vec<NamePathSyntax>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NamePathSyntax {
+    pub site: Span,
+    pub path: Span,
 }
 
 impl Program {
+    pub fn visibility(&self, declaration: Span) -> Visibility {
+        self.item_visibilities
+            .iter()
+            .find(|item| item.declaration == declaration)
+            .map_or(Visibility::Private, |item| item.visibility)
+    }
+
     pub fn numeric_literal(&self, span: Span) -> Option<&NumberLiteral> {
         self.numeric_literals
             .iter()
@@ -61,6 +87,69 @@ impl Program {
             .find(|entry| entry.application == application)
             .map_or(&[], |entry| entry.arguments.as_slice())
     }
+
+    pub fn fixed_array(&self, array: Span) -> Option<&FixedArrayTypeSyntax> {
+        self.fixed_array_types
+            .iter()
+            .find(|entry| entry.array == array)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Visibility {
+    Private,
+    Public,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ItemVisibility {
+    pub declaration: Span,
+    pub visibility: Visibility,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ModuleDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub visibility: Visibility,
+    pub kind: ModuleKind,
+    pub span: Span,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ModuleKind {
+    External,
+    Inline { body: Span },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ImportDecl {
+    pub tree: ImportTree,
+    pub visibility: Visibility,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ImportTree {
+    Path {
+        segment: TypePathSegment,
+        tree: Box<ImportTree>,
+    },
+    Name {
+        name: TypePathSegment,
+        alias: Option<TypePathSegment>,
+    },
+    SelfValue {
+        span: Span,
+        alias: Option<TypePathSegment>,
+    },
+    Glob {
+        span: Span,
+    },
+    Group {
+        items: Vec<ImportTree>,
+        span: Span,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -176,6 +265,9 @@ pub struct GenericParams {
 pub struct GenericParam {
     pub name: String,
     pub kind: GenericParamKind,
+    /// A source default for a const binder. Defaults for other binder kinds
+    /// are intentionally not part of the current language contract.
+    pub const_default: Option<ConstExprSyntax>,
     pub span: Span,
 }
 
@@ -202,6 +294,9 @@ pub struct WhereClause {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LifetimeOutlivesSyntax {
+    /// Generic parameters introduced by a leading `for<...>` binder. They are
+    /// scoped over both sides of this outlives predicate.
+    pub higher_ranked_lifetimes: Vec<GenericParam>,
     pub longer: LifetimeSyntax,
     pub shorter: LifetimeSyntax,
     pub span: Span,
@@ -258,6 +353,7 @@ pub struct ConstAssociatedArgumentSyntax {
 pub enum ConstArgumentValueSyntax {
     Quantity(QuantitySyntax),
     U32 { value: u64, span: Span },
+    Expression(ConstExprSyntax),
 }
 
 impl ConstArgumentValueSyntax {
@@ -265,8 +361,108 @@ impl ConstArgumentValueSyntax {
         match self {
             Self::Quantity(quantity) => quantity.span,
             Self::U32 { span, .. } => *span,
+            Self::Expression(expression) => expression.span,
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ConstExprSyntax {
+    pub kind: ConstExprSyntaxKind,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ConstExprSyntaxKind {
+    U32(u64),
+    Quantity(QuantitySyntax),
+    Path(Vec<TypePathSegment>),
+    Neg(Box<ConstExprSyntax>),
+    Binary {
+        op: ConstBinaryOp,
+        lhs: Box<ConstExprSyntax>,
+        rhs: Box<ConstExprSyntax>,
+    },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConstBinaryOp {
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Remainder,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum EvaluatedConst {
+    U32(u32),
+    Quantity { lower: u32, upper: Option<u32> },
+}
+
+pub fn evaluate_const_expression(
+    expression: &ConstExprSyntax,
+    mut resolve: impl FnMut(&[TypePathSegment]) -> Option<EvaluatedConst>,
+) -> Result<EvaluatedConst, String> {
+    fn evaluate(
+        expression: &ConstExprSyntax,
+        resolve: &mut impl FnMut(&[TypePathSegment]) -> Option<EvaluatedConst>,
+    ) -> Result<EvaluatedConst, String> {
+        match &expression.kind {
+            ConstExprSyntaxKind::U32(value) => u32::try_from(*value)
+                .map(EvaluatedConst::U32)
+                .map_err(|_| "const value exceeds the u32 domain".to_owned()),
+            ConstExprSyntaxKind::Quantity(quantity) => Ok(EvaluatedConst::Quantity {
+                lower: u32::try_from(quantity.lower)
+                    .map_err(|_| "quantity lower bound exceeds the u32 domain".to_owned())?,
+                upper: quantity
+                    .upper
+                    .map(u32::try_from)
+                    .transpose()
+                    .map_err(|_| "quantity upper bound exceeds the u32 domain".to_owned())?,
+            }),
+            ConstExprSyntaxKind::Path(path) => resolve(path).ok_or_else(|| {
+                "const expression contains an unresolved parameter or path".to_owned()
+            }),
+            ConstExprSyntaxKind::Neg(value) => match evaluate(value, resolve)? {
+                EvaluatedConst::U32(_) => {
+                    Err("a negative value is outside the u32 const domain".to_owned())
+                }
+                EvaluatedConst::Quantity { .. } => {
+                    Err("quantity const values cannot be negated".to_owned())
+                }
+            },
+            ConstExprSyntaxKind::Binary { op, lhs, rhs } => {
+                let (EvaluatedConst::U32(lhs), EvaluatedConst::U32(rhs)) =
+                    (evaluate(lhs, resolve)?, evaluate(rhs, resolve)?)
+                else {
+                    return Err("const arithmetic currently requires u32 operands".to_owned());
+                };
+                let value = match op {
+                    ConstBinaryOp::Add => lhs.checked_add(rhs),
+                    ConstBinaryOp::Subtract => lhs.checked_sub(rhs),
+                    ConstBinaryOp::Multiply => lhs.checked_mul(rhs),
+                    ConstBinaryOp::Divide => lhs.checked_div(rhs),
+                    ConstBinaryOp::Remainder => lhs.checked_rem(rhs),
+                }
+                .ok_or_else(|| match op {
+                    ConstBinaryOp::Divide | ConstBinaryOp::Remainder if rhs == 0 => {
+                        "division by zero in const expression".to_owned()
+                    }
+                    _ => "const arithmetic overflows the u32 domain".to_owned(),
+                })?;
+                Ok(EvaluatedConst::U32(value))
+            }
+        }
+    }
+    evaluate(expression, &mut resolve)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FixedArrayTypeSyntax {
+    pub array: Span,
+    pub element: TypeSyntax,
+    pub length: ConstExprSyntax,
 }
 
 impl AssociatedArgumentSyntax {

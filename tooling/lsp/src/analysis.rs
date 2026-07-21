@@ -7,17 +7,20 @@
 //! while navigation continues to use the last successful snapshot; no partial
 //! parse or declaration scan can leak into semantic requests.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use anyhow::Result;
+use grandiose::compiler_session::IncrementalCompilerSession;
 use grandiose::diagnostic::Severity;
-use grandiose::interface::{InterfaceDeclaration, InterfaceSelection, scan_interfaces};
-use grandiose::lossless::{LosslessKind, lex_lossless};
-use grandiose::source_bundle::{DISTRIBUTED_STANDARD_LIBRARY_NAME, Segment, SourceBundle};
-use grandiose::{CompileOptions, OptimizationLevel, compile_bundle_to_phases_with_options};
+use grandiose::interface::{
+    InterfaceDeclaration, InterfaceSelection, InterfaceSnapshot, scan_interface_snapshot,
+};
+use grandiose::semantic::SemanticSnapshot as CompilerSemanticSnapshot;
+use grandiose::source_bundle::{Segment, SourceBundle};
+use grandiose::{CompileOptions, OptimizationLevel};
 
 pub struct Workspace {
     roots: Vec<PathBuf>,
@@ -27,6 +30,8 @@ pub struct Workspace {
     /// Successfully checked semantic state, independently transactional per
     /// workspace root.
     last_good: RefCell<BTreeMap<PathBuf, RootSnapshot>>,
+    next_body_arena: Cell<u64>,
+    compiler_sessions: RefCell<BTreeMap<PathBuf, IncrementalCompilerSession>>,
 }
 
 #[derive(Debug, Clone)]
@@ -50,6 +55,13 @@ pub struct Analysis {
     /// Definition-bound occurrences. References and rename query this by
     /// semantic identity rather than searching for equal token spellings.
     pub occurrences: Vec<SemanticOccurrence>,
+    /// Compiler-elaborated local definitions and references.
+    pub locals: Vec<Local>,
+    pub local_occurrences: Vec<SemanticOccurrence>,
+    pub expression_types: Vec<SemanticExpression>,
+    /// Byte prefix unchanged from the successful snapshot that owns semantic
+    /// spans. Requests outside it must not apply stale offsets to a broken edit.
+    semantic_prefixes: BTreeMap<PathBuf, usize>,
     pub file_roots: BTreeMap<PathBuf, PathBuf>,
 }
 
@@ -81,6 +93,37 @@ struct RootSnapshot {
     declarations: Vec<SemanticDeclaration>,
     std_declarations: Vec<SemanticDeclaration>,
     occurrences: Vec<SemanticOccurrence>,
+    locals: Vec<Local>,
+    local_occurrences: Vec<SemanticOccurrence>,
+    expression_types: Vec<SemanticExpression>,
+    sources: BTreeMap<PathBuf, String>,
+    body_arenas: BTreeMap<String, BodyArena>,
+}
+
+#[derive(Debug, Clone)]
+struct BodyArena {
+    generation: u64,
+    semantic: Rc<grandiose::semantic::SemanticBodySnapshot>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct Local {
+    pub identity: String,
+    pub name: String,
+    pub file: PathBuf,
+    pub definition_start_byte: usize,
+    pub definition_end_byte: usize,
+    pub scope_start_byte: usize,
+    pub scope_end_byte: usize,
+    pub inferred_type: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SemanticExpression {
+    pub file: PathBuf,
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub inferred_type: String,
 }
 
 impl Analysis {
@@ -98,14 +141,76 @@ impl Analysis {
     pub fn occurrence_at(&self, file: &Path, offset: usize) -> Option<&SemanticOccurrence> {
         self.occurrences.iter().find(|occurrence| {
             occurrence.file == file
-                && (occurrence.start_byte..=occurrence.end_byte).contains(&offset)
+                && (occurrence.start_byte..occurrence.end_byte).contains(&offset)
+                && self.span_is_current(file, occurrence.end_byte)
         })
     }
 
     pub fn references(&self, identity: &str) -> impl Iterator<Item = &SemanticOccurrence> {
-        self.occurrences
+        self.occurrences.iter().filter(move |occurrence| {
+            occurrence.identity == identity
+                && self.span_is_current(&occurrence.file, occurrence.end_byte)
+        })
+    }
+
+    pub fn local(&self, identity: &str) -> Option<&Local> {
+        self.locals.iter().find(|local| local.identity == identity)
+    }
+
+    pub fn local_occurrence_at(&self, file: &Path, offset: usize) -> Option<&SemanticOccurrence> {
+        self.local_occurrences.iter().find(|occurrence| {
+            occurrence.file == file
+                && (occurrence.start_byte..occurrence.end_byte).contains(&offset)
+                && self.span_is_current(file, occurrence.end_byte)
+        })
+    }
+
+    pub fn local_references(&self, identity: &str) -> impl Iterator<Item = &SemanticOccurrence> {
+        self.local_occurrences.iter().filter(move |occurrence| {
+            occurrence.identity == identity
+                && self.span_is_current(&occurrence.file, occurrence.end_byte)
+        })
+    }
+
+    pub fn expression_at(&self, file: &Path, offset: usize) -> Option<&SemanticExpression> {
+        self.expression_types
             .iter()
-            .filter(move |occurrence| occurrence.identity == identity)
+            .filter(|expression| {
+                expression.file == file
+                    && (expression.start_byte..expression.end_byte).contains(&offset)
+                    && self.span_is_current(file, expression.end_byte)
+            })
+            .min_by_key(|expression| expression.end_byte.saturating_sub(expression.start_byte))
+    }
+
+    pub fn locals_at(&self, file: &Path, offset: usize) -> Vec<&Local> {
+        let mut by_name = BTreeMap::new();
+        for local in self.locals.iter().filter(|local| {
+            local.file == file
+                && local.definition_start_byte <= offset
+                && (local.scope_start_byte..=local.scope_end_byte).contains(&offset)
+                && self.span_is_current(file, local.definition_end_byte)
+        }) {
+            by_name.insert(local.name.as_str(), local);
+        }
+        by_name.into_values().collect()
+    }
+
+    pub fn inlay_locals(&self, file: &Path, start: usize, end: usize) -> Vec<&Local> {
+        self.locals
+            .iter()
+            .filter(|local| {
+                local.file == file
+                    && (start..end).contains(&local.definition_end_byte)
+                    && self.span_is_current(file, local.definition_end_byte)
+            })
+            .collect()
+    }
+
+    fn span_is_current(&self, file: &Path, end: usize) -> bool {
+        self.semantic_prefixes
+            .get(file)
+            .is_some_and(|prefix| end <= *prefix)
     }
 }
 
@@ -117,6 +222,8 @@ impl Workspace {
             revision: 0,
             cache: RefCell::new(None),
             last_good: RefCell::new(BTreeMap::new()),
+            next_body_arena: Cell::new(0),
+            compiler_sessions: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -156,23 +263,38 @@ impl Workspace {
     /// (offline: an editor session must never hit the network); when there is
     /// no manifest or resolution fails, degrades to the open overlays so
     /// single-file editing still works.
-    fn project_groups(&self) -> Vec<(PathBuf, Vec<PathBuf>)> {
+    fn project_groups(&self) -> Vec<(PathBuf, Vec<PathBuf>, BTreeMap<PathBuf, String>)> {
         let mut groups = Vec::new();
         let mut assigned = BTreeSet::new();
         for root in &self.roots {
-            let mut files = match self.resolve_project(root) {
-                Ok(files) if !files.is_empty() => files,
-                _ => self
-                    .overlays
-                    .keys()
-                    .filter(|path| path.starts_with(root))
-                    .cloned()
-                    .collect(),
+            let (mut files, mut dependency_roots) = match self.resolve_project(root) {
+                Ok((files, dependency_roots)) if !files.is_empty() => (files, dependency_roots),
+                _ => (
+                    self.overlays
+                        .keys()
+                        .filter(|path| path.starts_with(root))
+                        .cloned()
+                        .collect(),
+                    BTreeMap::new(),
+                ),
             };
             files.sort();
             files.dedup();
+            // A crate root is semantic, not lexicographic. Keep the manifest
+            // entry first so SourceBundle's primary segment receives the root
+            // module exception (`src/main.glorious` need not live in
+            // `main/main.glorious`). Declared child modules remain sorted.
+            if let Ok((project_root, manifest)) = grand::manifest::find_project(root)
+                && let Some(entry) = manifest.project.entry
+                && let entry = project_root.join(entry)
+                && let Some(index) = files.iter().position(|file| *file == entry)
+            {
+                let primary = files.remove(index);
+                files.insert(0, primary);
+            }
             files.retain(|file| assigned.insert(file.clone()));
-            groups.push((root.clone(), files));
+            dependency_roots.retain(|file, _| files.contains(file));
+            groups.push((root.clone(), files, dependency_roots));
         }
         for file in self
             .overlays
@@ -180,12 +302,12 @@ impl Workspace {
             .filter(|file| !assigned.contains(*file))
         {
             let root = file.parent().unwrap_or(file).to_path_buf();
-            groups.push((root, vec![file.clone()]));
+            groups.push((root, vec![file.clone()], BTreeMap::new()));
         }
         groups
     }
 
-    fn resolve_project(&self, root: &Path) -> Result<Vec<PathBuf>> {
+    fn resolve_project(&self, root: &Path) -> Result<(Vec<PathBuf>, BTreeMap<PathBuf, String>)> {
         let (project_root, manifest) = grand::manifest::find_project(root)?;
         let lock = grand::lock::Lockfile::load(&project_root.join(grand::lock::LOCK_NAME))?;
         let options = grand::resolve::ResolveOptions {
@@ -195,6 +317,12 @@ impl Workspace {
         };
         let resolution =
             grand::resolve::resolve(&project_root, &manifest, lock.as_ref(), &options)?;
+        let semantic_roots = grand::bundle::module_input_files(&resolution, None)?;
+        let dependency_roots = semantic_roots
+            .into_iter()
+            .skip(1)
+            .map(|(name, path)| (path, name))
+            .collect::<BTreeMap<_, _>>();
         let mut files = Vec::new();
         for package in &resolution.packages {
             files.extend(grand::bundle::package_sources(package)?);
@@ -207,7 +335,7 @@ impl Workspace {
                 }
             }
         }
-        Ok(files)
+        Ok((files, dependency_roots))
     }
 
     /// Cached per revision; cheap to call from every request handler.
@@ -228,29 +356,45 @@ impl Workspace {
         let mut declarations = Vec::new();
         let mut std_declarations = Vec::new();
         let mut occurrences = Vec::new();
+        let mut locals = Vec::new();
+        let mut local_occurrences = Vec::new();
+        let mut expression_types = Vec::new();
+        let mut semantic_prefixes = BTreeMap::new();
         let mut file_roots = BTreeMap::new();
 
-        for (root, group_files) in &groups {
+        for (root, group_files, dependency_roots) in &groups {
             let mut segments = Vec::new();
+            let mut group_sources = BTreeMap::new();
             for file in group_files {
                 diagnostics.entry(file.clone()).or_default();
                 file_roots.insert(file.clone(), root.clone());
                 let Some(text) = self.text(file) else {
                     continue;
                 };
-                segments.push(Segment::new(file.display().to_string(), text));
+                group_sources.insert(file.clone(), text.clone());
+                let segment = Segment::new(file.display().to_string(), text);
+                segments.push(if let Some(name) = dependency_roots.get(file) {
+                    segment.with_package_root(name.clone())
+                } else {
+                    segment
+                });
             }
             let Some(primary) = segments.first().cloned() else {
                 continue;
             };
             let bundle = SourceBundle::distributed(primary, segments.into_iter().skip(1));
             let fallback = group_files.first().cloned().unwrap_or_default();
-            let checked = compile_bundle_to_phases_with_options(
-                &bundle,
-                CompileOptions {
-                    optimization_level: OptimizationLevel::O0,
-                },
-            );
+            let checked = self
+                .compiler_sessions
+                .borrow_mut()
+                .entry(root.clone())
+                .or_default()
+                .compile_bundle(
+                    &bundle,
+                    CompileOptions {
+                        optimization_level: OptimizationLevel::O0,
+                    },
+                );
             let compiler_diagnostics = match &checked {
                 Ok(_) => &[][..],
                 Err(diagnostics) => diagnostics.as_slice(),
@@ -283,18 +427,35 @@ impl Workspace {
             // Both compiler checking and interface extraction must succeed
             // before the new side tables become visible. This is the semantic
             // transaction boundary for one workspace root.
-            let user_interfaces = scan_interfaces(&bundle, InterfaceSelection::User);
-            let standard_interfaces = scan_interfaces(&bundle, InterfaceSelection::StandardLibrary);
-            if checked.is_ok()
+            let user_interfaces = scan_interface_snapshot(&bundle, InterfaceSelection::User);
+            let standard_interfaces =
+                scan_interface_snapshot(&bundle, InterfaceSelection::StandardLibrary);
+            if let Ok(phases) = &checked
                 && let (Ok(user), Ok(standard)) = (user_interfaces, standard_interfaces)
             {
-                let snapshot = semantic_snapshot(&bundle, user, standard);
+                let compiler = grandiose::semantic::semantic_snapshot(&bundle, phases);
+                let previous = self.last_good.borrow().get(root).cloned();
+                let mut snapshot = semantic_snapshot(
+                    user,
+                    standard,
+                    compiler,
+                    previous.as_ref(),
+                    &self.next_body_arena,
+                );
+                snapshot.sources = group_sources.clone();
                 self.last_good.borrow_mut().insert(root.clone(), snapshot);
             }
             if let Some(snapshot) = self.last_good.borrow().get(root) {
                 declarations.extend(snapshot.declarations.iter().cloned());
                 std_declarations.extend(snapshot.std_declarations.iter().cloned());
                 occurrences.extend(snapshot.occurrences.iter().cloned());
+                locals.extend(snapshot.locals.iter().cloned());
+                local_occurrences.extend(snapshot.local_occurrences.iter().cloned());
+                expression_types.extend(snapshot.expression_types.iter().cloned());
+                for (file, previous) in &snapshot.sources {
+                    let current = group_sources.get(file).map(String::as_str).unwrap_or("");
+                    semantic_prefixes.insert(file.clone(), common_prefix_len(previous, current));
+                }
             }
         }
         std_declarations.sort_by(|left, right| left.identity.cmp(&right.identity));
@@ -304,22 +465,44 @@ impl Workspace {
             declarations,
             std_declarations,
             occurrences,
+            locals,
+            local_occurrences,
+            expression_types,
+            semantic_prefixes,
             file_roots,
         }
     }
 }
 
+fn common_prefix_len(left: &str, right: &str) -> usize {
+    left.bytes()
+        .zip(right.bytes())
+        .take_while(|(left, right)| left == right)
+        .count()
+}
+
 fn semantic_snapshot(
-    bundle: &SourceBundle,
-    user: Vec<InterfaceDeclaration>,
-    standard: Vec<InterfaceDeclaration>,
+    user: InterfaceSnapshot,
+    standard: InterfaceSnapshot,
+    compiler: CompilerSemanticSnapshot,
+    previous: Option<&RootSnapshot>,
+    next_body_arena: &Cell<u64>,
 ) -> RootSnapshot {
+    let body_arenas = retain_body_arenas(&compiler, previous, next_body_arena);
     let convert = |interface: InterfaceDeclaration| SemanticDeclaration {
         file: PathBuf::from(&interface.file),
         interface,
     };
-    let declarations = user.into_iter().map(convert).collect::<Vec<_>>();
-    let std_declarations = standard.into_iter().map(convert).collect::<Vec<_>>();
+    let declarations = user
+        .declarations
+        .into_iter()
+        .map(convert)
+        .collect::<Vec<_>>();
+    let std_declarations = standard
+        .declarations
+        .into_iter()
+        .map(convert)
+        .collect::<Vec<_>>();
     let mut occurrences = declarations
         .iter()
         .map(|declaration| SemanticOccurrence {
@@ -330,77 +513,18 @@ fn semantic_snapshot(
             definition: true,
         })
         .collect::<Vec<_>>();
-
-    // A successfully compiled flat namespace has one authoritative identity
-    // for an unambiguous spelling. Ambiguous cross-namespace spellings are
-    // deliberately omitted until the compiler exports its typed occurrence
-    // table; guessing would make rename unsound.
-    let mut identities = BTreeMap::<String, Vec<String>>::new();
-    for declaration in declarations.iter().chain(&std_declarations) {
-        identities
-            .entry(declaration.interface.name.clone())
-            .or_default()
-            .push(declaration.interface.identity.clone());
-    }
-    for segment in bundle.segments() {
-        if segment.name() == DISTRIBUTED_STANDARD_LIBRARY_NAME {
-            continue;
-        }
-        let file = PathBuf::from(segment.name());
-        let Ok(tokens) = lex_lossless(segment.source()) else {
-            continue;
-        };
-        let tokens = tokens
+    occurrences.extend(
+        user.occurrences
             .into_iter()
-            .filter(|token| !token.kind.is_trivia())
-            .collect::<Vec<_>>();
-        for (index, token) in tokens.iter().copied().enumerate() {
-            if token.kind != LosslessKind::Identifier {
-                continue;
-            }
-            let name = token.text(segment.source());
-            let Some(identity) = identities
-                .get(name)
-                .filter(|candidates| candidates.len() == 1)
-                .and_then(|candidates| candidates.first())
-            else {
-                continue;
-            };
-            // Locals shadow the flat value namespace. Do not attach a global
-            // identity to a compiler-accepted local use just because its
-            // spelling is equal.
-            if locals_at(segment.source(), token.span.start)
-                .iter()
-                .any(|local| local.name == name)
-            {
-                continue;
-            }
-            let previous = index
-                .checked_sub(1)
-                .and_then(|index| tokens.get(index))
-                .map(|token| token.text(segment.source()));
-            let next = tokens
-                .get(index + 1)
-                .map(|token| token.text(segment.source()));
-            if matches!(previous, Some("let" | ".")) || matches!(next, Some(":" | "=")) {
-                continue;
-            }
-            if occurrences.iter().any(|occurrence| {
-                occurrence.file == file
-                    && occurrence.start_byte == token.span.start
-                    && occurrence.end_byte == token.span.end
-            }) {
-                continue;
-            }
-            occurrences.push(SemanticOccurrence {
-                identity: identity.clone(),
-                file: file.clone(),
-                start_byte: token.span.start,
-                end_byte: token.span.end,
+            .chain(standard.occurrences)
+            .map(|occurrence| SemanticOccurrence {
+                identity: occurrence.identity,
+                file: occurrence.file.into(),
+                start_byte: occurrence.start_byte,
+                end_byte: occurrence.end_byte,
                 definition: false,
-            });
-        }
-    }
+            }),
+    );
     occurrences.sort_by(|left, right| {
         (&left.file, left.start_byte, left.end_byte).cmp(&(
             &right.file,
@@ -408,165 +532,87 @@ fn semantic_snapshot(
             right.end_byte,
         ))
     });
+    let locals = compiler
+        .locals
+        .into_iter()
+        .map(|local| Local {
+            identity: local.identity,
+            name: local.name,
+            file: local.file.into(),
+            definition_start_byte: local.definition_start_byte,
+            definition_end_byte: local.definition_end_byte,
+            scope_start_byte: local.scope_start_byte,
+            scope_end_byte: local.scope_end_byte,
+            inferred_type: local.inferred_type,
+        })
+        .collect();
+    let local_occurrences = compiler
+        .occurrences
+        .into_iter()
+        .map(|occurrence| SemanticOccurrence {
+            identity: occurrence.identity,
+            file: occurrence.file.into(),
+            start_byte: occurrence.start_byte,
+            end_byte: occurrence.end_byte,
+            definition: occurrence.definition,
+        })
+        .collect();
+    let expression_types = compiler
+        .expressions
+        .into_iter()
+        .map(|expression| SemanticExpression {
+            file: expression.file.into(),
+            start_byte: expression.start_byte,
+            end_byte: expression.end_byte,
+            inferred_type: expression.inferred_type,
+        })
+        .collect();
     RootSnapshot {
         declarations,
         std_declarations,
         occurrences,
+        locals,
+        local_occurrences,
+        expression_types,
+        sources: BTreeMap::new(),
+        body_arenas,
     }
 }
 
-// ---------------------------------------------------------------------------
-// Locals: a scope-aware, token-light view of the callable under the cursor.
-
-pub struct Local {
-    pub name: String,
-    /// Byte offset of the defining occurrence in the same file.
-    pub def_offset: usize,
-    pub detail: String,
-}
-
-/// Parameters and `let` bindings of the callable enclosing `offset`,
-/// text-derived so it works on broken files. Bindings after the cursor are
-/// excluded (they are not in scope yet).
-pub fn locals_at(text: &str, offset: usize) -> Vec<Local> {
-    let Some((header_start, body_start, body_end)) = enclosing_callable(text, offset) else {
-        return Vec::new();
-    };
-    let mut locals = Vec::new();
-    // Parameters: identifiers directly followed by `:` inside the header's
-    // parameter parentheses.
-    if let Some(open) = text[header_start..body_start].find('(') {
-        let params_start = header_start + open + 1;
-        let close = matching_paren(text, params_start - 1).unwrap_or(body_start);
-        for (name, position) in identifiers(&text[params_start..close]) {
-            let after = text[params_start + position + name.len()..close.min(text.len())]
-                .trim_start()
-                .starts_with(':');
-            if after {
-                locals.push(Local {
-                    name: name.to_string(),
-                    def_offset: params_start + position,
-                    detail: "parameter".into(),
-                });
+fn retain_body_arenas(
+    compiler: &CompilerSemanticSnapshot,
+    previous: Option<&RootSnapshot>,
+    next_body_arena: &Cell<u64>,
+) -> BTreeMap<String, BodyArena> {
+    compiler
+        .bodies
+        .iter()
+        .map(|body| {
+            let retained = previous
+                .and_then(|snapshot| snapshot.body_arenas.get(&body.identity))
+                .filter(|arena| arena.semantic.source_fingerprint == body.source_fingerprint);
+            if let Some(arena) = retained
+                && arena.semantic.file == body.file
+                && arena.semantic.start_byte == body.start_byte
+                && arena.semantic.end_byte == body.end_byte
+            {
+                return (body.identity.clone(), arena.clone());
             }
-        }
-    }
-    // `let name` bindings before the cursor inside the body.
-    let scope_end = offset.clamp(body_start, body_end);
-    let body = &text[body_start..scope_end];
-    for (word, position) in identifiers(body) {
-        if word == "let" {
-            let rest = &body[position + 3..];
-            let trimmed = rest.trim_start();
-            let name: String = trimmed
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                .collect();
-            if !name.is_empty() && !name.chars().next().unwrap().is_ascii_digit() {
-                let name_offset = body_start + position + 3 + (rest.len() - trimmed.len());
-                locals.push(Local {
-                    name,
-                    def_offset: name_offset,
-                    detail: "let binding".into(),
-                });
-            }
-        }
-    }
-    locals
-}
-
-/// (header start, body `{` offset + 1, body end) of the callable containing
-/// `offset`, found by scanning top-level declarations heuristically.
-fn enclosing_callable(text: &str, offset: usize) -> Option<(usize, usize, usize)> {
-    let mut line_start = 0usize;
-    let mut depth = 0i64;
-    let mut candidate: Option<(usize, usize, usize)> = None;
-    for line in text.split_inclusive('\n') {
-        if depth == 0 {
-            let trimmed = line.trim_start();
-            let head: String = trimmed
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                .collect();
-            let is_callable = !head.is_empty()
-                && !matches!(
-                    head.as_str(),
-                    "let"
-                        | "type"
-                        | "struct"
-                        | "enum"
-                        | "trait"
-                        | "impl"
-                        | "effect"
-                        | "cases"
-                        | "infixl"
-                        | "infixr"
-                        | "prefix"
-                )
-                && trimmed[head.len()..].trim_start().starts_with(['(', '<']);
-            if is_callable && let Some(open) = text[line_start..].find('{') {
-                let body_open = line_start + open;
-                let body_end = matching_brace(text, body_open).unwrap_or(text.len());
-                candidate = Some((line_start, body_open + 1, body_end));
-            }
-        }
-        for byte in line.bytes() {
-            match byte {
-                b'{' | b'(' | b'[' => depth += 1,
-                b'}' | b')' | b']' => depth -= 1,
-                _ => {}
-            }
-        }
-        line_start += line.len();
-        if line_start > offset {
-            break;
-        }
-    }
-    candidate.filter(|(start, _, end)| (*start..=*end).contains(&offset))
-}
-
-fn matching_brace(text: &str, open: usize) -> Option<usize> {
-    matching(text, open, b'{', b'}')
-}
-
-fn matching_paren(text: &str, open: usize) -> Option<usize> {
-    matching(text, open, b'(', b')')
-}
-
-fn matching(text: &str, open: usize, open_byte: u8, close_byte: u8) -> Option<usize> {
-    let mut depth = 0i64;
-    for (index, byte) in text.bytes().enumerate().skip(open) {
-        if byte == open_byte {
-            depth += 1;
-        } else if byte == close_byte {
-            depth -= 1;
-            if depth == 0 {
-                return Some(index);
-            }
-        }
-    }
-    None
-}
-
-/// Word-boundary identifier occurrences (name, byte offset) in `text`,
-/// skipping line comments and string literals.
-pub fn identifiers(text: &str) -> Vec<(&str, usize)> {
-    let tokens = match lex_lossless(text) {
-        Ok(tokens) => tokens,
-        Err(error) => {
-            let prefix_end = error.span.map_or(0, |span| span.start);
-            lex_lossless(&text[..prefix_end]).unwrap_or_default()
-        }
-    };
-    tokens
-        .into_iter()
-        .filter_map(|token| match token.kind {
-            LosslessKind::Identifier => Some((token.text(text), token.span.start)),
-            LosslessKind::Label | LosslessKind::Lifetime => Some((
-                &text[token.span.start + 1..token.span.end],
-                token.span.start + 1,
-            )),
-            _ => None,
+            let generation = retained.map_or_else(
+                || {
+                    let generation = next_body_arena.get();
+                    next_body_arena.set(generation.saturating_add(1));
+                    generation
+                },
+                |arena| arena.generation,
+            );
+            (
+                body.identity.clone(),
+                BodyArena {
+                    generation,
+                    semantic: Rc::new(body.clone()),
+                },
+            )
         })
         .collect()
 }
@@ -575,43 +621,59 @@ pub fn identifiers(text: &str) -> Vec<(&str, usize)> {
 mod tests {
     use super::*;
 
+    fn compiler_body(identity: &str, fingerprint: u64, start: usize) -> CompilerSemanticSnapshot {
+        CompilerSemanticSnapshot {
+            bodies: vec![grandiose::semantic::SemanticBodySnapshot {
+                identity: identity.into(),
+                file: "main.gr".into(),
+                start_byte: start,
+                end_byte: start + 10,
+                source_fingerprint: fingerprint,
+                locals: vec![],
+                occurrences: vec![],
+                expressions: vec![],
+            }],
+            ..CompilerSemanticSnapshot::default()
+        }
+    }
+
     #[test]
-    fn locals_see_params_and_earlier_lets() {
-        let text = "helper(seed: i64) -> i64 { seed }\n\
-                    main(count: i64) -> i64 {\n    let first = 1\n    let second = 2\n    first\n}\n";
-        let cursor = text.rfind("first").unwrap();
-        let locals = locals_at(text, cursor);
-        let names: Vec<&str> = locals.iter().map(|l| l.name.as_str()).collect();
-        assert_eq!(names, vec!["count", "first", "second"]);
-        // From inside `helper`, only helper's scope is visible.
-        let cursor = text.find("seed }").unwrap();
-        let names: Vec<String> = locals_at(text, cursor)
-            .into_iter()
-            .map(|l| l.name)
-            .collect();
-        assert_eq!(names, vec!["seed"]);
+    fn body_arenas_reuse_unchanged_inference_rebase_spans_and_invalidate_changes() {
+        let next = Cell::new(0);
+        let first = retain_body_arenas(&compiler_body("body:main", 7, 10), None, &next);
+        let first_generation = first["body:main"].generation;
+        let previous = RootSnapshot {
+            body_arenas: first,
+            ..RootSnapshot::default()
+        };
+        let unchanged =
+            retain_body_arenas(&compiler_body("body:main", 7, 10), Some(&previous), &next);
+        assert!(Rc::ptr_eq(
+            &unchanged["body:main"].semantic,
+            &previous.body_arenas["body:main"].semantic,
+        ));
+        let shifted =
+            retain_body_arenas(&compiler_body("body:main", 7, 40), Some(&previous), &next);
+        assert_eq!(shifted["body:main"].generation, first_generation);
+        assert_eq!(shifted["body:main"].semantic.start_byte, 40);
+        let previous = RootSnapshot {
+            body_arenas: shifted,
+            ..RootSnapshot::default()
+        };
+        let changed =
+            retain_body_arenas(&compiler_body("body:main", 8, 40), Some(&previous), &next);
+        assert_ne!(changed["body:main"].generation, first_generation);
     }
 
     #[test]
     fn std_index_contains_prelude_names() {
         let bundle =
             SourceBundle::distributed(Segment::new("main.glorious", "main() -> i64 { 0 }"), []);
-        let standard = scan_interfaces(&bundle, InterfaceSelection::StandardLibrary).unwrap();
+        let standard =
+            grandiose::interface::scan_interfaces(&bundle, InterfaceSelection::StandardLibrary)
+                .unwrap();
         let names: Vec<&str> = standard.iter().map(|d| d.name.as_str()).collect();
         assert!(names.contains(&"if"), "std scan missing `if`: {names:?}");
-    }
-
-    #[test]
-    fn identifiers_skip_nested_comments_literals_and_keep_byte_offsets() {
-        let text = "before /* hidden /* nested */ end */ \"also_hidden\" 😀 after";
-        let after = text.find("after").unwrap();
-        assert_eq!(identifiers(text), vec![("before", 0), ("after", after)]);
-        assert_ne!(after, text[..after].encode_utf16().count());
-    }
-
-    #[test]
-    fn identifiers_before_malformed_trivia_remain_available() {
-        assert_eq!(identifiers("visible /* never closed"), vec![("visible", 0)]);
     }
 
     #[test]
@@ -623,9 +685,16 @@ mod tests {
             ),
             [],
         );
-        let user = scan_interfaces(&bundle, InterfaceSelection::User).unwrap();
-        let standard = scan_interfaces(&bundle, InterfaceSelection::StandardLibrary).unwrap();
-        let snapshot = semantic_snapshot(&bundle, user, standard);
+        let user = scan_interface_snapshot(&bundle, InterfaceSelection::User).unwrap();
+        let standard =
+            scan_interface_snapshot(&bundle, InterfaceSelection::StandardLibrary).unwrap();
+        let snapshot = semantic_snapshot(
+            user,
+            standard,
+            CompilerSemanticSnapshot::default(),
+            None,
+            &Cell::new(0),
+        );
         let helper_occurrences = snapshot
             .occurrences
             .iter()
@@ -633,6 +702,53 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(helper_occurrences.len(), 1);
         assert!(helper_occurrences[0].definition);
+    }
+
+    #[test]
+    fn compiler_occurrences_distinguish_equal_names_in_sibling_modules() {
+        let root = "mod left; mod right;\n\
+                    use crate::left::answer as left_answer;\n\
+                    use crate::right::answer as right_answer;\n\
+                    probe() -> i64 { left_answer() + right_answer() }\n\
+                    main() -> { () }";
+        let bundle = SourceBundle::distributed(
+            Segment::new("/work/src/main.glorious", root),
+            [
+                Segment::new("/work/src/left/left.glorious", "pub answer() -> i64 { 20 }"),
+                Segment::new(
+                    "/work/src/right/right.glorious",
+                    "pub answer() -> i64 { 22 }",
+                ),
+            ],
+        );
+        let user = scan_interface_snapshot(&bundle, InterfaceSelection::User).unwrap();
+        let standard =
+            scan_interface_snapshot(&bundle, InterfaceSelection::StandardLibrary).unwrap();
+        let snapshot = semantic_snapshot(
+            user,
+            standard,
+            CompilerSemanticSnapshot::default(),
+            None,
+            &Cell::new(0),
+        );
+        let left = snapshot
+            .occurrences
+            .iter()
+            .filter(|occurrence| occurrence.identity == "user:value:left::answer")
+            .collect::<Vec<_>>();
+        let right = snapshot
+            .occurrences
+            .iter()
+            .filter(|occurrence| occurrence.identity == "user:value:right::answer")
+            .collect::<Vec<_>>();
+        assert!(!left.is_empty(), "{:#?}", snapshot.occurrences);
+        assert!(!right.is_empty(), "{:#?}", snapshot.occurrences);
+        assert!(left.iter().any(|occurrence| {
+            !occurrence.definition && occurrence.file.ends_with("main.glorious")
+        }));
+        assert!(right.iter().any(|occurrence| {
+            !occurrence.definition && occurrence.file.ends_with("main.glorious")
+        }));
     }
 
     #[test]
@@ -670,5 +786,80 @@ mod tests {
         assert!(!analysis.same_root(&first_main, &second_main));
         assert!(analysis.diagnostics[&first_main].is_empty());
         assert!(analysis.diagnostics[&second_main].is_empty());
+    }
+
+    #[test]
+    fn manifest_entry_precedes_lexically_earlier_module_files() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let root = temporary.path().join("app");
+        std::fs::create_dir_all(root.join("src/aaa")).unwrap();
+        std::fs::write(
+            root.join("grandiose.toml"),
+            "[project]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.gr\"\n",
+        )
+        .unwrap();
+        let main = root.join("src/main.gr");
+        let module = root.join("src/aaa/aaa.gr");
+        std::fs::write(&main, "mod aaa; main() -> () { () }").unwrap();
+        std::fs::write(&module, "pub helper() -> () { () }").unwrap();
+
+        let workspace = Workspace::new(root);
+        let groups = workspace.project_groups();
+        assert_eq!(groups[0].1[0], main);
+        assert!(groups[0].1.contains(&module));
+    }
+
+    #[test]
+    fn manifest_dependencies_are_marked_as_package_roots_for_navigation() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let app = temporary.path().join("app");
+        let dependency = temporary.path().join("math-lib");
+        std::fs::create_dir_all(app.join("src")).unwrap();
+        std::fs::create_dir_all(dependency.join("src/values")).unwrap();
+        std::fs::write(
+            app.join("grandiose.toml"),
+            "[project]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.glorious\"\n\n[dependencies]\nmath-lib = { path = \"../math-lib\" }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dependency.join("grandiose.toml"),
+            "[project]\nname = \"math-lib\"\nversion = \"0.1.0\"\n",
+        )
+        .unwrap();
+        let main = app.join("src/main.glorious");
+        std::fs::write(
+            &main,
+            "use math_lib::answer; probe() -> i64 { answer() } main() -> () { () }",
+        )
+        .unwrap();
+        let dependency_root = dependency.join("src/lib.glorious");
+        std::fs::write(
+            &dependency_root,
+            "pub mod values; pub answer() -> i64 { crate::values::answer() }",
+        )
+        .unwrap();
+        std::fs::write(
+            dependency.join("src/values/values.glorious"),
+            "pub answer() -> i64 { 42 }",
+        )
+        .unwrap();
+
+        let workspace = Workspace::new(app);
+        let analysis = workspace.analyze();
+        assert!(
+            analysis.diagnostics[&main].is_empty(),
+            "{:#?}",
+            analysis.diagnostics
+        );
+        let declaration = analysis
+            .declarations
+            .iter()
+            .find(|declaration| declaration.file == dependency_root && declaration.name == "answer")
+            .expect("dependency declaration missing");
+        assert!(
+            analysis
+                .references(&declaration.identity)
+                .any(|occurrence| occurrence.file == main && !occurrence.definition)
+        );
     }
 }

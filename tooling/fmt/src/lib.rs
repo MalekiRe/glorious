@@ -54,7 +54,15 @@ impl std::error::Error for Error {}
 /// fixities) participate in parsing, but which are not themselves formatted.
 #[derive(Clone, Copy, Debug)]
 pub struct Context<'source> {
+    /// Physical/logical name of the source being formatted. Module-aware
+    /// formatting requires the same path used by compiler module discovery.
+    pub source_name: &'source str,
+    /// Crate root when formatting one of its external module files. Omit this
+    /// when the formatted source itself is the crate root.
+    pub crate_root: Option<(&'source str, &'source str)>,
     pub sources: &'source [(&'source str, &'source str)],
+    /// Explicit dependency package roots `(manifest name, path, source)`.
+    pub dependencies: &'source [(&'source str, &'source str, &'source str)],
     /// User files see the distributed prelude. The prelude's own source file
     /// disables this to avoid parsing a second embedded copy of itself.
     pub include_distributed_standard_library: bool,
@@ -63,7 +71,10 @@ pub struct Context<'source> {
 impl Default for Context<'_> {
     fn default() -> Self {
         Self {
+            source_name: FORMAT_SOURCE,
+            crate_root: None,
             sources: &[],
+            dependencies: &[],
             include_distributed_standard_library: true,
         }
     }
@@ -157,16 +168,32 @@ fn error_from_diagnostic(diagnostic: grandiose::diagnostic::Diagnostic) -> Error
 }
 
 fn bundle(source: &str, context: Context<'_>) -> SourceBundle {
-    let additional = context
+    let target = Segment::new(context.source_name, source);
+    let ordinary = context
         .sources
         .iter()
         .map(|(name, source)| Segment::new(*name, *source));
+    let dependencies = context
+        .dependencies
+        .iter()
+        .map(|(package, name, source)| Segment::new(*name, *source).with_package_root(*package));
+    let additional = context
+        .crate_root
+        .is_some()
+        .then_some(target)
+        .into_iter()
+        .chain(ordinary)
+        .chain(dependencies);
+    let primary = context.crate_root.map_or_else(
+        || Segment::new(context.source_name, source),
+        |(name, source)| Segment::new(name, source),
+    );
     if context.include_distributed_standard_library {
-        SourceBundle::distributed(Segment::new(FORMAT_SOURCE, source), additional)
+        SourceBundle::distributed(primary, additional)
     } else {
         SourceBundle::raw_for_conformance(
             Segment::new("<grandfmt:no-std>", ""),
-            Segment::new(FORMAT_SOURCE, source),
+            primary,
             additional,
         )
     }
@@ -180,7 +207,7 @@ fn analyze(source: &str, context: Context<'_>) -> Result<BTreeSet<usize>, Error>
             let offset = diagnostic
                 .span
                 .and_then(|span| bundle.map_span(span))
-                .filter(|mapped| mapped.segment.name() == FORMAT_SOURCE)
+                .filter(|mapped| mapped.segment.name() == context.source_name)
                 .map_or(0, |mapped| mapped.span.start);
             Error {
                 offset,
@@ -193,7 +220,7 @@ fn analyze(source: &str, context: Context<'_>) -> Result<BTreeSet<usize>, Error>
         })?;
     Ok(declarations
         .into_iter()
-        .filter(|declaration| declaration.file == FORMAT_SOURCE)
+        .filter(|declaration| declaration.file == context.source_name)
         .map(|declaration| leading_comment_start(source, declaration.declaration_start_byte))
         .collect())
 }
@@ -667,6 +694,45 @@ mod tests {
         )
         .unwrap();
         assert!(output.contains("1 <*> 2"), "{output}");
+    }
+
+    #[test]
+    fn external_module_formatting_uses_crate_paths_imported_fixities_and_privacy() {
+        let root = "pub mod ops; pub mod consumer; main()->{()}";
+        let ops =
+            "pub infixl 5 join; pub join(left:i64,right:i64)->i64{left-right} private()->{()}";
+        let source = "use crate::ops::join; pub calculate()->i64{1 join 2*3}";
+        let context = Context {
+            source_name: "/work/src/consumer/consumer.glorious",
+            crate_root: Some(("/work/src/main.glorious", root)),
+            sources: &[("/work/src/ops/ops.glorious", ops)],
+            ..Context::default()
+        };
+        let output = format_with_context(source, context).unwrap();
+        assert!(output.contains("use crate::ops::join;"), "{output}");
+        assert!(output.contains("1 join 2 * 3"), "{output}");
+        assert_eq!(format_with_context(&output, context).unwrap(), output);
+
+        let private_source = "use crate::ops::private; pub bad()->{private()}";
+        let error = format_with_context(private_source, context).unwrap_err();
+        assert!(error.message.contains("private"), "{error}");
+    }
+
+    #[test]
+    fn formatter_context_preserves_explicit_dependency_roots() {
+        let source = "use cool_pkg::answer; main()->i64{answer()}";
+        let context = Context {
+            source_name: "/work/app/main.glorious",
+            dependencies: &[(
+                "cool-pkg",
+                "/deps/cool/src/lib.glorious",
+                "pub answer()->i64{42}",
+            )],
+            ..Context::default()
+        };
+        let output = format_with_context(source, context).unwrap();
+        assert!(output.contains("use cool_pkg::answer;"), "{output}");
+        assert_eq!(format_with_context(&output, context).unwrap(), output);
     }
 
     #[test]

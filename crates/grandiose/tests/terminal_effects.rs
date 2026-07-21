@@ -118,7 +118,7 @@ fn o2_fuses_only_cleanup_empty_single_clause_terminal_handler() {
         [function.code_start as usize..(function.code_start + function.code_len) as usize];
     assert!(code.iter().any(|instruction| matches!(
         instruction,
-        Instruction::CallIndirect {
+        Instruction::TailCallIndirect {
             receiver_mode: 2,
             ..
         }

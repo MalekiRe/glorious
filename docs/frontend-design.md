@@ -236,18 +236,43 @@ normalization or case folding occurs. Distinct namespaces exist for:
 Nominal types and type aliases own a value subnamespace containing constructors
 and explicitly declared associated bindings such as `String::len` and
 `Option::Some`. A top-level qualified value declaration may add a binding only
-to an already declared type or type alias. This is a flat symbol-table owner key,
-not a module, file scope, import path, or general namespace nesting mechanism.
+to an already declared type or type alias. Named modules add a separate lexical
+namespace. Every definition is resolved to a structured `(ModuleId, namespace,
+local definition id)` identity; textual qualification and imports never become
+the authoritative identity.
 
-Privacy is the one G1 boundary attached to source units despite that flat name
-lookup. Struct fields are public by default; `private field: T` records the
-`SourceBundle` entry containing the nominal declaration as its authority.
-Deconstruction and field projection may name that field only from a span mapped
-to the same entry. Single-source compilation has one entry and therefore one
-authority. The source map supplies stable entry identities before concatenated
-parsing, and generated code receives an unforgeable resolved authority token.
-This is not an import or module namespace; a future module format may group
-entries while retaining identity-based visibility.
+`mod name;` declares an external child. If the declaring module's logical
+directory is `D`, its source is exactly `D/name/name.glorious`. `mod name { ... }`
+declares an inline child and advances the same logical directory for external
+modules nested inside it. The compiler-designated crate root is exempt from the
+self-named-folder rule, so `src/main.glorious` or any manifest-selected file may
+be the root. Additional package roots are supplied explicitly by the driver,
+never inferred from positional files. A dependency manifest name is normalized
+from `-` to `_` and becomes a public package-module binding in the application
+root; invalid or colliding aliases are errors. Each package root is parentless,
+so `crate` names the current package rather than always naming the application.
+Unmarked additional files remain ordinary module fragments and are still
+subject to orphan checks. `crate`, `self`, and `super` are contextual path roots. `use`
+supports explicit names, `as`, groups, globs, and `self` imports. Imports are
+resolved to a deterministic fixed point; benign re-export cycles are accepted,
+while unresolved and ambiguous cycles are diagnosed.
+
+Items in a named module are private by default and `pub` exports them to the
+parent/module path. Legacy explicitly supplied source fragments without any
+module edge remain crate-root fragments for compatibility. Once a crate uses
+module syntax, supplied files that are orphaned, duplicated, or mapped to the
+wrong hybrid path are errors. Fixity declarations are module scoped and operator
+resolution observes explicit and glob imports just like other value bindings.
+
+Struct fields are public by default; `private field: T` records the declaring
+module as its authority. Deconstruction, construction by named fields, and field
+projection may name that field only inside that module's privacy domain. Code
+outside the domain therefore cannot consume a must-move value by destructuring
+private fields or by calling an intrinsic destructor: it must transfer the whole
+value to a callable whose definition has field access and which eventually
+destructures it. The source map and module-resolution table supply stable
+authority identities before elaboration, and generated code receives an
+unforgeable resolved authority token.
 
 A `ResolvedName` is a declaration identity plus namespace and generic depth, not
 a string. Compiler intrinsics are recognized by identities supplied in a trusted
@@ -621,17 +646,22 @@ Generic arguments are supplied or inferred in binder order, and kind mismatches
 are errors before trait solving. All declarations are checked for well-formed
 generic bounds under placeholders, not inference variables.
 
-`u32` and `Quantity` const substitutions participate in nominal equality and
-specialization identity just like type substitutions, but never masquerade as
-runtime field types. Thus `Tag<3>` and `Tag<4>` are distinct even when `Tag` is
-phantom and both layouts are otherwise identical. A named const binder is legal
-only in a generic argument position whose declaration has the same const kind;
-using it as a field, parameter, or result type is rejected. Generic callable
-consts may currently be inferred through such nominal structure. Explicit
-generic-call const arguments, const expressions/defaults, const aliases, and
-layout-level consumers remain outside this implemented slice. Associated-type
-const parameters use the same structural values and normalize before runtime
-signature lowering.
+`u32` and `Quantity` are the complete, closed set of G1 const kinds. Their
+substitutions participate in nominal equality and specialization identity just
+like type substitutions, but never masquerade as runtime field types. Thus
+`Tag<3>` and `Tag<4>` are distinct even when `Tag` is phantom and both layouts
+are otherwise identical. A named const binder is legal only in a generic
+argument position whose declaration has the same const kind; using it as a
+field, parameter, or result type is rejected. Generic callable consts are
+inferred through nominal structure, and symbolic checked `u32` arithmetic is
+folded after specialization. Const-generic aliases, trailing defaults (including
+defaults that reference earlier const binders), and checked arithmetic normalize
+into the same canonical identity; invalid arithmetic and kind mismatches are
+diagnosed. Ground fixed-array lengths are checked against the 1024-element G1
+layout limit and lowered to fixed tuple-backed storage, so array length affects
+real runtime layout rather than only phantom identity. Associated-type const
+parameters use the same structural values and normalize before runtime signature
+lowering.
 
 Owned nominal layout recursion is rejected after normalization. Edges through
 references, callables, handlers, and resumptions break the owned-layout cycle.
@@ -739,9 +769,10 @@ placeholders only beneath the binder that introduced them. The leak check reject
 an answer if a preexisting inference variable becomes equated with, or constrained
 solely by, a newer placeholder. Applying a higher-ranked answer replaces bound
 variables with fresh inference types or regions in the caller universe. Source
-where-goal binders currently admit type and lifetime parameters. Higher-ranked
-const/effect-row binders and higher-ranked outlives constraints are diagnosed as
-unsupported rather than being silently treated as ordinary generics.
+where-goal binders admit type, lifetime, const, and effect-row parameters.
+Higher-ranked outlives constraints retain their own binder scope; unrelated
+universal lifetimes do not acquire an outlives relation, and a shadowing binder
+cannot leak facts into an outer lifetime of the same spelling.
 
 ### 6.7 Coherence, orphan, and negative reasoning
 
@@ -1340,10 +1371,10 @@ It never contains local/place IDs, concrete capture layouts, binder keys, solver
 variables, loan IDs, or diagnostic spans as semantic fields. Anonymous exported
 identities receive stable owner-derived opaque names.
 
-G1 has no module/package loader, so normal compilation keeps this as compact
-tables already owned by the session and does not serialize or hash them.
+The G1 module loader keeps this as compact tables owned by the crate session and
+does not serialize or hash them.
 Conformance/debug mode exercises a canonical serialization to prove that no
-source-local identities escape. A future module format may persist a versioned
+source-local identities escape. A future package format may persist a versioned
 form without putting that cost on the self-host path.
 
 ### 9.4 Bytecode serialization boundary
@@ -1374,6 +1405,13 @@ G1 recompiles the whole concatenated standard-library/source bundle on every inv
 no filesystem cache, dependency graph, revision number, or query invalidation
 protocol. This is an explicit compactness and bootstrap decision, not an omitted
 feature.
+
+This batch policy does not prohibit the host-side editor session. The Rust
+`IncrementalCompilerSession` reparses and resolves each supplied bundle, but reuses
+an unchanged body's inferred products when both its body fingerprint and the
+declaration-context fingerprint match. A failed request restores the previous
+per-body cache. These results are an in-memory tooling optimization only and do not
+change batch semantics or artifact identity.
 
 Within one invocation, only queries with measured reuse are memoized. Cache keys
 use canonical terms and never spans, addresses, hash seeds, or insertion order.

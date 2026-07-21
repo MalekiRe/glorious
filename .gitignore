@@ -1,0 +1,8 @@
+/target/
+/tooling/*/target/
+/.idea/
+/perf.data
+/perf.data.old
+/editors/vscode/node_modules/
+/editors/vscode/dist/
+/editors/vscode/*.vsix

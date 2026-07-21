@@ -176,13 +176,13 @@ fn custom_drop_structs_cannot_be_deconstructed() {
 fn deconstruction_transfers_reference_field_origins() {
     let reference = r#"
         struct Borrowed { value: &mut i64 }
-        take(value: Borrowed) -> i64 {
+        unpack_borrowed(value: Borrowed) -> i64 {
             let Borrowed { value } = value;
             *value
         }
         answer() -> i64 {
             let number = 42;
-            take(Borrowed { value: &mut number })
+            unpack_borrowed(Borrowed { value: &mut number })
         }
         main() -> { () }
     "#;
@@ -651,13 +651,13 @@ fn tuple_deconstructed_positive_lower_elements_remain_checked_owners() {
 #[test]
 fn tuple_deconstruction_transfers_reference_element_origins() {
     let reference = r#"
-        take(value: (&mut i64, i64)) -> i64 {
+        unpack_borrowed_tuple(value: (&mut i64, i64)) -> i64 {
             let (borrowed, number) = value;
             *borrowed + number
         }
         answer() -> i64 {
             let number = 40;
-            take((&mut number, 2))
+            unpack_borrowed_tuple((&mut number, 2))
         }
         main() -> { () }
     "#;

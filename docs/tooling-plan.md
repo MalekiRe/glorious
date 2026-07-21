@@ -2,10 +2,10 @@
 
 Covers four deliverables: a build tool (`grand`), dependency management (GitHub + local
 path), an auto-formatter (`grand fmt`), and a language server (`grand lsp`). Written
-against the *target* design in `docs/frontend-design.md`, `docs/architecture.md`,
-`docs/std-lib.md`, and the core spec — not the current state of the bootstrap.
+against `docs/frontend-design.md`, `docs/architecture.md`, `docs/std-lib.md`, and
+the core spec, with implementation status called out below.
 
-Current implementation note: the Rust `grand` crate already provides the
+Current implementation note: the Rust `grand` crate provides the
 scaffold/build/check/run/test foundation, deterministic path and pinned-git
 resolution, lockfiles, caching, vendoring, and compile-fail tests. The formatter
 uses the authoritative semantic parser and lossless lexer, ordered bundle
@@ -15,11 +15,13 @@ token-equivalence checks. `grand fmt` renders every package file before writing
 any of them, so malformed input refuses the operation transactionally; corpus,
 idempotence, width, and malformed-input tests cover the implementation. The LSP
 now runs the shared compiler bundle/interface/diagnostic pipeline in a persistent
-multi-root document session, atomically retains last-good semantic identities
-and exact definition spans, and uses those identities for symbols,
-cross-file definition, completion, references, rename, and signature/doc hover;
-its local-scope fallback remains lexical until the compiler exports local/type
-side tables. `grand` now probes the real versioned `grc` contract,
+multi-root document session. The compiler exports typed, scoped local-definition,
+local-occurrence, and expression-type side tables derived from successfully
+elaborated Core. The LSP atomically retains last-good body snapshots and uses
+compiler identities for symbols, cross-file and dependency definition,
+completion, references, rename, inferred-type hover and inlay hints, and
+signature/doc hover; it has no lexical local-resolution fallback. `grand` probes
+the real versioned `grc` contract,
 passes ordered canonical `.glorious` inputs, consumes JSON diagnostics and
 authoritative user/std interfaces, emits `.grbc`, and executes it through
 `grvm`; legacy `.gr` and fake/LLVM flows remain compatibility paths. The
@@ -27,10 +29,10 @@ authoritative user/std interfaces, emits `.grbc`, and executes it through
 and fingerprints compiler + VM content identities atomically. The `lex`, declaration-`scan`, and
 interface/name/type `resolve`, and `check` stop boundaries are real. Released-seed
 identity negotiation and the bounded versioned `grc --serve` JSON-line transport
-are also implemented. Remaining work is per-body incremental inference and
-compiler-exported local/type side tables. The
-milestone table is dependency order, not a claim that every milestone is still
-unimplemented.
+are also implemented. `IncrementalCompilerSession` performs genuine per-body
+inference reuse when declaration context is unchanged, transactionally rolling
+back a failed request. The milestone table records implementation dependency
+order rather than outstanding work.
 
 Ground rules (project decisions):
 - **All tooling is written in Rust**, as crates alongside the existing bootstrap
@@ -47,14 +49,13 @@ Ground rules (project decisions):
 
 These properties of the language design shape everything below:
 
-- **Concatenation compilation model.** A program is `std-lib` + source files
-  concatenated in a deterministic order into one UTF-8 stream; a segment table maps
-  byte ranges back to file names. There is no import statement, no per-file namespace.
-  This makes the build tool's job unusually simple: *dependency resolution produces an
-  ordered file list*, nothing more.
-- **Flat global namespace, source-entry authority.** Privacy (private fields) is keyed
-  to the source-bundle entry that declared the type, not to modules. Cross-package name
-  collisions are a real hazard the build tool must mitigate (see §2.6).
+- **Package/module compilation model.** A program is `std-lib` + an application
+  root and module closure + explicitly named dependency roots and their closures,
+  all in deterministic order; a segment table maps byte ranges back to files. The
+  compiler owns package-root, module, import, privacy, and fixity resolution.
+- **Structured namespaces and authority.** Definitions carry module identities;
+  item and private-field access is checked against the declaring module's privacy
+  domain. Cross-package collisions are handled at package-root/module boundaries.
 - **Source-declared operator fixities.** `infixl/infixr/none 0..255` and `prefix`
   declarations live in source and affect how expressions *group*. Any tool that parses
   expressions (formatter, LSP) must collect fixities from the whole bundle — including
@@ -71,11 +72,11 @@ These properties of the language design shape everything below:
   objects; a renderer owns wording; spans are `(start_byte, end_byte)` u32 pairs into
   the bundle. The compiler's JSON diagnostic mode and the LSP both consume this
   machine-readable shape (§1.2).
-- **Whole-bundle, non-incremental compilation by design**, but with two salvageable
-  hooks for the LSP: (a) the declaration scanner records **body token ranges without
-  building trees**, so bodies are independently re-elaboratable units; (b) inference
-  already has **transactional snapshots** (mark/rollback/commit). The LSP strategy in
-  §4 is built on these two hooks rather than a full query engine.
+- **Batch compilation remains whole-bundle and non-incremental by design.** The
+  persistent editor path reparses and resolves the bundle, then reuses checked
+  per-body inference products when the declaration context and that body's
+  fingerprint are unchanged. Failed requests roll back the session cache. This
+  remains a compact two-level design, not a general query engine.
 - **Frozen CLI contract** (`architecture.md §7`): `grc [-O..] [--emit ...] SOURCE... -o OUT`.
   The build tool drives this; it does not reimplement the frontend.
 
@@ -85,12 +86,10 @@ Small compiler-side investments that all three tools consume. Do these first; th
 cheap now and expensive to retrofit.
 
 ### 1.1 Lexer trivia
-- Implement line + nested block comments with spans, emitted as trivia attached to
-  the token stream (leading/trailing trivia per token, Roslyn-style), not discarded.
-  The compiler proper ignores trivia; the formatter and LSP require it. This lands
-  in **both** lexers — the Rust bootstrap lexer (which the tooling reuses, §3.1) and
-  the self-hosted one (which at minimum must *skip* comments so formatted code
-  compiles).
+- The compiler's authoritative lexer recognizes line and nested block comments and
+  also exposes a gap-free lossless token stream. The semantic pipeline ignores
+  trivia while the formatter and LSP consume the lossless view; there is no second
+  tooling lexer.
 - Keep the invariant: concatenating `(token text + trivia)` reproduces the source
   byte-for-byte. This is the formatter's round-trip foundation and costs nothing to
   maintain from day one.
@@ -125,7 +124,8 @@ either); it is also the piece with the *least* pressure to ever migrate to Grand
 
 ### 2.1 Commands
 ```
-grand new <name> / grand init      # scaffold: grandiose.toml, src/main.glorious, .gitignore
+grand new <name> [--path <path>]   # scaffold a package (default: ./<name>)
+grand init                         # scaffold the current, existing directory
 grand build [-O..] [--emit ...]    # resolve deps -> ordered file list -> compiler
 grand run [-- args]                # build + execute under the supervisor limits
 grand check                        # frontend only, no emission (fast feedback)
@@ -170,9 +170,8 @@ kind = "vm"              # canonical G1 `.grbc` + `grvm` pipeline
 2. Build the package DAG; reject cycles with a diagnostic naming the cycle.
 3. **Version policy: one version per package name, minimal-version selection.** If two
    packages require `json` at incompatible pins, that's a hard error listing both
-   requirers. (The flat namespace makes coexisting duplicate versions impossible
-   anyway — duplicate top-level names would collide. This constraint should be stated
-   loudly in docs.)
+   requirers. Explicit dependency roots are assigned normalized package aliases;
+   this policy avoids two different roots competing for the same alias.
 4. Topologically sort packages (dependencies first), then within each package apply
    its deterministic source ordering.
 5. Final bundle: `std-lib` + dep packages in topo order + root package, entry file
@@ -226,16 +225,11 @@ deps = ["text"]
 - `grand vendor` copies checkouts into `./vendor/` and a config key redirects
   resolution there for offline/hermetic builds.
 
-### 2.7 Namespace collisions (the flat-namespace problem)
-Until a real module system exists, the build tool is the only line of defense:
-- After resolution, run the interface scan (§1.3) per package and check for duplicate
-  top-level names *across* packages; report `name X defined by both json and utils`
-  as a build-tool error before invoking the full compiler (whose own error would be
-  more confusing).
-- Establish a convention now, enforced as a warning: packages should prefix their
-  public top-level names (`json_parse`, not `parse`). Document that a future module
-  system must remain compatible with G1 bundles (std-lib.md §14 already requires
-  additivity), at which point this section dissolves.
+### 2.7 Namespace collisions
+Run the compiler interface scan per package and compare fully qualified exported
+identities. Duplicate leaf names in distinct modules are valid. Only conflicting
+package/module identities are build-tool diagnostics; the compiler remains the
+authority for imports, visibility, and ambiguity.
 
 ### 2.8 Tests
 - Convention: files matching `tests/**/*.glorious` (plus legacy `.gr`) each compile as their own executable
@@ -246,16 +240,13 @@ Until a real module system exists, the build tool is the only line of defense:
 ## 3. Formatter: `grand fmt`
 
 ### 3.1 Architecture
-- **Rust**, but not a second parser: the bootstrap interpreter crate already contains
-  a full Grandiose lexer/parser (it loads `main.glorious` today). Factor that frontend into
-  a reusable library crate (`grandiose-syntax`), add trivia preservation to it
-  (§1.1), and build the formatter on top. One Rust parser, shared by the
-  interpreter, the formatter, and the LSP's syntax layer — drift is only possible
-  against the *self-hosted* parser, which the round-trip corpus tests (below, run
-  over `src/main.glorious` and all examples) exist to catch.
-- Migration seam: the formatter is a pure function `tokens+AST → text`. When the
-  self-hosted compiler is done, reimplement that function in Grandiose against the
-  same golden corpus; `grand fmt` just swaps the engine it shells into.
+- **Rust, using the compiler frontend directly.** `tooling/fmt` depends on the
+  `grandiose` compiler crate and consumes its authoritative gap-free lossless lexer,
+  interface/fixity collection, and parser validation. There is no independently
+  vendored tooling parser or lexer to keep synchronized.
+- Migration seam: formatting remains a pure transformation over compiler-produced
+  syntax and trivia. A future compiler port can preserve the same interface and
+  golden corpus without creating a second grammar authority.
 - Pipeline: lex with trivia (§1.1) → parse to AST-with-trivia → pretty-print via a
   Wadler/Prettier-style document algebra (`group`, `indent`, `softline`, `hardline`)
   with a max width (100) — the standard algorithm; it fits the "one canonical
@@ -299,20 +290,22 @@ Expression grouping depends on fixity declarations that may live in *other files
   UTF-16↔byte-offset position mapping (LSP speaks UTF-16 line/col; compiler speaks
   byte offsets — one conversion layer, tested hard), debouncing, request
   cancellation, and process supervision.
-- The semantic engine is "the compiler", behind a versioned JSON contract — which
-  today means the Rust bootstrap frontend (in-process, via the shared
-  `grandiose-syntax`/frontend crates) and later means the self-hosted native
-  compiler binary speaking the same contract as a subprocess. Designing against the
-  contract rather than either implementation is what makes the migration a swap.
-  Phase 1–2 need only the `--emit` flags; phase 3 needs the session mode (§4.4).
+- The semantic engine is the compiler: the LSP uses the shared `grandiose` frontend
+  and `IncrementalCompilerSession` in process, while the versioned `grc` JSON
+  contract exposes the corresponding batch surfaces to external tools. The shared
+  frontend is the grammar and name/type authority; the LSP does not maintain a
+  private parser or resolver.
 - The build tool provides project shape: `grand lsp` reads `grandiose.toml` +
-  lockfile to know the bundle's ordered file list, so diagnostics and navigation are
-  correct across dependencies from day one (deps are just earlier segments of the
-  same bundle — cross-package go-to-definition is *free* in this model).
+  lockfile to discover the application root and explicit dependency package roots.
+  Those roots are marked in the compiler bundle, so package aliases, module paths,
+  privacy, diagnostics, and go-to-definition into dependency source all use the
+  compiler's structured identities.
 
 ### 4.2 Phase 1 — diagnostics (ship first, tiny)
-- On open/change (debounced ~300 ms) run `grand check --emit diagnostics-json` with
-  overlays; map spans through the segment table to per-file LSP diagnostics.
+- On open/change, compile the overlaid project bundle through the in-process
+  compiler session and map compiler spans through the segment table to per-file
+  LSP diagnostics. External clients can obtain the same structured diagnostics
+  through `grc --diagnostics json`.
 - Whole-bundle check must stay fast enough for keystroke-ish latency; the <120 s
   budget is for *self-hosting the 36 k-line compiler at -O2* — a `--phase check`
   run of a normal project should be well under a second. If the compiler-on-itself
@@ -320,47 +313,37 @@ Expression grouping depends on fixity declarations that may live in *other files
 - Also in phase 1: document formatting (delegates to §3), and that's it. This alone
   is 80 % of daily editor value.
 
-### 4.3 Phase 2 — syntax + interface features (no body elaboration)
-All powered by `--emit interfaces-json` (§1.3) plus a lex of the current file:
+### 4.3 Phase 2 — syntax + interface features (implemented)
+Interface features consume compiler interface and occurrence tables plus the shared
+lossless token stream:
 - Document symbols / workspace symbols (declaration list with spans).
-- Go-to-definition and find-references for *top-level* names: the scanner knows every
-  declaration site; references found by identifier-token match filtered through the
-  resolver's lookup rules (good enough before full resolution data exists).
+- Go-to-definition and find-references for top-level and imported names use the
+  compiler's resolved occurrences. This includes structured module paths and
+  manifest dependency package roots.
 - Completion: top-level callables/types/variants/effect operations with signatures
   from interface data; keyword + snippet completion (`handle`, `effect`, `struct`).
 - Hover: declared signature text + doc comment for top-level names.
 - Semantic tokens (coarse: from lexer + declaration kinds), folding ranges, selection
   ranges.
 
-### 4.4 Phase 3 — body-level semantics (the real investment)
-Requires compiler work, designed around the two existing hooks:
-- **Persistent frontend session.** The Rust frontend now provides `grc --serve`
+### 4.4 Phase 3 — body-level semantics (implemented)
+- **Persistent frontend session.** The Rust frontend provides `grc --serve`
   over versioned JSON lines, with bounded requests/source snapshots,
   whole-bundle content invalidation, atomic last-good commits, and one-shot
-  diagnostic/artifact parity. The next layer keeps post-scan semantic state
-  resident: interned symbols/types, interface tables, fixity tables, and
-  resolved-name tables.
-- **Per-body re-elaboration as the incrementality unit.** The declaration scanner
-  already records body token ranges without trees. An edit inside one body ⇒ re-lex
-  that segment, re-elaborate that body against the resident interface tables,
-  using the transactional inference snapshot API to keep the session state clean.
-  An edit that touches a declaration head/fixity ⇒ invalidate and rerun the scan
-  (whole-bundle, but scan is the cheap pass). This is deliberately *not* a general
-  query engine — it's two invalidation levels, matching frontend-design's phase
-  structure, and it reuses arenas exactly as the batch compiler does.
-- **Elaboration side tables for the IDE.** While checking a body, optionally record
-  (span → resolved def, span → type) pairs into a flat side array (only when
-  requested by the session — zero cost in batch mode). This single table powers:
-  hover with inferred types (including effect rows and `Use` intervals — uniquely
-  valuable in this language), go-to-definition for locals/params, find-references,
-  rename (top-level + local), inlay hints (inferred types, resumption intervals),
-  signature help.
-- Completion inside bodies: resolved scope at cursor position (params, lets in
+  diagnostic/artifact parity. The in-process `IncrementalCompilerSession` caches
+  per-body inferred products behind context and body fingerprints; unchanged bodies
+  are reused, changed bodies are elaborated, and failure restores the prior cache.
+- **Compiler-owned semantic side tables.** Successful typed Core produces stable
+  file-local local identities, exact definition/reference spans, lexical scope
+  ranges, inferred local types, and expression types. These tables power:
+  hover with inferred types, go-to-definition for locals/params, find-references,
+  rename (top-level + local), inferred-local-type inlay hints, and signature help.
+- Completion inside bodies: compiler-resolved scope at cursor position (params, lets in
   scope, then top-levels), typed member access after `.` / `::` from the side
   tables of the enclosing body's last successful elaboration.
-- **Error resilience matters more than freshness:** always serve the last good side
-  table for a body that currently fails to parse/check; the parser's
-  poison/recovery nodes (already designed) keep sibling declarations analyzable.
+- **Error resilience matters more than freshness:** the LSP retains last-good body
+  tables only through the unchanged source prefix; shifted or ambiguous spans fail
+  closed rather than being rebound lexically.
 
 ### 4.5 Editor distribution
 - VS Code extension (TextMate grammar for instant syntax highlighting — worth
@@ -386,29 +369,22 @@ long tail:
 | 10 | Compiler session mode + per-body re-elaboration + side tables (§4.4) | 6 |
 | 11 | LSP phase 3: hover types, rename, references, inlay hints | 10 |
 
-Milestones 1–2 are compiler-internal and small; 3 and 5 are pure Rust and can proceed
-in parallel with any compiler work; 7 is the first one that needs real parser
-integration; 10–11 are the long pole and are deliberately last — everything before
-them is useful without them.
+All listed milestones are implemented. Their numbering remains useful as the order
+in which the interfaces depend on one another.
 
 ## 6. Risks / open questions
 
-- **Whole-bundle check latency** is the LSP's structural risk. Mitigations are layered
-  (debounce → check-on-save → phase-3 per-body incrementality); if the language grows
-  and none suffice, the fallback is caching post-scan state per bundle revision,
-  which the session mode (§4.4) already implies.
-- **Flat namespace + package ecosystem** will hurt at even modest scale; §2.6 is a
-  stopgap. When the module design happens, revisit manifest (`exports = [...]`?) and
-  formatter/LSP together — the tooling built here (interface scan, bundle ordering)
-  is the substrate that design will need anyway.
+- **Whole-bundle parse/resolve latency** remains the LSP's structural scaling risk.
+  Per-body inference reuse removes unchanged elaboration work, while debounce and
+  check-on-save remain available if project-scale bundle rebuilding becomes visible.
+- **Package ecosystem breadth** beyond the implemented explicit manifest-name to
+  dependency-root mapping (version selection, registries, and artifact caching)
+  remains build-tool policy rather than compiler module semantics.
 - **Fixity-dependent parsing** means a lone file can't be parsed in isolation with
   certainty. Every tool here therefore operates on the *resolved bundle*, never on a
   single file out of context. Worth stating as a project-wide invariant.
-- **Rust/self-hosted frontend divergence.** Until the migration, two parsers exist
-  (bootstrap Rust + self-hosted). The corpus round-trip tests (§3.3) and the shared
-  golden diagnostics are the tripwire; any grammar change must land in both in the
-  same commit as a project rule.
 - **Tooling migration to Grandiose** (post-compiler) is cheapest if the Rust crates
-  keep hard seams now: `grandiose-syntax` (lexer/parser), the formatter's pure
-  AST→text function, and the LSP's JSON engine contract are each independently
-  replaceable; the git/network/process layer likely stays Rust the longest.
+  keep hard seams now: the shared compiler frontend API, the formatter's pure
+  syntax/trivia-to-text function, and the LSP's semantic snapshot boundary are each
+  independently replaceable; the git/network/process layer likely stays Rust the
+  longest.

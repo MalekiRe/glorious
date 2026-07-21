@@ -1,0 +1,115 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Grandiose",
+  "scopeName": "source.grandiose",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#keywords" },
+    { "include": "#effects" },
+    { "include": "#types" },
+    { "include": "#functions" },
+    { "include": "#numbers" },
+    { "include": "#lifetimes" },
+    { "include": "#labels" },
+    { "include": "#operators" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-slash.grandiose", "match": "//.*$" },
+        {
+          "name": "comment.block.grandiose",
+          "begin": "/\\*",
+          "end": "\\*/",
+          "patterns": [{ "include": "#comments" }]
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.byte.grandiose",
+          "begin": "b\"",
+          "end": "\"",
+          "patterns": [
+            { "name": "constant.character.escape.grandiose", "match": "\\\\(?:[0nrt\"'\\\\]|x[0-9A-Fa-f]{2}|u\\{[0-9A-Fa-f_]+\\})" }
+          ]
+        },
+        {
+          "name": "string.quoted.double.grandiose",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [
+            { "name": "constant.character.escape.grandiose", "match": "\\\\(?:[0nrt\"'\\\\]|x[0-9A-Fa-f]{2}|u\\{[0-9A-Fa-f_]+\\})" }
+          ]
+        },
+        {
+          "name": "constant.character.byte.grandiose",
+          "match": "b'(?:[^'\\\\]|\\\\(?:[0nrt\"'\\\\]|x[0-9A-Fa-f]{2}))'"
+        },
+        {
+          "name": "constant.character.grandiose",
+          "match": "'(?:[^'\\\\]|\\\\(?:[0nrt\"'\\\\]|x[0-9A-Fa-f]{2}|u\\{[0-9A-Fa-f_]+\\}))'"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.grandiose",
+          "match": "\\b(handle|perform|resume|cancel|tail|label|leave|is)\\b"
+        },
+        {
+          "name": "keyword.declaration.grandiose",
+          "match": "\\b(let|struct|enum|trait|impl|effect|type|where)\\b"
+        },
+        {
+          "name": "storage.modifier.contextual.grandiose",
+          "match": "\\b(for|with|mut|move|cases|private|const|infinity|infix|infixl|infixr|prefix)\\b"
+        }
+      ]
+    },
+    "effects": {
+      "name": "entity.name.tag.resumption-interval.grandiose",
+      "match": "\\[\\s*\\d+\\s*,\\s*(\\d+|infinity)\\s*\\]"
+    },
+    "types": {
+      "patterns": [
+        { "name": "entity.name.type.grandiose", "match": "\\b[A-Z][A-Za-z0-9_]*\\b" },
+        {
+          "name": "storage.type.primitive.grandiose",
+          "match": "\\b(u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize|f32|f64|char|Text|Bytes|Array)\\b|!"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "name": "entity.name.function.declaration.grandiose",
+          "match": "^\\s*([a-z_][A-Za-z0-9_]*)\\s*(?=[(<])"
+        },
+        {
+          "name": "entity.name.function.call.grandiose",
+          "match": "\\b([a-z_][A-Za-z0-9_]*)\\s*(?=\\()"
+        }
+      ]
+    },
+    "numbers": {
+      "name": "constant.numeric.grandiose",
+      "match": "(?x)\\b(?:0[bB][01](?:_?[01])*|0[oO][0-7](?:_?[0-7])*|0[xX][0-9A-Fa-f](?:_?[0-9A-Fa-f])*|[0-9](?:_?[0-9])*(?:\\.[0-9](?:_?[0-9])*)?(?:[eE][+-]?[0-9](?:_?[0-9])*)?)\\b"
+    },
+    "lifetimes": {
+      "name": "storage.modifier.lifetime.grandiose",
+      "match": "'[a-z][A-Za-z0-9_]*"
+    },
+    "labels": {
+      "name": "entity.name.label.grandiose",
+      "match": "@[a-z][A-Za-z0-9_]*"
+    },
+    "operators": {
+      "name": "keyword.operator.grandiose",
+      "match": "->|=>|::|\\.\\.|[+\\-*/%=<>&|!?.~^]+"
+    }
+  }
+}

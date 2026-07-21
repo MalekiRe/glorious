@@ -1,7 +1,7 @@
 use grandiose::{
     ast::{
-        AssociatedArgumentSyntax, ConstKind, FieldVisibility, GenericParamKind, GoalArgument,
-        GoalPolarity, TypeSyntax, TypeSyntaxKind,
+        AssociatedArgumentSyntax, ConstBinaryOp, ConstExprSyntaxKind, ConstKind, FieldVisibility,
+        GenericParamKind, GoalArgument, GoalPolarity, TypeSyntax, TypeSyntaxKind,
     },
     lexer, parser,
 };
@@ -44,9 +44,70 @@ fn retains_explicit_reference_lifetimes_and_named_outlives_constraints() {
         "&'short mut i64"
     );
     let constraint = &function.where_clause.as_ref().unwrap().lifetime_outlives[0];
+    assert!(constraint.higher_ranked_lifetimes.is_empty());
     assert_eq!(constraint.longer.name, "'long");
     assert_eq!(constraint.shorter.name, "'short");
     assert_eq!(&source[constraint.span.range()], "'long: 'short");
+}
+
+#[test]
+fn higher_ranked_outlives_binders_are_preserved_on_the_constraint() {
+    let source = "check() -> () where for<'long, 'short> 'long: 'short { () } main() -> { () }";
+    let program = parse(source);
+    let constraint = &program.functions[0]
+        .where_clause
+        .as_ref()
+        .unwrap()
+        .lifetime_outlives[0];
+    assert_eq!(constraint.higher_ranked_lifetimes.len(), 2);
+    assert_eq!(constraint.higher_ranked_lifetimes[0].name, "'long");
+    assert_eq!(constraint.higher_ranked_lifetimes[1].name, "'short");
+    assert_eq!(&source[constraint.span.range()], "'long: 'short");
+}
+
+#[test]
+fn const_alias_defaults_expressions_and_fixed_arrays_are_preserved() {
+    let source = "type Buffer<const N:u32 = 2 + 3 * 4> = [i64; N + 1]; struct Wrap<const N:u32>{value:Buffer<N + 2>} main()->{()}";
+    let program = parse(source);
+
+    let alias = &program.type_aliases[0];
+    let parameter = &alias.generics.as_ref().unwrap().params[0];
+    assert_eq!(parameter.kind, GenericParamKind::Const(ConstKind::U32));
+    let default = parameter.const_default.as_ref().unwrap();
+    let ConstExprSyntaxKind::Binary {
+        op: ConstBinaryOp::Add,
+        rhs,
+        ..
+    } = &default.kind
+    else {
+        panic!("expected additive default: {default:#?}");
+    };
+    assert!(matches!(
+        rhs.kind,
+        ConstExprSyntaxKind::Binary {
+            op: ConstBinaryOp::Multiply,
+            ..
+        }
+    ));
+
+    let array = program.fixed_array(alias.target.span).unwrap();
+    assert_eq!(array.element.simple_name(), Some("i64"));
+    assert_eq!(&source[array.array.range()], "[i64; N + 1]");
+    assert!(matches!(
+        array.length.kind,
+        ConstExprSyntaxKind::Binary {
+            op: ConstBinaryOp::Add,
+            ..
+        }
+    ));
+
+    let field = &program.structs[0].fields[0].ty;
+    let arguments = program.type_const_arguments(field.span);
+    assert_eq!(arguments.len(), 1);
+    assert!(matches!(
+        arguments[0].value,
+        grandiose::ast::ConstArgumentValueSyntax::Expression(_)
+    ));
 }
 
 #[test]
@@ -360,23 +421,29 @@ fn higher_ranked_where_type_and_lifetime_binders_are_preserved() {
     assert_eq!(error.title, "unsupported generic binder");
     assert!(error.message.contains("higher-ranked"));
 
-    let error = parser::parse(
-        lexer::lex("trait Rel<T>{} check()->() where for<const N: u32> Text:Rel<N>{} main()->{()}")
-            .unwrap(),
-    )
-    .unwrap_err();
-    assert_eq!(error.title, "unsupported higher-ranked binder kind");
-    assert!(error.message.contains("const and effect-row universes"));
+    let const_program = parse(
+        "trait Rel<const N:u32>{} check()->() where for<const N: u32> Text:Rel<N>{} main()->{()}",
+    );
+    let const_binder = &const_program.functions[0]
+        .where_clause
+        .as_ref()
+        .unwrap()
+        .goals[0]
+        .higher_ranked_lifetimes[0];
+    assert_eq!(const_binder.name, "N");
+    assert_eq!(const_binder.kind, GenericParamKind::Const(ConstKind::U32));
 
-    let error = parser::parse(
-        lexer::lex(
-            "trait Rel<T>{} check()->() where for<Row: EffectRow> Text:Rel<Row>{} main()->{()}",
-        )
-        .unwrap(),
-    )
-    .unwrap_err();
-    assert_eq!(error.title, "unsupported higher-ranked binder kind");
-    assert!(error.message.contains("const and effect-row universes"));
+    let effect_program = parse(
+        "trait Rel<Row:EffectRow>{} check()->() where for<Row: EffectRow> Text:Rel<Row>{} main()->{()}",
+    );
+    let effect_binder = &effect_program.functions[0]
+        .where_clause
+        .as_ref()
+        .unwrap()
+        .goals[0]
+        .higher_ranked_lifetimes[0];
+    assert_eq!(effect_binder.name, "Row");
+    assert_eq!(effect_binder.kind, GenericParamKind::EffectRow);
 }
 
 #[test]
