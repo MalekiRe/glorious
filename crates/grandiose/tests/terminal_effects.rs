@@ -454,6 +454,8 @@ fn o2_terminal_fusion_preserves_ordered_cleanup_and_resumption_barriers() {
         }
         main() -> { () }
     "#;
+    let resumptive_baseline =
+        compile_source_to_phases("resumptive-static-handler-o0.gr", resumptive).unwrap();
     let resumptive_phases = optimized_phases(resumptive);
     let resumptive_function = resumptive_phases
         .artifact
@@ -463,10 +465,32 @@ fn o2_terminal_fusion_preserves_ordered_cleanup_and_resumption_barriers() {
         .unwrap();
     let resumptive_code = &resumptive_phases.artifact.code[resumptive_function.code_start as usize
         ..(resumptive_function.code_start + resumptive_function.code_len) as usize];
-    assert!(
-        resumptive_code
-            .iter()
-            .any(|instruction| matches!(instruction, Instruction::Handle { .. }))
+    assert!(!resumptive_code.iter().any(|instruction| matches!(
+        instruction,
+        Instruction::MakeHandler { .. }
+            | Instruction::Handle { .. }
+            | Instruction::Perform { .. }
+            | Instruction::Cancel { .. }
+    )));
+    let baseline_id = resumptive_baseline
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "test")
+        .unwrap() as u32;
+    let optimized_id = resumptive_phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "test")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(resumptive_baseline.artifact).unwrap())
+            .run(baseline_id, vec![])
+            .unwrap(),
+        Vm::new(verify(resumptive_phases.artifact).unwrap())
+            .run(optimized_id, vec![])
+            .unwrap()
     );
 
     let clause_capture = r#"
@@ -514,6 +538,331 @@ fn o2_terminal_fusion_preserves_ordered_cleanup_and_resumption_barriers() {
         .unwrap();
     assert_eq!(baseline_value, Value::I64(17));
     assert_eq!(optimized_value, baseline_value);
+}
+
+#[test]
+fn o2_o3_statically_compose_one_shot_resume_cancel_and_partial_handler_hits() {
+    let source = r#"
+        effect Choice {
+            [0,1] resume_it(value: i64) -> i64
+            [0,1] cancel_it(value: i64) -> i64
+            [0,1] forwarded(value: i64) -> i64
+        }
+
+        resumed() -> i64 {
+            handle (perform Choice::resume_it(20)) + 1 {
+                Choice::resume_it(value) with continuation => {
+                    resume(continuation, value + 1)
+                },
+                Choice::cancel_it(value) with continuation => {
+                    cancel(continuation);
+                    value
+                },
+                Choice::forwarded(value) with continuation => {
+                    cancel(continuation);
+                    value
+                }
+            }
+        }
+
+        cancelled() -> i64 {
+            handle perform Choice::cancel_it(40) {
+                Choice::resume_it(value) with continuation => {
+                    cancel(continuation);
+                    value
+                },
+                Choice::cancel_it(value) with continuation => {
+                    cancel(continuation);
+                    value + 2
+                },
+                Choice::forwarded(value) with continuation => {
+                    cancel(continuation);
+                    value
+                }
+            }
+        }
+
+        partial_hit() -> i64 / {Choice} {
+            handle perform Choice::resume_it(41) {
+                Choice::resume_it(value) with continuation => {
+                    cancel(continuation);
+                    value + 1
+                }
+            }
+        }
+
+        partial_fallback() -> i64 / {Choice} {
+            handle perform Choice::forwarded(9) {
+                Choice::resume_it(value) with continuation => {
+                    cancel(continuation);
+                    value
+                }
+            }
+        }
+        main() -> { () }
+    "#;
+    let baseline = compile_source_to_phases("resumptive-static-o0.gr", source).unwrap();
+    let compile = |level| {
+        compile_source_to_phases_with_options(
+            "resumptive-static-optimized.gr",
+            source,
+            CompileOptions {
+                optimization_level: level,
+            },
+        )
+        .unwrap()
+    };
+    for level in [OptimizationLevel::O2, OptimizationLevel::O3] {
+        let optimized = compile(level);
+        let repeated = compile(level);
+        assert_eq!(optimized.optimization_report, repeated.optimization_report);
+        assert_eq!(optimized.artifact.encode(), repeated.artifact.encode());
+        assert_eq!(
+            control_outcome(&optimized),
+            OptimizationPassOutcome::Changed
+        );
+        for (name, expected) in [("resumed", 22), ("cancelled", 42), ("partial_hit", 42)] {
+            let baseline_id = baseline
+                .artifact
+                .functions
+                .iter()
+                .position(|function| function.name == name)
+                .unwrap() as u32;
+            let optimized_id = optimized
+                .artifact
+                .functions
+                .iter()
+                .position(|function| function.name == name)
+                .unwrap() as u32;
+            let function = &optimized.artifact.functions[optimized_id as usize];
+            let code = &optimized.artifact.code
+                [function.code_start as usize..(function.code_start + function.code_len) as usize];
+            assert!(
+                code.iter().all(|instruction| !matches!(
+                    instruction,
+                    Instruction::MakeHandler { .. }
+                        | Instruction::Handle { .. }
+                        | Instruction::Perform { .. }
+                        | Instruction::Resume { .. }
+                        | Instruction::Cancel { .. }
+                )),
+                "{name} retained dynamic control at {level:?}: {code:#?}"
+            );
+            let baseline_value = Vm::new(verify(baseline.artifact.clone()).unwrap())
+                .run(baseline_id, vec![])
+                .unwrap();
+            let optimized_value = Vm::new(verify(optimized.artifact.clone()).unwrap())
+                .run(optimized_id, vec![])
+                .unwrap();
+            assert_eq!(baseline_value, Value::I64(expected));
+            assert_eq!(optimized_value, baseline_value, "{name} at {level:?}");
+        }
+
+        let fallback_id = optimized
+            .artifact
+            .functions
+            .iter()
+            .position(|function| function.name == "partial_fallback")
+            .unwrap();
+        let fallback = &optimized.artifact.functions[fallback_id];
+        let fallback_code = &optimized.artifact.code
+            [fallback.code_start as usize..(fallback.code_start + fallback.code_len) as usize];
+        assert!(
+            fallback_code
+                .iter()
+                .any(|instruction| matches!(instruction, Instruction::Handle { .. }))
+        );
+    }
+}
+
+#[test]
+fn o2_o3_specialize_an_exact_forwarded_terminal_operation() {
+    let source = r#"
+        effect Exit { first(value: i64) -> ! second(value: i64) -> ! }
+        forward(value: i64) -> ! / {Exit} { perform Exit::second(value) }
+        selected() -> i64 {
+            handle forward(40 + 2) {
+                Exit::first(value) => value + 100,
+                Exit::second(value) => value
+            }
+        }
+        main() -> { () }
+    "#;
+    let baseline = compile_source_to_phases("forwarded-handler-o0.gr", source).unwrap();
+    let baseline_id = baseline
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    let baseline_value = Vm::new(verify(baseline.artifact).unwrap())
+        .run(baseline_id, vec![])
+        .unwrap();
+    assert_eq!(baseline_value, Value::I64(42));
+
+    for level in [OptimizationLevel::O2, OptimizationLevel::O3] {
+        let optimized = compile_source_to_phases_with_options(
+            "forwarded-handler-optimized.gr",
+            source,
+            CompileOptions {
+                optimization_level: level,
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            control_outcome(&optimized),
+            OptimizationPassOutcome::Changed
+        );
+        let selected = optimized
+            .artifact
+            .functions
+            .iter()
+            .position(|function| function.name == "selected")
+            .unwrap() as u32;
+        let function = &optimized.artifact.functions[selected as usize];
+        let code = &optimized.artifact.code
+            [function.code_start as usize..(function.code_start + function.code_len) as usize];
+        assert!(code.iter().all(|instruction| !matches!(
+            instruction,
+            Instruction::MakeHandler { .. }
+                | Instruction::Handle { .. }
+                | Instruction::Perform { .. }
+        )));
+        assert_eq!(
+            Vm::new(verify(optimized.artifact).unwrap())
+                .run(selected, vec![])
+                .unwrap(),
+            baseline_value,
+            "{level:?}"
+        );
+    }
+}
+
+#[test]
+fn static_handler_specialization_keeps_deep_capture_and_loan_barriers() {
+    let fixtures = [
+        (
+            "deep-reinstatement",
+            r#"
+                effect Ask { [0,1] ask() -> i64 }
+                test() -> i64 {
+                    handle (perform Ask::ask()) + (perform Ask::ask()) {
+                        Ask::ask() with continuation => resume(continuation, 20)
+                    }
+                }
+                main() -> { () }
+            "#,
+            Value::I64(40),
+        ),
+        (
+            "captured-owner",
+            r#"
+                effect Ask { [0,1] ask() -> i64 }
+                test() -> i64 {
+                    handle {
+                        let abandoned = "must be cleaned";
+                        let value = perform Ask::ask();
+                        abandoned;
+                        value
+                    } {
+                        Ask::ask() with continuation => {
+                            cancel(continuation);
+                            42
+                        }
+                    }
+                }
+                main() -> { () }
+            "#,
+            Value::I64(42),
+        ),
+        (
+            "captured-unique-loan",
+            r#"
+                effect Ask { [0,1] ask() -> i64 }
+                test() -> i64 {
+                    let value = 7;
+                    let borrowed = &mut value;
+                    handle {
+                        let ignored = perform Ask::ask();
+                        *borrowed
+                    } {
+                        Ask::ask() with continuation => {
+                            cancel(continuation);
+                            42
+                        }
+                    }
+                }
+                main() -> { () }
+            "#,
+            Value::I64(42),
+        ),
+        (
+            "exact-multishot",
+            r#"
+                effect Choose { [2,2] choose() -> i64 }
+                test() -> i64 {
+                    handle {
+                        let retained = "copied with each snapshot";
+                        let selected = perform Choose::choose();
+                        retained;
+                        selected + 1
+                    } {
+                        Choose::choose() with continuation => {
+                            let ignored = resume(continuation, 19);
+                            resume(move continuation, 41)
+                        }
+                    }
+                }
+                main() -> { () }
+            "#,
+            Value::I64(42),
+        ),
+    ];
+
+    for (name, source, expected) in fixtures {
+        let baseline = compile_source_to_phases(&format!("{name}-o0.gr"), source).unwrap();
+        let baseline_id = baseline
+            .artifact
+            .functions
+            .iter()
+            .position(|function| function.name == "test")
+            .unwrap() as u32;
+        let baseline_value = Vm::new(verify(baseline.artifact).unwrap())
+            .run(baseline_id, vec![])
+            .unwrap();
+        assert_eq!(baseline_value, expected, "{name} O0");
+        for level in [OptimizationLevel::O2, OptimizationLevel::O3] {
+            let optimized = compile_source_to_phases_with_options(
+                &format!("{name}-{level:?}.gr"),
+                source,
+                CompileOptions {
+                    optimization_level: level,
+                },
+            )
+            .unwrap();
+            let test = optimized
+                .artifact
+                .functions
+                .iter()
+                .position(|function| function.name == "test")
+                .unwrap() as u32;
+            let function = &optimized.artifact.functions[test as usize];
+            let code = &optimized.artifact.code
+                [function.code_start as usize..(function.code_start + function.code_len) as usize];
+            assert!(
+                code.iter()
+                    .any(|instruction| matches!(instruction, Instruction::Handle { .. })),
+                "{name} lost its required handler barrier at {level:?}"
+            );
+            assert_eq!(
+                Vm::new(verify(optimized.artifact).unwrap())
+                    .run(test, vec![])
+                    .unwrap(),
+                baseline_value,
+                "{name} at {level:?}"
+            );
+        }
+    }
 }
 
 #[test]

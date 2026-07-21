@@ -1,7 +1,8 @@
 use std::{fs, path::PathBuf, process::Command};
 
 use grandiose_vm::{
-    Artifact, Constant, Function, Instruction, TEXT, Type, UNIT,
+    Artifact, Constant, Function, Instruction, RELEASED_SEED_IDENTITY, SEED_IDENTITY_VERSION, TEXT,
+    Type, UNIT,
     bytecode::{Import, Signature},
     verify::with_generated_cleanup_plans,
 };
@@ -31,6 +32,7 @@ fn unit_program() -> TempArtifact {
         cleanups: vec![],
         exports: vec![],
         drop_glue: vec![],
+        reference_return_contracts: vec![],
         functions: vec![Function {
             flags: 0,
             name: "main".into(),
@@ -86,6 +88,7 @@ fn process_args_program() -> TempArtifact {
         cleanups: vec![],
         exports: vec![],
         drop_glue: vec![],
+        reference_return_contracts: vec![],
         functions: vec![Function {
             flags: 0,
             name: "main".into(),
@@ -118,6 +121,144 @@ fn process_args_program() -> TempArtifact {
     )
     .unwrap();
     TempArtifact(path)
+}
+
+fn allocation_limit_program() -> TempArtifact {
+    let path = std::env::temp_dir().join(format!(
+        "grandiose-vm-cli-{}-allocation-limit.grbc",
+        std::process::id()
+    ));
+    let mut types = Type::predefined();
+    let array = types.len() as u32;
+    types.push(Type::Array { element: UNIT }.restricted(false, true));
+    let mut artifact = Artifact {
+        required_features: 1,
+        entry_function: Some(0),
+        types,
+        constants: vec![Constant::Usize(64 * 1024 * 1024 + 1), Constant::Unit],
+        functions: vec![Function {
+            flags: 0,
+            name: "main".into(),
+            params: vec![],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, grandiose_vm::USIZE, UNIT, array, UNIT],
+            code_start: 0,
+            code_len: 6,
+            label_slot_count: 0,
+        }],
+        code: vec![
+            Instruction::Const {
+                dst: 1,
+                constant: 0,
+            },
+            Instruction::Const {
+                dst: 2,
+                constant: 1,
+            },
+            Instruction::Primitive {
+                dst: 3,
+                op: grandiose_vm::Primitive::ArrayNew,
+                args: vec![1, 2],
+            },
+            Instruction::Drop { register: 3 },
+            Instruction::Const {
+                dst: 4,
+                constant: 1,
+            },
+            Instruction::Return { src: Some(4) },
+        ],
+        ..Artifact::default()
+    };
+    artifact.canonicalize_constants();
+    fs::write(
+        &path,
+        with_generated_cleanup_plans(artifact).unwrap().encode(),
+    )
+    .unwrap();
+    TempArtifact(path)
+}
+
+#[test]
+fn reports_the_versioned_vm_and_artifact_compatibility_contract() {
+    let output = Command::new(env!("CARGO_BIN_EXE_grvm"))
+        .arg("--capabilities")
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let capabilities = String::from_utf8(output.stdout).unwrap();
+    assert!(capabilities.contains(r#""contract":1"#));
+    assert!(capabilities.contains(r#""contract-min":1"#));
+    assert!(capabilities.contains(r#""contract-max":1"#));
+    assert!(capabilities.contains(r#""artifact-major":1"#));
+    assert!(capabilities.contains(r#""artifact-minor-min":0"#));
+    assert!(capabilities.contains(r#""artifact-minor-max":0"#));
+    assert!(
+        capabilities.contains(&format!(
+            r#""seed-identity-version":{SEED_IDENTITY_VERSION}"#
+        )),
+        "{capabilities}"
+    );
+    assert!(
+        capabilities.contains(&format!(
+            r#""accepted-seed-identities":["{RELEASED_SEED_IDENTITY}"]"#
+        )),
+        "{capabilities}"
+    );
+
+    assert!(
+        !Command::new(env!("CARGO_BIN_EXE_grvm"))
+            .args(["--capabilities", "extra"])
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
+fn released_seed_identity_is_checked_before_loading_or_execution() {
+    let grvm = env!("CARGO_BIN_EXE_grvm");
+    let mismatch = Command::new(grvm)
+        .args([
+            "run",
+            "--seed-identity",
+            "incompatible-seed",
+            "does-not-exist.grbc",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(mismatch.status.code(), Some(1));
+    let stderr = String::from_utf8(mismatch.stderr).unwrap();
+    assert!(
+        stderr.contains("incompatible released-seed identity"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("does-not-exist"), "{stderr}");
+
+    let artifact = unit_program();
+    assert!(
+        Command::new(grvm)
+            .args(["run", "--seed-identity", RELEASED_SEED_IDENTITY])
+            .arg(&artifact.0)
+            .status()
+            .unwrap()
+            .success()
+    );
+}
+
+#[test]
+fn supervised_allocation_limit_is_distinct_from_an_internal_fault() {
+    let artifact = allocation_limit_program();
+    let output = Command::new(env!("CARGO_BIN_EXE_grvm"))
+        .args(["run", "--memory-limit", "4096MiB"])
+        .arg(&artifact.0)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(125));
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("memory-limit"), "{stderr}");
+    assert!(!stderr.contains("internal"), "{stderr}");
 }
 
 #[test]

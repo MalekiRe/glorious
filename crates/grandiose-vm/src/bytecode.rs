@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, error::Error, fmt};
+use std::{collections::BTreeMap, error::Error, fmt, ops::Range};
 
 pub type TypeId = u32;
 pub type Register = u32;
@@ -420,8 +420,10 @@ pub enum Primitive {
     FloatNeg = 0x002c,
     IntToFloat = 0x002d,
     FloatToIntChecked = 0x002e,
+    FloatToBits = 0x002f,
     CharFromU32Checked = 0x0030,
     CharToU32 = 0x0031,
+    FloatFromBits = 0x0032,
     TextByteLen = 0x0040,
     TextConcat = 0x0041,
     TextEq = 0x0042,
@@ -489,8 +491,10 @@ impl Primitive {
             0x002c => Self::FloatNeg,
             0x002d => Self::IntToFloat,
             0x002e => Self::FloatToIntChecked,
+            0x002f => Self::FloatToBits,
             0x0030 => Self::CharFromU32Checked,
             0x0031 => Self::CharToU32,
+            0x0032 => Self::FloatFromBits,
             0x0040 => Self::TextByteLen,
             0x0041 => Self::TextConcat,
             0x0042 => Self::TextEq,
@@ -553,6 +557,16 @@ pub(crate) fn primitive_result_type(op: Primitive, args: &[TypeId]) -> Option<Ty
         IntConvertChecked | IntConvertWrapping | IntToFloat | FloatConvert | FloatToIntChecked => {
             None
         }
+        FloatToBits => match args {
+            [F32] => Some(U32),
+            [F64] => Some(U64),
+            _ => None,
+        },
+        FloatFromBits => match args {
+            [U32] => Some(F32),
+            [U64] => Some(F64),
+            _ => None,
+        },
         FloatAdd | FloatSub | FloatMul | FloatDiv | FloatRem => match args {
             [a, b] if a == b && float(*a) => Some(*a),
             _ => None,
@@ -909,6 +923,25 @@ pub struct DropGlue {
     pub function: FunctionId,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReferenceReturnOrigin {
+    Parameter { parameter: u32, path: Vec<u32> },
+    Receiver { path: Vec<u32> },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReferenceReturnRoute {
+    pub result_path: Vec<u32>,
+    pub origin: ReferenceReturnOrigin,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReferenceReturnContract {
+    pub function: FunctionId,
+    pub routes: Vec<ReferenceReturnRoute>,
+}
+
+#[repr(C)]
 #[derive(Clone, Debug, PartialEq)]
 pub struct Artifact {
     pub required_features: u64,
@@ -921,8 +954,151 @@ pub struct Artifact {
     pub cleanups: Vec<CleanupPlan>,
     pub exports: Vec<Export>,
     pub drop_glue: Vec<DropGlue>,
+    pub reference_return_contracts: Vec<ReferenceReturnContract>,
     pub functions: Vec<Function>,
     pub code: Vec<Instruction>,
+}
+
+/// Decoder-owned table builder. This intentionally mirrors [`Artifact`]'s C
+/// layout so verification can inspect the tables without constructing the
+/// public mutable compatibility value. Only `into_artifact` crosses into that
+/// representation.
+#[repr(C)]
+pub(crate) struct DecodedTables {
+    pub(crate) required_features: u64,
+    pub(crate) entry_function: Option<FunctionId>,
+    pub(crate) types: Vec<Type>,
+    pub(crate) constants: Vec<Constant>,
+    pub(crate) imports: Vec<Import>,
+    pub(crate) protocols: Vec<Protocol>,
+    pub(crate) handler_defs: Vec<HandlerDef>,
+    pub(crate) cleanups: Vec<CleanupPlan>,
+    pub(crate) exports: Vec<Export>,
+    pub(crate) drop_glue: Vec<DropGlue>,
+    pub(crate) reference_return_contracts: Vec<ReferenceReturnContract>,
+    pub(crate) functions: Vec<Function>,
+    pub(crate) code: Vec<Instruction>,
+}
+
+pub(crate) struct DecodedArtifact {
+    pub(crate) tables: DecodedTables,
+    pub(crate) constant_payloads: Vec<Option<EncodedConstantPayload>>,
+    pub(crate) abort_messages: Vec<Option<Range<usize>>>,
+    pub(crate) strings: Vec<(String, Range<usize>)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum EncodedConstantPayload {
+    Text(Range<usize>),
+    Bytes(Range<usize>),
+}
+
+/// Dense immutable instruction storage used after verification. Variable
+/// register lists share one operand array instead of retaining one `Vec` per
+/// public [`Instruction`].
+#[derive(Debug)]
+pub(crate) struct PackedCode {
+    words: Box<[u32]>,
+    operands: Box<[u32]>,
+    offsets: Box<[u32]>,
+    abort_strings: Box<[String]>,
+}
+
+impl PackedCode {
+    pub(crate) fn from_instructions(instructions: &[Instruction]) -> Self {
+        let mut abort_strings = instructions
+            .iter()
+            .filter_map(|instruction| match instruction {
+                Instruction::Abort {
+                    message: Some(message),
+                } => Some(message.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        abort_strings.sort_by(|left, right| left.as_bytes().cmp(right.as_bytes()));
+        abort_strings.dedup();
+        let names = abort_strings
+            .iter()
+            .cloned()
+            .enumerate()
+            .map(|(index, name)| (name, index as u32))
+            .collect::<BTreeMap<_, _>>();
+        let mut words = Vec::new();
+        let mut operands = Vec::new();
+        let mut offsets = Vec::with_capacity(instructions.len() + 1);
+        for instruction in instructions {
+            offsets.push(words.len() as u32);
+            encode_instruction(instruction, &names, &mut words, &mut operands);
+        }
+        offsets.push(words.len() as u32);
+        Self {
+            words: words.into_boxed_slice(),
+            operands: operands.into_boxed_slice(),
+            offsets: offsets.into_boxed_slice(),
+            abort_strings: abort_strings.into_boxed_slice(),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.offsets.len().saturating_sub(1)
+    }
+
+    pub(crate) fn instruction(&self, index: usize) -> Option<Instruction> {
+        let start = *self.offsets.get(index)? as usize;
+        let end = *self.offsets.get(index + 1)? as usize;
+        let decoded = decode_instructions(
+            self.words.get(start..end)?,
+            &self.operands,
+            &self.abort_strings,
+        )
+        .expect("verified instructions remain decodable after packing");
+        decoded.into_iter().next()
+    }
+
+    pub(crate) fn materialize(&self) -> Vec<Instruction> {
+        (0..self.len())
+            .map(|index| self.instruction(index).expect("packed instruction exists"))
+            .collect()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn storage_bytes(&self) -> usize {
+        (self.words.len() + self.operands.len() + self.offsets.len()) * std::mem::size_of::<u32>()
+            + self.abort_strings.len() * std::mem::size_of::<String>()
+            + self.abort_strings.iter().map(String::len).sum::<usize>()
+    }
+}
+
+impl DecodedTables {
+    pub(crate) fn as_artifact(&self) -> &Artifact {
+        const {
+            assert!(std::mem::size_of::<DecodedTables>() == std::mem::size_of::<Artifact>());
+            assert!(std::mem::align_of::<DecodedTables>() == std::mem::align_of::<Artifact>());
+        }
+        // SAFETY: both structs are `repr(C)` and declare the exact same field
+        // types in the exact same order. The compile-time size/alignment
+        // assertions catch gross drift; the field-offset regression test
+        // below catches same-size reordering during development.
+        unsafe { &*(std::ptr::from_ref(self).cast::<Artifact>()) }
+    }
+
+    fn into_artifact(self) -> Artifact {
+        Artifact {
+            required_features: self.required_features,
+            entry_function: self.entry_function,
+            types: self.types,
+            constants: self.constants,
+            imports: self.imports,
+            protocols: self.protocols,
+            handler_defs: self.handler_defs,
+            cleanups: self.cleanups,
+            exports: self.exports,
+            drop_glue: self.drop_glue,
+            reference_return_contracts: self.reference_return_contracts,
+            functions: self.functions,
+            code: self.code,
+        }
+    }
 }
 impl Default for Artifact {
     fn default() -> Self {
@@ -937,6 +1113,7 @@ impl Default for Artifact {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![],
             code: vec![],
         }
@@ -1104,6 +1281,8 @@ impl Artifact {
         let signatures = encode_signatures(&signature_values);
         let (drop_glue, dropped_types) =
             encode_drop_glue(&self.drop_glue, self.types.len(), &self.functions)?;
+        let reference_return_contracts =
+            encode_reference_return_contracts(&self.reference_return_contracts, &self.functions)?;
         let types = encode_types(&self.types, &name_id, &signature_values, &dropped_types)?;
         let constants = encode_constants(&self.constants, &name_id)?;
         let protocols = encode_protocols(&self.protocols, &name_id, &signature_values)?;
@@ -1214,6 +1393,16 @@ impl Artifact {
                 width: 16,
                 bytes: drop_glue,
             },
+            Section {
+                id: 14,
+                // Pre-release G1.0 canonical-format change: section 14 is a
+                // mandatory critical table, even when empty. The decoder
+                // intentionally rejects artifacts from the earlier 13-table
+                // draft rather than silently discarding provenance contracts.
+                count: self.reference_return_contracts.len() as u32,
+                width: 0,
+                bytes: reference_return_contracts,
+            },
         ];
         let directory_end = HEADER_LEN + DIRECTORY_ENTRY_LEN * sections.len();
         let mut offsets = Vec::new();
@@ -1261,6 +1450,17 @@ impl Artifact {
     }
 
     pub fn decode(bytes: &[u8]) -> Result<Self, DecodeError> {
+        Self::decode_impl(bytes, true).map(|decoded| decoded.tables.into_artifact())
+    }
+
+    pub(crate) fn decode_internal(bytes: &[u8]) -> Result<DecodedArtifact, DecodeError> {
+        Self::decode_impl(bytes, false)
+    }
+
+    fn decode_impl(
+        bytes: &[u8],
+        materialize_constant_payloads: bool,
+    ) -> Result<DecodedArtifact, DecodeError> {
         if bytes.len() < HEADER_LEN {
             return Err(DecodeError::Truncated);
         }
@@ -1306,7 +1506,7 @@ impl Artifact {
                 DecodeError::InvalidHeader
             });
         }
-        if count < 13 || count as usize > (bytes.len() - 64) / 32 {
+        if count < 14 || count as usize > (bytes.len() - 64) / 32 {
             return Err(DecodeError::InvalidDirectory);
         }
         let mut d = Reader::new(&bytes[64..]);
@@ -1342,19 +1542,19 @@ impl Artifact {
                 return Err(DecodeError::NonCanonical("nonzero padding".into()));
             }
             placement = padded;
-            if id <= 13 {
+            if id <= 14 {
                 if fl != CRITICAL {
                     return Err(DecodeError::InvalidDirectory);
                 }
                 sections.insert(id, (&bytes[off..end], ec, width));
-            } else if id == 14 || fl & CRITICAL != 0 {
+            } else if id == 15 || fl & CRITICAL != 0 {
                 return Err(DecodeError::UnknownCriticalSection(id));
             }
         }
         if placement != bytes.len() {
             return Err(DecodeError::InvalidDirectory);
         }
-        for id in 1..=13 {
+        for id in 1..=14 {
             if !sections.contains_key(&id) {
                 return Err(DecodeError::MissingSection(id));
             }
@@ -1363,7 +1563,7 @@ impl Artifact {
         if sw != 0 {
             return Err(DecodeError::InvalidTable("strings"));
         }
-        let strings = decode_strings(sb, sc)?;
+        let (strings, string_ranges) = decode_strings(sb, sc, bytes)?;
         let (gb, gc, gw) = sections[&4];
         if gw != 0 {
             return Err(DecodeError::InvalidTable("signatures"));
@@ -1389,7 +1589,14 @@ impl Artifact {
         if cw != 0 {
             return Err(DecodeError::InvalidTable("constants"));
         }
-        let constants = decode_constants(cb, cc, &strings)?;
+        let (constants, constant_payloads) = decode_constants(
+            cb,
+            cc,
+            &strings,
+            &string_ranges,
+            bytes,
+            materialize_constant_payloads,
+        )?;
         for &(id, width) in &[
             (5, 24),
             (8, 64),
@@ -1433,6 +1640,7 @@ impl Artifact {
         let mut functions = Vec::with_capacity(decoded_functions.len());
         let mut cleanup_ranges = Vec::with_capacity(decoded_functions.len());
         let mut code = Vec::new();
+        let mut abort_messages = Vec::new();
         let mut next_word = 0usize;
         for (mut f, instruction_count, cleanup_start, cleanup_count) in decoded_functions {
             let word_start = f.code_start as usize;
@@ -1448,13 +1656,20 @@ impl Artifact {
                 .get(word_start..word_end)
                 .ok_or(DecodeError::InvalidTable("function code"))?;
             let ordinal_start = code.len() as u32;
-            let decoded = decode_instructions(words, &operands, &strings)?;
+            let (decoded, decoded_abort_messages) = decode_instructions_with_messages(
+                words,
+                &operands,
+                &strings,
+                &string_ranges,
+                materialize_constant_payloads,
+            )?;
             if decoded.len() as u32 != instruction_count {
                 return Err(DecodeError::InvalidTable("function instruction count"));
             }
             f.code_start = ordinal_start;
             f.code_len = decoded.len() as u32;
             code.extend(decoded);
+            abort_messages.extend(decoded_abort_messages);
             functions.push(f);
             cleanup_ranges.push((cleanup_start, cleanup_count));
             next_word = word_end;
@@ -1462,6 +1677,12 @@ impl Artifact {
         if next_word != code_words.len() {
             return Err(DecodeError::InvalidTable("unclaimed code words"));
         }
+        let (contract_bytes, contract_count, contract_width) = sections[&14];
+        if contract_width != 0 {
+            return Err(DecodeError::InvalidTable("reference return contracts"));
+        }
+        let reference_return_contracts =
+            decode_reference_return_contracts(contract_bytes, contract_count, functions.len())?;
         let cleanups = decode_cleanups(
             sections[&11].0,
             sections[&11].1,
@@ -1485,7 +1706,7 @@ impl Artifact {
                 "required feature bits do not exactly describe the artifact".into(),
             ));
         }
-        let artifact = Self {
+        let tables = DecodedTables {
             required_features: lo,
             entry_function: (entry != NONE32).then_some(entry),
             types,
@@ -1496,18 +1717,24 @@ impl Artifact {
             cleanups,
             exports,
             drop_glue,
+            reference_return_contracts,
             functions,
             code,
         };
         validate_canonical_metadata(
-            &artifact.protocols,
-            &artifact.handler_defs,
-            &artifact.types,
-            &artifact.functions,
-            &artifact.imports,
-            &artifact.exports,
+            &tables.protocols,
+            &tables.handler_defs,
+            &tables.types,
+            &tables.functions,
+            &tables.imports,
+            &tables.exports,
         )?;
-        Ok(artifact)
+        Ok(DecodedArtifact {
+            tables,
+            constant_payloads,
+            abort_messages,
+            strings: strings.into_iter().zip(string_ranges).collect(),
+        })
     }
 }
 
@@ -1748,7 +1975,11 @@ fn encode_strings(xs: &[String]) -> Vec<u8> {
     }
     w
 }
-fn decode_strings(b: &[u8], count: u32) -> Result<Vec<String>, DecodeError> {
+fn decode_strings(
+    b: &[u8],
+    count: u32,
+    encoded: &[u8],
+) -> Result<(Vec<String>, Vec<Range<usize>>), DecodeError> {
     let mut r = Reader::new(b);
     if r.u32() != Ok(count) {
         return Err(DecodeError::InvalidTable("strings"));
@@ -1763,18 +1994,21 @@ fn decode_strings(b: &[u8], count: u32) -> Result<Vec<String>, DecodeError> {
     }
     let data = r.take(n)?;
     r.finish()?;
+    let data_start = data.as_ptr() as usize - encoded.as_ptr() as usize;
     let mut out = Vec::new();
+    let mut ranges = Vec::new();
     for x in offs.windows(2) {
         out.push(
             std::str::from_utf8(&data[x[0]..x[1]])
                 .map_err(|_| DecodeError::InvalidUtf8)?
                 .to_owned(),
-        )
+        );
+        ranges.push(data_start + x[0]..data_start + x[1]);
     }
     if out.windows(2).any(|x| x[0].as_bytes() >= x[1].as_bytes()) {
         return Err(DecodeError::NonCanonical("string order".into()));
     }
-    Ok(out)
+    Ok((out, ranges))
 }
 fn record(tag: u8, flags: u8, payload: Vec<u8>) -> Vec<u8> {
     let mut w = vec![tag, flags, 0, 0];
@@ -2473,12 +2707,20 @@ fn encode_constants(
     }
     Ok(var_section(&rs))
 }
-fn decode_constants(b: &[u8], count: u32, names: &[String]) -> Result<Vec<Constant>, DecodeError> {
+fn decode_constants(
+    b: &[u8],
+    count: u32,
+    names: &[String],
+    name_ranges: &[Range<usize>],
+    encoded: &[u8],
+    materialize_payloads: bool,
+) -> Result<(Vec<Constant>, Vec<Option<EncodedConstantPayload>>), DecodeError> {
     let rs = decode_var(b)?;
     if rs.len() != count as usize {
         return Err(DecodeError::InvalidTable("constants"));
     }
     let mut out = Vec::new();
+    let mut payloads = Vec::new();
     let mut prior = None;
     for (tag, flags, p) in rs {
         if flags != 0
@@ -2490,6 +2732,7 @@ fn decode_constants(b: &[u8], count: u32, names: &[String]) -> Result<Vec<Consta
         }
         prior = Some((tag, p.to_vec()));
         let mut r = Reader::new(p);
+        let mut encoded_payload = None;
         let c = match tag {
             0 => Constant::Unit,
             2 => Constant::U8(r.u8()?),
@@ -2521,22 +2764,41 @@ fn decode_constants(b: &[u8], count: u32, names: &[String]) -> Result<Vec<Consta
             16 => Constant::Char(
                 char::from_u32(r.u32()?).ok_or(DecodeError::InvalidTable("character constant"))?,
             ),
-            17 => Constant::Text(
-                names
-                    .get(r.u32()? as usize)
-                    .ok_or(DecodeError::InvalidTable("text constant"))?
-                    .clone(),
-            ),
+            17 => {
+                let name = r.u32()? as usize;
+                encoded_payload = Some(EncodedConstantPayload::Text(
+                    name_ranges
+                        .get(name)
+                        .ok_or(DecodeError::InvalidTable("text constant"))?
+                        .clone(),
+                ));
+                Constant::Text(if materialize_payloads {
+                    names
+                        .get(name)
+                        .ok_or(DecodeError::InvalidTable("text constant"))?
+                        .clone()
+                } else {
+                    String::new()
+                })
+            }
             18 => {
                 let n = r.u32()? as usize;
-                Constant::Bytes(r.take(n)?.to_vec())
+                let bytes = r.take(n)?;
+                let start = bytes.as_ptr() as usize - encoded.as_ptr() as usize;
+                encoded_payload = Some(EncodedConstantPayload::Bytes(start..start + n));
+                Constant::Bytes(if materialize_payloads {
+                    bytes.to_vec()
+                } else {
+                    Vec::new()
+                })
             }
             _ => return Err(DecodeError::InvalidTable("constant tag")),
         };
         r.finish()?;
-        out.push(c)
+        out.push(c);
+        payloads.push(encoded_payload);
     }
-    Ok(out)
+    Ok((out, payloads))
 }
 fn collect_signatures(
     fs: &[Function],
@@ -2847,10 +3109,14 @@ fn decode_drop_glue(
     type_count: usize,
     function_count: usize,
 ) -> Result<Vec<DropGlue>, DecodeError> {
-    if bytes.len() != count as usize * 16 {
+    let count = usize::try_from(count).map_err(|_| DecodeError::InvalidTable("drop glue"))?;
+    let expected_len = count
+        .checked_mul(16)
+        .ok_or(DecodeError::InvalidTable("drop glue"))?;
+    if bytes.len() != expected_len {
         return Err(DecodeError::InvalidTable("drop glue"));
     }
-    let mut entries = Vec::with_capacity(count as usize);
+    let mut entries = Vec::with_capacity(count);
     for record in bytes.chunks_exact(16) {
         let mut reader = Reader::new(record);
         let ty = reader.u32()?;
@@ -2869,6 +3135,140 @@ fn decode_drop_glue(
         ));
     }
     Ok(entries)
+}
+
+fn encode_reference_return_contracts(
+    contracts: &[ReferenceReturnContract],
+    functions: &[Function],
+) -> Result<Vec<u8>, DecodeError> {
+    if !contracts
+        .windows(2)
+        .all(|pair| pair[0].function < pair[1].function)
+    {
+        return Err(DecodeError::NonCanonical(
+            "reference return contracts must be sorted by unique function".into(),
+        ));
+    }
+    let records = contracts
+        .iter()
+        .map(|contract| {
+            if contract.function as usize >= functions.len()
+                || contract.routes.is_empty()
+                || !contract
+                    .routes
+                    .windows(2)
+                    .all(|pair| pair[0].result_path < pair[1].result_path)
+            {
+                return Err(DecodeError::InvalidTable("reference return contract"));
+            }
+            let mut payload = Vec::new();
+            put_u32(&mut payload, contract.function);
+            put_u32(&mut payload, contract.routes.len() as u32);
+            for route in &contract.routes {
+                put_u32(&mut payload, route.result_path.len() as u32);
+                for &field in &route.result_path {
+                    put_u32(&mut payload, field);
+                }
+                match &route.origin {
+                    ReferenceReturnOrigin::Parameter { parameter, path } => {
+                        put_u32(&mut payload, 0);
+                        put_u32(&mut payload, *parameter);
+                        put_u32(&mut payload, path.len() as u32);
+                        for &field in path {
+                            put_u32(&mut payload, field);
+                        }
+                    }
+                    ReferenceReturnOrigin::Receiver { path } => {
+                        put_u32(&mut payload, 1);
+                        put_u32(&mut payload, path.len() as u32);
+                        for &field in path {
+                            put_u32(&mut payload, field);
+                        }
+                    }
+                }
+            }
+            Ok(record(0, 0, payload))
+        })
+        .collect::<Result<Vec<_>, DecodeError>>()?;
+    Ok(var_section(&records))
+}
+
+fn decode_reference_return_contracts(
+    bytes: &[u8],
+    count: u32,
+    function_count: usize,
+) -> Result<Vec<ReferenceReturnContract>, DecodeError> {
+    fn path(reader: &mut Reader<'_>) -> Result<Vec<u32>, DecodeError> {
+        let count = reader.u32()? as usize;
+        let byte_len = count
+            .checked_mul(std::mem::size_of::<u32>())
+            .ok_or(DecodeError::InvalidTable("reference return path"))?;
+        let bytes = reader
+            .take(byte_len)
+            .map_err(|_| DecodeError::InvalidTable("reference return path"))?;
+        Ok(bytes
+            .chunks_exact(4)
+            .map(|word| u32::from_le_bytes(word.try_into().unwrap()))
+            .collect())
+    }
+    let records = decode_var(bytes)?;
+    if records.len() != count as usize {
+        return Err(DecodeError::InvalidTable("reference return contracts"));
+    }
+    let mut contracts = Vec::with_capacity(records.len());
+    for (tag, flags, payload) in records {
+        if tag != 0 || flags != 0 {
+            return Err(DecodeError::InvalidTable("reference return contract"));
+        }
+        let mut reader = Reader::new(payload);
+        let function = reader.u32()?;
+        let route_count = reader.u32()? as usize;
+        // Even an empty receiver-origin route needs a result-path count, an
+        // origin tag, and an origin-path count. Bound the compact scalar by
+        // bytes that are actually present before using it as a capacity.
+        const MIN_ROUTE_BYTES: usize = 3 * std::mem::size_of::<u32>();
+        if function as usize >= function_count
+            || route_count == 0
+            || route_count > reader.remaining() / MIN_ROUTE_BYTES
+        {
+            return Err(DecodeError::InvalidTable("reference return contract"));
+        }
+        let mut routes = Vec::with_capacity(route_count);
+        for _ in 0..route_count {
+            let result_path = path(&mut reader)?;
+            let origin = match reader.u32()? {
+                0 => ReferenceReturnOrigin::Parameter {
+                    parameter: reader.u32()?,
+                    path: path(&mut reader)?,
+                },
+                1 => ReferenceReturnOrigin::Receiver {
+                    path: path(&mut reader)?,
+                },
+                _ => return Err(DecodeError::InvalidTable("reference return origin")),
+            };
+            routes.push(ReferenceReturnRoute {
+                result_path,
+                origin,
+            });
+        }
+        reader.finish()?;
+        contracts.push(ReferenceReturnContract { function, routes });
+    }
+    if !contracts
+        .windows(2)
+        .all(|pair| pair[0].function < pair[1].function)
+        || contracts.iter().any(|contract| {
+            !contract
+                .routes
+                .windows(2)
+                .all(|pair| pair[0].result_path < pair[1].result_path)
+        })
+    {
+        return Err(DecodeError::NonCanonical(
+            "reference return contracts must be sorted and unique".into(),
+        ));
+    }
+    Ok(contracts)
 }
 
 fn encode_protocols(
@@ -3163,8 +3563,15 @@ fn decode_cleanups(
     functions: &[Function],
     ranges: &[(u32, u32)],
 ) -> Result<Vec<CleanupPlan>, DecodeError> {
+    let count = usize::try_from(count).map_err(|_| DecodeError::InvalidTable("cleanup count"))?;
+    let expected_len = count
+        .checked_mul(24)
+        .ok_or(DecodeError::InvalidTable("cleanup count"))?;
+    if bytes.len() != expected_len {
+        return Err(DecodeError::InvalidTable("cleanup count"));
+    }
     let mut reader = Reader::new(bytes);
-    let mut plans = Vec::with_capacity(count as usize);
+    let mut plans = Vec::with_capacity(count);
     for _ in 0..count {
         let function = reader.u32()?;
         let first_instruction = reader.u32()?;
@@ -3189,7 +3596,7 @@ fn decode_cleanups(
         });
     }
     reader.finish()?;
-    if plans.len() != count as usize {
+    if plans.len() != count {
         return Err(DecodeError::InvalidTable("cleanup count"));
     }
     let mut expected_start = 0u32;
@@ -3497,9 +3904,22 @@ fn decode_instructions(
     ops: &[u32],
     strings: &[String],
 ) -> Result<Vec<Instruction>, DecodeError> {
+    decode_instructions_with_messages(words, ops, strings, &[], true).map(|(code, _)| code)
+}
+
+type DecodedInstructions = (Vec<Instruction>, Vec<Option<Range<usize>>>);
+
+fn decode_instructions_with_messages(
+    words: &[u32],
+    ops: &[u32],
+    strings: &[String],
+    string_ranges: &[Range<usize>],
+    materialize_messages: bool,
+) -> Result<DecodedInstructions, DecodeError> {
     let mut at = 0;
     let mut ordinal = 0;
     let mut out = Vec::new();
+    let mut abort_messages = Vec::new();
     while at < words.len() {
         let h = words[at];
         let op = (h & 0xfff) as u16;
@@ -3524,6 +3944,7 @@ fn decode_instructions(
             ops.get(start..end)
                 .ok_or(DecodeError::InvalidTable("operands"))
         };
+        let mut abort_message = None;
         let i = match op {
             0x000 => {
                 fixed(0)?;
@@ -3845,12 +4266,19 @@ fn decode_instructions(
                     message: if w[0] == NONE32 {
                         None
                     } else {
-                        Some(
+                        let index = w[0] as usize;
+                        abort_message = string_ranges.get(index).cloned();
+                        if !materialize_messages && abort_message.is_none() {
+                            return Err(DecodeError::InvalidTable("abort message"));
+                        }
+                        Some(if materialize_messages {
                             strings
-                                .get(w[0] as usize)
+                                .get(index)
                                 .ok_or(DecodeError::InvalidTable("abort message"))?
-                                .clone(),
-                        )
+                                .clone()
+                        } else {
+                            String::new()
+                        })
                     },
                 }
             }
@@ -3881,10 +4309,11 @@ fn decode_instructions(
             }
         };
         out.push(i);
+        abort_messages.push(abort_message);
         at += 1 + n;
         ordinal += 1
     }
-    Ok(out)
+    Ok((out, abort_messages))
 }
 fn infer_register_types(
     types: &[Type],
@@ -3895,6 +4324,9 @@ fn infer_register_types(
     fs: &mut [Function],
     code: &[Instruction],
 ) -> Result<(), DecodeError> {
+    if fs.iter().any(|function| function.register_types.is_empty()) {
+        return Err(DecodeError::InvalidTable("register count"));
+    }
     let sigs: Vec<_> = fs
         .iter()
         .map(|f| {
@@ -5139,6 +5571,9 @@ impl<'a> Reader<'a> {
     fn u64(&mut self) -> Result<u64, DecodeError> {
         Ok(u64::from_le_bytes(self.take(8)?.try_into().unwrap()))
     }
+    fn remaining(&self) -> usize {
+        self.bytes.len() - self.at
+    }
     fn finish(self) -> Result<(), DecodeError> {
         if self.at == self.bytes.len() {
             Ok(())
@@ -5157,6 +5592,121 @@ mod tests {
         } else {
             artifact
         }
+    }
+
+    #[test]
+    fn compact_wire_counts_are_bounded_before_capacity_reservation() {
+        let contract_section = |payload: Vec<u8>| var_section(&[record(0, 0, payload)]);
+
+        let mut excessive_routes = Vec::new();
+        put_u32(&mut excessive_routes, 0);
+        put_u32(&mut excessive_routes, u32::MAX);
+        let excessive_routes = contract_section(excessive_routes);
+        assert!(excessive_routes.len() < 64);
+        assert!(matches!(
+            decode_reference_return_contracts(&excessive_routes, 1, 1),
+            Err(DecodeError::InvalidTable("reference return contract"))
+        ));
+
+        let mut excessive_path = Vec::new();
+        put_u32(&mut excessive_path, 0);
+        put_u32(&mut excessive_path, 1);
+        put_u32(&mut excessive_path, u32::MAX);
+        put_u32(&mut excessive_path, 1);
+        put_u32(&mut excessive_path, 0);
+        let excessive_path = contract_section(excessive_path);
+        assert!(excessive_path.len() < 64);
+        assert!(matches!(
+            decode_reference_return_contracts(&excessive_path, 1, 1),
+            Err(DecodeError::InvalidTable("reference return path"))
+        ));
+
+        assert!(matches!(
+            decode_cleanups(&[], u32::MAX, &[], &[], &[]),
+            Err(DecodeError::InvalidTable("cleanup count"))
+        ));
+        assert!(matches!(
+            decode_drop_glue(&[], u32::MAX, 0, 0),
+            Err(DecodeError::InvalidTable("drop glue"))
+        ));
+    }
+
+    #[test]
+    fn packed_code_shares_variable_operands_and_roundtrips_public_instructions() {
+        let instructions = vec![
+            Instruction::Construct {
+                dst: 0,
+                ty: 19,
+                variant: None,
+                fields: (0..1024).collect(),
+            },
+            Instruction::Abort {
+                message: Some("packed abort".into()),
+            },
+        ];
+        let public_bytes = instructions.len() * std::mem::size_of::<Instruction>()
+            + instructions
+                .iter()
+                .map(|instruction| match instruction {
+                    Instruction::Construct { fields, .. } => {
+                        fields.capacity() * std::mem::size_of::<u32>()
+                    }
+                    Instruction::Abort {
+                        message: Some(message),
+                    } => message.capacity(),
+                    _ => 0,
+                })
+                .sum::<usize>();
+        let packed = PackedCode::from_instructions(&instructions);
+
+        assert_eq!(packed.materialize(), instructions);
+        assert!(packed.storage_bytes() < public_bytes);
+    }
+
+    #[test]
+    fn reference_return_contracts_roundtrip_in_their_critical_section() {
+        let mut types = Type::predefined();
+        let shared = types.len() as TypeId;
+        types.push(Type::RefShared { referent: I64 });
+        let artifact = crate::verify::with_generated_cleanup_plans(Artifact {
+            required_features: CORE_G1 | REFERENCES_G1,
+            types,
+            reference_return_contracts: vec![ReferenceReturnContract {
+                function: 0,
+                routes: vec![ReferenceReturnRoute {
+                    result_path: vec![],
+                    origin: ReferenceReturnOrigin::Parameter {
+                        parameter: 0,
+                        path: vec![],
+                    },
+                }],
+            }],
+            functions: vec![Function {
+                name: "identity".into(),
+                flags: 0,
+                params: vec![shared],
+                return_type: shared,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, shared, shared],
+                code_start: 0,
+                code_len: 2,
+                label_slot_count: 0,
+            }],
+            code: vec![
+                Instruction::Copy { dst: 2, src: 1 },
+                Instruction::Return { src: Some(2) },
+            ],
+            ..Artifact::default()
+        })
+        .unwrap();
+        let bytes = artifact.encode();
+        let decoded = Artifact::decode(&bytes).unwrap();
+        assert_eq!(
+            decoded.reference_return_contracts,
+            artifact.reference_return_contracts
+        );
+        assert_eq!(decoded.encode(), bytes);
     }
     fn artifact() -> Artifact {
         crate::verify::with_generated_cleanup_plans(Artifact {
@@ -5243,7 +5793,7 @@ mod tests {
         let b = artifact().encode();
         assert_eq!(&b[..8], b"GRBC\r\n\x1a\n");
         assert_eq!(&b[8..16], &[1, 0, 0, 0, 64, 0, 0, 0]);
-        assert_eq!(u32::from_le_bytes(b[20..24].try_into().unwrap()), 13);
+        assert_eq!(u32::from_le_bytes(b[20..24].try_into().unwrap()), 14);
         assert_eq!(u32::from_le_bytes(b[24..28].try_into().unwrap()), 32);
         assert_eq!(u64::from_le_bytes(b[48..56].try_into().unwrap()), 64);
         assert_eq!(u32::from_le_bytes(b[64..68].try_into().unwrap()), 1);
@@ -5252,19 +5802,19 @@ mod tests {
     #[test]
     fn rejects_unpadded_final_section_without_panicking() {
         let mut bytes = artifact().encode();
-        let drop_glue_directory = 64 + (13 - 1) * 32;
-        let drop_glue_offset = u64::from_le_bytes(
-            bytes[drop_glue_directory + 8..drop_glue_directory + 16]
+        let contract_directory = 64 + (14 - 1) * 32;
+        let contract_offset = u64::from_le_bytes(
+            bytes[contract_directory + 8..contract_directory + 16]
                 .try_into()
                 .unwrap(),
         ) as usize;
-        assert_eq!(drop_glue_offset, bytes.len());
+        assert_eq!(contract_offset + 8, bytes.len());
 
         bytes.push(0);
         let file_size = bytes.len() as u64;
         bytes[56..64].copy_from_slice(&file_size.to_le_bytes());
-        bytes[drop_glue_directory + 16..drop_glue_directory + 24]
-            .copy_from_slice(&1u64.to_le_bytes());
+        bytes[contract_directory + 16..contract_directory + 24]
+            .copy_from_slice(&9u64.to_le_bytes());
 
         assert_eq!(Artifact::decode(&bytes), Err(DecodeError::InvalidDirectory));
     }
@@ -5728,7 +6278,58 @@ mod tests {
         let bytes = artifact.encode();
         let decoded = Artifact::decode(&bytes).unwrap();
         assert_eq!(decoded, canonical(artifact));
+        let Constant::F32(zero32) = decoded.constants[13] else {
+            panic!()
+        };
+        let Constant::F64(zero64) = decoded.constants[14] else {
+            panic!()
+        };
+        assert_eq!(zero32.to_bits(), (-0.0_f32).to_bits());
+        assert_eq!(zero64.to_bits(), (-0.0_f64).to_bits());
         assert_eq!(decoded.encode(), bytes);
+    }
+
+    #[test]
+    fn float_constant_codec_canonicalizes_and_rejects_hostile_nan_payloads() {
+        let artifact = Artifact {
+            constants: vec![
+                Constant::F32(f32::from_bits(0xff80_0001)),
+                Constant::F64(f64::from_bits(0xfff0_0000_0000_0001)),
+            ],
+            ..Artifact::default()
+        };
+        let bytes = artifact.encode();
+        let decoded = Artifact::decode(&bytes).unwrap();
+        let Constant::F32(nan32) = decoded.constants[0] else {
+            panic!()
+        };
+        let Constant::F64(nan64) = decoded.constants[1] else {
+            panic!()
+        };
+        assert_eq!(nan32.to_bits(), 0x7fc0_0000);
+        assert_eq!(nan64.to_bits(), 0x7ff8_0000_0000_0000);
+
+        for (canonical, hostile) in [
+            (
+                0x7fc0_0000_u32.to_le_bytes().to_vec(),
+                0x7fc0_0001_u32.to_le_bytes().to_vec(),
+            ),
+            (
+                0x7ff8_0000_0000_0000_u64.to_le_bytes().to_vec(),
+                0xfff8_0000_0000_0001_u64.to_le_bytes().to_vec(),
+            ),
+        ] {
+            let mut hostile_bytes = bytes.clone();
+            let offset = hostile_bytes
+                .windows(canonical.len())
+                .position(|window| window == canonical)
+                .expect("canonical NaN payload is present once in the constant table");
+            hostile_bytes[offset..offset + hostile.len()].copy_from_slice(&hostile);
+            assert_eq!(
+                Artifact::decode(&hostile_bytes),
+                Err(DecodeError::NonCanonical("NaN".into()))
+            );
+        }
     }
     #[test]
     fn extended_primitive_ids_roundtrip_with_inferred_result_types() {
@@ -5775,6 +6376,8 @@ mod tests {
             ("c", F64, F32, Primitive::FloatConvert, 0x002b),
             ("d", I128, F64, Primitive::IntToFloat, 0x002d),
             ("e", F32, I32, Primitive::FloatToIntChecked, 0x002e),
+            ("f", F32, U32, Primitive::FloatToBits, 0x002f),
+            ("g", U64, F64, Primitive::FloatFromBits, 0x0032),
         ];
         let functions = cases
             .iter()
@@ -5886,6 +6489,38 @@ mod tests {
                     target,
                 ));
             }
+        }
+        assert!(primitive_signature(
+            &types,
+            Primitive::FloatToBits,
+            &[F32],
+            U32
+        ));
+        assert!(primitive_signature(
+            &types,
+            Primitive::FloatToBits,
+            &[F64],
+            U64
+        ));
+        assert!(primitive_signature(
+            &types,
+            Primitive::FloatFromBits,
+            &[U32],
+            F32
+        ));
+        assert!(primitive_signature(
+            &types,
+            Primitive::FloatFromBits,
+            &[U64],
+            F64
+        ));
+        for (op, args, result) in [
+            (Primitive::FloatToBits, vec![F32], U64),
+            (Primitive::FloatToBits, vec![F64], U32),
+            (Primitive::FloatFromBits, vec![U32], F64),
+            (Primitive::FloatFromBits, vec![U64], F32),
+        ] {
+            assert!(!primitive_signature(&types, op, &args, result));
         }
         assert!(!primitive_signature(
             &types,
@@ -6328,7 +6963,7 @@ mod tests {
         let hash = b.iter().fold(0xcbf29ce484222325u64, |h, x| {
             (h ^ u64::from(*x)).wrapping_mul(0x100000001b3)
         });
-        assert_eq!((b.len(), hash), (968, 11_587_050_277_566_009_790));
+        assert_eq!((b.len(), hash), (1008, 8_653_562_428_044_392_972));
     }
     #[test]
     fn rejects_new_required_feature() {

@@ -1,92 +1,137 @@
 # Compiler changes the tooling wants
 
-`tooling/grand` (the build tool) drives the compiler strictly as-is: an
-executable invoked `grc <input.gr> <output.ll>`, one input file, diagnostics as
-rendered text on stderr, nonzero exit on failure. Everything below is what the
-compiler should grow *later* — none of it blocks the build tool, and each item
-lists the workaround grand uses today so the seams are easy to find (grep for
-the item number in `tooling/grand/src/`). Ordered roughly by value.
+`tooling/grand` now drives the versioned G1 compiler contract: ordered
+`.glorious` inputs, JSON diagnostics, check-only compilation, `.grbc` output,
+and execution through `grvm`. Legacy `.gr`, fake-compiler, and LLVM paths are
+retained as compatibility seams. The numbered list records both completed
+contract pieces and the remaining interface/session work.
 
-**Status: the contract for items 1–5 and 7 is now concrete and fully mocked.**
+**Status: items 1–5 and 7–9 are real and integration-tested. The remaining
+phase-3 work is retained per-body inference and compiler local/type side tables,
+not the session transport.**
 `tooling/grand/src/contract.rs` is the normative spec (capabilities probe,
 CLI shapes, JSON schemas); grand already implements both sides of every
 capability with graceful legacy fallback, verified by
-`tooling/grand/tests/contract.rs` against a bash mock of the future `grc`
+`tooling/grand/tests/contract.rs` against a bash subprocess mock of the versioned compiler contract
 (real subprocess protocol) and the in-process fake
 (`GRAND_COMPILER=fake` + `GRAND_FAKE_CAPS=multi-file,check,diagnostics,interfaces,std`).
-Implementing an item in the real compiler means: answer `--capabilities`
-truthfully and match the contract; grand lights the path up automatically —
-no grand changes needed. The probe contract:
+The real compiler answers `--capabilities` truthfully, and grand gates every
+optional path on that response. The current probe contract is:
 
 ```
 $ grc --capabilities
-{"grc":"0.1.0","contract":1,"multi-file":true,"phases":["check"],
- "emit":["interfaces-json","std-interfaces-json"],"diagnostics-json":true}
+{"grc":"0.1.0","contract":1,"multi-file":true,
+ "artifact-major":1,"artifact-minor":0,
+ "seed-identity-version":1,
+ "seed-identity":"grandiose-seed-v1;grc-contract=1;grvm-contract=1;artifact=1.0;features=00000000000000ff",
+ "phases":["lex","scan","resolve","check"],
+ "emit":["bytecode","grbc","mir","core","provisional",
+         "interfaces-json","std-interfaces-json"],"diagnostics-json":true,
+ "serve":{"protocol":1,"transport":"json-lines",
+          "max-request-bytes":1048576,"max-arguments":128,
+          "max-inputs":64,"max-source-bytes":16777216}}
 $ grc --diagnostics json [--phase check] [-o OUT] SOURCE...   # diagnostics: stderr, one JSON object/line
 $ grc --emit interfaces-json SOURCE...                        # stdout: JSON array of declarations
 $ grc --emit std-interfaces-json                              # stdout: prelude declarations
+$ grvm --capabilities
+{"grvm":"0.1.0","contract":1,"contract-min":1,"contract-max":1,
+ "artifact-major":1,"artifact-minor-min":0,"artifact-minor-max":0,
+ "seed-identity-version":1,
+ "accepted-seed-identities":["grandiose-seed-v1;grc-contract=1;grvm-contract=1;artifact=1.0;features=00000000000000ff"]}
 ```
+
+`grc --serve` reads one JSON request per line. A compile request is
+`{"protocol":1,"id":N,"method":"compile","arguments":[...]}`; its argument
+array is exactly the one-shot compiler argument vector. Responses contain the
+same protocol and ID, process-style `status`, captured `stdout`/`stderr`, a
+monotonic last-good `generation`, `transaction` (`committed`, `unchanged`, or
+`retained`), and the exact source-bundle fingerprint. `shutdown` is the only
+other method. Protocol, request, argument, input-count, and aggregate source
+limits are checked before compilation.
 
 1. **Multiple source inputs + a segment table.**
    `grc SOURCE... -o OUT` concatenating in argument order (the architecture.md
    §7 contract), with diagnostics reporting original file/line via a segment
-   map. *Today:* grand concatenates everything into
-   `target/grand/<stem>.gr` itself and writes `<stem>.map.json` beside it;
-   compiler diagnostics point into the bundle and the user (or grand's failure
-   hint) maps lines back by hand. This is the single highest-value change:
-   it deletes the worst UX wart in `grand build`.
+   map. **Implemented:** `grc` owns canonical bundle ordering and maps every
+   independently located diagnostic back to its original input. Grand passes
+   files individually when the capability is present.
 
 2. **`--emit diagnostics-json`.**
    One JSON object per diagnostic: code, severity, title, labels as
    `{file, start_byte, end_byte, line, col, message}`, note, help. With (1) it
-   makes grand's error output precise; it is also the entire substrate of LSP
-   phase 1 (see docs/tooling-plan.md §1.2). *Today:* stderr passes through
-   verbatim.
+   makes grand's error output precise; it is also the substrate of LSP phase 1
+   (see docs/tooling-plan.md §1.2). **Implemented for batch compilation.**
 
 3. **Check-only mode (`--phase check`).**
-   Stop after the frontend, emit nothing. *Today:* `grand check` compiles all
-   the way to `.ll` and discards it — correct but wasteful, and it means check
-   latency includes codegen.
+   Stop after the checked compiler pipeline and emit nothing. **Implemented:**
+   `grand check` uses this path and fingerprints successful checks. The real
+   compiler also implements truthful earlier `lex`, declaration-`scan`, and
+   interface/name/type `resolve` stop boundaries; none writes an artifact.
+   `resolve` validates compiler interfaces without elaborating callable bodies,
+   running ownership, constructing Core/MIR, or lowering bytecode. Grand
+   capability-gates this distinct boundary rather than substituting `check`.
 
 4. **`--emit interfaces-json`.**
    Declaration-scan products (callables + signatures, types, effects,
    fixities, spans, doc comments) without body elaboration. Powers grand's
    cross-package name-collision preflight (flat namespace!) and LSP phase 2.
-   *Today:* collisions surface as confusing duplicate-definition errors from
-   deep inside the compiler.
+   **Implemented:** the real parser supplies ordered file/line/signature/doc
+   metadata plus stable namespace-qualified identities and exact file-local
+   declaration/name byte spans. The LSP consumes these directly; grand retains
+   its warning-only heuristic only for legacy compilers.
 
 5. **A real `grc` binary with `--version`.**
-   Today `compiler/grc` is a bash wrapper over `cargo run -p grandiose`, so
-   the first compile silently pays a cargo build, and grand cannot check the
-   toolchain version against `[backend] minimum-version`. Ship the bootstrap
-   as a built binary (and keep the `<input> <output>` CLI stable or version
-   it). *Today:* grand discovers `GRAND_COMPILER` env → `compiler/grc` upward
-   from the project → `grc` on PATH, and does no version checking.
+   **Implemented:** the native Rust bootstrap ships a real `grc` binary
+   with `--version` and a contract version. Grand fingerprints its identity;
+   compiler contract ranges and emitted artifact major/minor are rejected when
+   incompatible. Grand probes the selected VM before compilation, rejects an
+   incompatible VM contract or artifact range, and fingerprints the compiler
+   and VM identities atomically using executable-content digests rather than
+   mutable timestamps. The compiler advertises a deterministic released-seed
+   identity derived from the compiler/VM contract revisions, artifact version,
+   and supported artifact feature set. The VM advertises a sorted acceptance
+   set. Grand requires matching protocol/identity metadata before consulting
+   build freshness, includes it in the atomic toolchain fingerprint, and passes
+   the selected identity to `grvm run` for a second check before artifact load.
+   Both sides omitting metadata remains an explicit legacy compatibility mode;
+   asymmetric omission, malformed metadata, version mismatch, and an
+   unaccepted identity fail closed.
 
 6. **Comment syntax, lexed as trivia.**
    Line + nested block comments per docs/frontend-design.md. Prerequisite for
-   the formatter and for doc comments in (4); the batch compiler only needs to
-   skip them. *Today:* source with comments simply doesn't lex.
+   the formatter and for doc comments in (4). **Implemented:** the semantic
+   lexer, shared gap-free lossless trivia stream, and declaration doc
+   extraction all consume the same source bytes.
 
 7. **Distributed std-lib manifest.**
    The bootstrap embeds `distributed_std.gr` invisibly. Tooling needs to know
    which names are implicit (collision checks, LSP hover/completion, and the
    eventual `std-lib.glorious` prepend contract). A `--emit std-interfaces` or
-   a shipped interface file both work. *Today:* grand is unaware of the
-   prelude; a user package colliding with it gets a raw compiler error.
+   a shipped interface file both work. **Implemented:** `std-interfaces-json`
+   reports only the trusted embedded-prelude segment and grand consumes it for
+   collision preflight.
 
 8. **Object/executable emission.**
    Long-term the compiler (or a driver library it exposes) should own
-   `-O` levels and native emission. *Today:* grand shells `llvm-as` + `lli
-   --dlopen=<runtime.so>` (interp target) or `clang <ll> native_entry.c`
-   (native target) — see `tooling/grand/src/target.rs`; the `Target` enum is
-   the seam where a compiler-owned backend (or the VM, if it returns) slots in.
+   `-O` levels and native emission. **The canonical G1 path is implemented:**
+   grand selects bytecode from capabilities and runs `.grbc` through `grvm`.
+   The LLVM interpreter/native paths remain compatibility targets.
 
 9. **Session mode (`grc --serve`).**
-   Long-lived process holding post-scan state, per-body re-elaboration,
-   span→type/def side tables. This is LSP phase 3; full design and rationale
-   in docs/tooling-plan.md §4.4. Nothing in grand depends on it.
+   **Transport implemented:** one long-lived process accepts repeated resolve,
+   check, interface, and compile requests through the versioned JSON-line
+   protocol above. Every request revalidates the complete ordered source bundle;
+   successful snapshots commit atomically, failed requests retain the previous
+   bounded last-good snapshot, and byte-identical requests are reported as
+   unchanged. The session and one-shot paths call the same phase/output driver,
+   so diagnostics and artifacts are identical. Oversized and malformed requests
+   fail without poisoning the process, and process restart begins with empty
+   state. Grand validates the advertised protocol but remains a batch client;
+   spawning a session for one build would add no benefit. The Rust LSP separately
+   retains per-root last-good definition snapshots. Retained post-scan inference,
+   per-body re-elaboration, and local/type side tables remain phase-3 work in
+   `docs/tooling-plan.md` §4.4.
 
-While none of this exists, `GRAND_COMPILER=fake` makes grand emit a trivial
-exit-0 module instead of compiling, which is how grand's own test suite runs
-without a working compiler or LLVM toolchain (`tooling/grand/tests/e2e.rs`).
+`GRAND_COMPILER=fake` remains useful for hermetic build-tool tests; contract
+tests also exercise bytecode selection and VM invocation, while the real
+`grc`/`grvm` pair is used by the repository integration gate.

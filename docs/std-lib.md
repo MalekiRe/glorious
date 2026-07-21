@@ -287,12 +287,14 @@ ordinary array destruction.
 
 The distribution manifest freezes the opaque `Array` machine constructor at
 identity `0x21`. Its trusted source bindings, together with the immutable
-`Text`/`Bytes` leaves, mirror the frozen primitive identities. These names are
+`char`/`Text`/`Bytes` leaves, mirror the frozen primitive identities. These names are
 internal layer-1 declarations, not public APIs, and both their declarations and
 their call sites require the trusted standard-library source domain:
 
 | Identity | Trusted source binding | Primitive |
 |---:|---|---|
+| `0x0030` | `__g1_char_from_u32_checked` | `CharFromU32Checked` |
+| `0x0031` | `__g1_char_to_u32` | `CharToU32` |
 | `0x0040` | `__g1_text_byte_len` | `TextByteLen` |
 | `0x0041` | `__g1_text_concat` | `TextConcat` |
 | `0x0042` | `__g1_text_eq` | `TextEq` |
@@ -324,9 +326,12 @@ table is the canonical distribution mapping only.
 The bootstrap profile is normative: stage 1 must not rely on a helper that is
 available only in the Rust VM or existing interpreter. Convenience APIs beyond
 this profile may be added later without expanding the language or VM core.
-The size target is 1,500–2,500 nonblank, noncomment Grandiose lines: roughly
-800–1,500 for control/runtime wrappers and 700–1,000 for the reusable collection
-and compiler-building layer.
+The size target is 6,000–9,000 nonblank, noncomment Grandiose lines. It includes
+the explicit all-width checked-conversion matrix, runtime/control and formatting
+wrappers, deterministic collections, diagnostic/source-map support, and the
+compiler-building toolkit. This is a review budget: repetitive APIs should be
+generated or expressed generically where that preserves the canonical source
+distribution, but conformance is not removed to meet the count.
 
 ### 7.1 Scalar and primitive surface
 
@@ -360,6 +365,16 @@ an `N`-bit operand. Shift counts have type `u32` and a count greater than or
 equal to `N` traps. Left shift retains the low `N` bits; right shift is logical
 for unsigned operands and sign-extending arithmetic shift for signed operands.
 
+Layer 1 contains concrete, manifest-bound `f32` and `f64` leaves for arithmetic,
+negation, zero/one comparisons, cross-width conversion, every integer-to-float
+pair, every checked float-to-integer pair, and the exact `f32`/`u32` and
+`f64`/`u64` bit pairs. These declarations are deliberately width-specific: the
+trusted declaration identity and its exact parameter/result signature select a
+frozen primitive, while copying the spelling into user source grants no
+authority. Float-producing leaves canonicalize NaNs to the bytecode-specified
+positive quiet NaN and preserve signed zero. Public traits, parsing, formatting,
+and convenience APIs remain ordinary source definitions above this boundary.
+
 Wrapping conversion to target type `T` is spelled `wrapping_convert_to_T` and
 accepts every integer source type. It applies the bytecode modulo rule directly.
 Checked conversion from `S` to `T` is spelled `checked_S_to_T` and returns
@@ -371,8 +386,33 @@ proof across every width and signedness pair. Only the successful arm invokes
 the private trapping `int.convert_checked` leaf. Consequently an out-of-range
 public conversion cannot produce a catchless primitive fault.
 
-The character surface includes scalar validation, `char`/`u32` conversion,
-UTF-8 encoded length, encoding, and decoding. The compiler's lexical name classes
+Floating arithmetic and IEEE comparisons use the width-explicit public
+families `f32_add` through `f32_neg` / `f64_add` through `f64_neg` and
+`f32_equal` through `f32_greater_equal` / their `f64` counterparts. Integer to
+float conversion is named `<integer>_to_f32` or `<integer>_to_f64`; narrowing
+and widening are `f64_to_f32` and `f32_to_f64`. Every public float-to-integer
+conversion is checked and returns `Option<T>` under the name
+`checked_f32_to_<integer>` or `checked_f64_to_<integer>`. Its ordinary source
+wrapper rejects NaN, infinity, and values outside the target's half-open
+representable interval before calling the trapping frozen leaf.
+
+The canonical `f32_to_bits` and `f64_to_bits` views collapse every NaN to the
+frozen quiet-NaN spelling and preserve signed zero; the inverse constructors do
+the same canonicalization. Float `Eq`, `Ord`, and `Hash` all use those bits, so
+NaN is reflexive, signed zeroes remain distinct, total order runs from negative
+infinity through negative values, `-0`, `+0`, positive values, positive
+infinity, then canonical NaN, and equal values append
+the identical fixed-width hash stream. `Display` and `Debug` render a finite
+value as an exact decimal scientific numeral derived from its binary rational;
+rendering never consults host locale or host float formatting.
+
+The character surface includes scalar validation (`char_is_valid_scalar`),
+checked `u32` conversion (`char_from_u32`), scalar extraction (`char_to_u32`),
+UTF-8 encoded length (`char_utf8_len`), and the `char_encode_utf8` /
+`char_decode_utf8` codec. Invalid scalars return `CharFromU32Error`; malformed,
+overlong, surrogate, truncated, and out-of-range UTF-8 returns `Utf8Error` at
+the offending byte rather than invoking the trapping manifest leaf. The
+compiler's lexical name classes
 are ASCII in generation 1; Unicode remains fully supported in character and text
 literals and values. Therefore the standard library does not carry a Unicode XID
 database.
@@ -411,8 +451,10 @@ iterator-adapter hierarchy. Compiler hot loops may use indices directly.
 
 The small ownership/memory helper surface includes `identity`, `replace`,
 `swap`, `take` (when `Default` is available), and compiler-mediated zero-use
-disposal. The current source surface has no `Default` contract, so it exposes
-`identity`, `replace`, and `swap` but omits `take`. A normal
+disposal. The current source surface implements receiverless `Default` for the
+integer scalars, `String`, and `Bytes`; generic `take` is implemented through
+receiverless `Default` evidence and `replace`, preserving initialization of the
+borrowed place. A normal
 `destroy<T>(value:T)` by-value function is not that operation:
 the call transfers `value` and records one owned use before the body can destroy
 it. A source-facing disposal helper therefore requires `T: Use<[0,0]>` and a

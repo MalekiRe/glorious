@@ -48,25 +48,51 @@ fn advance(line: &str, depth: &mut i64, comment_depth: &mut u32) {
         let (current, next) = (bytes[i], bytes.get(i + 1).copied());
         if *comment_depth > 0 {
             match (current, next) {
-                (b'*', Some(b'/')) => { *comment_depth -= 1; i += 2; continue; }
-                (b'/', Some(b'*')) => { *comment_depth += 1; i += 2; continue; }
-                _ => { i += 1; continue; }
+                (b'*', Some(b'/')) => {
+                    *comment_depth -= 1;
+                    i += 2;
+                    continue;
+                }
+                (b'/', Some(b'*')) => {
+                    *comment_depth += 1;
+                    i += 2;
+                    continue;
+                }
+                _ => {
+                    i += 1;
+                    continue;
+                }
             }
         }
         if in_string {
             match current {
                 b'\\' => i += 2,
-                b'"' => { in_string = false; i += 1; }
+                b'"' => {
+                    in_string = false;
+                    i += 1;
+                }
                 _ => i += 1,
             }
             continue;
         }
         match (current, next) {
             (b'/', Some(b'/')) => return,
-            (b'/', Some(b'*')) => { *comment_depth += 1; i += 2; }
-            (b'"', _) => { in_string = true; i += 1; }
-            (b'{' | b'(' | b'[', _) => { *depth += 1; i += 1; }
-            (b'}' | b')' | b']', _) => { *depth -= 1; i += 1; }
+            (b'/', Some(b'*')) => {
+                *comment_depth += 1;
+                i += 2;
+            }
+            (b'"', _) => {
+                in_string = true;
+                i += 1;
+            }
+            (b'{' | b'(' | b'[', _) => {
+                *depth += 1;
+                i += 1;
+            }
+            (b'}' | b')' | b']', _) => {
+                *depth -= 1;
+                i += 1;
+            }
             _ => i += 1,
         }
     }
@@ -154,8 +180,10 @@ generic<T>(value: T) -> T { value }
 impl Drop for Pair { drop(&mut self) -> { } }
 ";
         let declarations = scan(Path::new("test.gr"), source);
-        let names: Vec<(&str, DeclarationKind)> =
-            declarations.iter().map(|d| (d.name.as_str(), d.kind)).collect();
+        let names: Vec<(&str, DeclarationKind)> = declarations
+            .iter()
+            .map(|d| (d.name.as_str(), d.kind))
+            .collect();
         assert_eq!(
             names,
             vec![
@@ -169,14 +197,20 @@ impl Drop for Pair { drop(&mut self) -> { } }
                 ("generic", DeclarationKind::Callable),
             ]
         );
-        assert_eq!(declarations[6].signature.as_deref(), Some("add(lhs: i64, rhs: i64) -> i64"));
+        assert_eq!(
+            declarations[6].signature.as_deref(),
+            Some("add(lhs: i64, rhs: i64) -> i64")
+        );
         assert_eq!(declarations[6].line, 9);
     }
 
     #[test]
     fn braces_in_strings_do_not_change_depth() {
         let source = "greet() -> i64 {\n    print(\"{ \\\" }\")\n}\nafter() -> i64 { 0 }\n";
-        let names: Vec<String> = scan(Path::new("t.gr"), source).into_iter().map(|d| d.name).collect();
+        let names: Vec<String> = scan(Path::new("t.gr"), source)
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
         assert_eq!(names, vec!["greet", "after"]);
     }
 }

@@ -1,19 +1,23 @@
 mod analysis;
-mod frontend;
 mod position;
 mod rpc;
 
 use std::io::{BufReader, Stdout};
 use std::path::PathBuf;
-use std::sync::mpsc;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicU64, Ordering},
+    mpsc,
+};
 use std::time::Duration;
 
 use anyhow::Result;
-use grand::contract::{Declaration, DeclarationKind};
-use serde_json::{json, Value};
+use grandiose::diagnostic::Severity;
+use grandiose::interface::DeclarationKind;
+use grandiose::lossless::{LosslessKind, lex_lossless};
+use serde_json::{Value, json};
 
-use crate::analysis::{identifiers, locals_at, Local, Workspace};
-use crate::frontend::diagnostic::Severity;
+use crate::analysis::{Local, SemanticDeclaration, Workspace, identifiers, locals_at};
 use crate::position::LineIndex;
 use crate::rpc::{path_to_uri, read_message, uri_to_path, write_message};
 
@@ -26,23 +30,54 @@ struct Server {
     published: std::collections::BTreeSet<PathBuf>,
     /// A didChange happened and diagnostics have not been re-published yet.
     dirty: bool,
+    cancellation: Arc<Mutex<std::collections::BTreeSet<String>>>,
+    document_versions: std::collections::BTreeMap<PathBuf, i64>,
+    input_generation: Arc<AtomicU64>,
+    applied_generation: u64,
 }
 
 /// What the cursor resolves to, in scope order: local, workspace declaration,
 /// std declaration.
 enum Target {
     Local(PathBuf, Local),
-    Decl(Declaration),
-    Std(Declaration),
+    Decl(SemanticDeclaration),
+    Std(SemanticDeclaration),
 }
 
 fn main() -> Result<()> {
     // Reader thread feeds a channel so the main loop can debounce with
     // recv_timeout while staying single-threaded for state.
     let (sender, receiver) = mpsc::channel::<Value>();
+    let cancellation = Arc::new(Mutex::new(std::collections::BTreeSet::new()));
+    let reader_cancellation = Arc::clone(&cancellation);
+    let input_generation = Arc::new(AtomicU64::new(0));
+    let reader_generation = Arc::clone(&input_generation);
     std::thread::spawn(move || {
         let mut input = BufReader::new(std::io::stdin());
-        while let Ok(Some(message)) = read_message(&mut input) {
+        while let Ok(Some(mut message)) = read_message(&mut input) {
+            if matches!(
+                message["method"].as_str(),
+                Some(
+                    "textDocument/didOpen"
+                        | "textDocument/didChange"
+                        | "textDocument/didSave"
+                        | "textDocument/didClose"
+                )
+            ) {
+                let generation = reader_generation.fetch_add(1, Ordering::AcqRel) + 1;
+                if let Some(object) = message.as_object_mut() {
+                    object.insert("__grandiose_generation".into(), json!(generation));
+                }
+            }
+            if message["method"] == "$/cancelRequest"
+                && let Some(key) = request_key(&message["params"]["id"])
+            {
+                let mut cancelled = reader_cancellation.lock().unwrap();
+                if cancelled.len() >= 4096 {
+                    cancelled.pop_first();
+                }
+                cancelled.insert(key);
+            }
             if sender.send(message).is_err() {
                 break;
             }
@@ -54,14 +89,17 @@ fn main() -> Result<()> {
         output: std::io::stdout(),
         published: Default::default(),
         dirty: false,
+        cancellation,
+        document_versions: Default::default(),
+        input_generation,
+        applied_generation: 0,
     };
     loop {
         let message = match receiver.recv_timeout(DEBOUNCE) {
             Ok(message) => message,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if server.dirty {
+                if server.dirty && server.publish(None)? {
                     server.dirty = false;
-                    server.publish()?;
                 }
                 continue;
             }
@@ -78,55 +116,122 @@ impl Server {
     /// Returns false on `exit`.
     fn handle(&mut self, message: Value) -> Result<bool> {
         let method = message["method"].as_str().unwrap_or_default().to_string();
+        if let Some(generation) = message["__grandiose_generation"].as_u64() {
+            self.applied_generation = self.applied_generation.max(generation);
+        }
         let id = message["id"].clone();
         let params = message["params"].clone();
+        if method == "$/cancelRequest" {
+            return Ok(true);
+        }
+        if !id.is_null() && self.is_cancelled(&id) {
+            self.respond(&id, Value::Null)?;
+            return Ok(true);
+        }
         // Any request observes up-to-date diagnostics/state.
         if !id.is_null() && self.dirty {
-            self.dirty = false;
-            self.publish()?;
+            if self.publish(Some(&id))? {
+                self.dirty = false;
+            } else if self.is_cancelled(&id) {
+                self.respond(&id, Value::Null)?;
+                return Ok(true);
+            }
         }
         match method.as_str() {
             "initialize" => {
-                if let Some(root) = params["rootUri"].as_str().and_then(|u| uri_to_path(u).ok()) {
+                let roots = params["workspaceFolders"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|folder| folder["uri"].as_str())
+                    .filter_map(|uri| uri_to_path(uri).ok())
+                    .collect::<Vec<_>>();
+                if let Some(root) = roots.first().cloned().or_else(|| {
+                    params["rootUri"]
+                        .as_str()
+                        .and_then(|uri| uri_to_path(uri).ok())
+                }) {
                     self.workspace = Workspace::new(root);
+                    self.workspace.set_roots(roots);
                 }
-                self.respond(&id, json!({
-                    "capabilities": {
-                        "textDocumentSync": 1, // full
-                        "documentSymbolProvider": true,
-                        "definitionProvider": true,
-                        "hoverProvider": true,
-                        "completionProvider": {},
-                        "documentFormattingProvider": true,
-                        "referencesProvider": true,
-                        "renameProvider": true,
-                    },
-                    "serverInfo": {"name": "grand-lsp", "version": env!("CARGO_PKG_VERSION")},
-                }))?;
+                self.respond(
+                    &id,
+                    json!({
+                        "capabilities": {
+                            "textDocumentSync": 1, // full
+                            "documentSymbolProvider": true,
+                            "definitionProvider": true,
+                            "hoverProvider": true,
+                            "completionProvider": {},
+                            "signatureHelpProvider": {"triggerCharacters": ["(", ","]},
+                            "semanticTokensProvider": {
+                                "legend": {
+                                    "tokenTypes": [
+                                        "type", "enum", "interface", "struct", "variable",
+                                        "event", "function", "keyword", "comment", "string",
+                                        "number", "operator"
+                                    ],
+                                    "tokenModifiers": []
+                                },
+                                "full": true
+                            },
+                            "documentFormattingProvider": true,
+                            "referencesProvider": true,
+                            "renameProvider": true,
+                            "workspace": {"workspaceFolders": {"supported": true, "changeNotifications": false}},
+                        },
+                        "serverInfo": {"name": "grand-lsp", "version": env!("CARGO_PKG_VERSION")},
+                    }),
+                )?;
             }
             "shutdown" => self.respond(&id, Value::Null)?,
             "exit" => return Ok(false),
             "textDocument/didOpen" => {
                 let path = doc_path(&params)?;
                 let text = params["textDocument"]["text"].as_str().unwrap_or_default();
+                if let Some(version) = params["textDocument"]["version"].as_i64() {
+                    self.document_versions.insert(path.clone(), version);
+                }
                 self.workspace.open(path, text.to_string());
-                self.publish()?;
+                self.publish(None)?;
             }
             "textDocument/didChange" => {
                 let path = doc_path(&params)?;
-                if let Some(text) = params["contentChanges"][0]["text"].as_str() {
-                    self.workspace.open(path, text.to_string());
+                let version = params["textDocument"]["version"].as_i64();
+                if version.is_some_and(|incoming| {
+                    self.document_versions
+                        .get(&path)
+                        .is_some_and(|current| incoming <= *current)
+                }) {
+                    return Ok(true);
                 }
+                let changes = params["contentChanges"].as_array();
+                let full_text = changes
+                    .filter(|changes| changes.len() == 1)
+                    .and_then(|changes| changes.first())
+                    .filter(|change| change.get("range").is_none())
+                    .and_then(|change| change["text"].as_str());
+                let Some(text) = full_text else {
+                    // The server advertises full synchronization. Reject
+                    // malformed/ranged sequences instead of interpreting a
+                    // fragment as the complete document.
+                    return Ok(true);
+                };
+                if let Some(version) = version {
+                    self.document_versions.insert(path.clone(), version);
+                }
+                self.workspace.open(path, text.to_string());
                 self.dirty = true; // debounced publish
             }
             "textDocument/didSave" => {
                 self.workspace.invalidate();
-                self.publish()?;
+                self.publish(None)?;
             }
             "textDocument/didClose" => {
                 let path = doc_path(&params)?;
+                self.document_versions.remove(&path);
                 self.workspace.close(&path);
-                self.publish()?;
+                self.publish(None)?;
             }
             "textDocument/documentSymbol" => {
                 let path = doc_path(&params)?;
@@ -138,12 +243,19 @@ impl Server {
                     .iter()
                     .filter(|d| d.file == path)
                     .map(|d| {
-                        let range = line_range(&index, &text, d.line);
+                        let range = byte_range(
+                            &index,
+                            &text,
+                            d.declaration_start_byte,
+                            d.declaration_end_byte,
+                        );
+                        let selection_range =
+                            byte_range(&index, &text, d.name_start_byte, d.name_end_byte);
                         json!({
                             "name": d.name,
                             "kind": symbol_kind(d.kind),
                             "range": range,
-                            "selectionRange": range,
+                            "selectionRange": selection_range,
                             "detail": d.signature,
                         })
                     })
@@ -171,7 +283,12 @@ impl Server {
                         let index = LineIndex::new(&text);
                         json!({
                             "uri": path_to_uri(&declaration.file),
-                            "range": line_range(&index, &text, declaration.line),
+                            "range": byte_range(
+                                &index,
+                                &text,
+                                declaration.name_start_byte,
+                                declaration.name_end_byte,
+                            ),
                         })
                     }
                     // Std names have no navigable file.
@@ -191,9 +308,41 @@ impl Server {
                 };
                 self.respond(&id, result)?;
             }
+            "textDocument/signatureHelp" => {
+                let path = doc_path(&params)?;
+                let result = self
+                    .workspace
+                    .text(&path)
+                    .and_then(|text| {
+                        signature_help(
+                            &self.workspace.analyze(),
+                            &path,
+                            &text,
+                            cursor_offset(&params, &text),
+                        )
+                    })
+                    .unwrap_or(Value::Null);
+                self.respond(&id, result)?;
+            }
+            "textDocument/semanticTokens/full" => {
+                let path = doc_path(&params)?;
+                let result = self.workspace.text(&path).map_or(Value::Null, |text| {
+                    semantic_tokens(&self.workspace.analyze(), &path, &text)
+                });
+                self.respond(&id, result)?;
+            }
             "textDocument/references" => {
-                let locations = match self.word_under_cursor(&params)? {
-                    Some(word) => json!(self.find_references(&word)),
+                let path = doc_path(&params)?;
+                let locations = match self.lookup(&params)? {
+                    Some(Target::Decl(declaration)) => {
+                        json!(self.find_references(&declaration.identity, &path))
+                    }
+                    Some(Target::Std(declaration)) => {
+                        json!(self.find_references(&declaration.identity, &path))
+                    }
+                    Some(Target::Local(_, local)) => {
+                        json!(self.find_local_references(&local, &path))
+                    }
                     None => json!([]),
                 };
                 self.respond(&id, locations)?;
@@ -201,8 +350,13 @@ impl Server {
             "textDocument/rename" => {
                 let new_name = params["newName"].as_str().unwrap_or_default().to_string();
                 let valid = !new_name.is_empty()
-                    && new_name.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-                    && new_name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+                    && new_name
+                        .chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    && new_name
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '_');
                 if !valid {
                     self.reply(json!({
                         "jsonrpc": "2.0", "id": id,
@@ -210,10 +364,26 @@ impl Server {
                     }))?;
                     return Ok(true);
                 }
-                let result = match self.word_under_cursor(&params)? {
-                    Some(word) => {
+                let result = match self.lookup(&params)? {
+                    Some(Target::Decl(declaration)) | Some(Target::Std(declaration)) => {
                         let mut changes: serde_json::Map<String, Value> = Default::default();
-                        for location in self.find_references(&word) {
+                        let path = doc_path(&params)?;
+                        for location in self.find_references(&declaration.identity, &path) {
+                            let uri = location["uri"].as_str().unwrap().to_string();
+                            let edit = json!({"range": location["range"], "newText": new_name});
+                            changes
+                                .entry(uri)
+                                .or_insert_with(|| json!([]))
+                                .as_array_mut()
+                                .unwrap()
+                                .push(edit);
+                        }
+                        json!({"changes": changes})
+                    }
+                    Some(Target::Local(_, local)) => {
+                        let mut changes: serde_json::Map<String, Value> = Default::default();
+                        let path = doc_path(&params)?;
+                        for location in self.find_local_references(&local, &path) {
                             let uri = location["uri"].as_str().unwrap().to_string();
                             let edit = json!({"range": location["range"], "newText": new_name});
                             changes
@@ -253,19 +423,24 @@ impl Server {
             "textDocument/completion" => {
                 let analysis = self.workspace.analyze();
                 let mut items: Vec<Value> = Vec::new();
-                if let Ok(path) = doc_path(&params) {
-                    if let Some(text) = self.workspace.text(&path) {
-                        let offset = cursor_offset(&params, &text);
-                        for local in locals_at(&text, offset) {
-                            items.push(json!({
-                                "label": local.name,
-                                "kind": 6, // Variable
-                                "detail": local.detail,
-                            }));
-                        }
+                let request_path = doc_path(&params).ok();
+                if let Some(path) = request_path.as_ref()
+                    && let Some(text) = self.workspace.text(path)
+                {
+                    let offset = cursor_offset(&params, &text);
+                    for local in locals_at(&text, offset) {
+                        items.push(json!({
+                            "label": local.name,
+                            "kind": 6, // Variable
+                            "detail": local.detail,
+                        }));
                     }
                 }
-                for d in analysis.declarations.iter() {
+                for d in analysis.declarations.iter().filter(|declaration| {
+                    request_path
+                        .as_ref()
+                        .is_none_or(|path| analysis.same_root(path, &declaration.file))
+                }) {
                     items.push(json!({
                         "label": d.name,
                         "kind": completion_kind(d.kind),
@@ -304,13 +479,39 @@ impl Server {
     }
 
     fn respond(&mut self, id: &Value, result: Value) -> Result<()> {
+        if self.take_cancelled(id) {
+            return self.reply(json!({
+                "jsonrpc": "2.0", "id": id,
+                "error": {"code": -32800, "message": "request cancelled"},
+            }));
+        }
         self.reply(json!({"jsonrpc": "2.0", "id": id, "result": result}))
+    }
+
+    fn is_cancelled(&self, id: &Value) -> bool {
+        request_key(id).is_some_and(|key| self.cancellation.lock().unwrap().contains(&key))
+    }
+
+    fn take_cancelled(&self, id: &Value) -> bool {
+        request_key(id).is_some_and(|key| self.cancellation.lock().unwrap().remove(&key))
     }
 
     /// Re-analyze the workspace and publish diagnostics for every file that
     /// has any (plus empty sets to clear files that no longer do).
-    fn publish(&mut self) -> Result<()> {
+    fn publish(&mut self, cancel_id: Option<&Value>) -> Result<bool> {
+        let generation = self.applied_generation;
         let analysis = self.workspace.analyze();
+        let cancellation = Arc::clone(&self.cancellation);
+        let cancellation_guard = cancellation.lock().unwrap();
+        if cancel_id
+            .and_then(request_key)
+            .is_some_and(|key| cancellation_guard.contains(&key))
+        {
+            return Ok(false);
+        }
+        if self.input_generation.load(Ordering::Acquire) != generation {
+            return Ok(false);
+        }
         let mut current = std::collections::BTreeSet::new();
         for (file, diagnostics) in &analysis.diagnostics {
             current.insert(file.clone());
@@ -343,7 +544,12 @@ impl Server {
                 "params": {"uri": path_to_uri(file), "diagnostics": payload},
             }))?;
         }
-        for stale in self.published.difference(&current).cloned().collect::<Vec<_>>() {
+        for stale in self
+            .published
+            .difference(&current)
+            .cloned()
+            .collect::<Vec<_>>()
+        {
             self.reply(json!({
                 "jsonrpc": "2.0",
                 "method": "textDocument/publishDiagnostics",
@@ -351,60 +557,95 @@ impl Server {
             }))?;
         }
         self.published = current;
-        Ok(())
-    }
-
-    fn word_under_cursor(&self, params: &Value) -> Result<Option<String>> {
-        let path = doc_path(params)?;
-        let Some(text) = self.workspace.text(&path) else { return Ok(None) };
-        let offset = cursor_offset(params, &text);
-        Ok(word_at(&text, offset).map(str::to_string))
+        drop(cancellation_guard);
+        Ok(true)
     }
 
     /// Resolve the identifier under the cursor: locals of the enclosing
     /// callable shadow workspace declarations, which shadow std.
     fn lookup(&self, params: &Value) -> Result<Option<Target>> {
         let path = doc_path(params)?;
-        let Some(text) = self.workspace.text(&path) else { return Ok(None) };
+        let Some(text) = self.workspace.text(&path) else {
+            return Ok(None);
+        };
         let offset = cursor_offset(params, &text);
-        let Some(word) = word_at(&text, offset) else { return Ok(None) };
-        if let Some(local) = locals_at(&text, offset).into_iter().find(|l| l.name == word) {
+        let Some(word) = word_at(&text, offset) else {
+            return Ok(None);
+        };
+        if let Some(local) = locals_at(&text, offset)
+            .into_iter()
+            .find(|l| l.name == word)
+        {
             return Ok(Some(Target::Local(path, local)));
         }
         let analysis = self.workspace.analyze();
-        if let Some(declaration) = analysis.declarations.iter().find(|d| d.name == word) {
-            return Ok(Some(Target::Decl(declaration.clone())));
-        }
-        if let Some(declaration) = analysis.std_declarations.iter().find(|d| d.name == word) {
-            return Ok(Some(Target::Std(declaration.clone())));
+        if let Some(occurrence) = analysis.occurrence_at(&path, offset)
+            && let Some(declaration) = analysis.declaration(&occurrence.identity)
+        {
+            if declaration.interface.identity.starts_with("std:") {
+                return Ok(Some(Target::Std(declaration.clone())));
+            }
+            if analysis.same_root(&path, &declaration.file) {
+                return Ok(Some(Target::Decl(declaration.clone())));
+            }
         }
         Ok(None)
     }
 
-    /// Every word-boundary occurrence of `name` across the workspace
-    /// (comment/string-aware), as LSP Locations.
-    fn find_references(&self, name: &str) -> Vec<Value> {
+    /// Every compiler-bound occurrence of one declaration identity within the
+    /// originating compilation root.
+    fn find_references(&self, identity: &str, origin: &std::path::Path) -> Vec<Value> {
         let analysis = self.workspace.analyze();
         let mut locations = Vec::new();
-        for file in &analysis.files {
-            let Some(text) = self.workspace.text(file) else { continue };
-            let index = LineIndex::new(&text);
-            for (word, offset) in identifiers(&text) {
-                if word != name {
-                    continue;
-                }
-                let (line, col) = index.position(&text, offset);
-                let (end_line, end_col) = index.position(&text, offset + word.len());
-                locations.push(json!({
-                    "uri": path_to_uri(file),
-                    "range": {
-                        "start": {"line": line, "character": col},
-                        "end": {"line": end_line, "character": end_col},
-                    },
-                }));
+        for occurrence in analysis.references(identity) {
+            if !analysis.same_root(origin, &occurrence.file) {
+                continue;
             }
+            let Some(text) = self.workspace.text(&occurrence.file) else {
+                continue;
+            };
+            let index = LineIndex::new(&text);
+            locations.push(json!({
+                "uri": path_to_uri(&occurrence.file),
+                "range": byte_range(
+                    &index,
+                    &text,
+                    occurrence.start_byte,
+                    occurrence.end_byte,
+                ),
+            }));
         }
         locations
+    }
+
+    fn find_local_references(&self, target: &Local, path: &std::path::Path) -> Vec<Value> {
+        let Some(text) = self.workspace.text(path) else {
+            return Vec::new();
+        };
+        let index = LineIndex::new(&text);
+        identifiers(&text)
+            .into_iter()
+            .filter(|(word, offset)| {
+                *word == target.name
+                    && locals_at(&text, *offset)
+                        .iter()
+                        .any(|local| local.def_offset == target.def_offset)
+            })
+            .map(|(word, offset)| {
+                json!({
+                    "uri": path_to_uri(path),
+                    "range": byte_range(&index, &text, offset, offset + word.len()),
+                })
+            })
+            .collect()
+    }
+}
+
+fn request_key(id: &Value) -> Option<String> {
+    match id {
+        Value::String(value) => Some(format!("s:{value}")),
+        Value::Number(value) => Some(format!("n:{value}")),
+        _ => None,
     }
 }
 
@@ -418,7 +659,293 @@ fn cursor_offset(params: &Value, text: &str) -> usize {
     LineIndex::new(text).offset(text, line, character)
 }
 
-fn hover_markdown(declaration: &Declaration, std: bool) -> Value {
+#[derive(Clone, Copy)]
+enum Delimiter {
+    Call {
+        callee_start: usize,
+        callee_end: usize,
+        active_parameter: usize,
+    },
+    Other(char),
+}
+
+fn signature_help(
+    analysis: &analysis::Analysis,
+    path: &std::path::Path,
+    text: &str,
+    offset: usize,
+) -> Option<Value> {
+    let tokens = lex_lossless(text).ok()?;
+    let significant = tokens
+        .iter()
+        .copied()
+        .filter(|token| !token.kind.is_trivia() && token.span.start < offset)
+        .collect::<Vec<_>>();
+    let mut stack = Vec::new();
+    let mut previous = None;
+    for token in significant {
+        let spelling = token.text(text);
+        if token.kind == LosslessKind::Punctuation {
+            match spelling {
+                "(" => {
+                    let call = previous
+                        .filter(|previous: &grandiose::lossless::LosslessToken| {
+                            previous.kind == LosslessKind::Identifier
+                        })
+                        .map_or(Delimiter::Other('('), |callee| Delimiter::Call {
+                            callee_start: callee.span.start,
+                            callee_end: callee.span.end,
+                            active_parameter: 0,
+                        });
+                    stack.push(call);
+                }
+                "[" | "{" => stack.push(Delimiter::Other(spelling.chars().next()?)),
+                ")" => {
+                    if matches!(
+                        stack.last(),
+                        Some(Delimiter::Call { .. } | Delimiter::Other('('))
+                    ) {
+                        stack.pop();
+                    }
+                }
+                "]" => {
+                    if matches!(stack.last(), Some(Delimiter::Other('['))) {
+                        stack.pop();
+                    }
+                }
+                "}" => {
+                    if matches!(stack.last(), Some(Delimiter::Other('{'))) {
+                        stack.pop();
+                    }
+                }
+                "," => {
+                    if let Some(Delimiter::Call {
+                        active_parameter, ..
+                    }) = stack.last_mut()
+                    {
+                        *active_parameter += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        previous = Some(token);
+    }
+    let (callee_start, callee_end, active_parameter) = stack.iter().rev().find_map(|frame| {
+        let Delimiter::Call {
+            callee_start,
+            callee_end,
+            active_parameter,
+        } = frame
+        else {
+            return None;
+        };
+        Some((*callee_start, *callee_end, *active_parameter))
+    })?;
+    let occurrence = analysis.occurrences.iter().find(|occurrence| {
+        occurrence.file == path
+            && occurrence.start_byte == callee_start
+            && occurrence.end_byte == callee_end
+    })?;
+    let declaration = analysis.declaration(&occurrence.identity)?;
+    if declaration.kind != DeclarationKind::Callable {
+        return None;
+    }
+    let signature = declaration.signature.as_ref()?;
+    let parameters = signature_parameters(signature);
+    let active_parameter = if parameters.is_empty() {
+        0
+    } else {
+        active_parameter.min(parameters.len() - 1)
+    };
+    let parameter_payload = parameters
+        .iter()
+        .map(|label| json!({"label": label}))
+        .collect::<Vec<_>>();
+    Some(json!({
+        "signatures": [{
+            "label": signature,
+            "documentation": declaration.docs,
+            "parameters": parameter_payload,
+        }],
+        "activeSignature": 0,
+        "activeParameter": active_parameter,
+    }))
+}
+
+fn signature_parameters(signature: &str) -> Vec<String> {
+    let Some(open) = signature.find('(') else {
+        return Vec::new();
+    };
+    let mut depth = 0usize;
+    let mut start = open + 1;
+    let mut parameters = Vec::new();
+    for (relative, character) in signature[open + 1..].char_indices() {
+        let index = open + 1 + relative;
+        match character {
+            '(' | '[' | '{' | '<' => depth += 1,
+            ')' if depth == 0 => {
+                let parameter = signature[start..index].trim();
+                if !parameter.is_empty() {
+                    parameters.push(parameter.to_string());
+                }
+                break;
+            }
+            ')' | ']' | '}' | '>' => depth = depth.saturating_sub(1),
+            ',' if depth == 0 => {
+                let parameter = signature[start..index].trim();
+                if !parameter.is_empty() {
+                    parameters.push(parameter.to_string());
+                }
+                start = index + character.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    parameters
+}
+
+fn semantic_tokens(analysis: &analysis::Analysis, path: &std::path::Path, text: &str) -> Value {
+    let mut spans = std::collections::BTreeMap::<(usize, usize), u32>::new();
+    if let Ok(tokens) = lex_lossless(text) {
+        for token in tokens {
+            let token_type = match token.kind {
+                LosslessKind::LineComment | LosslessKind::BlockComment => Some(8),
+                LosslessKind::String
+                | LosslessKind::Character
+                | LosslessKind::ByteString
+                | LosslessKind::ByteCharacter => Some(9),
+                LosslessKind::Number => Some(10),
+                LosslessKind::Identifier if is_keyword(token.text(text)) => Some(7),
+                LosslessKind::Punctuation if is_operator(token.text(text)) => Some(11),
+                _ => None,
+            };
+            if let Some(token_type) = token_type {
+                insert_single_line_spans(
+                    &mut spans,
+                    text,
+                    token.span.start,
+                    token.span.end,
+                    token_type,
+                );
+            }
+        }
+    }
+    for occurrence in analysis
+        .occurrences
+        .iter()
+        .filter(|occurrence| occurrence.file == path)
+    {
+        let Some(declaration) = analysis.declaration(&occurrence.identity) else {
+            continue;
+        };
+        let Some(spelling) = text.get(occurrence.start_byte..occurrence.end_byte) else {
+            continue;
+        };
+        if declaration.name.rsplit("::").next() != Some(spelling) {
+            continue;
+        }
+        let token_type = match declaration.kind {
+            DeclarationKind::Callable => 6,
+            DeclarationKind::Struct => 3,
+            DeclarationKind::Enum => 1,
+            DeclarationKind::Type => 0,
+            DeclarationKind::Effect => 5,
+            DeclarationKind::Trait | DeclarationKind::Impl => 2,
+            DeclarationKind::Global => 4,
+            DeclarationKind::Fixity => 11,
+        };
+        spans.insert((occurrence.start_byte, occurrence.end_byte), token_type);
+    }
+
+    let index = LineIndex::new(text);
+    let mut data = Vec::<u32>::new();
+    let mut previous_line = 0;
+    let mut previous_start = 0;
+    for ((start, end), token_type) in spans {
+        if start >= end || end > text.len() {
+            continue;
+        }
+        let (line, start_character) = index.position(text, start);
+        let (end_line, end_character) = index.position(text, end);
+        if line != end_line || end_character <= start_character {
+            continue;
+        }
+        let delta_line = line - previous_line;
+        let delta_start = if delta_line == 0 {
+            start_character - previous_start
+        } else {
+            start_character
+        };
+        data.extend([
+            delta_line,
+            delta_start,
+            end_character - start_character,
+            token_type,
+            0,
+        ]);
+        previous_line = line;
+        previous_start = start_character;
+    }
+    json!({"data": data})
+}
+
+fn insert_single_line_spans(
+    spans: &mut std::collections::BTreeMap<(usize, usize), u32>,
+    text: &str,
+    start: usize,
+    end: usize,
+    token_type: u32,
+) {
+    let mut line_start = start;
+    for (relative, character) in text[start..end].char_indices() {
+        if character == '\n' {
+            let line_end = start + relative;
+            if line_start < line_end {
+                spans.insert((line_start, line_end), token_type);
+            }
+            line_start = line_end + 1;
+        }
+    }
+    if line_start < end {
+        spans.insert((line_start, end), token_type);
+    }
+}
+
+fn is_keyword(spelling: &str) -> bool {
+    matches!(
+        spelling,
+        "let"
+            | "struct"
+            | "enum"
+            | "trait"
+            | "impl"
+            | "effect"
+            | "where"
+            | "handle"
+            | "perform"
+            | "resume"
+            | "cancel"
+            | "tail"
+            | "label"
+            | "leave"
+            | "is"
+            | "type"
+            | "infix"
+            | "infixl"
+            | "infixr"
+            | "prefix"
+    )
+}
+
+fn is_operator(spelling: &str) -> bool {
+    !matches!(
+        spelling,
+        "(" | ")" | "[" | "]" | "{" | "}" | "," | ";" | ":" | "." | "::"
+    )
+}
+
+fn hover_markdown(declaration: &SemanticDeclaration, std: bool) -> Value {
     let mut markdown = String::new();
     if let Some(signature) = &declaration.signature {
         markdown.push_str(&format!("```grandiose\n{signature}\n```\n"));
@@ -454,13 +981,11 @@ fn word_at(text: &str, offset: usize) -> Option<&str> {
     (start < end).then(|| &text[start..end])
 }
 
-fn line_range(index: &LineIndex, text: &str, line_1based: usize) -> Value {
-    let line = line_1based.saturating_sub(1) as u32;
-    let start = index.offset(text, line, 0);
-    let end = text[start..].find('\n').map(|n| start + n).unwrap_or(text.len());
-    let (end_line, end_col) = index.position(text, end);
+fn byte_range(index: &LineIndex, text: &str, start: usize, end: usize) -> Value {
+    let (start_line, start_col) = index.position(text, start.min(text.len()));
+    let (end_line, end_col) = index.position(text, end.min(text.len()));
     json!({
-        "start": {"line": line, "character": 0},
+        "start": {"line": start_line, "character": start_col},
         "end": {"line": end_line, "character": end_col},
     })
 }
@@ -470,10 +995,11 @@ fn symbol_kind(kind: DeclarationKind) -> u32 {
         DeclarationKind::Callable => 12, // Function
         DeclarationKind::Struct => 23,
         DeclarationKind::Enum => 10,
-        DeclarationKind::Type => 5,      // Class (alias)
-        DeclarationKind::Effect => 24,   // Event
-        DeclarationKind::Trait => 11,    // Interface
-        DeclarationKind::Global => 14,   // Constant
+        DeclarationKind::Type => 5,    // Class (alias)
+        DeclarationKind::Effect => 24, // Event
+        DeclarationKind::Trait => 11,  // Interface
+        DeclarationKind::Impl => 11,   // Interface implementation
+        DeclarationKind::Global => 14, // Constant
         DeclarationKind::Fixity => 24,
     }
 }
@@ -482,7 +1008,7 @@ fn completion_kind(kind: DeclarationKind) -> u32 {
     match kind {
         DeclarationKind::Callable => 3, // Function
         DeclarationKind::Struct | DeclarationKind::Enum | DeclarationKind::Type => 7, // Class
-        DeclarationKind::Effect | DeclarationKind::Trait => 8, // Interface
+        DeclarationKind::Effect | DeclarationKind::Trait | DeclarationKind::Impl => 8, // Interface
         DeclarationKind::Global => 21,  // Constant
         DeclarationKind::Fixity => 24,  // Operator
     }
@@ -496,6 +1022,7 @@ fn kind_name(kind: DeclarationKind) -> &'static str {
         DeclarationKind::Type => "type alias",
         DeclarationKind::Effect => "effect",
         DeclarationKind::Trait => "trait",
+        DeclarationKind::Impl => "impl",
         DeclarationKind::Global => "global",
         DeclarationKind::Fixity => "fixity",
     }

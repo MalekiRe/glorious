@@ -37,7 +37,9 @@ pub struct ResolveOptions {
 
 impl Resolution {
     pub fn root(&self) -> &ResolvedPackage {
-        self.packages.last().expect("resolution always contains the root package")
+        self.packages
+            .last()
+            .expect("resolution always contains the root package")
     }
 
     /// Name-sorted so it compares stably against a loaded lockfile.
@@ -55,7 +57,10 @@ impl Resolution {
             })
             .collect();
         packages.sort_by(|a, b| a.name.cmp(&b.name));
-        Lockfile { version: 1, packages }
+        Lockfile {
+            version: 1,
+            packages,
+        }
     }
 }
 
@@ -83,8 +88,16 @@ pub fn resolve(
         order: Vec::new(),
         vendor_dir: root_dir.join("vendor"),
     };
-    resolver.visit(root_manifest.project.name.clone(), root_dir.to_path_buf(), "root".to_string(), None, None)?;
-    Ok(Resolution { packages: resolver.order })
+    resolver.visit(
+        root_manifest.project.name.clone(),
+        root_dir.to_path_buf(),
+        "root".to_string(),
+        None,
+        None,
+    )?;
+    Ok(Resolution {
+        packages: resolver.order,
+    })
 }
 
 impl Resolver<'_> {
@@ -106,7 +119,10 @@ impl Resolver<'_> {
             return Ok(());
         }
         if self.in_progress.contains(&name) {
-            bail!("dependency cycle: {} -> {name}", self.in_progress.join(" -> "));
+            bail!(
+                "dependency cycle: {} -> {name}",
+                self.in_progress.join(" -> ")
+            );
         }
         self.in_progress.push(name.clone());
 
@@ -121,13 +137,22 @@ impl Resolver<'_> {
         let mut deps = Vec::new();
         for (dep_name, dep) in manifest.dependencies()? {
             deps.push(dep_name.clone());
-            let (dep_root, dep_source, dep_commit, dep_hash) = self.locate(&dep_name, &dep, &root)?;
+            let (dep_root, dep_source, dep_commit, dep_hash) =
+                self.locate(&dep_name, &dep, &root)?;
             self.visit(dep_name, dep_root, dep_source, dep_commit, dep_hash)?;
         }
 
         self.in_progress.pop();
         self.resolved.insert(name.clone(), source.clone());
-        self.order.push(ResolvedPackage { name, root, manifest, source, commit, content_hash, deps });
+        self.order.push(ResolvedPackage {
+            name,
+            root,
+            manifest,
+            source,
+            commit,
+            content_hash,
+            deps,
+        });
         Ok(())
     }
 
@@ -161,9 +186,9 @@ impl Resolver<'_> {
         match dep {
             Dependency::Path { path } => {
                 let root = base.join(path);
-                let root = root
-                    .canonicalize()
-                    .with_context(|| format!("path dependency `{name}` not found at {}", root.display()))?;
+                let root = root.canonicalize().with_context(|| {
+                    format!("path dependency `{name}` not found at {}", root.display())
+                })?;
                 Ok((root, dep.source_id(base), None, None))
             }
             Dependency::Git { url, reference } => {
@@ -182,7 +207,9 @@ impl Resolver<'_> {
         source: &str,
     ) -> Result<(PathBuf, String, String)> {
         let cache = cache_root()?;
-        let repo_id = &blake3_hex(url.as_bytes())[..16];
+        // Use the full URL digest: cache identity must not depend on a short
+        // hash prefix when repositories may contain executable build input.
+        let repo_id = blake3_hex(url.as_bytes());
         let bare = cache.join("git-db").join(format!("{repo_id}.git"));
         let locked = self.lock.and_then(|l| l.find(name, source));
         let wants_update = match &self.options.update {
@@ -197,31 +224,85 @@ impl Resolver<'_> {
                 .with_context(|| format!("lock entry for `{name}` is missing a commit"))?,
             _ => {
                 if self.options.locked {
-                    bail!("`{name}` is not pinned in {} and GRAND_LOCKED is set", crate::lock::LOCK_NAME);
+                    bail!(
+                        "`{name}` is not pinned in {} and GRAND_LOCKED is set",
+                        crate::lock::LOCK_NAME
+                    );
                 }
                 self.resolve_reference(&bare, url, reference, wants_update)
-                    .with_context(|| format!("resolving git dependency `{name}` ({url}, {})", reference.describe()))?
+                    .with_context(|| {
+                        format!(
+                            "resolving git dependency `{name}` ({url}, {})",
+                            reference.describe()
+                        )
+                    })?
             }
         };
 
-        let checkout = cache.join("checkouts").join(repo_id).join(&commit);
+        if !matches!(commit.len(), 40 | 64) || !commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+        {
+            bail!("invalid pinned commit for `{name}`: expected a full hexadecimal object id");
+        }
+
+        let checkout = cache.join("checkouts").join(&repo_id).join(&commit);
         if !checkout.join(MANIFEST_NAME).is_file() {
             self.ensure_bare(&bare, url)?;
-            if git(&["cat-file", "-e", &format!("{commit}^{{commit}}")], Some(&bare)).is_err() {
+            if git(
+                &["cat-file", "-e", &format!("{commit}^{{commit}}")],
+                Some(&bare),
+            )
+            .is_err()
+            {
                 self.fetch_bare(&bare, url)?;
             }
             let staging = checkout.with_extension("part");
             let _ = std::fs::remove_dir_all(&staging);
             std::fs::create_dir_all(staging.parent().unwrap())?;
             git(
-                &["clone", "--shared", "--no-checkout", bare.to_str().unwrap(), staging.to_str().unwrap()],
+                &[
+                    "clone",
+                    "--shared",
+                    "--no-checkout",
+                    bare.to_str().unwrap(),
+                    staging.to_str().unwrap(),
+                ],
                 None,
             )?;
             git(&["checkout", "--detach", &commit], Some(&staging))?;
             std::fs::rename(&staging, &checkout).context("moving checkout into place")?;
             if !checkout.join(MANIFEST_NAME).is_file() {
-                bail!("git dependency `{name}` ({url}@{commit}) has no {MANIFEST_NAME} at its root");
+                bail!(
+                    "git dependency `{name}` ({url}@{commit}) has no {MANIFEST_NAME} at its root"
+                );
             }
+        }
+
+        let actual_commit = git(&["rev-parse", "--verify", "HEAD^{commit}"], Some(&checkout))
+            .with_context(|| format!("cached checkout for `{name}` is not a valid git worktree"))?;
+        if actual_commit != commit {
+            bail!(
+                "cached checkout for `{name}` has the wrong commit:\n  expected: {commit}\n  actual:   {actual_commit}\n\
+                 run `grand clean --cache` and retry"
+            );
+        }
+        if git(&["diff", "--quiet", "HEAD", "--"], Some(&checkout)).is_err() {
+            bail!(
+                "cached checkout for `{name}` contains modified tracked files; run `grand clean --cache` and retry"
+            );
+        }
+        let untracked = git(&["ls-files", "--others", "-z"], Some(&checkout))?;
+        if untracked
+            .split('\0')
+            .filter(|path| !path.is_empty())
+            .any(|path| {
+                let path = Path::new(path);
+                crate::util::is_source_path(path)
+                    || path.file_name().is_some_and(|file| file == MANIFEST_NAME)
+            })
+        {
+            bail!(
+                "cached checkout for `{name}` contains untracked package inputs; run `grand clean --cache` and retry"
+            );
         }
 
         let hash = hash_package_dir(&checkout)?;
@@ -253,7 +334,13 @@ impl Resolver<'_> {
             bail!("`{url}` needs a fetch and GRAND_OFFLINE is set");
         }
         git(
-            &["fetch", "--force", url, "+refs/heads/*:refs/heads/*", "+refs/tags/*:refs/tags/*"],
+            &[
+                "fetch",
+                "--force",
+                url,
+                "+refs/heads/*:refs/heads/*",
+                "+refs/tags/*:refs/tags/*",
+            ],
             Some(bare),
         )?;
         Ok(())

@@ -4,13 +4,13 @@ use std::path::{Path, PathBuf};
 use anyhow::{bail, Context, Result};
 
 use crate::bundle::{assemble, input_files, package_sources};
-use crate::compiler::{discover_runtime, Compiler};
+use crate::compiler::{discover_runtime, discover_vm, Compiler};
 use crate::contract::{Declaration, DeclarationKind, Diagnostic, Fix, Severity};
 use crate::lock::{Lockfile, LOCK_NAME};
 use crate::manifest::{Manifest, MANIFEST_NAME};
 use crate::resolve::{resolve, Resolution, ResolveOptions};
 use crate::target::{materialize, Artifact, Target};
-use crate::util::{copy_dir, valid_package_name};
+use crate::util::{copy_dir, is_source_path, valid_package_name};
 
 pub struct Project {
     pub root: PathBuf,
@@ -31,9 +31,12 @@ impl Project {
     pub fn locate() -> Result<Project> {
         let cwd = std::env::current_dir()?;
         let select = SELECTED_PACKAGE.get().and_then(|s| s.as_deref());
-        let (root, manifest, lock_root) =
-            crate::manifest::find_project_in_workspace(&cwd, select)?;
-        Ok(Project { root, manifest, lock_root })
+        let (root, manifest, lock_root) = crate::manifest::find_project_in_workspace(&cwd, select)?;
+        Ok(Project {
+            root,
+            manifest,
+            lock_root,
+        })
     }
 
     pub fn build_dir(&self) -> PathBuf {
@@ -56,9 +59,17 @@ pub fn load_and_resolve(update: Option<Vec<String>>) -> Result<(Project, Resolut
         update,
         offline: env_flag("GRAND_OFFLINE"),
     };
-    let resolution = resolve(&project.root, &project.manifest, previous.as_ref(), &options)?;
+    let resolution = resolve(
+        &project.root,
+        &project.manifest,
+        previous.as_ref(),
+        &options,
+    )?;
     let fresh = resolution.to_lockfile();
-    let changed = previous.as_ref().map(|p| p.packages != fresh.packages).unwrap_or(true);
+    let changed = previous
+        .as_ref()
+        .map(|p| p.packages != fresh.packages)
+        .unwrap_or(true);
     if changed {
         if options.locked {
             bail!("{LOCK_NAME} is out of date and GRAND_LOCKED is set; run `grand lock` locally");
@@ -152,6 +163,9 @@ pub struct CompileOptions<'a> {
     /// Optimization level, forwarded as `-O<n>` to contract-aware compilers
     /// (legacy compilers have no such flag; it is ignored there).
     pub opt: Option<u8>,
+    /// Identity of the selected execution backend, when artifact emission and
+    /// execution must be negotiated as one atomic toolchain.
+    pub runtime_identity: Option<&'a str>,
 }
 
 /// Compile the resolved project. `entry` substitutes the root entry file
@@ -167,24 +181,49 @@ fn compile(
     opts: CompileOptions,
     cli_lints: &[(String, LintLevel)],
 ) -> Result<Compiled> {
-    let CompileOptions { entry, stem, want_ir, quiet, opt } = opts;
+    let CompileOptions {
+        entry,
+        stem,
+        want_ir,
+        quiet,
+        opt,
+        runtime_identity,
+    } = opts;
     macro_rules! progress {
         ($($arg:tt)*) => { if !quiet { eprintln!($($arg)*); } };
     }
     let lints = Lints::new(&project.manifest, cli_lints)?;
     if let Some(version) = &compiler.caps.grc {
-        progress!("      Using grc {version} (contract {})", compiler.caps.contract);
+        progress!(
+            "      Using grc {version} (contract {})",
+            compiler.caps.contract
+        );
     }
     let files = input_files(resolution, entry)?;
     let mut diagnostics = preflight(compiler, &files)?;
-    progress!("  Collected {} file(s), {} package(s)", files.len(), resolution.packages.len());
+    progress!(
+        "  Collected {} file(s), {} package(s)",
+        files.len(),
+        resolution.packages.len()
+    );
 
     let build_dir = project.build_dir();
     std::fs::create_dir_all(&build_dir)?;
-    let ir_path = build_dir.join(format!("{stem}.ll"));
-    let output = (want_ir || !compiler.caps.has_phase("check")).then_some(ir_path);
+    let extension = if compiler.emits_bytecode() {
+        "grbc"
+    } else {
+        "ll"
+    };
+    let compiler_output = build_dir.join(format!("{stem}.{extension}"));
+    let output = (want_ir || !compiler.caps.has_phase("check")).then_some(compiler_output);
     let (inputs, bundle) = if compiler.caps.multi_file {
-        (files.iter().map(|(_, file)| file.clone()).collect::<Vec<_>>(), None)
+        (
+            files
+                .iter()
+                .map(|(_, file)| file.clone())
+                .collect::<Vec<_>>(),
+            None,
+        )
     } else {
         let bundle = assemble(&files)?;
         let path = bundle.write(&build_dir, stem)?;
@@ -198,7 +237,9 @@ fn compile(
     let fingerprint = {
         let mut hasher = blake3::Hasher::new();
         match &bundle {
-            Some(bundle) => { hasher.update(bundle.text.as_bytes()); }
+            Some(bundle) => {
+                hasher.update(bundle.text.as_bytes());
+            }
             None => {
                 for input in &inputs {
                     hasher.update(input.to_string_lossy().as_bytes());
@@ -207,6 +248,9 @@ fn compile(
             }
         }
         hasher.update(compiler.identity().as_bytes());
+        if let Some(identity) = runtime_identity {
+            hasher.update(identity.as_bytes());
+        }
         hasher.update(&[u8::from(output.is_some()), opt.unwrap_or(u8::MAX)]);
         hasher.finalize().to_hex().to_string()
     };
@@ -223,7 +267,12 @@ fn compile(
         }
         let success = diagnostics.iter().all(|d| d.severity != Severity::Error);
         progress!("      Fresh {stem}");
-        return Ok(Compiled { ir: output, diagnostics, passthrough: String::new(), success });
+        return Ok(Compiled {
+            ir: output,
+            diagnostics,
+            passthrough: String::new(),
+            success,
+        });
     }
 
     progress!("  Compiling {}", project.manifest.project.name);
@@ -258,7 +307,12 @@ fn compile(
             build_dir.display()
         );
     }
-    Ok(Compiled { ir: output, diagnostics, passthrough: report.passthrough, success })
+    Ok(Compiled {
+        ir: output,
+        diagnostics,
+        passthrough: report.passthrough,
+        success,
+    })
 }
 
 fn compile_ok(
@@ -311,7 +365,10 @@ fn preflight(compiler: &Compiler, files: &[(String, PathBuf)]) -> Result<Vec<Dia
             }
         };
         for declaration in declarations {
-            if declaration.kind == DeclarationKind::Fixity {
+            if matches!(
+                declaration.kind,
+                DeclarationKind::Fixity | DeclarationKind::Impl
+            ) {
                 continue;
             }
             if std_declarations.iter().any(|s| s.name == declaration.name) {
@@ -324,7 +381,11 @@ fn preflight(compiler: &Compiler, files: &[(String, PathBuf)]) -> Result<Vec<Dia
             }
             match seen.get(&declaration.name) {
                 Some((other_package, other)) if other_package != package => {
-                    let severity = if authoritative { Severity::Error } else { Severity::Warning };
+                    let severity = if authoritative {
+                        Severity::Error
+                    } else {
+                        Severity::Warning
+                    };
                     findings.push(diagnostic(
                         severity,
                         "GRAND001",
@@ -332,7 +393,10 @@ fn preflight(compiler: &Compiler, files: &[(String, PathBuf)]) -> Result<Vec<Dia
                             "`{}` is defined by both `{other_package}` and `{package}`",
                             declaration.name
                         ),
-                        &[(other, "first defined here"), (&declaration, "also defined here")],
+                        &[
+                            (other, "first defined here"),
+                            (&declaration, "also defined here"),
+                        ],
                     ));
                 }
                 Some(_) => {} // same-package duplicates are the compiler's to report
@@ -372,24 +436,73 @@ fn diagnostic(
     }
 }
 
+struct BuildOptions<'a> {
+    target: Target,
+    entry: Option<&'a Path>,
+    stem: &'a str,
+    opt: Option<u8>,
+    cli_lints: &'a [(String, LintLevel)],
+}
+
 fn build_artifact(
     project: &Project,
     resolution: &Resolution,
     compiler: &Compiler,
-    target: Target,
-    entry: Option<&Path>,
-    stem: &str,
-    opt: Option<u8>,
-    cli_lints: &[(String, LintLevel)],
+    options: BuildOptions<'_>,
 ) -> Result<Artifact> {
-    if let Some(minimum) = project.manifest.backend.as_ref().and_then(|b| b.minimum_version) {
-        crate::target::check_toolchain(minimum)?;
+    let BuildOptions {
+        target,
+        entry,
+        stem,
+        opt,
+        cli_lints,
+    } = options;
+    let vm = compiler
+        .emits_bytecode()
+        .then(|| discover_vm(&project.root))
+        .transpose()?;
+    if let Some(vm) = &vm {
+        compiler.ensure_seed_compatible(vm)?;
     }
-    let opts = CompileOptions { entry, stem, want_ir: true, quiet: false, opt };
-    let ir = compile_ok(project, resolution, compiler, opts, cli_lints)?
+    if !compiler.emits_bytecode() {
+        if let Some(minimum) = project
+            .manifest
+            .backend
+            .as_ref()
+            .and_then(|b| b.minimum_version)
+        {
+            crate::target::check_toolchain(minimum)?;
+        }
+    }
+    let opts = CompileOptions {
+        entry,
+        stem,
+        want_ir: true,
+        quiet: false,
+        opt,
+        runtime_identity: vm.as_ref().map(|vm| vm.identity()),
+    };
+    let compiler_output = compile_ok(project, resolution, compiler, opts, cli_lints)?
         .expect("want_ir always yields an output path");
-    let runtime = discover_runtime(&project.root)?;
-    let artifact = materialize(target, &ir, &runtime, &project.build_dir(), stem)?;
+    let artifact = if compiler.emits_bytecode() {
+        Artifact::bytecode(
+            target,
+            compiler_output,
+            vm.expect("bytecode compiler probes a VM before compilation")
+                .path()
+                .to_owned(),
+            compiler.seed_identity().map(str::to_owned),
+        )?
+    } else {
+        let runtime = discover_runtime(&project.root)?;
+        materialize(
+            target,
+            &compiler_output,
+            &runtime,
+            &project.build_dir(),
+            stem,
+        )?
+    };
     eprintln!("   Finished {} -> {}", stem, artifact.path().display());
     Ok(artifact)
 }
@@ -401,7 +514,18 @@ pub fn build(target: Target, opt: Option<u8>, cli_lints: &[(String, LintLevel)])
     let (project, resolution) = load_and_resolve(None)?;
     let compiler = Compiler::discover(&project.root)?;
     let stem = project.manifest.project.name.clone();
-    build_artifact(&project, &resolution, &compiler, target, None, &stem, opt, cli_lints)?;
+    build_artifact(
+        &project,
+        &resolution,
+        &compiler,
+        BuildOptions {
+            target,
+            entry: None,
+            stem: &stem,
+            opt,
+            cli_lints,
+        },
+    )?;
     Ok(())
 }
 
@@ -410,7 +534,14 @@ pub fn check(cli_lints: &[(String, LintLevel)]) -> Result<()> {
     let compiler = Compiler::discover(&project.root)?;
     // Uses `--phase check` when the compiler supports it; legacy compilers
     // compile to IR which is simply discarded.
-    let opts = CompileOptions { entry: None, stem: "check", want_ir: false, quiet: false, opt: None };
+    let opts = CompileOptions {
+        entry: None,
+        stem: "check",
+        want_ir: false,
+        quiet: false,
+        opt: None,
+        runtime_identity: None,
+    };
     compile_ok(&project, &resolution, &compiler, opts, cli_lints)?;
     eprintln!("    Checked {}", project.manifest.project.name);
     Ok(())
@@ -425,8 +556,18 @@ pub fn run(
     let (project, resolution) = load_and_resolve(None)?;
     let compiler = Compiler::discover(&project.root)?;
     let stem = project.manifest.project.name.clone();
-    let artifact =
-        build_artifact(&project, &resolution, &compiler, target, None, &stem, opt, cli_lints)?;
+    let artifact = build_artifact(
+        &project,
+        &resolution,
+        &compiler,
+        BuildOptions {
+            target,
+            entry: None,
+            stem: &stem,
+            opt,
+            cli_lints,
+        },
+    )?;
     artifact.execute(&arguments)
 }
 
@@ -436,7 +577,7 @@ fn discover_tests(dir: &Path, filter: Option<&str>) -> Result<Vec<PathBuf>> {
         for entry in walkdir::WalkDir::new(dir).sort_by_file_name() {
             let entry = entry?;
             let path = entry.path();
-            if !entry.file_type().is_file() || path.extension().is_none_or(|e| e != "gr") {
+            if !entry.file_type().is_file() || !is_source_path(path) {
                 continue;
             }
             let name = path.file_stem().unwrap_or_default().to_string_lossy();
@@ -448,9 +589,10 @@ fn discover_tests(dir: &Path, filter: Option<&str>) -> Result<Vec<PathBuf>> {
     Ok(tests)
 }
 
-/// Run tests. Each `tests/*.gr` is its own executable (package sources minus
+/// Run tests. Each `tests/*.glorious` (or legacy `.gr`) is its own executable
+/// (package sources minus
 /// the root entry + the test file providing `main`; exit 0 passes), built and
-/// run in parallel. `tests/compile-fail/*.gr` must FAIL to compile and their
+/// run in parallel. `tests/compile-fail/*.{glorious,gr}` must FAIL to compile and their
 /// rendered diagnostics must match a sibling `.stderr` golden file
 /// (`--bless` rewrites the goldens). `filter` selects tests by substring.
 pub fn test(
@@ -473,22 +615,36 @@ pub fn test(
 
     // Pre-build the shared runtime once: parallel materializations must not
     // race on compiling libgrandiose-runtime.so.
-    if !run_tests.is_empty() {
+    if !run_tests.is_empty() && !compiler.emits_bytecode() {
         let runtime = discover_runtime(&project.root)?;
         crate::target::ensure_runtime(&runtime, &project.build_dir())?;
     }
 
     let failures = std::sync::atomic::AtomicUsize::new(0);
-    let queue = std::sync::Mutex::new(run_tests.iter().cloned().collect::<Vec<_>>());
-    let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).min(8);
+    let queue = std::sync::Mutex::new(run_tests.to_vec());
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .min(8);
     std::thread::scope(|scope| {
         for _ in 0..workers.min(run_tests.len().max(1)) {
             scope.spawn(|| loop {
-                let Some(test) = queue.lock().unwrap().pop() else { break };
+                let Some(test) = queue.lock().unwrap().pop() else {
+                    break;
+                };
                 let name = test.file_stem().unwrap().to_string_lossy().to_string();
                 let stem = format!("test-{name}");
                 let outcome = build_artifact(
-                    &project, &resolution, &compiler, target, Some(&test), &stem, None, cli_lints,
+                    &project,
+                    &resolution,
+                    &compiler,
+                    BuildOptions {
+                        target,
+                        entry: Some(&test),
+                        stem: &stem,
+                        opt: None,
+                        cli_lints,
+                    },
                 )
                 .and_then(|artifact| artifact.execute(&[]));
                 match outcome {
@@ -510,7 +666,14 @@ pub fn test(
     for test in &fail_tests {
         let name = test.file_stem().unwrap().to_string_lossy();
         let stem = format!("cf-{name}");
-        let opts = CompileOptions { entry: Some(test), stem: &stem, want_ir: false, quiet: true, opt: None };
+        let opts = CompileOptions {
+            entry: Some(test),
+            stem: &stem,
+            want_ir: false,
+            quiet: true,
+            opt: None,
+            runtime_identity: None,
+        };
         let compiled = compile(&project, &resolution, &compiler, opts, cli_lints)?;
         if compiled.success {
             eprintln!("test compile-fail/{name} ... FAILED (compiled successfully)");
@@ -558,7 +721,14 @@ pub fn test(
 pub fn fix(cli_lints: &[(String, LintLevel)]) -> Result<()> {
     let (project, resolution) = load_and_resolve(None)?;
     let compiler = Compiler::discover(&project.root)?;
-    let opts = CompileOptions { entry: None, stem: "fix", want_ir: false, quiet: false, opt: None };
+    let opts = CompileOptions {
+        entry: None,
+        stem: "fix",
+        want_ir: false,
+        quiet: false,
+        opt: None,
+        runtime_identity: None,
+    };
     let compiled = compile(&project, &resolution, &compiler, opts, cli_lints)?;
     let mut by_file: BTreeMap<PathBuf, Vec<Fix>> = BTreeMap::new();
     for fix in compiled.diagnostics.iter().filter_map(|d| d.fix.clone()) {
@@ -566,11 +736,15 @@ pub fn fix(cli_lints: &[(String, LintLevel)]) -> Result<()> {
     }
     if by_file.is_empty() {
         eprintln!("nothing to fix");
-        return if compiled.success { Ok(()) } else { bail!("compilation failed") };
+        return if compiled.success {
+            Ok(())
+        } else {
+            bail!("compilation failed")
+        };
     }
     let mut applied = 0;
     for (file, mut fixes) in by_file {
-        fixes.sort_by(|a, b| b.start_byte.cmp(&a.start_byte));
+        fixes.sort_by_key(|fix| std::cmp::Reverse(fix.start_byte));
         let mut text = std::fs::read_to_string(&file)
             .with_context(|| format!("reading {}", file.display()))?;
         let mut previous_start = usize::MAX;
@@ -625,7 +799,10 @@ pub fn doc(open: bool) -> Result<()> {
         };
         html.push_str(&format!("<h1>{}</h1>\n", escape(&package.name)));
         for declaration in declarations {
-            if declaration.kind == DeclarationKind::Fixity {
+            if matches!(
+                declaration.kind,
+                DeclarationKind::Fixity | DeclarationKind::Impl
+            ) {
                 continue;
             }
             html.push_str(&format!(
@@ -645,7 +822,11 @@ pub fn doc(open: bool) -> Result<()> {
     std::fs::create_dir_all(&doc_dir)?;
     let index = doc_dir.join("index.html");
     std::fs::write(&index, html)?;
-    eprintln!(" Documented {} -> {}", project.manifest.project.name, index.display());
+    eprintln!(
+        " Documented {} -> {}",
+        project.manifest.project.name,
+        index.display()
+    );
     if open {
         let _ = std::process::Command::new("xdg-open").arg(&index).spawn();
     }
@@ -679,7 +860,7 @@ pub fn fmt(check: bool, paths: Vec<PathBuf>) -> Result<()> {
             }
             for entry in walkdir::WalkDir::new(&root).sort_by_file_name() {
                 let entry = entry?;
-                if entry.file_type().is_file() && entry.path().extension().is_some_and(|e| e == "gr") {
+                if entry.file_type().is_file() && is_source_path(entry.path()) {
                     files.push(entry.into_path());
                 }
             }
@@ -694,25 +875,50 @@ pub fn fmt(check: bool, paths: Vec<PathBuf>) -> Result<()> {
         paths
     };
 
+    let sources = files
+        .iter()
+        .map(|file| {
+            std::fs::read_to_string(file)
+                .with_context(|| format!("reading {}", file.display()))
+                .map(|source| (file.clone(), source))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    // Parse and lay out every file before writing any of them. A malformed
+    // member therefore refuses the whole operation transactionally, while
+    // every file sees the ordered package fixity/declaration context.
+    let mut rendered = Vec::with_capacity(sources.len());
+    for (index, (file, source)) in sources.iter().enumerate() {
+        let context_sources = sources
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != index)
+            .map(|(_, (path, source))| (path.to_string_lossy().into_owned(), source.as_str()))
+            .collect::<Vec<_>>();
+        let borrowed_context = context_sources
+            .iter()
+            .map(|(path, source)| (path.as_str(), *source))
+            .collect::<Vec<_>>();
+        let formatted = grandfmt::format_with_context(
+            source,
+            grandfmt::Context {
+                sources: &borrowed_context,
+                ..grandfmt::Context::default()
+            },
+        )
+        .with_context(|| format!("refusing to format {}", file.display()))?;
+        rendered.push((file, source, formatted));
+    }
+
     let mut dirty = Vec::new();
-    for file in &files {
-        let source = std::fs::read_to_string(file)
-            .with_context(|| format!("reading {}", file.display()))?;
-        let formatted = match grandfmt::format(&source) {
-            Ok(formatted) => formatted,
-            Err(error) => {
-                eprintln!("warning: skipping {}: {error}", file.display());
-                continue;
-            }
-        };
-        if formatted != source {
+    for (file, source, formatted) in rendered {
+        if formatted != source.as_str() {
             if check {
                 eprintln!("would reformat {}", file.display());
             } else {
-                std::fs::write(file, formatted)?;
+                std::fs::write(file, &formatted)?;
                 eprintln!("  Formatted {}", file.display());
             }
-            dirty.push(file.clone());
+            dirty.push(file.to_path_buf());
         }
     }
     if check && !dirty.is_empty() {
@@ -734,7 +940,9 @@ pub fn fmt_stdin() -> Result<()> {
 }
 
 fn escape(text: &str) -> String {
-    text.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 pub fn new(name: &str) -> Result<()> {
@@ -771,13 +979,13 @@ fn scaffold(root: &Path, name: &str) -> Result<()> {
     std::fs::write(
         root.join(MANIFEST_NAME),
         format!(
-            "[project]\nname = \"{name}\"\nversion = \"0.1.0\"\nentry = \"src/main.gr\"\n\n\
-             [backend]\nkind = \"llvm\"\nminimum-version = 18\n"
+            "[project]\nname = \"{name}\"\nversion = \"0.1.0\"\nentry = \"src/main.glorious\"\n\n\
+             [backend]\nkind = \"vm\"\n"
         ),
     )?;
-    let main = root.join("src").join("main.gr");
+    let main = root.join("src").join("main.glorious");
     if !main.exists() {
-        std::fs::write(main, "main() -> i64 {\n    0\n}\n")?;
+        std::fs::write(main, "main() -> () {\n    ()\n}\n")?;
     }
     let gitignore = root.join(".gitignore");
     if !gitignore.exists() {
@@ -802,7 +1010,8 @@ pub fn add(spec: AddSpec) -> Result<()> {
     let project = Project::locate()?;
     let manifest_path = project.root.join(MANIFEST_NAME);
     let original = std::fs::read_to_string(&manifest_path)?;
-    let mut document: toml_edit::DocumentMut = original.parse().context("parsing grandiose.toml")?;
+    let mut document: toml_edit::DocumentMut =
+        original.parse().context("parsing grandiose.toml")?;
 
     let mut entry = toml_edit::InlineTable::new();
     let mut set = |key: &str, value: &Option<String>| {

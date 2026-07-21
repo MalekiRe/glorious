@@ -733,8 +733,10 @@ Arguments and result types are checked from the primitive ID.
 | `0x002c` | `float.neg` |
 | `0x002d` | `int.to_float` |
 | `0x002e` | `float.to_int_checked` |
+| `0x002f` | `float.to_bits` |
 | `0x0030` | `char.from_u32_checked` |
 | `0x0031` | `char.to_u32` |
+| `0x0032` | `float.from_bits` |
 | `0x0040` | `text.byte_len` |
 | `0x0041` | `text.concat` |
 | `0x0042` | `text.eq` |
@@ -774,7 +776,11 @@ conversion `(T)->U`. `float.to_int_checked` traps on NaN, infinity, or a value
 outside `U`; `int.to_float` and `float.convert` use IEEE round-to-nearest
 ties-to-even. Integer and float comparisons have `(T,T)->u32` and return exactly
 0 or 1, not a language Boolean; the standard library converts that discriminator
-to its result-based truth type.
+to its result-based truth type. `float.to_bits` is exactly `f32->u32` or
+`f64->u64`; `float.from_bits` is the inverse width pair. Every float-producing
+primitive and both bit conversions canonicalize every NaN to the positive quiet
+NaN (`0x7fc00000` or `0x7ff8000000000000`). Non-NaN bit patterns, including
+positive and negative zero, are preserved by the bit round trip.
 
 Character conversion has `u32->char` (trapping for a nonscalar) and `char->u32`.
 Text operations are `byte_len(Text)->usize`, `concat(Text,Text)->Text`,
@@ -938,6 +944,18 @@ Before assigning an unassigned ID, a change must update this document, add its
 feature bit, land VM decode/verify/execute support, and add a golden artifact.
 Only then may a compiler emit it. Released IDs are never deleted, and every
 released compiler seed remains in the newest VM's compatibility suite.
+
+The native bootstrap tools negotiate released-seed compatibility before a
+bytecode artifact is compiled, reused, or executed. `grc --capabilities`
+advertises a versioned identity whose inputs are the compiler and VM contract
+revisions, artifact major/minor, and supported feature mask; `grvm
+--capabilities` advertises a sorted set of identities it accepts. The build
+driver rejects partial metadata, protocol mismatches, or an unaccepted identity
+before consulting cache freshness, fingerprints the complete compiler/VM/seed
+tuple, and forwards the selected identity to `grvm run`, which checks it before
+loading the artifact. A pre-negotiation compiler and VM may interoperate only
+when both omit seed metadata. This deployment check does not add a field to the
+G1 bytecode container or weaken normal decoder/verifier compatibility checks.
 
 A bytecode extension is bootstrap-safe in this order:
 

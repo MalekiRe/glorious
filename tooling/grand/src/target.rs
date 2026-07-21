@@ -13,6 +13,9 @@ use crate::util::run_command;
 /// materialize/execute pair so the rest of grand is target-agnostic.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Target {
+    /// Select the G1 VM for `.grbc`, otherwise the legacy LLVM interpreter.
+    Auto,
+    Vm,
     Interp,
     Native,
 }
@@ -20,19 +23,30 @@ pub enum Target {
 impl Target {
     pub fn parse(name: &str) -> Result<Target> {
         match name {
+            "auto" => Ok(Target::Auto),
+            "vm" => Ok(Target::Vm),
             "interp" => Ok(Target::Interp),
             "native" => Ok(Target::Native),
-            other => bail!("unknown target `{other}` (expected `interp` or `native`)"),
+            other => {
+                bail!("unknown target `{other}` (expected `auto`, `vm`, `interp`, or `native`)")
+            }
         }
     }
 }
 
 pub struct Artifact {
-    target: Target,
-    /// Native: the executable. Interp: the `.bc` file.
+    runner: Runner,
+    /// VM: the `.grbc`; native: the executable; interp: the `.bc` file.
     payload: PathBuf,
-    /// Interp only: the runtime shared object for `--dlopen`.
-    runtime: Option<PathBuf>,
+}
+
+enum Runner {
+    Vm {
+        executable: PathBuf,
+        seed_identity: Option<String>,
+    },
+    Interp(PathBuf),
+    Native,
 }
 
 /// Turn textual IR into a runnable artifact inside `out_dir`.
@@ -45,7 +59,7 @@ pub fn materialize(
 ) -> Result<Artifact> {
     std::fs::create_dir_all(out_dir)?;
     match target {
-        Target::Interp => {
+        Target::Auto | Target::Interp => {
             let bitcode = out_dir.join(format!("{stem}.bc"));
             if needs_rebuild(&bitcode, ir)? {
                 let mut llvm_as = Command::new("llvm-as");
@@ -53,21 +67,54 @@ pub fn materialize(
                 run_command(llvm_as, "llvm-as")?;
             }
             let shared = ensure_runtime(runtime_c, out_dir)?;
-            Ok(Artifact { target, payload: bitcode, runtime: Some(shared) })
+            Ok(Artifact {
+                runner: Runner::Interp(shared),
+                payload: bitcode,
+            })
         }
         Target::Native => {
             let executable = out_dir.join(stem);
             if needs_rebuild(&executable, ir)? || needs_rebuild(&executable, runtime_c)? {
                 let mut clang = Command::new("clang");
-                clang.args(["-O2", "-o"]).arg(&executable).arg(ir).arg(runtime_c);
+                clang
+                    .args(["-O2", "-o"])
+                    .arg(&executable)
+                    .arg(ir)
+                    .arg(runtime_c);
                 run_command(clang, "clang (link)")?;
             }
-            Ok(Artifact { target, payload: executable, runtime: None })
+            Ok(Artifact {
+                runner: Runner::Native,
+                payload: executable,
+            })
+        }
+        Target::Vm => {
+            bail!("the selected compiler emitted LLVM IR; use `--target auto` or `interp`")
         }
     }
 }
 
 impl Artifact {
+    pub fn bytecode(
+        target: Target,
+        payload: PathBuf,
+        vm: PathBuf,
+        seed_identity: Option<String>,
+    ) -> Result<Self> {
+        match target {
+            Target::Auto | Target::Vm => Ok(Self {
+                runner: Runner::Vm {
+                    executable: vm,
+                    seed_identity,
+                },
+                payload,
+            }),
+            Target::Interp | Target::Native => {
+                bail!("the selected compiler emits G1 bytecode; use `--target auto` or `vm`")
+            }
+        }
+    }
+
     pub fn path(&self) -> &Path {
         &self.payload
     }
@@ -76,14 +123,29 @@ impl Artifact {
     /// generated code is untrusted until the toolchain settles) and return
     /// its exit code.
     pub fn execute(&self, arguments: &[String]) -> Result<i32> {
-        let mut command = match self.target {
-            Target::Interp => {
+        let mut command = match &self.runner {
+            Runner::Vm {
+                executable,
+                seed_identity,
+            } => {
+                let mut grvm = Command::new(executable);
+                grvm.arg("run");
+                if let Some(identity) = seed_identity {
+                    grvm.args(["--seed-identity", identity]);
+                }
+                grvm.arg(&self.payload);
+                if !arguments.is_empty() {
+                    grvm.arg("--");
+                }
+                grvm
+            }
+            Runner::Interp(runtime) => {
                 let mut lli = Command::new("lli");
-                let runtime = self.runtime.as_ref().expect("interp artifacts carry a runtime");
-                lli.arg(format!("--dlopen={}", runtime.display())).arg(&self.payload);
+                lli.arg(format!("--dlopen={}", runtime.display()))
+                    .arg(&self.payload);
                 lli
             }
-            Target::Native => Command::new(&self.payload),
+            Runner::Native => Command::new(&self.payload),
         };
         command.args(arguments);
         limit_address_space(&mut command, 4 << 30);
@@ -105,7 +167,10 @@ impl Artifact {
                             libc::SIGBUS => " (SIGBUS)",
                             _ => "",
                         };
-                        bail!("{} terminated by signal {signal}{name}", self.payload.display());
+                        bail!(
+                            "{} terminated by signal {signal}{name}",
+                            self.payload.display()
+                        );
                     }
                 }
                 bail!("{} terminated abnormally", self.payload.display())
@@ -123,7 +188,11 @@ pub fn check_toolchain(minimum: u64) -> Result<()> {
         let output = Command::new("clang").arg("--version").output().ok()?;
         let text = String::from_utf8_lossy(&output.stdout);
         let after = text.split("version ").nth(1)?;
-        after.split(|c: char| !c.is_ascii_digit()).next()?.parse().ok()
+        after
+            .split(|c: char| !c.is_ascii_digit())
+            .next()?
+            .parse()
+            .ok()
     });
     match major {
         Some(major) if *major < minimum => bail!(
@@ -131,7 +200,9 @@ pub fn check_toolchain(minimum: u64) -> Result<()> {
         ),
         Some(_) => Ok(()),
         None => {
-            eprintln!("warning: could not determine clang version to check minimum-version = {minimum}");
+            eprintln!(
+                "warning: could not determine clang version to check minimum-version = {minimum}"
+            );
             Ok(())
         }
     }
@@ -144,14 +215,19 @@ pub fn ensure_runtime(runtime_c: &Path, out_dir: &Path) -> Result<PathBuf> {
     let shared = out_dir.join("libgrandiose-runtime.so");
     if needs_rebuild(&shared, runtime_c)? {
         let mut clang = Command::new("clang");
-        clang.args(["-shared", "-fPIC", "-O2", "-o"]).arg(&shared).arg(runtime_c);
+        clang
+            .args(["-shared", "-fPIC", "-O2", "-o"])
+            .arg(&shared)
+            .arg(runtime_c);
         run_command(clang, "clang (runtime)")?;
     }
     Ok(shared)
 }
 
 fn needs_rebuild(artifact: &Path, source: &Path) -> Result<bool> {
-    let Ok(artifact_meta) = artifact.metadata() else { return Ok(true) };
+    let Ok(artifact_meta) = artifact.metadata() else {
+        return Ok(true);
+    };
     Ok(source.metadata()?.modified()? > artifact_meta.modified()?)
 }
 
@@ -161,7 +237,10 @@ fn limit_address_space(command: &mut Command, bytes: u64) {
     // SAFETY: setrlimit is async-signal-safe; nothing else runs in the child yet.
     unsafe {
         command.pre_exec(move || {
-            let limit = libc::rlimit { rlim_cur: bytes, rlim_max: bytes };
+            let limit = libc::rlimit {
+                rlim_cur: bytes,
+                rlim_max: bytes,
+            };
             if libc::setrlimit(libc::RLIMIT_AS, &limit) != 0 {
                 return Err(std::io::Error::last_os_error());
             }

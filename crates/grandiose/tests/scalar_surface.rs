@@ -37,6 +37,7 @@ fn source() -> String {
             "wrap_add_{ty}(a: {ty}, b: {ty}) -> {ty} {{ wrapping_add(move a, move b) }}\n\
              wrap_sub_{ty}(a: {ty}, b: {ty}) -> {ty} {{ wrapping_sub(move a, move b) }}\n\
              wrap_mul_{ty}(a: {ty}, b: {ty}) -> {ty} {{ wrapping_mul(move a, move b) }}\n\
+             wrap_neg_{ty}(a: {ty}) -> {ty} {{ wrapping_neg(move a) }}\n\
              and_{ty}(a: {ty}, b: {ty}) -> {ty} {{ bit_and(move a, move b) }}\n\
              or_{ty}(a: {ty}, b: {ty}) -> {ty} {{ bit_or(move a, move b) }}\n\
              xor_{ty}(a: {ty}, b: {ty}) -> {ty} {{ bit_xor(move a, move b) }}\n\
@@ -137,6 +138,11 @@ fn frozen_integer_surface_executes_all_widths_at_o0_through_o3() {
                 "{level:?} wrapping mul {ty}"
             );
             assert_eq!(
+                run("wrap_neg", vec![value(ty, 1)]),
+                value(ty, mask),
+                "{level:?} wrapping negation {ty}"
+            );
+            assert_eq!(
                 run("and", vec![value(ty, 0xaa), value(ty, 0x0f)]),
                 value(ty, 0x0a)
             );
@@ -203,7 +209,7 @@ fn frozen_integer_surface_executes_all_widths_at_o0_through_o3() {
 fn recovery_interpreter_uses_the_same_typed_wrapping_and_shift_rules() {
     for ty in INTEGER_TYPES {
         let source = format!(
-            "typed(value: {ty}) -> {ty} {{ wrapping_add(bit_not(move value), 1) }}\n\
+            "typed(value: {ty}) -> {ty} {{ wrapping_neg(wrapping_neg(move value)) }}\n\
              main() -> {ty} {{ typed(0) }}"
         );
         let result = run_source("scalar-recovery.gr", &source, vec![], &mut NoHost).unwrap();

@@ -48,6 +48,7 @@ pub fn parse_recovering(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         reference_lifetimes: Vec::new(),
         effect_paths: Vec::new(),
         type_const_arguments: Vec::new(),
+        numeric_literals: Vec::new(),
     }
     .program(diagnostics)
 }
@@ -212,6 +213,7 @@ struct Parser {
     reference_lifetimes: Vec<ReferenceLifetimeSyntax>,
     effect_paths: Vec<EffectPathSyntax>,
     type_const_arguments: Vec<crate::ast::TypeConstApplicationSyntax>,
+    numeric_literals: Vec<crate::ast::NumericLiteralSyntax>,
 }
 
 impl Parser {
@@ -240,6 +242,7 @@ impl Parser {
             reference_lifetimes: self.reference_lifetimes,
             effect_paths: self.effect_paths,
             type_const_arguments: self.type_const_arguments,
+            numeric_literals: self.numeric_literals,
         };
         (program, diagnostics)
     }
@@ -2149,14 +2152,22 @@ impl Parser {
         let token = self.bump().clone();
         let mut expr = match token.kind {
             TokenKind::Number(literal) => {
+                self.numeric_literals
+                    .push(crate::ast::NumericLiteralSyntax {
+                        span: token.span,
+                        literal: literal.clone(),
+                    });
                 if literal.is_float() {
                     Expr {
-                        kind: ExprKind::Float(literal.as_f64()),
+                        kind: ExprKind::Float(0.0),
                         span: token.span,
                     }
                 } else {
                     Expr {
-                        kind: ExprKind::Int(literal.as_i64(token.span)?),
+                        // This payload exists only for legacy AST consumers.
+                        // Semantic consumers select a width from the exact
+                        // `numeric_literals` spelling recorded above.
+                        kind: ExprKind::Int(literal.as_i64(token.span).unwrap_or(0)),
                         span: token.span,
                     }
                 }
@@ -2587,20 +2598,29 @@ impl Parser {
                         kind: PatternKind::Variant {
                             path,
                             fields: Vec::new(),
+                            rest: None,
                         },
                         span: token.span.join(end),
                     }
                 }
             }
             TokenKind::Number(literal) => {
+                self.numeric_literals
+                    .push(crate::ast::NumericLiteralSyntax {
+                        span: token.span,
+                        literal: literal.clone(),
+                    });
                 if literal.is_float() {
                     Pattern {
-                        kind: PatternKind::Float(literal.as_f64()),
+                        kind: PatternKind::Float(0.0),
                         span: token.span,
                     }
                 } else {
                     Pattern {
-                        kind: PatternKind::Int(literal.as_i64(token.span)?),
+                        // Pattern typing likewise consumes the exact side-table
+                        // entry; never make this compatibility shadow the
+                        // source-range authority.
+                        kind: PatternKind::Int(literal.as_i64(token.span).unwrap_or(0)),
                         span: token.span,
                     }
                 }
@@ -2632,14 +2652,25 @@ impl Parser {
         };
         if matches!(pattern.kind, PatternKind::Variant { .. }) && self.eat(&TokenKind::LParen) {
             let mut fields = Vec::new();
+            let mut rest: Option<PatternRest> = None;
             while !self.at(&TokenKind::RParen) {
                 if self.at(&TokenKind::DotDot) {
-                    return Err(self.error(
-                        "unsupported variant remainder",
-                        "`..` remainders are not supported in variant payload patterns; spell every payload",
-                    ));
+                    let span = self.bump().span;
+                    if let Some(existing) = rest {
+                        return Err(Diagnostic::error(
+                            "duplicate pattern remainder",
+                            "a variant payload pattern may contain only one `..` remainder",
+                            span,
+                        )
+                        .with_related(existing.span, "the first remainder is here"));
+                    }
+                    rest = Some(PatternRest {
+                        before: fields.len(),
+                        span,
+                    });
+                } else {
+                    fields.push(self.pattern()?);
                 }
-                fields.push(self.pattern()?);
                 if !self.eat(&TokenKind::Comma) {
                     break;
                 }
@@ -2651,7 +2682,7 @@ impl Parser {
                 unreachable!()
             };
             pattern = Pattern {
-                kind: PatternKind::Variant { path, fields },
+                kind: PatternKind::Variant { path, fields, rest },
                 span: pattern.span.join(end),
             };
         }
@@ -3526,6 +3557,21 @@ pub fn normalize_for_legacy_consumers(program: Program) -> Program {
             .map(|function| Function {
                 body: expr(&function.body),
                 ..function.clone()
+            })
+            .collect(),
+        impls: program
+            .impls
+            .iter()
+            .map(|implementation| ImplDecl {
+                methods: implementation
+                    .methods
+                    .iter()
+                    .map(|method| TraitMethod {
+                        body: method.body.as_ref().map(expr),
+                        ..method.clone()
+                    })
+                    .collect(),
+                ..implementation.clone()
             })
             .collect(),
         ..program

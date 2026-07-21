@@ -7,6 +7,7 @@ use grandiose::{
     ast::{ExprKind, PatternKind, Program, Stmt},
     diagnostic::Diagnostic,
     lexer, parser,
+    span::Span,
 };
 
 fn parse_ok(source: &str) -> Program {
@@ -43,6 +44,51 @@ fn declaration_only_programs_parse() {
     assert!(program.functions.is_empty());
     let program = parse_ok("");
     assert!(program.functions.is_empty());
+}
+
+#[test]
+fn numeric_source_payloads_survive_parsing_without_eager_narrowing() {
+    let integer = "0xffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff";
+    let oversized = "340282366920938463463374607431768211456";
+    let float =
+        "1.00000005960464477539062582718061255302767487140869206996285356581211090087890625";
+    let source = format!(
+        "wide() -> u128 {{ {integer} }} oversized() -> u128 {{ {oversized} }} \
+         direct() -> f32 {{ {float} }} main() -> {{ () }}"
+    );
+    let program = parse_ok(&source);
+
+    let integer_start = source.find(integer).unwrap();
+    let integer_literal = program
+        .numeric_literal(Span::new(integer_start, integer_start + integer.len()))
+        .expect("wide integer token remains attached to its exact source span");
+    assert_eq!(integer_literal.spelling, integer);
+    assert_eq!(integer_literal.as_u128(Span::default()).unwrap(), u128::MAX);
+
+    let oversized_start = source.find(oversized).unwrap();
+    let oversized_literal = program
+        .numeric_literal(Span::new(
+            oversized_start,
+            oversized_start + oversized.len(),
+        ))
+        .expect("out-of-range magnitude is preserved until contextual selection");
+    assert_eq!(oversized_literal.spelling, oversized);
+    assert!(oversized_literal.as_u128(Span::default()).is_err());
+
+    let float_start = source.find(float).unwrap();
+    let float_literal = program
+        .numeric_literal(Span::new(float_start, float_start + float.len()))
+        .expect("float token remains attached to its exact source span");
+    assert_eq!(float_literal.spelling, float);
+    assert_eq!(
+        float_literal.as_f32(Span::default()).unwrap().to_bits(),
+        0x3f80_0001
+    );
+    assert_eq!(
+        float_literal.as_f64(Span::default()).unwrap() as f32,
+        1.0,
+        "the fixture distinguishes direct f32 rounding from f64-then-f32"
+    );
 }
 
 #[test]
@@ -160,7 +206,7 @@ fn is_expressions_retain_subject_and_nested_pattern() {
         panic!("expected an is expression");
     };
     assert!(matches!(subject.kind, ExprKind::Variable(_)));
-    let PatternKind::Variant { path, fields } = &pattern.kind else {
+    let PatternKind::Variant { path, fields, .. } = &pattern.kind else {
         panic!("expected a variant pattern");
     };
     assert_eq!(path, &vec!["Shape".to_string(), "Circle".to_string()]);
@@ -197,8 +243,18 @@ fn pattern_binders_and_remainders_are_validated() {
     let diagnostics = parse_err("main() -> { x is Point { y: 1, y: 2 } }");
     assert_eq!(diagnostics[0].title, "duplicate struct pattern field");
 
-    let diagnostics = parse_err("main() -> { x is Shape::Circle(a, ..) }");
-    assert_eq!(diagnostics[0].title, "unsupported variant remainder");
+    let program = parse_ok("main() -> { x is Shape::Circle(first, .., last) }");
+    let ExprKind::Is { pattern, .. } = body_expr(&program, "main") else {
+        panic!("expected an is expression");
+    };
+    let PatternKind::Variant { fields, rest, .. } = &pattern.kind else {
+        panic!("expected a variant pattern");
+    };
+    assert_eq!(fields.len(), 2);
+    assert_eq!(rest.expect("variant remainder").before, 1);
+
+    let diagnostics = parse_err("main() -> { x is Shape::Circle(a, .., b, ..) }");
+    assert_eq!(diagnostics[0].title, "duplicate pattern remainder");
 }
 
 #[test]

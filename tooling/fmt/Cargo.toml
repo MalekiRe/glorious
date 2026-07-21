@@ -8,3 +8,4 @@ description = "Auto-formatter for the Grandiose language"
 [workspace]
 
 [dependencies]
+grandiose = { path = "../../crates/grandiose" }

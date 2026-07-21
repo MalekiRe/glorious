@@ -423,6 +423,22 @@ Names such as `if`, `match`, `loop`, `return`, `yield`, `await`, and arithmetic
 spellings are lexed as ordinary identifiers or operator runs. The lexer performs
 no contextual keyword conversion based on declaration names.
 
+Numeric tokens retain their complete spelling and separator-free digit runs;
+lexing never commits them to a machine scalar. Integer magnitude conversion is
+deferred until elaboration supplies the expected type; the G1 integer domain
+then admits magnitudes through `u128` and reports an exact token-span diagnostic
+for larger spellings or narrower signed/unsigned targets. Decimal floats are
+parsed directly at the selected IEEE width using round-to-nearest, ties-to-even;
+an `f32` literal must not be parsed through `f64`, because that can double-round
+values adjacent to a binary32 midpoint. Finite overflow is a source diagnostic,
+while underflow and subnormal rounding follow IEEE rules.
+
+Source-preserving tools use the shared `lossless` layer. Its byte spans form a
+gap-free partition containing whitespace, line comments, nested block comments,
+literals, identifiers, and punctuation; concatenating each span's source slice
+must reproduce the input exactly. It does not decode literals or replace the
+semantic lexer, so adding tooling trivia cannot change parser behavior.
+
 `for` is also lexed as an identifier so a source library may bind that name. The
 type parser recognizes the exact token sequence `for < ... >` contextually when
 an HRTB binder is grammatically permitted; elsewhere it remains an ordinary

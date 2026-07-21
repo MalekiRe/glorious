@@ -15,7 +15,7 @@ use crate::{
         ReclamationScope, ReferenceTarget, ResumptionValue, RuntimeFrame, RuntimeLabel, SlotStore,
         Value,
     },
-    verify::{VerifiedArtifact, VerifyError, verify},
+    verify::{ExecutionImage, ImageConstant, VerifiedArtifact, VerifyError, verify},
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -98,6 +98,7 @@ pub enum RuntimeError {
     ArraySlotAlreadyInitialized,
     ArrayNotDrained,
     AllocationOverflow,
+    AllocationLimit,
     ReachedUnreachable,
     UnhandledEffect { protocol: u32, operation: u32 },
     HostLink(HostLinkError),
@@ -115,6 +116,7 @@ pub enum RuntimeFaultCategory {
     PrimitiveTrap,
     HostFault,
     ExplicitAbort,
+    MemoryLimit,
     Internal,
 }
 
@@ -133,6 +135,7 @@ impl RuntimeError {
             | Self::ArraySlotAlreadyInitialized
             | Self::ArrayNotDrained
             | Self::AllocationOverflow => RuntimeFaultCategory::PrimitiveTrap,
+            Self::AllocationLimit => RuntimeFaultCategory::MemoryLimit,
             Self::HostFault(_) | Self::HostLink(_) => RuntimeFaultCategory::HostFault,
             Self::Aborted(_) => RuntimeFaultCategory::ExplicitAbort,
             Self::InvalidFunction(_)
@@ -171,6 +174,7 @@ impl fmt::Display for RuntimeError {
             Self::ArraySlotAlreadyInitialized => write!(f, "array slot is already initialized"),
             Self::ArrayNotDrained => write!(f, "array still contains initialized slots"),
             Self::AllocationOverflow => write!(f, "array capacity overflow"),
+            Self::AllocationLimit => write!(f, "runtime allocation limit exceeded"),
             Self::ReachedUnreachable => write!(f, "execution reached an unreachable instruction"),
             Self::UnhandledEffect {
                 protocol,
@@ -207,13 +211,23 @@ enum ResolvedImport {
 
 type Frame = RuntimeFrame;
 
+#[derive(Clone, Copy)]
+enum CapturePruning {
+    Multishot,
+    Cancellation,
+}
+
 impl Vm {
     pub fn new(artifact: VerifiedArtifact) -> Self {
-        let imports = if artifact.artifact().imports.is_empty() {
+        let imports = if artifact.image().imports.is_empty() {
             Ok(vec![])
         } else {
+            let first = artifact
+                .image()
+                .import_id(0)
+                .expect("nonempty import table has a first checked ID");
             Err(HostLinkError::DeniedCapability(
-                artifact.artifact().imports[0].capability.clone(),
+                artifact.image().import_capability(first).to_owned(),
             ))
         };
         Self {
@@ -250,7 +264,7 @@ impl Vm {
             .into_iter()
             .map(|grant| grant.as_ref().to_owned())
             .collect::<BTreeSet<_>>();
-        let imports = link_imports(artifact.artifact(), &grants)?;
+        let imports = link_imports(artifact.image(), &grants)?;
         Ok(Self {
             artifact,
             host: Some(Box::new(host)),
@@ -272,7 +286,7 @@ impl Vm {
             .imports
             .as_ref()
             .map_err(|error| RuntimeError::HostLink(error.clone()))?;
-        let a = self.artifact.artifact();
+        let a = self.artifact.image();
         let mut stack = vec![make_frame(a, function, args, Value::Unit, None)?];
         loop {
             let frame = stack.last_mut().expect("execution stack cannot be empty");
@@ -284,11 +298,14 @@ impl Vm {
             let verified_pc = verified_fun
                 .checked_pc(frame.pc)
                 .ok_or(RuntimeError::TypeConfusion)?;
-            let ins = verified_fun.instruction(verified_pc).clone();
+            let ins = verified_fun.instruction(verified_pc);
             match ins {
                 Instruction::Nop => frame.pc += 1,
                 Instruction::Const { dst, constant } => {
-                    put(frame, dst, constant_value(&a.constants[constant as usize])?)?;
+                    let constant = a
+                        .checked_constant(constant)
+                        .ok_or(RuntimeError::TypeConfusion)?;
+                    put(frame, dst, constant_value(constant)?)?;
                     frame.pc += 1;
                 }
                 Instruction::Move { dst, src } => {
@@ -475,31 +492,58 @@ impl Vm {
                     {
                         return Err(RuntimeError::TypeConfusion);
                     }
-                    let referent_type =
-                        match a.types[fun.register_types[dst as usize] as usize].representation() {
-                            Type::RefShared { referent } if !unique => *referent,
-                            Type::RefUnique { referent } if unique => *referent,
-                            _ => return Err(RuntimeError::TypeConfusion),
-                        };
+                    let referent_type = match a
+                        .checked_type(fun.register_types[dst as usize])
+                        .ok_or(RuntimeError::TypeConfusion)?
+                        .representation()
+                    {
+                        Type::RefShared { referent } if !unique => *referent,
+                        Type::RefUnique { referent } if unique => *referent,
+                        _ => return Err(RuntimeError::TypeConfusion),
+                    };
+                    // A callable environment may store a reference handle as
+                    // a field. Borrowing that field with a destination whose
+                    // referent is the stored handle's referent is a per-call
+                    // reborrow of the captured target, not a borrow of the
+                    // handle slot itself. The verifier admits this flattened
+                    // form only for shared reborrows, or for a unique reborrow
+                    // through an originally unique captured handle.
+                    let flattened = {
+                        let aggregate = aggregate.borrow();
+                        match aggregate.fields.get(field).and_then(Option::as_ref) {
+                            Some(Value::Reference {
+                                referent_type: captured_referent,
+                                unique: captured_unique,
+                                target,
+                            }) if *captured_referent == referent_type
+                                && (!unique || *captured_unique) =>
+                            {
+                                Some(target.clone())
+                            }
+                            _ => None,
+                        }
+                    };
                     put(
                         frame,
                         dst,
                         Value::Reference {
                             referent_type,
                             unique,
-                            target: ReferenceTarget::AggregateField { aggregate, field },
+                            target: flattened
+                                .unwrap_or(ReferenceTarget::AggregateField { aggregate, field }),
                         },
                     )?;
                     frame.pc += 1;
                 }
                 Instruction::EnumTag { dst, src } => {
-                    let Value::Aggregate(aggregate) = get(frame, src)? else {
-                        return Err(RuntimeError::TypeConfusion);
+                    let tag = match get(frame, src)? {
+                        Value::Aggregate(aggregate) => aggregate
+                            .borrow()
+                            .variant
+                            .ok_or(RuntimeError::TypeConfusion)?,
+                        Value::Reference { target, .. } => reference_target_enum_tag(&target)?,
+                        _ => return Err(RuntimeError::TypeConfusion),
                     };
-                    let tag = aggregate
-                        .borrow()
-                        .variant
-                        .ok_or(RuntimeError::TypeConfusion)?;
                     put(frame, dst, Value::U64(u64::from(tag)))?;
                     frame.pc += 1;
                 }
@@ -540,12 +584,17 @@ impl Vm {
                     otherwise,
                 } => {
                     let value = get(frame, discr)?;
-                    frame.pc = cases
-                        .into_iter()
-                        .find_map(|(c, t)| {
-                            (constant_eq(&value, &a.constants[c as usize])).then_some(t)
-                        })
-                        .unwrap_or(otherwise);
+                    let mut target = otherwise;
+                    for (constant, case_target) in cases {
+                        let constant = a
+                            .checked_constant(constant)
+                            .ok_or(RuntimeError::TypeConfusion)?;
+                        if constant_eq(&value, constant) {
+                            target = case_target;
+                            break;
+                        }
+                    }
+                    frame.pc = target;
                 }
                 Instruction::Call {
                     dst,
@@ -652,8 +701,10 @@ impl Vm {
                     if fun.register_types[dst as usize] != callable_type {
                         return Err(RuntimeError::TypeConfusion);
                     }
-                    let Type::Callable { capture_type, .. } =
-                        a.types[callable_type as usize].representation()
+                    let Type::Callable { capture_type, .. } = a
+                        .checked_type(callable_type)
+                        .ok_or(RuntimeError::TypeConfusion)?
+                        .representation()
                     else {
                         return Err(RuntimeError::TypeConfusion);
                     };
@@ -690,7 +741,9 @@ impl Vm {
                         .into_iter()
                         .map(|register| take(frame, register).map(Some))
                         .collect::<Result<Vec<_>, _>>()?;
-                    let definition = &a.handler_defs[handler_def as usize];
+                    let definition = a
+                        .checked_handler_def(handler_def)
+                        .ok_or(RuntimeError::TypeConfusion)?;
                     for (value, clause) in values.iter().zip(&definition.clauses) {
                         let Some(Value::Callable(callable)) = value else {
                             return Err(RuntimeError::TypeConfusion);
@@ -725,7 +778,10 @@ impl Vm {
                     let Type::Handler {
                         capture_type: clause_tuple,
                         ..
-                    } = a.types[handler_type as usize].representation()
+                    } = a
+                        .checked_type(handler_type)
+                        .ok_or(RuntimeError::TypeConfusion)?
+                        .representation()
                     else {
                         return Err(RuntimeError::TypeConfusion);
                     };
@@ -741,7 +797,10 @@ impl Vm {
                     let Type::Callable {
                         capture_type: environment_type,
                         ..
-                    } = a.types[clause_types[0] as usize].representation()
+                    } = a
+                        .checked_type(clause_types[0])
+                        .ok_or(RuntimeError::TypeConfusion)?
+                        .representation()
                     else {
                         return Err(RuntimeError::TypeConfusion);
                     };
@@ -890,14 +949,27 @@ impl Vm {
                     let resumption_type = selected
                         .resumption_type
                         .ok_or(RuntimeError::TypeConfusion)?;
-                    let Type::Resumption { upper_uses, .. } =
-                        a.types[resumption_type as usize].representation()
+                    let Type::Resumption {
+                        lower_uses,
+                        upper_uses,
+                        ..
+                    } = a
+                        .checked_type(resumption_type)
+                        .ok_or(RuntimeError::TypeConfusion)?
+                        .representation()
                     else {
                         return Err(RuntimeError::TypeConfusion);
                     };
                     if upper_uses.is_none_or(|upper| upper > 1) {
                         for captured in &mut frames {
-                            self.prune_frame_for_multishot(captured)?;
+                            self.prune_frame_for_continuation(captured, CapturePruning::Multishot)?;
+                        }
+                    } else if *lower_uses == 0 {
+                        for captured in &mut frames {
+                            self.prune_frame_for_continuation(
+                                captured,
+                                CapturePruning::Cancellation,
+                            )?;
                         }
                     }
                     values.push(Value::Resumption(ControlHandle::new(Some(
@@ -919,8 +991,10 @@ impl Vm {
                     value,
                 } => {
                     let expected_resumption_type = fun.register_types[resumption as usize];
-                    let Type::Resumption { upper_uses, .. } =
-                        a.types[expected_resumption_type as usize].representation()
+                    let Type::Resumption { upper_uses, .. } = a
+                        .checked_type(expected_resumption_type)
+                        .ok_or(RuntimeError::TypeConfusion)?
+                        .representation()
                     else {
                         return Err(RuntimeError::TypeConfusion);
                     };
@@ -978,7 +1052,7 @@ impl Vm {
                     else {
                         return Err(RuntimeError::TypeConfusion);
                     };
-                    put(last, *perform_dst, value)?;
+                    put(last, perform_dst, value)?;
                     stack.extend(captured.frames);
                 }
                 Instruction::TailResume {
@@ -987,8 +1061,10 @@ impl Vm {
                     value,
                 } => {
                     let expected_resumption_type = fun.register_types[resumption as usize];
-                    let Type::Resumption { upper_uses, .. } =
-                        a.types[expected_resumption_type as usize].representation()
+                    let Type::Resumption { upper_uses, .. } = a
+                        .checked_type(expected_resumption_type)
+                        .ok_or(RuntimeError::TypeConfusion)?
+                        .representation()
                     else {
                         return Err(RuntimeError::TypeConfusion);
                     };
@@ -1050,7 +1126,7 @@ impl Vm {
                     else {
                         return Err(RuntimeError::TypeConfusion);
                     };
-                    put(last, *perform_dst, value)?;
+                    put(last, perform_dst, value)?;
 
                     let mut resumed = captured.frames.into_iter();
                     let replacement = resumed.next().ok_or(RuntimeError::TypeConfusion)?;
@@ -1078,11 +1154,17 @@ impl Vm {
                         .map(|register| take(frame, register))
                         .collect::<Result<Vec<_>, _>>()?;
                     let host = self.host.as_deref().ok_or_else(|| {
-                        RuntimeError::HostLink(HostLinkError::DeniedCapability(
-                            a.imports[import as usize].capability.clone(),
-                        ))
+                        let capability = a
+                            .import_id(import)
+                            .map(|import| a.import_capability(import).to_owned())
+                            .unwrap_or_else(|| "<invalid import>".into());
+                        RuntimeError::HostLink(HostLinkError::DeniedCapability(capability))
                     })?;
-                    let value = invoke_host(host, resolved_imports[import as usize], arguments)?;
+                    let import_id = a.import_id(import).ok_or(RuntimeError::TypeConfusion)?;
+                    let resolved = *resolved_imports
+                        .get(import_id.index())
+                        .ok_or(RuntimeError::TypeConfusion)?;
+                    let value = invoke_host(host, resolved, arguments)?;
                     if let Some(dst) = dst {
                         if !value_matches(a, &value, fun.register_types[dst as usize]) {
                             return Err(RuntimeError::TypeConfusion);
@@ -1122,6 +1204,10 @@ impl Vm {
                     result_register,
                     target,
                 } => {
+                    frame
+                        .labels
+                        .try_reserve(1)
+                        .map_err(|_| RuntimeError::AllocationLimit)?;
                     frame.labels.push(RuntimeLabel {
                         slot,
                         result_register,
@@ -1162,48 +1248,62 @@ impl Vm {
                     frame.pc = label.target;
                 }
                 Instruction::Unreachable => return Err(RuntimeError::ReachedUnreachable),
-                Instruction::Abort { message } => return Err(RuntimeError::Aborted(message)),
+                Instruction::Abort { message } => {
+                    let message = a
+                        .abort_message((fun.code_start + frame.pc) as usize)
+                        .map(str::to_owned)
+                        .or(message);
+                    return Err(RuntimeError::Aborted(message));
+                }
             }
         }
     }
 }
 
 fn link_imports(
-    artifact: &Artifact,
+    artifact: &ExecutionImage,
     grants: &BTreeSet<String>,
 ) -> Result<Vec<ResolvedImport>, HostLinkError> {
     artifact
         .imports
         .iter()
-        .map(|import| {
-            if !grants.contains(&import.capability) {
-                return Err(HostLinkError::DeniedCapability(import.capability.clone()));
+        .enumerate()
+        .map(|(index, import)| {
+            let id = artifact
+                .import_id(index as u32)
+                .expect("enumerated import ID is checked");
+            let capability = artifact.import_capability(id);
+            if !grants.contains(capability) {
+                return Err(HostLinkError::DeniedCapability(capability.to_owned()));
             }
-            resolve_standard_import(artifact, import)
+            resolve_standard_import(artifact, id, import)
         })
         .collect()
 }
 
 fn resolve_standard_import(
-    artifact: &Artifact,
+    artifact: &ExecutionImage,
+    id: crate::verify::ImageImportId,
     import: &Import,
 ) -> Result<ResolvedImport, HostLinkError> {
-    let resolved = match (import.capability.as_str(), import.symbol.as_str()) {
+    let capability = artifact.import_capability(id);
+    let symbol = artifact.import_symbol(id);
+    let resolved = match (capability, symbol) {
         ("process.args", "get") => ResolvedImport::ProcessArgs,
         ("fs.read", "read") => ResolvedImport::FsRead,
         ("fs.write", "write") => ResolvedImport::FsWrite,
         ("diagnostic", "write") => ResolvedImport::DiagnosticWrite,
         _ => {
             return Err(HostLinkError::UnknownImport {
-                capability: import.capability.clone(),
-                symbol: import.symbol.clone(),
+                capability: capability.to_owned(),
+                symbol: symbol.to_owned(),
             });
         }
     };
     if !import.may_trap {
         return Err(HostLinkError::MissingMayTrap {
-            capability: import.capability.clone(),
-            symbol: import.symbol.clone(),
+            capability: capability.to_owned(),
+            symbol: symbol.to_owned(),
         });
     }
     let signature = &import.signature;
@@ -1211,7 +1311,7 @@ fn resolve_standard_import(
     let valid = match resolved {
         ResolvedImport::ProcessArgs => {
             signature.params.is_empty()
-                && matches!(artifact.types.get(signature.result as usize).map(Type::representation), Some(Type::Array { element }) if *element == TEXT)
+                && matches!(artifact.checked_type(signature.result).map(Type::representation), Some(Type::Array { element }) if *element == TEXT)
         }
         ResolvedImport::FsRead => signature.params == [TEXT] && signature.result == BYTES,
         ResolvedImport::FsWrite => signature.params == [TEXT, BYTES] && signature.result == UNIT,
@@ -1219,8 +1319,8 @@ fn resolve_standard_import(
     } && no_effects;
     if !valid {
         return Err(HostLinkError::SignatureMismatch {
-            capability: import.capability.clone(),
-            symbol: import.symbol.clone(),
+            capability: capability.to_owned(),
+            symbol: symbol.to_owned(),
         });
     }
     Ok(resolved)
@@ -1276,7 +1376,7 @@ fn invoke_host(
 }
 
 fn make_frame(
-    a: &Artifact,
+    a: &ExecutionImage,
     function: u32,
     args: Vec<Value>,
     receiver: Value,
@@ -1315,7 +1415,12 @@ fn make_frame(
         return_dst,
         delimiter: None,
         guards: Vec::new(),
-        labels: Vec::with_capacity(f.label_slot_count as usize),
+        // `label_slot_count` is an artifact namespace bound, not the number
+        // of simultaneously live labels. In particular, it is a compact u32
+        // scalar and can be much larger than the artifact itself. Allocate
+        // lazily at `LabelPush` so hostile-but-valid metadata cannot turn a
+        // tiny function into a process-scale speculative reservation.
+        labels: Vec::new(),
     })
 }
 
@@ -1332,7 +1437,11 @@ fn cleanup_registers(
 }
 
 impl Vm {
-    fn prune_frame_for_multishot(&self, frame: &mut Frame) -> Result<(), RuntimeError> {
+    fn prune_frame_for_continuation(
+        &self,
+        frame: &mut Frame,
+        pruning: CapturePruning,
+    ) -> Result<(), RuntimeError> {
         let function = self
             .artifact
             .function(frame.function)
@@ -1340,14 +1449,19 @@ impl Vm {
         let pc = function
             .checked_pc(frame.pc)
             .ok_or(RuntimeError::TypeConfusion)?;
-        let retained = function.continuation_registers(pc);
+        let mut retained = match pruning {
+            CapturePruning::Multishot => function.multishot_registers(pc),
+            CapturePruning::Cancellation => function.cancellation_registers(pc),
+        }
+        .peekable();
         for register in 0..frame.registers.len() {
-            if retained.binary_search(&(register as u32)).is_err()
-                && let Some(value) = frame.registers[register].take()
-            {
+            if retained.peek().copied() == Some(register as u32) {
+                retained.next();
+            } else if let Some(value) = frame.registers[register].take() {
                 self.destroy_typed(function.descriptor().register_types[register], value)?;
             }
         }
+        debug_assert!(retained.next().is_none());
         Ok(())
     }
 
@@ -1395,7 +1509,7 @@ impl Vm {
             Value::Array(array) => {
                 let element = array.borrow().element_type;
                 self.artifact
-                    .artifact()
+                    .image()
                     .types
                     .iter()
                     .position(
@@ -1415,7 +1529,7 @@ impl Vm {
                 .map_err(|_| RuntimeError::TypeConfusion)?,
             value => value,
         };
-        let a = self.artifact.artifact();
+        let a = self.artifact.image();
         if let Some(glue) = a.drop_glue.iter().find(|glue| glue.ty == ty) {
             let slot = self
                 .slots
@@ -1441,7 +1555,7 @@ impl Vm {
     /// Destroy children without consulting glue for `ty` again.  Recursive
     /// children still receive their own declared-type glue exactly once.
     fn destroy_structural(&self, ty: TypeId, value: Value) -> Result<(), RuntimeError> {
-        let a = self.artifact.artifact();
+        let a = self.artifact.image();
         match value {
             Value::Aggregate(aggregate) => {
                 let mut aggregate = aggregate
@@ -1450,7 +1564,7 @@ impl Vm {
                 if aggregate.ty != ty {
                     return Err(RuntimeError::TypeConfusion);
                 }
-                let layout_type = match a.types.get(ty as usize).map(Type::representation) {
+                let layout_type = match a.checked_type(ty).map(Type::representation) {
                     Some(Type::BindingPack { payload_type, .. }) => *payload_type,
                     _ => ty,
                 };
@@ -1598,7 +1712,7 @@ fn whole_place(slots: &SlotStore, f: &mut Frame, r: u32) -> Result<ReferenceTarg
 }
 
 fn copy_reference_target(
-    artifact: &Artifact,
+    artifact: &ExecutionImage,
     referent_type: TypeId,
     target: &ReferenceTarget,
 ) -> Result<Value, RuntimeError> {
@@ -1632,6 +1746,63 @@ fn copy_reference_target(
             .ok_or(RuntimeError::TypeConfusion)?,
     };
     copy_value(artifact, referent_type, &value)
+}
+
+fn reference_target_enum_tag(target: &ReferenceTarget) -> Result<u32, RuntimeError> {
+    fn value_tag(value: &Value) -> Result<u32, RuntimeError> {
+        let Value::Aggregate(aggregate) = value else {
+            return Err(RuntimeError::TypeConfusion);
+        };
+        let tag = aggregate
+            .try_borrow()
+            .map_err(|_| RuntimeError::TypeConfusion)?
+            .variant
+            .ok_or(RuntimeError::TypeConfusion)?;
+        Ok(tag)
+    }
+
+    match target {
+        ReferenceTarget::DropSlot(slot) | ReferenceTarget::WholePlace(slot) => {
+            value_tag(&slot.get().map_err(|_| RuntimeError::TypeConfusion)?)
+        }
+        ReferenceTarget::CallableCapture(slot) => {
+            let value = slot.try_borrow().map_err(|_| RuntimeError::TypeConfusion)?;
+            value_tag(value.as_ref().ok_or(RuntimeError::TypeConfusion)?)
+        }
+        ReferenceTarget::Aggregate(aggregate) => {
+            let tag = aggregate
+                .try_borrow()
+                .map_err(|_| RuntimeError::TypeConfusion)?
+                .variant
+                .ok_or(RuntimeError::TypeConfusion)?;
+            Ok(tag)
+        }
+        ReferenceTarget::AggregateField { aggregate, field } => {
+            let aggregate = aggregate
+                .try_borrow()
+                .map_err(|_| RuntimeError::TypeConfusion)?;
+            value_tag(
+                aggregate
+                    .fields
+                    .get(*field)
+                    .and_then(Option::as_ref)
+                    .ok_or(RuntimeError::TypeConfusion)?,
+            )
+        }
+        ReferenceTarget::ArrayElement { array, index } => {
+            let array = array
+                .try_borrow()
+                .map_err(|_| RuntimeError::TypeConfusion)?;
+            value_tag(
+                array
+                    .slots
+                    .get(*index)
+                    .and_then(Option::as_ref)
+                    .ok_or(RuntimeError::TypeConfusion)?,
+            )
+        }
+        ReferenceTarget::Array(_) => Err(RuntimeError::TypeConfusion),
+    }
 }
 
 fn take_reference_target(target: &ReferenceTarget) -> Result<Value, RuntimeError> {
@@ -1774,32 +1945,40 @@ struct SelectedHandlerClause {
     resumption_type: Option<TypeId>,
 }
 
-fn clause_requires_reusable_receiver(a: &Artifact, clause: &HandlerClause) -> bool {
+fn clause_requires_reusable_receiver(a: &ExecutionImage, clause: &HandlerClause) -> bool {
     let Some(resumption_type) = clause.resumption_type else {
         return false;
     };
     !matches!(
-        a.types[resumption_type as usize].representation(),
-        Type::Resumption {
+        a.checked_type(resumption_type).map(Type::representation),
+        Some(Type::Resumption {
             upper_uses: Some(0),
             ..
-        }
+        })
     )
 }
 
 fn select_handler_clause(
-    a: &Artifact,
+    a: &ExecutionImage,
     stack: &mut [Frame],
     protocol: u32,
     operation: u32,
 ) -> Result<SelectedHandlerClause, RuntimeError> {
+    let protocol_descriptor = a
+        .checked_protocol(protocol)
+        .ok_or(RuntimeError::TypeConfusion)?;
+    if operation as usize >= protocol_descriptor.operations.len() {
+        return Err(RuntimeError::TypeConfusion);
+    }
     for delimiter in (0..stack.len()).rev() {
         let Some(Value::Handler(handler)) = &stack[delimiter].delimiter else {
             continue;
         };
         let handler_guard = Value::Handler(handler.clone());
         let mut handler = handler.borrow_mut();
-        let definition = &a.handler_defs[handler.handler_def as usize];
+        let definition = a
+            .checked_handler_def(handler.handler_def)
+            .ok_or(RuntimeError::TypeConfusion)?;
         let Some(clause_index) = definition
             .clauses
             .iter()
@@ -1846,7 +2025,7 @@ fn select_handler_clause(
 }
 
 fn callable_receiver(
-    a: &Artifact,
+    a: &ExecutionImage,
     frame: &mut Frame,
     register: u32,
     receiver_mode: u32,
@@ -1866,7 +2045,7 @@ fn callable_receiver(
 }
 
 fn indirect_callable_receiver(
-    a: &Artifact,
+    a: &ExecutionImage,
     callable: ControlHandle<CallableValue>,
     requested_mode: u32,
 ) -> Result<(u32, Value, Option<Value>), RuntimeError> {
@@ -1908,7 +2087,7 @@ fn indirect_callable_receiver(
 }
 
 fn owned_callable_receiver(
-    a: &Artifact,
+    a: &ExecutionImage,
     callable: Value,
     receiver_mode: u32,
 ) -> Result<(u32, Value), RuntimeError> {
@@ -1953,8 +2132,9 @@ fn owned_callable_receiver(
     Ok((function, receiver))
 }
 
-fn copy_value(a: &Artifact, ty: TypeId, value: &Value) -> Result<Value, RuntimeError> {
-    match (value, a.types[ty as usize].representation()) {
+fn copy_value(a: &ExecutionImage, ty: TypeId, value: &Value) -> Result<Value, RuntimeError> {
+    let ty_descriptor = a.checked_type(ty).ok_or(RuntimeError::TypeConfusion)?;
+    match (value, ty_descriptor.representation()) {
         (Value::Unit, Type::Unit) => Ok(Value::Unit),
         (Value::I64(value), _) => Ok(Value::I64(*value)),
         (Value::I128(value), Type::I128) => Ok(Value::I128(*value)),
@@ -1970,7 +2150,7 @@ fn copy_value(a: &Artifact, ty: TypeId, value: &Value) -> Result<Value, RuntimeE
             Type::Tuple { .. } | Type::Struct { .. } | Type::Enum { .. } | Type::BindingPack { .. },
         ) => {
             let aggregate = aggregate.borrow();
-            let layout_type = match a.types[ty as usize].representation() {
+            let layout_type = match ty_descriptor.representation() {
                 Type::BindingPack { payload_type, .. } => *payload_type,
                 _ => ty,
             };
@@ -2025,14 +2205,18 @@ struct SnapshotCloneContext {
 }
 
 impl SnapshotCloneContext {
-    fn pre_register_runtime(&mut self, a: &Artifact, value: &Value) -> Result<(), RuntimeError> {
+    fn pre_register_runtime(
+        &mut self,
+        a: &ExecutionImage,
+        value: &Value,
+    ) -> Result<(), RuntimeError> {
         let ty = runtime_value_type(a, value)?;
         self.pre_register(a, ty, value)
     }
 
     fn pre_register(
         &mut self,
-        a: &Artifact,
+        a: &ExecutionImage,
         ty: TypeId,
         value: &Value,
     ) -> Result<(), RuntimeError> {
@@ -2050,7 +2234,8 @@ impl SnapshotCloneContext {
             }
             return Ok(());
         }
-        match (value, a.types[ty as usize].representation()) {
+        let ty_descriptor = a.checked_type(ty).ok_or(RuntimeError::TypeConfusion)?;
+        match (value, ty_descriptor.representation()) {
             (Value::Array(array), Type::Array { element }) => {
                 let key = array.identity();
                 if self.arrays.contains_key(&key) {
@@ -2093,7 +2278,7 @@ impl SnapshotCloneContext {
                         fields: vec![],
                     }),
                 );
-                let layout = match a.types[ty as usize].representation() {
+                let layout = match ty_descriptor.representation() {
                     Type::BindingPack { payload_type, .. } => *payload_type,
                     _ => ty,
                 };
@@ -2185,7 +2370,7 @@ impl SnapshotCloneContext {
 
     fn pre_register_resumption(
         &mut self,
-        a: &Artifact,
+        a: &ExecutionImage,
         source: &ResumptionValue,
     ) -> Result<(), RuntimeError> {
         for frame in &source.frames {
@@ -2211,7 +2396,7 @@ impl SnapshotCloneContext {
 /// corresponding node in each replay. Targets outside the captured graph stay
 /// shared with their external owner. Unique references are never cloneable.
 fn clone_resumption_snapshot(
-    a: &Artifact,
+    a: &ExecutionImage,
     source: &ResumptionValue,
 ) -> Result<ResumptionValue, RuntimeError> {
     let mut context = SnapshotCloneContext::default();
@@ -2220,7 +2405,7 @@ fn clone_resumption_snapshot(
 }
 
 fn clone_resumption_snapshot_with(
-    a: &Artifact,
+    a: &ExecutionImage,
     source: &ResumptionValue,
     context: &mut SnapshotCloneContext,
 ) -> Result<ResumptionValue, RuntimeError> {
@@ -2266,7 +2451,7 @@ fn clone_resumption_snapshot_with(
     })
 }
 
-fn runtime_value_type(a: &Artifact, value: &Value) -> Result<TypeId, RuntimeError> {
+fn runtime_value_type(a: &ExecutionImage, value: &Value) -> Result<TypeId, RuntimeError> {
     Ok(match value {
         Value::Array(array) => {
             let element = array.borrow().element_type;
@@ -2288,7 +2473,7 @@ fn runtime_value_type(a: &Artifact, value: &Value) -> Result<TypeId, RuntimeErro
 }
 
 fn snapshot_clone_runtime_value(
-    a: &Artifact,
+    a: &ExecutionImage,
     value: &Value,
     context: &mut SnapshotCloneContext,
 ) -> Result<Value, RuntimeError> {
@@ -2296,7 +2481,7 @@ fn snapshot_clone_runtime_value(
 }
 
 fn snapshot_clone_value(
-    a: &Artifact,
+    a: &ExecutionImage,
     ty: TypeId,
     value: &Value,
     context: &mut SnapshotCloneContext,
@@ -2319,7 +2504,8 @@ fn snapshot_clone_value(
         }
         return Ok(Value::Place(cloned));
     }
-    match (value, a.types[ty as usize].representation()) {
+    let ty_descriptor = a.checked_type(ty).ok_or(RuntimeError::TypeConfusion)?;
+    match (value, ty_descriptor.representation()) {
         (Value::Unit, Type::Unit) => Ok(Value::Unit),
         (Value::I64(value), _) => Ok(Value::I64(*value)),
         (Value::I128(value), Type::I128) => Ok(Value::I128(*value)),
@@ -2372,7 +2558,7 @@ fn snapshot_clone_value(
             let aggregate = aggregate
                 .try_borrow()
                 .map_err(|_| RuntimeError::TypeConfusion)?;
-            let layout_type = match a.types[ty as usize].representation() {
+            let layout_type = match ty_descriptor.representation() {
                 Type::BindingPack { payload_type, .. } => *payload_type,
                 _ => ty,
             };
@@ -2538,7 +2724,15 @@ fn remap_shared_reference_target(
     })
 }
 
-fn constant_value(c: &Constant) -> Result<Value, RuntimeError> {
+fn constant_value(c: ImageConstant<'_>) -> Result<Value, RuntimeError> {
+    match c {
+        ImageConstant::Text(text) => Ok(Value::Text(Rc::from(text))),
+        ImageConstant::Bytes(bytes) => Ok(Value::Bytes(Rc::from(bytes))),
+        ImageConstant::Inline(constant) => inline_constant_value(constant),
+    }
+}
+
+fn inline_constant_value(c: &Constant) -> Result<Value, RuntimeError> {
     Ok(match c {
         Constant::Unit => Value::Unit,
         Constant::U8(x) => Value::U64(u64::from(*x)),
@@ -2560,7 +2754,15 @@ fn constant_value(c: &Constant) -> Result<Value, RuntimeError> {
         Constant::Bytes(x) => Value::Bytes(Rc::from(x.as_slice())),
     })
 }
-fn constant_eq(v: &Value, c: &Constant) -> bool {
+fn constant_eq(v: &Value, c: ImageConstant<'_>) -> bool {
+    match c {
+        ImageConstant::Text(text) => matches!(v, Value::Text(value) if value.as_ref() == text),
+        ImageConstant::Bytes(bytes) => matches!(v, Value::Bytes(value) if value.as_ref() == bytes),
+        ImageConstant::Inline(constant) => inline_constant_eq(v, constant),
+    }
+}
+
+fn inline_constant_eq(v: &Value, c: &Constant) -> bool {
     match (v, c) {
         (Value::Unit, Constant::Unit) => true,
         (Value::U64(x), Constant::U8(y)) => *x == u64::from(*y),
@@ -2583,8 +2785,11 @@ fn constant_eq(v: &Value, c: &Constant) -> bool {
         _ => false,
     }
 }
-fn value_matches(a: &Artifact, v: &Value, ty: TypeId) -> bool {
-    match (a.types[ty as usize].representation(), v) {
+fn value_matches(a: &ExecutionImage, v: &Value, ty: TypeId) -> bool {
+    let Some(ty_descriptor) = a.checked_type(ty) else {
+        return false;
+    };
+    match (ty_descriptor.representation(), v) {
         (Type::Unit, Value::Unit)
         | (Type::I64 | Type::Isize, Value::I64(_))
         | (Type::I128, Value::I128(_))
@@ -2634,7 +2839,7 @@ fn value_matches(a: &Artifact, v: &Value, ty: TypeId) -> bool {
             Value::Aggregate(aggregate),
         ) => {
             let aggregate = aggregate.borrow();
-            let layout_type = match a.types[ty as usize].representation() {
+            let layout_type = match ty_descriptor.representation() {
                 Type::BindingPack { payload_type, .. } => *payload_type,
                 _ => ty,
             };
@@ -2750,20 +2955,18 @@ fn aggregate_place(
 }
 
 fn runtime_field_types(
-    a: &Artifact,
+    a: &ExecutionImage,
     ty: TypeId,
     variant: Option<u32>,
 ) -> Result<Vec<TypeId>, RuntimeError> {
     crate::bytecode::construction_field_types(
-        a.types
-            .get(ty as usize)
-            .ok_or(RuntimeError::TypeConfusion)?,
+        a.checked_type(ty).ok_or(RuntimeError::TypeConfusion)?,
         variant,
     )
     .ok_or(RuntimeError::TypeConfusion)?
     .into_iter()
     .filter_map(
-        |field| match a.types.get(field as usize).map(Type::representation) {
+        |field| match a.checked_type(field).map(Type::representation) {
             Some(Type::Available { .. }) => None,
             Some(_) => Some(Ok(field)),
             None => Some(Err(RuntimeError::TypeConfusion)),
@@ -2773,13 +2976,12 @@ fn runtime_field_types(
 }
 
 fn runtime_field_index(
-    a: &Artifact,
+    a: &ExecutionImage,
     aggregate: &AggregateValue,
     nominal_field: u32,
 ) -> Result<usize, RuntimeError> {
     let fields = crate::bytecode::construction_field_types(
-        a.types
-            .get(aggregate.ty as usize)
+        a.checked_type(aggregate.ty)
             .ok_or(RuntimeError::TypeConfusion)?,
         aggregate.variant,
     )
@@ -2789,7 +2991,7 @@ fn runtime_field_index(
         .get(nominal_field)
         .ok_or(RuntimeError::TypeConfusion)?;
     if matches!(
-        a.types.get(field_type as usize).map(Type::representation),
+        a.checked_type(field_type).map(Type::representation),
         Some(Type::Available { .. })
     ) {
         return Err(RuntimeError::TypeConfusion);
@@ -2797,7 +2999,7 @@ fn runtime_field_index(
     fields[..nominal_field]
         .iter()
         .try_fold(0usize, |runtime_index, &field| {
-            match a.types.get(field as usize).map(Type::representation) {
+            match a.checked_type(field).map(Type::representation) {
                 Some(Type::Available { .. }) => Ok(runtime_index),
                 Some(_) => Ok(runtime_index + 1),
                 None => Err(RuntimeError::TypeConfusion),
@@ -2806,7 +3008,7 @@ fn runtime_field_index(
 }
 
 fn primitive_typed(
-    a: &Artifact,
+    a: &ExecutionImage,
     result_type: TypeId,
     op: Primitive,
     arg_types: &[TypeId],
@@ -2851,7 +3053,9 @@ fn primitive_typed(
         | Primitive::FloatConvert
         | Primitive::FloatNeg
         | Primitive::IntToFloat
-        | Primitive::FloatToIntChecked => float_primitive(result_type, op, arg_types, v),
+        | Primitive::FloatToIntChecked
+        | Primitive::FloatToBits
+        | Primitive::FloatFromBits => float_primitive(result_type, op, arg_types, v),
         Primitive::CharFromU32Checked => match v {
             [Value::U64(value)] => u32::try_from(*value)
                 .ok()
@@ -3031,12 +3235,11 @@ fn primitive_typed(
                 {
                     return Err(RuntimeError::EmptyArraySlot);
                 }
-                let referent_type =
-                    match a.types.get(result_type as usize).map(Type::representation) {
-                        Some(Type::RefShared { referent }) if !unique => *referent,
-                        Some(Type::RefUnique { referent }) if unique => *referent,
-                        _ => return Err(RuntimeError::TypeConfusion),
-                    };
+                let referent_type = match a.checked_type(result_type).map(Type::representation) {
+                    Some(Type::RefShared { referent }) if !unique => *referent,
+                    Some(Type::RefUnique { referent }) if unique => *referent,
+                    _ => return Err(RuntimeError::TypeConfusion),
+                };
                 Ok(Value::Reference {
                     referent_type,
                     unique,
@@ -3115,7 +3318,7 @@ fn primitive_typed(
 
 #[cfg(test)]
 fn primitive(
-    a: &Artifact,
+    a: &ExecutionImage,
     result_type: TypeId,
     op: Primitive,
     values: &[Value],
@@ -3135,8 +3338,8 @@ fn primitive(
     primitive_typed(a, result_type, op, &arg_types, values)
 }
 
-fn array_element_type(a: &Artifact, array_type: TypeId) -> Result<TypeId, RuntimeError> {
-    match a.types.get(array_type as usize).map(Type::representation) {
+fn array_element_type(a: &ExecutionImage, array_type: TypeId) -> Result<TypeId, RuntimeError> {
+    match a.checked_type(array_type).map(Type::representation) {
         Some(Type::Array { element }) => Ok(*element),
         _ => Err(RuntimeError::TypeConfusion),
     }
@@ -3209,14 +3412,14 @@ fn grow_array(array: &mut ArrayValue, required: usize) -> Result<(), RuntimeErro
             array
                 .slots
                 .try_reserve_exact(capacity.saturating_sub(array.slots.len()))
-                .map_err(|_| RuntimeError::AllocationOverflow)?;
+                .map_err(|_| RuntimeError::AllocationLimit)?;
         }
         array.logical_capacity = capacity;
     } else if required > array.slots.capacity() {
         array
             .slots
             .try_reserve_exact(required.saturating_sub(array.slots.len()))
-            .map_err(|_| RuntimeError::AllocationOverflow)?;
+            .map_err(|_| RuntimeError::AllocationLimit)?;
     }
     Ok(())
 }
@@ -3237,8 +3440,10 @@ fn checked_output_bytes<T>(count: usize) -> Result<(), RuntimeError> {
     let bytes = count
         .checked_mul(std::mem::size_of::<T>().max(1))
         .ok_or(RuntimeError::AllocationOverflow)?;
-    if bytes > MAX_PRIMITIVE_ALLOCATION_BYTES || bytes > isize::MAX as usize {
+    if bytes > isize::MAX as usize {
         Err(RuntimeError::AllocationOverflow)
+    } else if bytes > MAX_PRIMITIVE_ALLOCATION_BYTES {
+        Err(RuntimeError::AllocationLimit)
     } else {
         Ok(())
     }
@@ -3256,14 +3461,14 @@ fn reserve_output<T>(values: &mut Vec<T>, count: usize) -> Result<(), RuntimeErr
     checked_output_bytes::<T>(count)?;
     values
         .try_reserve_exact(count)
-        .map_err(|_| RuntimeError::AllocationOverflow)
+        .map_err(|_| RuntimeError::AllocationLimit)
 }
 
 fn reserve_string_output(value: &mut String, count: usize) -> Result<(), RuntimeError> {
     checked_output_bytes::<u8>(count)?;
     value
         .try_reserve_exact(count)
-        .map_err(|_| RuntimeError::AllocationOverflow)
+        .map_err(|_| RuntimeError::AllocationLimit)
 }
 
 fn clone_output<T: Clone>(values: &[T]) -> Result<Vec<T>, RuntimeError> {
@@ -3576,6 +3781,24 @@ fn float_primitive(
 ) -> Result<Value, RuntimeError> {
     use Primitive::*;
     let source_type = *arg_types.first().ok_or(RuntimeError::TypeConfusion)?;
+    if op == FloatToBits {
+        return match (source_type, result_type, values) {
+            (F32, U32, [Value::F32(value)]) => {
+                Ok(Value::U64(u64::from(canonical_f32(*value).to_bits())))
+            }
+            (F64, U64, [Value::F64(value)]) => Ok(Value::U64(canonical_f64(*value).to_bits())),
+            _ => Err(RuntimeError::TypeConfusion),
+        };
+    }
+    if op == FloatFromBits {
+        return match (source_type, result_type, values) {
+            (U32, F32, [Value::U64(bits)]) if u32::try_from(*bits).is_ok() => {
+                Ok(Value::F32(canonical_f32(f32::from_bits(*bits as u32))))
+            }
+            (U64, F64, [Value::U64(bits)]) => Ok(Value::F64(canonical_f64(f64::from_bits(*bits)))),
+            _ => Err(RuntimeError::TypeConfusion),
+        };
+    }
     if op == IntToFloat {
         let spec = int_spec(source_type).ok_or(RuntimeError::TypeConfusion)?;
         let value = values.first().ok_or(RuntimeError::TypeConfusion)?;
@@ -3702,6 +3925,9 @@ fn float_primitive(
 mod tests {
     use super::*;
     use crate::bytecode::*;
+    fn image(artifact: Artifact) -> ExecutionImage {
+        ExecutionImage::from_artifact(artifact)
+    }
     fn verify(artifact: Artifact) -> Result<VerifiedArtifact, VerifyError> {
         let artifact = if artifact.cleanups.is_empty() && !artifact.functions.is_empty() {
             crate::verify::with_generated_cleanup_plans(artifact)?
@@ -3711,7 +3937,55 @@ mod tests {
         crate::verify::verify(artifact)
     }
     fn prim(result: TypeId, op: Primitive, values: &[Value]) -> Result<Value, RuntimeError> {
-        primitive(&Artifact::default(), result, op, values)
+        primitive(&image(Artifact::default()), result, op, values)
+    }
+
+    #[test]
+    fn extreme_label_namespace_does_not_preallocate_runtime_storage() {
+        let artifact = Artifact {
+            functions: vec![Function {
+                flags: 0,
+                name: "sparse_label_namespace".into(),
+                params: vec![],
+                return_type: UNIT,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, UNIT],
+                code_start: 0,
+                code_len: 3,
+                label_slot_count: u32::MAX,
+            }],
+            code: vec![
+                Instruction::LabelPush {
+                    slot: u32::MAX - 1,
+                    result_register: 1,
+                    target: 2,
+                },
+                Instruction::LabelPop { slot: u32::MAX - 1 },
+                Instruction::Return { src: None },
+            ],
+            required_features: 1 | (1 << 2),
+            ..Artifact::default()
+        };
+
+        assert_eq!(
+            Vm::from_artifact(artifact).unwrap().run(0, vec![]),
+            Ok(Value::Unit)
+        );
+    }
+
+    #[test]
+    fn enum_tag_reads_an_enum_through_an_array_element_reference() {
+        let Value::Array(array) = Value::array(
+            19,
+            [Value::aggregate_with_variant(19, Some(2), [Value::Unit])],
+        ) else {
+            unreachable!();
+        };
+        assert_eq!(
+            reference_target_enum_tag(&ReferenceTarget::ArrayElement { array, index: 0 }).unwrap(),
+            2
+        );
     }
 
     #[test]
@@ -3777,6 +4051,7 @@ mod tests {
                     partial: true,
                 },
             ],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "clause".into(),
@@ -3817,7 +4092,7 @@ mod tests {
             labels: vec![],
         };
         let mut stack = vec![frame(handler), frame(partial)];
-        let selected = select_handler_clause(&artifact, &mut stack, 0, 0).unwrap();
+        let selected = select_handler_clause(&image(artifact.clone()), &mut stack, 0, 0).unwrap();
         assert_eq!(selected.delimiter, 0);
         assert_eq!(selected.resumption_type, Some(20));
     }
@@ -3922,6 +4197,7 @@ mod tests {
                     function: 1,
                 },
             ],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -3996,6 +4272,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -4067,6 +4344,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -4139,6 +4417,7 @@ mod tests {
             required_features: 1 | (1 << 1),
             types,
             constants: vec![Constant::I64(42)],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "main".into(),
@@ -4199,6 +4478,7 @@ mod tests {
             required_features: 1 | (1 << 1),
             types,
             constants: vec![Constant::I64(42)],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "main".into(),
@@ -4239,6 +4519,7 @@ mod tests {
             required_features: 1 | (1 << 1),
             types,
             constants: vec![Constant::I64(42), Constant::I64(7)],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "replace".into(),
@@ -4281,6 +4562,7 @@ mod tests {
         let artifact = Artifact {
             required_features: 1 | (1 << 1),
             types,
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "read_text".into(),
@@ -4315,14 +4597,19 @@ mod tests {
         assert!(Rc::ptr_eq(&text, &copied_text));
 
         let bytes: Rc<[u8]> = Rc::from(&b"shared bytes"[..]);
-        let copied = copy_value(&Artifact::default(), BYTES, &Value::Bytes(bytes.clone())).unwrap();
+        let copied = copy_value(
+            &image(Artifact::default()),
+            BYTES,
+            &Value::Bytes(bytes.clone()),
+        )
+        .unwrap();
         let Value::Bytes(copied_bytes) = copied else {
             panic!("Bytes COPY returned a non-Bytes value")
         };
         assert!(Rc::ptr_eq(&bytes, &copied_bytes));
 
         let snapshotted = snapshot_clone_value(
-            &Artifact::default(),
+            &image(Artifact::default()),
             BYTES,
             &Value::Bytes(bytes.clone()),
             &mut SnapshotCloneContext::default(),
@@ -4363,6 +4650,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -4441,6 +4729,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "dangling".into(),
@@ -4483,6 +4772,7 @@ mod tests {
         });
         let artifact = Artifact {
             types,
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -4565,6 +4855,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -4642,6 +4933,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "main".into(),
@@ -4825,7 +5117,7 @@ mod tests {
                     ty
                 };
                 primitive_typed(
-                    &Artifact::default(),
+                    &image(Artifact::default()),
                     result,
                     op,
                     &[ty, ty],
@@ -4843,7 +5135,7 @@ mod tests {
                 } else {
                     three.clone()
                 };
-                primitive_typed(&Artifact::default(), ty, op, &[ty], &[input]).unwrap();
+                primitive_typed(&image(Artifact::default()), ty, op, &[ty], &[input]).unwrap();
             }
 
             let maximum = if spec.signed {
@@ -4853,7 +5145,7 @@ mod tests {
             };
             assert_eq!(
                 primitive_typed(
-                    &Artifact::default(),
+                    &image(Artifact::default()),
                     ty,
                     Primitive::IntCheckedAdd,
                     &[ty, ty],
@@ -4863,7 +5155,7 @@ mod tests {
                 "checked maximum overflow for type {ty}",
             );
             let wrapped = primitive_typed(
-                &Artifact::default(),
+                &image(Artifact::default()),
                 ty,
                 Primitive::IntWrappingAdd,
                 &[ty, ty],
@@ -4877,7 +5169,7 @@ mod tests {
             );
             assert_eq!(
                 primitive_typed(
-                    &Artifact::default(),
+                    &image(Artifact::default()),
                     ty,
                     Primitive::IntShl,
                     &[ty, U32],
@@ -4890,7 +5182,7 @@ mod tests {
                 let minimum = 1_u128 << (spec.bits - 1);
                 assert_eq!(
                     primitive_typed(
-                        &Artifact::default(),
+                        &image(Artifact::default()),
                         ty,
                         Primitive::IntCheckedNeg,
                         &[ty],
@@ -4900,7 +5192,7 @@ mod tests {
                 );
                 assert_eq!(
                     primitive_typed(
-                        &Artifact::default(),
+                        &image(Artifact::default()),
                         ty,
                         Primitive::IntWrappingNeg,
                         &[ty],
@@ -4916,7 +5208,7 @@ mod tests {
     fn numeric_conversions_are_width_signedness_and_float_checked() {
         assert_eq!(
             primitive_typed(
-                &Artifact::default(),
+                &image(Artifact::default()),
                 U8,
                 Primitive::IntConvertChecked,
                 &[I16],
@@ -4926,7 +5218,7 @@ mod tests {
         );
         assert_eq!(
             primitive_typed(
-                &Artifact::default(),
+                &image(Artifact::default()),
                 U16,
                 Primitive::IntConvertWrapping,
                 &[I8],
@@ -4936,7 +5228,7 @@ mod tests {
         );
         assert_eq!(
             primitive_typed(
-                &Artifact::default(),
+                &image(Artifact::default()),
                 I8,
                 Primitive::IntConvertChecked,
                 &[U16],
@@ -4946,7 +5238,7 @@ mod tests {
         );
         assert_eq!(
             primitive_typed(
-                &Artifact::default(),
+                &image(Artifact::default()),
                 I8,
                 Primitive::IntConvertWrapping,
                 &[U16],
@@ -4956,7 +5248,7 @@ mod tests {
         );
 
         let Value::F32(nan32) = primitive_typed(
-            &Artifact::default(),
+            &image(Artifact::default()),
             F32,
             Primitive::FloatAdd,
             &[F32, F32],
@@ -4967,7 +5259,7 @@ mod tests {
         };
         assert_eq!(nan32.to_bits(), 0x7fc0_0000);
         let Value::F32(converted_nan) = primitive_typed(
-            &Artifact::default(),
+            &image(Artifact::default()),
             F32,
             Primitive::FloatConvert,
             &[F64],
@@ -4979,7 +5271,7 @@ mod tests {
         assert_eq!(converted_nan.to_bits(), 0x7fc0_0000);
         assert_eq!(
             primitive_typed(
-                &Artifact::default(),
+                &image(Artifact::default()),
                 U8,
                 Primitive::FloatToIntChecked,
                 &[F64],
@@ -4990,7 +5282,7 @@ mod tests {
         for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 256.0, -1.0] {
             assert_eq!(
                 primitive_typed(
-                    &Artifact::default(),
+                    &image(Artifact::default()),
                     U8,
                     Primitive::FloatToIntChecked,
                     &[F64],
@@ -5001,7 +5293,7 @@ mod tests {
         }
         assert_eq!(
             primitive_typed(
-                &Artifact::default(),
+                &image(Artifact::default()),
                 F64,
                 Primitive::IntToFloat,
                 &[U128],
@@ -5011,7 +5303,7 @@ mod tests {
         );
         assert_eq!(
             primitive_typed(
-                &Artifact::default(),
+                &image(Artifact::default()),
                 I128,
                 Primitive::FloatToIntChecked,
                 &[F64],
@@ -5019,6 +5311,184 @@ mod tests {
             ),
             Err(RuntimeError::ArithmeticOverflow),
         );
+    }
+
+    #[test]
+    fn frozen_float_leaves_preserve_zero_and_canonicalize_every_nan_bit_path() {
+        for (ty, negative_zero, canonical_nan, bits_ty) in [
+            (F32, Value::F32(-0.0), 0x7fc0_0000_u64, U32),
+            (F64, Value::F64(-0.0), 0x7ff8_0000_0000_0000_u64, U64),
+        ] {
+            let negated = primitive_typed(
+                &image(Artifact::default()),
+                ty,
+                Primitive::FloatNeg,
+                &[ty],
+                std::slice::from_ref(&negative_zero),
+            )
+            .unwrap();
+            match negated {
+                Value::F32(value) => assert_eq!(value.to_bits(), 0),
+                Value::F64(value) => assert_eq!(value.to_bits(), 0),
+                _ => panic!(),
+            }
+            assert_eq!(
+                primitive_typed(
+                    &image(Artifact::default()),
+                    bits_ty,
+                    Primitive::FloatToBits,
+                    &[ty],
+                    std::slice::from_ref(&negative_zero),
+                ),
+                Ok(Value::U64(if ty == F32 {
+                    1_u64 << 31
+                } else {
+                    1_u64 << 63
+                }))
+            );
+
+            let hostile_nan = if ty == F32 {
+                Value::F32(f32::from_bits(0xff80_0001))
+            } else {
+                Value::F64(f64::from_bits(0xfff0_0000_0000_0001))
+            };
+            assert_eq!(
+                primitive_typed(
+                    &image(Artifact::default()),
+                    bits_ty,
+                    Primitive::FloatToBits,
+                    &[ty],
+                    &[hostile_nan],
+                ),
+                Ok(Value::U64(canonical_nan))
+            );
+            let from_bits = primitive_typed(
+                &image(Artifact::default()),
+                ty,
+                Primitive::FloatFromBits,
+                &[bits_ty],
+                &[Value::U64(if ty == F32 {
+                    0xff80_0001
+                } else {
+                    0xfff0_0000_0000_0001
+                })],
+            )
+            .unwrap();
+            match from_bits {
+                Value::F32(value) => assert_eq!(u64::from(value.to_bits()), canonical_nan),
+                Value::F64(value) => assert_eq!(value.to_bits(), canonical_nan),
+                _ => panic!(),
+            }
+        }
+
+        for (ty, a, b) in [
+            (F32, Value::F32(7.5), Value::F32(2.0)),
+            (F64, Value::F64(7.5), Value::F64(2.0)),
+        ] {
+            for op in [
+                Primitive::FloatAdd,
+                Primitive::FloatSub,
+                Primitive::FloatMul,
+                Primitive::FloatDiv,
+                Primitive::FloatRem,
+            ] {
+                assert!(
+                    primitive_typed(
+                        &image(Artifact::default()),
+                        ty,
+                        op,
+                        &[ty, ty],
+                        &[a.clone(), b.clone()],
+                    )
+                    .is_ok()
+                );
+            }
+            for op in [
+                Primitive::FloatEq,
+                Primitive::FloatNe,
+                Primitive::FloatLt,
+                Primitive::FloatLe,
+                Primitive::FloatGt,
+                Primitive::FloatGe,
+            ] {
+                assert!(matches!(
+                    primitive_typed(
+                        &image(Artifact::default()),
+                        U32,
+                        op,
+                        &[ty, ty],
+                        &[a.clone(), b.clone()],
+                    ),
+                    Ok(Value::U64(value)) if value <= 1
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn checked_float_to_integer_observes_every_width_boundary() {
+        let image = image(Artifact::default());
+        for ty in [
+            U8, U16, U32, U64, U128, USIZE, I8, I16, I32, I64, I128, ISIZE,
+        ] {
+            let spec = int_spec(ty).unwrap();
+            let (inside, outside, expected) = if spec.signed {
+                let limit = 2_f64.powi((spec.bits - 1) as i32);
+                (-limit, limit, make_int(spec, (-limit as i128) as u128))
+            } else {
+                let limit = 2_f64.powi(spec.bits as i32);
+                (0.0, limit, make_int(spec, 0))
+            };
+            assert_eq!(
+                primitive_typed(
+                    &image,
+                    ty,
+                    Primitive::FloatToIntChecked,
+                    &[F64],
+                    &[Value::F64(inside)],
+                ),
+                Ok(expected)
+            );
+            assert_eq!(
+                primitive_typed(
+                    &image,
+                    ty,
+                    Primitive::FloatToIntChecked,
+                    &[F64],
+                    &[Value::F64(outside)],
+                ),
+                Err(RuntimeError::ArithmeticOverflow)
+            );
+            assert!(
+                primitive_typed(
+                    &image,
+                    F32,
+                    Primitive::IntToFloat,
+                    &[ty],
+                    &[make_int(
+                        spec,
+                        if spec.signed {
+                            u128::MAX
+                        } else {
+                            int_mask(spec.bits)
+                        }
+                    )],
+                )
+                .is_ok()
+            );
+        }
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(
+                primitive_typed(
+                    &image,
+                    I128,
+                    Primitive::FloatToIntChecked,
+                    &[F64],
+                    &[Value::F64(invalid)],
+                ),
+                Err(RuntimeError::ArithmeticOverflow)
+            );
+        }
     }
 
     #[test]
@@ -5032,6 +5502,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "main".into(),
@@ -5085,6 +5556,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "main".into(),
@@ -5149,6 +5621,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "main".into(),
@@ -5207,6 +5680,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "drain_one".into(),
@@ -5260,6 +5734,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "finish_resident".into(),
@@ -5304,10 +5779,10 @@ mod tests {
         types.push(Type::RefUnique { referent: 19 });
         types.push(Type::RefShared { referent: 19 });
         types.push(Type::Array { element: U8 });
-        let artifact = Artifact {
+        let artifact = image(Artifact {
             types,
             ..Artifact::default()
-        };
+        });
         let array = primitive(
             &artifact,
             19,
@@ -5432,10 +5907,10 @@ mod tests {
         });
         types.push(Type::Array { element: 19 });
         types.push(Type::RefShared { referent: 20 });
-        let artifact = Artifact {
+        let artifact = image(Artifact {
             types,
             ..Artifact::default()
-        };
+        });
         let fill = Value::aggregate(19, [Value::U64(7)]);
         let array = primitive(
             &artifact,
@@ -5487,6 +5962,7 @@ mod tests {
         types.push(Type::Array { element: U64 });
         let artifact = Artifact {
             types,
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "huge_array".into(),
@@ -5518,6 +5994,14 @@ mod tests {
         assert_eq!(
             RuntimeError::AllocationOverflow.category(),
             RuntimeFaultCategory::PrimitiveTrap
+        );
+        assert_eq!(
+            checked_output_bytes::<u8>(MAX_PRIMITIVE_ALLOCATION_BYTES + 1),
+            Err(RuntimeError::AllocationLimit)
+        );
+        assert_eq!(
+            RuntimeError::AllocationLimit.category(),
+            RuntimeFaultCategory::MemoryLimit
         );
     }
 
@@ -5556,6 +6040,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "main".into(),
@@ -5638,6 +6123,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "main".into(),
@@ -5723,6 +6209,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "main".into(),
@@ -5790,6 +6277,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "main".into(),
@@ -5864,6 +6352,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -5986,6 +6475,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -6091,6 +6581,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -6222,6 +6713,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -6397,6 +6889,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -6583,6 +7076,7 @@ mod tests {
                     partial: false,
                 },
             ],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "terminal clause".into(),
@@ -6629,7 +7123,7 @@ mod tests {
                 labels: vec![],
             },
         ];
-        let selected = select_handler_clause(&artifact, &mut stack, 0, 0).unwrap();
+        let selected = select_handler_clause(&image(artifact.clone()), &mut stack, 0, 0).unwrap();
         assert_eq!(selected.delimiter, 0);
         assert_eq!(selected.receiver_mode, 2);
     }
@@ -6655,6 +7149,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "cancel".into(),
@@ -6727,6 +7222,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "bindings".into(),
@@ -6798,6 +7294,7 @@ mod tests {
         let artifact = Artifact {
             types,
             constants: vec![Constant::I64(42)],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "construct erased field".into(),
@@ -6846,6 +7343,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "aborter".into(),
@@ -6979,6 +7477,7 @@ mod tests {
                     registers: vec![8],
                 },
             ],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "leave_pair".into(),
@@ -7065,6 +7564,7 @@ mod tests {
         for (constant, ty, expected) in cases {
             let artifact = Artifact {
                 constants: vec![constant],
+                reference_return_contracts: vec![],
                 functions: vec![Function {
                     flags: 0,
                     name: "scalar_constant".into(),
@@ -7223,6 +7723,7 @@ mod tests {
                 },
                 may_trap: true,
             }],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "diagnostic".into(),
@@ -7306,6 +7807,7 @@ mod tests {
                 types,
                 constants: vec![],
                 protocols: vec![protocol],
+                reference_return_contracts: vec![],
                 functions: vec![
                     Function {
                         flags: 0,
@@ -7419,6 +7921,7 @@ mod tests {
                     resumption_upper: Some(1),
                 }],
             }],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -7529,6 +8032,7 @@ mod tests {
                     resumption_upper: Some(2),
                 }],
             }],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -7652,6 +8156,7 @@ mod tests {
         ]);
         let artifact = Artifact {
             types,
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "captured".into(),
@@ -7693,8 +8198,8 @@ mod tests {
             }],
         };
 
-        let first = clone_resumption_snapshot(&artifact, &source).unwrap();
-        let second = clone_resumption_snapshot(&artifact, &source).unwrap();
+        let first = clone_resumption_snapshot(&image(artifact.clone()), &source).unwrap();
+        let second = clone_resumption_snapshot(&image(artifact.clone()), &source).unwrap();
         let captures = |snapshot: &ResumptionValue| {
             let Value::Handler(handler) = snapshot.frames[0].delimiter.as_ref().unwrap() else {
                 panic!("snapshot delimiter is not a handler")
@@ -7776,8 +8281,8 @@ mod tests {
                 labels: vec![],
             }],
         };
-        let first = clone_resumption_snapshot(&artifact, &source).unwrap();
-        let second = clone_resumption_snapshot(&artifact, &source).unwrap();
+        let first = clone_resumption_snapshot(&image(artifact.clone()), &source).unwrap();
+        let second = clone_resumption_snapshot(&image(artifact.clone()), &source).unwrap();
         let Some(Value::Place(first_place)) = &first.frames[0].registers[2] else {
             panic!("first cloned place")
         };
@@ -7889,8 +8394,8 @@ mod tests {
             }],
         };
 
-        let first = clone_resumption_snapshot(&artifact, &source).unwrap();
-        let second = clone_resumption_snapshot(&artifact, &source).unwrap();
+        let first = clone_resumption_snapshot(&image(artifact.clone()), &source).unwrap();
+        let second = clone_resumption_snapshot(&image(artifact.clone()), &source).unwrap();
         let first_registers = &first.frames[0].registers;
         let second_registers = &second.frames[0].registers;
         let Some(Value::Place(first_owner)) = &first_registers[1] else {
@@ -7990,7 +8495,7 @@ mod tests {
             }],
         };
         assert!(matches!(
-            clone_resumption_snapshot(&artifact, &source),
+            clone_resumption_snapshot(&image(artifact.clone()), &source),
             Err(RuntimeError::TypeConfusion)
         ));
     }

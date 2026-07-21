@@ -5,6 +5,33 @@ path), an auto-formatter (`grand fmt`), and a language server (`grand lsp`). Wri
 against the *target* design in `docs/frontend-design.md`, `docs/architecture.md`,
 `docs/std-lib.md`, and the core spec — not the current state of the bootstrap.
 
+Current implementation note: the Rust `grand` crate already provides the
+scaffold/build/check/run/test foundation, deterministic path and pinned-git
+resolution, lockfiles, caching, vendoring, and compile-fail tests. The formatter
+uses the authoritative semantic parser and lossless lexer, ordered bundle
+fixity context, a fixed-width document algebra with structured delimiter and
+body wrapping, verbatim anchored comments, and fail-closed normalization and
+token-equivalence checks. `grand fmt` renders every package file before writing
+any of them, so malformed input refuses the operation transactionally; corpus,
+idempotence, width, and malformed-input tests cover the implementation. The LSP
+now runs the shared compiler bundle/interface/diagnostic pipeline in a persistent
+multi-root document session, atomically retains last-good semantic identities
+and exact definition spans, and uses those identities for symbols,
+cross-file definition, completion, references, rename, and signature/doc hover;
+its local-scope fallback remains lexical until the compiler exports local/type
+side tables. `grand` now probes the real versioned `grc` contract,
+passes ordered canonical `.glorious` inputs, consumes JSON diagnostics and
+authoritative user/std interfaces, emits `.grbc`, and executes it through
+`grvm`; legacy `.gr` and fake/LLVM flows remain compatibility paths. The
+`grand` also probes the selected VM's contract/artifact range before compiling
+and fingerprints compiler + VM content identities atomically. The `lex`, declaration-`scan`, and
+interface/name/type `resolve`, and `check` stop boundaries are real. Released-seed
+identity negotiation and the bounded versioned `grc --serve` JSON-line transport
+are also implemented. Remaining work is per-body incremental inference and
+compiler-exported local/type side tables. The
+milestone table is dependency order, not a claim that every milestone is still
+unimplemented.
+
 Ground rules (project decisions):
 - **All tooling is written in Rust**, as crates alongside the existing bootstrap
   interpreter crate. Migration to Grandiose happens after the compiler is done; the
@@ -38,12 +65,12 @@ These properties of the language design shape everything below:
   empty effect row `/ {}` omitted, `!` never omitted). The formatter enforces spec
   canon; there is no style configuration.
 - **Comments: line comments + nested block comments** (per frontend-design). The
-  bootstrap lexer doesn't implement them yet — they are a hard prerequisite for the
-  formatter and must be added as *trivia-preserving* tokens, not skipped bytes.
+  semantic lexer and shared gap-free lossless stream implement both forms; the
+  formatter retains them as anchored trivia rather than dropping their bytes.
 - **Structured diagnostics.** Phases return `(origin, proof_trace, reason)` failure
   objects; a renderer owns wording; spans are `(start_byte, end_byte)` u32 pairs into
-  the bundle. This is exactly the shape an LSP wants — the missing piece is a
-  machine-readable emission mode (§1.2).
+  the bundle. The compiler's JSON diagnostic mode and the LSP both consume this
+  machine-readable shape (§1.2).
 - **Whole-bundle, non-incremental compilation by design**, but with two salvageable
   hooks for the LSP: (a) the declaration scanner records **body token ranges without
   building trees**, so bodies are independently re-elaboratable units; (b) inference
@@ -98,11 +125,11 @@ either); it is also the piece with the *least* pressure to ever migrate to Grand
 
 ### 2.1 Commands
 ```
-grand new <name> / grand init      # scaffold: grandiose.toml, src/main.gr, .gitignore
+grand new <name> / grand init      # scaffold: grandiose.toml, src/main.glorious, .gitignore
 grand build [-O..] [--emit ...]    # resolve deps -> ordered file list -> compiler
 grand run [-- args]                # build + execute under the supervisor limits
 grand check                        # frontend only, no emission (fast feedback)
-grand test                         # run *_test.gr files / test callables (see 2.7)
+grand test                         # run *_test.glorious files / test callables (see 2.7)
 grand fmt [--check]                # formatter (§3)
 grand lsp                          # start the language server (§4)
 grand add <dep>                    # edit [dependencies] + update lockfile
@@ -115,7 +142,7 @@ grand clean
 [project]
 name = "my-app"          # must match package-name rules: [a-z][a-z0-9-]*
 version = "0.1.0"        # semver
-entry = "src/main.gr"
+entry = "src/main.glorious"
 
 [dependencies]
 # local path dependency
@@ -127,11 +154,11 @@ utils = { git = "https://github.com/user/gr-utils", rev = "a1b2c3d" }
 text  = { github = "user/gr-text", branch = "main" }
 
 [backend]
-kind = "llvm"            # (or "vm" if/when that backend lands)
-minimum-version = 18
+kind = "vm"              # canonical G1 `.grbc` + `grvm` pipeline
 ```
 - A dependency is itself a directory with a `grandiose.toml`. **Library packages have
-  no `entry`;** instead `sources = ["src/**/*.gr"]` (default: `src/**/*.gr` sorted
+  no `entry`;** instead `sources = ["src/**/*.glorious"]` (default: canonical
+  `.glorious` plus legacy `.gr` sources sorted
   lexicographically for determinism). An executable package has `entry`; its entry
   file is placed last in the bundle.
 - `git` requires exactly one of `tag | rev | branch`. `branch` is resolved to a
@@ -194,7 +221,7 @@ deps = ["text"]
 - Checkouts are read-only; `content-hash` is verified before every build so a
   tampered cache is detected.
 - **No build scripts, no code execution at resolution time — ever.** A package is
-  data (`.gr` files + manifest). This is a security stance worth keeping permanently;
+  data (`.glorious`/legacy `.gr` files + manifest). This is a security stance worth keeping permanently;
   the concatenation model means there's nothing a build script would legitimately do.
 - `grand vendor` copies checkouts into `./vendor/` and a config key redirects
   resolution there for offline/hermetic builds.
@@ -211,7 +238,7 @@ Until a real module system exists, the build tool is the only line of defense:
   additivity), at which point this section dissolves.
 
 ### 2.8 Tests
-- Convention: files matching `tests/**/*.gr` each compile as their own executable
+- Convention: files matching `tests/**/*.glorious` (plus legacy `.gr`) each compile as their own executable
   (package sources + that file, its `main` as entry); exit code 0 = pass. This
   matches the existing e2e harness style and needs zero language features.
 - Later, when attributes/annotations exist, migrate to in-source `test` callables.
@@ -220,12 +247,12 @@ Until a real module system exists, the build tool is the only line of defense:
 
 ### 3.1 Architecture
 - **Rust**, but not a second parser: the bootstrap interpreter crate already contains
-  a full Grandiose lexer/parser (it loads `main.gr` today). Factor that frontend into
+  a full Grandiose lexer/parser (it loads `main.glorious` today). Factor that frontend into
   a reusable library crate (`grandiose-syntax`), add trivia preservation to it
   (§1.1), and build the formatter on top. One Rust parser, shared by the
   interpreter, the formatter, and the LSP's syntax layer — drift is only possible
   against the *self-hosted* parser, which the round-trip corpus tests (below, run
-  over `src/main.gr` and all examples) exist to catch.
+  over `src/main.glorious` and all examples) exist to catch.
 - Migration seam: the formatter is a pure function `tokens+AST → text`. When the
   self-hosted compiler is done, reimplement that function in Grandiose against the
   same golden corpus; `grand fmt` just swaps the engine it shells into.
@@ -254,7 +281,7 @@ Expression grouping depends on fixity declarations that may live in *other files
 - Comments: preserved verbatim, anchored to the token they preceded/followed
   (leading trivia stays leading). Never reflow comment text.
 - Idempotence and safety invariants, enforced in CI on the whole corpus
-  (`examples/`, `tests/cases/`, `src/main.gr` itself):
+  (`examples/`, `tests/cases/`, `src/main.glorious` itself):
   1. `fmt(fmt(x)) == fmt(x)`
   2. `parse(fmt(x))` is α-identical to `parse(x)` (token stream modulo trivia is
      unchanged apart from the spec normalizations)
@@ -307,10 +334,12 @@ All powered by `--emit interfaces-json` (§1.3) plus a lex of the current file:
 
 ### 4.4 Phase 3 — body-level semantics (the real investment)
 Requires compiler work, designed around the two existing hooks:
-- **Persistent frontend session.** A long-lived analysis session (in-process with
-  the Rust frontend now; `grc --serve` over stdin JSON once the self-hosted native
-  compiler takes over) that keeps the post-scan state resident: interned
-  symbols/types, interface tables, fixity tables, resolved-name tables.
+- **Persistent frontend session.** The Rust frontend now provides `grc --serve`
+  over versioned JSON lines, with bounded requests/source snapshots,
+  whole-bundle content invalidation, atomic last-good commits, and one-shot
+  diagnostic/artifact parity. The next layer keeps post-scan semantic state
+  resident: interned symbols/types, interface tables, fixity tables, and
+  resolved-name tables.
 - **Per-body re-elaboration as the incrementality unit.** The declaration scanner
   already records body token ranges without trees. An edit inside one body ⇒ re-lex
   that segment, re-elaborate that body against the resident interface tables,

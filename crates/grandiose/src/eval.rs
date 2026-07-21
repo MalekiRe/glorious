@@ -66,7 +66,8 @@ use crate::{
     HostImportRole,
     ast::{
         AssignmentField, AssignmentPlaceKind, BinaryOp, DropDecl, Expr, ExprKind, Function,
-        HandlerClause, Pattern, PatternKind, Program, Stmt, UnaryOp,
+        GoalPolarity, HandlerClause, Pattern, PatternKind, Program, Stmt, TraitMethod, TypeSyntax,
+        TypeSyntaxKind, UnaryOp, pattern_field_index,
     },
     diagnostic::Diagnostic,
     span::Span,
@@ -450,6 +451,11 @@ pub enum Value {
     Uninitialized,
     Unit,
     Int(i64),
+    /// A source magnitude awaiting contextual integer width selection.
+    IntegerLiteral {
+        negative: bool,
+        magnitude: u128,
+    },
     /// An integer whose source type cannot be represented faithfully by the
     /// recovery evaluator's legacy, implicitly-i64 `Int` case. `raw` is the
     /// width-truncated two's-complement bit pattern.
@@ -458,9 +464,11 @@ pub enum Value {
         bits: u8,
         raw: u128,
     },
-    /// The recovery evaluator is untyped, so every float literal evaluates at
-    /// the f64 default width regardless of an `f32` source annotation.
+    /// A contextually f64 (or not-yet-contextualized) floating-point value.
     Float(f64),
+    /// A contextually f32 floating-point value. Keeping the source width in
+    /// recovery execution is required for exact primitive and bit semantics.
+    Float32(f32),
     Char(char),
     String(TextRef),
     /// Immutable octets returned by the generation-1 filesystem host surface.
@@ -567,6 +575,27 @@ impl PartialEq for Value {
             (Self::Uninitialized, Self::Uninitialized) => true,
             (Self::Unit, Self::Unit) => true,
             (Self::Int(a), Self::Int(b)) => a == b,
+            (
+                Self::IntegerLiteral {
+                    negative,
+                    magnitude,
+                },
+                Self::Int(value),
+            )
+            | (
+                Self::Int(value),
+                Self::IntegerLiteral {
+                    negative,
+                    magnitude,
+                },
+            ) => {
+                if *negative {
+                    i128::try_from(*magnitude).ok().and_then(i128::checked_neg)
+                        == Some(i128::from(*value))
+                } else {
+                    u128::try_from(*value).is_ok_and(|value| value == *magnitude)
+                }
+            }
             (Self::Int(value), Self::Integer { signed, bits, raw })
             | (Self::Integer { signed, bits, raw }, Self::Int(value)) => {
                 if *signed {
@@ -589,6 +618,7 @@ impl PartialEq for Value {
             ) => asigned == bsigned && abits == bbits && araw == braw,
             // IEEE comparison, matching the bytecode FloatEq primitive.
             (Self::Float(a), Self::Float(b)) => a == b,
+            (Self::Float32(a), Self::Float32(b)) => a == b,
             (Self::Char(a), Self::Char(b)) => a == b,
             (Self::String(a), Self::String(b)) => a == b,
             (Self::Bytes(a), Self::Bytes(b)) => a == b,
@@ -644,6 +674,16 @@ impl fmt::Display for Value {
             Self::Uninitialized => write!(f, "<uninitialized>"),
             Self::Unit => write!(f, "()"),
             Self::Int(value) => write!(f, "{value}"),
+            Self::IntegerLiteral {
+                negative,
+                magnitude,
+            } => {
+                if *negative {
+                    write!(f, "-{magnitude}")
+                } else {
+                    write!(f, "{magnitude}")
+                }
+            }
             Self::Integer { signed, bits, raw } => {
                 if *signed {
                     write!(f, "{}", signed_integer(*raw, *bits))
@@ -652,6 +692,7 @@ impl fmt::Display for Value {
                 }
             }
             Self::Float(value) => write!(f, "{value}"),
+            Self::Float32(value) => write!(f, "{value}"),
             Self::Char(value) => write!(f, "{value}"),
             Self::String(value) => write!(f, "{value}"),
             Self::Bytes(value) => write!(f, "<bytes len={}>", value.len()),
@@ -1007,7 +1048,42 @@ pub(crate) enum RuntimeLeaf {
         primitive: Primitive,
         target: IntegerKind,
     },
+    FloatPrimitive(FloatRuntimeLeaf),
     HostImport(HostImportRole),
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum FloatRuntimeLeaf {
+    Unary {
+        primitive: Primitive,
+        width: FloatKind,
+    },
+    Binary {
+        primitive: Primitive,
+        width: FloatKind,
+    },
+    Comparison {
+        primitive: Primitive,
+        width: FloatKind,
+    },
+    Convert {
+        source: FloatKind,
+        target: FloatKind,
+    },
+    IntToFloat {
+        source: IntegerKind,
+        target: FloatKind,
+    },
+    FloatToIntChecked {
+        source: FloatKind,
+        target: IntegerKind,
+    },
+    ToBits {
+        source: FloatKind,
+    },
+    FromBits {
+        target: FloatKind,
+    },
 }
 
 impl RuntimeLeafAuthority {
@@ -1043,6 +1119,25 @@ impl RuntimeLeafAuthority {
                         primitive,
                         target: function.return_type.as_ref().and_then(integer_kind)?,
                     },
+                    RuntimeLeaf::Primitive(
+                        primitive @ (Primitive::FloatAdd
+                        | Primitive::FloatSub
+                        | Primitive::FloatMul
+                        | Primitive::FloatDiv
+                        | Primitive::FloatRem
+                        | Primitive::FloatNeg
+                        | Primitive::FloatEq
+                        | Primitive::FloatNe
+                        | Primitive::FloatLt
+                        | Primitive::FloatLe
+                        | Primitive::FloatGt
+                        | Primitive::FloatGe
+                        | Primitive::FloatConvert
+                        | Primitive::IntToFloat
+                        | Primitive::FloatToIntChecked
+                        | Primitive::FloatToBits
+                        | Primitive::FloatFromBits),
+                    ) => RuntimeLeaf::FloatPrimitive(float_runtime_leaf(function, primitive)?),
                     leaf => leaf,
                 };
                 Some((index, leaf))
@@ -1108,6 +1203,44 @@ pub(crate) fn run_entry_with_runtime(
         .enumerate()
         .map(|(index, function)| (function.declaration.name.as_str(), index))
         .collect();
+    let type_aliases = program
+        .type_aliases
+        .iter()
+        .map(|alias| (alias.name.as_str(), &alias.target))
+        .collect::<HashMap<_, _>>();
+    let mut trait_methods = Vec::new();
+    let mut trait_method_groups: Vec<Vec<usize>> = Vec::new();
+    let mut trait_method_indices = HashMap::new();
+    for implementation in &program.impls {
+        if implementation.polarity != GoalPolarity::Positive {
+            continue;
+        }
+        let Some(trait_name) = implementation
+            .trait_ref
+            .path
+            .last()
+            .map(|segment| segment.name.as_str())
+        else {
+            continue;
+        };
+        for method in &implementation.methods {
+            if method.body.is_none() {
+                continue;
+            }
+            let group = *trait_method_indices
+                .entry((trait_name, method.name.as_str()))
+                .or_insert_with(|| {
+                    trait_method_groups.push(Vec::new());
+                    trait_method_groups.len() - 1
+                });
+            let index = trait_methods.len();
+            trait_methods.push(RuntimeTraitMethod {
+                method,
+                self_ty: &implementation.self_ty,
+            });
+            trait_method_groups[group].push(index);
+        }
+    }
     let main = function_indices
         .get(entry_name)
         .map(|index| functions[*index].declaration)
@@ -1173,10 +1306,16 @@ pub(crate) fn run_entry_with_runtime(
         .collect();
     let function_count = functions.len();
     let mut evaluator = Evaluator {
+        program,
         functions,
         function_indices,
+        trait_methods,
+        trait_method_groups,
+        trait_method_indices,
+        type_aliases,
         function_call_counts: vec![0; function_count],
         current_function: None,
+        generic_witnesses: HashMap::new(),
         call_names: SpanMap::default(),
         call_kinds: SpanMap::default(),
         local_depths: SpanMap::default(),
@@ -1200,7 +1339,12 @@ pub(crate) fn run_entry_with_runtime(
     };
     for binding in &program.globals {
         let value = evaluator.evaluate(binding.value.clone(), Locals::new())?;
-        evaluator.globals.insert(binding.name.clone(), value);
+        let name = binding
+            .owner
+            .as_ref()
+            .map(|owner| format!("{owner}::{}", binding.name))
+            .unwrap_or_else(|| binding.name.clone());
+        evaluator.globals.insert(name, value);
     }
     let locals = main
         .params
@@ -1208,7 +1352,14 @@ pub(crate) fn run_entry_with_runtime(
         .map(|param| param.name.clone())
         .zip(values)
         .collect();
-    evaluator.evaluate(main.body.clone(), locals)
+    let value = evaluator.evaluate(main.body.clone(), locals)?;
+    if let Some(kind) = main.return_type.as_ref().and_then(integer_kind) {
+        coerce_integer(value, kind, main.body.span)
+    } else if let Some(kind) = main.return_type.as_ref().and_then(float_kind) {
+        coerce_declared_float(value, kind, main.body.span)
+    } else {
+        Ok(value)
+    }
 }
 
 struct RuntimeFunction<'a> {
@@ -1216,11 +1367,25 @@ struct RuntimeFunction<'a> {
     parameter_names: Rc<Vec<Rc<str>>>,
 }
 
+struct RuntimeTraitMethod<'a> {
+    method: &'a TraitMethod,
+    self_ty: &'a TypeSyntax,
+}
+
 struct Evaluator<'a> {
+    program: &'a Program,
     functions: Vec<RuntimeFunction<'a>>,
     function_indices: HashMap<&'a str, usize>,
+    trait_methods: Vec<RuntimeTraitMethod<'a>>,
+    trait_method_groups: Vec<Vec<usize>>,
+    trait_method_indices: HashMap<(&'a str, &'a str), usize>,
+    type_aliases: HashMap<&'a str, &'a TypeSyntax>,
     function_call_counts: Vec<u64>,
     current_function: Option<usize>,
+    /// Runtime witnesses for type parameters of the active recovery-evaluator
+    /// call. Compiled execution resolves these calls statically; recovery
+    /// execution retains enough evidence for the same receiverless choice.
+    generic_witnesses: HashMap<String, Value>,
     call_names: SpanMap<Rc<str>>,
     call_kinds: SpanMap<CallKind>,
     local_depths: SpanMap<usize>,
@@ -1365,7 +1530,15 @@ impl ContinuationSnapshot {
                 bits: *bits,
                 raw: *raw,
             },
+            Value::IntegerLiteral {
+                negative,
+                magnitude,
+            } => Value::IntegerLiteral {
+                negative: *negative,
+                magnitude: *magnitude,
+            },
             Value::Float(value) => Value::Float(*value),
+            Value::Float32(value) => Value::Float32(*value),
             Value::Char(value) => Value::Char(*value),
             Value::String(value) => Value::String(value.clone()),
             Value::Bytes(value) => Value::Bytes(value.clone()),
@@ -1506,10 +1679,12 @@ impl ContinuationSnapshot {
             }
             EvalFrame::BinaryLeft { locals, .. } => *locals = self.locals(locals),
             EvalFrame::BinaryRight { lhs, .. } => *lhs = self.value(lhs),
+            EvalFrame::RefinementIf { locals, .. } => *locals = self.locals(locals),
             EvalFrame::Field { .. }
             | EvalFrame::MoveDereference { .. }
             | EvalFrame::MemoizeDeclarationLookup { .. }
             | EvalFrame::FunctionReturn { .. }
+            | EvalFrame::GenericEnvironment { .. }
             | EvalFrame::HandleExit { .. }
             | EvalFrame::HandlerDelimiter { .. }
             | EvalFrame::Unary { .. }
@@ -1555,6 +1730,7 @@ enum CallKind {
     Intrinsic(IntrinsicKind),
     EnumConstructor(usize),
     Function(usize),
+    TraitMethodGroup(usize),
 }
 
 #[derive(Clone, Copy)]
@@ -1594,6 +1770,12 @@ pub(crate) struct IntegerKind {
     bits: u8,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum FloatKind {
+    F32,
+    F64,
+}
+
 fn integer_kind(ty: &crate::ast::TypeSyntax) -> Option<IntegerKind> {
     let (signed, bits) = match ty.simple_name()? {
         "u8" => (false, 8),
@@ -1609,6 +1791,124 @@ fn integer_kind(ty: &crate::ast::TypeSyntax) -> Option<IntegerKind> {
         _ => return None,
     };
     Some(IntegerKind { signed, bits })
+}
+
+fn float_kind(ty: &crate::ast::TypeSyntax) -> Option<FloatKind> {
+    match ty.simple_name()? {
+        "f32" => Some(FloatKind::F32),
+        "f64" => Some(FloatKind::F64),
+        _ => None,
+    }
+}
+
+fn float_runtime_leaf(function: &Function, primitive: Primitive) -> Option<FloatRuntimeLeaf> {
+    let params = function
+        .params
+        .iter()
+        .map(|parameter| &parameter.ty)
+        .collect::<Vec<_>>();
+    let result = function.return_type.as_ref()?;
+    match primitive {
+        Primitive::FloatNeg => {
+            let [value] = params.as_slice() else {
+                return None;
+            };
+            let width = float_kind(value)?;
+            (float_kind(result) == Some(width))
+                .then_some(FloatRuntimeLeaf::Unary { primitive, width })
+        }
+        Primitive::FloatAdd
+        | Primitive::FloatSub
+        | Primitive::FloatMul
+        | Primitive::FloatDiv
+        | Primitive::FloatRem => {
+            let [left, right] = params.as_slice() else {
+                return None;
+            };
+            let width = float_kind(left)?;
+            (float_kind(right) == Some(width) && float_kind(result) == Some(width))
+                .then_some(FloatRuntimeLeaf::Binary { primitive, width })
+        }
+        Primitive::FloatEq
+        | Primitive::FloatNe
+        | Primitive::FloatLt
+        | Primitive::FloatLe
+        | Primitive::FloatGt
+        | Primitive::FloatGe => {
+            let [left, right] = params.as_slice() else {
+                return None;
+            };
+            let width = float_kind(left)?;
+            (float_kind(right) == Some(width)
+                && integer_kind(result)
+                    == Some(IntegerKind {
+                        signed: false,
+                        bits: 32,
+                    }))
+            .then_some(FloatRuntimeLeaf::Comparison { primitive, width })
+        }
+        Primitive::FloatConvert => {
+            let [value] = params.as_slice() else {
+                return None;
+            };
+            let source = float_kind(value)?;
+            let target = float_kind(result)?;
+            (source != target).then_some(FloatRuntimeLeaf::Convert { source, target })
+        }
+        Primitive::IntToFloat => {
+            let [value] = params.as_slice() else {
+                return None;
+            };
+            Some(FloatRuntimeLeaf::IntToFloat {
+                source: integer_kind(value)?,
+                target: float_kind(result)?,
+            })
+        }
+        Primitive::FloatToIntChecked => {
+            let [value] = params.as_slice() else {
+                return None;
+            };
+            Some(FloatRuntimeLeaf::FloatToIntChecked {
+                source: float_kind(value)?,
+                target: integer_kind(result)?,
+            })
+        }
+        Primitive::FloatToBits => {
+            let [value] = params.as_slice() else {
+                return None;
+            };
+            let source = float_kind(value)?;
+            let expected = match source {
+                FloatKind::F32 => IntegerKind {
+                    signed: false,
+                    bits: 32,
+                },
+                FloatKind::F64 => IntegerKind {
+                    signed: false,
+                    bits: 64,
+                },
+            };
+            (integer_kind(result) == Some(expected)).then_some(FloatRuntimeLeaf::ToBits { source })
+        }
+        Primitive::FloatFromBits => {
+            let [value] = params.as_slice() else {
+                return None;
+            };
+            let target = float_kind(result)?;
+            let expected = match target {
+                FloatKind::F32 => IntegerKind {
+                    signed: false,
+                    bits: 32,
+                },
+                FloatKind::F64 => IntegerKind {
+                    signed: false,
+                    bits: 64,
+                },
+            };
+            (integer_kind(value) == Some(expected)).then_some(FloatRuntimeLeaf::FromBits { target })
+        }
+        _ => None,
+    }
 }
 
 #[derive(Clone)]
@@ -1664,7 +1964,11 @@ enum EvalFrame {
     },
     FunctionReturn {
         integer_kind: Option<IntegerKind>,
+        float_kind: Option<FloatKind>,
         span: Span,
+    },
+    GenericEnvironment {
+        previous: HashMap<String, Value>,
     },
     PerformArgs {
         effect: Rc<str>,
@@ -1718,6 +2022,13 @@ enum EvalFrame {
         pattern: Rc<Pattern>,
         span: Span,
     },
+    RefinementIf {
+        pattern: Rc<Pattern>,
+        positive: Expr,
+        negative: Expr,
+        locals: Locals,
+        span: Span,
+    },
 }
 
 #[derive(Clone)]
@@ -1751,6 +2062,7 @@ fn pending_frame_span(frame: &EvalFrame) -> Option<Span> {
         | EvalFrame::BinaryLeft { span, .. }
         | EvalFrame::BinaryRight { span, .. }
         | EvalFrame::Is { span, .. }
+        | EvalFrame::RefinementIf { span, .. }
         | EvalFrame::AssignmentDereference { span, .. }
         | EvalFrame::AssignmentStoreAfterDestroy { span, .. }
         | EvalFrame::MoveDereference { span, .. } => Some(*span),
@@ -1758,6 +2070,7 @@ fn pending_frame_span(frame: &EvalFrame) -> Option<Span> {
         EvalFrame::List { .. }
         | EvalFrame::Block { .. }
         | EvalFrame::MemoizeDeclarationLookup { .. }
+        | EvalFrame::GenericEnvironment { .. }
         | EvalFrame::HandleExit { .. }
         | EvalFrame::HandlerDelimiter { .. }
         | EvalFrame::ResumptionBoundary { .. } => None,
@@ -2178,9 +2491,9 @@ impl Evaluator<'_> {
                 EvalFrame::Block { .. }
                 | EvalFrame::AssignmentDereference { .. }
                 | EvalFrame::AssignmentStoreAfterDestroy { .. } => blocks += 1,
-                EvalFrame::MemoizeDeclarationLookup { .. } | EvalFrame::FunctionReturn { .. } => {
-                    other += 1
-                }
+                EvalFrame::MemoizeDeclarationLookup { .. }
+                | EvalFrame::FunctionReturn { .. }
+                | EvalFrame::GenericEnvironment { .. } => other += 1,
                 EvalFrame::HandleExit { .. }
                 | EvalFrame::HandlerDelimiter { .. }
                 | EvalFrame::ResumptionBoundary { .. } => handlers += 1,
@@ -2192,6 +2505,7 @@ impl Evaluator<'_> {
                 | EvalFrame::Reborrow { .. }
                 | EvalFrame::MoveDereference { .. }
                 | EvalFrame::Is { .. }
+                | EvalFrame::RefinementIf { .. }
                 | EvalFrame::DropStructural { .. }
                 | EvalFrame::DestroyRemaining { .. } => other += 1,
             }
@@ -2246,18 +2560,6 @@ impl Evaluator<'_> {
     }
 
     fn evaluate(&mut self, expression: Expr, locals: Locals) -> Result<Value, Diagnostic> {
-        struct HeartbeatGuard {
-            done: std::sync::Arc<std::sync::atomic::AtomicBool>,
-            handle: Option<std::thread::JoinHandle<()>>,
-        }
-        impl Drop for HeartbeatGuard {
-            fn drop(&mut self) {
-                self.done.store(true, std::sync::atomic::Ordering::Relaxed);
-                if let Some(handle) = self.handle.take() {
-                    let _ = handle.join();
-                }
-            }
-        }
         let max_frames = env::var("GRANDIOSE_MAX_EVAL_FRAMES")
             .ok()
             .and_then(|value| value.parse().ok())
@@ -2276,43 +2578,8 @@ impl Evaluator<'_> {
         let mut control = Control::Expr(expression, locals);
         let mut frames = Vec::<EvalFrame>::new();
 
-        // Unconditional wall-clock heartbeat: a background thread prints a
-        // stats line every 60s regardless of what the eval loop is doing, so
-        // progress stays visible even during native-heavy (non-stepping)
-        // stretches where the step-gated telemetry goes silent. The `_guard`'s
-        // Drop stops the thread on every return path from this function.
-        let heartbeat_steps = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0));
-        let heartbeat_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let _guard = {
-            let steps_ref = std::sync::Arc::clone(&heartbeat_steps);
-            let done_ref = std::sync::Arc::clone(&heartbeat_done);
-            let handle = std::thread::spawn(move || {
-                let start = Instant::now();
-                let mut elapsed_secs = 0_u64;
-                while !done_ref.load(std::sync::atomic::Ordering::Relaxed) {
-                    std::thread::sleep(Duration::from_millis(250));
-                    if start.elapsed().as_secs() >= elapsed_secs + 60 {
-                        elapsed_secs = start.elapsed().as_secs();
-                        eprintln!(
-                            "[grandiose heartbeat] elapsed={}s steps={} {}",
-                            elapsed_secs,
-                            steps_ref.load(std::sync::atomic::Ordering::Relaxed),
-                            process_memory_summary(),
-                        );
-                    }
-                }
-            });
-            HeartbeatGuard {
-                done: std::sync::Arc::clone(&heartbeat_done),
-                handle: Some(handle),
-            }
-        };
-
         loop {
             steps = steps.wrapping_add(1);
-            if steps & ((1 << 16) - 1) == 0 {
-                heartbeat_steps.store(steps, std::sync::atomic::Ordering::Relaxed);
-            }
             if let Control::Expr(expression, _) = &control {
                 current_span = expression.span;
             }
@@ -2365,7 +2632,8 @@ impl Evaluator<'_> {
                                 .or_insert((pending.span, 1));
                         }
                         EvalFrame::MemoizeDeclarationLookup { .. }
-                        | EvalFrame::FunctionReturn { .. } => call += 1,
+                        | EvalFrame::FunctionReturn { .. }
+                        | EvalFrame::GenericEnvironment { .. } => call += 1,
                         EvalFrame::PerformArgs { .. } => perform += 1,
                         EvalFrame::HandleExit { .. } | EvalFrame::HandlerDelimiter { .. } => {
                             handler += 1
@@ -2379,7 +2647,8 @@ impl Evaluator<'_> {
                         }
                         EvalFrame::BinaryLeft { .. }
                         | EvalFrame::BinaryRight { .. }
-                        | EvalFrame::Is { .. } => binary += 1,
+                        | EvalFrame::Is { .. }
+                        | EvalFrame::RefinementIf { .. } => binary += 1,
                     }
                 }
                 let mut diagnostic = runtime(
@@ -2410,8 +2679,28 @@ impl Evaluator<'_> {
             control = match control {
                 Control::Expr(expr, locals) => match expr.kind {
                     ExprKind::Unit => Control::Value(Value::Unit),
-                    ExprKind::Int(value) => Control::Value(Value::Int(value)),
-                    ExprKind::Float(value) => Control::Value(Value::Float(value)),
+                    ExprKind::Int(value) => {
+                        let value = match self.program.numeric_literal(expr.span) {
+                            Some(literal) => {
+                                let magnitude = literal.as_u128(expr.span)?;
+                                match i64::try_from(magnitude) {
+                                    Ok(value) => Value::Int(value),
+                                    Err(_) => Value::IntegerLiteral {
+                                        negative: false,
+                                        magnitude,
+                                    },
+                                }
+                            }
+                            None => Value::Int(value),
+                        };
+                        Control::Value(value)
+                    }
+                    ExprKind::Float(value) => Control::Value(Value::Float(
+                        match self.program.numeric_literal(expr.span) {
+                            Some(literal) => literal.as_f64(expr.span)?,
+                            None => value,
+                        },
+                    )),
                     ExprKind::Char(value) => Control::Value(Value::Char(value)),
                     ExprKind::Byte(value) => Control::Value(Value::Integer {
                         signed: false,
@@ -2484,6 +2773,9 @@ impl Evaluator<'_> {
                                 variant: path[1].clone(),
                                 fields: Rc::new(Vec::new()),
                             })
+                        } else if path.len() == 2 {
+                            let qualified = format!("{}::{}", path[0], path[1]);
+                            self.globals.get(&qualified).cloned()
                         } else {
                             None
                         };
@@ -2597,42 +2889,63 @@ impl Evaluator<'_> {
                         }
                     }
                     ExprKind::Call(callee, arguments) => {
-                        let lexical_callable = match &callee.kind {
-                            ExprKind::Variable(path) if path.len() == 1 => locals
-                                .find(path[0].as_ref())
-                                .map(|(_, value)| value.borrow().clone())
-                                .or_else(|| self.globals.get(path[0].as_ref()).cloned()),
-                            _ => None,
-                        };
-                        let call_kind = match &callee.kind {
-                            ExprKind::Variable(path) if lexical_callable.is_none() => {
-                                self.resolve_call_kind(&callee, path)
-                            }
-                            _ => None,
-                        };
-                        if let Some(kind) = call_kind {
-                            self.begin_call_arguments(
-                                CallDesignator::Path { callee, kind },
-                                arguments,
-                                locals,
-                                expr.span,
-                                &mut frames,
-                            )?
-                        } else if let Some(value) = lexical_callable {
-                            self.begin_call_arguments(
-                                CallDesignator::Closure(value),
-                                arguments,
-                                locals,
-                                expr.span,
-                                &mut frames,
-                            )?
-                        } else {
-                            frames.push(EvalFrame::CallCallee {
-                                arguments,
+                        if let ExprKind::Variable(else_path) = &callee.kind
+                            && else_path.len() == 1
+                            && else_path[0].as_ref() == "else"
+                            && let [if_expression, negative] = arguments.as_slice()
+                            && let ExprKind::Call(if_callee, if_arguments) = &if_expression.kind
+                            && let ExprKind::Variable(if_path) = &if_callee.kind
+                            && if_path.len() == 1
+                            && if_path[0].as_ref() == "if"
+                            && let [condition, positive] = if_arguments.as_slice()
+                            && let ExprKind::Is { subject, pattern } = &condition.kind
+                        {
+                            frames.push(EvalFrame::RefinementIf {
+                                pattern: pattern.clone(),
+                                positive: positive.clone(),
+                                negative: negative.clone(),
                                 locals: locals.clone(),
                                 span: expr.span,
                             });
-                            Control::Expr(unwrap_expr(callee), locals)
+                            Control::Expr((**subject).clone(), locals)
+                        } else {
+                            let lexical_callable = match &callee.kind {
+                                ExprKind::Variable(path) if path.len() == 1 => locals
+                                    .find(path[0].as_ref())
+                                    .map(|(_, value)| value.borrow().clone())
+                                    .or_else(|| self.globals.get(path[0].as_ref()).cloned()),
+                                _ => None,
+                            };
+                            let call_kind = match &callee.kind {
+                                ExprKind::Variable(path) if lexical_callable.is_none() => {
+                                    self.resolve_call_kind(&callee, path)
+                                }
+                                _ => None,
+                            };
+                            if let Some(kind) = call_kind {
+                                self.begin_call_arguments(
+                                    CallDesignator::Path { callee, kind },
+                                    arguments,
+                                    locals,
+                                    expr.span,
+                                    &mut frames,
+                                )?
+                            } else if let Some(value) = lexical_callable {
+                                self.begin_call_arguments(
+                                    CallDesignator::Closure(value),
+                                    arguments,
+                                    locals,
+                                    expr.span,
+                                    &mut frames,
+                                )?
+                            } else {
+                                frames.push(EvalFrame::CallCallee {
+                                    arguments,
+                                    locals: locals.clone(),
+                                    span: expr.span,
+                                });
+                                Control::Expr(unwrap_expr(callee), locals)
+                            }
                         }
                     }
                     ExprKind::Perform {
@@ -3213,11 +3526,20 @@ impl Evaluator<'_> {
                             self.declaration_lookup_cache.insert(key, value.clone());
                             Control::Value(value)
                         }
-                        EvalFrame::FunctionReturn { integer_kind, span } => {
-                            Control::Value(match integer_kind {
-                                Some(kind) => coerce_integer(value, kind, span)?,
-                                None => value,
-                            })
+                        EvalFrame::FunctionReturn {
+                            integer_kind,
+                            float_kind,
+                            span,
+                        } => Control::Value(if let Some(kind) = integer_kind {
+                            coerce_integer(value, kind, span)?
+                        } else if let Some(kind) = float_kind {
+                            coerce_declared_float(value, kind, span)?
+                        } else {
+                            value
+                        }),
+                        EvalFrame::GenericEnvironment { previous } => {
+                            self.generic_witnesses = previous;
+                            Control::Value(value)
                         }
                         EvalFrame::PerformArgs {
                             effect,
@@ -3271,6 +3593,16 @@ impl Evaluator<'_> {
                                     .checked_neg()
                                     .ok_or_else(|| runtime(span, "integer negation overflowed"))?,
                             )),
+                            (
+                                UnaryOp::Negate,
+                                Value::IntegerLiteral {
+                                    negative: false,
+                                    magnitude,
+                                },
+                            ) => Control::Value(Value::IntegerLiteral {
+                                negative: true,
+                                magnitude,
+                            }),
                             (UnaryOp::BorrowShared, Value::Reference { value, .. }) => {
                                 Control::Value(Value::Reference {
                                     value,
@@ -3417,8 +3749,26 @@ impl Evaluator<'_> {
                             // a positive refinement branch, which compiled
                             // lowering represents explicitly.
                             let mut bindings = HashMap::new();
-                            let matched = match_pattern(&pattern, &value, &mut bindings);
+                            let matched =
+                                match_pattern(self.program, &pattern, &value, &mut bindings);
                             Control::Value(truth(matched))
+                        }
+                        EvalFrame::RefinementIf {
+                            pattern,
+                            positive,
+                            negative,
+                            mut locals,
+                            ..
+                        } => {
+                            let mut bindings = HashMap::new();
+                            if match_pattern(self.program, &pattern, &value, &mut bindings) {
+                                for (name, value) in bindings {
+                                    locals.insert(name, value);
+                                }
+                                Control::Expr(positive, locals)
+                            } else {
+                                Control::Expr(negative, locals)
+                            }
                         }
                     }
                 }
@@ -3491,11 +3841,21 @@ impl Evaluator<'_> {
                 "tail" => Some(CallKind::TailResume),
                 "cancel" => Some(CallKind::Cancel),
                 "destroy" => Some(CallKind::Destroy),
-                name => self
-                    .function_indices
-                    .get(name)
-                    .copied()
-                    .map(CallKind::Function),
+                name => name
+                    .strip_prefix("$trait_deferred$")
+                    .and_then(|deferred| deferred.split_once('$'))
+                    .and_then(|(trait_name, method)| {
+                        self.trait_method_indices
+                            .get(&(trait_name, method))
+                            .copied()
+                            .map(CallKind::TraitMethodGroup)
+                    })
+                    .or_else(|| {
+                        self.function_indices
+                            .get(name)
+                            .copied()
+                            .map(CallKind::Function)
+                    }),
             }
         } else if path.len() == 2 && path[0].as_ref() == "core" {
             Some(CallKind::Intrinsic(intrinsic_kind(path[1].as_ref())))
@@ -3504,6 +3864,12 @@ impl Evaluator<'_> {
                 .get(&(path[0].as_ref(), path[1].as_ref()))
                 .copied()
                 .map(CallKind::EnumConstructor)
+                .or_else(|| {
+                    self.trait_method_indices
+                        .get(&(path[0].as_ref(), path[1].as_ref()))
+                        .copied()
+                        .map(CallKind::TraitMethodGroup)
+                })
         } else {
             None
         };
@@ -3701,6 +4067,93 @@ impl Evaluator<'_> {
                         fields: Rc::new(args),
                     }));
                 }
+                if let CallKind::TraitMethodGroup(group) = kind {
+                    let matches = self
+                        .trait_method_groups
+                        .get(group)
+                        .into_iter()
+                        .flatten()
+                        .filter(|index| {
+                            let candidate = &self.trait_methods[**index];
+                            if let Some(receiver) = args.first() {
+                                self.value_matches_type(receiver, candidate.self_ty, 0)
+                            } else {
+                                candidate.method.params.is_empty()
+                                    && self.generic_witnesses.values().any(|witness| {
+                                        self.value_matches_type(witness, candidate.self_ty, 0)
+                                    })
+                            }
+                        })
+                        .copied()
+                        .collect::<Vec<_>>();
+                    let [method_index] = matches.as_slice() else {
+                        return Err(runtime(
+                            span,
+                            if matches.is_empty() {
+                                if args.is_empty() {
+                                    format!(
+                                        "no implementation of receiverless trait method `{name}` matches the active generic type evidence"
+                                    )
+                                } else {
+                                    format!(
+                                        "no implementation of trait method `{name}` matches the runtime receiver"
+                                    )
+                                }
+                            } else {
+                                format!(
+                                    "trait method `{name}` is ambiguous for the runtime type evidence"
+                                )
+                            },
+                        ));
+                    };
+                    let method = &self.trait_methods[*method_index].method;
+                    if method.params.len() != args.len() {
+                        return Err(runtime(
+                            span,
+                            format!(
+                                "trait method `{name}` expects {} argument(s), but received {}",
+                                method.params.len(),
+                                args.len()
+                            ),
+                        ));
+                    }
+                    let body = method
+                        .body
+                        .clone()
+                        .expect("runtime trait method has a body");
+                    let params = method
+                        .params
+                        .iter()
+                        .map(|parameter| parameter.name.clone())
+                        .collect::<Vec<_>>();
+                    let return_kind = method.return_type.as_ref().and_then(integer_kind);
+                    let return_float_kind = method.return_type.as_ref().and_then(float_kind);
+                    let mut args = args;
+                    for (argument, parameter) in args.iter_mut().zip(&method.params) {
+                        let value = std::mem::replace(argument, Value::Unit);
+                        *argument = if let Some(kind) = integer_kind(&parameter.ty) {
+                            coerce_declared_integer(value, kind, parameter.span)?
+                        } else if let Some(kind) = float_kind(&parameter.ty) {
+                            coerce_declared_float(value, kind, parameter.span)?
+                        } else {
+                            value
+                        };
+                    }
+                    let mut locals = Locals::new();
+                    for (parameter, argument) in params.into_iter().zip(args) {
+                        locals.insert(parameter, argument);
+                    }
+                    if (return_kind.is_some() || return_float_kind.is_some())
+                        && !matches!(frames.last(), Some(EvalFrame::FunctionReturn { .. }))
+                    {
+                        frames.push(EvalFrame::FunctionReturn {
+                            integer_kind: return_kind,
+                            float_kind: return_float_kind,
+                            span,
+                        });
+                    }
+                    return Ok(Control::Expr(body, locals));
+                }
                 let CallKind::Function(function_index) = kind else {
                     unreachable!("all non-function call kinds returned above")
                 };
@@ -3733,7 +4186,9 @@ impl Evaluator<'_> {
                 if let Some(leaf) = self.runtime_leaves.leaf(function_index) {
                     if matches!(
                         leaf,
-                        RuntimeLeaf::Primitive(_) | RuntimeLeaf::IntegerConversion { .. }
+                        RuntimeLeaf::Primitive(_)
+                            | RuntimeLeaf::IntegerConversion { .. }
+                            | RuntimeLeaf::FloatPrimitive(_)
                     ) && !self.runtime_leaves.authorizes_call(span)
                     {
                         return Err(runtime(
@@ -3747,6 +4202,9 @@ impl Evaluator<'_> {
                         }
                         RuntimeLeaf::IntegerConversion { primitive, target } => {
                             eval_runtime_integer_conversion(primitive, target, &args, span)?
+                        }
+                        RuntimeLeaf::FloatPrimitive(leaf) => {
+                            eval_runtime_float_primitive(leaf, &args, span)?
                         }
                         RuntimeLeaf::HostImport(role) => self.eval_host_import(role, args, span)?,
                     };
@@ -3765,25 +4223,64 @@ impl Evaluator<'_> {
                     .functions
                     .get(function_index)
                     .expect("validated function index");
+                let generic_names = function
+                    .declaration
+                    .generics
+                    .as_ref()
+                    .map(|generics| {
+                        generics
+                            .params
+                            .iter()
+                            .map(|parameter| parameter.name.as_str())
+                            .collect::<HashSet<_>>()
+                    })
+                    .unwrap_or_default();
+                let mut inferred_witnesses = HashMap::new();
+                for (parameter, argument) in function.declaration.params.iter().zip(&args) {
+                    infer_generic_witnesses(
+                        &parameter.ty,
+                        argument,
+                        &generic_names,
+                        &mut inferred_witnesses,
+                    );
+                }
                 let parameter_kinds = function
                     .declaration
                     .params
                     .iter()
                     .map(|parameter| integer_kind(&parameter.ty))
                     .collect::<Vec<_>>();
+                let parameter_float_kinds = function
+                    .declaration
+                    .params
+                    .iter()
+                    .map(|parameter| float_kind(&parameter.ty))
+                    .collect::<Vec<_>>();
                 let return_kind = function
                     .declaration
                     .return_type
                     .as_ref()
                     .and_then(integer_kind);
+                let return_float_kind = function
+                    .declaration
+                    .return_type
+                    .as_ref()
+                    .and_then(float_kind);
                 let mut args = args;
-                for ((argument, kind), parameter) in args
+                for (((argument, kind), float_kind), parameter) in args
                     .iter_mut()
                     .zip(parameter_kinds)
+                    .zip(parameter_float_kinds)
                     .zip(&function.declaration.params)
                 {
                     if let Some(kind) = kind {
                         *argument = coerce_declared_integer(
+                            std::mem::replace(argument, Value::Unit),
+                            kind,
+                            parameter.span,
+                        )?;
+                    } else if let Some(kind) = float_kind {
+                        *argument = coerce_declared_float(
                             std::mem::replace(argument, Value::Unit),
                             kind,
                             parameter.span,
@@ -3795,15 +4292,29 @@ impl Evaluator<'_> {
                 {
                     locals.insert(parameter_name, argument);
                 }
+                if !inferred_witnesses.is_empty() {
+                    let changes_type = inferred_witnesses.iter().any(|(name, witness)| {
+                        self.generic_witnesses
+                            .get(name)
+                            .is_none_or(|active| !same_runtime_witness_type(active, witness))
+                    });
+                    if changes_type {
+                        let mut next = self.generic_witnesses.clone();
+                        next.extend(inferred_witnesses);
+                        let previous = std::mem::replace(&mut self.generic_witnesses, next);
+                        frames.push(EvalFrame::GenericEnvironment { previous });
+                    }
+                }
                 // A caller's integer-return coercion also covers a statically
                 // valid tail call, so do not retain one frame per recursive
                 // call. This preserves the recovery evaluator's constant-space
                 // tail-call behavior.
-                if return_kind.is_some()
+                if (return_kind.is_some() || return_float_kind.is_some())
                     && !matches!(frames.last(), Some(EvalFrame::FunctionReturn { .. }))
                 {
                     frames.push(EvalFrame::FunctionReturn {
                         integer_kind: return_kind,
+                        float_kind: return_float_kind,
                         span,
                     });
                 }
@@ -3855,6 +4366,80 @@ impl Evaluator<'_> {
             CallDesignator::Closure(value) => {
                 Err(runtime(span, format!("`{value:?}` is not callable")))
             }
+        }
+    }
+
+    fn value_matches_type(&self, value: &Value, ty: &TypeSyntax, depth: usize) -> bool {
+        if depth > 32 {
+            return false;
+        }
+        if !matches!(
+            ty.kind,
+            TypeSyntaxKind::SharedReference(_) | TypeSyntaxKind::UniqueReference(_)
+        ) {
+            match value {
+                Value::Reference { value, .. } => {
+                    return self.value_matches_type(&value.borrow(), ty, depth + 1);
+                }
+                Value::ProjectedReference { root, fields, .. } => {
+                    return projected_reference_value(root, fields)
+                        .is_some_and(|value| self.value_matches_type(&value, ty, depth + 1));
+                }
+                _ => {}
+            }
+        }
+        match (&ty.kind, value) {
+            (TypeSyntaxKind::SharedReference(referent), Value::Reference { value, .. })
+            | (TypeSyntaxKind::UniqueReference(referent), Value::Reference { value, .. }) => {
+                self.value_matches_type(&value.borrow(), referent, depth + 1)
+            }
+            (
+                TypeSyntaxKind::SharedReference(referent)
+                | TypeSyntaxKind::UniqueReference(referent),
+                Value::ProjectedReference { root, fields, .. },
+            ) => projected_reference_value(root, fields)
+                .is_some_and(|value| self.value_matches_type(&value, referent, depth + 1)),
+            (
+                TypeSyntaxKind::SharedReference(referent)
+                | TypeSyntaxKind::UniqueReference(referent),
+                value,
+            ) => self.value_matches_type(value, referent, depth + 1),
+            (TypeSyntaxKind::Application { constructor, .. }, value) => {
+                self.value_matches_type(value, constructor, depth + 1)
+            }
+            (TypeSyntaxKind::Path(path), value) if path.len() == 1 => {
+                let name = path[0].name.as_str();
+                if let Some(target) = self.type_aliases.get(name) {
+                    return self.value_matches_type(value, target, depth + 1);
+                }
+                match value {
+                    Value::Unit => name == "Unit",
+                    Value::Int(_) => name == "i64",
+                    Value::Integer { signed, bits, .. } => match (*signed, *bits) {
+                        (true, 8) => name == "i8",
+                        (true, 16) => name == "i16",
+                        (true, 32) => name == "i32",
+                        (true, 64) => name == "i64" || name == "isize",
+                        (true, 128) => name == "i128",
+                        (false, 8) => name == "u8",
+                        (false, 16) => name == "u16",
+                        (false, 32) => name == "u32",
+                        (false, 64) => name == "u64" || name == "usize",
+                        (false, 128) => name == "u128",
+                        _ => false,
+                    },
+                    Value::Float(_) => name == "f64",
+                    Value::Float32(_) => name == "f32",
+                    Value::Char(_) => name == "Char",
+                    Value::String(_) => name == "Text",
+                    Value::Bytes(_) => name == "Bytes",
+                    Value::Struct { name: actual, .. } | Value::Enum { name: actual, .. } => {
+                        actual.as_ref() == name
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
         }
     }
 
@@ -4158,7 +4743,9 @@ impl Evaluator<'_> {
                     .patterns
                     .iter()
                     .zip(&args)
-                    .all(|(pattern, value)| match_pattern(pattern, value, &mut bindings))
+                    .all(|(pattern, value)| {
+                        match_pattern(self.program, pattern, value, &mut bindings)
+                    })
                     .then(|| {
                         (
                             handler_index,
@@ -4259,7 +4846,91 @@ fn debug_abort_stack(frames: &[EvalFrame]) {
     eprintln!("abort call stack (innermost last): {tail:?}");
 }
 
-fn match_pattern(pattern: &Pattern, value: &Value, bindings: &mut HashMap<String, Value>) -> bool {
+fn infer_generic_witnesses(
+    formal: &TypeSyntax,
+    value: &Value,
+    generic_names: &HashSet<&str>,
+    witnesses: &mut HashMap<String, Value>,
+) {
+    match (&formal.kind, value) {
+        (TypeSyntaxKind::Path(path), value)
+            if path.len() == 1 && generic_names.contains(path[0].name.as_str()) =>
+        {
+            witnesses.insert(path[0].name.clone(), value.clone());
+        }
+        (
+            TypeSyntaxKind::SharedReference(referent) | TypeSyntaxKind::UniqueReference(referent),
+            Value::Reference { value, .. },
+        ) => infer_generic_witnesses(referent, &value.borrow(), generic_names, witnesses),
+        (
+            TypeSyntaxKind::SharedReference(referent) | TypeSyntaxKind::UniqueReference(referent),
+            Value::ProjectedReference { root, fields, .. },
+        ) => {
+            if let Some(value) = projected_reference_value(root, fields) {
+                infer_generic_witnesses(referent, &value, generic_names, witnesses);
+            }
+        }
+        (
+            TypeSyntaxKind::SharedReference(referent) | TypeSyntaxKind::UniqueReference(referent),
+            value,
+        ) => infer_generic_witnesses(referent, value, generic_names, witnesses),
+        _ => {}
+    }
+}
+
+fn same_runtime_witness_type(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Reference { value: left, .. }, Value::Reference { value: right, .. }) => {
+            same_runtime_witness_type(&left.borrow(), &right.borrow())
+        }
+        (
+            Value::ProjectedReference {
+                root: left,
+                fields: left_fields,
+                ..
+            },
+            Value::ProjectedReference {
+                root: right,
+                fields: right_fields,
+                ..
+            },
+        ) => projected_reference_value(left, left_fields)
+            .zip(projected_reference_value(right, right_fields))
+            .is_some_and(|(left, right)| same_runtime_witness_type(&left, &right)),
+        (Value::Int(_), Value::Int(_))
+        | (Value::IntegerLiteral { .. }, Value::IntegerLiteral { .. }) => true,
+        (
+            Value::Integer {
+                signed: left_signed,
+                bits: left_bits,
+                ..
+            },
+            Value::Integer {
+                signed: right_signed,
+                bits: right_bits,
+                ..
+            },
+        ) => left_signed == right_signed && left_bits == right_bits,
+        (Value::Struct { name: left, .. }, Value::Struct { name: right, .. })
+        | (Value::Enum { name: left, .. }, Value::Enum { name: right, .. }) => left == right,
+        (Value::Unit, Value::Unit)
+        | (Value::Float(_), Value::Float(_))
+        | (Value::Float32(_), Value::Float32(_))
+        | (Value::Char(_), Value::Char(_))
+        | (Value::String(_), Value::String(_))
+        | (Value::Bytes(_), Value::Bytes(_))
+        | (Value::List(_), Value::List(_))
+        | (Value::Array(_), Value::Array(_)) => true,
+        _ => false,
+    }
+}
+
+fn match_pattern(
+    program: &Program,
+    pattern: &Pattern,
+    value: &Value,
+    bindings: &mut HashMap<String, Value>,
+) -> bool {
     match (&pattern.kind, value) {
         (PatternKind::Wildcard, _) => true,
         (PatternKind::Binding(name), value) => {
@@ -4274,7 +4945,20 @@ fn match_pattern(pattern: &Pattern, value: &Value, bindings: &mut HashMap<String
                 u128::try_from(*literal).is_ok_and(|literal| literal == *raw)
             }
         }
-        (PatternKind::Float(a), Value::Float(b)) => a == b,
+        (PatternKind::Float(a), Value::Float(b)) => {
+            program
+                .numeric_literal(pattern.span)
+                .and_then(|literal| literal.as_f64(pattern.span).ok())
+                .unwrap_or(*a)
+                == *b
+        }
+        (PatternKind::Float(a), Value::Float32(b)) => {
+            program
+                .numeric_literal(pattern.span)
+                .and_then(|literal| literal.as_f64(pattern.span).ok())
+                .unwrap_or(*a) as f32
+                == *b
+        }
         (PatternKind::Char(a), Value::Char(b)) => a == b,
         (PatternKind::Byte(literal), Value::Int(b)) => i64::from(*literal) == *b,
         (PatternKind::Byte(literal), Value::Integer { signed, bits, raw }) => {
@@ -4286,7 +4970,7 @@ fn match_pattern(pattern: &Pattern, value: &Value, bindings: &mut HashMap<String
         }
         (PatternKind::String(a), Value::String(b)) => b.0.equals_str(a),
         (
-            PatternKind::Variant { path, fields },
+            PatternKind::Variant { path, fields, rest },
             Value::Enum {
                 name,
                 variant,
@@ -4296,19 +4980,19 @@ fn match_pattern(pattern: &Pattern, value: &Value, bindings: &mut HashMap<String
             path.len() == 2
                 && path[0].as_str() == name.as_ref()
                 && path[1].as_str() == variant.as_ref()
-                && fields.len() == values.len()
-                && fields
-                    .iter()
-                    .zip(values.iter())
-                    .all(|(pattern, value)| match_pattern(pattern, value, bindings))
+                && fields.len() <= values.len()
+                && fields.iter().enumerate().all(|(position, pattern)| {
+                    let index = pattern_field_index(*rest, position, fields.len(), values.len());
+                    match_pattern(program, pattern, &values[index], bindings)
+                })
         }
         (PatternKind::Tuple { elements, rest }, Value::List(values)) => match rest {
             None => {
-                elements.len() == values.len()
+                elements.len() <= values.len()
                     && elements
                         .iter()
                         .zip(values.iter())
-                        .all(|(pattern, value)| match_pattern(pattern, value, bindings))
+                        .all(|(pattern, value)| match_pattern(program, pattern, value, bindings))
             }
             Some(rest) => {
                 // `..` absorbs the middle: prefix patterns match from the
@@ -4320,7 +5004,7 @@ fn match_pattern(pattern: &Pattern, value: &Value, bindings: &mut HashMap<String
                         } else {
                             values.len() - (elements.len() - position)
                         };
-                        match_pattern(pattern, &values[index], bindings)
+                        match_pattern(program, pattern, &values[index], bindings)
                     })
             }
         },
@@ -4333,9 +5017,9 @@ fn match_pattern(pattern: &Pattern, value: &Value, bindings: &mut HashMap<String
         ) => {
             name.as_str() == value_name.as_ref()
                 && fields.iter().all(|field| {
-                    values
-                        .get(&field.field)
-                        .is_some_and(|value| match_pattern(&field.pattern, value, bindings))
+                    values.get(&field.field).is_some_and(|value| {
+                        match_pattern(program, &field.pattern, value, bindings)
+                    })
                 })
         }
         _ => false,
@@ -4611,6 +5295,23 @@ fn eval_runtime_primitive(
         return eval_runtime_integer_primitive(primitive, args, span);
     }
     match (primitive, args) {
+        (Primitive::CharFromU32Checked, [value]) => {
+            let scalar = unsigned_scalar(value, 32)
+                .and_then(|value| u32::try_from(value).ok())
+                .ok_or_else(|| runtime(span, "char conversion requires a u32 scalar"))?;
+            char::from_u32(scalar)
+                .map(Value::Char)
+                .ok_or_else(|| runtime(span, "integer is not a valid Unicode scalar"))
+        }
+        (Primitive::CharToU32, [Value::Char(value)]) => Ok(Value::Integer {
+            signed: false,
+            bits: 32,
+            raw: u128::from(u32::from(*value)),
+        }),
+        (Primitive::CharFromU32Checked | Primitive::CharToU32, _) => Err(runtime(
+            span,
+            format!("invalid call to character primitive {primitive:?}"),
+        )),
         (Primitive::TextByteLen, [Value::String(text)]) => {
             array_length_value(text.0.byte_len(), span)
         }
@@ -4808,6 +5509,263 @@ fn eval_runtime_integer_primitive(
         _ => unreachable!("caller filters scalar runtime primitives"),
     };
     Ok(make(result))
+}
+
+fn eval_runtime_float_primitive(
+    leaf: FloatRuntimeLeaf,
+    args: &[Value],
+    span: Span,
+) -> Result<Value, Diagnostic> {
+    let bool_value = |value: bool| Value::Integer {
+        signed: false,
+        bits: 32,
+        raw: u128::from(value),
+    };
+    match leaf {
+        FloatRuntimeLeaf::Unary { primitive, width } => {
+            let [value] = args else {
+                return Err(runtime(span, "unary float primitive expects one operand"));
+            };
+            if primitive != Primitive::FloatNeg {
+                return Err(runtime(span, "invalid unary float primitive"));
+            }
+            match width {
+                FloatKind::F32 => Ok(Value::Float32(canonical_f32(-float_as_f32(value, span)?))),
+                FloatKind::F64 => Ok(Value::Float(canonical_f64(-float_as_f64(value, span)?))),
+            }
+        }
+        FloatRuntimeLeaf::Binary { primitive, width } => {
+            let [left, right] = args else {
+                return Err(runtime(span, "binary float primitive expects two operands"));
+            };
+            match width {
+                FloatKind::F32 => {
+                    let (left, right) = (float_as_f32(left, span)?, float_as_f32(right, span)?);
+                    let result = match primitive {
+                        Primitive::FloatAdd => left + right,
+                        Primitive::FloatSub => left - right,
+                        Primitive::FloatMul => left * right,
+                        Primitive::FloatDiv => left / right,
+                        Primitive::FloatRem => left % right,
+                        _ => return Err(runtime(span, "invalid binary float primitive")),
+                    };
+                    Ok(Value::Float32(canonical_f32(result)))
+                }
+                FloatKind::F64 => {
+                    let (left, right) = (float_as_f64(left, span)?, float_as_f64(right, span)?);
+                    let result = match primitive {
+                        Primitive::FloatAdd => left + right,
+                        Primitive::FloatSub => left - right,
+                        Primitive::FloatMul => left * right,
+                        Primitive::FloatDiv => left / right,
+                        Primitive::FloatRem => left % right,
+                        _ => return Err(runtime(span, "invalid binary float primitive")),
+                    };
+                    Ok(Value::Float(canonical_f64(result)))
+                }
+            }
+        }
+        FloatRuntimeLeaf::Comparison { primitive, width } => {
+            let [left, right] = args else {
+                return Err(runtime(span, "float comparison expects two operands"));
+            };
+            let result = match width {
+                FloatKind::F32 => {
+                    let (left, right) = (float_as_f32(left, span)?, float_as_f32(right, span)?);
+                    compare_float(primitive, left, right, span)?
+                }
+                FloatKind::F64 => {
+                    let (left, right) = (float_as_f64(left, span)?, float_as_f64(right, span)?);
+                    compare_float(primitive, left, right, span)?
+                }
+            };
+            Ok(bool_value(result))
+        }
+        FloatRuntimeLeaf::Convert { source, target } => {
+            let [value] = args else {
+                return Err(runtime(span, "float conversion expects one operand"));
+            };
+            match (source, target) {
+                (FloatKind::F32, FloatKind::F64) => Ok(Value::Float(canonical_f64(f64::from(
+                    float_as_f32(value, span)?,
+                )))),
+                (FloatKind::F64, FloatKind::F32) => Ok(Value::Float32(canonical_f32(
+                    float_as_f64(value, span)? as f32,
+                ))),
+                _ => Err(runtime(span, "float conversion requires different widths")),
+            }
+        }
+        FloatRuntimeLeaf::IntToFloat { source, target } => {
+            let [value] = args else {
+                return Err(runtime(
+                    span,
+                    "integer-to-float conversion expects one operand",
+                ));
+            };
+            let value = integer_raw_for_kind(value, source, span)?;
+            match (source.signed, target) {
+                (true, FloatKind::F32) => {
+                    Ok(Value::Float32(canonical_f32(
+                        signed_integer(value, source.bits) as f32,
+                    )))
+                }
+                (false, FloatKind::F32) => Ok(Value::Float32(canonical_f32(value as f32))),
+                (true, FloatKind::F64) => Ok(Value::Float(canonical_f64(signed_integer(
+                    value,
+                    source.bits,
+                ) as f64))),
+                (false, FloatKind::F64) => Ok(Value::Float(canonical_f64(value as f64))),
+            }
+        }
+        FloatRuntimeLeaf::FloatToIntChecked { source, target } => {
+            let [value] = args else {
+                return Err(runtime(
+                    span,
+                    "float-to-integer conversion expects one operand",
+                ));
+            };
+            let value = match source {
+                FloatKind::F32 => f64::from(float_as_f32(value, span)?),
+                FloatKind::F64 => float_as_f64(value, span)?,
+            };
+            if !value.is_finite() {
+                return Err(runtime(span, "float-to-integer conversion is out of range"));
+            }
+            let raw = if target.signed {
+                let limit = 2_f64.powi(i32::from(target.bits - 1));
+                if value < -limit || value >= limit {
+                    return Err(runtime(span, "float-to-integer conversion is out of range"));
+                }
+                (value.trunc() as i128) as u128
+            } else {
+                let limit = 2_f64.powi(i32::from(target.bits));
+                if value < 0.0 || value >= limit {
+                    return Err(runtime(span, "float-to-integer conversion is out of range"));
+                }
+                value.trunc() as u128
+            };
+            Ok(Value::Integer {
+                signed: target.signed,
+                bits: target.bits,
+                raw: raw & integer_mask(target.bits),
+            })
+        }
+        FloatRuntimeLeaf::ToBits { source } => {
+            let [value] = args else {
+                return Err(runtime(
+                    span,
+                    "float-to-bits conversion expects one operand",
+                ));
+            };
+            match source {
+                FloatKind::F32 => Ok(Value::Integer {
+                    signed: false,
+                    bits: 32,
+                    raw: u128::from(canonical_f32(float_as_f32(value, span)?).to_bits()),
+                }),
+                FloatKind::F64 => Ok(Value::Integer {
+                    signed: false,
+                    bits: 64,
+                    raw: u128::from(canonical_f64(float_as_f64(value, span)?).to_bits()),
+                }),
+            }
+        }
+        FloatRuntimeLeaf::FromBits { target } => {
+            let [value] = args else {
+                return Err(runtime(
+                    span,
+                    "bits-to-float conversion expects one operand",
+                ));
+            };
+            let source = match target {
+                FloatKind::F32 => IntegerKind {
+                    signed: false,
+                    bits: 32,
+                },
+                FloatKind::F64 => IntegerKind {
+                    signed: false,
+                    bits: 64,
+                },
+            };
+            let bits = integer_raw_for_kind(value, source, span)?;
+            match target {
+                FloatKind::F32 => Ok(Value::Float32(canonical_f32(f32::from_bits(bits as u32)))),
+                FloatKind::F64 => Ok(Value::Float(canonical_f64(f64::from_bits(bits as u64)))),
+            }
+        }
+    }
+}
+
+fn canonical_f32(value: f32) -> f32 {
+    if value.is_nan() {
+        f32::from_bits(0x7fc0_0000)
+    } else {
+        value
+    }
+}
+
+fn canonical_f64(value: f64) -> f64 {
+    if value.is_nan() {
+        f64::from_bits(0x7ff8_0000_0000_0000)
+    } else {
+        value
+    }
+}
+
+fn float_as_f32(value: &Value, span: Span) -> Result<f32, Diagnostic> {
+    match value {
+        Value::Float32(value) => Ok(*value),
+        // Float literals start unconstrained in recovery execution and obtain
+        // their exact width at the trusted declaration boundary.
+        Value::Float(value) => Ok(canonical_f32(*value as f32)),
+        value => Err(runtime(
+            span,
+            format!("expected an f32 value, received `{value:?}`"),
+        )),
+    }
+}
+
+fn float_as_f64(value: &Value, span: Span) -> Result<f64, Diagnostic> {
+    match value {
+        Value::Float(value) => Ok(*value),
+        Value::Float32(value) => Ok(f64::from(*value)),
+        value => Err(runtime(
+            span,
+            format!("expected an f64 value, received `{value:?}`"),
+        )),
+    }
+}
+
+fn coerce_declared_float(value: Value, kind: FloatKind, span: Span) -> Result<Value, Diagnostic> {
+    match kind {
+        FloatKind::F32 => Ok(Value::Float32(canonical_f32(float_as_f32(&value, span)?))),
+        FloatKind::F64 => Ok(Value::Float(canonical_f64(float_as_f64(&value, span)?))),
+    }
+}
+
+fn compare_float<T: PartialEq + PartialOrd>(
+    primitive: Primitive,
+    left: T,
+    right: T,
+    span: Span,
+) -> Result<bool, Diagnostic> {
+    match primitive {
+        Primitive::FloatEq => Ok(left == right),
+        Primitive::FloatNe => Ok(left != right),
+        Primitive::FloatLt => Ok(left < right),
+        Primitive::FloatLe => Ok(left <= right),
+        Primitive::FloatGt => Ok(left > right),
+        Primitive::FloatGe => Ok(left >= right),
+        _ => Err(runtime(span, "invalid float comparison primitive")),
+    }
+}
+
+fn integer_raw_for_kind(value: &Value, kind: IntegerKind, span: Span) -> Result<u128, Diagnostic> {
+    match coerce_integer(value.clone(), kind, span)? {
+        Value::Int(value) => Ok(value as u128 & integer_mask(kind.bits)),
+        Value::Integer { raw, .. } => Ok(raw),
+        _ => unreachable!("integer coercion returned a non-integer"),
+    }
 }
 
 fn eval_runtime_integer_conversion(
@@ -5225,6 +6183,31 @@ fn coerce_integer(value: Value, kind: IntegerKind, span: Span) -> Result<Value, 
                 return Err(runtime(span, "integer value is outside its declared type"));
             }
             value
+        }
+        Value::IntegerLiteral {
+            negative,
+            magnitude,
+        } => {
+            if negative {
+                if !kind.signed {
+                    return Err(runtime(span, "negative value has an unsigned integer type"));
+                }
+                let minimum_magnitude = 1_u128 << (kind.bits - 1);
+                if magnitude > minimum_magnitude {
+                    return Err(runtime(span, "integer value is outside its declared type"));
+                }
+                0_u128.wrapping_sub(magnitude) & integer_mask(kind.bits)
+            } else {
+                let maximum = if kind.signed {
+                    (1_u128 << (kind.bits - 1)) - 1
+                } else {
+                    integer_mask(kind.bits)
+                };
+                if magnitude > maximum {
+                    return Err(runtime(span, "integer value is outside its declared type"));
+                }
+                magnitude
+            }
         }
         Value::Integer { raw, .. } => raw,
         value => {
@@ -5658,6 +6641,337 @@ mod array_runtime_tests {
             bits: kind.bits,
             raw: raw & integer_mask(kind.bits),
         }
+    }
+
+    fn float_call(leaf: FloatRuntimeLeaf, args: &[Value]) -> Result<Value, Diagnostic> {
+        eval_runtime_float_primitive(leaf, args, TEST_SPAN)
+    }
+
+    #[test]
+    fn recovery_float_arithmetic_and_comparisons_are_width_exact() {
+        for primitive in [
+            Primitive::FloatAdd,
+            Primitive::FloatSub,
+            Primitive::FloatMul,
+            Primitive::FloatDiv,
+            Primitive::FloatRem,
+        ] {
+            let result = float_call(
+                FloatRuntimeLeaf::Binary {
+                    primitive,
+                    width: FloatKind::F32,
+                },
+                &[Value::Float32(7.0), Value::Float32(2.0)],
+            )
+            .unwrap();
+            let expected = match primitive {
+                Primitive::FloatAdd => 9.0,
+                Primitive::FloatSub => 5.0,
+                Primitive::FloatMul => 14.0,
+                Primitive::FloatDiv => 3.5,
+                Primitive::FloatRem => 1.0,
+                _ => unreachable!(),
+            };
+            assert_eq!(result, Value::Float32(expected));
+        }
+        assert_eq!(
+            float_call(
+                FloatRuntimeLeaf::Binary {
+                    primitive: Primitive::FloatAdd,
+                    width: FloatKind::F32,
+                },
+                &[Value::Float32(16_777_216.0), Value::Float32(1.0)],
+            )
+            .unwrap(),
+            Value::Float32(16_777_216.0)
+        );
+        assert_eq!(
+            float_call(
+                FloatRuntimeLeaf::Unary {
+                    primitive: Primitive::FloatNeg,
+                    width: FloatKind::F64,
+                },
+                &[Value::Float(3.5)],
+            )
+            .unwrap(),
+            Value::Float(-3.5)
+        );
+        for (primitive, expected) in [
+            (Primitive::FloatEq, false),
+            (Primitive::FloatNe, true),
+            (Primitive::FloatLt, false),
+            (Primitive::FloatLe, false),
+            (Primitive::FloatGt, false),
+            (Primitive::FloatGe, false),
+        ] {
+            assert_eq!(
+                float_call(
+                    FloatRuntimeLeaf::Comparison {
+                        primitive,
+                        width: FloatKind::F64,
+                    },
+                    &[Value::Float(f64::NAN), Value::Float(0.0)],
+                )
+                .unwrap(),
+                typed_integer(
+                    IntegerKind {
+                        signed: false,
+                        bits: 32,
+                    },
+                    u128::from(expected),
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_float_bits_canonicalize_nan_and_preserve_signed_zero() {
+        for (width, value, expected) in [
+            (FloatKind::F32, Value::Float32(-0.0), 0x8000_0000_u128),
+            (
+                FloatKind::F32,
+                Value::Float32(f32::from_bits(0x7fa1_2345)),
+                0x7fc0_0000,
+            ),
+            (FloatKind::F64, Value::Float(-0.0), 0x8000_0000_0000_0000),
+            (
+                FloatKind::F64,
+                Value::Float(f64::from_bits(0x7ff0_0000_0000_0001)),
+                0x7ff8_0000_0000_0000,
+            ),
+        ] {
+            let bits = float_call(FloatRuntimeLeaf::ToBits { source: width }, &[value]).unwrap();
+            let bits_kind = IntegerKind {
+                signed: false,
+                bits: if width == FloatKind::F32 { 32 } else { 64 },
+            };
+            assert_eq!(bits, typed_integer(bits_kind, expected));
+            let roundtrip =
+                float_call(FloatRuntimeLeaf::FromBits { target: width }, &[bits]).unwrap();
+            match (width, roundtrip) {
+                (FloatKind::F32, Value::Float32(value)) => {
+                    assert_eq!(u128::from(value.to_bits()), expected)
+                }
+                (FloatKind::F64, Value::Float(value)) => {
+                    assert_eq!(u128::from(value.to_bits()), expected)
+                }
+                _ => panic!("wrong recovered float width"),
+            }
+        }
+    }
+
+    #[test]
+    fn recovery_float_integer_conversions_cover_every_g1_width_and_boundaries() {
+        let integer_kinds = [
+            IntegerKind {
+                signed: false,
+                bits: 8,
+            },
+            IntegerKind {
+                signed: false,
+                bits: 16,
+            },
+            IntegerKind {
+                signed: false,
+                bits: 32,
+            },
+            IntegerKind {
+                signed: false,
+                bits: 64,
+            },
+            IntegerKind {
+                signed: false,
+                bits: 128,
+            },
+            IntegerKind {
+                signed: true,
+                bits: 8,
+            },
+            IntegerKind {
+                signed: true,
+                bits: 16,
+            },
+            IntegerKind {
+                signed: true,
+                bits: 32,
+            },
+            IntegerKind {
+                signed: true,
+                bits: 64,
+            },
+            IntegerKind {
+                signed: true,
+                bits: 128,
+            },
+        ];
+        for kind in integer_kinds {
+            let raw = if kind.signed {
+                (-37_i128) as u128 & integer_mask(kind.bits)
+            } else {
+                37
+            };
+            for target in [FloatKind::F32, FloatKind::F64] {
+                let converted = float_call(
+                    FloatRuntimeLeaf::IntToFloat {
+                        source: kind,
+                        target,
+                    },
+                    &[typed_integer(kind, raw)],
+                )
+                .unwrap();
+                let expected = if kind.signed { -37.0 } else { 37.0 };
+                match converted {
+                    Value::Float32(value) => assert_eq!(value, expected as f32),
+                    Value::Float(value) => assert_eq!(value, expected),
+                    _ => panic!("integer conversion returned a non-float"),
+                }
+            }
+            let converted = float_call(
+                FloatRuntimeLeaf::FloatToIntChecked {
+                    source: FloatKind::F64,
+                    target: kind,
+                },
+                &[Value::Float(if kind.signed { -37.75 } else { 37.75 })],
+            )
+            .unwrap();
+            assert_eq!(converted, typed_integer(kind, raw));
+
+            let limit = if kind.signed {
+                2_f64.powi(i32::from(kind.bits - 1))
+            } else {
+                2_f64.powi(i32::from(kind.bits))
+            };
+            assert!(
+                float_call(
+                    FloatRuntimeLeaf::FloatToIntChecked {
+                        source: FloatKind::F64,
+                        target: kind,
+                    },
+                    &[Value::Float(limit)],
+                )
+                .unwrap_err()
+                .message
+                .contains("out of range")
+            );
+        }
+        for hostile in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                float_call(
+                    FloatRuntimeLeaf::FloatToIntChecked {
+                        source: FloatKind::F64,
+                        target: IntegerKind {
+                            signed: true,
+                            bits: 64,
+                        },
+                    },
+                    &[Value::Float(hostile)],
+                )
+                .is_err()
+            );
+        }
+
+        assert_eq!(
+            float_call(
+                FloatRuntimeLeaf::Convert {
+                    source: FloatKind::F32,
+                    target: FloatKind::F64,
+                },
+                &[Value::Float32(0.1)],
+            )
+            .unwrap(),
+            Value::Float(f64::from(0.1_f32))
+        );
+    }
+
+    #[test]
+    fn recovery_float_leaf_power_follows_exact_trusted_declaration_identity() {
+        struct NoHost;
+        impl Host for NoHost {
+            fn perform(
+                &mut self,
+                _effect: &str,
+                _operation: &str,
+                _args: Vec<Value>,
+                span: Span,
+            ) -> Result<Value, Diagnostic> {
+                Err(runtime(span, "unexpected host operation"))
+            }
+        }
+
+        let bundle = crate::SourceBundle::raw_with_trusted_standard_for_conformance(
+            crate::Segment::new(
+                "trusted.gr",
+                "__g1_f32_add(left: f32, right: f32) -> f32 { () }
+                 probe() -> f32 { __g1_f32_add(16777216.0, 1.0) }",
+            ),
+            crate::Segment::new("main.gr", "main() -> { () }"),
+            [],
+        );
+        let value = crate::run_bundle_entry_with_manifest_for_conformance(
+            &bundle,
+            "probe",
+            &mut NoHost,
+            &crate::compiler_traits::TrustedTraitManifest::trusted_distribution(),
+        )
+        .unwrap();
+        assert_eq!(value, Value::Float32(16_777_216.0));
+
+        // The same spelling in user code remains an ordinary function: its
+        // body executes and does not acquire primitive authority by name.
+        let untrusted = crate::SourceBundle::raw_with_trusted_standard_for_conformance(
+            crate::Segment::new("trusted.gr", "main() -> { () }"),
+            crate::Segment::new(
+                "user.gr",
+                "__g1_f32_add(left: f32, right: f32) -> f32 { left }
+                 probe() -> f32 { __g1_f32_add(2.0, 3.0) }",
+            ),
+            [],
+        );
+        let value = crate::run_bundle_entry_with_manifest_for_conformance(
+            &untrusted,
+            "probe",
+            &mut NoHost,
+            &crate::compiler_traits::TrustedTraitManifest::trusted_distribution(),
+        )
+        .unwrap();
+        assert_eq!(value, Value::Float32(2.0));
+    }
+
+    #[test]
+    fn recovery_character_primitives_accept_scalars_and_reject_hostile_values() {
+        let grin = typed_integer(
+            IntegerKind {
+                signed: false,
+                bits: 32,
+            },
+            0x1F600,
+        );
+        assert_eq!(
+            call(Primitive::CharFromU32Checked, &[grin]).unwrap(),
+            Value::Char('😀')
+        );
+        assert_eq!(
+            call(Primitive::CharToU32, &[Value::Char('€')]).unwrap(),
+            typed_integer(
+                IntegerKind {
+                    signed: false,
+                    bits: 32,
+                },
+                0x20AC,
+            )
+        );
+
+        for scalar in [0xD800, 0x11_0000] {
+            let hostile = typed_integer(
+                IntegerKind {
+                    signed: false,
+                    bits: 32,
+                },
+                scalar,
+            );
+            assert!(call(Primitive::CharFromU32Checked, &[hostile]).is_err());
+        }
+        assert!(call(Primitive::CharToU32, &[Value::Int(65)]).is_err());
     }
 
     #[test]

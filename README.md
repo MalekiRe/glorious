@@ -64,18 +64,21 @@ The compiler and VM already support closed effect rows, generic effect
 instances, terminal and resumptive handlers, deep resume, explicit
 cancellation, outward effect propagation, exact finite resumption quantities,
 nested suspension, handler environments, reference payloads/results, and
-mixed one-shot/multi-shot environments. Remaining effect work is tracked only
-in the live backlog and is currently concentrated in fully compositional
-handler-result inference/nesting, recursive reference-origin summaries, and
-late recursive or broader quantity-bearing resumption environments.
+mixed one-shot/multi-shot environments. Handler-result inference and nesting,
+bounded recursive/SCC reference-origin summaries, structural closure origins
+across handler exits, late recursive generic resumption environments, owned
+cyclic receiver reclamation, and interprocedural dynamic-array quantity
+summaries are implemented. Remaining effect work in the live backlog is
+optimizer specialization; unbounded resumption quantities are a deliberate G1
+exclusion.
 
 ### Verification gates
 
 The repository uses deterministic unit, hostile-artifact, source-to-VM, and
-O0-O3 acceptance tests. The ownership checkpoint currently includes 263 library
-tests, 200 compiler integration tests, 21 path-sensitive suspension cases, 20
-generic reference-transport cases, 31 typed-callable cases, 19 deconstruction
-cases, and strict workspace formatting and Clippy gates.
+O0-O3 acceptance tests. The current checkpoint includes 308 compiler-library
+tests, 318 VM-library tests, 12 reference-effect cases, 21 resumptive-effect
+cases, four resumption-quantity breadth cases, and strict workspace formatting
+and Clippy gates.
 
 These counts are checkpoints, not a promise of source or artifact stability.
 The compiler CLI, standard-library breadth, tooling, release hardening, and the

@@ -2,7 +2,7 @@
 
 use std::io::{BufRead, Write};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 /// Read one message; `None` on clean EOF.

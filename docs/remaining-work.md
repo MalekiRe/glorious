@@ -14,90 +14,27 @@ tooling-workspace tests, and hostile-artifact suites together. Any remaining
 failure must be reconciled as either a regression or an explicitly updated
 diagnostic expectation; no known failure is considered completed work.
 
-## Active top-five tranche
+## Active hardest tranche
 
-These are the five hardest currently active implementation tasks, in dependency
+These are the hardest currently active implementation tasks, in dependency
 order. Remove an item when its production behavior, adversarial tests, and
 relevant strict gates are complete; then promote the next hardest remaining
 item from the backlog.
 
-### Effects completion gate
-
-Do not remove this gate until all four production paths and their hostile,
-O0-O3, VM, formatting, and strict-Clippy gates are complete:
-
-1. bounded recursive/SCC effect reference-origin summaries;
-2. closure-origin joins across resume and handler exits;
-3. late recursive generic resumption environments;
-4. owned cyclic receiver and runtime ownership support.
-
-1. Complete richer closure reference-origin relations across resume and
-   handler exits. Exact direct/indirect calls, statically divergent arms,
-   non-root aggregate paths, generic effect payload/result routing, bounded
-   recursive SCCs, and equal-effect multi-arm joins are implemented; dynamic,
-   opaque, or ambiguous selection remains fail closed.
-2. Support higher-order lifetime substitution through executable callback
-   control-flow joins, opaque calls, recursive or multiple wrapper edges,
-   nominal projections, and a general symbolic lifetime environment.
-3. Extend cleanup-aware optimizer specialization: direct resume/cancel edges,
-   identity-safe CFG cloning, and richer tail formation.
-4. Complete general first-class callable breadth: escaping reference-bearing
-   environments; effectful, reference-signature, inferred, multi-callable, or
-   non-transparent runtime fallback; and late recursive generic
-   callable/resumption combinations.
-5. Complete handler result inference and nesting across normal completion,
-   clause joins, capture/lowering contexts, and forwarded optimizer paths.
-
-## 1. Source-language surface
-
-### 1.1 First-class callables
-
-- repeatable shared-reference environments and uniquely borrowed environments
-  with explicit per-callable reborrow ownership;
-- effectful, reference-signature, inferred, multi-callable, and
-  non-transparent runtime callable fallback;
-- broader late recursive generic callable/resumption combinations;
-- identity-observation rules if callable equality or reflection is added.
-
-### 1.2 Patterns and enum places
-
-- variant-payload `..` remainder and omission;
-- unreachable pattern-row warnings.
-
-### 1.3 Literals
-
-- source integer literals wider than the current signed `i64` token payload;
-- contextual `u64`/`u128` selection without eager narrowing;
-- exact source-level IEEE float parsing and rounding verification.
+1. Complete the optimizer backlog after semantic breadth: cleanup/effect
+   specialization, CFG cloning, tail formation, scalar replacement, GVN,
+   register reuse, and related backend optimization infrastructure.
 
 ## 3. Effects, handlers, and resumptions
 
-### 3.2 Reference payload/result breadth
-
-- richer closure origin relations across resume and handler-result joins.
-
 ### 3.3 Handler optimizer specialization
 
-- partial and forwarded handlers in optimizer specialization.
-
-### 3.4 Resumption closure and quantity breadth
-
-- late recursive generic resumption combinations;
-- reference-bearing escaping environments;
-
-Every finite bounded `u32` resumption interval is supported. Unbounded
-resumptions still require generalized runtime representation, use tracking,
-copy-glue policy, and verifier summaries; absent that decision, they remain a
-deliberate G1 limitation with a structured source diagnostic.
+- static-handler specialization beyond the implemented direct and one-hop
+  forwarded terminal fusion and canonical single-performance one-shot
+  resume/cancel composition: deeper forwarding graphs, branching or repeated
+  performances, captured continuations, and multishot/deep-reinstating cases.
 
 ## 4. Generics, traits, and lifetimes
-
-### 4.1 Trait methods
-
-- dot-call lookup and inferred trait selection;
-- receiver access-mode inference beyond the explicit receiver parameter type;
-- improved method-call diagnostics;
-- associated method values if required.
 
 ### 4.2 Higher-ranked generics and universes
 
@@ -113,74 +50,58 @@ deliberate G1 limitation with a structured source diagnostic.
 - layout-level const consumers such as arrays rather than phantom identity;
 - non-`u32`/`Quantity` kinds if G1 intends any.
 
-### 4.6 Generic callable evidence
-
-- ordinary trait-method evidence and associated projections in callable
-  signatures;
-- structural `else` specialization when a generic call returns `Result` or
-  `Option`;
-- full lifetime/const/effect parameter environments;
-- recursive specialization with a general finite-growth proof;
-- removal of bounded-discovery restrictions for deeply nested generic
-  callable/resumption combinations.
-
-### 4.7 Generic borrowing and references
-
-- executable callback control-flow joins, opaque calls, recursive or multiple
-  wrapper edges, nominal projections, and general symbolic lifetime
-  environments;
-
-### 4.8 General generic `Use`, `Drop`, aliases, and nominal shapes
-
-- noncanonical coherent generic heads and broader where subjects/arguments;
-- associated-equality conditions and grounded specialization discovery;
-- generic hook calls outside the current fixed-point slice;
-- clearer failure-to-ground diagnostics;
-- complex generic alias constructor arguments and aliases in effect signatures;
-- symbolic normalization before grounding;
-- field/payload shapes beyond the finite supported grammar;
-- general finite recursion proofs and binder substitution in alias impl heads.
-
 ## 5. MIR and bytecode backend
 
 ### 5.1 MIR infrastructure
 
-- typed block kinds and tombstoned arena mutation;
-- checked CFG mutation rather than direct vector edits and blanket
-  invalidation;
-- missing/reusable analysis bundles: predecessor/RPO/loop infrastructure,
-  edge liveness, place versions, alias sets, integer ranges, aggregate facts,
-  shared costs, and general interprocedural widening;
-- block, operation, local, move-path, scope, and control-site resource limits
-  with structured diagnostics and optimizer-budget remarks.
+- extend the implemented typed `BlockId`/block-kind checked editor and
+  transactional block tombstones to persistent typed arenas for locals,
+  operations, places, move paths, scopes, and control sites;
+- migrate the remaining edge redirection, block splitting/merging, operand,
+  and terminator replacement paths through the checked editor (NormalizeCfg
+  unreachable deletion and same-block scalar-`Move` removal are checked and
+  invalidate only the analyses they affect);
+- extend the implemented deterministic checked predecessor, reachability/RPO,
+  dominator, natural-loop/preheader, irreducible-SCC, and edge-liveness bundles
+  with place versions, alias sets, integer ranges, aggregate facts, shared
+  costs, lazy caching, and general interprocedural widening;
+- optimizer-budget remarks and resource limits for the remaining control-site
+  categories (block, operation, local, move-path, scope, label, and handler
+  limits now fail structurally before optimization).
 
 ### 5.2 Register allocation and block layout
 
-- live intervals and owned/shared/unique register classes;
-- register reuse, including after loan end and across compatible types;
-- addressable-place allocation and minimal parallel-copy cycle breaking;
+- extend the implemented deterministic exact-type, same-block physical reuse
+  after proven emptying/loan end to compatible-representation and general
+  cross-block coloring once distinct type/drop-glue identities can be proved
+  interchangeable;
+- use the implemented addressable-place classification for one-to-one place
+  allocation and minimal parallel-copy cycle breaking;
 - erased/ZST register elimination;
-- explicit normal, cleanup, handler, resumption, and label block regions;
-- lexical control-aware layout and stable cleanup interval boundaries.
+- extend the implemented typed entry/RPO-normal, label, cleanup, handler, and
+  resumption grouping through whole successor regions, lexical nesting, and
+  stable cleanup interval boundaries.
 
 ### 5.3 Instruction selection and cleanup maps
 
-- abort, binding packs, `Available` evidence, and complete erased-ZST
-  selection;
-- serialize MIR-derived cleanup lists directly, including edge-transfer
-  temporaries;
-- infer arbitrary public `LEAVE` boundaries without compiler-seeded lexical
-  facts.
+- standalone erased-ZST local/parameter elimination (`Available` fields are
+  erased consistently from MIR ownership and VM aggregate/binding-pack
+  payload layouts; direct MIR abort selection/no-cleanup semantics and
+  binding-pack construction, ownership, reference-origin transport, and frozen
+  bytecode selection are implemented). Direct final cleanup serialization,
+  including parallel edge-transfer temporaries and arbitrary MIR-derived
+  public-`LEAVE` boundaries, now consumes the single MIR ownership source and
+  is independently checked by the VM verifier.
 
 ### 5.4 Bytecode peepholes and validation
 
-- NOP removal, move-chain collapse, and empty transfer-block removal;
-- redundant `EndBorrow` removal and constant-pool-aware rewrites;
+- move-chain collapse beyond straight-line independent transfer snapshots
+  (target-safe NOP/fallthrough-jump removal, non-entry transfer-temporary
+  `Move`/`Copy` chains across independent parallel snapshots, and direct
+  selection without empty switch-transfer blocks are implemented);
+- redundant `EndBorrow` removal and constant-pool-aware rewrites beyond the
+  implemented target-safe retargeting of one-use constant transfer temporaries;
 - cleanup/label/handler-safe repatching;
-- a distinct `ValidateBytecodeInput` checkpoint;
-- optimized-MIR validation against cleanup/drop facts before serialization;
-- accurate backend pass reporting.
-
 ## 6. Optimizer
 
 ### 6.1 CFG and sparse simplification
@@ -216,12 +137,16 @@ deliberate G1 limitation with a structured source diagnostic.
 
 ### 6.4 Effect/resumption specialization
 
-- general static-handler removal and partial handlers;
+- general static-handler removal beyond implemented direct/one-hop-forwarded
+  terminal fusion and canonical one-shot resume/cancel composition (selected
+  operation groups and known partial-handler hits specialize; unmatched partial
+  fallback remains dynamic);
 - residual, conditional, or custom-`Drop` abandoned-continuation cleanup
   (computed scalar, fresh owned aggregate, shared-reference and transferred
   unique-reference payloads, plus ordered whole-owner cleanup are
   specialized; abandoned unique loans remain a barrier);
-- one-shot allocation elimination and direct resume/cancel edges;
+- one-shot allocation elimination and direct resume/cancel edges beyond the
+  implemented canonical single-performance composition;
 - deep reinstatement proofs, multishot copy-glue sharing, and resumption escape
   analysis.
 
@@ -238,57 +163,29 @@ deliberate G1 limitation with a structured source diagnostic.
 - loop normalization without a unique preheader;
 - more precise trap, alias, range, and trip-count proofs.
 
-## 7. VM, verifier, and artifact hardening
-
-### 7.1 Compact verified artifact
-
-- decode borrowed strings/blobs directly from an owned byte container;
-- an encoded/verified loader that can release raw sections without first
-  materializing the mutable public `Artifact`;
-- a denser execution-only opcode/operand layout;
-- checked IDs for constants, types, imports, protocols, and handler definitions;
-- leader-only runtime facts if supervision/JIT work needs them;
-- separate the compatibility `artifact()` view from execution.
-
-### 7.2 Continuation and effect summaries
-
-- cancellation-only sparse plans where earlier destruction is observably safe;
-- further compact sparse register sets for very large frames;
-- dynamic array-slot summaries and precise maybe-cancel/maybe-multishot facts;
-- non-pristine effect-payload quantity provenance beyond exact sole-owner
-  `perform`, nested forwarding, and terminal clause consume/return
-  dispositions;
-- general effectful quantity transport beyond converged finite callable SCCs.
-
-### 7.3 Supervisor portability
-
-- non-Unix/Linux adapters or narrower portability claims;
-- reliable OOM/memory-limit classification distinct from internal signals;
-- platform-specific process-group cleanup tests.
-
 ## 8. Standard library
 
 ### 8.1 Scalars and fundamental traits
 
-- integer-negation wrappers and numeric `min`, `max`, `clamp`;
-- float arithmetic, comparison, conversion, parsing, and formatting;
-- character validation, `char`/`u32` conversion, and UTF-8 length/codec APIs;
-- integer parsing for every source base and broader numeric diagnostics;
-- `Ordering`, `Eq`, `Ord`, `Hash`, `Default`, `Display`, and `Debug`, including
-  scalar, String, Bytes, Option, Result, and tuple implementations.
+- exact runtime parsing of the generation-1 decimal float grammar;
+- complete the fundamental trait surface for `Option`, `Result`, and tuples;
+  close the remaining symbolic/provisional receiver-typing path for bounded
+  `Eq`, `Ord`, `Hash`, `Default`, `Display`, and `Debug` calls inside those
+  generic implementations (recovery execution is covered);
 
 ### 8.2 Result, Option, ranges, and helpers
 
-- borrowing projections for `Result` and `Option`;
 - deliberately trapping conveniences if desired;
-- `take` after `Default`, assertions, `assert_eq`, `unreachable`, abort
-  wrappers, and an ownership-aware `Slot<T>` if retained.
+- assertions, `assert_eq`, `unreachable`, abort wrappers, and an
+  ownership-aware `Slot<T>` if retained.
 
 ### 8.3 Text, bytes, and formatting
 
 - byte/character/index iteration and view hashing;
-- `StringBuilder::append_char`, escaped output, and arbitrary values;
-- decimal/hex formatting and `Display`/`Debug` integration;
+- escaped output beyond the implemented String `Debug` escapes and arbitrary
+  formatting values;
+- hex formatting and complete `Display`/`Debug` integration (signed and
+  unsigned decimal formatting through 128 bits is implemented);
 - ordinary `format` callable;
 - `SourceMap`, line tables, labels, severities, notes, and a deterministic
   source-defined diagnostic renderer.
@@ -297,64 +194,59 @@ deliberate G1 limitation with a structured source diagnostic.
 
 - Vec split/drain APIs, additional iterator forms, restricted-element
   abandonment tests, and unified-PlaceFlow validation;
-- `HashMap`/`HashSet` with deterministic open addressing, growth, budgets,
-  replacement/removal/entry/iteration APIs, and interner probing;
-- bounded introsort, heapsort fallback, stable merge sort, binary search,
-  bounds, partition, deduplication, lexicographic comparison, and adversarial
-  complexity tests.
+- extend the implemented private generic `HashMap`/`HashSet` core (deterministic
+  open addressing, growth, capacity budgets, insertion/replacement, lookup,
+  membership, bounded collision-cluster-repair removal, length/capacity/empty
+  queries, `get_mut`, one-probe occupied/vacant entry insertion, deterministic
+  exhaustive owning iteration, borrowed iterator representations, O0--O3 VM
+  execution, and recovery parity) with reference-returning insert-or-get and
+  borrowed-consumer specialization breadth, checked raw-entry probing,
+  `remove_entry`/general reserve and clear, and set union/intersection APIs;
 
 ### 8.5 Compiler toolkit
 
-- `Id<Tag>`, `IndexVec`, rollback-capable `Arena`, `Interner`, `BitSet`,
-  `SparseSet`, `WorkQueue`, `MultiMap`, and `SourceMap`;
-- checked counters, logical budgets, and deterministic statistics records.
-
-### 8.6 Library size
-
-Decide whether to compact/generate repetitive APIs, express them generically,
-or revise the documented 1,500–2,500 nonblank-line target. The generated
-checked integer-conversion matrix is the main source of excess size.
+- Ordinary source now implements private, checked `Id<Tag>`, `IndexVec`, the
+  rollback-capable `Arena`, machine-word `BitSet`, `SparseSet`, a deduplicating
+  FIFO `WorkQueue`, arbitrary-key hash-backed `MultiMap<K,V>`, and line/column
+  `SourceMap`. Their
+  storage, rollback, set-algebra, queue, grouping, capacity, O0--O3 VM, and
+  recovery paths have focused coverage. The remaining collection-dependent
+  part is an optional borrowed-key raw-entry optimization for `MultiMap`.
+  `Interner<T>` is fully generic and hash-backed,
+  stores each canonical value once, preserves insertion-order IDs, and checks
+  equality within deterministic hash buckets; String and colliding non-String
+  heads have O0--O3/recovery coverage.
+- Checked counters, monotonic logical `StepBudget`s, and stable-field-order,
+  timer-free compiler statistics records are implemented and tested for atomic
+  overflow/limit rejection.
 
 ## 9. Compiler CLI and tooling
 
-### 9.1 Canonical compiler/build contract
-
-- real `grc`: capabilities, multiple inputs, canonical ordering, O0–O3,
-  MIR/bytecode and phase output, JSON diagnostics/interfaces, std interface,
-  output/version negotiation, and long-lived sessions;
-- migrate `grand` from legacy/fake flows to `.glorious`/`.grbc`, `grvm`, atomic
-  toolchain identities, authoritative interfaces, real check-only diagnostics,
-  end-to-end tests, and compatibility enforcement.
-
 ### 9.2 Formatter and LSP
 
-- shared lossless frontend/trivia rather than duplicated/private lexers;
-- AST/document-algebra formatting with fixity context, width grouping,
-  structured wrapping, safe normalizations, invalid-input refusal, and corpus
-  equivalence tests;
-- persistent incremental compiler sessions and transactional inference;
-- definition/type side tables and last-good semantics;
-- semantic hover, navigation, rename, signature help, completion, hints,
-  tokens, ranges, symbols, cancellation, multi-root handling, dependency
-  navigation, and full compiler diagnostics.
-
-### 9.3 Editor distribution and tooling CI
-
-- canonical `.glorious` recognition, updated grammar, packaged VS Code/LSP
-  distribution, other-editor documentation, and release automation;
-- CI for root, `grand`, formatter, and LSP workspaces;
-- formatter corpus tests, LSP UTF-16/cancellation fuzzing, resolver
-  hermetic/security tests, compiler-contract integration, and extension
-  packaging tests.
+- extend the implemented persistent per-workspace-root document session (root
+  transactions, compiler-check diagnostics, and atomic last-good declaration /
+  definition snapshots are implemented) with per-body incremental elaboration
+  and retained transactional inference arenas;
+- add compiler-exported span-to-type and fully resolved local-definition side
+  tables (stable top-level identities, exact declaration/name spans, and
+  last-good top-level definition tables are implemented);
+- extend the authoritative compiler-interface-backed symbols, cross-file
+  definition, completion, references, rename, hover signatures/docs, and full
+  compiler diagnostics with inferred-type hover, hints, and dependency
+  navigation; authoritative callable signature help and semantic tokens for
+  compiler-bound declarations/occurrences plus compiler-lexed source classes
+  are implemented with UTF-16, multi-file, and transactional last-good
+  coverage. Replace the remaining lexical local-scope fallback once compiler
+  local-definition tables exist.
 
 ## 10. Testing and release hardening
 
-- checked MIR builder and ownership-valid MIR generator;
-- MIR mutation fuzzing and per-pass differential VM testing;
-- trace equality for effects, resume, cancel, leave, host calls, and custom drop;
-- hostile decoder/verifier/VM fuzz targets and allocation-amplification/OOM
-  corpora;
-- golden `.grbc` and released-seed compatibility fixtures;
+- coverage-guided hostile decoder/verifier/VM fuzz targets and broader runtime
+  OOM corpora (deterministic full-loader truncation, byte/field mutation,
+  fixed-seed arbitrary-input, small-input allocation-amplification, hostile
+  array-length, sparse extreme label namespaces, and supervised
+  allocation-limit corpora are implemented);
 - determinism tests for optimizer caches/maps, statistics, and fingerprints;
 - resource-limit diagnostics and pass budget/fixed-point remarks;
 - self-compilation performance gate below 120 seconds and 4 GiB;
@@ -382,6 +274,8 @@ These are not part of the completion backlog:
   arbitrary-precision integers, general serialization, runtime dependency
   discovery;
 - compiler-known `if`, `match`, `loop`, or operator semantics;
+- unbounded resumption quantities without a generalized runtime
+  representation, use tracking, copy-glue policy, and verifier summaries;
 - pattern guards, ranges, OR patterns, and user-overloadable pattern protocols;
 - borrowed indirect tail-call receivers;
 - memoized globals whose value has a restricted `Use` interval;
@@ -408,8 +302,7 @@ These are not part of the completion backlog:
    layout, direct cleanup serialization, and bytecode-input validation.
 5. Complete nonlocal optimizer breadth: cleanup, scalar replacement, callable
    and effect specialization, multi-block inlining, tail formation, and LICM.
-6. Finish compact loading, checked artifact IDs, supervisor portability, and
-   hostile-input hardening.
+6. Finish continuation/effect-summary compaction.
 7. Complete the source standard library/toolkit, canonical CLI/build flow,
    semantic tooling, editor distribution, and multi-workspace CI.
 8. Perform the separately tracked wholesale port and stage convergence.

@@ -1,9 +1,15 @@
-use std::{collections::VecDeque, error::Error, fmt, ops::Range, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet, VecDeque},
+    error::Error,
+    fmt,
+    ops::Range,
+    sync::{Arc, OnceLock},
+};
 
 use crate::bytecode::{
-    Artifact, Constant, DROP_HOOK, EXPORTED, Function, HandlerClause, Instruction, NO_RETURN,
-    Primitive, Signature, Type, TypeId, U32, UNIT, construction_field_types, primitive_signature,
-    projection_field_type,
+    Artifact, Constant, DROP_HOOK, DecodedTables, EXPORTED, EncodedConstantPayload, Function,
+    HandlerClause, Instruction, NO_RETURN, PackedCode, Primitive, ReferenceReturnOrigin, Signature,
+    Type, TypeId, U32, UNIT, construction_field_types, primitive_signature, projection_field_type,
 };
 
 /// Immutable, verifier-produced indexes used by the interpreter.
@@ -27,7 +33,84 @@ struct FunctionLayout {
 #[derive(Clone, Debug)]
 struct CapturePlan {
     pc: u32,
-    registers: Box<[u32]>,
+    multishot_registers: CompactRegisterSet,
+    cancellation_registers: CompactRegisterSet,
+}
+
+/// A verifier-built, delta-encoded set of sorted register indices.
+///
+/// Continuation capture maps are usually sparse even for very large frames.
+/// Keeping their small deltas as unsigned LEB128 avoids paying four bytes for
+/// every retained register while still allowing one linear pass when the VM
+/// prunes a frame. The set is execution-only metadata and does not alter the
+/// canonical artifact format.
+#[derive(Clone, Debug, Default)]
+struct CompactRegisterSet {
+    deltas: Box<[u8]>,
+}
+
+impl CompactRegisterSet {
+    fn from_sorted(registers: impl IntoIterator<Item = u32>) -> Self {
+        let mut deltas = Vec::new();
+        let mut previous = None;
+        for register in registers {
+            let delta = previous.map_or(register, |previous| register - previous);
+            encode_u32_leb128(delta, &mut deltas);
+            previous = Some(register);
+        }
+        Self {
+            deltas: deltas.into_boxed_slice(),
+        }
+    }
+}
+
+fn encode_u32_leb128(mut value: u32, output: &mut Vec<u8>) {
+    loop {
+        let mut byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value != 0 {
+            byte |= 0x80;
+        }
+        output.push(byte);
+        if value == 0 {
+            return;
+        }
+    }
+}
+
+pub(crate) struct CompactRegisterIter<'a> {
+    bytes: &'a [u8],
+    offset: usize,
+    previous: Option<u32>,
+}
+
+impl Iterator for CompactRegisterIter<'_> {
+    type Item = u32;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.offset == self.bytes.len() {
+            return None;
+        }
+        let mut value = 0_u32;
+        let mut shift = 0;
+        loop {
+            let byte = self.bytes[self.offset];
+            self.offset += 1;
+            value |= u32::from(byte & 0x7f) << shift;
+            if byte & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+            debug_assert!(shift < 32, "verifier produced an invalid register delta");
+        }
+        let register = self.previous.map_or(value, |previous| {
+            previous
+                .checked_add(value)
+                .expect("verified register delta overflowed")
+        });
+        self.previous = Some(register);
+        Some(register)
+    }
 }
 
 /// A function-local instruction offset whose bounds were checked against the
@@ -39,11 +122,12 @@ pub(crate) struct VerifiedPc {
 }
 
 /// A checked view of one function in a verified artifact.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct VerifiedFunction<'a> {
     function: u32,
     descriptor: &'a Function,
-    code: &'a [Instruction],
+    code: &'a PackedCode,
+    code_range: Range<u32>,
     cleanups: &'a [crate::bytecode::CleanupPlan],
     captures: &'a [CapturePlan],
 }
@@ -54,18 +138,20 @@ impl<'a> VerifiedFunction<'a> {
     }
 
     pub(crate) fn checked_pc(&self, pc: u32) -> Option<VerifiedPc> {
-        ((pc as usize) < self.code.len()).then_some(VerifiedPc {
+        (pc < self.code_range.end - self.code_range.start).then_some(VerifiedPc {
             function: self.function,
             offset: pc,
         })
     }
 
-    pub(crate) fn instruction(&self, pc: VerifiedPc) -> &'a Instruction {
+    pub(crate) fn instruction(&self, pc: VerifiedPc) -> Instruction {
         assert_eq!(
             pc.function, self.function,
             "verified PC used with wrong function"
         );
-        &self.code[pc.offset as usize]
+        self.code
+            .instruction((self.code_range.start + pc.offset) as usize)
+            .expect("verified PC has a packed instruction")
     }
 
     pub(crate) fn cleanup_registers(&self, pc: VerifiedPc) -> &'a [u32] {
@@ -83,46 +169,458 @@ impl<'a> VerifiedFunction<'a> {
             .expect("verified function PC has cleanup metadata")
     }
 
-    pub(crate) fn continuation_registers(&self, pc: VerifiedPc) -> &'a [u32] {
+    fn capture_plan(&self, pc: VerifiedPc) -> Option<&CapturePlan> {
         assert_eq!(
             pc.function, self.function,
             "verified PC used with wrong function"
         );
         let at = self.captures.partition_point(|plan| plan.pc < pc.offset);
-        self.captures
-            .get(at)
-            .filter(|plan| plan.pc == pc.offset)
-            .map_or(&[], |plan| plan.registers.as_ref())
+        self.captures.get(at).filter(|plan| plan.pc == pc.offset)
+    }
+
+    pub(crate) fn multishot_registers(&self, pc: VerifiedPc) -> CompactRegisterIter<'_> {
+        let bytes = self
+            .capture_plan(pc)
+            .map_or(&[][..], |plan| plan.multishot_registers.deltas.as_ref());
+        CompactRegisterIter {
+            bytes,
+            offset: 0,
+            previous: None,
+        }
+    }
+
+    pub(crate) fn cancellation_registers(&self, pc: VerifiedPc) -> CompactRegisterIter<'_> {
+        let bytes = self
+            .capture_plan(pc)
+            .map_or(&[][..], |plan| plan.cancellation_registers.deltas.as_ref());
+        CompactRegisterIter {
+            bytes,
+            offset: 0,
+            previous: None,
+        }
     }
 }
 
 #[derive(Clone, Debug)]
 pub struct VerifiedArtifact {
-    artifact: Arc<Artifact>,
+    image: Arc<ExecutionImage>,
     layout: Arc<RuntimeLayout>,
+    compatibility_artifact: Arc<OnceLock<Arc<Artifact>>>,
 }
 
 impl VerifiedArtifact {
-    pub fn artifact(&self) -> &Artifact {
-        &self.artifact
+    pub fn entry_function(&self) -> Option<crate::bytecode::FunctionId> {
+        self.image.entry_function
     }
+
+    /// Materialize the mutable compatibility representation on demand.
+    ///
+    /// The execution path deliberately never calls this method. It exists for
+    /// callers that historically inspected a verified [`Artifact`].
+    pub fn artifact(&self) -> &Artifact {
+        self.compatibility_artifact
+            .get_or_init(|| Arc::new(self.image.materialize()))
+    }
+
+    /// Materialize and return the compatibility representation.
     pub fn into_inner(self) -> Arc<Artifact> {
-        self.artifact
+        self.compatibility_artifact
+            .get_or_init(|| Arc::new(self.image.materialize()))
+            .clone()
+    }
+
+    pub(crate) fn image(&self) -> &ExecutionImage {
+        &self.image
+    }
+
+    #[cfg(test)]
+    fn compatibility_artifact_is_materialized(&self) -> bool {
+        self.compatibility_artifact.get().is_some()
     }
 
     pub(crate) fn function(&self, function: u32) -> Option<VerifiedFunction<'_>> {
         let index = usize::try_from(function).ok()?;
-        let descriptor = self.artifact.functions.get(index)?;
+        let descriptor = self.image.functions.get(index)?;
         let layout = self.layout.functions.get(index)?;
         Some(VerifiedFunction {
             function,
             descriptor,
-            code: &self.artifact.code[layout.code.start as usize..layout.code.end as usize],
-            cleanups: &self.artifact.cleanups
+            code: &self.image.code,
+            code_range: layout.code.clone(),
+            cleanups: &self.image.cleanups
                 [layout.cleanups.start as usize..layout.cleanups.end as usize],
             captures: &self.layout.captures
                 [layout.captures.start as usize..layout.captures.end as usize],
         })
+    }
+}
+
+/// Immutable execution-only tables. Unlike [`Artifact`], these fields cannot
+/// be mutated and their backing allocations have no construction spare
+/// capacity. The public compatibility view is cloned from this image only when
+/// explicitly requested.
+#[derive(Debug)]
+pub(crate) struct ExecutionImage {
+    pub(crate) required_features: u64,
+    pub(crate) entry_function: Option<crate::bytecode::FunctionId>,
+    pub(crate) types: Box<[Type]>,
+    pub(crate) constants: Box<[Constant]>,
+    pub(crate) imports: Box<[crate::bytecode::Import]>,
+    pub(crate) protocols: Box<[crate::bytecode::Protocol]>,
+    pub(crate) handler_defs: Box<[crate::bytecode::HandlerDef]>,
+    pub(crate) cleanups: Box<[crate::bytecode::CleanupPlan]>,
+    pub(crate) exports: Box<[crate::bytecode::Export]>,
+    pub(crate) drop_glue: Box<[crate::bytecode::DropGlue]>,
+    pub(crate) reference_return_contracts: Box<[crate::bytecode::ReferenceReturnContract]>,
+    pub(crate) functions: Box<[Function]>,
+    pub(crate) code: PackedCode,
+    encoded: Option<Arc<[u8]>>,
+    constant_payloads: Box<[Option<EncodedConstantPayload>]>,
+    abort_messages: Box<[Option<Range<usize>>]>,
+    import_names: Box<[ImportNameRanges]>,
+}
+
+type ImportNameRanges = Option<(Range<usize>, Range<usize>)>;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum ImageConstant<'a> {
+    Inline(&'a Constant),
+    Text(&'a str),
+    Bytes(&'a [u8]),
+}
+
+fn strip_descriptor_names(tables: &mut DecodedTables) {
+    fn strip_type(ty: &mut Type) {
+        match ty {
+            Type::Restricted { base, .. } => strip_type(base),
+            Type::Callable { identity_name, .. }
+            | Type::Handler { identity_name, .. }
+            | Type::Resumption { identity_name, .. }
+            | Type::BindingPack { identity_name, .. }
+            | Type::Available { identity_name } => *identity_name = String::new(),
+            Type::Struct { name, fields, .. } => {
+                *name = String::new();
+                for field in fields {
+                    field.name = String::new();
+                }
+            }
+            Type::Enum { name, variants, .. } => {
+                *name = String::new();
+                for variant in variants {
+                    variant.name = String::new();
+                    for field in &mut variant.fields {
+                        field.name = String::new();
+                    }
+                }
+            }
+            Type::Unit
+            | Type::Never
+            | Type::U8
+            | Type::U16
+            | Type::U32
+            | Type::U64
+            | Type::U128
+            | Type::I8
+            | Type::I16
+            | Type::I32
+            | Type::I64
+            | Type::I128
+            | Type::Usize
+            | Type::Isize
+            | Type::F32
+            | Type::F64
+            | Type::Char
+            | Type::Text
+            | Type::Bytes
+            | Type::Array { .. }
+            | Type::RefShared { .. }
+            | Type::RefUnique { .. }
+            | Type::Tuple { .. } => {}
+        }
+    }
+
+    for ty in &mut tables.types {
+        strip_type(ty);
+    }
+    for import in &mut tables.imports {
+        import.capability = String::new();
+        import.symbol = String::new();
+    }
+    for protocol in &mut tables.protocols {
+        protocol.display_name = String::new();
+        for operation in &mut protocol.operations {
+            operation.name = String::new();
+        }
+    }
+    for export in &mut tables.exports {
+        export.name = String::new();
+    }
+    for function in &mut tables.functions {
+        function.name = String::new();
+    }
+}
+
+macro_rules! checked_image_id {
+    ($name:ident) => {
+        #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+        pub(crate) struct $name(usize);
+
+        impl $name {
+            fn new(raw: u32, length: usize) -> Option<Self> {
+                let index = usize::try_from(raw).ok()?;
+                (index < length).then_some(Self(index))
+            }
+
+            pub(crate) fn index(self) -> usize {
+                self.0
+            }
+        }
+    };
+}
+
+checked_image_id!(ImageConstantId);
+checked_image_id!(ImageTypeId);
+checked_image_id!(ImageImportId);
+checked_image_id!(ImageProtocolId);
+checked_image_id!(ImageHandlerDefId);
+
+impl ExecutionImage {
+    pub(crate) fn from_artifact(artifact: Artifact) -> Self {
+        let constant_count = artifact.constants.len();
+        let instruction_count = artifact.code.len();
+        let import_count = artifact.imports.len();
+        Self {
+            required_features: artifact.required_features,
+            entry_function: artifact.entry_function,
+            types: artifact.types.into_boxed_slice(),
+            constants: artifact.constants.into_boxed_slice(),
+            imports: artifact.imports.into_boxed_slice(),
+            protocols: artifact.protocols.into_boxed_slice(),
+            handler_defs: artifact.handler_defs.into_boxed_slice(),
+            cleanups: artifact.cleanups.into_boxed_slice(),
+            exports: artifact.exports.into_boxed_slice(),
+            drop_glue: artifact.drop_glue.into_boxed_slice(),
+            reference_return_contracts: artifact.reference_return_contracts.into_boxed_slice(),
+            functions: artifact.functions.into_boxed_slice(),
+            code: PackedCode::from_instructions(&artifact.code),
+            encoded: None,
+            constant_payloads: std::iter::repeat_n(None, constant_count).collect::<Box<[_]>>(),
+            abort_messages: std::iter::repeat_n(None, instruction_count).collect::<Box<[_]>>(),
+            import_names: std::iter::repeat_n(None, import_count).collect::<Box<[_]>>(),
+        }
+    }
+
+    fn from_decoded(
+        mut tables: DecodedTables,
+        constant_payloads: Vec<Option<EncodedConstantPayload>>,
+        abort_messages: Vec<Option<Range<usize>>>,
+        strings: Vec<(String, Range<usize>)>,
+        encoded: Arc<[u8]>,
+    ) -> Self {
+        assert_eq!(tables.constants.len(), constant_payloads.len());
+        assert_eq!(tables.code.len(), abort_messages.len());
+        for (constant, payload) in tables.constants.iter_mut().zip(&constant_payloads) {
+            match (constant, payload) {
+                (Constant::Text(text), Some(EncodedConstantPayload::Text(_))) => {
+                    *text = String::new();
+                }
+                (Constant::Bytes(bytes), Some(EncodedConstantPayload::Bytes(_))) => {
+                    *bytes = Vec::new();
+                }
+                (_, None) => {}
+                _ => unreachable!("decoded constant payload kind must match its descriptor"),
+            }
+        }
+        for (instruction, message) in tables.code.iter_mut().zip(&abort_messages) {
+            if let (
+                Instruction::Abort {
+                    message: Some(text),
+                },
+                Some(_),
+            ) = (instruction, message)
+            {
+                *text = String::new();
+            }
+        }
+        let strings = strings.into_iter().collect::<BTreeMap<_, _>>();
+        let import_names = tables
+            .imports
+            .iter()
+            .map(|import| {
+                Some((
+                    strings[&import.capability].clone(),
+                    strings[&import.symbol].clone(),
+                ))
+            })
+            .collect::<Box<[_]>>();
+        strip_descriptor_names(&mut tables);
+        Self {
+            required_features: tables.required_features,
+            entry_function: tables.entry_function,
+            types: tables.types.into_boxed_slice(),
+            constants: tables.constants.into_boxed_slice(),
+            imports: tables.imports.into_boxed_slice(),
+            protocols: tables.protocols.into_boxed_slice(),
+            handler_defs: tables.handler_defs.into_boxed_slice(),
+            cleanups: tables.cleanups.into_boxed_slice(),
+            exports: tables.exports.into_boxed_slice(),
+            drop_glue: tables.drop_glue.into_boxed_slice(),
+            reference_return_contracts: tables.reference_return_contracts.into_boxed_slice(),
+            functions: tables.functions.into_boxed_slice(),
+            code: PackedCode::from_instructions(&tables.code),
+            encoded: Some(encoded),
+            constant_payloads: constant_payloads.into_boxed_slice(),
+            abort_messages: abort_messages.into_boxed_slice(),
+            import_names,
+        }
+    }
+
+    fn materialize(&self) -> Artifact {
+        if let Some(encoded) = &self.encoded {
+            return Artifact::decode(encoded)
+                .expect("verified canonical bytes remain decodable for compatibility");
+        }
+        Artifact {
+            required_features: self.required_features,
+            entry_function: self.entry_function,
+            types: self.types.to_vec(),
+            constants: self
+                .constants
+                .iter()
+                .enumerate()
+                .map(|(index, _)| self.materialize_constant(index))
+                .collect(),
+            imports: self.imports.to_vec(),
+            protocols: self.protocols.to_vec(),
+            handler_defs: self.handler_defs.to_vec(),
+            cleanups: self.cleanups.to_vec(),
+            exports: self.exports.to_vec(),
+            drop_glue: self.drop_glue.to_vec(),
+            reference_return_contracts: self.reference_return_contracts.to_vec(),
+            functions: self.functions.to_vec(),
+            code: self
+                .code
+                .materialize()
+                .into_iter()
+                .enumerate()
+                .map(|(index, instruction)| self.materialize_instruction(index, &instruction))
+                .collect(),
+        }
+    }
+
+    pub(crate) fn constant_id(&self, raw: u32) -> Option<ImageConstantId> {
+        ImageConstantId::new(raw, self.constants.len())
+    }
+
+    pub(crate) fn constant(&self, id: ImageConstantId) -> ImageConstant<'_> {
+        let index = id.index();
+        let descriptor = &self.constants[index];
+        match &self.constant_payloads[index] {
+            None => ImageConstant::Inline(descriptor),
+            Some(EncodedConstantPayload::Text(range)) => {
+                let bytes =
+                    &self.encoded.as_ref().expect("encoded payload has storage")[range.clone()];
+                ImageConstant::Text(
+                    std::str::from_utf8(bytes).expect("text range was checked during decoding"),
+                )
+            }
+            Some(EncodedConstantPayload::Bytes(range)) => ImageConstant::Bytes(
+                &self.encoded.as_ref().expect("encoded payload has storage")[range.clone()],
+            ),
+        }
+    }
+
+    pub(crate) fn checked_constant(&self, raw: u32) -> Option<ImageConstant<'_>> {
+        self.constant_id(raw).map(|id| self.constant(id))
+    }
+
+    fn materialize_constant(&self, index: usize) -> Constant {
+        match self.constant(ImageConstantId(index)) {
+            ImageConstant::Inline(constant) => constant.clone(),
+            ImageConstant::Text(text) => Constant::Text(text.to_owned()),
+            ImageConstant::Bytes(bytes) => Constant::Bytes(bytes.to_vec()),
+        }
+    }
+
+    fn wire_text(&self, range: &Range<usize>) -> &str {
+        let bytes = &self.encoded.as_ref().expect("encoded payload has storage")[range.clone()];
+        std::str::from_utf8(bytes).expect("text range was checked during decoding")
+    }
+
+    fn materialize_instruction(&self, index: usize, instruction: &Instruction) -> Instruction {
+        match (&self.abort_messages[index], instruction) {
+            (Some(range), Instruction::Abort { .. }) => Instruction::Abort {
+                message: Some(self.wire_text(range).to_owned()),
+            },
+            _ => instruction.clone(),
+        }
+    }
+
+    pub(crate) fn abort_message(&self, instruction: usize) -> Option<&str> {
+        self.abort_messages
+            .get(instruction)
+            .and_then(Option::as_ref)
+            .map(|range| self.wire_text(range))
+    }
+
+    pub(crate) fn type_id(&self, raw: u32) -> Option<ImageTypeId> {
+        ImageTypeId::new(raw, self.types.len())
+    }
+
+    pub(crate) fn ty(&self, id: ImageTypeId) -> &Type {
+        &self.types[id.index()]
+    }
+
+    pub(crate) fn checked_type(&self, raw: u32) -> Option<&Type> {
+        self.type_id(raw).map(|id| self.ty(id))
+    }
+
+    pub(crate) fn import_id(&self, raw: u32) -> Option<ImageImportId> {
+        ImageImportId::new(raw, self.imports.len())
+    }
+
+    pub(crate) fn import(&self, id: ImageImportId) -> &crate::bytecode::Import {
+        &self.imports[id.index()]
+    }
+
+    pub(crate) fn import_capability(&self, id: ImageImportId) -> &str {
+        self.import_names[id.index()]
+            .as_ref()
+            .map_or(self.import(id).capability.as_str(), |(range, _)| {
+                self.wire_text(range)
+            })
+    }
+
+    pub(crate) fn import_symbol(&self, id: ImageImportId) -> &str {
+        self.import_names[id.index()]
+            .as_ref()
+            .map_or(self.import(id).symbol.as_str(), |(_, range)| {
+                self.wire_text(range)
+            })
+    }
+
+    pub(crate) fn protocol_id(&self, raw: u32) -> Option<ImageProtocolId> {
+        ImageProtocolId::new(raw, self.protocols.len())
+    }
+
+    pub(crate) fn protocol(&self, id: ImageProtocolId) -> &crate::bytecode::Protocol {
+        &self.protocols[id.index()]
+    }
+
+    pub(crate) fn checked_protocol(&self, raw: u32) -> Option<&crate::bytecode::Protocol> {
+        self.protocol_id(raw).map(|id| self.protocol(id))
+    }
+
+    pub(crate) fn handler_def_id(&self, raw: u32) -> Option<ImageHandlerDefId> {
+        ImageHandlerDefId::new(raw, self.handler_defs.len())
+    }
+
+    pub(crate) fn handler_def(&self, id: ImageHandlerDefId) -> &crate::bytecode::HandlerDef {
+        &self.handler_defs[id.index()]
+    }
+
+    pub(crate) fn checked_handler_def(&self, raw: u32) -> Option<&crate::bytecode::HandlerDef> {
+        self.handler_def_id(raw).map(|id| self.handler_def(id))
     }
 }
 
@@ -152,14 +650,18 @@ impl RuntimeLayout {
                     .enumerate()
                 {
                     if is_continuation_boundary_pc(artifact, function, pc as u32) {
+                        let multishot_registers = CompactRegisterSet::from_sorted(
+                            live.iter()
+                                .copied()
+                                .enumerate()
+                                .filter_map(|(register, live)| live.then_some(register as u32)),
+                        );
                         captures.push(CapturePlan {
                             pc: pc as u32,
-                            registers: live
-                                .into_iter()
-                                .enumerate()
-                                .filter_map(|(register, live)| live.then_some(register as u32))
-                                .collect::<Vec<_>>()
-                                .into_boxed_slice(),
+                            multishot_registers,
+                            cancellation_registers: cancellation_capture_registers(
+                                artifact, function, &live,
+                            ),
                         });
                     }
                 }
@@ -177,6 +679,27 @@ impl RuntimeLayout {
             captures: captures.into_boxed_slice(),
         }
     }
+}
+
+/// Keep future-live registers plus any dead value whose destruction could be
+/// observable or violate a positive use obligation. Everything omitted from
+/// this conservative plan may be destroyed when a cancellation-capable
+/// one-shot continuation is captured, rather than retaining irrelevant frame
+/// storage until a later resume or cancel.
+fn cancellation_capture_registers(
+    artifact: &Artifact,
+    function: &Function,
+    live: &[bool],
+) -> CompactRegisterSet {
+    CompactRegisterSet::from_sorted(live.iter().copied().enumerate().filter_map(
+        |(register, live)| {
+            let ty = function.register_types[register];
+            (live
+                || residual_contains_custom_drop(artifact, ty, None, None, &mut Vec::new())
+                || !residual_zero_use_allowed(artifact, ty, None, None))
+            .then_some(register as u32)
+        },
+    ))
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -345,6 +868,57 @@ impl fmt::Display for VerifyError {
 }
 impl Error for VerifyError {}
 
+/// Failure at either fail-closed stage of loading encoded G1 bytecode.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LoadError {
+    Decode(crate::bytecode::DecodeError),
+    Verify(VerifyError),
+}
+
+impl fmt::Display for LoadError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Decode(error) => error.fmt(f),
+            Self::Verify(error) => error.fmt(f),
+        }
+    }
+}
+
+impl Error for LoadError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Decode(error) => Some(error),
+            Self::Verify(error) => Some(error),
+        }
+    }
+}
+
+/// Decode, fully verify, and freeze encoded G1 bytecode for execution.
+///
+/// Section slices and the caller's encoded byte buffer are borrowed only for
+/// the duration of this call. The returned image owns exactly the decoded
+/// tables needed at runtime and can outlive or immediately release that raw
+/// input. Use [`VerifiedArtifact::artifact`] only when the legacy mutable
+/// compatibility representation is actually required.
+pub fn load_verified(bytes: &[u8]) -> Result<VerifiedArtifact, LoadError> {
+    let encoded: Arc<[u8]> = Arc::from(bytes);
+    let decoded = Artifact::decode_internal(&encoded).map_err(LoadError::Decode)?;
+    let artifact = decoded.tables.as_artifact();
+    verify_artifact(artifact, true, false).map_err(LoadError::Verify)?;
+    let layout = Arc::new(RuntimeLayout::from_verified(artifact));
+    Ok(VerifiedArtifact {
+        image: Arc::new(ExecutionImage::from_decoded(
+            decoded.tables,
+            decoded.constant_payloads,
+            decoded.abort_messages,
+            decoded.strings,
+            encoded,
+        )),
+        layout,
+        compatibility_artifact: Arc::new(OnceLock::new()),
+    })
+}
+
 pub fn verify(mut artifact: Artifact) -> Result<VerifiedArtifact, VerifyError> {
     verify_artifact(&artifact, true, false)?;
     // The decoded/assembled form is deliberately mutable and often has spare
@@ -362,8 +936,9 @@ pub fn verify(mut artifact: Artifact) -> Result<VerifiedArtifact, VerifyError> {
     artifact.code.shrink_to_fit();
     let layout = Arc::new(RuntimeLayout::from_verified(&artifact));
     Ok(VerifiedArtifact {
-        artifact: Arc::new(artifact),
+        image: Arc::new(ExecutionImage::from_artifact(artifact)),
         layout,
+        compatibility_artifact: Arc::new(OnceLock::new()),
     })
 }
 
@@ -1003,12 +1578,10 @@ fn verify_function(
     }
     let label_states = verify_labels(a, fid, f)?;
     let continuation_live = continuation_live_registers(a, f, &label_states)?;
+    let loan_live = loan_live_registers(a, f, &label_states)?;
     let callable_targets = callable_targets_at_pcs(a, fid, f, &label_states)?;
-    verify_resumption_quantities(a, fid, f, &label_states).map_err(|error| {
-        eprintln!("quantity verification failed for {fid}: {error:?}");
-        error
-    })?;
-    let enum_facts = verify_enum_dominance(a, fid, f, &label_states)?;
+    verify_resumption_quantities(a, fid, f, &label_states)?;
+    let (enum_facts, _, _) = verify_enum_dominance(a, fid, f, &label_states)?;
     let move_path_states = verify_move_paths(a, fid, f, &enum_facts, &label_states)?;
     let result_leaves = reference_leaves(a, f.return_type);
     let single_result_leaf = single_reference_leaf(a, f.return_type);
@@ -1016,16 +1589,31 @@ fn verify_function(
         type_at(a, f.return_type)?.representation(),
         Type::RefShared { .. } | Type::RefUnique { .. }
     );
-    if result_leaves.len() > 1
-        || (single_result_leaf.is_some()
-            && ((!direct_reference_result && !result_leaves.is_empty())
-                || f.params.iter().any(|ty| reference_leaves(a, *ty).len() > 1)))
-    {
-        aggregate_reference_return_origins(a, fid, &mut Vec::new())?;
-    } else if single_result_leaf.is_some() {
-        reference_return_parameter(a, fid, &mut Vec::new())?;
+    let declared_contract = declared_carrier_contract(a, fid)?;
+    let has_contract_bearing_exit = function_may_return(a, fid)
+        && a.code[start..end].iter().any(|instruction| {
+            matches!(
+                instruction,
+                Instruction::Return { src: Some(_) }
+                    | Instruction::TailCall { .. }
+                    | Instruction::TailCallSelf { .. }
+                    | Instruction::TailCallKnownReceiver { .. }
+                    | Instruction::TailCallIndirect { .. }
+            )
+        });
+    if has_contract_bearing_exit {
+        if declared_contract.is_some()
+            || result_leaves.len() > 1
+            || (single_result_leaf.is_some()
+                && ((!direct_reference_result && !result_leaves.is_empty())
+                    || f.params.iter().any(|ty| reference_leaves(a, *ty).len() > 1)))
+        {
+            aggregate_reference_return_origins(a, fid, &mut Vec::new())?;
+        } else if single_result_leaf.is_some() {
+            reference_return_parameter(a, fid, &mut Vec::new())?;
+        }
     }
-    let loan_states = verify_loans(a, fid, f, &label_states)?;
+    let loan_states = verify_loans(a, fid, f, &label_states, &loan_live)?;
     let mut entry = vec![false; f.register_types.len()];
     entry[0] = f.receiver_mode.is_some();
     entry[1..1 + f.params.len()].fill(true);
@@ -1091,7 +1679,7 @@ fn verify_function(
         if let Instruction::Deconstruct { src } = ins {
             shell_ages[*src as usize] = order.iter().position(|register| register == src);
         }
-        let successors = transfer(
+        let mut successors = transfer(
             TransferContext {
                 artifact: a,
                 function_id: fid,
@@ -1109,6 +1697,15 @@ fn verify_function(
             ins,
             &mut state,
         )?;
+        let nonreturning_call = match ins {
+            Instruction::Call { function, .. }
+            | Instruction::CallKnownReceiver { function, .. } => !function_may_return(a, *function),
+            Instruction::CallSelf { .. } => !function_may_return(a, fid),
+            _ => false,
+        };
+        if nonreturning_call {
+            successors.clear();
+        }
         if let Instruction::Move { dst, src } = ins {
             let position = order.iter().position(|register| register == src).ok_or(
                 VerifyError::StateMismatch {
@@ -1307,6 +1904,18 @@ fn quantity_variant_leaf_range(
     Some(start..start + len)
 }
 
+fn array_quantity_element_types(a: &Artifact, ty: TypeId) -> Option<Vec<TypeId>> {
+    let ty = match type_at(a, ty).ok()?.representation() {
+        Type::RefShared { referent } | Type::RefUnique { referent } => *referent,
+        _ => ty,
+    };
+    let Type::Array { element } = type_at(a, ty).ok()?.representation() else {
+        return None;
+    };
+    let leaves = quantity_leaf_types(a, *element);
+    (!leaves.is_empty()).then_some(leaves)
+}
+
 /// Summaries are permutations from result leaves to receiver/parameter leaves.
 /// They deliberately describe transport only: any resumption/cancel/drop in a
 /// candidate body prevents certification, so quantity deltas cannot be hidden.
@@ -1382,14 +1991,14 @@ fn quantity_transport_summaries(a: &Artifact) -> Vec<Option<Vec<usize>>> {
                         None,
                         *field,
                     )?;
-                    let projected = state.0[*src as usize][range.clone()].to_vec();
+                    let projected = state.0[*src as usize].get(range.clone())?.to_vec();
                     if projected.len() != shapes[*dst as usize]
                         || projected.iter().any(Option::is_none)
                     {
                         return None;
                     }
                     state.0[*dst as usize] = projected;
-                    state.0[*src as usize][range].fill(None);
+                    state.0[*src as usize].get_mut(range)?.fill(None);
                 }
                 Instruction::Call {
                     dst: Some(dst),
@@ -1577,14 +2186,14 @@ fn quantity_transport_summaries(a: &Artifact) -> Vec<Option<Vec<usize>>> {
                         None,
                         *field,
                     )?;
-                    let projected = registers[*src as usize][range.clone()].to_vec();
+                    let projected = registers[*src as usize].get(range.clone())?.to_vec();
                     if projected.len() != shapes[*dst as usize]
                         || projected.iter().any(Option::is_none)
                     {
                         return None;
                     }
                     registers[*dst as usize] = projected;
-                    registers[*src as usize][range].fill(None);
+                    registers[*src as usize].get_mut(range)?.fill(None);
                 }
                 Instruction::Call {
                     dst: Some(dst),
@@ -1735,7 +2344,6 @@ fn quantity_transport_summaries(a: &Artifact) -> Vec<Option<Vec<usize>>> {
                     .flatten()
             })
             .collect::<Vec<_>>();
-        eprintln!("relaxed summary iteration: {:?}", next.get(10));
         if next == summaries {
             return next;
         }
@@ -1853,11 +2461,23 @@ fn analyze_borrowed_receiver_resume_deltas(
                     origins[*src as usize].fill(None);
                 }
             }
-            Instruction::Resume { resumption, .. } | Instruction::TailResume { resumption, .. } => {
+            Instruction::Resume {
+                resumption,
+                receiver_mode,
+                ..
+            }
+            | Instruction::TailResume {
+                resumption,
+                receiver_mode,
+                ..
+            } => {
                 match origins[*resumption as usize].as_slice() {
                     [Some(origin)] => deltas[*origin] = deltas[*origin].checked_add(1)?,
                     slots if slots.iter().all(Option::is_none) => {}
                     _ => return None,
+                }
+                if *receiver_mode == 2 {
+                    origins[*resumption as usize].fill(None);
                 }
             }
             Instruction::Construct { dst, fields, .. } => {
@@ -1943,9 +2563,15 @@ fn analyze_borrowed_receiver_resume_deltas(
                 continue;
             }
             Instruction::Const { dst, .. }
+            | Instruction::EnumTag { dst, .. }
+            | Instruction::DerefCopy { dst, .. }
             | Instruction::Primitive { dst, .. }
             | Instruction::Cancel { dst, .. } => origins[*dst as usize].fill(None),
-            Instruction::Jump { .. } | Instruction::Switch { .. } | Instruction::Nop => {}
+            Instruction::Jump { .. }
+            | Instruction::Switch { .. }
+            | Instruction::Nop
+            | Instruction::Unreachable
+            | Instruction::Abort { .. } => {}
             _ => {
                 if count != 0 {
                     return None;
@@ -2055,7 +2681,6 @@ fn borrowed_receiver_resume_delta_summaries(a: &Artifact) -> Vec<Option<Vec<u64>
                 analyze_borrowed_receiver_resume_deltas(a, function as u32, &summaries, true)
             })
             .collect::<Vec<_>>();
-        eprintln!("exact summary iteration: {:?}", next.get(10));
         if next == summaries {
             summaries = next;
             break;
@@ -2123,6 +2748,43 @@ struct TerminalEffectPayloadSummary {
     operation: u32,
     payloads: Vec<usize>,
     dropped: Vec<usize>,
+    /// Resume-count deltas accumulated before the terminal effect, indexed by
+    /// the function's flattened receiver/parameter quantity origins.
+    resumes: Vec<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ArrayQuantityAction {
+    Set {
+        root: u32,
+        index: u64,
+        value: Vec<usize>,
+    },
+    Push {
+        root: u32,
+        value: Vec<usize>,
+    },
+    Get {
+        root: u32,
+        index: u64,
+        produced: Vec<usize>,
+    },
+    Pop {
+        root: u32,
+        produced: Vec<usize>,
+    },
+    Resume(usize),
+    Terminal(usize),
+    Finish(u32),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ArrayQuantityCallSummary {
+    actions: Vec<ArrayQuantityAction>,
+    outputs: Vec<usize>,
+    input_count: usize,
+    token_count: usize,
+    token_types: Vec<TypeId>,
 }
 
 type InstantiatedQuantityOutcome = (
@@ -2164,11 +2826,11 @@ fn terminal_effect_payload_summaries(a: &Artifact) -> Vec<Option<TerminalEffectP
         }
         let code = function_code(a, function).ok()?;
         let mut states = vec![None; code.len()];
-        states[0] = Some(entry);
+        states[0] = Some((entry, vec![0u64; input_count]));
         let mut work = VecDeque::from([0usize]);
         let mut effect = None;
         while let Some(pc) = work.pop_front() {
-            let mut origins = states[pc].clone()?;
+            let (mut origins, mut resume_counts) = states[pc].clone()?;
             let instruction = &code[pc];
             match instruction {
                 Instruction::Move { dst, src } => {
@@ -2283,6 +2945,10 @@ fn terminal_effect_payload_summaries(a: &Artifact) -> Vec<Option<TerminalEffectP
                         .iter()
                         .map(|index| body_inputs.get(*index).copied().flatten())
                         .collect::<Option<Vec<_>>>()?;
+                    for (input, delta) in body_inputs.iter().zip(&body_effect.resumes) {
+                        let input = input.as_ref().copied()?;
+                        resume_counts[input] = resume_counts[input].checked_add(*delta)?;
+                    }
                     let payload_origins = payloads
                         .iter()
                         .copied()
@@ -2301,6 +2967,7 @@ fn terminal_effect_payload_summaries(a: &Artifact) -> Vec<Option<TerminalEffectP
                         operation: body_effect.operation,
                         payloads,
                         dropped,
+                        resumes: resume_counts.clone(),
                     };
                     if effect.as_ref().is_some_and(|known| known != &summary) {
                         return None;
@@ -2336,12 +3003,27 @@ fn terminal_effect_payload_summaries(a: &Artifact) -> Vec<Option<TerminalEffectP
                         operation: *operation,
                         payloads,
                         dropped,
+                        resumes: resume_counts.clone(),
                     };
                     if effect.as_ref().is_some_and(|known| known != &summary) {
                         return None;
                     }
                     effect = Some(summary);
                     continue;
+                }
+                Instruction::Resume {
+                    resumption,
+                    receiver_mode,
+                    ..
+                } => {
+                    let [origin] = origins[*resumption as usize].as_slice() else {
+                        return None;
+                    };
+                    let origin = origin.as_ref().copied()?;
+                    resume_counts[origin] = resume_counts[origin].checked_add(1)?;
+                    if *receiver_mode == 2 {
+                        origins[*resumption as usize][0] = None;
+                    }
                 }
                 Instruction::Jump { .. } | Instruction::Switch { .. } | Instruction::Nop => {}
                 _ if instruction_register_uses(instruction)
@@ -2369,10 +3051,12 @@ fn terminal_effect_payload_summaries(a: &Artifact) -> Vec<Option<TerminalEffectP
             };
             for successor in successors {
                 match states.get_mut(successor)? {
-                    Some(existing) if existing != &origins => return None,
+                    Some(existing) if existing != &(origins.clone(), resume_counts.clone()) => {
+                        return None;
+                    }
                     Some(_) => {}
                     slot @ None => {
-                        *slot = Some(origins.clone());
+                        *slot = Some((origins.clone(), resume_counts.clone()));
                         work.push_back(successor);
                     }
                 }
@@ -3131,6 +3815,10 @@ fn owned_receiver_quantity_summaries(a: &Artifact) -> Vec<Option<OwnedReceiverQu
                         .chain(args.iter().copied())
                         .flat_map(|operand| state.origins[operand as usize].iter().copied())
                         .collect::<Vec<_>>();
+                    for (input, delta) in body_inputs.iter().zip(&effect.resumes) {
+                        let origin = input.as_ref().copied()?;
+                        state.resumes[origin] = state.resumes[origin].checked_add(*delta)?;
+                    }
                     let clause_inputs = selected_receiver_inputs
                         .iter()
                         .copied()
@@ -3640,6 +4328,210 @@ fn canonical_quantity_transport_summary<'a>(
         .then_some(first)
 }
 
+/// Infer a compact, body-derived replay program for quantity-bearing dynamic
+/// array mutations. The first slice deliberately accepts only straight-line
+/// bodies: calls, control-flow joins, opaque indices, and locally-created array
+/// roots fail closed instead of trusting producer metadata.
+fn array_quantity_call_summary(a: &Artifact, fid: u32) -> Option<ArrayQuantityCallSummary> {
+    let function = a.functions.get(fid as usize)?;
+    let mut leaf_types = function
+        .register_types
+        .iter()
+        .map(|ty| quantity_leaf_types(a, *ty))
+        .collect::<Vec<_>>();
+    if matches!(function.receiver_mode, Some(0 | 1))
+        && let Type::RefShared { referent } | Type::RefUnique { referent } =
+            a.types[function.register_types[0] as usize].representation()
+    {
+        leaf_types[0] = quantity_leaf_types(a, *referent);
+    }
+    let array_types = function
+        .register_types
+        .iter()
+        .map(|ty| array_quantity_element_types(a, *ty))
+        .collect::<Vec<_>>();
+    if !array_types[..=function.params.len()]
+        .iter()
+        .any(Option::is_some)
+    {
+        return None;
+    }
+    let input_count = leaf_types[..=function.params.len()]
+        .iter()
+        .map(Vec::len)
+        .sum();
+    let mut tokens = leaf_types
+        .iter()
+        .map(|shape| vec![None; shape.len()])
+        .collect::<Vec<_>>();
+    let mut next_token = 0usize;
+    let mut token_types = Vec::new();
+    for (register_index, register) in tokens
+        .iter_mut()
+        .enumerate()
+        .take(function.params.len() + 1)
+    {
+        for (leaf_index, slot) in register.iter_mut().enumerate() {
+            *slot = Some(next_token);
+            token_types.push(leaf_types[register_index][leaf_index]);
+            next_token += 1;
+        }
+    }
+    let mut roots = vec![None; function.register_types.len()];
+    for (register, root) in roots.iter_mut().enumerate().take(function.params.len() + 1) {
+        if array_types[register].is_some() {
+            *root = Some(register as u32);
+        }
+    }
+    let mut constants = vec![None; function.register_types.len()];
+    let mut actions = Vec::new();
+    for instruction in function_code(a, function).ok()? {
+        match instruction {
+            Instruction::Const { dst, constant } => {
+                constants[*dst as usize] = match a.constants.get(*constant as usize) {
+                    Some(Constant::U64(value) | Constant::Usize(value)) => Some(*value),
+                    _ => None,
+                };
+            }
+            Instruction::Move { dst, src } if array_types[*src as usize].is_some() => {
+                roots[*dst as usize] = roots[*src as usize].take();
+            }
+            Instruction::BorrowShared { dst, src } | Instruction::BorrowUnique { dst, src }
+                if array_types[*dst as usize].is_some() =>
+            {
+                roots[*dst as usize] = roots[*src as usize];
+            }
+            Instruction::EndBorrow { reference } if array_types[*reference as usize].is_some() => {
+                roots[*reference as usize] = None;
+            }
+            Instruction::Move { dst, src } | Instruction::Copy { dst, src }
+                if !leaf_types[*src as usize].is_empty() =>
+            {
+                if tokens[*dst as usize].len() != tokens[*src as usize].len() {
+                    return None;
+                }
+                tokens[*dst as usize] = tokens[*src as usize].clone();
+                if matches!(instruction, Instruction::Move { .. }) {
+                    tokens[*src as usize].fill(None);
+                }
+            }
+            Instruction::Primitive { op, args, .. }
+                if matches!(op, Primitive::ArraySetMove | Primitive::ArrayPushMove) =>
+            {
+                let reference = *args.first()?;
+                let root = roots[reference as usize]?;
+                let (index, item) = if matches!(op, Primitive::ArraySetMove) {
+                    let index_register = *args.get(1)?;
+                    (Some(constants[index_register as usize]?), *args.get(2)?)
+                } else {
+                    (None, *args.get(1)?)
+                };
+                let value = tokens[item as usize]
+                    .iter()
+                    .copied()
+                    .collect::<Option<Vec<_>>>()?;
+                tokens[item as usize].fill(None);
+                actions.push(if let Some(index) = index {
+                    ArrayQuantityAction::Set { root, index, value }
+                } else {
+                    ArrayQuantityAction::Push { root, value }
+                });
+            }
+            Instruction::Primitive { dst, op, args }
+                if matches!(op, Primitive::ArrayGetMove | Primitive::ArrayPopMove)
+                    && !leaf_types[*dst as usize].is_empty() =>
+            {
+                let reference = *args.first()?;
+                let root = roots[reference as usize]?;
+                let produced = leaf_types[*dst as usize]
+                    .iter()
+                    .map(|ty| {
+                        let token = next_token;
+                        next_token += 1;
+                        token_types.push(*ty);
+                        token
+                    })
+                    .collect::<Vec<_>>();
+                tokens[*dst as usize] = produced.iter().copied().map(Some).collect();
+                actions.push(if matches!(op, Primitive::ArrayGetMove) {
+                    let index_register = *args.get(1)?;
+                    ArrayQuantityAction::Get {
+                        root,
+                        index: constants[index_register as usize]?,
+                        produced,
+                    }
+                } else {
+                    ArrayQuantityAction::Pop { root, produced }
+                });
+            }
+            Instruction::Primitive {
+                op: Primitive::ArrayFinishDrained,
+                args,
+                ..
+            } => actions.push(ArrayQuantityAction::Finish(roots[*args.first()? as usize]?)),
+            Instruction::Resume { resumption, .. } | Instruction::TailResume { resumption, .. } => {
+                let [Some(token)] = tokens[*resumption as usize].as_slice() else {
+                    return None;
+                };
+                actions.push(ArrayQuantityAction::Resume(*token));
+                if matches!(instruction, Instruction::TailResume { .. }) {
+                    return None;
+                }
+            }
+            Instruction::Cancel { resumption, .. } => {
+                let [Some(token)] = tokens[*resumption as usize].as_slice() else {
+                    return None;
+                };
+                actions.push(ArrayQuantityAction::Terminal(*token));
+                tokens[*resumption as usize].fill(None);
+            }
+            Instruction::Drop { register } if !leaf_types[*register as usize].is_empty() => {
+                for token in tokens[*register as usize].iter().copied().flatten() {
+                    actions.push(ArrayQuantityAction::Terminal(token));
+                }
+                tokens[*register as usize].fill(None);
+            }
+            Instruction::Return { src } => {
+                let outputs = src
+                    .map(|src| {
+                        tokens[src as usize]
+                            .iter()
+                            .copied()
+                            .collect::<Option<Vec<_>>>()
+                    })
+                    .flatten()
+                    .unwrap_or_default();
+                return Some(ArrayQuantityCallSummary {
+                    actions,
+                    outputs,
+                    input_count,
+                    token_count: next_token,
+                    token_types,
+                });
+            }
+            Instruction::Nop
+            | Instruction::Deconstruct { .. }
+            | Instruction::Drop { .. }
+            | Instruction::Primitive { .. } => {}
+            _ => return None,
+        }
+    }
+    None
+}
+
+fn canonical_array_quantity_call_summary(
+    a: &Artifact,
+    targets: &CallableTargets,
+) -> Option<ArrayQuantityCallSummary> {
+    let mut alternatives = targets
+        .iter()
+        .map(|target| array_quantity_call_summary(a, *target));
+    let first = alternatives.next()??;
+    alternatives
+        .all(|alternative| alternative.as_ref() == Some(&first))
+        .then_some(first)
+}
+
 fn verify_resumption_quantities(
     a: &Artifact,
     fid: u32,
@@ -3687,6 +4579,7 @@ fn verify_resumption_quantities_for_variants(
     let owned_summaries = owned_receiver_quantity_summaries(a);
     let terminal_effect_summaries = terminal_effect_payload_summaries(a);
     let finite_callable_targets = callable_targets_at_pcs(a, fid, f, label_states)?;
+    let constants = constant_u64_registers_at_pcs(a, fid, f, label_states)?;
     let finite_handler_representatives = |handler_type: TypeId| -> Option<Vec<u32>> {
         finite_handler_clause_targets(a, handler_type)?
             .into_iter()
@@ -3730,12 +4623,23 @@ fn verify_resumption_quantities_for_variants(
         // of one quantity owner, not independently disposable resumptions.
         shared_handler_environment: Vec<bool>,
         enum_variants: Vec<Option<u32>>,
+        // Quantity-bearing arrays have a dynamic number of leaves. Exact
+        // locally-built slots are tracked separately from the fixed register
+        // shapes; `None` means an opaque array provenance and fails closed on
+        // quantity-sensitive access.
+        array_slots: Vec<Option<BTreeMap<u64, Vec<Option<usize>>>>>,
+        array_roots: Vec<Option<u32>>,
     }
 
     let mut leaf_types = f
         .register_types
         .iter()
         .map(|&ty| quantity_leaf_types(a, ty))
+        .collect::<Vec<_>>();
+    let array_element_types = f
+        .register_types
+        .iter()
+        .map(|&ty| array_quantity_element_types(a, ty))
         .collect::<Vec<_>>();
     if matches!(f.receiver_mode, Some(0 | 1)) {
         let referent = match a.types[f.register_types[0] as usize].representation() {
@@ -3746,7 +4650,21 @@ fn verify_resumption_quantities_for_variants(
             leaf_types[0] = quantity_leaf_types(a, referent);
         }
     }
-    if !leaf_types.iter().any(|leaves| !leaves.is_empty()) {
+    if !leaf_types.iter().any(|leaves| !leaves.is_empty())
+        && !array_element_types.iter().any(Option::is_some)
+    {
+        return Ok(());
+    }
+    // Quantity-array parameters are intentionally opaque when this body is
+    // checked in isolation. A successful body-derived replay summary is the
+    // proof consumed at every finite producer call site; inspecting a fake
+    // empty entry array here would reject valid push/pop helpers and, worse,
+    // could certify behavior for the wrong incoming slots.
+    if array_element_types[..=f.params.len()]
+        .iter()
+        .any(Option::is_some)
+        && array_quantity_call_summary(a, fid).is_some()
+    {
         return Ok(());
     }
     let mut entry = QuantityState {
@@ -3759,6 +4677,8 @@ fn verify_resumption_quantities_for_variants(
         handler_targets: vec![None; leaf_types.len()],
         shared_handler_environment: vec![false; leaf_types.len()],
         enum_variants: vec![None; leaf_types.len()],
+        array_slots: vec![None; leaf_types.len()],
+        array_roots: vec![None; leaf_types.len()],
     };
     let mut group_base = 0usize;
     for (register, &entry_variant) in entry_variants.iter().enumerate() {
@@ -3821,6 +4741,199 @@ fn verify_resumption_quantities_for_variants(
                 }
                 Ok(())
             };
+        let replay_array_summary = |state: &mut QuantityState,
+                                    summary: &ArrayQuantityCallSummary,
+                                    input_registers: &[Option<u32>],
+                                    dst: Option<u32>,
+                                    tail: bool|
+         -> Result<(), VerifyError> {
+            let input_groups = input_registers
+                .iter()
+                .flatten()
+                .flat_map(|register| state.registers[*register as usize].iter().copied())
+                .collect::<Vec<_>>();
+            if input_groups.len() != summary.input_count || input_groups.iter().any(Option::is_none)
+            {
+                return Err(VerifyError::InvalidFunction(fid));
+            }
+            let mut token_groups = vec![None; summary.token_count];
+            token_groups[..summary.input_count].copy_from_slice(&input_groups);
+            let resolve_root = |state: &QuantityState, symbolic: u32| {
+                let register = input_registers.get(symbolic as usize).copied().flatten()?;
+                let root = state.array_roots[register as usize].or_else(|| {
+                    state.array_slots[register as usize]
+                        .as_ref()
+                        .map(|_| register)
+                })?;
+                (root != register || state.array_slots[root as usize].is_some()).then_some(root)
+            };
+            for action in &summary.actions {
+                match action {
+                    ArrayQuantityAction::Set { root, value, .. }
+                    | ArrayQuantityAction::Push { root, value } => {
+                        let root =
+                            resolve_root(state, *root).ok_or(VerifyError::InvalidFunction(fid))?;
+                        let carried = value
+                            .iter()
+                            .map(|token| token_groups.get(*token).copied().flatten())
+                            .collect::<Option<Vec<_>>>()
+                            .ok_or(VerifyError::InvalidFunction(fid))?
+                            .into_iter()
+                            .map(Some)
+                            .collect();
+                        let slots = state.array_slots[root as usize]
+                            .as_mut()
+                            .ok_or(VerifyError::InvalidFunction(fid))?;
+                        let index = match action {
+                            ArrayQuantityAction::Set { index, .. } => *index,
+                            ArrayQuantityAction::Push { .. } => slots
+                                .keys()
+                                .next_back()
+                                .map_or(Some(0), |index| index.checked_add(1))
+                                .ok_or(VerifyError::InvalidFunction(fid))?,
+                            _ => unreachable!(),
+                        };
+                        if slots.insert(index, carried).is_some() {
+                            return Err(VerifyError::InvalidFunction(fid));
+                        }
+                        for token in value {
+                            token_groups[*token] = None;
+                        }
+                    }
+                    ArrayQuantityAction::Get { root, produced, .. }
+                    | ArrayQuantityAction::Pop { root, produced } => {
+                        let root =
+                            resolve_root(state, *root).ok_or(VerifyError::InvalidFunction(fid))?;
+                        let slots = state.array_slots[root as usize]
+                            .as_mut()
+                            .ok_or(VerifyError::InvalidFunction(fid))?;
+                        let index = match action {
+                            ArrayQuantityAction::Get { index, .. } => *index,
+                            ArrayQuantityAction::Pop { .. } => *slots
+                                .keys()
+                                .next_back()
+                                .ok_or(VerifyError::InvalidFunction(fid))?,
+                            _ => unreachable!(),
+                        };
+                        let carried = slots
+                            .remove(&index)
+                            .ok_or(VerifyError::InvalidFunction(fid))?;
+                        if carried.len() != produced.len() {
+                            return Err(VerifyError::InvalidFunction(fid));
+                        }
+                        for (token, group) in produced.iter().zip(carried) {
+                            token_groups[*token] = group;
+                        }
+                    }
+                    ArrayQuantityAction::Resume(token) => {
+                        let group = token_groups
+                            .get(*token)
+                            .copied()
+                            .flatten()
+                            .ok_or(VerifyError::InvalidFunction(fid))?;
+                        let ty = *summary
+                            .token_types
+                            .get(*token)
+                            .ok_or(VerifyError::InvalidFunction(fid))?;
+                        let Type::Resumption { upper_uses, .. } =
+                            a.types[ty as usize].representation()
+                        else {
+                            return Err(VerifyError::InvalidFunction(fid));
+                        };
+                        let count = state.counts[group]
+                            .as_mut()
+                            .ok_or(VerifyError::InvalidFunction(fid))?;
+                        count.min = count.min.saturating_add(1);
+                        count.max = count.max.saturating_add(1);
+                        if upper_uses.is_some_and(|upper| count.max > u64::from(upper)) {
+                            return Err(VerifyError::InvalidFunction(fid));
+                        }
+                    }
+                    ArrayQuantityAction::Terminal(token) => {
+                        let group = token_groups
+                            .get(*token)
+                            .copied()
+                            .flatten()
+                            .ok_or(VerifyError::InvalidFunction(fid))?;
+                        let ty = *summary
+                            .token_types
+                            .get(*token)
+                            .ok_or(VerifyError::InvalidFunction(fid))?;
+                        let Type::Resumption { lower_uses, .. } =
+                            a.types[ty as usize].representation()
+                        else {
+                            return Err(VerifyError::InvalidFunction(fid));
+                        };
+                        if state.counts[group]
+                            .is_none_or(|count| count.min < u64::from(*lower_uses))
+                        {
+                            return Err(VerifyError::InvalidFunction(fid));
+                        }
+                        token_groups[*token] = None;
+                        if token_groups.contains(&Some(group))
+                            || state.array_slots.iter().flatten().any(|slots| {
+                                slots.values().flatten().any(|slot| *slot == Some(group))
+                            })
+                        {
+                            return Err(VerifyError::InvalidFunction(fid));
+                        }
+                        state.counts[group] = None;
+                    }
+                    ArrayQuantityAction::Finish(root) => {
+                        let root =
+                            resolve_root(state, *root).ok_or(VerifyError::InvalidFunction(fid))?;
+                        if state.array_slots[root as usize]
+                            .as_ref()
+                            .is_none_or(|slots| !slots.is_empty())
+                        {
+                            return Err(VerifyError::InvalidFunction(fid));
+                        }
+                        state.array_slots[root as usize] = None;
+                        state.array_roots[root as usize] = None;
+                    }
+                }
+            }
+            let output = summary
+                .outputs
+                .iter()
+                .map(|token| token_groups.get(*token).copied().flatten())
+                .collect::<Option<Vec<_>>>()
+                .ok_or(VerifyError::InvalidFunction(fid))?;
+            if !tail
+                && dst.map_or(!output.is_empty(), |dst| {
+                    output.len() != state.registers[dst as usize].len()
+                        || state.registers[dst as usize].iter().any(Option::is_some)
+                })
+            {
+                return Err(VerifyError::InvalidFunction(fid));
+            }
+            for register in input_registers.iter().flatten() {
+                state.registers[*register as usize].fill(None);
+                if state.array_roots[*register as usize].is_some_and(|root| root != *register) {
+                    state.array_roots[*register as usize] = None;
+                }
+            }
+            if let Some(dst) = dst.filter(|_| !tail) {
+                state.registers[dst as usize] = output.iter().copied().map(Some).collect();
+            }
+            for group in input_groups.into_iter().flatten() {
+                let in_register = state
+                    .registers
+                    .iter()
+                    .flatten()
+                    .any(|slot| *slot == Some(group));
+                let in_array = state
+                    .array_slots
+                    .iter()
+                    .flatten()
+                    .any(|slots| slots.values().flatten().any(|slot| *slot == Some(group)));
+                let transported = in_register || in_array || tail && output.contains(&group);
+                if !transported && state.counts[group].is_some() {
+                    return Err(VerifyError::InvalidFunction(fid));
+                }
+            }
+            Ok(())
+        };
         match instruction {
             Instruction::Resume {
                 resumption,
@@ -3940,6 +5053,143 @@ fn verify_resumption_quantities_for_variants(
                     }
                 }
             }
+            Instruction::BorrowShared { dst, src } | Instruction::BorrowUnique { dst, src }
+                if array_element_types[*dst as usize].is_some() =>
+            {
+                let root = state.array_roots[*src as usize]
+                    .or_else(|| state.array_slots[*src as usize].as_ref().map(|_| *src))
+                    .ok_or(VerifyError::InvalidFunction(fid))?;
+                state.array_roots[*dst as usize] = Some(root);
+            }
+            Instruction::EndBorrow { reference }
+                if array_element_types[*reference as usize].is_some() =>
+            {
+                state.array_roots[*reference as usize] = None;
+            }
+            Instruction::Drop { register } if array_element_types[*register as usize].is_some() => {
+                if state.array_slots[*register as usize]
+                    .as_ref()
+                    .is_some_and(|slots| !slots.is_empty())
+                {
+                    return Err(VerifyError::InvalidFunction(fid));
+                }
+                state.array_slots[*register as usize] = None;
+                state.array_roots[*register as usize] = None;
+            }
+            Instruction::Move { src, dst }
+                if array_element_types[*src as usize].is_some()
+                    || array_element_types[*dst as usize].is_some() =>
+            {
+                if state.array_slots[*dst as usize].is_some()
+                    || state.array_roots[*dst as usize].is_some()
+                {
+                    return Err(VerifyError::InvalidFunction(fid));
+                }
+                state.array_slots[*dst as usize] = state.array_slots[*src as usize].take();
+                state.array_roots[*dst as usize] = state.array_roots[*src as usize].take();
+                for root in &mut state.array_roots {
+                    if *root == Some(*src) {
+                        *root = Some(*dst);
+                    }
+                }
+            }
+            Instruction::Primitive {
+                dst,
+                op: Primitive::ArrayEmpty,
+                ..
+            } if array_element_types[*dst as usize].is_some() => {
+                state.array_slots[*dst as usize] = Some(BTreeMap::new());
+                state.array_roots[*dst as usize] = Some(*dst);
+            }
+            Instruction::Primitive { op, args, .. }
+                if matches!(op, Primitive::ArraySetMove | Primitive::ArrayPushMove)
+                    && args
+                        .get(2)
+                        .or_else(|| args.get(1))
+                        .is_some_and(|item| !leaf_types[*item as usize].is_empty()) =>
+            {
+                let reference = *args.first().ok_or(VerifyError::InvalidFunction(fid))?;
+                let root = state.array_roots[reference as usize]
+                    .ok_or(VerifyError::InvalidFunction(fid))?;
+                let item = *args
+                    .get(if matches!(op, Primitive::ArraySetMove) {
+                        2
+                    } else {
+                        1
+                    })
+                    .ok_or(VerifyError::InvalidFunction(fid))?;
+                let carried = state.registers[item as usize].clone();
+                if carried.iter().any(Option::is_none) {
+                    return Err(VerifyError::InvalidFunction(fid));
+                }
+                let slots = state.array_slots[root as usize]
+                    .as_mut()
+                    .ok_or(VerifyError::InvalidFunction(fid))?;
+                let index = if matches!(op, Primitive::ArraySetMove) {
+                    let index_register = *args.get(1).ok_or(VerifyError::InvalidFunction(fid))?;
+                    constants[pc as usize][index_register as usize]
+                        .ok_or(VerifyError::InvalidFunction(fid))?
+                } else {
+                    slots
+                        .keys()
+                        .next_back()
+                        .map_or(Some(0), |index| index.checked_add(1))
+                        .ok_or(VerifyError::InvalidFunction(fid))?
+                };
+                if slots.insert(index, carried).is_some() {
+                    return Err(VerifyError::InvalidFunction(fid));
+                }
+                state.registers[item as usize].fill(None);
+            }
+            Instruction::Primitive { dst, op, args }
+                if matches!(op, Primitive::ArrayGetMove | Primitive::ArrayPopMove)
+                    && !leaf_types[*dst as usize].is_empty() =>
+            {
+                let reference = *args.first().ok_or(VerifyError::InvalidFunction(fid))?;
+                let root = state.array_roots[reference as usize]
+                    .ok_or(VerifyError::InvalidFunction(fid))?;
+                let slots = state.array_slots[root as usize]
+                    .as_mut()
+                    .ok_or(VerifyError::InvalidFunction(fid))?;
+                let index = if matches!(op, Primitive::ArrayGetMove) {
+                    let index_register = *args.get(1).ok_or(VerifyError::InvalidFunction(fid))?;
+                    constants[pc as usize][index_register as usize]
+                        .ok_or(VerifyError::InvalidFunction(fid))?
+                } else {
+                    *slots
+                        .keys()
+                        .next_back()
+                        .ok_or(VerifyError::InvalidFunction(fid))?
+                };
+                let carried = slots
+                    .remove(&index)
+                    .ok_or(VerifyError::InvalidFunction(fid))?;
+                if carried.len() != state.registers[*dst as usize].len()
+                    || state.registers[*dst as usize].iter().any(Option::is_some)
+                {
+                    return Err(VerifyError::InvalidFunction(fid));
+                }
+                state.registers[*dst as usize] = carried;
+            }
+            Instruction::Primitive {
+                op: Primitive::ArrayFinishDrained,
+                args,
+                ..
+            } if args
+                .first()
+                .is_some_and(|array| array_element_types[*array as usize].is_some()) =>
+            {
+                let array = *args.first().ok_or(VerifyError::InvalidFunction(fid))?;
+                let root = state.array_roots[array as usize].unwrap_or(array);
+                let slots = state.array_slots[root as usize]
+                    .as_ref()
+                    .ok_or(VerifyError::InvalidFunction(fid))?;
+                if !slots.is_empty() {
+                    return Err(VerifyError::InvalidFunction(fid));
+                }
+                state.array_slots[root as usize] = None;
+                state.array_roots[root as usize] = None;
+            }
             Instruction::Move { src, dst }
                 if !leaf_types[*src as usize].is_empty()
                     || !leaf_types[*dst as usize].is_empty() =>
@@ -4043,7 +5293,10 @@ fn verify_resumption_quantities_for_variants(
                 ) else {
                     return Err(VerifyError::InvalidFunction(fid));
                 };
-                let projected = state.registers[*src as usize][range.clone()].to_vec();
+                let projected = state.registers[*src as usize]
+                    .get(range.clone())
+                    .ok_or(VerifyError::InvalidFunction(fid))?
+                    .to_vec();
                 if projected.len() != state.registers[*dst as usize].len()
                     || projected.iter().any(Option::is_none)
                     || state.registers[*dst as usize].iter().any(Option::is_some)
@@ -4054,7 +5307,10 @@ fn verify_resumption_quantities_for_variants(
                 state.callable_targets[*dst as usize] =
                     state.callable_targets[*src as usize].clone();
                 if matches!(instruction, Instruction::ProjectMove { .. }) {
-                    state.registers[*src as usize][range].fill(None);
+                    state.registers[*src as usize]
+                        .get_mut(range)
+                        .ok_or(VerifyError::InvalidFunction(fid))?
+                        .fill(None);
                     state.callable_targets[*src as usize].clear();
                 }
             }
@@ -4181,10 +5437,8 @@ fn verify_resumption_quantities_for_variants(
                 if dst.is_some_and(|dst| !leaf_types[dst as usize].is_empty()) {
                     return Err(VerifyError::InvalidFunction(fid));
                 }
-                let deltas = borrowed_receiver_resume_deltas(a, fid).ok_or_else(|| {
-                    eprintln!("missing borrowed recursive delta summary for {fid}");
-                    VerifyError::InvalidFunction(fid)
-                })?;
+                let deltas = borrowed_receiver_resume_deltas(a, fid)
+                    .ok_or(VerifyError::InvalidFunction(fid))?;
                 if deltas.len() != state.registers[0].len() {
                     return Err(VerifyError::InvalidFunction(fid));
                 }
@@ -4240,6 +5494,163 @@ fn verify_resumption_quantities_for_variants(
                     }
                 }
                 transfer_pristine(&mut state, args)?;
+            }
+            Instruction::Call {
+                dst,
+                function,
+                args,
+            } if args
+                .iter()
+                .any(|register| array_element_types[*register as usize].is_some()) =>
+            {
+                let summary = array_quantity_call_summary(a, *function)
+                    .ok_or(VerifyError::InvalidFunction(fid))?;
+                let inputs = std::iter::once(None)
+                    .chain(args.iter().copied().map(Some))
+                    .collect::<Vec<_>>();
+                replay_array_summary(&mut state, &summary, &inputs, *dst, false)?;
+            }
+            Instruction::CallKnownReceiver {
+                dst,
+                function,
+                receiver,
+                args,
+            } if array_element_types[*receiver as usize].is_some()
+                || args
+                    .iter()
+                    .any(|register| array_element_types[*register as usize].is_some()) =>
+            {
+                let summary = array_quantity_call_summary(a, *function)
+                    .ok_or(VerifyError::InvalidFunction(fid))?;
+                let inputs = std::iter::once(Some(*receiver))
+                    .chain(args.iter().copied().map(Some))
+                    .collect::<Vec<_>>();
+                replay_array_summary(&mut state, &summary, &inputs, *dst, false)?;
+            }
+            Instruction::Call {
+                dst,
+                function,
+                args,
+            }
+            | Instruction::CallKnownReceiver {
+                dst,
+                function,
+                args,
+                ..
+            } if (dst.is_some_and(|dst| !leaf_types[dst as usize].is_empty())
+                || args
+                    .iter()
+                    .any(|&register| !leaf_types[register as usize].is_empty()))
+                && match instruction {
+                    Instruction::Call { .. } => true,
+                    Instruction::CallKnownReceiver { receiver, .. } => {
+                        leaf_types[*receiver as usize].is_empty()
+                    }
+                    _ => unreachable!(),
+                }
+                && owned_summaries
+                    .get(*function as usize)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|summary| {
+                        summary.resumes.iter().any(|resumes| *resumes != 0)
+                            || summary.dispositions.iter().any(|disposition| {
+                                *disposition != QuantityTerminalDisposition::Returned
+                            })
+                    }) =>
+            {
+                let summary = owned_summaries
+                    .get(*function as usize)
+                    .and_then(Option::as_ref)
+                    .ok_or(VerifyError::InvalidFunction(fid))?;
+                let inputs = args
+                    .iter()
+                    .flat_map(|arg| state.registers[*arg as usize].iter().copied())
+                    .collect::<Vec<_>>();
+                if inputs.len() != summary.resumes.len() {
+                    return Err(VerifyError::InvalidFunction(fid));
+                }
+                let group_types = inputs
+                    .iter()
+                    .copied()
+                    .flatten()
+                    .map(|group| {
+                        state
+                            .registers
+                            .iter()
+                            .zip(&leaf_types)
+                            .find_map(|(slots, types)| {
+                                slots
+                                    .iter()
+                                    .position(|slot| *slot == Some(group))
+                                    .map(|index| types[index])
+                            })
+                            .map(|ty| (group, ty))
+                            .ok_or(VerifyError::InvalidFunction(fid))
+                    })
+                    .collect::<Result<BTreeMap<_, _>, _>>()?;
+                for (input, delta) in inputs.iter().zip(&summary.resumes) {
+                    let group = input.ok_or(VerifyError::InvalidFunction(fid))?;
+                    let count = state.counts[group]
+                        .as_mut()
+                        .ok_or(VerifyError::InvalidFunction(fid))?;
+                    count.min = count.min.saturating_add(*delta);
+                    count.max = count.max.saturating_add(*delta);
+                    let Type::Resumption { upper_uses, .. } =
+                        a.types[group_types[&group] as usize].representation()
+                    else {
+                        return Err(VerifyError::InvalidFunction(fid));
+                    };
+                    if upper_uses.is_some_and(|upper| count.max > u64::from(upper)) {
+                        return Err(VerifyError::InvalidFunction(fid));
+                    }
+                }
+                let output = summary
+                    .outputs
+                    .iter()
+                    .map(|index| inputs.get(*index).copied().flatten())
+                    .collect::<Option<Vec<_>>>()
+                    .ok_or(VerifyError::InvalidFunction(fid))?;
+                if dst.map_or(!output.is_empty(), |dst| {
+                    output.len() != state.registers[dst as usize].len()
+                }) {
+                    return Err(VerifyError::InvalidFunction(fid));
+                }
+                for arg in args {
+                    state.registers[*arg as usize].fill(None);
+                    state.callable_targets[*arg as usize].clear();
+                }
+                if let Some(dst) = dst {
+                    state.registers[*dst as usize] = output.iter().copied().map(Some).collect();
+                }
+                for ((input, disposition), leaf_ty) in inputs.iter().zip(&summary.dispositions).zip(
+                    inputs
+                        .iter()
+                        .map(|input| input.and_then(|group| group_types.get(&group).copied())),
+                ) {
+                    let group = input.ok_or(VerifyError::InvalidFunction(fid))?;
+                    let leaf_ty = leaf_ty.ok_or(VerifyError::InvalidFunction(fid))?;
+                    let still_live = state
+                        .registers
+                        .iter()
+                        .flatten()
+                        .any(|slot| *slot == Some(group));
+                    if *disposition != QuantityTerminalDisposition::Returned && still_live {
+                        return Err(VerifyError::InvalidFunction(fid));
+                    }
+                    if *disposition != QuantityTerminalDisposition::Returned {
+                        let Type::Resumption { lower_uses, .. } =
+                            a.types[leaf_ty as usize].representation()
+                        else {
+                            return Err(VerifyError::InvalidFunction(fid));
+                        };
+                        if state.counts[group]
+                            .is_none_or(|count| count.min < u64::from(*lower_uses))
+                        {
+                            return Err(VerifyError::InvalidFunction(fid));
+                        }
+                        state.counts[group] = None;
+                    }
+                }
             }
             Instruction::Call { dst, args, .. }
             | Instruction::CallKnownReceiver { dst, args, .. } => {
@@ -4383,6 +5794,39 @@ fn verify_resumption_quantities_for_variants(
                         .chain(args.iter().copied())
                         .flat_map(|operand| state.registers[operand as usize].iter().copied())
                         .collect::<Vec<_>>();
+                    if body_inputs.len() != effect.resumes.len() {
+                        return Err(VerifyError::InvalidFunction(fid));
+                    }
+                    for (group, delta) in body_inputs.iter().zip(&effect.resumes) {
+                        let group = group.ok_or(VerifyError::InvalidFunction(fid))?;
+                        if *delta == 0 {
+                            continue;
+                        }
+                        let leaf_ty = state
+                            .registers
+                            .iter()
+                            .zip(&leaf_types)
+                            .find_map(|(slots, types)| {
+                                slots
+                                    .iter()
+                                    .position(|slot| *slot == Some(group))
+                                    .map(|index| types[index])
+                            })
+                            .ok_or(VerifyError::InvalidFunction(fid))?;
+                        let count = state.counts[group]
+                            .as_mut()
+                            .ok_or(VerifyError::InvalidFunction(fid))?;
+                        count.min = count.min.saturating_add(*delta);
+                        count.max = count.max.saturating_add(*delta);
+                        let Type::Resumption { upper_uses, .. } =
+                            a.types[leaf_ty as usize].representation()
+                        else {
+                            return Err(VerifyError::InvalidFunction(fid));
+                        };
+                        if upper_uses.is_some_and(|upper| count.max > u64::from(upper)) {
+                            return Err(VerifyError::InvalidFunction(fid));
+                        }
+                    }
                     let clause_inputs = effect
                         .payloads
                         .iter()
@@ -4720,7 +6164,11 @@ fn verify_resumption_quantities_for_variants(
             } if !leaf_types[*dst as usize].is_empty()
                 || args
                     .iter()
-                    .any(|&register| !leaf_types[register as usize].is_empty()) =>
+                    .any(|&register| !leaf_types[register as usize].is_empty())
+                || matches!(instruction, Instruction::HostCall { .. })
+                    && args
+                        .iter()
+                        .any(|register| array_element_types[*register as usize].is_some()) =>
             {
                 return Err(VerifyError::InvalidFunction(fid));
             }
@@ -4729,6 +6177,129 @@ fn verify_resumption_quantities_for_variants(
                     || !leaf_types[*body as usize].is_empty() =>
             {
                 return Err(VerifyError::InvalidFunction(fid));
+            }
+            Instruction::TailCall { function, args, .. }
+                if args
+                    .iter()
+                    .any(|register| array_element_types[*register as usize].is_some()) =>
+            {
+                let summary = array_quantity_call_summary(a, *function)
+                    .ok_or(VerifyError::InvalidFunction(fid))?;
+                let inputs = std::iter::once(None)
+                    .chain(args.iter().copied().map(Some))
+                    .collect::<Vec<_>>();
+                replay_array_summary(&mut state, &summary, &inputs, None, true)?;
+            }
+            Instruction::TailCallKnownReceiver {
+                function,
+                receiver,
+                args,
+            } if array_element_types[*receiver as usize].is_some()
+                || args
+                    .iter()
+                    .any(|register| array_element_types[*register as usize].is_some()) =>
+            {
+                let summary = array_quantity_call_summary(a, *function)
+                    .ok_or(VerifyError::InvalidFunction(fid))?;
+                let inputs = std::iter::once(Some(*receiver))
+                    .chain(args.iter().copied().map(Some))
+                    .collect::<Vec<_>>();
+                replay_array_summary(&mut state, &summary, &inputs, None, true)?;
+            }
+            Instruction::TailCall { function, args, .. }
+            | Instruction::TailCallKnownReceiver { function, args, .. }
+                if match instruction {
+                    Instruction::TailCall { .. } => true,
+                    Instruction::TailCallKnownReceiver { receiver, .. } => {
+                        leaf_types[*receiver as usize].is_empty()
+                    }
+                    _ => unreachable!(),
+                } && owned_summaries
+                    .get(*function as usize)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|summary| {
+                        summary.resumes.iter().any(|resumes| *resumes != 0)
+                            || summary.dispositions.iter().any(|disposition| {
+                                *disposition != QuantityTerminalDisposition::Returned
+                            })
+                    }) =>
+            {
+                let summary = owned_summaries[*function as usize]
+                    .as_ref()
+                    .ok_or(VerifyError::InvalidFunction(fid))?;
+                let inputs = args
+                    .iter()
+                    .flat_map(|arg| state.registers[*arg as usize].iter().copied())
+                    .collect::<Vec<_>>();
+                if inputs.len() != summary.resumes.len() {
+                    return Err(VerifyError::InvalidFunction(fid));
+                }
+                let group_types = inputs
+                    .iter()
+                    .copied()
+                    .flatten()
+                    .map(|group| {
+                        state
+                            .registers
+                            .iter()
+                            .zip(&leaf_types)
+                            .find_map(|(slots, types)| {
+                                slots
+                                    .iter()
+                                    .position(|slot| *slot == Some(group))
+                                    .map(|index| types[index])
+                            })
+                            .map(|ty| (group, ty))
+                            .ok_or(VerifyError::InvalidFunction(fid))
+                    })
+                    .collect::<Result<BTreeMap<_, _>, _>>()?;
+                for (input, delta) in inputs.iter().zip(&summary.resumes) {
+                    let group = input.ok_or(VerifyError::InvalidFunction(fid))?;
+                    let count = state.counts[group]
+                        .as_mut()
+                        .ok_or(VerifyError::InvalidFunction(fid))?;
+                    count.min = count.min.saturating_add(*delta);
+                    count.max = count.max.saturating_add(*delta);
+                    let Type::Resumption { upper_uses, .. } =
+                        a.types[group_types[&group] as usize].representation()
+                    else {
+                        return Err(VerifyError::InvalidFunction(fid));
+                    };
+                    if upper_uses.is_some_and(|upper| count.max > u64::from(upper)) {
+                        return Err(VerifyError::InvalidFunction(fid));
+                    }
+                }
+                for arg in args {
+                    state.registers[*arg as usize].fill(None);
+                }
+                for ((input, disposition), leaf_ty) in inputs.iter().zip(&summary.dispositions).zip(
+                    inputs
+                        .iter()
+                        .map(|input| input.and_then(|group| group_types.get(&group).copied())),
+                ) {
+                    let group = input.ok_or(VerifyError::InvalidFunction(fid))?;
+                    if *disposition == QuantityTerminalDisposition::Returned {
+                        continue;
+                    }
+                    if state
+                        .registers
+                        .iter()
+                        .flatten()
+                        .any(|slot| *slot == Some(group))
+                    {
+                        return Err(VerifyError::InvalidFunction(fid));
+                    }
+                    let leaf_ty = leaf_ty.ok_or(VerifyError::InvalidFunction(fid))?;
+                    let Type::Resumption { lower_uses, .. } =
+                        a.types[leaf_ty as usize].representation()
+                    else {
+                        return Err(VerifyError::InvalidFunction(fid));
+                    };
+                    if state.counts[group].is_none_or(|count| count.min < u64::from(*lower_uses)) {
+                        return Err(VerifyError::InvalidFunction(fid));
+                    }
+                    state.counts[group] = None;
+                }
             }
             Instruction::TailCall { args, .. }
             | Instruction::TailCallSelf { args }
@@ -4741,21 +6312,83 @@ fn verify_resumption_quantities_for_variants(
             | Instruction::Primitive { args, .. }
                 if args
                     .iter()
-                    .any(|&register| !leaf_types[register as usize].is_empty()) =>
+                    .any(|&register| !leaf_types[register as usize].is_empty())
+                    || matches!(instruction, Instruction::HostCall { .. })
+                        && args
+                            .iter()
+                            .any(|register| array_element_types[*register as usize].is_some()) =>
             {
                 return Err(VerifyError::InvalidFunction(fid));
             }
-            Instruction::Perform { payloads, .. }
-                if payloads
-                    .iter()
-                    .any(|&register| !leaf_types[register as usize].is_empty()) =>
+            Instruction::Perform {
+                dst,
+                protocol,
+                operation,
+                payloads,
+            } if payloads
+                .iter()
+                .any(|&register| !leaf_types[register as usize].is_empty()) =>
             {
                 // The runtime moves these exact values into the selected
                 // clause (or preserves them unchanged while forwarding).
-                // Requiring a pristine sole owner prevents an alias or prior
-                // use count from being laundered into the clause's fresh
-                // parameter accounting.
-                transfer_pristine(&mut state, payloads)?;
+                // A body-derived terminal summary also carries exact prior
+                // resume deltas, so a non-pristine sole owner can cross the
+                // delimiter without being reset to a fresh quantity. Opaque
+                // and resumptive effects retain the older pristine rule.
+                let summarized_terminal = dst.is_none()
+                    && terminal_effect_summaries
+                        .get(fid as usize)
+                        .and_then(Option::as_ref)
+                        .is_some_and(|summary| {
+                            summary.protocol == *protocol && summary.operation == *operation
+                        });
+                if summarized_terminal {
+                    for &register in payloads {
+                        for group in state.registers[register as usize].iter().copied().flatten() {
+                            let locations = state
+                                .registers
+                                .iter()
+                                .flatten()
+                                .filter(|candidate| **candidate == Some(group))
+                                .count();
+                            if locations != 1 {
+                                return Err(VerifyError::InvalidFunction(fid));
+                            }
+                        }
+                    }
+                    for &register in payloads {
+                        for slot in &mut state.registers[register as usize] {
+                            if let Some(group) = slot.take() {
+                                state.counts[group] = None;
+                            }
+                        }
+                    }
+                } else {
+                    transfer_pristine(&mut state, payloads)?;
+                }
+            }
+            Instruction::CallIndirect {
+                dst,
+                callable,
+                args,
+                ..
+            } if array_element_types[*callable as usize].is_some()
+                || args
+                    .iter()
+                    .any(|register| array_element_types[*register as usize].is_some()) =>
+            {
+                let targets = if state.callable_targets[*callable as usize].is_empty() {
+                    &finite_callable_targets[pc as usize][*callable as usize]
+                } else {
+                    &state.callable_targets[*callable as usize]
+                };
+                let summary = canonical_array_quantity_call_summary(a, targets)
+                    .ok_or(VerifyError::InvalidFunction(fid))?;
+                let inputs = std::iter::once(Some(*callable))
+                    .chain(args.iter().copied().map(Some))
+                    .collect::<Vec<_>>();
+                replay_array_summary(&mut state, &summary, &inputs, *dst, false)?;
+                state.callable_targets[*callable as usize].clear();
             }
             Instruction::CallIndirect {
                 dst,
@@ -4814,6 +6447,117 @@ fn verify_resumption_quantities_for_variants(
                 }
                 let mut operands = vec![*callable];
                 operands.extend(args.iter().copied());
+                if let Some(summary) =
+                    canonical_owned_receiver_quantity_summary(&owned_summaries, targets).filter(
+                        |summary| {
+                            summary.resumes.iter().any(|resumes| *resumes != 0)
+                                || summary.dispositions.iter().any(|disposition| {
+                                    *disposition != QuantityTerminalDisposition::Returned
+                                })
+                        },
+                    )
+                {
+                    let inputs = operands
+                        .iter()
+                        .flat_map(|operand| state.registers[*operand as usize].iter().copied())
+                        .collect::<Vec<_>>();
+                    if inputs.len() != summary.resumes.len() {
+                        return Err(VerifyError::InvalidFunction(fid));
+                    }
+                    let group_types = inputs
+                        .iter()
+                        .copied()
+                        .flatten()
+                        .map(|group| {
+                            state
+                                .registers
+                                .iter()
+                                .zip(&leaf_types)
+                                .find_map(|(slots, types)| {
+                                    slots
+                                        .iter()
+                                        .position(|slot| *slot == Some(group))
+                                        .map(|index| types[index])
+                                })
+                                .map(|ty| (group, ty))
+                                .ok_or(VerifyError::InvalidFunction(fid))
+                        })
+                        .collect::<Result<BTreeMap<_, _>, _>>()?;
+                    for (input, delta) in inputs.iter().zip(&summary.resumes) {
+                        let group = input.ok_or(VerifyError::InvalidFunction(fid))?;
+                        let count = state.counts[group]
+                            .as_mut()
+                            .ok_or(VerifyError::InvalidFunction(fid))?;
+                        count.min = count.min.saturating_add(*delta);
+                        count.max = count.max.saturating_add(*delta);
+                        let Type::Resumption { upper_uses, .. } =
+                            a.types[group_types[&group] as usize].representation()
+                        else {
+                            return Err(VerifyError::InvalidFunction(fid));
+                        };
+                        if upper_uses.is_some_and(|upper| count.max > u64::from(upper)) {
+                            return Err(VerifyError::InvalidFunction(fid));
+                        }
+                    }
+                    let output = summary
+                        .outputs
+                        .iter()
+                        .map(|index| inputs.get(*index).copied().flatten())
+                        .collect::<Option<Vec<_>>>()
+                        .ok_or(VerifyError::InvalidFunction(fid))?;
+                    if dst.map_or(!output.is_empty(), |dst| {
+                        output.len() != state.registers[dst as usize].len()
+                            || state.registers[dst as usize].iter().any(Option::is_some)
+                    }) {
+                        return Err(VerifyError::InvalidFunction(fid));
+                    }
+                    let output_targets = operands
+                        .iter()
+                        .flat_map(|operand| {
+                            state.callable_targets[*operand as usize].iter().copied()
+                        })
+                        .collect::<CallableTargets>();
+                    for operand in &operands {
+                        state.registers[*operand as usize].fill(None);
+                        state.callable_targets[*operand as usize].clear();
+                    }
+                    if let Some(dst) = dst {
+                        state.registers[*dst as usize] = output.iter().copied().map(Some).collect();
+                        state.callable_targets[*dst as usize] = output_targets;
+                    }
+                    for ((input, disposition), leaf_ty) in
+                        inputs.iter().zip(&summary.dispositions).zip(
+                            inputs.iter().map(|input| {
+                                input.and_then(|group| group_types.get(&group).copied())
+                            }),
+                        )
+                    {
+                        let group = input.ok_or(VerifyError::InvalidFunction(fid))?;
+                        let leaf_ty = leaf_ty.ok_or(VerifyError::InvalidFunction(fid))?;
+                        let still_live = state
+                            .registers
+                            .iter()
+                            .flatten()
+                            .any(|slot| *slot == Some(group));
+                        if *disposition != QuantityTerminalDisposition::Returned && still_live {
+                            return Err(VerifyError::InvalidFunction(fid));
+                        }
+                        if *disposition != QuantityTerminalDisposition::Returned {
+                            let Type::Resumption { lower_uses, .. } =
+                                a.types[leaf_ty as usize].representation()
+                            else {
+                                return Err(VerifyError::InvalidFunction(fid));
+                            };
+                            if state.counts[group]
+                                .is_none_or(|count| count.min < u64::from(*lower_uses))
+                            {
+                                return Err(VerifyError::InvalidFunction(fid));
+                            }
+                            state.counts[group] = None;
+                        }
+                    }
+                    break 'indirect;
+                }
                 if let Some(dst) = dst.filter(|dst| !leaf_types[*dst as usize].is_empty()) {
                     let summary =
                         canonical_quantity_transport_summary(&transport_summaries, targets)
@@ -4897,6 +6641,25 @@ fn verify_resumption_quantities_for_variants(
                 }
             }
             Instruction::TailCallIndirect { callable, args, .. }
+                if array_element_types[*callable as usize].is_some()
+                    || args
+                        .iter()
+                        .any(|register| array_element_types[*register as usize].is_some()) =>
+            {
+                let targets = if state.callable_targets[*callable as usize].is_empty() {
+                    &finite_callable_targets[pc as usize][*callable as usize]
+                } else {
+                    &state.callable_targets[*callable as usize]
+                };
+                let summary = canonical_array_quantity_call_summary(a, targets)
+                    .ok_or(VerifyError::InvalidFunction(fid))?;
+                let inputs = std::iter::once(Some(*callable))
+                    .chain(args.iter().copied().map(Some))
+                    .collect::<Vec<_>>();
+                replay_array_summary(&mut state, &summary, &inputs, None, true)?;
+                state.callable_targets[*callable as usize].clear();
+            }
+            Instruction::TailCallIndirect { callable, args, .. }
                 if !leaf_types[*callable as usize].is_empty()
                     || args
                         .iter()
@@ -4916,7 +6679,131 @@ fn verify_resumption_quantities_for_variants(
                 }
                 let mut operands = vec![*callable];
                 operands.extend(args.iter().copied());
-                transfer_pristine(&mut state, &operands)?;
+                if let Some(summary) =
+                    canonical_owned_receiver_quantity_summary(&owned_summaries, targets).filter(
+                        |summary| {
+                            summary.resumes.iter().any(|resumes| *resumes != 0)
+                                || summary.dispositions.iter().any(|disposition| {
+                                    *disposition != QuantityTerminalDisposition::Returned
+                                })
+                        },
+                    )
+                {
+                    let inputs = operands
+                        .iter()
+                        .flat_map(|operand| state.registers[*operand as usize].iter().copied())
+                        .collect::<Vec<_>>();
+                    if inputs.len() != summary.resumes.len() {
+                        return Err(VerifyError::InvalidFunction(fid));
+                    }
+                    let group_types = inputs
+                        .iter()
+                        .copied()
+                        .flatten()
+                        .map(|group| {
+                            state
+                                .registers
+                                .iter()
+                                .zip(&leaf_types)
+                                .find_map(|(slots, types)| {
+                                    slots
+                                        .iter()
+                                        .position(|slot| *slot == Some(group))
+                                        .map(|index| types[index])
+                                })
+                                .map(|ty| (group, ty))
+                                .ok_or(VerifyError::InvalidFunction(fid))
+                        })
+                        .collect::<Result<BTreeMap<_, _>, _>>()?;
+                    for (input, delta) in inputs.iter().zip(&summary.resumes) {
+                        let group = input.ok_or(VerifyError::InvalidFunction(fid))?;
+                        let count = state.counts[group]
+                            .as_mut()
+                            .ok_or(VerifyError::InvalidFunction(fid))?;
+                        count.min = count.min.saturating_add(*delta);
+                        count.max = count.max.saturating_add(*delta);
+                        let Type::Resumption { upper_uses, .. } =
+                            a.types[group_types[&group] as usize].representation()
+                        else {
+                            return Err(VerifyError::InvalidFunction(fid));
+                        };
+                        if upper_uses.is_some_and(|upper| count.max > u64::from(upper)) {
+                            return Err(VerifyError::InvalidFunction(fid));
+                        }
+                    }
+                    for operand in &operands {
+                        state.registers[*operand as usize].fill(None);
+                    }
+                    for ((input, disposition), leaf_ty) in
+                        inputs.iter().zip(&summary.dispositions).zip(
+                            inputs.iter().map(|input| {
+                                input.and_then(|group| group_types.get(&group).copied())
+                            }),
+                        )
+                    {
+                        let group = input.ok_or(VerifyError::InvalidFunction(fid))?;
+                        if *disposition == QuantityTerminalDisposition::Returned {
+                            continue;
+                        }
+                        if state
+                            .registers
+                            .iter()
+                            .flatten()
+                            .any(|slot| *slot == Some(group))
+                        {
+                            return Err(VerifyError::InvalidFunction(fid));
+                        }
+                        let leaf_ty = leaf_ty.ok_or(VerifyError::InvalidFunction(fid))?;
+                        let Type::Resumption { lower_uses, .. } =
+                            a.types[leaf_ty as usize].representation()
+                        else {
+                            return Err(VerifyError::InvalidFunction(fid));
+                        };
+                        if state.counts[group]
+                            .is_none_or(|count| count.min < u64::from(*lower_uses))
+                        {
+                            return Err(VerifyError::InvalidFunction(fid));
+                        }
+                        state.counts[group] = None;
+                    }
+                } else if let Some(deltas) = canonical_borrowed_receiver_resume_deltas(a, targets) {
+                    if deltas.len() != state.registers[*callable as usize].len() {
+                        return Err(VerifyError::InvalidFunction(fid));
+                    }
+                    let inputs = state.registers[*callable as usize].clone();
+                    for ((input, delta), leaf_ty) in inputs
+                        .iter()
+                        .zip(deltas)
+                        .zip(&leaf_types[*callable as usize])
+                    {
+                        let group = input.ok_or(VerifyError::InvalidFunction(fid))?;
+                        let count = state.counts[group]
+                            .as_mut()
+                            .ok_or(VerifyError::InvalidFunction(fid))?;
+                        count.min = count.min.saturating_add(delta);
+                        count.max = count.max.saturating_add(delta);
+                        let Type::Resumption {
+                            lower_uses,
+                            upper_uses,
+                            ..
+                        } = a.types[*leaf_ty as usize].representation()
+                        else {
+                            return Err(VerifyError::InvalidFunction(fid));
+                        };
+                        if upper_uses.is_some_and(|upper| count.max > u64::from(upper))
+                            || count.min < u64::from(*lower_uses)
+                        {
+                            return Err(VerifyError::InvalidFunction(fid));
+                        }
+                    }
+                    transfer_pristine(&mut state, args)?;
+                    state.registers[*callable as usize].fill(None);
+                    for group in inputs.into_iter().flatten() {
+                        state.counts[group] = None;
+                    }
+                } else {
+                    transfer_pristine(&mut state, &operands)?;
+                }
             }
             Instruction::Return { src: Some(src) } if !leaf_types[*src as usize].is_empty() => {
                 let actual = state.registers[*src as usize].clone();
@@ -4925,6 +6812,22 @@ fn verify_resumption_quantities_for_variants(
                         .iter()
                         .map(|group| state.counts[*group].map(|_| *group))
                         .collect::<Vec<_>>()
+                });
+                let exact_effectful = owned_summaries[fid as usize].as_ref().map(|summary| {
+                    let outputs = summary
+                        .outputs
+                        .iter()
+                        .map(|origin| Some(*origin))
+                        .collect::<Vec<_>>();
+                    let counts_match =
+                        summary.resumes.iter().enumerate().all(|(origin, resumes)| {
+                            state.counts.get(origin).copied().flatten()
+                                == Some(UseInterval {
+                                    min: *resumes,
+                                    max: *resumes,
+                                })
+                        });
+                    (outputs, counts_match)
                 });
                 let body_derived_input = actual
                     .iter()
@@ -4939,15 +6842,19 @@ fn verify_resumption_quantities_for_variants(
                     let returned = actual.iter().filter(|slot| **slot == Some(*group)).count();
                     live == returned
                 });
-                if exact_transport
+                let certified_effectful = exact_effectful
                     .as_ref()
-                    .is_some_and(|expected| actual != *expected)
-                    || (exact_transport.is_none() && !body_derived_input)
+                    .is_some_and(|(expected, counts_match)| actual == *expected && *counts_match);
+                if !certified_effectful
+                    && (exact_transport
+                        .as_ref()
+                        .is_some_and(|expected| actual != *expected)
+                        || (exact_transport.is_none() && !body_derived_input))
                     || !sole_return_owners
-                    || actual
-                        .iter()
-                        .flatten()
-                        .any(|group| state.counts[*group] != Some(UseInterval { min: 0, max: 0 }))
+                    || (!certified_effectful
+                        && actual.iter().flatten().any(|group| {
+                            state.counts[*group] != Some(UseInterval { min: 0, max: 0 })
+                        }))
                 {
                     return Err(VerifyError::InvalidFunction(fid));
                 }
@@ -4957,8 +6864,12 @@ fn verify_resumption_quantities_for_variants(
             }
             _ => {}
         }
-        let successors = label_successors(instruction, pc, &label_states[pc as usize])
-            .map_err(|_| VerifyError::InvalidFunction(fid))?;
+        let successors = if instruction_is_nonreturning_call(a, fid, instruction) {
+            vec![]
+        } else {
+            label_successors(instruction, pc, &label_states[pc as usize])
+                .map_err(|_| VerifyError::InvalidFunction(fid))?
+        };
         for (target, _) in successors {
             if target >= f.code_len {
                 continue;
@@ -4967,6 +6878,8 @@ fn verify_resumption_quantities_for_variants(
                 Some(previous) => {
                     if previous.handler_targets != state.handler_targets
                         || previous.shared_handler_environment != state.shared_handler_environment
+                        || previous.array_slots != state.array_slots
+                        || previous.array_roots != state.array_roots
                     {
                         return Err(VerifyError::StateMismatch {
                             function: fid,
@@ -4974,9 +6887,16 @@ fn verify_resumption_quantities_for_variants(
                         });
                     }
                     for register in 0..previous.registers.len() {
+                        let register_type = type_at(a, f.register_types[register])?;
+                        let enum_carrier = matches!(register_type, Type::Enum { .. })
+                            || matches!(
+                                register_type,
+                                Type::RefShared { referent } | Type::RefUnique { referent }
+                                    if matches!(type_at(a, *referent)?, Type::Enum { .. })
+                            );
                         let differing_enum_variant = previous.enum_variants[register]
                             != state.enum_variants[register]
-                            && matches!(type_at(a, f.register_types[register])?, Type::Enum { .. });
+                            && enum_carrier;
                         if differing_enum_variant {
                             previous.enum_variants[register] = None;
                             for (old, incoming) in previous.registers[register]
@@ -5203,18 +7123,25 @@ struct EnumFacts {
     variants: Vec<Option<u32>>,
 }
 
+type EnumDominance = (
+    Vec<Vec<Option<u32>>>,
+    Vec<bool>,
+    Vec<std::collections::BTreeSet<u32>>,
+);
+
 fn verify_enum_dominance(
     a: &Artifact,
     fid: u32,
     f: &Function,
     label_states: &[Vec<LabelEntry>],
-) -> Result<Vec<Vec<Option<u32>>>, VerifyError> {
+) -> Result<EnumDominance, VerifyError> {
     let start = f.code_start as usize;
     let empty = EnumFacts {
         tag_origins: vec![None; f.register_types.len()],
         variants: vec![None; f.register_types.len()],
     };
     let mut states: Vec<Option<EnumFacts>> = vec![None; f.code_len as usize];
+    let mut reachable_successors = vec![std::collections::BTreeSet::new(); f.code_len as usize];
     states[0] = Some(empty);
     let mut work = VecDeque::from([0u32]);
     while let Some(pc) = work.pop_front() {
@@ -5309,6 +7236,8 @@ fn verify_enum_dominance(
                 if origin.is_none() {
                     successors.extend(cases.iter().map(|case| (case.1, state.clone())));
                     successors.push((*otherwise, state));
+                    reachable_successors[pc as usize]
+                        .extend(successors.iter().map(|(target, _)| *target));
                     continue_enum_successors(&mut states, &mut work, successors);
                     continue;
                 }
@@ -5325,9 +7254,14 @@ fn verify_enum_dominance(
                     };
                     let mut edge = state.clone();
                     if let Some(origin) = origin {
-                        let Type::Enum { variants, .. } =
-                            type_at(a, f.register_types[origin as usize])?
-                        else {
+                        let origin_type = type_at(a, f.register_types[origin as usize])?;
+                        let origin_type = match origin_type {
+                            Type::RefShared { referent } | Type::RefUnique { referent } => {
+                                type_at(a, *referent)?
+                            }
+                            origin_type => origin_type,
+                        };
+                        let Type::Enum { variants, .. } = origin_type else {
                             return Err(VerifyError::InvalidAggregate {
                                 function: fid,
                                 instruction: pc,
@@ -5344,17 +7278,33 @@ fn verify_enum_dominance(
                     successors.push((target, edge));
                 }
                 let mut default = state.clone();
+                let mut default_reachable = true;
                 if let Some(origin) = origin
-                    && let Type::Enum { variants, .. } =
-                        type_at(a, f.register_types[origin as usize])?
+                    && let origin_type = type_at(a, f.register_types[origin as usize])?
                 {
+                    let origin_type = match origin_type {
+                        Type::RefShared { referent } | Type::RefUnique { referent } => {
+                            type_at(a, *referent)?
+                        }
+                        origin_type => origin_type,
+                    };
+                    let Type::Enum { variants, .. } = origin_type else {
+                        successors.push((*otherwise, default));
+                        reachable_successors[pc as usize]
+                            .extend(successors.iter().map(|(target, _)| *target));
+                        continue_enum_successors(&mut states, &mut work, successors);
+                        continue;
+                    };
                     let remaining = (0..variants.len() as u32)
                         .filter(|variant| !seen.contains(variant))
                         .collect::<Vec<_>>();
+                    default_reachable = !remaining.is_empty();
                     default.variants[origin as usize] =
                         (remaining.len() == 1).then(|| remaining[0]);
                 }
-                successors.push((*otherwise, default));
+                if default_reachable {
+                    successors.push((*otherwise, default));
+                }
             }
             Instruction::Jump { target } => successors.push((*target, state)),
             Instruction::Leave { slot, .. } => {
@@ -5375,9 +7325,11 @@ fn verify_enum_dominance(
             | Instruction::Abort { .. } => {}
             _ => successors.push((pc + 1, state)),
         }
+        reachable_successors[pc as usize].extend(successors.iter().map(|(target, _)| *target));
         continue_enum_successors(&mut states, &mut work, successors);
     }
-    Ok(states
+    let reachable = states.iter().map(Option::is_some).collect();
+    let variants = states
         .into_iter()
         .map(|state| {
             state
@@ -5387,7 +7339,8 @@ fn verify_enum_dominance(
                 })
                 .variants
         })
-        .collect())
+        .collect();
+    Ok((variants, reachable, reachable_successors))
 }
 
 fn continue_enum_successors(
@@ -5638,7 +7591,7 @@ fn verify_move_paths(
                 }
                 state[*register as usize] = None;
             }
-            Instruction::Call { dst, args, .. } => {
+            Instruction::Call { dst, args, .. } | Instruction::CallSelf { dst, args } => {
                 for &register in args {
                     ensure_complete(&state, register)?;
                     state[register as usize] = None;
@@ -5824,6 +7777,9 @@ fn verify_move_paths(
             }
             _ => {}
         }
+        if instruction_is_nonreturning_call(a, fid, instruction) {
+            continue;
+        }
         continue_move_path_successors(
             instruction,
             fid,
@@ -5933,7 +7889,7 @@ enum ReferenceOrigin {
     Local,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 enum CarrierOrigin {
     Parameter { parameter: usize, path: Vec<u32> },
     Receiver { path: Vec<u32> },
@@ -5942,6 +7898,55 @@ enum CarrierOrigin {
 
 type CarrierOrigins = Vec<(Vec<u32>, CarrierOrigin)>;
 type CallableTargets = std::collections::BTreeSet<u32>;
+
+fn declared_carrier_contract(
+    a: &Artifact,
+    fid: u32,
+) -> Result<Option<CarrierOrigins>, VerifyError> {
+    let mut matches = a
+        .reference_return_contracts
+        .iter()
+        .filter(|contract| contract.function == fid);
+    let Some(contract) = matches.next() else {
+        return Ok(None);
+    };
+    if matches.next().is_some() || contract.routes.is_empty() {
+        return Err(VerifyError::InvalidFunction(fid));
+    }
+    let function = a
+        .functions
+        .get(fid as usize)
+        .ok_or(VerifyError::InvalidFunction(fid))?;
+    let mut routes = contract
+        .routes
+        .iter()
+        .map(|route| {
+            let origin = match &route.origin {
+                ReferenceReturnOrigin::Parameter { parameter, path } => {
+                    if *parameter as usize >= function.params.len() {
+                        return Err(VerifyError::InvalidFunction(fid));
+                    }
+                    CarrierOrigin::Parameter {
+                        parameter: *parameter as usize,
+                        path: path.clone(),
+                    }
+                }
+                ReferenceReturnOrigin::Receiver { path } => {
+                    if function.receiver_mode.is_none() {
+                        return Err(VerifyError::InvalidFunction(fid));
+                    }
+                    CarrierOrigin::Receiver { path: path.clone() }
+                }
+            };
+            Ok((route.result_path.clone(), origin))
+        })
+        .collect::<Result<CarrierOrigins, VerifyError>>()?;
+    routes.sort_by(|left, right| left.0.cmp(&right.0));
+    if routes.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(VerifyError::InvalidFunction(fid));
+    }
+    Ok(Some(routes))
+}
 
 /// Compute the finite set of callable producers at every instruction boundary.
 /// An empty set means that no body-derived target is known. Branch joins union
@@ -6088,7 +8093,7 @@ fn canonical_callable_carrier_contract_with(
     provisional: &mut std::collections::BTreeMap<u32, CarrierOrigins>,
 ) -> Result<CarrierOrigins, VerifyError> {
     let mut contracts = targets.iter().map(|target| {
-        aggregate_reference_return_origins_with(a, *target, visiting, provisional)
+        carrier_return_contract_with(a, *target, visiting, provisional)
             .map_err(|_| VerifyError::InvalidFunction(*target))
     });
     let first = contracts
@@ -6100,6 +8105,50 @@ fn canonical_callable_carrier_contract_with(
         }
     }
     Ok(first)
+}
+
+fn carrier_return_contract_with(
+    a: &Artifact,
+    fid: u32,
+    visiting: &mut Vec<u32>,
+    provisional: &mut std::collections::BTreeMap<u32, CarrierOrigins>,
+) -> Result<CarrierOrigins, VerifyError> {
+    let function = a
+        .functions
+        .get(fid as usize)
+        .ok_or(VerifyError::InvalidFunction(fid))?;
+    let direct_reference_result = matches!(
+        type_at(a, function.return_type)?.representation(),
+        Type::RefShared { .. } | Type::RefUnique { .. }
+    );
+    if !direct_reference_result || declared_carrier_contract(a, fid)?.is_some() {
+        return aggregate_reference_return_origins_with(a, fid, visiting, provisional);
+    }
+    let single_path = |ty| {
+        let mut leaves = reference_leaves(a, ty);
+        (leaves.len() == 1)
+            .then(|| leaves.pop().unwrap().0)
+            .ok_or(VerifyError::InvalidFunction(fid))
+    };
+    let result_path = single_path(function.return_type)?;
+    let origin =
+        reference_return_parameter(a, fid, visiting)?.ok_or(VerifyError::InvalidFunction(fid))?;
+    let source = match origin {
+        ReferenceOrigin::Parameter(parameter) => {
+            let ty = *function
+                .params
+                .get(parameter)
+                .ok_or(VerifyError::InvalidFunction(fid))?;
+            let path = single_path(ty)?;
+            CarrierOrigin::Parameter { parameter, path }
+        }
+        ReferenceOrigin::Receiver => {
+            let path = single_path(function.register_types[0])?;
+            CarrierOrigin::Receiver { path }
+        }
+        ReferenceOrigin::Local => return Err(VerifyError::InvalidFunction(fid)),
+    };
+    Ok(vec![(result_path, source)])
 }
 
 fn canonical_callable_reference_contract(
@@ -6272,12 +8321,16 @@ fn aggregate_reference_return_origins_with(
     }
     const MAX_PROVISIONAL_CONTRACTS: usize = 256;
     let mut candidates = vec![CarrierOrigins::new()];
-    for (result_path, result_unique) in result_leaves {
+    for (result_path, result_unique) in result_leaves.iter().cloned() {
         let compatible = sources
             .iter()
             .filter(|(origin, source_unique, whole_carrier)| {
-                *source_unique == result_unique
+                // A shared result may be a reborrowed view of a unique
+                // parameter. A unique result still requires an exact unique
+                // source; shared-to-unique would manufacture authority.
+                (!result_unique || *source_unique)
                     && (!recursive
+                        || result_count == 1
                         || !*whole_carrier
                         || match origin {
                             CarrierOrigin::Parameter { path, .. }
@@ -6306,6 +8359,20 @@ fn aggregate_reference_return_origins_with(
                 })
             })
             .collect();
+    }
+    candidates.retain(|candidate| {
+        result_leaves
+            .iter()
+            .enumerate()
+            .all(|(index, (_, unique))| {
+                !*unique || unique_carrier_occurrences_are_exclusive(candidate, index)
+            })
+    });
+    if let Some(declared) = declared_carrier_contract(a, fid)? {
+        candidates.retain(|candidate| candidate == &declared);
+        if candidates.len() != 1 {
+            return Err(VerifyError::InvalidFunction(fid));
+        }
     }
     let mut fixed_points = Vec::new();
     for candidate in candidates {
@@ -6339,6 +8406,8 @@ fn aggregate_reference_return_origins_inner(
         .get(fid as usize)
         .ok_or(VerifyError::InvalidFunction(fid))?;
     let label_states = verify_labels(a, fid, f)?;
+    let live_registers = continuation_live_registers(a, f, &label_states)?;
+    let (enum_variants, _, enum_successors) = verify_enum_dominance(a, fid, f, &label_states)?;
     let callable_targets = callable_targets_at_pcs(a, fid, f, &label_states)?;
     let array_roots = array_roots_at_pcs(a, fid, f, &label_states)?;
     let constants = constant_u64_registers_at_pcs(a, fid, f, &label_states)?;
@@ -6387,6 +8456,9 @@ fn aggregate_reference_return_origins_inner(
                     origins.extend(state[field_register as usize].drain(..).map(
                         |(mut path, origin)| {
                             path.insert(0, field);
+                            if let Some(variant) = variant {
+                                path.insert(0, u32::MAX - *variant);
+                            }
                             (path, origin)
                         },
                     ));
@@ -6418,10 +8490,12 @@ fn aggregate_reference_return_origins_inner(
                 }
             }
             Instruction::ProjectMove { dst, src, field } => {
+                let prefix = enum_variants[pc as usize][*src as usize]
+                    .map_or_else(|| vec![*field], |variant| vec![u32::MAX - variant, *field]);
                 let mut projected = Vec::new();
                 state[*src as usize].retain(|(path, origin)| {
-                    if path.first() == Some(field) {
-                        projected.push((path[1..].to_vec(), origin.clone()));
+                    if path.starts_with(&prefix) {
+                        projected.push((path[prefix.len()..].to_vec(), origin.clone()));
                         false
                     } else {
                         true
@@ -6430,10 +8504,12 @@ fn aggregate_reference_return_origins_inner(
                 state[*dst as usize] = projected;
             }
             Instruction::ProjectCopy { dst, src, field } => {
+                let prefix = enum_variants[pc as usize][*src as usize]
+                    .map_or_else(|| vec![*field], |variant| vec![u32::MAX - variant, *field]);
                 let mut projected = state[*src as usize]
                     .iter()
-                    .filter(|(path, _)| path.first() == Some(field))
-                    .map(|(path, origin)| (path[1..].to_vec(), origin.clone()))
+                    .filter(|(path, _)| path.starts_with(&prefix))
+                    .map(|(path, origin)| (path[prefix.len()..].to_vec(), origin.clone()))
                     .collect::<CarrierOrigins>();
                 if projected.is_empty()
                     && *src == 0
@@ -6570,9 +8646,10 @@ fn aggregate_reference_return_origins_inner(
                 dst: Some(dst),
                 function,
                 args,
-            } if !reference_leaves(a, f.register_types[*dst as usize]).is_empty() => {
-                let contract =
-                    aggregate_reference_return_origins_with(a, *function, visiting, provisional)?;
+            } if function_may_return(a, *function)
+                && !reference_leaves(a, f.register_types[*dst as usize]).is_empty() =>
+            {
+                let contract = carrier_return_contract_with(a, *function, visiting, provisional)?;
                 let mut origins = Vec::new();
                 for (result_path, origin) in contract {
                     let CarrierOrigin::Parameter { parameter, path } = origin else {
@@ -6610,8 +8687,13 @@ fn aggregate_reference_return_origins_inner(
             } if !reference_leaves(a, f.register_types[*dst as usize]).is_empty() => {
                 let source = unique_reference_carrier(&state, payloads)
                     .ok_or(VerifyError::InvalidFunction(fid))?;
-                state[*dst as usize] =
-                    remap_carrier_origins(a, f.register_types[*dst as usize], source, fid)?;
+                state[*dst as usize] = remap_carrier_origins_with_expected(
+                    a,
+                    f.register_types[*dst as usize],
+                    source,
+                    provisional.get(&fid),
+                    fid,
+                )?;
                 for payload in payloads {
                     state[*payload as usize].clear();
                 }
@@ -6658,8 +8740,13 @@ fn aggregate_reference_return_origins_inner(
                     .iter()
                     .flat_map(|input| state[*input as usize].clone())
                     .collect::<CarrierOrigins>();
-                state[*dst as usize] =
-                    remap_carrier_origins(a, f.register_types[*dst as usize], sources, fid)?;
+                state[*dst as usize] = remap_carrier_origins_with_expected(
+                    a,
+                    f.register_types[*dst as usize],
+                    sources,
+                    provisional.get(&fid),
+                    fid,
+                )?;
                 for input in inputs {
                     state[input as usize].clear();
                 }
@@ -6667,8 +8754,7 @@ fn aggregate_reference_return_origins_inner(
             Instruction::TailCall { function, args }
                 if !reference_leaves(a, f.return_type).is_empty() =>
             {
-                let contract =
-                    aggregate_reference_return_origins_with(a, *function, visiting, provisional)?;
+                let contract = carrier_return_contract_with(a, *function, visiting, provisional)?;
                 let origins =
                     instantiate_carrier_contract(&contract, None, args, &state, *function)?;
                 record_carrier_return(fid, origins, &mut returned)?;
@@ -6676,8 +8762,7 @@ fn aggregate_reference_return_origins_inner(
             Instruction::TailCallSelf { args }
                 if !reference_leaves(a, f.return_type).is_empty() =>
             {
-                let contract =
-                    aggregate_reference_return_origins_with(a, fid, visiting, provisional)?;
+                let contract = carrier_return_contract_with(a, fid, visiting, provisional)?;
                 let origins = instantiate_carrier_contract(&contract, Some(0), args, &state, fid)?;
                 record_carrier_return(fid, origins, &mut returned)?;
             }
@@ -6686,8 +8771,7 @@ fn aggregate_reference_return_origins_inner(
                 receiver,
                 args,
             } if !reference_leaves(a, f.return_type).is_empty() => {
-                let contract =
-                    aggregate_reference_return_origins_with(a, *function, visiting, provisional)?;
+                let contract = carrier_return_contract_with(a, *function, visiting, provisional)?;
                 let mut origins = Vec::new();
                 for (result_path, origin) in contract {
                     let source = match origin {
@@ -6723,20 +8807,15 @@ fn aggregate_reference_return_origins_inner(
                 record_carrier_return(fid, origins, &mut returned)?;
             }
             Instruction::Return { src: Some(src) } => {
-                let origins = state[*src as usize].clone();
-                if origins
-                    .iter()
-                    .any(|(_, origin)| matches!(origin, CarrierOrigin::Local))
-                {
-                    return Err(VerifyError::InvalidFunction(fid));
-                }
-                match &returned {
-                    Some(existing) if existing != &origins => {
-                        return Err(VerifyError::InvalidFunction(fid));
-                    }
-                    None => returned = Some(origins),
-                    _ => {}
-                }
+                let remapped = remap_carrier_origins_with_expected(
+                    a,
+                    f.return_type,
+                    state[*src as usize].clone(),
+                    provisional.get(&fid),
+                    fid,
+                );
+                let origins = remapped?;
+                record_carrier_return(fid, origins, &mut returned)?;
             }
             Instruction::Leave { slot, value } => {
                 let entry = label_states[pc as usize]
@@ -6752,50 +8831,92 @@ fn aggregate_reference_return_origins_inner(
             | Instruction::Deconstruct { src: register } => state[*register as usize].clear(),
             _ => {}
         }
-        let successors = match instruction {
-            Instruction::Jump { target } => vec![*target],
-            Instruction::Switch {
-                cases, otherwise, ..
-            } => cases
-                .iter()
-                .map(|case| case.1)
-                .chain(std::iter::once(*otherwise))
-                .collect(),
-            Instruction::Return { .. }
-            | Instruction::TailCall { .. }
-            | Instruction::TailCallSelf { .. }
-            | Instruction::TailCallKnownReceiver { .. }
-            | Instruction::TailCallIndirect { .. }
-            | Instruction::TailResume { .. }
-            | Instruction::Perform { dst: None, .. }
-            | Instruction::Unreachable
-            | Instruction::Abort { .. } => vec![],
-            Instruction::Leave { slot, .. } => vec![
-                label_states[pc as usize]
+        let nonreturning_call = match instruction {
+            Instruction::Call { function, .. }
+            | Instruction::CallKnownReceiver { function, .. } => !function_may_return(a, *function),
+            Instruction::CallSelf { .. } => !function_may_return(a, fid),
+            _ => false,
+        };
+        let successors = if nonreturning_call {
+            vec![]
+        } else {
+            match instruction {
+                Instruction::Jump { target } => vec![*target],
+                Instruction::Switch {
+                    cases, otherwise, ..
+                } => cases
                     .iter()
-                    .rfind(|entry| entry.slot == *slot)
-                    .ok_or(VerifyError::InvalidFunction(fid))?
-                    .target,
-            ],
-            _ => vec![pc + 1],
+                    .map(|case| case.1)
+                    .chain(std::iter::once(*otherwise))
+                    .collect(),
+                Instruction::Return { .. }
+                | Instruction::TailCall { .. }
+                | Instruction::TailCallSelf { .. }
+                | Instruction::TailCallKnownReceiver { .. }
+                | Instruction::TailCallIndirect { .. }
+                | Instruction::TailResume { .. }
+                | Instruction::Perform { dst: None, .. }
+                | Instruction::Unreachable
+                | Instruction::Abort { .. } => vec![],
+                Instruction::Leave { slot, .. } => vec![
+                    label_states[pc as usize]
+                        .iter()
+                        .rfind(|entry| entry.slot == *slot)
+                        .ok_or(VerifyError::InvalidFunction(fid))?
+                        .target,
+                ],
+                _ => vec![pc + 1],
+            }
         };
         for successor in successors {
+            if !enum_successors[pc as usize].contains(&successor) {
+                continue;
+            }
             let slot = states
                 .get_mut(successor as usize)
                 .ok_or(VerifyError::InvalidFunction(fid))?;
             match slot {
                 Some(existing) if existing != &state => {
                     let mut changed = false;
-                    for (old, incoming) in existing.iter_mut().zip(&state) {
-                        if old == incoming || (!old.is_empty() && incoming.is_empty()) {
+                    for register in 0..existing.len() {
+                        if existing[register] == state[register] {
                             continue;
                         }
-                        if old.is_empty() {
-                            *old = incoming.clone();
-                            changed = true;
+                        if !live_registers[successor as usize][register] {
+                            if !existing[register].is_empty() {
+                                existing[register].clear();
+                                changed = true;
+                            }
                             continue;
                         }
-                        return Err(VerifyError::InvalidFunction(fid));
+                        let variant_count = match type_at(a, f.register_types[register])? {
+                            Type::Enum { variants, .. } => u32::try_from(variants.len()).ok(),
+                            _ => None,
+                        };
+                        let variant_path = |path: &[u32]| {
+                            variant_count
+                                .is_some_and(|count| path.len() >= 2 && u32::MAX - path[0] < count)
+                        };
+                        if !existing[register]
+                            .iter()
+                            .chain(&state[register])
+                            .all(|(path, _)| variant_path(path))
+                            || existing[register].iter().any(|(path, origin)| {
+                                state[register]
+                                    .iter()
+                                    .find(|(candidate, _)| candidate == path)
+                                    .is_some_and(|(_, other)| other != origin)
+                            })
+                        {
+                            return Err(VerifyError::InvalidFunction(fid));
+                        }
+                        for candidate in &state[register] {
+                            if !existing[register].contains(candidate) {
+                                existing[register].push(candidate.clone());
+                                changed = true;
+                            }
+                        }
+                        existing[register].sort_by(|left, right| left.0.cmp(&right.0));
                     }
                     if changed {
                         work.push_back(successor);
@@ -6810,6 +8931,88 @@ fn aggregate_reference_return_origins_inner(
         }
     }
     returned.ok_or(VerifyError::InvalidFunction(fid))
+}
+
+fn function_may_return(a: &Artifact, fid: u32) -> bool {
+    fn visit(
+        a: &Artifact,
+        fid: u32,
+        pc: u32,
+        visiting: &mut std::collections::BTreeSet<(u32, u32)>,
+        memo: &mut std::collections::BTreeMap<(u32, u32), bool>,
+    ) -> bool {
+        if let Some(result) = memo.get(&(fid, pc)) {
+            return *result;
+        }
+        if !visiting.insert((fid, pc)) {
+            return false;
+        }
+        let Some(function) = a.functions.get(fid as usize) else {
+            visiting.remove(&(fid, pc));
+            return true;
+        };
+        let Some(instruction) = a.code.get(function.code_start as usize + pc as usize) else {
+            visiting.remove(&(fid, pc));
+            return false;
+        };
+        let next = |visiting: &mut std::collections::BTreeSet<(u32, u32)>,
+                    memo: &mut std::collections::BTreeMap<(u32, u32), bool>| {
+            visit(a, fid, pc + 1, visiting, memo)
+        };
+        let result = match instruction {
+            Instruction::Return { .. } | Instruction::TailResume { .. } => true,
+            Instruction::TailCall { function, .. }
+            | Instruction::TailCallKnownReceiver { function, .. } => {
+                visit(a, *function, 0, visiting, memo)
+            }
+            Instruction::TailCallSelf { .. } => visit(a, fid, 0, visiting, memo),
+            Instruction::TailCallIndirect { .. } => true,
+            Instruction::Call { function, .. }
+            | Instruction::CallKnownReceiver { function, .. } => {
+                visit(a, *function, 0, visiting, memo) && next(visiting, memo)
+            }
+            Instruction::CallSelf { .. } => {
+                visit(a, fid, 0, visiting, memo) && next(visiting, memo)
+            }
+            Instruction::Jump { target } => visit(a, fid, *target, visiting, memo),
+            Instruction::Switch {
+                cases, otherwise, ..
+            } => {
+                cases
+                    .iter()
+                    .any(|case| visit(a, fid, case.1, visiting, memo))
+                    || visit(a, fid, *otherwise, visiting, memo)
+            }
+            Instruction::Perform { dst: None, .. }
+            | Instruction::Unreachable
+            | Instruction::Abort { .. } => false,
+            // Resolving a nonlocal label target requires verifier label state.
+            // Treat it conservatively as potentially returning.
+            Instruction::Leave { .. } => true,
+            _ => next(visiting, memo),
+        };
+        visiting.remove(&(fid, pc));
+        memo.insert((fid, pc), result);
+        result
+    }
+
+    visit(
+        a,
+        fid,
+        0,
+        &mut std::collections::BTreeSet::new(),
+        &mut std::collections::BTreeMap::new(),
+    )
+}
+
+fn instruction_is_nonreturning_call(a: &Artifact, fid: u32, instruction: &Instruction) -> bool {
+    match instruction {
+        Instruction::Call { function, .. } | Instruction::CallKnownReceiver { function, .. } => {
+            !function_may_return(a, *function)
+        }
+        Instruction::CallSelf { .. } => !function_may_return(a, fid),
+        _ => false,
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -7150,6 +9353,25 @@ fn record_carrier_return(
     Ok(())
 }
 
+fn unique_carrier_occurrences_are_exclusive(origins: &CarrierOrigins, index: usize) -> bool {
+    let Some((_, origin)) = origins.get(index) else {
+        return false;
+    };
+    let paths = origins
+        .iter()
+        .filter(|(_, candidate)| candidate == origin)
+        .map(|(path, _)| path)
+        .collect::<Vec<_>>();
+    if paths.len() == 1 {
+        return true;
+    }
+    let variants = paths
+        .iter()
+        .filter_map(|path| path.first().copied())
+        .collect::<std::collections::BTreeSet<_>>();
+    variants.len() == paths.len() && variants.iter().all(|variant| *variant > u32::MAX / 2)
+}
+
 fn remap_carrier_origins(
     a: &Artifact,
     destination: TypeId,
@@ -7160,11 +9382,70 @@ fn remap_carrier_origins(
     if leaves.len() != sources.len() {
         return Err(VerifyError::InvalidFunction(fid));
     }
-    Ok(leaves
+    let remapped = leaves
         .into_iter()
         .zip(sources)
         .map(|((path, _), (_, origin))| (path, origin))
-        .collect())
+        .collect::<CarrierOrigins>();
+    let destination_leaves = reference_leaves(a, destination);
+    if destination_leaves
+        .iter()
+        .enumerate()
+        .any(|(index, (_, unique))| {
+            *unique && !unique_carrier_occurrences_are_exclusive(&remapped, index)
+        })
+    {
+        return Err(VerifyError::InvalidFunction(fid));
+    }
+    Ok(remapped)
+}
+
+fn remap_carrier_origins_with_expected(
+    a: &Artifact,
+    destination: TypeId,
+    sources: CarrierOrigins,
+    expected: Option<&CarrierOrigins>,
+    fid: u32,
+) -> Result<CarrierOrigins, VerifyError> {
+    if let Ok(remapped) = remap_carrier_origins(a, destination, sources.clone(), fid) {
+        return Ok(remapped);
+    }
+    let expected = expected.ok_or(VerifyError::InvalidFunction(fid))?;
+    let leaves = reference_leaves(a, destination);
+    if expected.len() != leaves.len()
+        || expected
+            .iter()
+            .zip(&leaves)
+            .any(|((result_path, _), (leaf_path, _))| result_path != leaf_path)
+    {
+        return Err(VerifyError::InvalidFunction(fid));
+    }
+    if sources.is_empty()
+        && let Type::Enum { variants, .. } = type_at(a, destination)?
+        && expected.iter().all(|(path, _)| {
+            path.len() >= 2 && u32::MAX - path[0] < u32::try_from(variants.len()).unwrap_or(0)
+        })
+    {
+        // A zero-payload enum alternative reaches the join without a carrier.
+        // The provisional fixed-point contract records the mutually exclusive
+        // reference-bearing alternative; retaining it here makes inference
+        // independent of predecessor visitation order and is conservative for
+        // callers (it can only keep a loan live longer).
+        return Ok(expected.clone());
+    }
+    let available = sources
+        .into_iter()
+        .map(|(_, origin)| origin)
+        .collect::<std::collections::BTreeSet<_>>();
+    expected
+        .iter()
+        .enumerate()
+        .all(|(index, (_, origin))| {
+            available.contains(origin)
+                && (!leaves[index].1 || unique_carrier_occurrences_are_exclusive(expected, index))
+        })
+        .then(|| expected.clone())
+        .ok_or(VerifyError::InvalidFunction(fid))
 }
 
 /// Prove that every returning path yields a reference rooted in the same
@@ -7610,32 +9891,36 @@ fn reference_return_parameter_inner(
             _ => {}
         }
 
-        let successors: Vec<u32> = match instruction {
-            Instruction::Jump { target } => vec![*target],
-            Instruction::Switch {
-                cases, otherwise, ..
-            } => cases
-                .iter()
-                .map(|case| case.1)
-                .chain(std::iter::once(*otherwise))
-                .collect(),
-            Instruction::Return { .. }
-            | Instruction::TailCall { .. }
-            | Instruction::TailCallSelf { .. }
-            | Instruction::TailCallKnownReceiver { .. }
-            | Instruction::TailCallIndirect { .. }
-            | Instruction::TailResume { .. }
-            | Instruction::Perform { dst: None, .. }
-            | Instruction::Unreachable
-            | Instruction::Abort { .. } => vec![],
-            Instruction::Leave { slot, .. } => vec![
-                label_states[pc as usize]
+        let successors: Vec<u32> = if instruction_is_nonreturning_call(a, fid, instruction) {
+            vec![]
+        } else {
+            match instruction {
+                Instruction::Jump { target } => vec![*target],
+                Instruction::Switch {
+                    cases, otherwise, ..
+                } => cases
                     .iter()
-                    .rfind(|entry| entry.slot == *slot)
-                    .ok_or(VerifyError::InvalidFunction(fid))?
-                    .target,
-            ],
-            _ => vec![pc + 1],
+                    .map(|case| case.1)
+                    .chain(std::iter::once(*otherwise))
+                    .collect(),
+                Instruction::Return { .. }
+                | Instruction::TailCall { .. }
+                | Instruction::TailCallSelf { .. }
+                | Instruction::TailCallKnownReceiver { .. }
+                | Instruction::TailCallIndirect { .. }
+                | Instruction::TailResume { .. }
+                | Instruction::Perform { dst: None, .. }
+                | Instruction::Unreachable
+                | Instruction::Abort { .. } => vec![],
+                Instruction::Leave { slot, .. } => vec![
+                    label_states[pc as usize]
+                        .iter()
+                        .rfind(|entry| entry.slot == *slot)
+                        .ok_or(VerifyError::InvalidFunction(fid))?
+                        .target,
+                ],
+                _ => vec![pc + 1],
+            }
         };
         for successor in successors {
             let Some(slot) = states.get_mut(successor as usize) else {
@@ -7728,6 +10013,73 @@ struct CarrierLoan {
 }
 
 type CarrierLoans = Vec<CarrierLoan>;
+
+/// Merge loans carried by mutually exclusive enum alternatives at a CFG join.
+///
+/// Enum reference leaves are prefixed with `u32::MAX - variant`.  A branch may
+/// therefore carry only the leaves of the variant proved on that edge.  At the
+/// join the register is still one enum value, not two simultaneous unique
+/// references, so retain the union of the alternative-specific descriptions.
+/// If both edges describe the same variant, however, their descriptions must
+/// agree exactly.
+fn merge_exclusive_enum_carrier_loans(
+    a: &Artifact,
+    ty: TypeId,
+    existing: &mut CarrierLoans,
+    incoming: &CarrierLoans,
+) -> Option<bool> {
+    let Type::Enum { variants, .. } = a.types.get(ty as usize)?.representation() else {
+        return None;
+    };
+    let variant_count = u32::try_from(variants.len()).ok()?;
+    let variant_of = |loan: &CarrierLoan| {
+        loan.path.first().and_then(|marker| {
+            let variant = u32::MAX - *marker;
+            (variant < variant_count).then_some(variant)
+        })
+    };
+    if existing
+        .iter()
+        .chain(incoming)
+        .any(|loan| variant_of(loan).is_none())
+    {
+        return None;
+    }
+
+    let existing_variants = existing
+        .iter()
+        .filter_map(&variant_of)
+        .collect::<std::collections::BTreeSet<_>>();
+    let incoming_variants = incoming
+        .iter()
+        .filter_map(&variant_of)
+        .collect::<std::collections::BTreeSet<_>>();
+    for variant in existing_variants.intersection(&incoming_variants) {
+        let old = existing
+            .iter()
+            .filter(|loan| variant_of(loan) == Some(*variant))
+            .collect::<Vec<_>>();
+        let new = incoming
+            .iter()
+            .filter(|loan| variant_of(loan) == Some(*variant))
+            .collect::<Vec<_>>();
+        if old != new {
+            return None;
+        }
+    }
+
+    let mut changed = false;
+    for loan in incoming {
+        if !existing_variants.contains(&variant_of(loan).unwrap()) {
+            existing.push(loan.clone());
+            changed = true;
+        }
+    }
+    if changed {
+        existing.sort_by(|left, right| left.path.cmp(&right.path));
+    }
+    Some(changed)
+}
 
 // Array indices live in a separate namespace from aggregate field paths.
 // No well-formed aggregate can have `u32::MAX` fields, so this marker makes
@@ -8064,23 +10416,15 @@ fn reference_leaves(a: &Artifact, ty: TypeId) -> Vec<(Vec<u32>, bool)> {
                     path.pop();
                 }
             }
-            // Variant identity is not part of runtime field projection paths.
-            // Keep only paths whose reference kind agrees across all variants.
             Some(Type::Enum { variants, .. }) => {
-                let mut alternatives = Vec::new();
-                for variant in variants {
-                    let mut variant_leaves = Vec::new();
+                for (variant_index, variant) in variants.iter().enumerate() {
+                    path.push(u32::MAX - variant_index as u32);
                     for (field, ty) in variant.fields.iter().enumerate() {
                         path.push(field as u32);
-                        collect(a, ty.ty, visiting, path, &mut variant_leaves);
+                        collect(a, ty.ty, visiting, path, leaves);
                         path.pop();
                     }
-                    alternatives.push(variant_leaves);
-                }
-                if let Some(first) = alternatives.first()
-                    && alternatives.iter().all(|candidate| candidate == first)
-                {
-                    leaves.extend(first.iter().cloned());
+                    path.pop();
                 }
             }
             Some(Type::Callable { capture_type, .. }) => {
@@ -8230,15 +10574,131 @@ fn places_overlap(a: &BorrowedPlace, b: &BorrowedPlace) -> bool {
             .all(|(left, right)| left == right)
 }
 
+/// Identify the snapshot/commit move bundles emitted for MIR block edges.
+///
+/// A bundle is a maximal move-only suffix immediately before a jump.  Its
+/// first half snapshots pairwise-distinct sources into fresh scratch
+/// registers; its second half moves each scratch exactly once into a
+/// pairwise-distinct block parameter.  This shape is deliberately narrower
+/// than an arbitrary run of MOVE instructions, so hostile bytecode cannot
+/// relabel a borrowed owner with a lone move.
+fn parallel_edge_move_members(a: &Artifact, f: &Function) -> Vec<Option<BTreeSet<u32>>> {
+    let len = f.code_len as usize;
+    let start = f.code_start as usize;
+    let mut groups = vec![None; len];
+    let explicit_targets = a.code[start..start + len]
+        .iter()
+        .flat_map(|instruction| match instruction {
+            Instruction::Jump { target } => vec![*target],
+            Instruction::Switch {
+                cases, otherwise, ..
+            } => cases
+                .iter()
+                .map(|(_, target)| *target)
+                .chain(std::iter::once(*otherwise))
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect::<BTreeSet<_>>();
+    for boundary in 0..len {
+        let ends_in_jump = matches!(a.code[start + boundary], Instruction::Jump { .. });
+        if !ends_in_jump && !explicit_targets.contains(&(boundary as u32)) {
+            continue;
+        }
+        let mut first = boundary;
+        while first > 0 && matches!(a.code[start + first - 1], Instruction::Move { .. }) {
+            first -= 1;
+        }
+        let moves = &a.code[start + first..start + boundary];
+        if moves.len() < 2 || !moves.len().is_multiple_of(2) {
+            continue;
+        }
+        let count = moves.len() / 2;
+        let snapshots = moves[..count]
+            .iter()
+            .filter_map(|instruction| match instruction {
+                Instruction::Move { dst, src } => Some((*src, *dst)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let commits = moves[count..]
+            .iter()
+            .filter_map(|instruction| match instruction {
+                Instruction::Move { dst, src } => Some((*src, *dst)),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if snapshots.len() != count || commits.len() != count {
+            continue;
+        }
+        let sources = snapshots
+            .iter()
+            .map(|(src, _)| *src)
+            .collect::<BTreeSet<_>>();
+        let scratches = snapshots
+            .iter()
+            .map(|(_, dst)| *dst)
+            .collect::<BTreeSet<_>>();
+        let committed_scratches = commits.iter().map(|(src, _)| *src).collect::<BTreeSet<_>>();
+        let destinations = commits.iter().map(|(_, dst)| *dst).collect::<BTreeSet<_>>();
+        if sources.len() != count
+            || scratches.len() != count
+            || destinations.len() != count
+            || scratches != committed_scratches
+            || !sources.is_disjoint(&scratches)
+            || !destinations.is_disjoint(&scratches)
+        {
+            continue;
+        }
+        let members = sources
+            .into_iter()
+            .chain(scratches)
+            .chain(destinations)
+            .collect::<BTreeSet<_>>();
+        for slot in groups.iter_mut().take(boundary).skip(first) {
+            *slot = Some(members.clone());
+        }
+    }
+    groups
+}
+
+/// A tail call destroys the current register frame. References transferred to
+/// the replacement frame may therefore point only outside this frame or into
+/// an owner which is itself transferred by the same tail edge. This check is
+/// independent of the callee's return behavior: a divergent recursive cycle
+/// must not launder a borrow of abandoned local storage into parameter
+/// provenance.
+fn ensure_tail_loan_owners_survive(
+    loans: &[CarrierLoans],
+    transported: impl IntoIterator<Item = u32>,
+    fid: u32,
+) -> Result<(), VerifyError> {
+    let transported = transported.into_iter().collect::<BTreeSet<_>>();
+    for carrier in &transported {
+        let carried = loans
+            .get(*carrier as usize)
+            .ok_or(VerifyError::InvalidFunction(fid))?;
+        for loan in carried {
+            let owner = loan.loan.place.owner;
+            if (owner as usize) < loans.len() && !transported.contains(&owner) {
+                return Err(VerifyError::InvalidFunction(fid));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn verify_loans(
     a: &Artifact,
     fid: u32,
     f: &Function,
     label_states: &[Vec<LabelEntry>],
+    live_registers: &[Vec<bool>],
 ) -> Result<Vec<Vec<CarrierLoans>>, VerifyError> {
     let start = f.code_start as usize;
     let callable_targets = callable_targets_at_pcs(a, fid, f, label_states)?;
     let constants = constant_u64_registers_at_pcs(a, fid, f, label_states)?;
+    let parallel_move_members = parallel_edge_move_members(a, f);
     let mut states: Vec<Option<Vec<CarrierLoans>>> = vec![None; f.code_len as usize];
     let mut entry = vec![Vec::new(); f.register_types.len()];
     for (register, slot) in entry.iter_mut().enumerate().take(f.params.len() + 1) {
@@ -8290,7 +10750,9 @@ fn verify_loans(
         let is_suspended = |register: u32, loans: &[CarrierLoans]| {
             loans
                 .iter()
-                .flatten()
+                .enumerate()
+                .filter(|(carrier, _)| *carrier != register as usize)
+                .flat_map(|(_, loans)| loans)
                 .any(|loan| loan.loan.suspended_parent == Some(register))
         };
         let end_reference = |loans: &mut [CarrierLoans], register: u32| {
@@ -8447,11 +10909,40 @@ fn verify_loans(
                 end_reference(&mut loans, *reference)?;
             }
             Instruction::Move { dst, src } => {
-                consume_owner(&loans, *src)?;
+                let dependents = loans
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, carried)| {
+                        carried.iter().any(|loan| {
+                            loan.loan.place.owner == *src
+                                || loan.loan.suspended_parent == Some(*src)
+                        })
+                    })
+                    .map(|(carrier, _)| carrier as u32)
+                    .collect::<BTreeSet<_>>();
+                let relocates_borrowed_owner = !dependents.is_empty();
+                let authenticated_relocation = parallel_move_members[pc as usize]
+                    .as_ref()
+                    .is_some_and(|members| {
+                        members.contains(src)
+                            && members.contains(dst)
+                            && dependents.iter().all(|carrier| members.contains(carrier))
+                    });
+                if (conflicts(&whole(*src), true, Some(*src), &loans) || is_suspended(*src, &loans))
+                    && !authenticated_relocation
+                {
+                    return Err(conflict(*src));
+                }
                 loans[*dst as usize] = std::mem::take(&mut loans[*src as usize]);
-                for loan in loans.iter_mut().flatten() {
-                    if loan.loan.suspended_parent == Some(*src) {
-                        loan.loan.suspended_parent = Some(*dst);
+                if relocates_borrowed_owner {
+                    debug_assert!(authenticated_relocation);
+                    for loan in loans.iter_mut().flatten() {
+                        if loan.loan.place.owner == *src {
+                            loan.loan.place.owner = *dst;
+                        }
+                        if loan.loan.suspended_parent == Some(*src) {
+                            loan.loan.suspended_parent = Some(*dst);
+                        }
                     }
                 }
             }
@@ -8506,6 +10997,9 @@ fn verify_loans(
                 for (&register, field) in fields.iter().zip(field_indices) {
                     carried.extend(loans[register as usize].iter().cloned().map(|mut loan| {
                         loan.path.insert(0, field);
+                        if let Some(variant) = variant {
+                            loan.path.insert(0, u32::MAX - *variant);
+                        }
                         loan
                     }));
                 }
@@ -8596,7 +11090,48 @@ fn verify_loans(
             } => {
                 let result_has_references =
                     !reference_leaves(a, f.register_types[*dst as usize]).is_empty();
-                let carried = if result_has_references {
+                let carried = if result_has_references
+                    && let Some(contract) = declared_carrier_contract(a, fid)?
+                {
+                    contract
+                        .into_iter()
+                        .map(|(result_path, origin)| {
+                            let (register, source_path) = match origin {
+                                CarrierOrigin::Parameter { parameter, path } => {
+                                    (parameter as u32 + 1, path)
+                                }
+                                CarrierOrigin::Receiver { path } => (0, path),
+                                CarrierOrigin::Local => {
+                                    return Err(VerifyError::InvalidFunction(fid));
+                                }
+                            };
+                            let leaf = reference_leaves(a, f.register_types[register as usize])
+                                .iter()
+                                .position(|(path, _)| path == &source_path)
+                                .ok_or(VerifyError::InvalidFunction(fid))?;
+                            let external_owner = (f.register_types.len() as u32)
+                                .saturating_add(register)
+                                .saturating_add(
+                                    (leaf as u32).saturating_mul(f.register_types.len() as u32 + 1),
+                                );
+                            // The source leaf may have been moved out of its entry
+                            // aggregate and sealed into the handler/body environment.
+                            // Loan place identity is stable across those transports,
+                            // unlike the current register and carrier path.
+                            let mut loan = loans
+                                .iter()
+                                .flatten()
+                                .find(|loan| {
+                                    loan.loan.place.owner == external_owner
+                                        && loan.loan.place.projections.is_empty()
+                                })
+                                .cloned()
+                                .ok_or(VerifyError::InvalidFunction(fid))?;
+                            loan.path = result_path;
+                            Ok(loan)
+                        })
+                        .collect::<Result<Vec<_>, VerifyError>>()?
+                } else if result_has_references {
                     std::iter::once(handler)
                         .chain(std::iter::once(body))
                         .chain(args.iter())
@@ -8629,6 +11164,33 @@ fn verify_loans(
                     .filter(|payload| !loans[**payload as usize].is_empty());
                 let carried = if result_leaves.is_empty() {
                     Vec::new()
+                } else if let Some(contract) = declared_carrier_contract(a, fid)? {
+                    contract
+                        .into_iter()
+                        .map(|(result_path, origin)| {
+                            let source_path = match origin {
+                                CarrierOrigin::Parameter { path, .. }
+                                | CarrierOrigin::Receiver { path } => path,
+                                CarrierOrigin::Local => {
+                                    return Err(VerifyError::InvalidFunction(fid));
+                                }
+                            };
+                            let mut matches = payloads.iter().flat_map(|payload| {
+                                loans[*payload as usize]
+                                    .iter()
+                                    .filter(|loan| source_path.ends_with(&loan.path))
+                            });
+                            let mut loan = matches
+                                .next()
+                                .cloned()
+                                .ok_or(VerifyError::InvalidFunction(fid))?;
+                            if matches.next().is_some() {
+                                return Err(VerifyError::InvalidFunction(fid));
+                            }
+                            loan.path = result_path;
+                            Ok(loan)
+                        })
+                        .collect::<Result<Vec<_>, VerifyError>>()?
                 } else {
                     let payload = carriers.next().ok_or(VerifyError::InvalidFunction(fid))?;
                     if carriers.next().is_some() {
@@ -8663,6 +11225,11 @@ fn verify_loans(
                 if is_suspended(*receiver, &loans) {
                     return Err(conflict(*receiver));
                 }
+                ensure_tail_loan_owners_survive(
+                    &loans,
+                    std::iter::once(*receiver).chain(args.iter().copied()),
+                    fid,
+                )?;
                 for &register in args {
                     consume_owner(&loans, register)?;
                     end_reference(&mut loans, register)?;
@@ -8677,10 +11244,19 @@ fn verify_loans(
                     return Err(conflict(*src));
                 }
                 let mut projected = Vec::new();
+                let enum_variants = match type_at(a, f.register_types[*src as usize])? {
+                    Type::Enum { variants, .. } => u32::try_from(variants.len()).ok(),
+                    _ => None,
+                };
                 loans[*src as usize].retain(|loan| {
-                    if loan.path.first() == Some(field) {
+                    let enum_match = enum_variants.is_some_and(|count| {
+                        loan.path.len() >= 2
+                            && u32::MAX - loan.path[0] < count
+                            && loan.path[1] == *field
+                    });
+                    if enum_match || loan.path.first() == Some(field) {
                         let mut loan = loan.clone();
-                        loan.path.remove(0);
+                        loan.path.drain(..if enum_match { 2 } else { 1 });
                         projected.push(loan);
                         false
                     } else {
@@ -8688,6 +11264,7 @@ fn verify_loans(
                     }
                 });
                 projected.sort_by(|left, right| left.path.cmp(&right.path));
+                projected.dedup();
                 loans[*dst as usize] = projected;
             }
             Instruction::ProjectCopy { dst, src, field } => {
@@ -8698,12 +11275,28 @@ fn verify_loans(
                 if conflicts(&place, false, None, &loans) {
                     return Err(conflict(*src));
                 }
+                let enum_variants = match type_at(a, f.register_types[*src as usize])? {
+                    Type::Enum { variants, .. } => u32::try_from(variants.len()).ok(),
+                    _ => None,
+                };
                 let mut projected = loans[*src as usize]
                     .iter()
-                    .filter(|loan| loan.path.first() == Some(field))
+                    .filter(|loan| {
+                        loan.path.first() == Some(field)
+                            || enum_variants.is_some_and(|count| {
+                                loan.path.len() >= 2
+                                    && u32::MAX - loan.path[0] < count
+                                    && loan.path[1] == *field
+                            })
+                    })
                     .cloned()
                     .map(|mut loan| {
-                        loan.path.remove(0);
+                        let enum_match = enum_variants.is_some_and(|count| {
+                            loan.path.len() >= 2
+                                && u32::MAX - loan.path[0] < count
+                                && loan.path[1] == *field
+                        });
+                        loan.path.drain(..if enum_match { 2 } else { 1 });
                         loan
                     })
                     .collect::<Vec<_>>();
@@ -8741,6 +11334,7 @@ fn verify_loans(
                     return Err(conflict(*src));
                 }
                 projected.sort_by(|left, right| left.path.cmp(&right.path));
+                projected.dedup();
                 loans[*dst as usize] = projected;
             }
             Instruction::Switch { discr: src, .. } => {
@@ -9017,16 +11611,44 @@ fn verify_loans(
                 let result_leaves = dst.map_or_else(Vec::new, |dst| {
                     reference_leaves(a, f.register_types[dst as usize])
                 });
-                let callee_has_multi_leaf_parameter = a.functions[*function as usize]
+                let callee = a
+                    .functions
+                    .get(*function as usize)
+                    .ok_or(VerifyError::InvalidFunction(*function))?;
+                let call_returns = function_may_return(a, *function);
+                let callee_has_multi_leaf_parameter = callee
                     .params
                     .iter()
                     .any(|ty| reference_leaves(a, *ty).len() > 1);
+                let callee_has_aggregate_result_contract = !result_leaves.is_empty()
+                    && (declared_carrier_contract(a, *function)?.is_some()
+                        || !matches!(
+                            type_at(a, callee.return_type)?,
+                            Type::RefShared { .. } | Type::RefUnique { .. }
+                        ));
                 let array_contract = (!result_leaves.is_empty())
                     .then(|| aggregate_reference_return_origins(a, *function, &mut Vec::new()))
                     .and_then(Result::ok)
                     .filter(|contract| {
                         contract.iter().any(|(_, origin)| {
-                            matches!(origin, CarrierOrigin::Parameter { path, .. } if split_array_slot_path(path).is_some())
+                            let CarrierOrigin::Parameter { parameter, path } = origin else {
+                                return false;
+                            };
+                            let Some(parameter_type) = callee.params.get(*parameter).copied()
+                            else {
+                                return false;
+                            };
+                            let parameter_type = type_at(a, parameter_type).ok();
+                            let array_carrier = match parameter_type {
+                                Some(Type::Array { .. }) => true,
+                                Some(
+                                    Type::RefShared { referent } | Type::RefUnique { referent },
+                                ) => {
+                                    matches!(type_at(a, *referent), Ok(Type::Array { .. }))
+                                }
+                                _ => false,
+                            };
+                            array_carrier && split_array_slot_path(path).is_some()
                         })
                     });
                 let mut returned_loans = if let Some(contract) = array_contract {
@@ -9097,11 +11719,19 @@ fn verify_loans(
                     }
                     returned.sort_by(|left, right| left.path.cmp(&right.path));
                     returned
-                } else if result_leaves.len() > 1
+                } else if callee_has_aggregate_result_contract
+                    || result_leaves.len() > 1
                     || (!result_leaves.is_empty() && callee_has_multi_leaf_parameter)
                 {
-                    let contract =
-                        aggregate_reference_return_origins(a, *function, &mut Vec::new())?;
+                    // Declared routes are separately checked against the callee
+                    // body by `verify_function`.  At a call site, instantiate
+                    // that validated symbolic contract in the caller's live-loan
+                    // state instead of re-running recursive fixed-point inference
+                    // without its provisional context.
+                    let contract = match declared_carrier_contract(a, *function)? {
+                        Some(contract) => contract,
+                        None => aggregate_reference_return_origins(a, *function, &mut Vec::new())?,
+                    };
                     let mut returned = Vec::new();
                     for (result_path, origin) in contract {
                         let CarrierOrigin::Parameter { parameter, path } = origin else {
@@ -9120,7 +11750,8 @@ fn verify_loans(
                     }
                     returned.sort_by(|left, right| left.path.cmp(&right.path));
                     returned
-                } else if let Some(dst) = dst
+                } else if call_returns
+                    && let Some(dst) = dst
                     && single_reference_leaf(a, f.register_types[*dst as usize]).is_some()
                 {
                     let Some(ReferenceOrigin::Parameter(parameter)) =
@@ -9278,8 +11909,29 @@ fn verify_loans(
                                 .cloned()
                                 .map(|loan| vec![loan])
                                 .ok_or(VerifyError::InvalidFunction(fid))?,
-                            Some(ReferenceOrigin::Receiver) => loans[*callable as usize].clone(),
+                            Some(ReferenceOrigin::Receiver)
+                                if !loans[*callable as usize].is_empty() =>
+                            {
+                                loans[*callable as usize].clone()
+                            }
+                            Some(ReferenceOrigin::Receiver) if *receiver_mode != 2 => {
+                                let [(path, unique)] = result_leaves.as_slice() else {
+                                    return Err(VerifyError::InvalidFunction(fid));
+                                };
+                                vec![CarrierLoan {
+                                    path: path.clone(),
+                                    loan: Loan {
+                                        place: whole(*callable),
+                                        unique: *unique,
+                                        suspended_parent: Some(*callable),
+                                        referent_initialized: true,
+                                    },
+                                }]
+                            }
                             Some(ReferenceOrigin::Local) | None => {
+                                return Err(VerifyError::InvalidFunction(fid));
+                            }
+                            Some(ReferenceOrigin::Receiver) => {
                                 return Err(VerifyError::InvalidFunction(fid));
                             }
                         }
@@ -9297,6 +11949,46 @@ fn verify_loans(
                     {
                         return Err(conflict(*callable));
                     }
+                    if unique {
+                        // A unique callable receiver is a per-invocation
+                        // reborrow of each unique reference leaf sealed into
+                        // its environment. The callable register itself is a
+                        // carrier, not the referent, so checking only its
+                        // register place would miss a reference returned by a
+                        // preceding call into the same captured owner.
+                        for captured in loans[*callable as usize]
+                            .iter()
+                            .filter(|captured| captured.loan.unique)
+                        {
+                            let overlaps_external = loans
+                                .iter()
+                                .enumerate()
+                                .filter(|(carrier, _)| {
+                                    *carrier != *callable as usize
+                                        && Some(*carrier as u32) != captured.loan.suspended_parent
+                                })
+                                .flat_map(|(_, carried)| carried)
+                                .any(|loan| {
+                                    places_overlap(&captured.loan.place, &loan.loan.place)
+                                        && (captured.loan.unique || loan.loan.unique)
+                                });
+                            if overlaps_external {
+                                return Err(conflict(*callable));
+                            }
+                        }
+                        // A reference returned from the environment keeps the
+                        // per-call reborrow live. Ending that result removes
+                        // the dynamic parent edge and permits the next call;
+                        // moving or invoking the callable sooner is rejected.
+                        for returned in &mut returned_loans {
+                            if loans[*callable as usize].iter().any(|captured| {
+                                captured.loan.unique
+                                    && places_overlap(&captured.loan.place, &returned.loan.place)
+                            }) {
+                                returned.loan.suspended_parent = Some(*callable);
+                            }
+                        }
+                    }
                 }
                 for &register in args {
                     consume_owner(&loans, register)?;
@@ -9313,6 +12005,7 @@ fn verify_loans(
                 }
             }
             Instruction::TailCall { args, .. } => {
+                ensure_tail_loan_owners_survive(&loans, args.iter().copied(), fid)?;
                 for &register in args {
                     consume_owner(&loans, register)?;
                     end_reference(&mut loans, register)?;
@@ -9322,6 +12015,11 @@ fn verify_loans(
                 if is_suspended(0, &loans) {
                     return Err(conflict(0));
                 }
+                ensure_tail_loan_owners_survive(
+                    &loans,
+                    std::iter::once(0).chain(args.iter().copied()),
+                    fid,
+                )?;
                 consume_owner(&loans, 0)?;
                 end_reference(&mut loans, 0)?;
                 for &register in args {
@@ -9330,6 +12028,11 @@ fn verify_loans(
                 }
             }
             Instruction::TailCallIndirect { callable, args, .. } => {
+                ensure_tail_loan_owners_survive(
+                    &loans,
+                    std::iter::once(*callable).chain(args.iter().copied()),
+                    fid,
+                )?;
                 consume_owner(&loans, *callable)?;
                 end_reference(&mut loans, *callable)?;
                 for &register in args {
@@ -9379,32 +12082,36 @@ fn verify_loans(
             | Instruction::Unreachable
             | Instruction::Abort { .. } => {}
         }
-        let successors: Vec<u32> = match instruction {
-            Instruction::Jump { target } => vec![*target],
-            Instruction::Leave { slot, .. } => vec![
-                label_states[pc as usize]
+        let successors: Vec<u32> = if instruction_is_nonreturning_call(a, fid, instruction) {
+            vec![]
+        } else {
+            match instruction {
+                Instruction::Jump { target } => vec![*target],
+                Instruction::Leave { slot, .. } => vec![
+                    label_states[pc as usize]
+                        .iter()
+                        .rfind(|entry| entry.slot == *slot)
+                        .ok_or(VerifyError::InvalidFunction(fid))?
+                        .target,
+                ],
+                Instruction::Switch {
+                    cases, otherwise, ..
+                } => cases
                     .iter()
-                    .rfind(|entry| entry.slot == *slot)
-                    .ok_or(VerifyError::InvalidFunction(fid))?
-                    .target,
-            ],
-            Instruction::Switch {
-                cases, otherwise, ..
-            } => cases
-                .iter()
-                .map(|case| case.1)
-                .chain(std::iter::once(*otherwise))
-                .collect(),
-            Instruction::Return { .. }
-            | Instruction::TailCall { .. }
-            | Instruction::TailCallSelf { .. }
-            | Instruction::TailCallKnownReceiver { .. }
-            | Instruction::TailCallIndirect { .. }
-            | Instruction::TailResume { .. }
-            | Instruction::Perform { dst: None, .. }
-            | Instruction::Unreachable
-            | Instruction::Abort { .. } => vec![],
-            _ => vec![pc + 1],
+                    .map(|case| case.1)
+                    .chain(std::iter::once(*otherwise))
+                    .collect(),
+                Instruction::Return { .. }
+                | Instruction::TailCall { .. }
+                | Instruction::TailCallSelf { .. }
+                | Instruction::TailCallKnownReceiver { .. }
+                | Instruction::TailCallIndirect { .. }
+                | Instruction::TailResume { .. }
+                | Instruction::Perform { dst: None, .. }
+                | Instruction::Unreachable
+                | Instruction::Abort { .. } => vec![],
+                _ => vec![pc + 1],
+            }
         };
         for successor in successors {
             match &mut states[successor as usize] {
@@ -9414,12 +12121,28 @@ fn verify_loans(
                         if old[register] == loans[register] {
                             continue;
                         }
+                        if !live_registers[successor as usize][register] {
+                            if !old[register].is_empty() {
+                                old[register].clear();
+                                changed = true;
+                            }
+                            continue;
+                        }
                         if !old[register].is_empty() && loans[register].is_empty() {
                             continue;
                         }
                         if old[register].is_empty() && !loans[register].is_empty() {
                             old[register] = loans[register].clone();
                             changed = true;
+                            continue;
+                        }
+                        if let Some(merged) = merge_exclusive_enum_carrier_loans(
+                            a,
+                            f.register_types[register],
+                            &mut old[register],
+                            &loans[register],
+                        ) {
+                            changed |= merged;
                             continue;
                         }
                         return Err(VerifyError::StateMismatch {
@@ -10623,9 +13346,32 @@ fn transfer(
                     instruction: pc,
                 },
             )?;
+            let projected_descriptor = type_at(a, projected)?;
+            let flattened = match projected_descriptor {
+                Type::RefShared { referent } => Some((*referent, false)),
+                Type::RefUnique { referent } => Some((*referent, true)),
+                _ => None,
+            };
+            let same_runtime_type = |referent: TypeId| {
+                type_at(a, referent).is_ok_and(|referent_ty| {
+                    referent_ty.representation() == projected_descriptor.representation()
+                })
+            };
             let valid = match type_at(a, f.register_types[*dst as usize])? {
-                Type::RefShared { referent } => !unique && *referent == projected,
-                Type::RefUnique { referent } => unique && *referent == projected,
+                Type::RefShared { referent } => {
+                    !unique
+                        && (*referent == projected
+                            || same_runtime_type(*referent)
+                            || flattened.is_some_and(|(inner, _)| *referent == inner))
+                }
+                Type::RefUnique { referent } => {
+                    unique
+                        && (*referent == projected
+                            || same_runtime_type(*referent)
+                            || flattened.is_some_and(|(inner, captured_unique)| {
+                                captured_unique && *referent == inner
+                            }))
+                }
                 _ => false,
             };
             if !valid {
@@ -10639,10 +13385,14 @@ fn transfer(
         }
         Instruction::EnumTag { dst, src } => {
             read(s, *src)?;
-            if !matches!(
-                type_at(a, f.register_types[*src as usize])?,
-                Type::Enum { .. }
-            ) {
+            let source = type_at(a, f.register_types[*src as usize])?;
+            let source = match source {
+                Type::RefShared { referent } | Type::RefUnique { referent } => {
+                    type_at(a, *referent)?
+                }
+                source => source,
+            };
+            if !matches!(source, Type::Enum { .. }) {
                 return Err(VerifyError::InvalidAggregate {
                     function: fid,
                     instruction: pc,
@@ -11283,10 +14033,15 @@ fn projected_type_at(
 ) -> Option<TypeId> {
     let source_ty = f.register_types[source as usize];
     let (base_ty, variant_register) = match a.types.get(source_ty as usize)?.representation() {
-        Type::RefShared { referent } | Type::RefUnique { referent } => (
-            *referent,
-            loans.get(source as usize)?.first()?.loan.place.owner,
-        ),
+        Type::RefShared { referent } | Type::RefUnique { referent } => {
+            let owner = loans.get(source as usize)?.first()?.loan.place.owner;
+            let proof_register = enum_variants
+                .get(source as usize)
+                .copied()
+                .flatten()
+                .map_or(owner, |_| source);
+            (*referent, proof_register)
+        }
         _ => (source_ty, source),
     };
     let variant = matches!(
@@ -11780,8 +14535,21 @@ fn function_body_has_effect(
     function: u32,
     _visiting: &mut Vec<u32>,
     operation_has_effect: fn(&Artifact, u32, u32) -> bool,
-    signature_has_effect: fn(&Artifact, &Signature) -> bool,
+    _signature_has_effect: fn(&Artifact, &Signature) -> bool,
 ) -> bool {
+    let signature_effects = |signature: &Signature| {
+        signature
+            .outward_protocols
+            .iter()
+            .flat_map(|protocol| {
+                let operations = a
+                    .protocols
+                    .get(*protocol as usize)
+                    .map_or(0, |descriptor| descriptor.operations.len());
+                (0..operations as u32).map(move |operation| (*protocol, operation))
+            })
+            .collect::<BTreeSet<_>>()
+    };
     let dynamic_targets = a
         .functions
         .iter()
@@ -11791,92 +14559,177 @@ fn function_body_has_effect(
             callable_targets_at_pcs(a, fid as u32, descriptor, &labels).ok()
         })
         .collect::<Vec<_>>();
-    let mut summaries = vec![false; a.functions.len()];
+    let mut summaries = vec![BTreeSet::<(u32, u32)>::new(); a.functions.len()];
     loop {
         let mut changed = false;
         for (fid, descriptor) in a.functions.iter().enumerate() {
-            if summaries[fid] {
+            let mut inferred = BTreeSet::new();
+            let Ok(code) = function_code(a, descriptor) else {
+                inferred.extend(descriptor.outward_protocols.iter().flat_map(|protocol| {
+                    let operations = a
+                        .protocols
+                        .get(*protocol as usize)
+                        .map_or(0, |descriptor| descriptor.operations.len());
+                    (0..operations as u32).map(move |operation| (*protocol, operation))
+                }));
+                if inferred != summaries[fid] {
+                    summaries[fid] = inferred;
+                    changed = true;
+                }
                 continue;
-            }
-            let effect = function_code(a, descriptor).is_err()
-                || function_code(a, descriptor).is_ok_and(|code| {
-                    code.iter()
-                        .enumerate()
-                        .any(|(pc, instruction)| match instruction {
-                            Instruction::Perform {
-                                protocol: protocol_id,
-                                operation,
-                                ..
-                            } => operation_has_effect(a, *protocol_id, *operation),
-                            Instruction::Call { function, .. }
-                            | Instruction::TailCall { function, .. }
-                            | Instruction::CallKnownReceiver { function, .. }
-                            | Instruction::TailCallKnownReceiver { function, .. } => {
-                                summaries.get(*function as usize).copied().unwrap_or(true)
-                            }
-                            Instruction::CallIndirect { callable, .. }
-                            | Instruction::TailCallIndirect { callable, .. } => dynamic_targets
-                                [fid]
-                                .as_ref()
-                                .and_then(|at_pcs| at_pcs.get(pc))
-                                .and_then(|registers| registers.get(*callable as usize))
-                                .filter(|targets| !targets.is_empty())
-                                .map_or_else(
-                                    || {
-                                        descriptor
-                                            .register_types
-                                            .get(*callable as usize)
-                                            .and_then(|ty| type_at(a, *ty).ok())
-                                            .is_none_or(|ty| {
-                                                let Type::Callable { signature, .. } = ty else {
-                                                    return true;
-                                                };
-                                                // An externally supplied callable may inhabit the
-                                                // same type, so its declared signature remains the
-                                                // conservative upper bound.
-                                                signature_has_effect(a, signature)
-                                            })
-                                    },
-                                    |targets| {
-                                        targets.iter().any(|target| {
-                                            summaries.get(*target as usize).copied().unwrap_or(true)
+            };
+            for (pc, instruction) in code.iter().enumerate() {
+                match instruction {
+                    Instruction::Perform {
+                        protocol: protocol_id,
+                        operation,
+                        ..
+                    } => {
+                        inferred.insert((*protocol_id, *operation));
+                    }
+                    Instruction::Call { function, .. }
+                    | Instruction::TailCall { function, .. }
+                    | Instruction::CallKnownReceiver { function, .. }
+                    | Instruction::TailCallKnownReceiver { function, .. } => {
+                        if let Some(summary) = summaries.get(*function as usize) {
+                            inferred.extend(summary);
+                        } else {
+                            inferred.extend(signature_effects(&Signature {
+                                params: vec![],
+                                result: UNIT,
+                                outward_protocols: descriptor.outward_protocols.clone(),
+                            }));
+                        }
+                    }
+                    Instruction::CallIndirect { callable, .. }
+                    | Instruction::TailCallIndirect { callable, .. } => dynamic_targets[fid]
+                        .as_ref()
+                        .and_then(|at_pcs| at_pcs.get(pc))
+                        .and_then(|registers| registers.get(*callable as usize))
+                        .filter(|targets| !targets.is_empty())
+                        .map_or_else(
+                            || {
+                                descriptor
+                                    .register_types
+                                    .get(*callable as usize)
+                                    .and_then(|ty| type_at(a, *ty).ok())
+                                    .and_then(|ty| {
+                                        let Type::Callable { signature, .. } = ty else {
+                                            return None;
+                                        };
+                                        Some(signature_effects(signature))
+                                    })
+                                    .unwrap_or_else(|| {
+                                        signature_effects(&Signature {
+                                            params: vec![],
+                                            result: UNIT,
+                                            outward_protocols: descriptor.outward_protocols.clone(),
                                         })
-                                    },
-                                ),
-                            Instruction::Handle { body, .. } => descriptor
-                                .register_types
-                                .get(*body as usize)
-                                .and_then(|ty| type_at(a, *ty).ok())
-                                .is_none_or(|ty| {
-                                    let Type::Callable { signature, .. } = ty else {
-                                        return true;
-                                    };
-                                    signature_has_effect(a, signature)
-                                }),
-                            Instruction::Resume { resumption, .. }
-                            | Instruction::TailResume { resumption, .. } => descriptor
-                                .register_types
-                                .get(*resumption as usize)
-                                .and_then(|ty| type_at(a, *ty).ok())
-                                .is_none_or(|ty| {
-                                    let Type::Resumption {
-                                        effect_signature, ..
-                                    } = ty
-                                    else {
-                                        return true;
-                                    };
-                                    signature_has_effect(a, effect_signature)
-                                }),
-                            _ => false,
+                                    })
+                            },
+                            |targets| {
+                                targets
+                                    .iter()
+                                    .filter_map(|target| summaries.get(*target as usize))
+                                    .flatten()
+                                    .copied()
+                                    .collect()
+                            },
+                        )
+                        .into_iter()
+                        .for_each(|effect| {
+                            inferred.insert(effect);
+                        }),
+                    Instruction::Handle { handler, body, .. } => {
+                        let mut body_effects = dynamic_targets[fid]
+                            .as_ref()
+                            .and_then(|at_pcs| at_pcs.get(pc))
+                            .and_then(|registers| registers.get(*body as usize))
+                            .filter(|targets| !targets.is_empty())
+                            .map(|targets| {
+                                targets
+                                    .iter()
+                                    .filter_map(|target| summaries.get(*target as usize))
+                                    .flatten()
+                                    .copied()
+                                    .collect::<BTreeSet<_>>()
+                            })
+                            .or_else(|| {
+                                descriptor
+                                    .register_types
+                                    .get(*body as usize)
+                                    .and_then(|ty| type_at(a, *ty).ok())
+                                    .and_then(|ty| {
+                                        let Type::Callable { signature, .. } = ty else {
+                                            return None;
+                                        };
+                                        Some(signature_effects(signature))
+                                    })
+                            })
+                            .unwrap_or_else(|| {
+                                signature_effects(&Signature {
+                                    params: vec![],
+                                    result: UNIT,
+                                    outward_protocols: descriptor.outward_protocols.clone(),
+                                })
+                            });
+                        if let Some(handler_def) = descriptor
+                            .register_types
+                            .get(*handler as usize)
+                            .and_then(|ty| type_at(a, *ty).ok())
+                            .and_then(|ty| {
+                                let Type::Handler { handler_def, .. } = ty else {
+                                    return None;
+                                };
+                                a.handler_defs.get(*handler_def as usize)
+                            })
+                        {
+                            for clause in &handler_def.clauses {
+                                body_effects.remove(&(clause.protocol, clause.operation));
+                                inferred.extend(signature_effects(&clause.callable_signature));
+                            }
+                        }
+                        inferred.extend(body_effects);
+                    }
+                    Instruction::Resume { resumption, .. }
+                    | Instruction::TailResume { resumption, .. } => descriptor
+                        .register_types
+                        .get(*resumption as usize)
+                        .and_then(|ty| type_at(a, *ty).ok())
+                        .and_then(|ty| {
+                            let Type::Resumption {
+                                effect_signature, ..
+                            } = ty
+                            else {
+                                return None;
+                            };
+                            Some(signature_effects(effect_signature))
                         })
-                });
-            if effect {
-                summaries[fid] = true;
+                        .unwrap_or_else(|| {
+                            signature_effects(&Signature {
+                                params: vec![],
+                                result: UNIT,
+                                outward_protocols: descriptor.outward_protocols.clone(),
+                            })
+                        })
+                        .into_iter()
+                        .for_each(|effect| {
+                            inferred.insert(effect);
+                        }),
+                    _ => {}
+                }
+            }
+            if inferred != summaries[fid] {
+                summaries[fid] = inferred;
                 changed = true;
             }
         }
         if !changed {
-            return summaries.get(function as usize).copied().unwrap_or(true);
+            return summaries.get(function as usize).is_none_or(|effects| {
+                effects
+                    .iter()
+                    .any(|(protocol, operation)| operation_has_effect(a, *protocol, *operation))
+            });
         }
     }
 }
@@ -11904,6 +14757,23 @@ fn continuation_live_registers(
     a: &Artifact,
     function: &Function,
     label_states: &[Vec<LabelEntry>],
+) -> Result<Vec<Vec<bool>>, VerifyError> {
+    register_live_registers(a, function, label_states, false)
+}
+
+fn loan_live_registers(
+    a: &Artifact,
+    function: &Function,
+    label_states: &[Vec<LabelEntry>],
+) -> Result<Vec<Vec<bool>>, VerifyError> {
+    register_live_registers(a, function, label_states, false)
+}
+
+fn register_live_registers(
+    a: &Artifact,
+    function: &Function,
+    label_states: &[Vec<LabelEntry>],
+    ignore_ending_uses: bool,
 ) -> Result<Vec<Vec<bool>>, VerifyError> {
     let len = function.code_len as usize;
     let registers = function.register_types.len();
@@ -11960,8 +14830,15 @@ fn continuation_live_registers(
                     .result_register;
                 next[result as usize] = false;
             }
-            for used in instruction_register_uses(instruction) {
-                next[used as usize] = true;
+            if !(ignore_ending_uses
+                && matches!(
+                    instruction,
+                    Instruction::Drop { .. } | Instruction::EndBorrow { .. }
+                ))
+            {
+                for used in instruction_register_uses(instruction) {
+                    next[used as usize] = true;
+                }
             }
             if live_in[pc] != next {
                 live_in[pc] = next;
@@ -12606,6 +15483,52 @@ fn constant_type(a: &Artifact, c: &Constant) -> Result<TypeId, VerifyError> {
 mod tests {
     use super::*;
     use crate::bytecode::*;
+
+    #[test]
+    fn continuation_register_sets_roundtrip_sparse_large_frame_indices_compactly() {
+        let registers = [0, 1, 2, 127, 128, 16_384, u32::MAX];
+        let encoded = CompactRegisterSet::from_sorted(registers);
+        let decoded = CompactRegisterIter {
+            bytes: &encoded.deltas,
+            offset: 0,
+            previous: None,
+        }
+        .collect::<Vec<_>>();
+        assert_eq!(decoded, registers);
+        assert!(
+            encoded.deltas.len() < registers.len() * size_of::<u32>(),
+            "delta encoding should be smaller than a full-width sparse list"
+        );
+    }
+
+    #[test]
+    fn cancellation_capture_plan_prunes_only_unobservable_zero_use_dead_values() {
+        let mut artifact = base(
+            vec![Instruction::Return { src: Some(1) }],
+            vec![UNIT, I64, 19],
+        );
+        artifact.types.push(
+            Type::Tuple {
+                fields: vec![I64],
+                copy: false,
+            }
+            .restricted(false, false),
+        );
+        let registers = cancellation_capture_registers(
+            &artifact,
+            &artifact.functions[0],
+            &[false, true, false],
+        )
+        .deltas;
+        let retained = CompactRegisterIter {
+            bytes: &registers,
+            offset: 0,
+            previous: None,
+        }
+        .collect::<Vec<_>>();
+        assert_eq!(retained, [1, 2]);
+    }
+
     fn verify(artifact: Artifact) -> Result<VerifiedArtifact, VerifyError> {
         if artifact.cleanups.is_empty() && !artifact.functions.is_empty() {
             return with_generated_cleanup_plans(artifact).and_then(super::verify);
@@ -12622,6 +15545,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "main".into(),
@@ -12637,6 +15561,36 @@ mod tests {
             code,
             required_features: 1,
             entry_function: None,
+        }
+    }
+
+    #[test]
+    fn verifier_rejects_forged_float_bit_width_pairs() {
+        for (constant, source, result, op) in [
+            (Constant::F32(1.0), F32, U64, Primitive::FloatToBits),
+            (Constant::U32(0), U32, F64, Primitive::FloatFromBits),
+        ] {
+            let mut artifact = base(
+                vec![
+                    Instruction::Const {
+                        dst: 1,
+                        constant: 0,
+                    },
+                    Instruction::Primitive {
+                        dst: 2,
+                        op,
+                        args: vec![1],
+                    },
+                    Instruction::Return { src: Some(2) },
+                ],
+                vec![UNIT, source, result],
+            );
+            artifact.constants = vec![constant];
+            artifact.functions[0].return_type = result;
+            assert!(
+                verify(artifact).is_err(),
+                "forged {op:?} signature was accepted"
+            );
         }
     }
 
@@ -12680,7 +15634,7 @@ mod tests {
     }
 
     #[test]
-    fn verified_runtime_indexes_are_compact_and_freeze_spare_code_capacity() {
+    fn verified_runtime_indexes_are_compact_and_materialize_compatibility_lazily() {
         assert_eq!(
             std::mem::size_of::<VerifiedPc>(),
             2 * std::mem::size_of::<u32>()
@@ -12695,13 +15649,201 @@ mod tests {
         artifact.functions.reserve(1024);
         assert!(artifact.code.capacity() > artifact.code.len());
         let verified = verify(artifact).unwrap();
+        assert!(!verified.compatibility_artifact_is_materialized());
+        assert_eq!(verified.image.code.len(), 1);
+        assert_eq!(verified.image.functions.len(), 1);
+        assert!(
+            verified.image.code.storage_bytes() < std::mem::size_of::<Instruction>(),
+            "one packed zero-operand instruction must be smaller than the public enum"
+        );
+
+        let compatibility = verified.artifact();
+        assert!(verified.compatibility_artifact_is_materialized());
+        assert_eq!(compatibility.code.capacity(), compatibility.code.len());
         assert_eq!(
-            verified.artifact().code.capacity(),
-            verified.artifact().code.len()
+            compatibility.functions.capacity(),
+            compatibility.functions.len()
+        );
+    }
+
+    #[test]
+    fn encoded_loader_keeps_text_and_blob_payloads_in_one_wire_allocation() {
+        let text = "wire-backed text payload".repeat(256);
+        let bytes = vec![0xa5; 16 * 1024];
+        let artifact = Artifact {
+            constants: vec![Constant::Text(text.clone()), Constant::Bytes(bytes.clone())],
+            ..Artifact::default()
+        };
+        let encoded = artifact.encode();
+        let verified = load_verified(&encoded).expect("canonical encoded constants must load");
+
+        assert!(!verified.compatibility_artifact_is_materialized());
+        assert!(verified.image.encoded.is_some());
+        assert!(matches!(
+            &verified.image.constants[0],
+            Constant::Text(value) if value.is_empty() && value.capacity() == 0
+        ));
+        assert!(matches!(
+            &verified.image.constants[1],
+            Constant::Bytes(value) if value.is_empty() && value.capacity() == 0
+        ));
+        assert_eq!(
+            verified.image.constant(ImageConstantId(0)),
+            ImageConstant::Text(text.as_str())
         );
         assert_eq!(
-            verified.artifact().functions.capacity(),
-            verified.artifact().functions.len()
+            verified.image.constant(ImageConstantId(1)),
+            ImageConstant::Bytes(bytes.as_slice())
+        );
+
+        let compatibility = verified.artifact();
+        assert_eq!(compatibility.constants[0], Constant::Text(text));
+        assert_eq!(compatibility.constants[1], Constant::Bytes(bytes));
+    }
+
+    #[test]
+    fn encoded_loader_releases_descriptor_and_abort_string_allocations() {
+        let message = "wire-backed abort detail".repeat(64);
+        let mut artifact = Artifact {
+            types: {
+                let mut types = Type::predefined();
+                types.push(Type::Struct {
+                    name: "NamedPayload".into(),
+                    fields: vec![Field {
+                        name: "value".into(),
+                        ty: UNIT,
+                    }],
+                    copy: true,
+                });
+                types
+            },
+            imports: vec![Import {
+                capability: "diagnostic".into(),
+                symbol: "write".into(),
+                signature: Signature {
+                    params: vec![TEXT],
+                    result: UNIT,
+                    outward_protocols: vec![],
+                },
+                may_trap: true,
+            }],
+            functions: vec![Function {
+                name: "named_abort".into(),
+                flags: 0,
+                params: vec![],
+                return_type: UNIT,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT],
+                code_start: 0,
+                code_len: 1,
+                label_slot_count: 0,
+            }],
+            code: vec![Instruction::Abort {
+                message: Some(message.clone()),
+            }],
+            ..Artifact::default()
+        };
+        artifact.required_features =
+            crate::bytecode::used_features(&artifact.types, &artifact.code, false, true);
+        let encoded = with_generated_cleanup_plans(artifact).unwrap().encode();
+        let verified = load_verified(&encoded).unwrap();
+
+        assert_eq!(verified.image.functions[0].name.capacity(), 0);
+        let Type::Struct { name, fields, .. } = &verified.image.types[Type::predefined().len()]
+        else {
+            panic!("appended descriptor must remain a struct")
+        };
+        assert_eq!(name.capacity(), 0);
+        assert_eq!(fields[0].name.capacity(), 0);
+        assert_eq!(verified.image.imports[0].capability.capacity(), 0);
+        assert_eq!(verified.image.imports[0].symbol.capacity(), 0);
+        let Instruction::Abort {
+            message: Some(stub),
+        } = verified.image.code.instruction(0).unwrap()
+        else {
+            panic!("abort descriptor must remain present")
+        };
+        assert_eq!(stub.capacity(), 0);
+        let import = verified.image.import_id(0).unwrap();
+        assert_eq!(verified.image.import_capability(import), "diagnostic");
+        assert_eq!(verified.image.import_symbol(import), "write");
+
+        let compatibility = verified.artifact();
+        assert_eq!(compatibility.functions[0].name, "named_abort");
+        assert!(matches!(
+            &compatibility.code[0],
+            Instruction::Abort { message: Some(restored) } if restored == &message
+        ));
+    }
+
+    #[test]
+    fn execution_image_ids_are_kind_specific_and_bounds_checked() {
+        let mut artifact = Artifact::default();
+        artifact.constants.push(Constant::Unit);
+        artifact.imports.push(Import {
+            capability: "diagnostic".into(),
+            symbol: "write".into(),
+            signature: Signature {
+                params: vec![TEXT],
+                result: UNIT,
+                outward_protocols: vec![],
+            },
+            may_trap: true,
+        });
+        artifact.protocols.push(Protocol {
+            display_name: "P".into(),
+            type_arguments: vec![],
+            operations: vec![],
+        });
+        artifact.handler_defs.push(HandlerDef {
+            result_type: UNIT,
+            clauses: vec![],
+            partial: true,
+        });
+        let image = ExecutionImage::from_artifact(artifact);
+
+        assert!(image.type_id(1).is_some());
+        assert!(image.constant_id(1).is_none());
+        assert!(image.import_id(1).is_none());
+        assert!(image.protocol_id(1).is_none());
+        assert!(image.handler_def_id(1).is_none());
+
+        assert_eq!(
+            image.constant(image.constant_id(0).unwrap()),
+            ImageConstant::Inline(&Constant::Unit)
+        );
+        assert_eq!(image.import(image.import_id(0).unwrap()).symbol, "write");
+        assert_eq!(
+            image.protocol(image.protocol_id(0).unwrap()).display_name,
+            "P"
+        );
+        assert!(image.handler_def(image.handler_def_id(0).unwrap()).partial);
+
+        for raw in [u32::MAX, 20] {
+            assert!(image.type_id(raw).is_none());
+            assert!(image.constant_id(raw).is_none());
+            assert!(image.import_id(raw).is_none());
+            assert!(image.protocol_id(raw).is_none());
+            assert!(image.handler_def_id(raw).is_none());
+        }
+    }
+
+    #[test]
+    fn verifier_rejects_a_type_id_used_as_a_constant_id() {
+        let artifact = base(
+            vec![
+                Instruction::Const {
+                    dst: 1,
+                    constant: I64,
+                },
+                Instruction::Return { src: Some(1) },
+            ],
+            vec![UNIT, I64],
+        );
+        assert_eq!(
+            verify(artifact).unwrap_err(),
+            VerifyError::InvalidConstant(I64)
         );
     }
 
@@ -12739,6 +15881,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "reference_echo".into(),
@@ -12861,6 +16004,7 @@ mod tests {
                 Constant::I64(42),
                 Constant::I64(99),
             ],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -13132,6 +16276,7 @@ mod tests {
                 clauses: vec![clause(0), clause(1)],
                 partial: false,
             }],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -13326,6 +16471,7 @@ mod tests {
                 }],
                 partial: false,
             }],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "conservative".into(),
@@ -13378,6 +16524,7 @@ mod tests {
         let artifact = Artifact {
             types,
             constants: vec![Constant::I64(2)],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "resume_once".into(),
@@ -14113,6 +17260,7 @@ mod tests {
                     ty: 19,
                     function: 0,
                 }],
+                reference_return_contracts: vec![],
                 functions: vec![
                     Function {
                         flags: DROP_HOOK,
@@ -14354,6 +17502,7 @@ mod tests {
                     ty: 19,
                     function: 0,
                 }],
+                reference_return_contracts: vec![],
                 functions: vec![
                     Function {
                         flags: DROP_HOOK,
@@ -14453,6 +17602,7 @@ mod tests {
         let artifact = Artifact {
             types: Type::predefined(),
             constants: vec![Constant::I64(1)],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -14518,6 +17668,7 @@ mod tests {
         let artifact = Artifact {
             types,
             constants: vec![Constant::I64(1)],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -14576,6 +17727,7 @@ mod tests {
     #[test]
     fn none32_call_destination_accepts_a_never_result() {
         let artifact = Artifact {
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -14627,6 +17779,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "main".into(),
@@ -14679,6 +17832,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "finish".into(),
@@ -14734,6 +17888,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "main".into(),
@@ -14785,6 +17940,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "main".into(),
@@ -14851,6 +18007,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "bad".into(),
@@ -14906,6 +18063,7 @@ mod tests {
         let artifact = |variant, field| Artifact {
             types: types.clone(),
             constants: vec![Constant::I64(42)],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "project".into(),
@@ -14991,6 +18149,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "bad".into(),
@@ -15051,6 +18210,7 @@ mod tests {
         Artifact {
             types,
             constants: vec![Constant::Unit],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "split".into(),
@@ -15120,6 +18280,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "bad".into(),
@@ -15179,6 +18340,7 @@ mod tests {
             cleanups: vec![],
             exports: vec![],
             drop_glue: vec![],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "observe".into(),
@@ -15214,6 +18376,7 @@ mod tests {
         let artifact = Artifact {
             types,
             constants: vec![Constant::I64(1)],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "bad_recursive_relay".into(),
@@ -15252,6 +18415,7 @@ mod tests {
         types.push(Type::RefShared { referent: I64 });
         let artifact = Artifact {
             types,
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -15319,6 +18483,7 @@ mod tests {
         });
         let valid = Artifact {
             types: types.clone(),
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "wrap_parameter".into(),
@@ -15348,6 +18513,7 @@ mod tests {
         let hostile = Artifact {
             types,
             constants: vec![Constant::I64(1)],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "wrap_local".into(),
@@ -15664,6 +18830,7 @@ mod tests {
             required_features: 1 | (1 << 3),
             types,
             constants: vec![],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "cancel".into(),
@@ -15732,6 +18899,7 @@ mod tests {
             required_features: 1 | (1 << 3),
             types: optional_types(),
             protocols: vec![optional_protocol(19)],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "suspend".into(),
@@ -15772,6 +18940,7 @@ mod tests {
             required_features: 1 | (1 << 3),
             types: optional_types(),
             protocols: vec![optional_protocol(19)],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -15845,6 +19014,7 @@ mod tests {
             required_features: 1 | (1 << 3),
             types,
             protocols: vec![optional_protocol(19)],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -16020,6 +19190,7 @@ mod tests {
             types,
             constants: vec![Constant::Unit, Constant::U32(0)],
             protocols: vec![protocol],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -16195,6 +19366,7 @@ mod tests {
                 }],
                 partial: false,
             }],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -16347,6 +19519,7 @@ mod tests {
                 }],
                 partial: true,
             }],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -16514,6 +19687,7 @@ mod tests {
         types.push(Type::RefShared { referent: I64 });
         let artifact = Artifact {
             types,
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "select".into(),
@@ -16762,6 +19936,7 @@ mod tests {
         Artifact {
             types,
             constants: vec![Constant::Unit],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "finite_multishot".into(),
@@ -16780,6 +19955,584 @@ mod tests {
             required_features: 1 | (1 << 3) | (1 << 4),
             ..Artifact::default()
         }
+    }
+
+    fn quantity_array_transport_artifact(pop: bool) -> Artifact {
+        let mut types = Type::predefined();
+        types.extend([
+            Type::Resumption {
+                input_type: I64,
+                output_type: I64,
+                effect_signature: Signature {
+                    params: vec![],
+                    result: UNIT,
+                    outward_protocols: vec![],
+                },
+                lower_uses: 1,
+                upper_uses: Some(1),
+                identity_name: "array quantity".into(),
+                copy: false,
+            },
+            Type::Array { element: 19 },
+            Type::RefUnique { referent: 20 },
+        ]);
+        let mut code = vec![
+            Instruction::Primitive {
+                dst: 3,
+                op: Primitive::ArrayEmpty,
+                args: vec![],
+            },
+            Instruction::BorrowUnique { dst: 4, src: 3 },
+            Instruction::Primitive {
+                dst: 5,
+                op: Primitive::ArrayPushMove,
+                args: vec![4, 1],
+            },
+            Instruction::Drop { register: 5 },
+        ];
+        if pop {
+            code.extend([
+                Instruction::BorrowUnique { dst: 6, src: 3 },
+                Instruction::Primitive {
+                    dst: 7,
+                    op: Primitive::ArrayPopMove,
+                    args: vec![6],
+                },
+                Instruction::Resume {
+                    dst: 8,
+                    resumption: 7,
+                    receiver_mode: 2,
+                    value: 2,
+                },
+                Instruction::Drop { register: 8 },
+            ]);
+        }
+        code.extend([
+            Instruction::Primitive {
+                dst: 9,
+                op: Primitive::ArrayFinishDrained,
+                args: vec![3],
+            },
+            Instruction::Return { src: Some(9) },
+        ]);
+        let mut artifact = Artifact {
+            types,
+            constants: vec![],
+            functions: vec![Function {
+                flags: 0,
+                name: "quantity_array_transport".into(),
+                params: vec![19, I64],
+                return_type: UNIT,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, 19, I64, 20, 21, UNIT, 21, 19, I64, UNIT],
+                code_start: 0,
+                code_len: code.len() as u32,
+                label_slot_count: 0,
+            }],
+            code,
+            ..Artifact::default()
+        };
+        artifact.required_features =
+            crate::bytecode::used_features(&artifact.types, &artifact.code, true, false);
+        artifact
+    }
+
+    #[test]
+    fn dynamic_array_slots_preserve_and_discharge_one_quantity_identity() {
+        verify(quantity_array_transport_artifact(true))
+            .expect("a pushed quantity is the same logical owner after an exact pop");
+        assert!(matches!(
+            verify(quantity_array_transport_artifact(false)),
+            Err(VerifyError::InvalidFunction(0))
+        ));
+    }
+
+    #[test]
+    fn direct_array_summaries_replay_push_and_pop_quantity_identity() {
+        let mut artifact = quantity_array_transport_artifact(true);
+        artifact.code = vec![
+            Instruction::Primitive {
+                dst: 3,
+                op: Primitive::ArrayEmpty,
+                args: vec![],
+            },
+            Instruction::BorrowUnique { dst: 4, src: 3 },
+            Instruction::Call {
+                dst: Some(5),
+                function: 1,
+                args: vec![4, 1],
+            },
+            Instruction::BorrowUnique { dst: 6, src: 3 },
+            Instruction::Call {
+                dst: Some(7),
+                function: 2,
+                args: vec![6],
+            },
+            Instruction::Resume {
+                dst: 8,
+                resumption: 7,
+                receiver_mode: 2,
+                value: 2,
+            },
+            Instruction::Drop { register: 8 },
+            Instruction::Primitive {
+                dst: 9,
+                op: Primitive::ArrayFinishDrained,
+                args: vec![3],
+            },
+            Instruction::Return { src: Some(9) },
+            Instruction::Primitive {
+                dst: 3,
+                op: Primitive::ArrayPushMove,
+                args: vec![1, 2],
+            },
+            Instruction::Return { src: Some(3) },
+            Instruction::Primitive {
+                dst: 2,
+                op: Primitive::ArrayPopMove,
+                args: vec![1],
+            },
+            Instruction::Return { src: Some(2) },
+        ];
+        artifact.functions = vec![
+            Function {
+                flags: 0,
+                name: "array_summary_caller".into(),
+                params: vec![19, I64],
+                return_type: UNIT,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, 19, I64, 20, 21, UNIT, 21, 19, I64, UNIT],
+                code_start: 0,
+                code_len: 9,
+                label_slot_count: 0,
+            },
+            Function {
+                flags: 0,
+                name: "array_summary_push".into(),
+                params: vec![21, 19],
+                return_type: UNIT,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, 21, 19, UNIT],
+                code_start: 9,
+                code_len: 2,
+                label_slot_count: 0,
+            },
+            Function {
+                flags: 0,
+                name: "array_summary_pop".into(),
+                params: vec![21],
+                return_type: 19,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, 21, 19],
+                code_start: 11,
+                code_len: 2,
+                label_slot_count: 0,
+            },
+        ];
+        artifact.required_features =
+            crate::bytecode::used_features(&artifact.types, &artifact.code, true, false);
+
+        verify(artifact.clone())
+            .expect("body-derived array summaries preserve the exact stored owner");
+        let divergent = CallableTargets::from([1, 2]);
+        assert!(canonical_array_quantity_call_summary(&artifact, &divergent).is_none());
+        let mut hostile_host = artifact.clone();
+        hostile_host.imports.push(Import {
+            capability: "hostile-array".into(),
+            symbol: "mutate".into(),
+            signature: Signature {
+                params: vec![21, 19],
+                result: UNIT,
+                outward_protocols: vec![],
+            },
+            may_trap: false,
+        });
+        hostile_host.code[2] = Instruction::HostCall {
+            dst: Some(5),
+            import: 0,
+            args: vec![4, 1],
+        };
+        hostile_host.required_features =
+            crate::bytecode::used_features(&hostile_host.types, &hostile_host.code, false, true);
+        let hostile = verify(hostile_host);
+        assert!(
+            matches!(hostile, Err(VerifyError::InvalidFunction(0))),
+            "{hostile:?}"
+        );
+
+        let mut effectful = artifact.clone();
+        let Type::Resumption {
+            lower_uses,
+            upper_uses,
+            copy,
+            ..
+        } = &mut effectful.types[19]
+        else {
+            unreachable!()
+        };
+        *lower_uses = 2;
+        *upper_uses = Some(2);
+        *copy = true;
+        let pop_start = effectful.functions[2].code_start as usize;
+        effectful.code.splice(
+            pop_start..,
+            [
+                Instruction::Primitive {
+                    dst: 3,
+                    op: Primitive::ArrayPopMove,
+                    args: vec![1],
+                },
+                Instruction::Resume {
+                    dst: 4,
+                    resumption: 3,
+                    receiver_mode: 0,
+                    value: 2,
+                },
+                Instruction::Drop { register: 4 },
+                Instruction::Return { src: Some(3) },
+            ],
+        );
+        effectful.functions[0].register_types.push(I64);
+        effectful
+            .code
+            .insert(4, Instruction::Copy { dst: 10, src: 2 });
+        effectful.functions[0].code_len += 1;
+        effectful.functions[1].code_start += 1;
+        effectful.functions[2].code_start += 1;
+        let Instruction::Call { args, .. } = &mut effectful.code[5] else {
+            unreachable!()
+        };
+        args.push(10);
+        effectful.functions[2].params.push(I64);
+        effectful.functions[2].register_types = vec![UNIT, 21, I64, 19, I64];
+        effectful.functions[2].code_len = 4;
+        effectful.required_features =
+            crate::bytecode::used_features(&effectful.types, &effectful.code, true, false);
+        verify(effectful.clone())
+            .expect("a popped slot may accumulate an exact body-derived resume delta");
+        let Type::Resumption {
+            lower_uses,
+            upper_uses,
+            copy,
+            ..
+        } = &mut effectful.types[19]
+        else {
+            unreachable!()
+        };
+        *lower_uses = 1;
+        *upper_uses = Some(1);
+        *copy = false;
+        effectful.required_features =
+            crate::bytecode::used_features(&effectful.types, &effectful.code, true, false);
+        assert!(matches!(
+            verify(effectful),
+            Err(VerifyError::InvalidFunction(0))
+        ));
+
+        let mut indirect = artifact;
+        indirect.types.push(Type::Callable {
+            signature: Signature {
+                params: vec![21, 19],
+                result: UNIT,
+                outward_protocols: vec![],
+            },
+            capture_type: UNIT,
+            receiver_mode: 2,
+            identity_name: "array summary push callable".into(),
+            copy: false,
+            zero_use_allowed: false,
+        });
+        indirect.functions[0].register_types.push(22);
+        indirect.code.insert(
+            2,
+            Instruction::MakeCallable {
+                dst: 10,
+                callable_type: 22,
+                function: 1,
+                captures: vec![],
+            },
+        );
+        indirect.code[3] = Instruction::CallIndirect {
+            dst: Some(5),
+            callable: 10,
+            receiver_mode: 2,
+            args: vec![4, 1],
+        };
+        indirect.functions[0].code_len += 1;
+        indirect.functions[1].receiver_mode = Some(2);
+        indirect.functions[1].code_start += 1;
+        indirect.functions[2].code_start += 1;
+        indirect.required_features =
+            crate::bytecode::used_features(&indirect.types, &indirect.code, true, false);
+        verify(indirect).expect("a finite indirect producer replays the same exact array summary");
+    }
+
+    #[test]
+    fn direct_effectful_quantity_summary_composes_resume_deltas_and_returned_identity() {
+        let mut types = Type::predefined();
+        types.push(Type::Resumption {
+            input_type: UNIT,
+            output_type: UNIT,
+            effect_signature: Signature {
+                params: vec![],
+                result: UNIT,
+                outward_protocols: vec![],
+            },
+            lower_uses: 2,
+            upper_uses: Some(2),
+            identity_name: "direct effectful quantity".into(),
+            copy: true,
+        });
+        let caller = vec![
+            Instruction::Call {
+                dst: Some(3),
+                function: 1,
+                args: vec![1],
+            },
+            Instruction::Resume {
+                dst: 4,
+                resumption: 3,
+                receiver_mode: 2,
+                value: 2,
+            },
+            Instruction::Drop { register: 4 },
+            Instruction::Const {
+                dst: 5,
+                constant: 0,
+            },
+            Instruction::Return { src: Some(5) },
+        ];
+        let helper = vec![
+            Instruction::Const {
+                dst: 2,
+                constant: 0,
+            },
+            Instruction::Resume {
+                dst: 3,
+                resumption: 1,
+                receiver_mode: 0,
+                value: 2,
+            },
+            Instruction::Drop { register: 3 },
+            Instruction::Return { src: Some(1) },
+        ];
+        let helper_start = caller.len() as u32;
+        let mut code = caller;
+        code.extend(helper);
+        let mut artifact = Artifact {
+            types,
+            constants: vec![Constant::Unit],
+            functions: vec![
+                Function {
+                    flags: 0,
+                    name: "direct_effectful_quantity_caller".into(),
+                    params: vec![19, UNIT],
+                    return_type: UNIT,
+                    outward_protocols: vec![],
+                    receiver_mode: None,
+                    register_types: vec![UNIT, 19, UNIT, 19, UNIT, UNIT],
+                    code_start: 0,
+                    code_len: helper_start,
+                    label_slot_count: 0,
+                },
+                Function {
+                    flags: 0,
+                    name: "direct_effectful_quantity_helper".into(),
+                    params: vec![19],
+                    return_type: 19,
+                    outward_protocols: vec![],
+                    receiver_mode: None,
+                    register_types: vec![UNIT, 19, UNIT, UNIT],
+                    code_start: helper_start,
+                    code_len: 4,
+                    label_slot_count: 0,
+                },
+            ],
+            code,
+            ..Artifact::default()
+        };
+        artifact.required_features =
+            crate::bytecode::used_features(&artifact.types, &artifact.code, true, false);
+
+        verify(artifact.clone()).expect("the caller continues the exact helper-updated quantity");
+
+        let mut forged_bound = artifact;
+        let Type::Resumption {
+            lower_uses,
+            upper_uses,
+            copy,
+            ..
+        } = &mut forged_bound.types[19]
+        else {
+            unreachable!()
+        };
+        *lower_uses = 1;
+        *upper_uses = Some(1);
+        *copy = false;
+        forged_bound.required_features =
+            crate::bytecode::used_features(&forged_bound.types, &forged_bound.code, true, false);
+        let forged = verify(forged_bound);
+        assert!(
+            matches!(forged, Err(VerifyError::InvalidFunction(0))),
+            "{forged:?}"
+        );
+    }
+
+    #[test]
+    fn indirect_effectful_quantity_summary_composes_receiver_resume_deltas() {
+        let mut types = Type::predefined();
+        types.extend([
+            Type::Resumption {
+                input_type: UNIT,
+                output_type: UNIT,
+                effect_signature: Signature {
+                    params: vec![],
+                    result: UNIT,
+                    outward_protocols: vec![],
+                },
+                lower_uses: 2,
+                upper_uses: Some(2),
+                identity_name: "indirect effectful quantity".into(),
+                copy: true,
+            },
+            Type::Tuple {
+                fields: vec![19],
+                copy: false,
+            },
+            Type::Callable {
+                signature: Signature {
+                    params: vec![],
+                    result: 20,
+                    outward_protocols: vec![],
+                },
+                capture_type: 20,
+                receiver_mode: 2,
+                identity_name: "indirect effectful closure".into(),
+                copy: false,
+                zero_use_allowed: false,
+            },
+        ]);
+        let caller = vec![
+            Instruction::MakeCallable {
+                dst: 2,
+                callable_type: 21,
+                function: 1,
+                captures: vec![1],
+            },
+            Instruction::CallIndirect {
+                dst: Some(3),
+                callable: 2,
+                receiver_mode: 2,
+                args: vec![],
+            },
+            Instruction::ProjectMove {
+                dst: 4,
+                src: 3,
+                field: 0,
+            },
+            Instruction::Deconstruct { src: 3 },
+            Instruction::Const {
+                dst: 5,
+                constant: 0,
+            },
+            Instruction::Resume {
+                dst: 6,
+                resumption: 4,
+                receiver_mode: 2,
+                value: 5,
+            },
+            Instruction::Drop { register: 6 },
+            Instruction::Const {
+                dst: 7,
+                constant: 0,
+            },
+            Instruction::Return { src: Some(7) },
+        ];
+        let target = vec![
+            Instruction::ProjectCopy {
+                dst: 1,
+                src: 0,
+                field: 0,
+            },
+            Instruction::Const {
+                dst: 2,
+                constant: 0,
+            },
+            Instruction::Resume {
+                dst: 3,
+                resumption: 1,
+                receiver_mode: 0,
+                value: 2,
+            },
+            Instruction::Drop { register: 3 },
+            Instruction::Drop { register: 1 },
+            Instruction::Move { dst: 4, src: 0 },
+            Instruction::Return { src: Some(4) },
+        ];
+        let target_start = caller.len() as u32;
+        let mut code = caller;
+        code.extend(target);
+        let mut artifact = Artifact {
+            types,
+            constants: vec![Constant::Unit],
+            functions: vec![
+                Function {
+                    flags: 0,
+                    name: "indirect_effectful_quantity_caller".into(),
+                    params: vec![19],
+                    return_type: UNIT,
+                    outward_protocols: vec![],
+                    receiver_mode: None,
+                    register_types: vec![UNIT, 19, 21, 20, 19, UNIT, UNIT, UNIT],
+                    code_start: 0,
+                    code_len: target_start,
+                    label_slot_count: 0,
+                },
+                Function {
+                    flags: 0,
+                    name: "indirect_effectful_quantity_target".into(),
+                    params: vec![],
+                    return_type: 20,
+                    outward_protocols: vec![],
+                    receiver_mode: Some(2),
+                    register_types: vec![20, 19, UNIT, UNIT, 20],
+                    code_start: target_start,
+                    code_len: 7,
+                    label_slot_count: 0,
+                },
+            ],
+            code,
+            ..Artifact::default()
+        };
+        artifact.required_features =
+            crate::bytecode::used_features(&artifact.types, &artifact.code, true, false);
+
+        verify(artifact.clone())
+            .expect("the finite indirect target preserves the updated quantity");
+
+        let mut forged_bound = artifact;
+        let Type::Resumption {
+            lower_uses,
+            upper_uses,
+            copy,
+            ..
+        } = &mut forged_bound.types[19]
+        else {
+            unreachable!()
+        };
+        *lower_uses = 1;
+        *upper_uses = Some(1);
+        *copy = false;
+        forged_bound.required_features =
+            crate::bytecode::used_features(&forged_bound.types, &forged_bound.code, true, false);
+        assert!(matches!(
+            verify(forged_bound),
+            Err(VerifyError::InvalidFunction(0))
+        ));
     }
 
     #[test]
@@ -16943,6 +20696,7 @@ mod tests {
         Artifact {
             types,
             constants: vec![Constant::Unit],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "aggregate_resumptions".into(),
@@ -17153,6 +20907,7 @@ mod tests {
         Artifact {
             types,
             constants: vec![Constant::Unit],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -17744,6 +21499,7 @@ mod tests {
         };
         Artifact {
             types,
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "branch_transport".into(),
@@ -17969,6 +21725,7 @@ mod tests {
         Artifact {
             types,
             constants: vec![Constant::Unit],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -18008,6 +21765,29 @@ mod tests {
         assert!(
             verify_resumption_quantities(&artifact, 0, &artifact.functions[0], &labels).is_ok()
         );
+    }
+
+    #[test]
+    fn borrowed_callable_tail_consumption_composes_the_final_resume_delta() {
+        let mut artifact = borrowed_callable_resumes(2);
+        let target_start = artifact.functions[1].code_start as usize;
+        let mut target = artifact.code[target_start..].to_vec();
+        target.insert(3, Instruction::Drop { register: 2 });
+        artifact.code.truncate(3);
+        artifact.code[2] = Instruction::TailCallIndirect {
+            callable: 4,
+            receiver_mode: 2,
+            args: vec![3],
+        };
+        artifact.functions[1].code_len = target.len() as u32;
+        artifact.code.extend(target);
+        artifact.functions[0].code_len = 3;
+        artifact.functions[1].code_start = 3;
+        artifact.required_features =
+            crate::bytecode::used_features(&artifact.types, &artifact.code, true, false);
+
+        verify(artifact)
+            .expect("the final owned call discharges the accumulated receiver quantity");
     }
 
     fn branched_borrowed_callable(disagree: bool) -> Artifact {
@@ -18546,6 +22326,7 @@ mod tests {
                 }],
                 partial: false,
             }],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -18875,6 +22656,94 @@ mod tests {
         verify(artifact).expect("the caller inherits the callee's exact cancellation");
     }
 
+    #[test]
+    fn effectful_tail_call_composes_a_preexisting_quantity_delta() {
+        let mut types = Type::predefined();
+        types.push(Type::Resumption {
+            input_type: UNIT,
+            output_type: UNIT,
+            effect_signature: Signature {
+                params: vec![],
+                result: UNIT,
+                outward_protocols: vec![],
+            },
+            lower_uses: 2,
+            upper_uses: Some(2),
+            identity_name: "effectful tail quantity".into(),
+            copy: true,
+        });
+        let first = vec![
+            Instruction::Const {
+                dst: 2,
+                constant: 0,
+            },
+            Instruction::Resume {
+                dst: 3,
+                resumption: 1,
+                receiver_mode: 0,
+                value: 2,
+            },
+            Instruction::Drop { register: 3 },
+            Instruction::TailCall {
+                function: 1,
+                args: vec![1],
+            },
+        ];
+        let second = vec![
+            Instruction::Const {
+                dst: 2,
+                constant: 0,
+            },
+            Instruction::Resume {
+                dst: 3,
+                resumption: 1,
+                receiver_mode: 0,
+                value: 2,
+            },
+            Instruction::Drop { register: 3 },
+            Instruction::Return { src: Some(1) },
+        ];
+        let second_start = first.len() as u32;
+        let mut code = first;
+        code.extend(second);
+        let mut artifact = Artifact {
+            types,
+            constants: vec![Constant::Unit],
+            functions: vec![
+                Function {
+                    flags: 0,
+                    name: "effectful_tail_forwarder".into(),
+                    params: vec![19],
+                    return_type: 19,
+                    outward_protocols: vec![],
+                    receiver_mode: None,
+                    register_types: vec![UNIT, 19, UNIT, UNIT],
+                    code_start: 0,
+                    code_len: second_start,
+                    label_slot_count: 0,
+                },
+                Function {
+                    flags: 0,
+                    name: "effectful_tail_target".into(),
+                    params: vec![19],
+                    return_type: 19,
+                    outward_protocols: vec![],
+                    receiver_mode: None,
+                    register_types: vec![UNIT, 19, UNIT, UNIT],
+                    code_start: second_start,
+                    code_len: 4,
+                    label_slot_count: 0,
+                },
+            ],
+            code,
+            ..Artifact::default()
+        };
+        artifact.required_features =
+            crate::bytecode::used_features(&artifact.types, &artifact.code, true, false);
+
+        verify(artifact).expect("the tail target receives the already-updated logical quantity");
+    }
+
     fn borrowed_receiver_parameter_types() -> Vec<Type> {
         let mut types = Type::predefined();
         types.extend([
@@ -18900,6 +22769,7 @@ mod tests {
     fn borrowed_self_tail_recursion_preserves_parameter_quantity_identity() {
         let mut artifact = Artifact {
             types: borrowed_receiver_parameter_types(),
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "borrowed_quantity_self".into(),
@@ -18933,6 +22803,7 @@ mod tests {
     fn known_borrowed_receiver_propagates_terminal_parameter_cancellation() {
         let mut artifact = Artifact {
             types: borrowed_receiver_parameter_types(),
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -19264,6 +23135,7 @@ mod tests {
                 }],
                 partial: false,
             }],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -19686,6 +23558,7 @@ mod tests {
                 }],
                 partial: false,
             }],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -19740,6 +23613,15 @@ mod tests {
             verify(fresh_handler_resumption_artifact(true)),
             Err(VerifyError::InvalidFunction(1))
         ));
+    }
+
+    #[test]
+    fn complete_local_handlers_remove_cancel_and_multishot_from_outer_effect_facts() {
+        let artifact = fresh_handler_resumption_artifact(false);
+        assert!(function_body_may_cancel(&artifact, 2));
+        assert!(function_body_may_multishot(&artifact, 2));
+        assert!(!function_body_may_cancel(&artifact, 0));
+        assert!(!function_body_may_multishot(&artifact, 0));
     }
 
     fn handler_quantity_payload_artifact(forge_alias: bool) -> Artifact {
@@ -19866,6 +23748,7 @@ mod tests {
                 }],
                 partial: false,
             }],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -19932,6 +23815,48 @@ mod tests {
             verify(handler_quantity_payload_artifact(true)),
             Err(VerifyError::InvalidFunction(2))
         ));
+    }
+
+    #[test]
+    fn terminal_effect_summary_preserves_a_preperformed_quantity_delta() {
+        let mut artifact = handler_quantity_payload_artifact(false);
+        artifact.constants.push(Constant::Unit);
+        artifact.code.splice(
+            7..8,
+            [
+                Instruction::Const {
+                    dst: 2,
+                    constant: 0,
+                },
+                Instruction::Resume {
+                    dst: 3,
+                    resumption: 1,
+                    receiver_mode: 0,
+                    value: 2,
+                },
+                Instruction::Drop { register: 3 },
+                Instruction::Perform {
+                    dst: None,
+                    protocol: 0,
+                    operation: 0,
+                    payloads: vec![1],
+                },
+            ],
+        );
+        artifact.functions[2].register_types = vec![UNIT, 19, UNIT, UNIT];
+        artifact.functions[2].code_len = 4;
+        artifact.required_features =
+            crate::bytecode::used_features(&artifact.types, &artifact.code, true, false);
+
+        assert_eq!(
+            terminal_effect_payload_summaries(&artifact)[2]
+                .as_ref()
+                .map(|summary| summary.resumes.as_slice()),
+            Some(&[1][..])
+        );
+        verify(artifact).expect(
+            "the handler observes the same quantity after one non-consuming pre-perform resume",
+        );
     }
 
     #[test]
@@ -20105,6 +24030,7 @@ mod tests {
                 operation: 0,
                 payloads: vec![0],
                 dropped: vec![],
+                resumes: vec![0],
             })
         );
         assert_eq!(
@@ -20295,6 +24221,7 @@ mod tests {
                     operation: 0,
                     payloads: vec![1],
                     dropped: vec![0],
+                    resumes: vec![0, 0],
                 })
             );
             assert_eq!(
@@ -20494,6 +24421,7 @@ mod tests {
                 operation: 0,
                 payloads: vec![0],
                 dropped: vec![],
+                resumes: vec![0],
             })
         );
         assert!(owned_receiver_quantity_summaries(&artifact)[1].is_some());
@@ -20723,6 +24651,7 @@ mod tests {
         Artifact {
             types,
             constants: vec![Constant::Unit, Constant::U32(0)],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "branched_resumption".into(),
@@ -20829,6 +24758,7 @@ mod tests {
         Artifact {
             types,
             constants: vec![Constant::Unit],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -20866,7 +24796,7 @@ mod tests {
         assert!(verify(resumption_helper_call(false, false)).is_ok());
         assert!(matches!(
             verify(resumption_helper_call(true, false)),
-            Err(VerifyError::InvalidFunction(0))
+            Err(VerifyError::InvalidFunction(0) | VerifyError::UseOfEmpty { function: 0, .. })
         ));
         assert!(matches!(
             verify(resumption_helper_call(false, true)),
@@ -20909,6 +24839,7 @@ mod tests {
                     resumption_upper: Some(2),
                 }],
             }],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "bad_capture".into(),
@@ -20941,7 +24872,10 @@ mod tests {
             .expect("a future-dead zero-use unique loan is pruned before the multishot snapshot");
         let function = verified.function(0).unwrap();
         let resume_pc = function.checked_pc(1).unwrap();
-        assert_eq!(function.continuation_registers(resume_pc), &[2]);
+        assert_eq!(
+            function.multishot_registers(resume_pc).collect::<Vec<_>>(),
+            [2]
+        );
         assert!(matches!(
             verify(artifact),
             Err(VerifyError::BorrowConflict { instruction: 0, .. })
@@ -20983,6 +24917,7 @@ mod tests {
                     resumption_upper: Some(2),
                 }],
             }],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "shared_capture".into(),
@@ -21051,6 +24986,7 @@ mod tests {
                     resumption_upper: Some(2),
                 }],
             }],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "residual_capture".into(),
@@ -21155,6 +25091,7 @@ mod tests {
                     resumption_upper: Some(2),
                 }],
             }],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "enum_residual_capture".into(),
@@ -21242,6 +25179,7 @@ mod tests {
                     resumption_upper: Some(2),
                 }],
             }],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "unproved_array_residual".into(),
@@ -21334,6 +25272,7 @@ mod tests {
                 ty: 19,
                 function: 0,
             }],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: DROP_HOOK,
@@ -21410,6 +25349,7 @@ mod tests {
         Artifact {
             types,
             constants,
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "shell_age".into(),
@@ -21538,6 +25478,130 @@ mod tests {
         types
     }
 
+    fn unique_borrowed_receiver_result(end_first: bool) -> Artifact {
+        let mut types = Type::predefined();
+        let environment = types.len() as TypeId;
+        types.push(
+            Type::Tuple {
+                fields: vec![I64],
+                copy: false,
+            }
+            .restricted(false, true),
+        );
+        let environment_reference = types.len() as TypeId;
+        types.push(Type::RefUnique {
+            referent: environment,
+        });
+        let callable = types.len() as TypeId;
+        types.push(Type::Callable {
+            signature: Signature {
+                params: vec![],
+                result: environment_reference,
+                outward_protocols: vec![],
+            },
+            capture_type: environment,
+            receiver_mode: 1,
+            identity_name: "unique borrowed environment".into(),
+            copy: false,
+            zero_use_allowed: true,
+        });
+        let mut caller = vec![
+            Instruction::MakeCallable {
+                dst: 2,
+                callable_type: callable,
+                function: 1,
+                captures: vec![1],
+            },
+            Instruction::CallIndirect {
+                dst: Some(3),
+                callable: 2,
+                receiver_mode: 1,
+                args: vec![],
+            },
+        ];
+        if end_first {
+            caller.push(Instruction::EndBorrow { reference: 3 });
+        }
+        caller.extend([
+            Instruction::CallIndirect {
+                dst: Some(4),
+                callable: 2,
+                receiver_mode: 1,
+                args: vec![],
+            },
+            Instruction::EndBorrow { reference: 4 },
+        ]);
+        if !end_first {
+            caller.push(Instruction::EndBorrow { reference: 3 });
+        }
+        caller.extend([
+            Instruction::Drop { register: 2 },
+            Instruction::Return { src: None },
+        ]);
+        let caller_len = caller.len() as u32;
+        let mut code = caller;
+        code.push(Instruction::Return { src: Some(0) });
+        let mut artifact = Artifact {
+            types,
+            reference_return_contracts: vec![],
+            functions: vec![
+                Function {
+                    flags: 0,
+                    name: "unique_environment_caller".into(),
+                    params: vec![I64],
+                    return_type: UNIT,
+                    outward_protocols: vec![],
+                    receiver_mode: None,
+                    register_types: vec![
+                        UNIT,
+                        I64,
+                        callable,
+                        environment_reference,
+                        environment_reference,
+                    ],
+                    code_start: 0,
+                    code_len: caller_len,
+                    label_slot_count: 0,
+                },
+                Function {
+                    flags: 0,
+                    name: "borrow_unique_environment".into(),
+                    params: vec![],
+                    return_type: environment_reference,
+                    outward_protocols: vec![],
+                    receiver_mode: Some(1),
+                    register_types: vec![environment_reference],
+                    code_start: caller_len,
+                    code_len: 1,
+                    label_slot_count: 0,
+                },
+            ],
+            code,
+            ..Artifact::default()
+        };
+        artifact.required_features =
+            crate::bytecode::used_features(&artifact.types, &artifact.code, false, false);
+        artifact
+    }
+
+    #[test]
+    fn unique_callable_receiver_reborrow_ends_before_a_repeated_call() {
+        verify(unique_borrowed_receiver_result(true))
+            .expect("ending the first receiver result permits a fresh unique call");
+    }
+
+    #[test]
+    fn unique_callable_receiver_rejects_overlapping_call_results() {
+        assert!(matches!(
+            verify(unique_borrowed_receiver_result(false)),
+            Err(VerifyError::BorrowConflict {
+                function: 0,
+                instruction: 2,
+                register: 2,
+            })
+        ));
+    }
+
     #[test]
     fn two_shared_origins_survive_construct_projection_and_deconstruction() {
         let code = vec![
@@ -21566,6 +25630,7 @@ mod tests {
         ];
         let artifact = Artifact {
             types: two_shared_reference_types(),
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "two_shared_local".into(),
@@ -21617,6 +25682,7 @@ mod tests {
         ];
         let artifact = Artifact {
             types: two_shared_reference_types(),
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "drop_two_shared".into(),
@@ -21674,6 +25740,7 @@ mod tests {
         code.extend(callee.clone());
         let artifact = Artifact {
             types: two_shared_reference_types(),
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -21770,6 +25837,7 @@ mod tests {
         code.extend(callee.clone());
         Artifact {
             types,
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -21971,6 +26039,7 @@ mod tests {
         });
         let artifact = Artifact {
             types,
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -22129,6 +26198,7 @@ mod tests {
         Artifact {
             types,
             constants: vec![Constant::U32(0)],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -22208,6 +26278,7 @@ mod tests {
                     terminal: false,
                 }],
             }],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -22323,6 +26394,7 @@ mod tests {
         Artifact {
             types: two_shared_reference_types(),
             constants: vec![Constant::U32(0)],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "recursive_pair".into(),
@@ -22387,6 +26459,7 @@ mod tests {
         Artifact {
             types: two_shared_reference_types(),
             constants: vec![Constant::U32(0)],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -22488,6 +26561,7 @@ mod tests {
         code.extend(callee.clone());
         let artifact = Artifact {
             types: two_shared_reference_types(),
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -22526,6 +26600,7 @@ mod tests {
         let artifact = Artifact {
             types: two_shared_reference_types(),
             constants: vec![Constant::U32(0)],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "choose_leaf".into(),
@@ -22610,6 +26685,7 @@ mod tests {
         ]);
         Artifact {
             types,
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "reference_array_transport".into(),
@@ -22652,6 +26728,7 @@ mod tests {
         let artifact = Artifact {
             types,
             constants: vec![Constant::Usize(0)],
+            reference_return_contracts: vec![],
             functions: vec![Function {
                 flags: 0,
                 name: "take_zero_reference".into(),
@@ -22748,6 +26825,7 @@ mod tests {
         code.extend(reader);
         let artifact = Artifact {
             types,
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -22812,6 +26890,7 @@ mod tests {
         let artifact = Artifact {
             types,
             constants: vec![Constant::I64(40)],
+            reference_return_contracts: vec![],
             functions: vec![
                 Function {
                     flags: 0,
@@ -22868,5 +26947,78 @@ mod tests {
             })
         );
         verify(artifact).expect("a quantity-free tail call must preserve the completed resume");
+    }
+
+    fn declared_reference_identity() -> Artifact {
+        let mut types = Type::predefined();
+        let shared = types.len() as TypeId;
+        types.push(Type::RefShared { referent: I64 });
+        Artifact {
+            required_features: 1 | (1 << 1),
+            types,
+            reference_return_contracts: vec![ReferenceReturnContract {
+                function: 0,
+                routes: vec![ReferenceReturnRoute {
+                    result_path: vec![],
+                    origin: ReferenceReturnOrigin::Parameter {
+                        parameter: 0,
+                        path: vec![],
+                    },
+                }],
+            }],
+            functions: vec![Function {
+                name: "identity".into(),
+                flags: 0,
+                params: vec![shared],
+                return_type: shared,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, shared, shared],
+                code_start: 0,
+                code_len: 2,
+                label_slot_count: 0,
+            }],
+            code: vec![
+                Instruction::Copy { dst: 2, src: 1 },
+                Instruction::Return { src: Some(2) },
+            ],
+            ..Artifact::default()
+        }
+    }
+
+    #[test]
+    fn declared_reference_contract_is_proved_and_forged_paths_fail_closed() {
+        verify(declared_reference_identity()).expect("the exact declared route is body-proved");
+
+        let mut wrong_result = declared_reference_identity();
+        wrong_result.reference_return_contracts[0].routes[0].result_path = vec![0];
+        assert_eq!(
+            verify(wrong_result).unwrap_err(),
+            VerifyError::InvalidFunction(0)
+        );
+
+        let mut wrong_source = declared_reference_identity();
+        let ReferenceReturnOrigin::Parameter { path, .. } =
+            &mut wrong_source.reference_return_contracts[0].routes[0].origin
+        else {
+            unreachable!()
+        };
+        *path = vec![0];
+        assert_eq!(
+            verify(wrong_source).unwrap_err(),
+            VerifyError::InvalidFunction(0)
+        );
+    }
+
+    #[test]
+    fn duplicate_declared_reference_contracts_fail_closed() {
+        let mut artifact = declared_reference_identity();
+        artifact
+            .reference_return_contracts
+            .push(artifact.reference_return_contracts[0].clone());
+        assert_eq!(
+            verify(artifact).unwrap_err(),
+            VerifyError::InvalidFunction(0)
+        );
     }
 }

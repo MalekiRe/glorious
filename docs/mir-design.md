@@ -918,10 +918,12 @@ After `-O1`:
 7. `EraseLoanProofsAndScalarizedReferences`.
 8. `FormTailCallsAndHoist` discovers tail calls and performs legal invariant
    motion using the same dominator/loop information.
-9. `LowerRegistersAndEdges` using dense maps of live IDs.
-10. `LayoutAndPeephole` lays out blocks, pools constants, and performs bytecode
+9. `ValidateBytecodeInput` rechecks optimized MIR and cleanup boundaries.
+10. `LowerRegistersAndEdges` using dense maps of live IDs.
+11. `LayoutAndPeephole` lays out blocks, pools constants, and performs bytecode
     peepholes.
-11. `ValidateBytecodeInput`.
+12. `ValidateFinalArtifact` runs the hostile-input verifier and cross-validates
+    serialized cleanup maps against the MIR ownership facts.
 
 Each sweep has a required body-property mask and individual rewrite rules check
 more specific bits. Aggregate, indirect-call, handler, resumption, drop-hook, and
@@ -1057,6 +1059,17 @@ against MIR `DropFacts` before serialization.
 
 ### 10.5 Peepholes
 
+The implemented ordinal peephole folds non-branch-entry transfer-temporary
+`Move`/`Copy` chains across independent straight-line parallel snapshots,
+removes target-safe `NOP` instructions and fallthrough jumps before
+cleanup-plan generation, and deterministically repatches switch, jump, and
+label destinations while retaining a referenced trailing target and the
+required nonempty function body.
+
+Switch arms without arguments target their MIR successor directly and never
+materialize an empty synthetic transfer block. Argument-carrying arms alone
+receive deterministic out-of-line transfer blocks.
+
 Bytecode peepholes may remove `NOP`, move-to-next-move chains, empty edge-transfer
 blocks, redundant borrow endings, and jumps to the immediately following
 instruction. They may not reorder instructions, cross cleanup interval boundaries,
@@ -1173,10 +1186,39 @@ boundary:
   mirrors the verifier's owner-age semantics exactly, so this is an
   independent two-sided proof. Direct serialization of the MIR-derived lists
   (covering the edge-transfer temporary PCs inside one terminator) is the
-  remaining migration step.
+  remaining migration step. Mandatory lower-register preparation now consumes
+  deterministic final-block-order live intervals classified as owned, shared
+  reference, unique reference, copy, or erased, and records addressable places.
+  It retains the frozen ABI prefix and compacts live identities monotonically;
+  physical reuse still awaits an explicit empty/ended-loan certificate in the
+  lowered representation. Checked typed block kinds also group entry/RPO-normal,
+  label, cleanup, handler, and resumption seeds deterministically before
+  emission; successor-region propagation and lexical cleanup boundaries remain.
+  A distinct reported `ValidateBytecodeInput` checkpoint now revalidates
+  optimized MIR, re-derives every statement/terminator cleanup state, checks
+  recorded destruction/drop-flag references against source-block ownership,
+  and proves arbitrary public-`LEAVE` source/target suffix boundaries directly
+  from MIR. Final label serialization now consumes that same centralized proof
+  to build the exact protected-source/protected-result anchors. The enclosing
+  compiler appends measured `LowerRegistersAndEdges`, `LayoutAndPeephole`, and
+  `ValidateFinalArtifact` entries only after those stages run; their work and
+  changed/unchanged outcomes are deterministic and never speculative. It still needs
+  to derive all edge-transfer-temporary lists directly and thereby remove the
+  seeded-bytecode-anchor completion step.
 - **Not yet realized.** `Store`/`StorageLive`/`StorageDead` statements,
-  `PlaceId` arenas with tombstones, multi-scope lexical export (one function
-  scope is exported), label/`Leave` MIR (facts and cleanup representation
-  exist; source labels remain gated), frontend-emitted drop flags (branch
-  post-states must agree at source level), and the finer-grained checked
-  mutation API (passes invalidate conservatively).
+  persistent typed arenas for places, locals, operations, move paths, scopes,
+  and control sites, multi-scope lexical export (one function scope is
+  exported), and frontend-emitted drop flags (branch post-states must agree at
+  source level). A typed `BlockId`/`BlockKind` checked editor now performs
+  transactional tombstoned NormalizeCfg deletion and precisely invalidated
+  same-block statement removal, and canonical resource limits fail
+  structurally before optimization. Reusable, deterministic checked analyses
+  now provide predecessors, reachability/RPO, dominators, natural loops and
+  preheaders, irreducible SCCs, and edge liveness with structured work budgets
+  and dependency-specific invalidation; LICM and identity-phi simplification
+  consume them. Remaining mutation migration covers edge redirection, block
+  splitting/merging, and operand/terminator replacement, while remaining
+  analysis work covers place/alias/value/cost facts and lazy caching; the outer
+  pass runner still invalidates changed passes conservatively. Source labels
+  and `Leave` are implemented through MIR, cleanup validation, bytecode
+  lowering, and O0-O3 execution.

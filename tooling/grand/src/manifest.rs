@@ -43,7 +43,8 @@ pub struct Project {
     /// Executable packages have an entry file; library packages omit it.
     pub entry: Option<String>,
     /// Source globs are not supported yet; this is a list of directories (or
-    /// files) relative to the package root that are scanned for `*.gr`.
+    /// files) relative to the package root that are scanned for canonical
+    /// `*.glorious` and legacy `*.gr` sources.
     /// Defaults to `["src"]`.
     pub sources: Option<Vec<String>>,
 }
@@ -72,8 +73,13 @@ pub struct DependencySpec {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dependency {
-    Path { path: PathBuf },
-    Git { url: String, reference: GitReference },
+    Path {
+        path: PathBuf,
+    },
+    Git {
+        url: String,
+        reference: GitReference,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -181,7 +187,10 @@ pub fn load_any(path: &Path) -> Result<ManifestFile> {
             Ok(ManifestFile::Package(manifest))
         }
         (None, Some(workspace)) => Ok(ManifestFile::WorkspaceRoot(workspace)),
-        (None, None) => bail!("{}: neither [project] nor [workspace] present", path.display()),
+        (None, None) => bail!(
+            "{}: neither [project] nor [workspace] present",
+            path.display()
+        ),
     }
 }
 
@@ -211,7 +220,12 @@ impl Manifest {
     pub fn dependencies(&self) -> Result<Vec<(String, Dependency)>> {
         self.dependencies
             .iter()
-            .map(|(name, spec)| Ok((name.clone(), spec.validate(name)?)))
+            .map(|(name, spec)| {
+                if !valid_package_name(name) {
+                    bail!("dependency name `{name}` is invalid (expected [a-z][a-z0-9-]*)");
+                }
+                Ok((name.clone(), spec.validate(name)?))
+            })
             .collect()
     }
 }
@@ -239,7 +253,10 @@ pub fn find_project_in_workspace(
                         }
                     } else if let Some(select) = select {
                         if manifest.project.name != select {
-                            bail!("package `{select}` not found (current package is `{}`)", manifest.project.name);
+                            bail!(
+                                "package `{select}` not found (current package is `{}`)",
+                                manifest.project.name
+                            );
                         }
                     }
                     let lock_root = workspace_root.unwrap_or_else(|| current.clone());
@@ -261,7 +278,10 @@ pub fn find_project_in_workspace(
         }
         dir = current.parent().map(Path::to_path_buf);
     }
-    bail!("no {MANIFEST_NAME} found in {} or any parent directory", start.display())
+    bail!(
+        "no {MANIFEST_NAME} found in {} or any parent directory",
+        start.display()
+    )
 }
 
 /// Legacy single-package lookup (used by the LSP and `add`).
@@ -282,8 +302,7 @@ fn enclosing_workspace(package: &Path) -> Option<PathBuf> {
             };
             if let Some(members) = members {
                 let is_member = members.iter().any(|m| {
-                    current.join(m).canonicalize().ok()
-                        == package.to_path_buf().canonicalize().ok()
+                    current.join(m).canonicalize().ok() == package.to_path_buf().canonicalize().ok()
                 });
                 if is_member {
                     return Some(current);
@@ -298,21 +317,46 @@ fn enclosing_workspace(package: &Path) -> Option<PathBuf> {
 /// Resolve `-p <name>` against a workspace root: match by package name or by
 /// the member path's final component.
 fn pick_member(root: &Path, select: &str) -> Result<(PathBuf, Manifest, PathBuf)> {
+    let canonical_root = root
+        .canonicalize()
+        .with_context(|| format!("canonicalizing workspace root {}", root.display()))?;
     let members = match load_any(&root.join(MANIFEST_NAME))? {
         ManifestFile::WorkspaceRoot(w) => w.members,
         ManifestFile::Package(m) => m.workspace.map(|w| w.members).unwrap_or_default(),
     };
     for member in &members {
         let member_dir = root.join(member);
+        let canonical_member = member_dir.canonicalize().with_context(|| {
+            format!(
+                "workspace member `{member}` does not exist ({})",
+                member_dir.display()
+            )
+        })?;
+        if !canonical_member.starts_with(&canonical_root) || canonical_member == canonical_root {
+            bail!(
+                "workspace member `{member}` escapes the workspace root {}",
+                root.display()
+            );
+        }
         let manifest_path = member_dir.join(MANIFEST_NAME);
         if !manifest_path.is_file() {
-            bail!("workspace member `{member}` has no {MANIFEST_NAME} ({})", member_dir.display());
+            bail!(
+                "workspace member `{member}` has no {MANIFEST_NAME} ({})",
+                member_dir.display()
+            );
         }
         let manifest = Manifest::load(&manifest_path)?;
-        let path_name = Path::new(member).file_name().unwrap_or_default().to_string_lossy();
+        let path_name = Path::new(member)
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy();
         if manifest.project.name == select || path_name == select {
-            return Ok((member_dir, manifest, root.to_path_buf()));
+            return Ok((canonical_member, manifest, canonical_root));
         }
     }
-    bail!("package `{select}` is not a member of the workspace at {} (members: {})", root.display(), members.join(", "))
+    bail!(
+        "package `{select}` is not a member of the workspace at {} (members: {})",
+        root.display(),
+        members.join(", ")
+    )
 }

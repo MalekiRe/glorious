@@ -23,7 +23,11 @@ impl Sandbox {
         // Empty stand-in for compiler/runtime/native_entry.c: the fake
         // compiler's modules need no runtime symbols.
         std::fs::write(dir.path().join("runtime.c"), "").unwrap();
-        Sandbox { _dir: dir, root, cache }
+        Sandbox {
+            _dir: dir,
+            root,
+            cache,
+        }
     }
 
     fn grand_in(&self, cwd: &Path, args: &[&str]) -> Output {
@@ -49,7 +53,10 @@ impl Sandbox {
 
     fn fail_in(&self, cwd: &Path, args: &[&str]) -> String {
         let output = self.grand_in(cwd, args);
-        assert!(!output.status.success(), "grand {args:?} unexpectedly succeeded");
+        assert!(
+            !output.status.success(),
+            "grand {args:?} unexpectedly succeeded"
+        );
         String::from_utf8_lossy(&output.stderr).into_owned()
     }
 }
@@ -64,7 +71,7 @@ fn lib_package(dir: &Path, name: &str, body: &str) {
         &dir.join("grandiose.toml"),
         &format!("[project]\nname = \"{name}\"\nversion = \"0.1.0\"\n"),
     );
-    write(&dir.join("src").join("lib.gr"), body);
+    write(&dir.join("src").join("lib.glorious"), body);
 }
 
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -77,7 +84,11 @@ fn git(dir: &Path, args: &[&str]) -> String {
         .env("GIT_COMMITTER_EMAIL", "t@t")
         .output()
         .unwrap();
-    assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
     String::from_utf8_lossy(&output.stdout).trim().to_string()
 }
 
@@ -96,7 +107,7 @@ fn scaffold_and_check() {
     let sandbox = Sandbox::new();
     sandbox.ok_in(&sandbox.root, &["new", "app"]);
     let app = sandbox.root.join("app");
-    assert!(app.join("src/main.gr").is_file());
+    assert!(app.join("src/main.glorious").is_file());
     let log = sandbox.ok_in(&app, &["check"]);
     assert!(log.contains("Checked app"), "unexpected log: {log}");
     // Library-only packages cannot be checked as executables.
@@ -121,21 +132,30 @@ fn path_dependencies_bundle_in_topological_order() {
     let app = sandbox.root.join("app");
     write(
         &app.join("grandiose.toml"),
-        "[project]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.gr\"\n\n[dependencies]\nmid = { path = \"../mid\" }\n",
+        "[project]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.glorious\"\n\n[dependencies]\nmid = { path = \"../mid\" }\n",
     );
     sandbox.ok_in(&app, &["check"]);
 
-    let bundle = std::fs::read_to_string(app.join("target/grand/check.gr")).unwrap();
+    let bundle = std::fs::read_to_string(app.join("target/grand/check.glorious")).unwrap();
     let deep_at = bundle.find("deep_value").unwrap();
     let mid_at = bundle.find("mid_value").unwrap();
     let main_at = bundle.find("main()").unwrap();
-    assert!(deep_at < mid_at && mid_at < main_at, "bundle order wrong:\n{bundle}");
+    assert!(
+        deep_at < mid_at && mid_at < main_at,
+        "bundle order wrong:\n{bundle}"
+    );
     let map = std::fs::read_to_string(app.join("target/grand/check.map.json")).unwrap();
-    assert!(map.contains("\"package\": \"deep\""), "segment map missing packages: {map}");
+    assert!(
+        map.contains("\"package\": \"deep\""),
+        "segment map missing packages: {map}"
+    );
     // Path dependencies do not appear pinned in the lockfile, but exist in it.
     let lock = std::fs::read_to_string(app.join("grandiose.lock")).unwrap();
     assert!(lock.contains("name = \"mid\"") && lock.contains("name = \"deep\""));
-    assert!(!lock.contains("commit = "), "path deps must not be pinned: {lock}");
+    assert!(
+        !lock.contains("commit = "),
+        "path deps must not be pinned: {lock}"
+    );
 }
 
 #[test]
@@ -148,25 +168,40 @@ fn git_dependencies_pin_lock_and_stay_reproducible() {
     sandbox.ok_in(&app, &["add", "util", "--git", &repo_url, "--tag", "v1"]);
 
     let lock = std::fs::read_to_string(app.join("grandiose.lock")).unwrap();
-    assert!(lock.contains("tag=v1") && lock.contains("commit = "), "lock not pinned: {lock}");
-    assert!(lock.contains("content-hash = \"blake3:"), "lock missing content hash: {lock}");
+    assert!(
+        lock.contains("tag=v1") && lock.contains("commit = "),
+        "lock not pinned: {lock}"
+    );
+    assert!(
+        lock.contains("content-hash = \"blake3:"),
+        "lock missing content hash: {lock}"
+    );
 
     sandbox.ok_in(&app, &["check"]);
-    let bundle = std::fs::read_to_string(app.join("target/grand/check.gr")).unwrap();
-    assert!(bundle.contains("util_value"), "git dep missing from bundle:\n{bundle}");
+    let bundle = std::fs::read_to_string(app.join("target/grand/check.glorious")).unwrap();
+    assert!(
+        bundle.contains("util_value"),
+        "git dep missing from bundle:\n{bundle}"
+    );
 
     // Moving the tag upstream must not affect a locked project…
-    write(&repo.join("src").join("lib.gr"), "util_value() -> i64 { 4 }\nextra() -> i64 { 5 }\n");
+    write(
+        &repo.join("src").join("lib.glorious"),
+        "util_value() -> i64 { 4 }\nextra() -> i64 { 5 }\n",
+    );
     git(&repo, &["commit", "-qam", "update"]);
     git(&repo, &["tag", "-f", "v1"]);
     sandbox.ok_in(&app, &["check"]);
-    let bundle = std::fs::read_to_string(app.join("target/grand/check.gr")).unwrap();
-    assert!(!bundle.contains("extra"), "locked build picked up unpinned changes");
+    let bundle = std::fs::read_to_string(app.join("target/grand/check.glorious")).unwrap();
+    assert!(
+        !bundle.contains("extra"),
+        "locked build picked up unpinned changes"
+    );
 
     // …until an explicit update re-resolves it.
     sandbox.ok_in(&app, &["update", "util"]);
     sandbox.ok_in(&app, &["check"]);
-    let bundle = std::fs::read_to_string(app.join("target/grand/check.gr")).unwrap();
+    let bundle = std::fs::read_to_string(app.join("target/grand/check.glorious")).unwrap();
     assert!(bundle.contains("extra"), "update did not move the pin");
 }
 
@@ -179,7 +214,7 @@ fn locked_mode_refuses_lockfile_changes() {
     write(
         &app.join("grandiose.toml"),
         &format!(
-            "[project]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.gr\"\n\n\
+            "[project]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.glorious\"\n\n\
              [dependencies]\nutil = {{ git = \"{}\", tag = \"v1\" }}\n",
             repo.display()
         ),
@@ -194,7 +229,10 @@ fn locked_mode_refuses_lockfile_changes() {
         .unwrap();
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("GRAND_LOCKED"), "unexpected error: {stderr}");
+    assert!(
+        stderr.contains("GRAND_LOCKED"),
+        "unexpected error: {stderr}"
+    );
 }
 
 #[test]
@@ -221,21 +259,27 @@ fn conflicting_sources_and_cycles_are_rejected() {
     let app = sandbox.root.join("app");
     write(
         &app.join("grandiose.toml"),
-        "[project]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.gr\"\n\n\
+        "[project]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.glorious\"\n\n\
          [dependencies]\nleft = { path = \"../left\" }\nright = { path = \"../right\" }\n",
     );
     let log = sandbox.fail_in(&app, &["check"]);
-    assert!(log.contains("two different sources"), "unexpected error: {log}");
+    assert!(
+        log.contains("two different sources"),
+        "unexpected error: {log}"
+    );
 
     // A self-cycle through path deps.
     let ouro = sandbox.root.join("ouro");
     lib_package(&ouro, "ouro", "o() -> i64 { 1 }\n");
     write(
         &ouro.join("grandiose.toml"),
-        "[project]\nname = \"ouro\"\nversion = \"0.1.0\"\nentry = \"src/lib.gr\"\n\n[dependencies]\nouro2 = { path = \".\" }\n",
+        "[project]\nname = \"ouro\"\nversion = \"0.1.0\"\nentry = \"src/lib.glorious\"\n\n[dependencies]\nouro2 = { path = \".\" }\n",
     );
     let log = sandbox.fail_in(&ouro, &["check"]);
-    assert!(log.contains("cycle") || log.contains("calls itself"), "unexpected error: {log}");
+    assert!(
+        log.contains("cycle") || log.contains("calls itself"),
+        "unexpected error: {log}"
+    );
 }
 
 #[test]
@@ -256,11 +300,243 @@ fn vendored_dependencies_take_precedence() {
 }
 
 #[test]
+fn source_and_workspace_paths_cannot_escape_their_roots() {
+    let sandbox = Sandbox::new();
+    sandbox.ok_in(&sandbox.root, &["new", "app"]);
+    let app = sandbox.root.join("app");
+    let outside = sandbox.root.join("outside.glorious");
+    write(&outside, "outside() -> i64 { 9 }\n");
+    write(
+        &app.join("grandiose.toml"),
+        "[project]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"../outside.glorious\"\n",
+    );
+    let log = sandbox.fail_in(&app, &["check"]);
+    assert!(
+        log.contains("escapes the package root"),
+        "unexpected error: {log}"
+    );
+
+    let workspace = sandbox.root.join("workspace");
+    write(
+        &workspace.join("grandiose.toml"),
+        "[workspace]\nmembers = [\"../external\"]\n",
+    );
+    lib_package(
+        &sandbox.root.join("external"),
+        "external",
+        "value() -> i64 { 1 }\n",
+    );
+    let log = sandbox.fail_in(&workspace, &["-p", "external", "check"]);
+    assert!(
+        log.contains("escapes the workspace root"),
+        "unexpected error: {log}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn symlinked_source_escape_is_rejected() {
+    use std::os::unix::fs::symlink;
+
+    let sandbox = Sandbox::new();
+    sandbox.ok_in(&sandbox.root, &["new", "app"]);
+    let app = sandbox.root.join("app");
+    let outside = sandbox.root.join("outside.glorious");
+    write(&outside, "outside() -> i64 { 9 }\n");
+    std::fs::remove_file(app.join("src/main.glorious")).unwrap();
+    symlink(&outside, app.join("src/main.glorious")).unwrap();
+    let log = sandbox.fail_in(&app, &["check"]);
+    assert!(
+        log.contains("escapes the package root"),
+        "unexpected error: {log}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn dependency_cycles_through_symlink_aliases_are_rejected() {
+    use std::os::unix::fs::symlink;
+
+    let sandbox = Sandbox::new();
+    let a = sandbox.root.join("a");
+    let b = sandbox.root.join("b");
+    lib_package(&a, "a", "a_value() -> i64 { 1 }\n");
+    lib_package(&b, "b", "b_value() -> i64 { 2 }\n");
+    symlink(&a, sandbox.root.join("a-alias")).unwrap();
+    symlink(&b, sandbox.root.join("b-alias")).unwrap();
+    write(
+        &a.join("grandiose.toml"),
+        "[project]\nname = \"a\"\nversion = \"0.1.0\"\nentry = \"src/lib.glorious\"\n\n\
+         [dependencies]\nb = { path = \"../b-alias\" }\n",
+    );
+    write(
+        &b.join("grandiose.toml"),
+        "[project]\nname = \"b\"\nversion = \"0.1.0\"\n\n\
+         [dependencies]\na = { path = \"../a-alias\" }\n",
+    );
+    let log = sandbox.fail_in(&a, &["check"]);
+    assert!(log.contains("dependency cycle"), "unexpected error: {log}");
+}
+
+#[test]
+fn dependency_names_cannot_be_used_as_vendor_path_traversal() {
+    let sandbox = Sandbox::new();
+    sandbox.ok_in(&sandbox.root, &["new", "app"]);
+    let app = sandbox.root.join("app");
+    write(
+        &app.join("grandiose.toml"),
+        "[project]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.glorious\"\n\n\
+         [dependencies.\"../escape\"]\npath = \".\"\n",
+    );
+    let log = sandbox.fail_in(&app, &["check"]);
+    assert!(
+        log.contains("dependency name") && log.contains("invalid"),
+        "unexpected error: {log}"
+    );
+}
+
+#[test]
+fn malformed_lock_pins_and_modified_checkouts_are_rejected() {
+    let sandbox = Sandbox::new();
+    let repo = git_package(&sandbox, "util", "util_value() -> i64 { 3 }\n");
+    sandbox.ok_in(&sandbox.root, &["new", "app"]);
+    let app = sandbox.root.join("app");
+    let repo_url = repo.display().to_string();
+    write(
+        &app.join("grandiose.toml"),
+        &format!(
+            "[project]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.glorious\"\n\n\
+             [dependencies]\nutil = {{ git = \"{repo_url}\", tag = \"v1\" }}\n"
+        ),
+    );
+    write(
+        &app.join("grandiose.lock"),
+        &format!(
+            "version = 1\n\n[[package]]\nname = \"util\"\nsource = \"git+{repo_url}?tag=v1\"\n\
+             commit = \"../../escape\"\ncontent-hash = \"blake3:{}\"\ndeps = []\n",
+            "0".repeat(64)
+        ),
+    );
+    let log = sandbox.fail_in(&app, &["check"]);
+    assert!(log.contains("invalid commit"), "unexpected error: {log}");
+
+    std::fs::remove_file(app.join("grandiose.lock")).unwrap();
+    sandbox.ok_in(&app, &["check"]);
+    let valid_lock = std::fs::read_to_string(app.join("grandiose.lock")).unwrap();
+    let tampered_lock = valid_lock
+        .lines()
+        .map(|line| {
+            if line.starts_with("content-hash = ") {
+                format!("content-hash = \"blake3:{}\"", "0".repeat(64))
+            } else {
+                line.to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        + "\n";
+    write(&app.join("grandiose.lock"), &tampered_lock);
+    let log = sandbox.fail_in(&app, &["check"]);
+    assert!(
+        log.contains("content hash mismatch"),
+        "unexpected error: {log}"
+    );
+    write(&app.join("grandiose.lock"), &valid_lock);
+
+    let checkout_source = walkdir::WalkDir::new(sandbox.cache.join("checkouts"))
+        .into_iter()
+        .filter_map(Result::ok)
+        .map(|entry| entry.into_path())
+        .find(|path| path.ends_with("src/lib.glorious"))
+        .expect("cached checkout source");
+    let injected = checkout_source.parent().unwrap().join("injected.glorious");
+    write(&injected, "injected() -> i64 { 666 }\n");
+    let log = sandbox.fail_in(&app, &["check"]);
+    assert!(
+        log.contains("untracked package inputs"),
+        "unexpected error: {log}"
+    );
+    std::fs::remove_file(injected).unwrap();
+
+    write(&checkout_source, "util_value() -> i64 { 999 }\n");
+    let log = sandbox.fail_in(&app, &["check"]);
+    assert!(
+        log.contains("modified tracked files"),
+        "unexpected error: {log}"
+    );
+}
+
+#[test]
+fn resolution_order_and_git_cache_identity_are_deterministic() {
+    let sandbox = Sandbox::new();
+    let first_repo = git_package(&sandbox, "first", "which() -> i64 { 1 }\n");
+    let second_repo = git_package(&sandbox, "second", "which() -> i64 { 2 }\n");
+
+    for (app_name, repo, dependency_name) in [
+        ("app-a", &first_repo, "first"),
+        ("app-b", &second_repo, "second"),
+    ] {
+        sandbox.ok_in(&sandbox.root, &["new", app_name]);
+        let app = sandbox.root.join(app_name);
+        write(
+            &app.join("grandiose.toml"),
+            &format!(
+                "[project]\nname = \"{app_name}\"\nversion = \"0.1.0\"\nentry = \"src/main.glorious\"\n\n\
+                 [dependencies]\n{dependency_name} = {{ git = \"{}\", tag = \"v1\" }}\n",
+                repo.display()
+            ),
+        );
+        sandbox.ok_in(&app, &["check"]);
+        let first = std::fs::read(app.join("grandiose.lock")).unwrap();
+        sandbox.ok_in(&app, &["check"]);
+        assert_eq!(std::fs::read(app.join("grandiose.lock")).unwrap(), first);
+        let bundle = std::fs::read_to_string(app.join("target/grand/check.glorious")).unwrap();
+        let expected = if dependency_name == "first" {
+            "{ 1 }"
+        } else {
+            "{ 2 }"
+        };
+        assert!(
+            bundle.contains(expected),
+            "cache contents crossed repositories: {bundle}"
+        );
+    }
+
+    let checkout_roots = std::fs::read_dir(sandbox.cache.join("checkouts"))
+        .unwrap()
+        .count();
+    assert_eq!(
+        checkout_roots, 2,
+        "distinct repository URLs shared a cache identity"
+    );
+
+    let alpha = sandbox.root.join("alpha");
+    let zulu = sandbox.root.join("zulu");
+    lib_package(&alpha, "alpha", "alpha_value() -> i64 { 1 }\n");
+    lib_package(&zulu, "zulu", "zulu_value() -> i64 { 2 }\n");
+    sandbox.ok_in(&sandbox.root, &["new", "ordered"]);
+    let ordered = sandbox.root.join("ordered");
+    write(
+        &ordered.join("grandiose.toml"),
+        "[project]\nname = \"ordered\"\nversion = \"0.1.0\"\nentry = \"src/main.glorious\"\n\n\
+         [dependencies]\nzulu = { path = \"../zulu\" }\nalpha = { path = \"../alpha\" }\n",
+    );
+    sandbox.ok_in(&ordered, &["check"]);
+    let lock = std::fs::read_to_string(ordered.join("grandiose.lock")).unwrap();
+    assert!(lock.find("name = \"alpha\"").unwrap() < lock.find("name = \"zulu\"").unwrap());
+    let bundle = std::fs::read_to_string(ordered.join("target/grand/check.glorious")).unwrap();
+    assert!(bundle.find("alpha_value").unwrap() < bundle.find("zulu_value").unwrap());
+}
+
+#[test]
 fn tests_run_as_independent_executables() {
     let sandbox = Sandbox::new();
     sandbox.ok_in(&sandbox.root, &["new", "app"]);
     let app = sandbox.root.join("app");
-    write(&app.join("tests").join("smoke.gr"), "main() -> i64 { 0 }\n");
+    write(
+        &app.join("tests").join("smoke.glorious"),
+        "main() -> i64 { 0 }\n",
+    );
     // The fake compiler ignores input and emits an exit-0 module, so this
     // exercises discovery, per-test bundling, materialization, and execution.
     if !has_llvm_toolchain() {
@@ -270,8 +546,12 @@ fn tests_run_as_independent_executables() {
     let log = sandbox.ok_in(&app, &["test"]);
     assert!(log.contains("test smoke ... ok"), "unexpected log: {log}");
     // The test bundle must contain the test file, not the root entry.
-    let bundle = std::fs::read_to_string(app.join("target/grand/test-smoke.gr")).unwrap();
-    assert_eq!(bundle.matches("main()").count(), 1, "root entry leaked into test bundle");
+    let bundle = std::fs::read_to_string(app.join("target/grand/test-smoke.glorious")).unwrap();
+    assert_eq!(
+        bundle.matches("main()").count(),
+        1,
+        "root entry leaked into test bundle"
+    );
 }
 
 fn has_llvm_toolchain() -> bool {

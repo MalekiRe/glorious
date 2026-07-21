@@ -203,6 +203,18 @@ pub enum ExprKind {
         subject: Box<Expr>,
         pattern: DecisionPattern,
     },
+    /// An observational pattern decision through a live shared or unique
+    /// reference. The referent is inspected in place; no owner is copied,
+    /// moved, or reconstructed.
+    PatternTestBorrowed {
+        reference: LocalId,
+        pattern: DecisionPattern,
+    },
+    /// A non-owning view of an existing reference register used only as the
+    /// subject of an observational refinement branch.
+    LocalReferenceView {
+        local: LocalId,
+    },
     /// The compiler-recognized CFG form of the ordinary source composition
     /// `if(subject is P) { positive } else { negative }`.
     RefinementBranch {
@@ -217,6 +229,9 @@ pub enum ExprKind {
         /// the incoming edges. Each bitmap marks fields governed by runtime
         /// Empty/drop-flag state after the join.
         conditional_at_join: Vec<(LocalId, Vec<bool>)>,
+        /// Exact complementary variant proven on the negative edge when the
+        /// enum has exactly two variants.
+        negative_variant: Option<u32>,
         positive: Box<Expr>,
         negative: Box<Expr>,
     },
@@ -313,8 +328,8 @@ pub enum DecisionPatternKind {
         name: String,
     },
     Unit,
-    Int(i64),
-    Float(f64),
+    Int(Constant),
+    Float(Constant),
     Char(char),
     String(String),
     Variant {
@@ -622,18 +637,29 @@ impl Expr {
                 writeln!(output, "pattern-test {pattern:?}").unwrap();
                 subject.write(output, depth + 1);
             }
+            ExprKind::PatternTestBorrowed { reference, pattern } => {
+                writeln!(
+                    output,
+                    "pattern-test-borrowed local#{reference} {pattern:?}"
+                )
+                .unwrap();
+            }
+            ExprKind::LocalReferenceView { local } => {
+                writeln!(output, "local-reference-view local#{local}").unwrap();
+            }
             ExprKind::RefinementBranch {
                 subject,
                 pattern,
                 bindings,
                 retire_at_join,
                 conditional_at_join,
+                negative_variant,
                 positive,
                 negative,
             } => {
                 writeln!(
                     output,
-                    "refinement-branch {pattern:?} bindings={bindings:?} retire={retire_at_join:?} conditional={conditional_at_join:?}"
+                    "refinement-branch {pattern:?} bindings={bindings:?} retire={retire_at_join:?} conditional={conditional_at_join:?} negative-variant={negative_variant:?}"
                 )
                 .unwrap();
                 subject.write(output, depth + 1);

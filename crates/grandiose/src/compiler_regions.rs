@@ -155,6 +155,11 @@ pub(crate) struct StoredReferenceOrigin {
     pub(crate) unique: bool,
     pub(crate) external: bool,
     pub(crate) borrowed: Place,
+    /// Named parent handle from which a unique reference was reborrowed into
+    /// this aggregate. The parent remains present in MIR state but is the
+    /// callable environment's own suspended capability, not a competing
+    /// per-call alias.
+    pub(crate) parent: Option<Register>,
 }
 
 /// A bounded, ABI-independent account of the array ownership effects an
@@ -705,6 +710,7 @@ fn infer_array_call_summary(
                 InstructionKind::DerefCopy { dst, .. }
                 | InstructionKind::DerefMove { dst, .. }
                 | InstructionKind::Construct { dst, .. }
+                | InstructionKind::MakeBindingPack { dst, .. }
                 | InstructionKind::EnumTag { dst, .. }
                 | InstructionKind::MakeHandler { dst, .. }
                 | InstructionKind::MakeHandlerShared { dst, .. } => {
@@ -1153,6 +1159,11 @@ pub(crate) struct FlowContext<'a> {
     /// exported facts: it still derives deterministic cleanup lists but only
     /// enforces structural loan discipline.
     pub(crate) strict: bool,
+    /// Semantic validation may prune impossible refined enum-switch arms.
+    /// Final bytecode cleanup serialization disables that pruning because the
+    /// verifier structurally visits every encoded target, including the
+    /// `Unreachable` arm of a proven tag switch.
+    pub(crate) refine_enum_switches: bool,
 }
 
 /// The engine result: per-block entry states and per-point cleanup lists.
@@ -1194,7 +1205,7 @@ impl<'a> FlowContext<'a> {
                 _ => break,
             };
         }
-        match (self.representation(projected), variant) {
+        let fields = match (self.representation(projected), variant) {
             (Type::Tuple { fields, .. }, None) => Some(fields.clone()),
             (Type::Struct { fields, .. }, None) => {
                 Some(fields.iter().map(|field| field.ty).collect())
@@ -1203,10 +1214,20 @@ impl<'a> FlowContext<'a> {
                 .get(variant as usize)
                 .map(|variant| variant.fields.iter().map(|field| field.ty).collect()),
             _ => None,
-        }
+        }?;
+        Some(
+            fields
+                .into_iter()
+                .filter(|field| !matches!(self.representation(*field), Type::Available { .. }))
+                .collect(),
+        )
     }
 
     fn enum_variant_count(&self, ty: TypeId) -> Option<u32> {
+        let ty = match self.representation(ty) {
+            Type::RefShared { referent } | Type::RefUnique { referent } => *referent,
+            _ => ty,
+        };
         match self.representation(ty) {
             Type::Enum { variants, .. } => u32::try_from(variants.len()).ok(),
             _ => None,
@@ -1246,6 +1267,107 @@ impl<'a> FlowContext<'a> {
             count
         }
         collect(self.types, ty, &mut vec![false; self.types.len()])
+    }
+
+    /// Build the exact caller-owned origins of every reference leaf carried
+    /// by an aggregate ABI value.  Unlike the opaque direct-reference loan,
+    /// these origins are rooted at the aggregate parameter and retain their
+    /// nominal field path, so two independently lowered projections of the
+    /// same parameter leaf remain identical at CFG joins.
+    fn external_aggregate_reference_origins(
+        &self,
+        register: Register,
+        ty: TypeId,
+    ) -> BTreeMap<Vec<u32>, StoredReferenceOrigin> {
+        fn collect(
+            types: &[Type],
+            ty: TypeId,
+            register: Register,
+            path: &mut Vec<u32>,
+            visiting: &mut [bool],
+            origins: &mut BTreeMap<Vec<u32>, StoredReferenceOrigin>,
+        ) {
+            let Some(descriptor) = types.get(ty as usize) else {
+                return;
+            };
+            match descriptor.representation() {
+                Type::RefShared { .. } | Type::RefUnique { .. } => {
+                    let borrowed = Place {
+                        base: register,
+                        projection: path
+                            .iter()
+                            .map(|field| Projection::Field {
+                                variant: None,
+                                field: *field,
+                            })
+                            .collect(),
+                    };
+                    origins.insert(
+                        path.clone(),
+                        StoredReferenceOrigin {
+                            unique: matches!(descriptor.representation(), Type::RefUnique { .. }),
+                            external: true,
+                            borrowed,
+                            parent: None,
+                        },
+                    );
+                    return;
+                }
+                _ => {}
+            }
+            if visiting.get(ty as usize).copied().unwrap_or(true) {
+                return;
+            }
+            visiting[ty as usize] = true;
+            let fields = match descriptor.representation() {
+                Type::Tuple { fields, .. } => Some(fields.clone()),
+                Type::Struct { fields, .. } => Some(fields.iter().map(|field| field.ty).collect()),
+                Type::Callable { capture_type, .. } | Type::Handler { capture_type, .. } => {
+                    match types.get(*capture_type as usize) {
+                        Some(capture) => match capture.representation() {
+                            Type::Tuple { fields, .. } => Some(fields.clone()),
+                            Type::Struct { fields, .. } => {
+                                Some(fields.iter().map(|field| field.ty).collect())
+                            }
+                            _ => None,
+                        },
+                        None => None,
+                    }
+                }
+                Type::BindingPack { payload_type, .. } => match types.get(*payload_type as usize) {
+                    Some(payload) => match payload.representation() {
+                        Type::Tuple { fields, .. } => Some(fields.clone()),
+                        Type::Struct { fields, .. } => {
+                            Some(fields.iter().map(|field| field.ty).collect())
+                        }
+                        _ => None,
+                    },
+                    None => None,
+                },
+                // An enum parameter has no entry variant proof, so a numeric
+                // payload field is not yet a stable nominal path.
+                _ => None,
+            };
+            if let Some(fields) = fields {
+                for (field, field_ty) in fields.into_iter().enumerate() {
+                    path.push(field as u32);
+                    collect(types, field_ty, register, path, visiting, origins);
+                    path.pop();
+                }
+            }
+            visiting[ty as usize] = false;
+        }
+
+        let mut origins = BTreeMap::new();
+        collect(
+            self.types,
+            ty,
+            register,
+            &mut Vec::new(),
+            &mut vec![false; self.types.len()],
+            &mut origins,
+        );
+        origins
     }
 
     fn register_type(&self, register: Register) -> TypeId {
@@ -1338,6 +1460,16 @@ impl<'a> FlowContext<'a> {
                         suspended: 0,
                     },
                 );
+            } else if register != 0 || context.function.receiver_mode.is_none() {
+                // Receiver capture environments are initialized and consumed
+                // by callable-specific lowering.  Their field origins are
+                // established by MakeCallable/Construct; treating r0 as an
+                // ordinary caller aggregate would retain leaves that a
+                // capture projection has legitimately moved out.
+                let origins = context.external_aggregate_reference_origins(register, ty);
+                if !origins.is_empty() {
+                    state.aggregate_reference_origins.insert(register, origins);
+                }
             }
         };
         if self.strict {
@@ -1357,10 +1489,22 @@ impl<'a> FlowContext<'a> {
                 }
             }
         } else {
-            // Bridge mode: hand-assembled MIR has no exported definition
-            // facts, so every register is conservatively considered live-in.
-            for register in 0..count as Register {
+            // Bridge mode relaxes definition diagnostics for hand-assembled
+            // MIR, but it must still honor the bytecode entry ABI. Only a
+            // receiver, explicit parameters, and locals explicitly declared
+            // initialized can contain values at PC 0. Treating every scratch
+            // register as live made MIR-derived cleanup metadata disagree
+            // with the verifier before the first instruction.
+            if self.function.receiver_mode.is_some() {
+                mark_live(self, &mut state, 0);
+            }
+            for register in 1..=self.function.params.len() as Register {
                 mark_live(self, &mut state, register);
+            }
+            for (register, fact) in self.locals.iter().enumerate() {
+                if fact.initial == InitAtEntry::Initialized && !state.regs[register].is_live() {
+                    mark_live(self, &mut state, register as Register);
+                }
             }
         }
         state
@@ -1375,6 +1519,52 @@ struct Interpreter<'a> {
 }
 
 impl Interpreter<'_> {
+    fn projected_aggregate_reference_origins(
+        &self,
+        source: Register,
+        field: u32,
+    ) -> BTreeMap<Vec<u32>, StoredReferenceOrigin> {
+        let prefix = self.state.active_variants[source as usize]
+            .map_or_else(|| vec![field], |variant| vec![u32::MAX - variant, field]);
+        self.state
+            .aggregate_reference_origins
+            .get(&source)
+            .into_iter()
+            .flat_map(|origins| origins.iter())
+            .filter(|(path, _)| path.starts_with(&prefix))
+            .map(|(path, origin)| (path[prefix.len()..].to_vec(), origin.clone()))
+            .collect()
+    }
+
+    fn install_projected_reference_origins(
+        &mut self,
+        destination: Register,
+        origins: BTreeMap<Vec<u32>, StoredReferenceOrigin>,
+    ) {
+        if self
+            .context
+            .is_reference(self.context.register_type(destination))
+        {
+            if let Some(origin) = origins.get(&[] as &[u32]) {
+                self.state.loans.insert(
+                    destination,
+                    LiveLoan {
+                        id: u32::MAX,
+                        unique: origin.unique,
+                        external: origin.external,
+                        borrowed: origin.borrowed.clone(),
+                        parent: None,
+                        suspended: 0,
+                    },
+                );
+            }
+        } else if !origins.is_empty() {
+            self.state
+                .aggregate_reference_origins
+                .insert(destination, origins);
+        }
+    }
+
     fn stored_reference_origin(
         &self,
         operand: Option<&Operand>,
@@ -1415,6 +1605,7 @@ impl Interpreter<'_> {
             unique: loan.unique,
             external: loan.external,
             borrowed: loan.borrowed.clone(),
+            parent: loan.parent,
         }))
     }
 
@@ -2111,6 +2302,7 @@ impl Interpreter<'_> {
         self.state.regs[register as usize] = RegState::Consumed;
         self.state.conditional_fields.remove(&register);
         self.state.array_slots.remove(&register);
+        self.state.aggregate_reference_origins.remove(&register);
         self.state.constants[register as usize] = None;
         self.state.quantity_groups[register as usize] = None;
         self.state.active_variants[register as usize] = None;
@@ -2482,6 +2674,80 @@ impl Interpreter<'_> {
                 }
                 self.consume(*reference, "EndBorrow")
             }
+            InstructionKind::MakeBindingPack {
+                dst,
+                binding_type,
+                payloads,
+            } => {
+                if self.context.strict && *binding_type != self.context.register_type(*dst) {
+                    return Err(self.error(format!(
+                        "MakeBindingPack initializes r{dst} with type {binding_type}, but the register has type {}",
+                        self.context.register_type(*dst)
+                    )));
+                }
+                if !matches!(
+                    self.context.representation(*binding_type),
+                    Type::BindingPack { .. }
+                ) {
+                    return Err(self.error(format!(
+                        "MakeBindingPack initializes r{dst} with a non-binding-pack type"
+                    )));
+                }
+                let expected = self
+                    .context
+                    .aggregate_fields(*binding_type, None)
+                    .ok_or_else(|| self.error("binding pack payload is not an aggregate"))?;
+                if self.context.strict && payloads.len() != expected.len() {
+                    return Err(self.error(format!(
+                        "MakeBindingPack initializes r{dst} with {} payloads, but its layout requires {}",
+                        payloads.len(),
+                        expected.len()
+                    )));
+                }
+                let mut aggregate_origins = BTreeMap::new();
+                for (field, (payload, expected)) in payloads.iter().zip(&expected).enumerate() {
+                    if self.context.strict
+                        && self.context.register_type(payload.register) != *expected
+                    {
+                        return Err(self.error(format!(
+                            "MakeBindingPack payload {field} of r{dst} has the wrong type"
+                        )));
+                    }
+                    let prefix = vec![field as u32];
+                    if let Some(loan) = self.state.loans.get(&payload.register) {
+                        aggregate_origins.insert(
+                            prefix.clone(),
+                            StoredReferenceOrigin {
+                                unique: loan.unique,
+                                external: loan.external,
+                                borrowed: loan.borrowed.clone(),
+                                parent: loan.parent,
+                            },
+                        );
+                    }
+                    if let Some(nested) = self
+                        .state
+                        .aggregate_reference_origins
+                        .get(&payload.register)
+                    {
+                        for (path, origin) in nested {
+                            let mut projected = prefix.clone();
+                            projected.extend(path);
+                            aggregate_origins.insert(projected, origin.clone());
+                        }
+                    }
+                }
+                for payload in payloads {
+                    self.operand(payload, "MakeBindingPack")?;
+                }
+                self.define(*dst, "MakeBindingPack")?;
+                if !aggregate_origins.is_empty() {
+                    self.state
+                        .aggregate_reference_origins
+                        .insert(*dst, aggregate_origins);
+                }
+                Ok(())
+            }
             InstructionKind::Construct {
                 dst,
                 ty,
@@ -2534,13 +2800,19 @@ impl Interpreter<'_> {
                 }
                 let mut aggregate_origins = BTreeMap::new();
                 for (field, operand) in fields.iter().enumerate() {
+                    let mut field_path = Vec::with_capacity(2);
+                    if let Some(variant) = variant {
+                        field_path.push(u32::MAX - *variant);
+                    }
+                    field_path.push(field as u32);
                     if let Some(loan) = self.state.loans.get(&operand.register) {
                         aggregate_origins.insert(
-                            vec![field as u32],
+                            field_path.clone(),
                             StoredReferenceOrigin {
                                 unique: loan.unique,
                                 external: loan.external,
                                 borrowed: loan.borrowed.clone(),
+                                parent: loan.parent,
                             },
                         );
                     }
@@ -2550,8 +2822,8 @@ impl Interpreter<'_> {
                         .get(&operand.register)
                     {
                         for (path, origin) in nested {
-                            let mut projected = Vec::with_capacity(path.len() + 1);
-                            projected.push(field as u32);
+                            let mut projected = Vec::with_capacity(path.len() + field_path.len());
+                            projected.extend(&field_path);
                             projected.extend(path);
                             aggregate_origins.insert(projected, origin.clone());
                         }
@@ -2586,10 +2858,14 @@ impl Interpreter<'_> {
             }
             InstructionKind::ProjectCopy { dst, src, field } => {
                 self.field_access(src.register, *field, "ProjectCopy")?;
-                self.define(*dst, "ProjectCopy")
+                let origins = self.projected_aggregate_reference_origins(src.register, *field);
+                self.define(*dst, "ProjectCopy")?;
+                self.install_projected_reference_origins(*dst, origins);
+                Ok(())
             }
             InstructionKind::ProjectMove { dst, src, field } => {
                 self.field_access(src.register, *field, "ProjectMove")?;
+                let origins = self.projected_aggregate_reference_origins(src.register, *field);
                 let ty = self.context.register_type(src.register);
                 if self.context.strict
                     && self.context.locals[src.register as usize].drop_glue == DropGlueKind::Custom
@@ -2634,7 +2910,19 @@ impl Interpreter<'_> {
                         src.register
                     )));
                 }
-                self.define(*dst, "ProjectMove")
+                if let Some(source_origins) = self
+                    .state
+                    .aggregate_reference_origins
+                    .get_mut(&src.register)
+                {
+                    source_origins.retain(|path, _| path.first() != Some(field));
+                    if source_origins.is_empty() {
+                        self.state.aggregate_reference_origins.remove(&src.register);
+                    }
+                }
+                self.define(*dst, "ProjectMove")?;
+                self.install_projected_reference_origins(*dst, origins);
+                Ok(())
             }
             InstructionKind::Deconstruct { src } => {
                 self.expect_live(*src, "Deconstruct")?;
@@ -2722,10 +3010,34 @@ impl Interpreter<'_> {
                 Ok(())
             }
             InstructionKind::MakeCallable { dst, captures, .. } => {
+                let mut origins = BTreeMap::new();
+                for (field, capture) in captures.iter().enumerate() {
+                    if let Some(origin) =
+                        self.stored_reference_origin(Some(capture), &[], "MakeCallable capture")?
+                    {
+                        origins.insert(vec![field as u32], origin);
+                    }
+                    if let Some(nested) = self
+                        .state
+                        .aggregate_reference_origins
+                        .get(&capture.register)
+                    {
+                        for (path, origin) in nested {
+                            let mut capture_path = Vec::with_capacity(path.len() + 1);
+                            capture_path.push(field as u32);
+                            capture_path.extend(path);
+                            origins.insert(capture_path, origin.clone());
+                        }
+                    }
+                }
                 for capture in captures {
                     self.operand(capture, "MakeCallable")?;
                 }
-                self.define(*dst, "MakeCallable")
+                self.define(*dst, "MakeCallable")?;
+                if !origins.is_empty() {
+                    self.state.aggregate_reference_origins.insert(*dst, origins);
+                }
+                Ok(())
             }
             InstructionKind::MakeHandler { dst, clauses, .. } => {
                 for clause in clauses {
@@ -3099,32 +3411,126 @@ fn apply_edge(
     if let Some(result) = implicit {
         interpreter.define(result, "terminator result")?;
     }
-    for (argument, parameter) in edge.args.iter().zip(params.iter().skip(skip)) {
-        match argument.mode {
-            UseMode::Move => {
-                // An edge transfer renames the owner into the parameter
-                // register; it is not an ownership use event.
-                if argument.register != parameter.register {
+    let original_count = interpreter.state.regs.len();
+    let mut temporaries = vec![0; edge.args.len()];
+
+    // Bytecode snapshots every edge argument before it writes any target
+    // parameter. Model those physical temporaries here as well; applying the
+    // renames sequentially loses values for swaps and longer cycles.
+    for mode in [UseMode::Copy, UseMode::Move] {
+        for (index, argument) in edge.args.iter().enumerate() {
+            if argument.mode != mode {
+                continue;
+            }
+            let temporary = interpreter.state.regs.len() as Register;
+            temporaries[index] = temporary;
+            interpreter.state.regs.push(RegState::Undefined);
+            interpreter.state.constants.push(None);
+            interpreter.state.active_variants.push(None);
+            interpreter.state.enum_tag_sources.push(None);
+            interpreter.state.shell_ages.push(None);
+            interpreter.state.uses.push(UseCount::ZERO);
+            interpreter.state.quantity_groups.push(None);
+            interpreter.state.quantity_uses.push(UseCount::ZERO);
+
+            match mode {
+                UseMode::Move => {
+                    // Snapshotting a move is a pure rename and therefore does
+                    // not count as an ownership use.
                     interpreter.statement(&InstructionKind::Move {
-                        dst: parameter.register,
+                        dst: temporary,
                         src: *argument,
                     })?;
                 }
-            }
-            UseMode::Copy => {
-                let tag_source = interpreter.state.enum_tag_sources[argument.register as usize];
-                let active_variant = interpreter.state.active_variants[argument.register as usize];
-                let quantity_group = interpreter.state.quantity_groups[argument.register as usize];
-                interpreter.operand(argument, "edge argument")?;
-                if argument.register != parameter.register {
-                    interpreter.define(parameter.register, "edge parameter")?;
-                    interpreter.state.quantity_groups[parameter.register as usize] = quantity_group;
-                    interpreter.state.enum_tag_sources[parameter.register as usize] = tag_source;
-                    interpreter.state.active_variants[parameter.register as usize] = active_variant;
+                UseMode::Copy => {
+                    let source = argument.register as usize;
+                    let tag_source = interpreter.state.enum_tag_sources[source];
+                    let active_variant = interpreter.state.active_variants[source];
+                    let constant = interpreter.state.constants[source];
+                    let quantity_group = interpreter.state.quantity_groups[source];
+                    let aggregate_origins = interpreter
+                        .state
+                        .aggregate_reference_origins
+                        .get(&argument.register)
+                        .cloned();
+                    interpreter.operand(argument, "edge argument")?;
+                    interpreter.state.regs[temporary as usize] = RegState::Live;
+                    interpreter.state.order.push(temporary);
+                    interpreter.state.constants[temporary as usize] = constant;
+                    interpreter.state.active_variants[temporary as usize] = active_variant;
+                    interpreter.state.enum_tag_sources[temporary as usize] = tag_source;
+                    interpreter.state.quantity_groups[temporary as usize] = quantity_group;
+                    if let Some(origins) = aggregate_origins {
+                        interpreter
+                            .state
+                            .aggregate_reference_origins
+                            .insert(temporary, origins);
+                    }
+                    let ty = interpreter.context.register_type(argument.register);
+                    if matches!(interpreter.context.representation(ty), Type::Array { .. }) {
+                        interpreter.state.array_slots.insert(
+                            temporary,
+                            ArraySlotState {
+                                length: None,
+                                empty: BTreeSet::new(),
+                                dynamic_hole: false,
+                                reference_origins: BTreeMap::new(),
+                            },
+                        );
+                    }
+                    if interpreter.context.is_reference(ty) {
+                        interpreter.state.loans.insert(
+                            temporary,
+                            LiveLoan {
+                                id: u32::MAX,
+                                unique: interpreter.context.is_unique_reference(ty),
+                                external: true,
+                                borrowed: Place::local(temporary),
+                                parent: None,
+                                suspended: 0,
+                            },
+                        );
+                    }
                 }
             }
         }
     }
+    for (parameter, temporary) in params.iter().skip(skip).zip(temporaries) {
+        interpreter.statement(&InstructionKind::Move {
+            dst: parameter.register,
+            src: Operand {
+                register: temporary,
+                mode: UseMode::Move,
+            },
+        })?;
+    }
+
+    let temporary_end = interpreter.state.regs.len();
+    debug_assert!(
+        interpreter
+            .state
+            .order
+            .iter()
+            .all(|register| (*register as usize) < original_count)
+    );
+    for temporary in original_count as Register..temporary_end as Register {
+        interpreter.state.conditional_fields.remove(&temporary);
+        interpreter.state.array_slots.remove(&temporary);
+        interpreter
+            .state
+            .aggregate_reference_origins
+            .remove(&temporary);
+        interpreter.state.loans.remove(&temporary);
+        interpreter.state.holes.remove(&temporary);
+    }
+    interpreter.state.regs.truncate(original_count);
+    interpreter.state.constants.truncate(original_count);
+    interpreter.state.active_variants.truncate(original_count);
+    interpreter.state.enum_tag_sources.truncate(original_count);
+    interpreter.state.shell_ages.truncate(original_count);
+    interpreter.state.uses.truncate(original_count);
+    interpreter.state.quantity_groups.truncate(original_count);
+    interpreter.state.quantity_uses.truncate(original_count);
     Ok(interpreter.state.clone())
 }
 
@@ -3166,7 +3572,12 @@ fn terminator_transfer(
                     && let grandiose_vm::Constant::U32(variant) = constant
                     && !interpreter.refine_enum_variant(source, *variant)?
                 {
-                    continue;
+                    if context.refine_enum_switches {
+                        continue;
+                    }
+                    // Serialization must retain the physical state on an
+                    // encoded but semantically impossible arm.
+                    interpreter.state = after.clone();
                 }
                 let state = apply_edge(interpreter, edge, params_of(edge.target), None)?;
                 successors.push((edge.target, state));
@@ -3188,8 +3599,11 @@ fn terminator_transfer(
             if let (Some(source), Some(variant)) = (enum_source, remaining_variant)
                 && !interpreter.refine_enum_variant(source, variant)?
             {
-                interpreter.state = base;
-                return Ok(successors);
+                if context.refine_enum_switches {
+                    interpreter.state = base;
+                    return Ok(successors);
+                }
+                interpreter.state = after.clone();
             }
             let state = apply_edge(interpreter, otherwise, params_of(otherwise.target), None)?;
             successors.push((otherwise.target, state));
@@ -3265,6 +3679,31 @@ fn terminator_transfer(
                 )?;
             } else {
                 interpreter.expect_live(callable.register, "CallIndirect receiver")?;
+                // A borrowed receiver creates a fresh, synchronous view of
+                // every reference leaf in its sealed environment. Unique
+                // leaves require exclusive access for this call; retaining
+                // the exact captured place makes the check independent of
+                // register allocation and catches a still-live result from a
+                // preceding call.
+                if *receiver_mode == 1
+                    && let Some(origins) = interpreter
+                        .state
+                        .aggregate_reference_origins
+                        .get(&callable.register)
+                {
+                    for origin in origins.values().filter(|origin| origin.unique) {
+                        if interpreter.state.loans.iter().any(|(reference, loan)| {
+                            Some(*reference) != origin.parent
+                                && loan.borrowed.overlaps(&origin.borrowed)
+                                && (origin.unique || loan.unique)
+                        }) {
+                            return Err(interpreter.error(format!(
+                                "CallIndirect unique receiver r{} overlaps a live reference into its captured environment",
+                                callable.register
+                            )));
+                        }
+                    }
+                }
             }
             for argument in args {
                 interpreter.operand(argument, "CallIndirect argument")?;
@@ -3637,7 +4076,9 @@ fn terminator_transfer(
             interpreter.state.labels.truncate(label_index);
             successors.push((target.target, interpreter.state.clone()));
         }
-        Terminator::Unreachable => {}
+        // Abort deliberately performs no ordinary cleanup and has no
+        // successor, matching the VM's immediate-termination contract.
+        Terminator::Abort { .. } | Terminator::Unreachable => {}
     }
     interpreter.state = base;
     Ok(successors)
@@ -3945,14 +4386,43 @@ fn join_states(
             }
         }
     }
-    if joined.loans != incoming.loans {
+    // Loan entries attached to references that are already dead on their
+    // predecessor do not cross the edge.  Scratch borrows commonly end on
+    // only one arm of a pattern test whose other arm does not return; keeping
+    // those dead entries makes otherwise identical continuing states appear
+    // incompatible at the join.
+    let joined_live = joined
+        .regs
+        .iter()
+        .map(RegState::is_live)
+        .collect::<Vec<_>>();
+    joined
+        .loans
+        .retain(|reference, _| joined_live[*reference as usize]);
+    for (reference, loan) in &mut joined.loans {
+        if loan.external && loan.id == u32::MAX && loan.parent.is_none() {
+            loan.borrowed = Place::local(*reference);
+        }
+    }
+    let mut incoming_loans = incoming
+        .loans
+        .iter()
+        .filter(|(reference, _)| incoming.regs[**reference as usize].is_live())
+        .map(|(reference, loan)| (*reference, loan.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for (reference, loan) in &mut incoming_loans {
+        if loan.external && loan.id == u32::MAX && loan.parent.is_none() {
+            loan.borrowed = Place::local(*reference);
+        }
+    }
+    if joined.loans != incoming_loans {
         if context.strict {
             return Err(flow_error(
                 block,
                 "block join has conflicting live loan sets",
             ));
         }
-        for (reference, loan) in &incoming.loans {
+        for (reference, loan) in &incoming_loans {
             joined
                 .loans
                 .entry(*reference)
@@ -4057,17 +4527,55 @@ fn join_states(
         );
     }
     if joined.aggregate_reference_origins != incoming.aggregate_reference_origins {
-        if context.strict {
-            return Err(flow_error(
-                block,
-                "block join has conflicting aggregate reference-origin paths",
-            ));
-        }
-        joined
+        let registers = joined
             .aggregate_reference_origins
-            .retain(|register, origins| {
-                incoming.aggregate_reference_origins.get(register) == Some(origins)
-            });
+            .keys()
+            .chain(incoming.aggregate_reference_origins.keys())
+            .copied()
+            .collect::<BTreeSet<_>>();
+        for register in registers {
+            let left = joined
+                .aggregate_reference_origins
+                .get(&register)
+                .cloned()
+                .unwrap_or_default();
+            let right = incoming
+                .aggregate_reference_origins
+                .get(&register)
+                .cloned()
+                .unwrap_or_default();
+            if left == right {
+                continue;
+            }
+            let variant_count = context.enum_variant_count(context.register_type(register));
+            let variant_path = |path: &[u32]| {
+                variant_count.is_some_and(|count| path.len() >= 2 && u32::MAX - path[0] < count)
+            };
+            let compatible = left
+                .keys()
+                .chain(right.keys())
+                .all(|path| variant_path(path))
+                && left
+                    .iter()
+                    .all(|(path, origin)| right.get(path).is_none_or(|other| other == origin));
+            if !compatible {
+                if context.strict {
+                    return Err(flow_error(
+                        block,
+                        "block join has conflicting aggregate reference-origin paths",
+                    ));
+                }
+                joined.aggregate_reference_origins.remove(&register);
+                continue;
+            }
+            let mut merged = left;
+            merged.extend(right);
+            if merged.is_empty() {
+                joined.aggregate_reference_origins.remove(&register);
+            } else {
+                joined.aggregate_reference_origins.insert(register, merged);
+            }
+        }
     }
     for (slot, incoming_uses) in joined.uses.iter_mut().zip(&incoming.uses) {
         *slot = slot.hull(*incoming_uses);
@@ -4205,6 +4713,7 @@ mod ownership_engine_tests {
             loans: loan_table(function, types),
             array_calls: &BTreeMap::new(),
             strict: true,
+            refine_enum_switches: true,
         };
         solve(&context)
     }
@@ -4231,6 +4740,157 @@ mod ownership_engine_tests {
         let unique = types.len() as grandiose_vm::TypeId;
         types.push(Type::RefUnique { referent: I64 });
         (types, shared, unique)
+    }
+
+    #[test]
+    fn equal_cfg_projections_of_an_aggregate_parameter_share_one_symbolic_origin() {
+        let (mut types, shared, _) = reference_types();
+        let pair = types.len() as grandiose_vm::TypeId;
+        types.push(Type::Tuple {
+            fields: vec![shared, shared],
+            copy: true,
+        });
+        let projected = |block_id, destination| {
+            block(
+                block_id,
+                vec![statement(InstructionKind::ProjectCopy {
+                    dst: destination,
+                    src: Operand {
+                        register: 2,
+                        mode: UseMode::Copy,
+                    },
+                    field: 0,
+                })],
+                Terminator::Goto(Edge {
+                    target: 3,
+                    args: vec![move_operand(destination)],
+                }),
+            )
+        };
+        let mut join = block(
+            3,
+            vec![
+                statement(InstructionKind::EndBorrow { reference: 5 }),
+                statement(InstructionKind::Drop {
+                    owner: move_operand(2),
+                }),
+            ],
+            Terminator::Return { value: None },
+        );
+        join.params.push(BlockParam {
+            register: 5,
+            ty: shared,
+            role: BlockParamRole::Ordinary,
+        });
+        let function = exported_function(
+            vec![UNIT, grandiose_vm::U32, pair, shared, shared, shared],
+            2,
+            vec![
+                block(
+                    0,
+                    vec![],
+                    Terminator::Switch {
+                        discr: Operand {
+                            register: 1,
+                            mode: UseMode::Copy,
+                        },
+                        cases: vec![(
+                            grandiose_vm::Constant::U32(0),
+                            Edge {
+                                target: 1,
+                                args: vec![],
+                            },
+                        )],
+                        otherwise: Edge {
+                            target: 2,
+                            args: vec![],
+                        },
+                    },
+                ),
+                projected(1, 3),
+                projected(2, 4),
+                join,
+            ],
+            &types,
+        );
+
+        let solution = solve_function(&function, &types).expect("equal symbolic origins join");
+        let loan = &solution.entries[&3].loans[&5];
+        assert!(loan.external);
+        assert_eq!(loan.borrowed, Place::field(2, None, 0));
+    }
+
+    #[test]
+    fn callable_environment_owns_and_releases_an_exact_unique_capture_origin() {
+        let (mut types, _, unique) = reference_types();
+        let environment = types.len() as grandiose_vm::TypeId;
+        types.push(
+            Type::Tuple {
+                fields: vec![unique],
+                copy: false,
+            }
+            .restricted(false, true),
+        );
+        let callable = types.len() as grandiose_vm::TypeId;
+        types.push(Type::Callable {
+            signature: Signature {
+                params: vec![],
+                result: UNIT,
+                outward_protocols: vec![],
+            },
+            capture_type: environment,
+            receiver_mode: 1,
+            identity_name: "unique environment".into(),
+            copy: false,
+            zero_use_allowed: true,
+        });
+        let function = exported_function(
+            vec![UNIT, I64, unique, callable, unique],
+            1,
+            vec![
+                block(
+                    0,
+                    vec![
+                        statement(InstructionKind::Borrow {
+                            dst: 2,
+                            src: 1,
+                            unique: true,
+                        }),
+                        statement(InstructionKind::MakeCallable {
+                            dst: 3,
+                            callable_type: callable,
+                            function: 1,
+                            captures: vec![move_operand(2)],
+                        }),
+                    ],
+                    Terminator::Goto(Edge {
+                        target: 1,
+                        args: vec![],
+                    }),
+                ),
+                block(
+                    1,
+                    vec![
+                        statement(InstructionKind::Drop {
+                            owner: move_operand(3),
+                        }),
+                        statement(InstructionKind::Borrow {
+                            dst: 4,
+                            src: 1,
+                            unique: true,
+                        }),
+                        statement(InstructionKind::EndBorrow { reference: 4 }),
+                    ],
+                    Terminator::Return { value: None },
+                ),
+            ],
+            &types,
+        );
+
+        let solution = solve_function(&function, &types).expect("unique environment flow");
+        let origin = &solution.entries[&1].aggregate_reference_origins[&3][&vec![0]];
+        assert!(origin.unique);
+        assert_eq!(origin.borrowed, Place::local(1));
     }
 
     fn enum_types() -> (Vec<Type>, grandiose_vm::TypeId) {
@@ -6039,6 +6699,7 @@ mod ownership_engine_tests {
             loans: loan_table(&aggregate_caller, &types),
             array_calls: &summaries,
             strict: true,
+            refine_enum_switches: true,
         })
         .expect("aggregate reference path is installed in the array slot");
         let aggregate_slots = &aggregate_solution.entries[&1].array_slots[&4];
@@ -6086,6 +6747,7 @@ mod ownership_engine_tests {
             loans: loan_table(&caller, &types),
             array_calls: &summaries,
             strict: true,
+            refine_enum_switches: true,
         })
         .expect("wrapper call installs the transported reference origin");
         let slots = &solution.entries[&1].array_slots[&2];

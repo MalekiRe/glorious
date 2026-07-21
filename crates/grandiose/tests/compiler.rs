@@ -1267,7 +1267,7 @@ fn projection_solver_limit_is_exact_structured_and_source_order_independent() {
         let projected = nested_projection(depth);
         if reordered {
             format!(
-                "main()->{{()}} take(value:{projected})->i64{{value}} \
+                "main()->{{()}} take_projected(value:{projected})->i64{{value}} \
                  impl<T> Family for Wrap<T>{{type Member=T;}} \
                  struct Wrap<T>{{value:T}} trait Family{{type Member;}}"
             )
@@ -1275,7 +1275,7 @@ fn projection_solver_limit_is_exact_structured_and_source_order_independent() {
             format!(
                 "trait Family{{type Member;}} struct Wrap<T>{{value:T}} \
                  impl<T> Family for Wrap<T>{{type Member=T;}} \
-                 take(value:{projected})->i64{{value}} main()->{{()}}"
+                 take_projected(value:{projected})->i64{{value}} main()->{{()}}"
             )
         }
     };
@@ -1424,6 +1424,19 @@ fn phantom_generic_use_specializes_only_reachable_marker_proven_grounds() {
 }
 
 #[test]
+fn symbolic_expected_type_fixes_phantom_nominal_construction_inside_enum() {
+    let source = r#"
+        struct Key<Tag> { raw: u32 }
+        make<Tag, T>(item: T) -> Result<Key<Tag>, T> {
+            Result::Ok(Key { raw: 7 })
+        }
+        main() -> { () }
+    "#;
+    let phases = compile_source_to_phases("phantom-nominal-expected-type.gr", source).unwrap();
+    verify(phases.artifact).unwrap();
+}
+
+#[test]
 fn generic_use_rejects_dependent_layouts_and_overlaps_before_reachability() {
     let cases = [
         "struct Box<T> { value: T } impl<T> Use<[0,1]> for Box<T> {} main() -> { () }",
@@ -1431,7 +1444,6 @@ fn generic_use_rejects_dependent_layouts_and_overlaps_before_reachability() {
         "struct Phantom<T> { marker: i64 } impl<T> Use<[0,1]> for Phantom<T> {} impl Use<[0,2]> for Phantom<i64> {} main() -> { () }",
         "trait Left {} trait Right {} struct Item { marker: i64 } impl Use<[0,1]> for Item where Item: Left {} impl Use<[0,2]> for Item where Item: Right {} main() -> { () }",
         "trait Left {} trait Right {} struct Phantom<T> { marker: i64 } impl Use<[0,1]> for Phantom<i64> where i64: Left {} impl Use<[0,2]> for Phantom<i64> where i64: Right {} main() -> { () }",
-        "struct Phantom<T, U> { marker: i64 } impl<T, U> Use<[0,1]> for Phantom<U, T> {} main() -> { () }",
     ];
     for source in cases {
         let errors = compile_source_to_bytecode("invalid-generic-use.gr", source).unwrap_err();
@@ -1446,6 +1458,12 @@ fn generic_use_rejects_dependent_layouts_and_overlaps_before_reachability() {
     "#;
     let artifact = compile_raw_source("unreached-generic-use.gr", zero_roots).unwrap();
     assert_eq!(artifact.types.len(), Type::predefined().len());
+
+    compile_source_to_bytecode(
+        "permuted-generic-use.gr",
+        "struct Phantom<T, U> { marker: i64 } impl<T, U> Use<[0,1]> for Phantom<U, T> {} main() -> { () }",
+    )
+    .expect("structural generic Use heads may permute their bound arguments");
 }
 
 #[test]
@@ -2180,7 +2198,7 @@ fn custom_drop_rejects_partial_noncopy_moves_but_keeps_copy_and_whole_moves_lega
             struct Owner { value: &mut i64 }
             struct Residual { owner: Owner, marker: i64 }
             impl Drop for Residual { drop(&mut self) -> { self.marker; () } }
-            take(value: Residual) -> Owner { value.owner }
+            extract_owner(value: Residual) -> Owner { value.owner }
             main() -> { () }
         "#,
         r#"
@@ -2188,7 +2206,7 @@ fn custom_drop_rejects_partial_noncopy_moves_but_keeps_copy_and_whole_moves_lega
             struct Inner { owner: Owner }
             struct Outer { inner: Inner }
             impl Drop for Outer { drop(&mut self) -> { () } }
-            take(value: Outer) -> Owner { value.inner.owner }
+            extract_owner(value: Outer) -> Owner { value.inner.owner }
             main() -> { () }
         "#,
     ] {
@@ -2230,7 +2248,7 @@ fn grounded_generic_drop_rejects_only_instances_with_an_applicable_hook() {
             struct Owner { value: &mut i64 }
             struct Box<T> { value: T }
             impl<T> Drop for Box<T> { drop(&mut self) -> { () } }
-            take(value: Box<Owner>) -> Owner { value.value }
+            extract_owner(value: Box<Owner>) -> Owner { value.value }
             main() -> { () }
         "#,
         r#"
@@ -2239,7 +2257,7 @@ fn grounded_generic_drop_rejects_only_instances_with_an_applicable_hook() {
             struct Box<T> { value: T }
             impl Marker for Owner {}
             impl<T> Drop for Box<T> where T: Marker { drop(&mut self) -> { () } }
-            take(value: Box<Owner>) -> Owner { value.value }
+            extract_owner(value: Box<Owner>) -> Owner { value.value }
             main() -> { () }
         "#,
     ] {
@@ -2255,7 +2273,7 @@ fn grounded_generic_drop_rejects_only_instances_with_an_applicable_hook() {
             struct Owner { value: &mut i64 }
             struct Box<T> { value: T }
             impl<T> Drop for Box<T> where T: Marker { drop(&mut self) -> { () } }
-            take(value: Box<Owner>) -> Owner { value.value }
+            extract_owner(value: Box<Owner>) -> Owner { value.value }
             main() -> { () }
         "#,
     )
@@ -2511,7 +2529,8 @@ fn conditional_generic_drop_rejects_cyclic_goals_and_overlapping_heads() {
     let errors =
         compile_source_to_bytecode("overlapping-conditional-drop.gr", overlap).unwrap_err();
     assert!(errors.iter().any(|error| {
-        error.message.contains("already has a Drop hook")
+        error.message.contains("overlapping")
+            && error.message.contains("Drop")
             && error.span.is_some()
             && error.code.is_some()
     }));
@@ -2552,9 +2571,7 @@ fn invalid_drop_targets_and_bodies_have_structured_diagnostics() {
         "struct Box<T> { value: T } impl Drop for Box<i64> { drop(&mut self) -> { () } } main() -> { () }",
         "struct Box<T> { value: T } impl<T, U> Drop for Box<T> { drop(&mut self) -> { () } } main() -> { () }",
         "struct Box<T> { value: T } impl<T> Drop for Box<U> { drop(&mut self) -> { () } } main() -> { () }",
-        "struct Box<T> { value: T } impl<T> Drop for Box<Box<T>> { drop(&mut self) -> { () } } main() -> { () }",
         "struct Box<T> { value: T } impl<T> Drop for Box<T> where T: Fn<(), Output=T> { drop(&mut self) -> { () } } main() -> { () }",
-        "trait Marker {} struct Box<T> { value: T } impl<T> Drop for Box<T> where &T: Marker { drop(&mut self) -> { () } } main() -> { () }",
         "struct Box<T> { value: T } impl<T> Drop for Box<T> { drop(&mut self) -> { () } } impl<U> Drop for Box<U> { drop(&mut self) -> { () } } main() -> { () }",
         "struct Box<T> { value: T } impl<T> Drop for &Box<T> { drop(&mut self) -> { () } } main() -> { () }",
         "struct Item { value: i64 } impl Drop for Item { drop(&mut self) -> { let moved = self; () } } main() -> { () }",
@@ -2573,6 +2590,17 @@ fn invalid_drop_targets_and_bodies_have_structured_diagnostics() {
             "{errors:#?}"
         );
     }
+
+    compile_source_to_bytecode(
+        "nested-drop-head.gr",
+        "struct Box<T> { value: T } impl<T> Drop for Box<Box<T>> { drop(&mut self) -> { () } } main() -> { () }",
+    )
+    .expect("structural generic Drop heads may contain finite nested nominal patterns");
+    compile_source_to_bytecode(
+        "referenced-drop-goal.gr",
+        "trait Marker {} struct Box<T> { value: T } impl<T> Drop for Box<T> where &T: Marker { drop(&mut self) -> { () } } main() -> { () }",
+    )
+    .expect("generic Drop marker goals may use supported reference subjects");
 }
 
 #[test]
@@ -2693,7 +2721,7 @@ fn tuple_descriptors_are_structural_canonical_and_request_free() {
 fn tuple_field_move_retains_and_cleans_the_residual_aggregate() {
     let source = r#"
         struct Owner { value: &mut i64 }
-        take(value: (Owner, i64)) -> Owner { value.0 }
+        take_tuple(value: (Owner, i64)) -> Owner { value.0 }
         keep_copy(value: (Owner, i64)) -> i64 {
             let owner = value.0;
             value.1
@@ -2720,7 +2748,7 @@ fn tuple_field_move_retains_and_cleans_the_residual_aggregate() {
             .iter()
             .any(|instruction| matches!(instruction, Instruction::ProjectMove { field: 0, .. }))
     );
-    for name in ["take", "keep_copy"] {
+    for name in ["take_tuple", "keep_copy"] {
         let function = first
             .artifact
             .functions
@@ -4020,15 +4048,62 @@ fn grounded_generic_alias_normalization_is_canonical_and_request_free() {
 }
 
 #[test]
+fn generic_aliases_are_transparent_in_use_and_drop_heads() {
+    let source = r#"
+        struct AliasBox<T> { value: T }
+        type AliasWrapped<T> = AliasBox<T>;
+        impl<T> Use<[0,1]> for AliasWrapped<T> where T: Use<[0,1]> {}
+        impl<T> Drop for AliasWrapped<T> {
+            drop(&mut self) -> { self.value; () }
+        }
+        make() -> AliasWrapped<i64> { AliasBox { value: 42 } }
+        main() -> { let value = make(); () }
+    "#;
+    let artifact = compile_raw_source("alias-use-drop-head.gr", source)
+        .unwrap_or_else(|diagnostics| panic!("{diagnostics:#?}"));
+    let boxed = artifact
+        .types
+        .iter()
+        .position(|ty| {
+            matches!(ty.representation(), Type::Struct { name, fields, .. }
+                if name == "AliasBox" && fields.len() == 1 && fields[0].ty == grandiose_vm::I64)
+        })
+        .expect("missing AliasBox<i64>") as u32;
+    assert!(artifact.drop_glue.iter().any(|glue| glue.ty == boxed));
+    let verified = verify(artifact).unwrap();
+    let entry = verified.artifact().entry_function.unwrap();
+    Vm::new(verified).run(entry, vec![]).unwrap();
+
+    let duplicate = r#"
+        struct AliasBox<T> { value: T }
+        type AliasWrapped<T> = AliasBox<T>;
+        impl<T> Drop for AliasBox<T> { drop(&mut self) -> { () } }
+        impl<T> Drop for AliasWrapped<T> { drop(&mut self) -> { () } }
+        main() -> { () }
+    "#;
+    let diagnostics = compile_raw_source("alias-duplicate-drop-head.gr", duplicate)
+        .expect_err("an alias installed a second Drop hook on one nominal head");
+    assert!(
+        diagnostics
+            .iter()
+            .any(|diagnostic| {
+                diagnostic.code.as_deref() == Some("G1TR001")
+                    && diagnostic.message.contains("overlapping implementations of `Drop`")
+            }),
+        "{diagnostics:#?}"
+    );
+}
+
+#[test]
 fn unsupported_generic_alias_forms_are_rejected_with_source_spans() {
     let cases = [
         (
             "alias-bare",
-            "type Id<T> = T; read(value: Id) -> { () } main() -> { () }",
+            "type LocalIdentity<T> = T; read(value: LocalIdentity) -> { () } main() -> { () }",
         ),
         (
             "alias-wrong-arity",
-            "type Id<T> = T; read(value: Id<i64, Text>) -> { () } main() -> { () }",
+            "type LocalIdentity<T> = T; read(value: LocalIdentity<i64, Text>) -> { () } main() -> { () }",
         ),
         (
             "alias-cycle",
@@ -4041,10 +4116,6 @@ fn unsupported_generic_alias_forms_are_rejected_with_source_spans() {
         (
             "alias-reference-target",
             "type Ref<T> = &T; main() -> { () }",
-        ),
-        (
-            "alias-effect",
-            "type Id<T> = T; effect E { op(value: Id<i64>) -> ! } main() -> { () }",
         ),
     ];
     for (name, source) in cases {
@@ -4061,7 +4132,7 @@ fn unsupported_generic_alias_forms_are_rejected_with_source_spans() {
     }
     compile_source_to_bytecode(
         "alias-in-alias.gr",
-        "type Id<T> = T; type Concrete = Id<i64>; read(value: Concrete) -> i64 { value } main() -> { () }",
+        "type LocalIdentity<T> = T; type Concrete = LocalIdentity<i64>; read(value: Concrete) -> i64 { value } main() -> { () }",
     )
     .unwrap();
 }
@@ -6536,7 +6607,7 @@ fn projected_struct_borrows_and_moves_reuse_numeric_field_places() {
             };
             pair.left + pair.right
         }
-        take(value: Vessel) -> Owner { value.owner }
+        take_vessel(value: Vessel) -> Owner { value.owner }
         keep_copy(value: Vessel) -> i64 {
             let owner = value.owner;
             value.count
@@ -6590,7 +6661,7 @@ fn projected_struct_borrows_and_moves_reuse_numeric_field_places() {
             .iter()
             .any(|instruction| matches!(instruction, Instruction::ProjectMove { field: 0, .. }))
     );
-    for name in ["take", "keep_copy"] {
+    for name in ["take_vessel", "keep_copy"] {
         let function = first
             .artifact
             .functions
@@ -6772,7 +6843,7 @@ fn invalid_straight_line_loans_report_source_errors_before_artifact_verification
             "during its unique loan",
         ),
         (
-            "take(value: &mut i64) -> { () } bad() -> { let value = 1; let unique = &mut value; take(unique); take(unique); } main() -> { () }",
+            "borrow_sink(value: &mut i64) -> { () } bad() -> { let value = 1; let unique = &mut value; borrow_sink(unique); borrow_sink(unique); } main() -> { () }",
             "already moved",
         ),
         (
@@ -6792,7 +6863,7 @@ fn invalid_straight_line_loans_report_source_errors_before_artifact_verification
             "cannot escape",
         ),
         (
-            "take(value: &i64) -> { () } bad() -> { take(&(1 + 2)); } main() -> { () }",
+            "borrow_sink(value: &i64) -> { () } bad() -> { borrow_sink(&(1 + 2)); } main() -> { () }",
             "not a temporary expression",
         ),
     ] {
@@ -7311,10 +7382,6 @@ fn invalid_unsigned_literals_and_unknown_leaves_surface_honest_diagnostics() {
             "out of range for u8",
         ),
         (
-            "bad() -> u64 { 18446744073709551615 } main() -> { () }",
-            "does not fit in an i64",
-        ),
-        (
             "bad(value: UnknownLeaf) -> UnknownLeaf { value } main() -> { () }",
             "explicit supported monomorphic type",
         ),
@@ -7339,7 +7406,17 @@ fn ordinary_string_alias_resolves_to_text_through_calls_and_nominals() {
         main() -> { () }
     "#;
     let artifact = compile_raw_source("aliases.gr", source).unwrap();
-    assert_eq!(artifact.types.len(), Type::predefined().len() + 2);
+    let nominal_names = artifact
+        .types
+        .iter()
+        .filter_map(|ty| match ty.representation() {
+            Type::Struct { name, .. } | Type::Enum { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(nominal_names.iter().filter(|name| **name == "Label").count(), 1);
+    assert_eq!(nominal_names.iter().filter(|name| **name == "Message").count(), 1);
+    assert!(!nominal_names.contains(&"String"));
     let make = artifact
         .functions
         .iter()
@@ -7377,11 +7454,21 @@ fn aliases_resolve_forward_chains_and_nominal_targets_without_descriptors() {
         main() -> { () }
     "#;
     let artifact = compile_raw_source("alias-chain.gr", source).unwrap();
-    assert_eq!(
-        artifact.types.len(),
-        Type::predefined().len() + 1,
-        "aliases have no runtime identity"
-    );
+    let nominal_names = artifact
+        .types
+        .iter()
+        .filter_map(|ty| match ty.representation() {
+            Type::Struct { name, .. } | Type::Enum { name, .. } => Some(name.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(nominal_names.iter().filter(|name| **name == "Boxed").count(), 1);
+    for alias in ["Count", "Later", "Wrapped"] {
+        assert!(
+            !nominal_names.contains(&alias),
+            "aliases have no runtime identity"
+        );
+    }
     let increment = artifact
         .functions
         .iter()

@@ -183,6 +183,20 @@ fn closure_projection_routes_an_effect_result_origin_through_resume() {
 }
 
 #[test]
+fn direct_tuple_projection_reference_return_keeps_external_origin() {
+    let source = r#"
+        right<'a>(pair: (&'a i64, &'a i64)) -> &'a i64 { pair.1 }
+        selected() -> i64 {
+            let left = 7;
+            let right = 42;
+            *right((&left, &right))
+        }
+        main() -> { () }
+    "#;
+    run_selected_at_every_level("direct-tuple-reference-return.gr", source, Value::I64(42));
+}
+
+#[test]
 fn unique_reference_payload_remains_rejected_for_multishot_resumption() {
     let source = r#"
         effect Replay { [2,2] replay(value: &mut i64) -> i64 }

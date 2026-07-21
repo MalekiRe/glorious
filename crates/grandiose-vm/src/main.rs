@@ -1,25 +1,140 @@
 mod supervisor;
 
 use std::{
+    alloc::{GlobalAlloc, Layout, System},
     env,
     ffi::OsString,
     fmt, fs,
     path::{Path, PathBuf},
     process::ExitCode,
+    sync::atomic::{AtomicI32, Ordering},
     time::Duration,
 };
 
 use grandiose_vm::{
-    Artifact, DecodeError, HostLinkError, RuntimeError, RuntimeFaultCategory, SystemHost, Value,
-    VerifyError, Vm, verify,
+    DecodeError, HostLinkError, LoadError, RuntimeError, RuntimeFaultCategory, SystemHost, Value,
+    VerifiedArtifact, VerifyError, Vm, load_verified,
 };
-use supervisor::{SupervisorError, SupervisorLimits, WorkerTermination, run_worker};
+use supervisor::{
+    MEMORY_REPORT_FD_ENV, SupervisorError, SupervisorLimits, WorkerTermination, run_worker,
+};
 
-const USAGE: &str = "usage:\n  grvm verify FILE\n  grvm run [--time-limit 120s] [--memory-limit 4096MiB] [--allow CAPABILITY]... FILE [-- args...]";
+const USAGE: &str = "usage:\n  grvm --capabilities\n  grvm verify FILE\n  grvm run [--seed-identity ID] [--time-limit 120s] [--memory-limit 4096MiB] [--allow CAPABILITY]... FILE [-- args...]";
 const DEFAULT_WALL_TIME: Duration = Duration::from_secs(120);
 const DEFAULT_ADDRESS_SPACE_BYTES: u64 = 4096 * 1024 * 1024;
 
+struct ReportingAllocator;
+
+#[global_allocator]
+static ALLOCATOR: ReportingAllocator = ReportingAllocator;
+static MEMORY_REPORT_FD: AtomicI32 = AtomicI32::new(-1);
+
+unsafe impl GlobalAlloc for ReportingAllocator {
+    unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        let pointer = unsafe { System.alloc(layout) };
+        if pointer.is_null() {
+            report_memory_limit();
+        }
+        pointer
+    }
+
+    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        let pointer = unsafe { System.alloc_zeroed(layout) };
+        if pointer.is_null() {
+            report_memory_limit();
+        }
+        pointer
+    }
+
+    unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        unsafe { System.dealloc(pointer, layout) };
+    }
+
+    unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, size: usize) -> *mut u8 {
+        let pointer = unsafe { System.realloc(pointer, layout, size) };
+        if pointer.is_null() {
+            report_memory_limit();
+        }
+        pointer
+    }
+}
+
+fn configure_memory_reporting() {
+    let Some(descriptor) = env::var_os(MEMORY_REPORT_FD_ENV)
+        .and_then(|value| value.to_str().and_then(|value| value.parse::<i32>().ok()))
+    else {
+        return;
+    };
+    if descriptor >= 0 {
+        MEMORY_REPORT_FD.store(descriptor, Ordering::Relaxed);
+        unsafe { fcntl(descriptor, F_SETFD, FD_CLOEXEC) };
+    }
+}
+
+fn report_memory_limit() {
+    let descriptor = memory_report_descriptor();
+    if descriptor >= 0 {
+        let marker = b'M';
+        unsafe {
+            write(
+                descriptor,
+                (&raw const marker).cast::<std::ffi::c_void>(),
+                1,
+            );
+        }
+    }
+}
+
+/// Resolve the inherited reporter without allocating. The global allocator can
+/// fail before `main` has had a chance to call `configure_memory_reporting`,
+/// while the worker is already under its address-space limit. `getenv` and the
+/// bounded decimal scan keep that startup path observable without recursively
+/// entering the allocator.
+fn memory_report_descriptor() -> i32 {
+    let cached = MEMORY_REPORT_FD.load(Ordering::Relaxed);
+    if cached != -1 {
+        return cached;
+    }
+    let descriptor = unsafe {
+        parse_memory_report_descriptor(getenv(c"GRANDIOSE_SUPERVISOR_MEMORY_FD".as_ptr()))
+    };
+    MEMORY_REPORT_FD.store(descriptor, Ordering::Relaxed);
+    descriptor
+}
+
+unsafe fn parse_memory_report_descriptor(mut value: *const std::ffi::c_char) -> i32 {
+    if value.is_null() {
+        return -2;
+    }
+    let mut result = 0_u32;
+    let mut digits = 0_u8;
+    loop {
+        let byte = unsafe { *value }.cast_unsigned();
+        if byte == 0 {
+            break;
+        }
+        if !byte.is_ascii_digit() || digits == 10 {
+            return -2;
+        }
+        result = match result
+            .checked_mul(10)
+            .and_then(|result| result.checked_add(u32::from(byte - b'0')))
+        {
+            Some(result) => result,
+            None => return -2,
+        };
+        digits += 1;
+        value = unsafe { value.add(1) };
+    }
+    if digits == 0 || result > i32::MAX as u32 {
+        -2
+    } else {
+        result as i32
+    }
+}
+
 fn main() -> ExitCode {
+    configure_memory_reporting();
     match parse(env::args_os().skip(1).collect()) {
         Ok(command) => ExitCode::from(dispatch(command)),
         Err(error) => {
@@ -31,12 +146,14 @@ fn main() -> ExitCode {
 
 #[derive(Debug, Eq, PartialEq)]
 enum Cli {
+    Capabilities,
     Verify(PathBuf),
     Run {
         file: PathBuf,
         args: Vec<OsString>,
         grants: Vec<String>,
         limits: SupervisorLimits,
+        seed_identity: Option<String>,
     },
     Worker {
         file: PathBuf,
@@ -51,6 +168,12 @@ fn parse(mut args: Vec<OsString>) -> Result<Cli, String> {
     }
     let command = args.remove(0);
     match command.to_str() {
+        Some("--capabilities") => {
+            if !args.is_empty() {
+                return Err("--capabilities does not accept other arguments".into());
+            }
+            Ok(Cli::Capabilities)
+        }
         Some("verify") => {
             if args.len() != 1 {
                 return Err("verify expects exactly one bytecode file".into());
@@ -70,6 +193,7 @@ fn parse_run(args: Vec<OsString>) -> Result<Cli, String> {
     let mut address_space_bytes = Some(DEFAULT_ADDRESS_SPACE_BYTES);
     let mut saw_time_limit = false;
     let mut saw_memory_limit = false;
+    let mut seed_identity = None;
     let mut grants = Vec::new();
     let file = loop {
         let arg = it.next().ok_or("run requires a bytecode file")?;
@@ -97,6 +221,19 @@ fn parse_run(args: Vec<OsString>) -> Result<Cli, String> {
                 let grant = capability_grant(it.next(), "--allow")?;
                 insert_grant(&mut grants, grant)?;
             }
+            Some("--seed-identity") => {
+                let identity = it
+                    .next()
+                    .ok_or("--seed-identity requires an identity")?
+                    .into_string()
+                    .map_err(|_| "--seed-identity must be valid UTF-8")?;
+                if identity.is_empty() {
+                    return Err("--seed-identity must not be empty".into());
+                }
+                if seed_identity.replace(identity).is_some() {
+                    return Err("--seed-identity may only be specified once".into());
+                }
+            }
             Some(option) if option.starts_with('-') => {
                 return Err(format!("unknown run option `{option}`"));
             }
@@ -110,6 +247,7 @@ fn parse_run(args: Vec<OsString>) -> Result<Cli, String> {
         args,
         grants,
         limits: SupervisorLimits::new(wall_time, address_space_bytes),
+        seed_identity,
     })
 }
 
@@ -183,6 +321,15 @@ fn trailing_args(mut args: Vec<OsString>) -> Result<Vec<OsString>, String> {
 
 fn dispatch(command: Cli) -> u8 {
     match command {
+        Cli::Capabilities => {
+            println!(
+                "{{\"grvm\":\"{}\",\"contract\":1,\"contract-min\":1,\"contract-max\":1,\"artifact-major\":1,\"artifact-minor-min\":0,\"artifact-minor-max\":0,\"seed-identity-version\":{},\"accepted-seed-identities\":[\"{}\"]}}",
+                env!("CARGO_PKG_VERSION"),
+                grandiose_vm::SEED_IDENTITY_VERSION,
+                grandiose_vm::RELEASED_SEED_IDENTITY,
+            );
+            0
+        }
         Cli::Verify(file) => report(verify_file(&file)),
         Cli::Worker { file, args, grants } => report(run_file(&file, args, grants)),
         Cli::Run {
@@ -190,7 +337,16 @@ fn dispatch(command: Cli) -> u8 {
             args,
             grants,
             limits,
-        } => supervise(file, args, grants, limits),
+            seed_identity,
+        } => {
+            if let Some(identity) = seed_identity
+                && identity != grandiose_vm::RELEASED_SEED_IDENTITY
+            {
+                eprintln!("grvm: seed-identity: incompatible released-seed identity `{identity}`");
+                return 1;
+            }
+            supervise(file, args, grants, limits)
+        }
     }
 }
 
@@ -225,43 +381,52 @@ fn supervise(
                 eprintln!("grvm: timeout: worker exceeded its wall-time limit");
                 124
             }
+            WorkerTermination::MemoryLimit => {
+                eprintln!("grvm: memory-limit: worker exceeded its allocation or memory limit");
+                125
+            }
         },
         Err(error) => report(Err(AppError::Supervisor(error))),
     }
 }
 
 fn verify_file(path: &Path) -> Result<u8, AppError> {
-    verify(load(path)?).map_err(AppError::Verify)?;
+    load(path)?;
     Ok(0)
 }
 
 fn run_file(path: &Path, args: Vec<OsString>, grants: Vec<String>) -> Result<u8, AppError> {
     let artifact = load(path)?;
-    let entry = artifact.entry_function.ok_or(AppError::MissingEntry)?;
-    let vm = Vm::with_host(
-        verify(artifact).map_err(AppError::Verify)?,
-        grants,
-        SystemHost::new(args),
-    )
-    .map_err(AppError::HostLink)?;
+    let entry = artifact.entry_function().ok_or(AppError::MissingEntry)?;
+    let vm = Vm::with_host(artifact, grants, SystemHost::new(args)).map_err(AppError::HostLink)?;
     match vm.run(entry, vec![]).map_err(AppError::Runtime)? {
         Value::Unit => Ok(0),
         value => Err(AppError::InvalidResult(value)),
     }
 }
 
-fn load(path: &Path) -> Result<Artifact, AppError> {
+fn load(path: &Path) -> Result<VerifiedArtifact, AppError> {
     let bytes = fs::read(path).map_err(|source| AppError::Read {
         path: path.to_owned(),
         source,
     })?;
-    Artifact::decode(&bytes).map_err(AppError::Decode)
+    load_verified(&bytes).map_err(|error| match error {
+        LoadError::Decode(error) => AppError::Decode(error),
+        LoadError::Verify(error) => AppError::Verify(error),
+    })
 }
 
 fn report(result: Result<u8, AppError>) -> u8 {
     match result {
         Ok(code) => code,
         Err(error) => {
+            if matches!(
+                error,
+                AppError::Runtime(ref runtime)
+                    if runtime.category() == RuntimeFaultCategory::MemoryLimit
+            ) {
+                report_memory_limit();
+            }
             eprintln!("grvm: {}: {error}", error.kind());
             1
         }
@@ -308,6 +473,7 @@ impl AppError {
                 RuntimeFaultCategory::PrimitiveTrap => "primitive-trap",
                 RuntimeFaultCategory::HostFault => "host-fault",
                 RuntimeFaultCategory::ExplicitAbort => "explicit-abort",
+                RuntimeFaultCategory::MemoryLimit => "memory-limit",
                 RuntimeFaultCategory::Internal => "internal",
             },
             Self::HostLink(_) => "host-link",
@@ -316,6 +482,15 @@ impl AppError {
             Self::SupervisorExecutable(_) | Self::Supervisor(_) => "supervisor",
         }
     }
+}
+
+const F_SETFD: i32 = 2;
+const FD_CLOEXEC: i32 = 1;
+
+unsafe extern "C" {
+    fn fcntl(descriptor: i32, command: i32, argument: i32) -> i32;
+    fn getenv(name: *const std::ffi::c_char) -> *mut std::ffi::c_char;
+    fn write(descriptor: i32, buffer: *const std::ffi::c_void, count: usize) -> isize;
 }
 
 impl fmt::Display for AppError {
@@ -343,8 +518,39 @@ impl fmt::Display for AppError {
 mod tests {
     use super::*;
 
+    fn parsed_report_descriptor(value: &[u8]) -> i32 {
+        assert_eq!(value.last(), Some(&0));
+        unsafe { parse_memory_report_descriptor(value.as_ptr().cast()) }
+    }
+
+    #[test]
+    fn allocation_report_descriptor_is_parsed_without_allocation() {
+        assert_eq!(parsed_report_descriptor(b"0\0"), 0);
+        assert_eq!(parsed_report_descriptor(b"198\0"), 198);
+        assert_eq!(parsed_report_descriptor(b"2147483647\0"), i32::MAX);
+        for invalid in [
+            b"\0".as_slice(),
+            b"-1\0",
+            b"12x\0",
+            b"2147483648\0",
+            b"00000000001\0",
+        ] {
+            assert_eq!(parsed_report_descriptor(invalid), -2, "{invalid:?}");
+        }
+        assert_eq!(
+            unsafe { parse_memory_report_descriptor(std::ptr::null()) },
+            -2
+        );
+    }
+
     fn strings(values: &[&str]) -> Vec<OsString> {
         values.iter().map(OsString::from).collect()
+    }
+
+    #[test]
+    fn capabilities_is_a_standalone_machine_command() {
+        assert_eq!(parse(strings(&["--capabilities"])), Ok(Cli::Capabilities));
+        assert!(parse(strings(&["--capabilities", "extra"])).is_err());
     }
 
     #[test]
@@ -389,6 +595,7 @@ mod tests {
                 file: "program.grbc".into(),
                 args: strings(&["one", "two"]),
                 grants: vec![],
+                seed_identity: None,
                 limits: SupervisorLimits::new(
                     Some(Duration::from_secs(120)),
                     Some(4096 * 1024 * 1024),
@@ -405,6 +612,7 @@ mod tests {
                 file: "program.grbc".into(),
                 args: vec![],
                 grants: vec![],
+                seed_identity: None,
                 limits: SupervisorLimits::new(
                     Some(DEFAULT_WALL_TIME),
                     Some(DEFAULT_ADDRESS_SPACE_BYTES),
@@ -430,11 +638,53 @@ mod tests {
                 file: "program.grbc".into(),
                 args: vec![],
                 grants: vec!["process.args".into(), "fs.read".into()],
+                seed_identity: None,
                 limits: SupervisorLimits::new(
                     Some(Duration::from_secs(1)),
                     Some(DEFAULT_ADDRESS_SPACE_BYTES),
                 ),
             })
+        );
+    }
+
+    #[test]
+    fn parses_and_validates_seed_identity_option() {
+        assert_eq!(
+            parse(strings(&[
+                "run",
+                "--seed-identity",
+                grandiose_vm::RELEASED_SEED_IDENTITY,
+                "program.grbc",
+            ])),
+            Ok(Cli::Run {
+                file: "program.grbc".into(),
+                args: vec![],
+                grants: vec![],
+                seed_identity: Some(grandiose_vm::RELEASED_SEED_IDENTITY.into()),
+                limits: SupervisorLimits::new(
+                    Some(DEFAULT_WALL_TIME),
+                    Some(DEFAULT_ADDRESS_SPACE_BYTES),
+                ),
+            })
+        );
+        assert_eq!(
+            parse(strings(&["run", "--seed-identity"])),
+            Err("--seed-identity requires an identity".into())
+        );
+        assert_eq!(
+            parse(strings(&["run", "--seed-identity", "", "program.grbc"])),
+            Err("--seed-identity must not be empty".into())
+        );
+        assert_eq!(
+            parse(strings(&[
+                "run",
+                "--seed-identity",
+                "first",
+                "--seed-identity",
+                "second",
+                "program.grbc",
+            ])),
+            Err("--seed-identity may only be specified once".into())
         );
     }
 

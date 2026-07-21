@@ -12,7 +12,7 @@ use grandiose_vm::{BYTES, CHAR, F32, F64, I64, TEXT, TypeId, U8, UNIT};
 
 use crate::ast::{
     AssignmentPlace, AssignmentPlaceKind, BinaryOp, Expr, ExprKind, GenericParamKind, PatternKind,
-    Program, Stmt, TypeSyntax, TypeSyntaxKind, UnaryOp,
+    Program, Stmt, TypeSyntax, TypeSyntaxKind, UnaryOp, pattern_field_index,
 };
 use crate::compiler_core as core;
 use crate::span::Span;
@@ -1678,19 +1678,13 @@ impl<'a> Typer<'a> {
                 let Some(ProvisionalType::Tuple(types)) = ty else {
                     return (false, false);
                 };
-                if rest.is_none() && elements.len() != types.len() || elements.len() > types.len() {
+                if elements.len() > types.len() {
                     return (false, false);
                 }
-                let before = rest.map_or(elements.len(), |rest| rest.before);
-                let trailing = elements.len().saturating_sub(before);
                 let mut irrefutable = true;
                 let mut safe = true;
                 for (index, element) in elements.iter().enumerate() {
-                    let field = if index < before {
-                        index
-                    } else {
-                        types.len() - trailing + (index - before)
-                    };
+                    let field = pattern_field_index(*rest, index, elements.len(), types.len());
                     projection.push(field as u32);
                     let (child_irrefutable, child_safe) = self.pattern_refinement(
                         element,
@@ -1740,7 +1734,7 @@ impl<'a> Typer<'a> {
                 }
                 (irrefutable, safe)
             }
-            PatternKind::Variant { path, fields } => {
+            PatternKind::Variant { path, fields, rest } => {
                 // A negative refinement can exclude a constructor only when
                 // failure of this whole test is equivalent to failure of the
                 // outer constructor test. Nested constructors and variants
@@ -1764,12 +1758,14 @@ impl<'a> Typer<'a> {
                 else {
                     return (false, false);
                 };
-                if fields.len() != types.len() {
+                if fields.len() > types.len() {
                     return (false, false);
                 }
                 let mut children_irrefutable = true;
                 let mut safe = true;
-                for (field, (pattern, field_ty)) in fields.iter().zip(types).enumerate() {
+                for (position, pattern) in fields.iter().enumerate() {
+                    let field = pattern_field_index(*rest, position, fields.len(), types.len());
+                    let field_ty = &types[field];
                     projection.extend([u32::MAX - variant as u32, field as u32]);
                     let (irrefutable, child_safe) = self.pattern_refinement(
                         pattern,

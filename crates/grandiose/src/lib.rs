@@ -10,8 +10,11 @@ mod compiler_traits;
 mod compiler_typeck;
 pub mod diagnostic;
 pub mod eval;
+pub mod interface;
 pub mod lexer;
+pub mod lossless;
 pub mod parser;
+pub mod resolve;
 pub mod source_bundle;
 pub mod span;
 pub mod validate;
@@ -67,6 +70,7 @@ fn run_source_entry_stream(
     }
     let program = parser::normalize_for_legacy_consumers(program);
     validate::validate(&program)?;
+    let program = compiler::normalize_trait_surface_for_recovery(&program)?;
     let program = compiler::normalize_constructor_aliases(&program)?;
     eval::run_entry_with_runtime(&program, entry_name, args, host, runtime_leaves)
         .map_err(|error| vec![error])

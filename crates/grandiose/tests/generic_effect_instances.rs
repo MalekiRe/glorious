@@ -120,6 +120,37 @@ fn associated_projection_effect_arguments_normalize_before_identity_selection() 
 }
 
 #[test]
+fn generic_aliases_normalize_in_effect_payloads_and_results() {
+    let source = r#"
+        struct Parcel<T> { value: T }
+        struct Envelope<T> { payload: Wrapped<(T, i64)> }
+        type Wrapped<T> = Parcel<T>;
+        type Identity<T> = T;
+        effect Exchange<T> {
+            [1,1] exchange(value: Envelope<T>, direct: Wrapped<(T, i64)>) -> Identity<T>
+        }
+        selected() -> i64 {
+            handle perform Exchange<i64>::exchange(
+                Envelope { payload: Parcel { value: (40, 2) } },
+                Parcel { value: (0, 0) }
+            ) {
+                Exchange<i64>::exchange(
+                    Envelope { payload: Parcel { value: (left, right) } },
+                    Parcel { value: (extra_left, extra_right) }
+                ) with continuation => {
+                    left + right + extra_left + extra_right + resume(continuation, 0)
+                }
+            }
+        }
+        main() -> { selected(); () }
+    "#;
+    for level in LEVELS {
+        let artifact = artifact_at("generic-alias-effect-signature.gr", source, level);
+        assert_eq!(run(artifact, "selected"), Value::I64(42), "{level:?}");
+    }
+}
+
+#[test]
 fn unresolved_projection_effect_arguments_are_structured_and_never_guess() {
     let source = r#"
         trait Value { type Item; }

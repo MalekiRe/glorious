@@ -89,9 +89,11 @@ the bytecode-emission hot path. Interned source text is sliced by byte offsets;
 diagnostic strings are rendered only for diagnostics that survive the 100-error
 cap.
 
-The VM decodes instructions once, verifies dataflow only at block leaders, and
-releases raw code plus verifier scratch before execution. Mutable arrays grow
-geometrically.
+The VM verifies private decoded instructions with dataflow states only at block
+leaders, then freezes them into packed opcode words, one shared variable-operand
+array, and compact instruction offsets. One immutable encoded container backs
+constant payloads and descriptor text; verifier scratch and temporary owned
+payloads are released before execution. Mutable arrays grow geometrically.
 
 ## 6. Measured constraints
 
@@ -100,13 +102,17 @@ The stretch targets count nonblank, noncomment Grandiose source lines:
 - frontend and static semantics: 6,000;
 - MIR optimizations and bytecode emission: 3,000–5,000;
 - complete compiler: 9,000–12,000;
-- runtime/control and primitive-wrapper library: 800–1,500;
-- reusable collections and compiler-building utilities: 700–1,000;
-- complete bootstrap standard library: 1,500–2,500 total;
+- runtime/control, primitive wrappers, formatting, and collections: 3,000–5,000;
+- diagnostics, source infrastructure, and compiler-building utilities:
+  2,000–4,000;
+- complete bootstrap standard library: 6,000–9,000 total;
 - compiler architecture review threshold: 14,000.
 
 The target is not enforced by deleting conformance. Crossing a threshold requires
 identifying which kernel or duplicated representation caused the growth.
+The revised library range reflects the normative all-width checked-conversion
+matrix and compiler-toolkit scope added after the original 1,500–2,500-line
+sketch; it is a review budget, not permission to duplicate implementations.
 
 The release benchmark is a cold stage-2 compiler compiling its own source and
 standard library at `-O2` in less than 120 seconds and 4096 MiB. `--stats`

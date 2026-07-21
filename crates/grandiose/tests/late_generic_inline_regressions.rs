@@ -94,6 +94,18 @@ fn mandatory_resumption_is_consumed_once_by_a_nontransparent_generic_callee() {
 }
 
 #[test]
+fn retained_monomorphic_std_wrapper_keeps_its_generic_specialization() {
+    let source = r#"
+        answer() -> u8 { __g1_char_utf8_continuation(0, 0) }
+        main() -> { () }
+    "#;
+    assert_eq!(
+        run("retained-std-generic-child.gr", source, "answer"),
+        Value::U64(128)
+    );
+}
+
+#[test]
 fn exact_two_resumption_uses_are_consumed_transitively_by_a_generic_callee() {
     let source = r#"
         effect Pick { [2,2] choose() -> i64 }

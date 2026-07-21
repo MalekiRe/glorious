@@ -1,6 +1,6 @@
 use std::rc::Rc;
 
-use crate::span::Span;
+use crate::{lexer::NumberLiteral, span::Span};
 
 #[derive(Clone, Debug)]
 pub struct Program {
@@ -28,9 +28,19 @@ pub struct Program {
     /// complete application span. Type/lifetime arguments remain in the
     /// legacy `TypeSyntaxKind::Application` vectors.
     pub type_const_arguments: Vec<TypeConstApplicationSyntax>,
+    /// Exact numeric token payloads keyed by expression/pattern span. The
+    /// legacy scalar enum payloads remain compatibility shadows only.
+    pub numeric_literals: Vec<NumericLiteralSyntax>,
 }
 
 impl Program {
+    pub fn numeric_literal(&self, span: Span) -> Option<&NumberLiteral> {
+        self.numeric_literals
+            .iter()
+            .find(|entry| entry.span == span)
+            .map(|entry| &entry.literal)
+    }
+
     pub fn reference_lifetime(&self, reference: Span) -> Option<&LifetimeSyntax> {
         self.reference_lifetimes
             .iter()
@@ -51,6 +61,12 @@ impl Program {
             .find(|entry| entry.application == application)
             .map_or(&[], |entry| entry.arguments.as_slice())
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct NumericLiteralSyntax {
+    pub span: Span,
+    pub literal: NumberLiteral,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -532,8 +548,9 @@ pub struct LabelSyntax {
 pub enum ExprKind {
     Unit,
     Int(i64),
-    /// A float literal. The exact digit payload survives in the token stream;
-    /// range/precision judgment belongs to expected-type elaboration.
+    /// A float literal. The program's numeric-literal side table retains the
+    /// exact token payload; range/precision judgment belongs to expected-type
+    /// elaboration.
     Float(f64),
     String(Rc<str>),
     Char(char),
@@ -658,6 +675,21 @@ pub struct PatternRest {
     pub span: Span,
 }
 
+/// Maps an explicit positional subpattern to its declaration-order field.
+/// With no remainder, short patterns name a prefix. With `..`, entries after
+/// the remainder name a suffix from the end.
+pub fn pattern_field_index(
+    rest: Option<PatternRest>,
+    position: usize,
+    explicit_len: usize,
+    field_count: usize,
+) -> usize {
+    match rest {
+        Some(rest) if position >= rest.before => field_count - (explicit_len - position),
+        _ => position,
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum PatternKind {
     Wildcard,
@@ -673,6 +705,7 @@ pub enum PatternKind {
     Variant {
         path: Vec<String>,
         fields: Vec<Pattern>,
+        rest: Option<PatternRest>,
     },
     /// `(a, b, ..)` — a tuple pattern with optional remainder.
     Tuple {

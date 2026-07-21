@@ -158,6 +158,373 @@ fn generic_qualified_trait_methods_specialize_with_where_evidence_at_all_levels(
 }
 
 #[test]
+fn bounded_symbolic_field_receivers_and_receiverless_results_defer_to_specialization() {
+    let source = r#"
+        trait Same { same(self: &Self, other: &Self) -> Bool; }
+        impl Same for i64 {
+            same(self: &i64, other: &i64) -> Bool { *self == *other }
+        }
+        impl<A> Same for (A,) where A: Same {
+            same(self: &(A,), other: &(A,)) -> Bool {
+                Same::same(&self.0, &other.0)
+            }
+        }
+
+        trait Make { make() -> Self; }
+        impl Make for i64 { make() -> i64 { 42 } }
+        impl<A> Make for (A,) where A: Make {
+            make() -> (A,) { (Make::make(),) }
+        }
+        impl<A, E> Make for Result<A, E> where A: Make {
+            make() -> Result<A, E> { Result::Ok(Make::make()) }
+        }
+
+        equal_pair() -> Bool {
+            let left = (42,);
+            let right = (42,);
+            Same::same(&left, &right)
+        }
+        make_pair() -> (i64,) { Make::make() }
+        make_result() -> Result<i64, Text> { Make::make() }
+        main() -> { equal_pair(); make_pair(); make_result(); () }
+    "#;
+    for optimization_level in [
+        OptimizationLevel::O0,
+        OptimizationLevel::O1,
+        OptimizationLevel::O2,
+        OptimizationLevel::O3,
+    ] {
+        let artifact = compile_source_to_bytecode_with_options(
+            "symbolic-bounded-trait-calls.gr",
+            source,
+            CompileOptions { optimization_level },
+        )
+        .unwrap_or_else(|errors| panic!("{optimization_level:?}: {errors:#?}"));
+        verify(artifact).unwrap_or_else(|errors| panic!("{optimization_level:?}: {errors:#?}"));
+    }
+}
+
+#[test]
+fn receiverless_default_selection_uses_the_expected_result_type() {
+    let source = r#"
+        selected() -> i64 { Default::default() }
+        main() -> () { () }
+    "#;
+    let artifact = grandiose::compile_source_to_bytecode(
+        "receiverless-default-expected-type.glorious",
+        source,
+    )
+    .unwrap();
+    let selected = artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(artifact).unwrap())
+            .run(selected, vec![])
+            .unwrap(),
+        Value::I64(0),
+    );
+    let recovery_source = source.replace("main() -> () { () }", "main() -> i64 { selected() }");
+    assert_eq!(
+        grandiose::run_source(
+            "receiverless-default-recovery.glorious",
+            &recovery_source,
+            vec![],
+            &mut grandiose::eval::SystemHost::default(),
+        )
+        .unwrap(),
+        grandiose::eval::Value::Int(0),
+    );
+}
+
+#[test]
+fn receiverless_associated_method_reports_missing_result_evidence() {
+    let source = r#"
+        struct Missing { marker: i64 }
+        selected() -> Missing { Default::default() }
+        main() -> () { () }
+    "#;
+    let errors = grandiose::compile_source_to_bytecode(
+        "receiverless-default-missing-evidence.glorious",
+        source,
+    )
+    .unwrap_err();
+    assert!(
+        errors.iter().any(|error| {
+            error
+                .message
+                .contains("no `Default::default` implementation produces the expected result `Missing`")
+                && error.span.is_some()
+        }),
+        "{errors:#?}"
+    );
+
+    let recovery_errors = grandiose::run_source(
+        "receiverless-default-missing-evidence-recovery.glorious",
+        source,
+        vec![],
+        &mut grandiose::eval::SystemHost::default(),
+    )
+    .unwrap_err();
+    assert!(
+        recovery_errors.iter().any(|error| {
+            error
+                .message
+                .contains("no `Default::default` implementation produces the expected result `Missing`")
+                && error.span.is_some()
+        }),
+        "{recovery_errors:#?}"
+    );
+}
+
+#[test]
+fn dot_trait_calls_match_qualified_calls_and_infer_shared_receivers() {
+    let source = r#"
+        trait Read { read(self: &Self) -> i64; }
+        struct Item { value: i64 }
+        impl Read for Item { read(self: &Item) -> i64 { self.value } }
+
+        dotted(item: Item) -> i64 { item.read() }
+        qualified(item: Item) -> i64 { Read::read(&item) }
+        relay<T>(item: T) -> i64 where T: Read { item.read() }
+        answer() -> i64 {
+            dotted(Item { value: 10 }) +
+            qualified(Item { value: 20 }) +
+            relay(Item { value: 12 })
+        }
+        main() -> () { () }
+    "#;
+    for optimization_level in [
+        OptimizationLevel::O0,
+        OptimizationLevel::O1,
+        OptimizationLevel::O2,
+        OptimizationLevel::O3,
+    ] {
+        let artifact = compile_source_to_bytecode_with_options(
+            "dot-trait-method.glorious",
+            source,
+            CompileOptions { optimization_level },
+        )
+        .unwrap_or_else(|errors| panic!("{optimization_level:?}: {errors:#?}"));
+        let answer = artifact
+            .functions
+            .iter()
+            .position(|function| function.name == "answer")
+            .unwrap() as u32;
+        assert_eq!(
+            Vm::new(verify(artifact).unwrap())
+                .run(answer, vec![])
+                .unwrap(),
+            Value::I64(42),
+            "{optimization_level:?}",
+        );
+    }
+    let recovery_source = source.replace("main() -> () { () }", "main() -> i64 { answer() }");
+    assert_eq!(
+        grandiose::run_source(
+            "dot-trait-method-recovery.glorious",
+            &recovery_source,
+            vec![],
+            &mut grandiose::eval::SystemHost::default(),
+        )
+        .unwrap(),
+        grandiose::eval::Value::Int(42),
+    );
+}
+
+#[test]
+fn dot_trait_calls_report_missing_and_ambiguous_selection() {
+    let missing = r#"
+        trait Read { read(self: &Self) -> i64; }
+        struct Item { value: i64 }
+        struct Other { value: i64 }
+        impl Read for Item { read(self: &Item) -> i64 { self.value } }
+        selected(other: Other) -> i64 { other.read() }
+        main() -> () { () }
+    "#;
+    let errors =
+        grandiose::compile_source_to_bytecode("dot-method-missing.glorious", missing).unwrap_err();
+    assert!(
+        errors.iter().any(|error| {
+            error
+                .message
+                .contains("no trait method `read` matches receiver `Other`")
+                && error.span.is_some()
+        }),
+        "{errors:#?}"
+    );
+
+    let ambiguous = r#"
+        trait Left { select(self: &Self) -> i64; }
+        trait Right { select(self: &Self) -> i64; }
+        struct Item { value: i64 }
+        impl Left for Item { select(self: &Item) -> i64 { 1 } }
+        impl Right for Item { select(self: &Item) -> i64 { 2 } }
+        selected(item: Item) -> i64 { item.select() }
+        main() -> () { () }
+    "#;
+    let errors = grandiose::compile_source_to_bytecode("dot-method-ambiguous.glorious", ambiguous)
+        .unwrap_err();
+    assert!(
+        errors.iter().any(|error| {
+            error
+                .message
+                .contains("trait method `select` is ambiguous for receiver `Item`")
+                && error
+                    .note
+                    .as_deref()
+                    .is_some_and(|note| note.contains("`Left`") && note.contains("`Right`"))
+        }),
+        "{errors:#?}"
+    );
+}
+
+#[test]
+fn dot_trait_calls_preserve_existing_borrows_and_owned_access() {
+    let source = r#"
+        trait Peek { peek(self: &Self) -> i64; }
+        trait Touch { touch(self: &mut Self) -> i64; }
+        trait Take { take(self: Self) -> i64; }
+        struct Item { value: i64 }
+        impl Peek for Item { peek(self: &Item) -> i64 { self.value } }
+        impl Touch for Item { touch(self: &mut Item) -> i64 { self.value } }
+        impl Take for Item { take(self: Item) -> i64 { self.value } }
+
+        through_shared(item: &Item) -> i64 { item.peek() }
+        through_unique(item: &mut Item) -> i64 { item.touch() }
+        through_owned(item: Item) -> i64 { item.take() }
+        answer() -> i64 {
+            let shared = Item { value: 10 };
+            let unique = Item { value: 20 };
+            through_shared(&shared) +
+            through_unique(&mut unique) +
+            through_owned(Item { value: 12 })
+        }
+        main() -> () { () }
+    "#;
+    for optimization_level in [
+        OptimizationLevel::O0,
+        OptimizationLevel::O1,
+        OptimizationLevel::O2,
+        OptimizationLevel::O3,
+    ] {
+        let artifact = compile_source_to_bytecode_with_options(
+            "dot-trait-receiver-access.glorious",
+            source,
+            CompileOptions { optimization_level },
+        )
+        .unwrap_or_else(|errors| panic!("{optimization_level:?}: {errors:#?}"));
+        let answer = artifact
+            .functions
+            .iter()
+            .position(|function| function.name == "answer")
+            .unwrap() as u32;
+        assert_eq!(
+            Vm::new(verify(artifact).unwrap())
+                .run(answer, vec![])
+                .unwrap(),
+            Value::I64(42),
+            "{optimization_level:?}",
+        );
+    }
+    let recovery_source = source.replace("main() -> () { () }", "main() -> i64 { answer() }");
+    assert_eq!(
+        grandiose::run_source(
+            "dot-trait-receiver-access-recovery.glorious",
+            &recovery_source,
+            vec![],
+            &mut grandiose::eval::SystemHost::default(),
+        )
+        .unwrap(),
+        grandiose::eval::Value::Int(42),
+    );
+}
+
+#[test]
+fn trait_calls_inside_generic_bodies_dispatch_from_ground_evidence() {
+    let source = r#"
+        trait Read { read(self: &Self) -> i64; }
+        struct Item { value: i64 }
+        impl Read for Item {
+            read(self: &Item) -> i64 { self.value }
+        }
+        relay<T>(value: &T) -> i64 where T: Read { Read::read(value) }
+        selected() -> i64 {
+            let item = Item { value: 42 };
+            relay(&item)
+        }
+        main() -> { () }
+    "#;
+    for optimization_level in [
+        OptimizationLevel::O0,
+        OptimizationLevel::O1,
+        OptimizationLevel::O2,
+        OptimizationLevel::O3,
+    ] {
+        let artifact = compile_source_to_bytecode_with_options(
+            "generic-body-trait-dispatch.gr",
+            source,
+            CompileOptions { optimization_level },
+        )
+        .unwrap_or_else(|errors| panic!("{optimization_level:?}: {errors:#?}"));
+        let selected = artifact
+            .functions
+            .iter()
+            .position(|function| function.name == "selected")
+            .unwrap() as u32;
+        assert_eq!(
+            Vm::new(verify(artifact).unwrap())
+                .run(selected, vec![])
+                .unwrap(),
+            Value::I64(42),
+            "{optimization_level:?}",
+        );
+    }
+}
+
+#[test]
+fn generic_body_trait_dispatch_requires_lexical_and_ground_evidence() {
+    let missing_lexical = r#"
+        trait Read { read(self: &Self) -> i64; }
+        struct Item { value: i64 }
+        impl Read for Item { read(self: &Item) -> i64 { self.value } }
+        bad<T>(value: &T) -> i64 { Read::read(value) }
+        main() -> { () }
+    "#;
+    let missing_ground = r#"
+        trait Read { read(self: &Self) -> i64; }
+        struct Item { value: i64 }
+        bad<T>(value: &T) -> i64 where T: Read { Read::read(value) }
+        selected() -> i64 {
+            let item = Item { value: 42 };
+            bad(&item)
+        }
+        main() -> { () }
+    "#;
+    for (name, source, needle) in [
+        (
+            "generic-trait-missing-lexical.gr",
+            missing_lexical,
+            "no ground",
+        ),
+        (
+            "generic-trait-missing-ground.gr",
+            missing_ground,
+            "no matching implementation",
+        ),
+    ] {
+        let errors = grandiose::compile_source_to_bytecode(name, source)
+            .expect_err("unproved generic trait dispatch compiled");
+        assert!(
+            errors.iter().any(|error| error.message.contains(needle)),
+            "{errors:#?}",
+        );
+    }
+}
+
+#[test]
 fn generic_trait_method_contracts_require_matching_binders_and_evidence() {
     let reordered = parse(
         "trait Left{} trait Right{} trait Pair{first<T,U>(self:&Self,left:T,right:U)->T where T:Left,U:Right;} struct Item{value:i64} impl Pair for Item{first<A,B>(self:&Item,left:A,right:B)->A where B:Right,A:Left{left}} main()->{()}",
@@ -273,7 +640,12 @@ fn qualified_methods_select_after_ground_gat_receiver_normalization() {
         answer(value: <Carrier as Family>::Item<i64>) -> i64 {
             Read::read(&value)
         }
-        selected() -> i64 { answer(Box { value: 42 }) }
+        answer_dot(value: <Carrier as Family>::Item<i64>) -> i64 {
+            value.read()
+        }
+        selected() -> i64 {
+            answer(Box { value: 20 }) + answer_dot(Box { value: 22 })
+        }
         main() -> { () }
     "#;
     for optimization_level in [
@@ -301,6 +673,17 @@ fn qualified_methods_select_after_ground_gat_receiver_normalization() {
             "{optimization_level:?}",
         );
     }
+    let recovery_source = source.replace("main() -> { () }", "main() -> i64 { selected() }");
+    assert_eq!(
+        grandiose::run_source(
+            "projected-dot-trait-method-recovery.gr",
+            &recovery_source,
+            vec![],
+            &mut grandiose::eval::SystemHost::default(),
+        )
+        .unwrap(),
+        grandiose::eval::Value::Int(42),
+    );
 }
 
 #[test]

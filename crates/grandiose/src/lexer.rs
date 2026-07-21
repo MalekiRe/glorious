@@ -129,7 +129,10 @@ impl NumberLiteral {
         self.fraction.is_some() || self.exponent.is_some()
     }
 
-    pub fn as_u64(&self, span: Span) -> Result<u64, Diagnostic> {
+    /// Converts the magnitude after lexing has preserved all source digits.
+    /// This is the widest source integer representation currently supported;
+    /// narrower conversions must be selected by semantic context.
+    pub fn as_u128(&self, span: Span) -> Result<u128, Diagnostic> {
         if self.is_float() {
             return Err(Diagnostic::error(
                 "expected an integer",
@@ -137,16 +140,16 @@ impl NumberLiteral {
                 span,
             ));
         }
-        let mut value: u64 = 0;
+        let mut value: u128 = 0;
         for digit in self.digits.chars() {
             let digit = digit.to_digit(self.base.radix()).expect("lexed digit");
             value = value
-                .checked_mul(self.base.radix() as u64)
-                .and_then(|value| value.checked_add(digit as u64))
+                .checked_mul(u128::from(self.base.radix()))
+                .and_then(|value| value.checked_add(u128::from(digit)))
                 .ok_or_else(|| {
                     Diagnostic::error(
                         "integer is too large",
-                        "this integer does not fit in 64 bits",
+                        "this integer does not fit in 128 bits",
                         span,
                     )
                 })?;
@@ -154,8 +157,18 @@ impl NumberLiteral {
         Ok(value)
     }
 
+    pub fn as_u64(&self, span: Span) -> Result<u64, Diagnostic> {
+        u64::try_from(self.as_u128(span)?).map_err(|_| {
+            Diagnostic::error(
+                "integer is too large",
+                "this integer does not fit in 64 bits",
+                span,
+            )
+        })
+    }
+
     pub fn as_i64(&self, span: Span) -> Result<i64, Diagnostic> {
-        let magnitude = self.as_u64(span)?;
+        let magnitude = self.as_u128(span)?;
         i64::try_from(magnitude).map_err(|_| {
             Diagnostic::error(
                 "integer is too large",
@@ -165,13 +178,60 @@ impl NumberLiteral {
         })
     }
 
-    pub fn as_f64(&self) -> f64 {
+    fn normalized_float_spelling(&self) -> String {
         self.spelling
             .chars()
             .filter(|character| *character != '_')
-            .collect::<String>()
-            .parse()
-            .unwrap_or(f64::INFINITY)
+            .collect()
+    }
+
+    /// Parses directly at binary32 precision. Going through `f64` first can
+    /// double-round values that lie close to an `f32` midpoint.
+    pub fn as_f32(&self, span: Span) -> Result<f32, Diagnostic> {
+        self.parse_float(span, "f32")
+    }
+
+    /// Parses directly at binary64 precision using Rust's correctly-rounded
+    /// decimal-to-IEEE conversion.
+    pub fn as_f64(&self, span: Span) -> Result<f64, Diagnostic> {
+        self.parse_float(span, "f64")
+    }
+
+    fn parse_float<T>(&self, span: Span, width: &'static str) -> Result<T, Diagnostic>
+    where
+        T: std::str::FromStr + FloatResult,
+    {
+        let value = self.normalized_float_spelling().parse::<T>().map_err(|_| {
+            Diagnostic::error(
+                "invalid float literal",
+                format!("this literal cannot be represented as {width}"),
+                span,
+            )
+        })?;
+        if !value.is_finite() {
+            return Err(Diagnostic::error(
+                "float literal is out of range",
+                format!("this literal overflows {width}"),
+                span,
+            ));
+        }
+        Ok(value)
+    }
+}
+
+trait FloatResult {
+    fn is_finite(&self) -> bool;
+}
+
+impl FloatResult for f32 {
+    fn is_finite(&self) -> bool {
+        f32::is_finite(*self)
+    }
+}
+
+impl FloatResult for f64 {
+    fn is_finite(&self) -> bool {
+        f64::is_finite(*self)
     }
 }
 

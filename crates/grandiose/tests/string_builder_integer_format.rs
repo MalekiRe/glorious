@@ -89,6 +89,16 @@ const SURFACE: &str = r#"
         StringBuilder::finish(move builder)
     }
 
+    wide_cases() -> Result<String, Utf8Error> {
+        let builder = StringBuilder::new();
+        let unsigned_max = bit_not(wrapping_convert_to_u128(0));
+        let signed_minimum = shift_left(wrapping_convert_to_i128(1), 127);
+        StringBuilder::append_u128(&mut builder, move unsigned_max);
+        StringBuilder::push_byte(&mut builder, 124);
+        StringBuilder::append_i128(&mut builder, move signed_minimum);
+        StringBuilder::finish(move builder)
+    }
+
     composed() -> Result<String, Utf8Error> {
         let prefix = "pre:";
         let middle = ":mid:";
@@ -134,6 +144,15 @@ fn string_builder_formats_u64_and_i64_at_every_optimization_level() {
             &format!("signed cases at {optimization_level:?}"),
         );
         assert_ok_text(
+            vm.run(function_id(&artifact, "wide_cases"), vec![])
+                .unwrap(),
+            concat!(
+                "340282366920938463463374607431768211455|",
+                "-170141183460469231731687303715884105728",
+            ),
+            &format!("wide cases at {optimization_level:?}"),
+        );
+        assert_ok_text(
             vm.run(function_id(&artifact, "composed"), vec![]).unwrap(),
             "pre:123:mid:-456!",
             &format!("composition at {optimization_level:?}"),
@@ -157,6 +176,16 @@ fn string_builder_integer_formatting_has_recovery_parity() {
                     &mut builder,
                     wrapping_convert_to_u64(-1)
                 );
+                StringBuilder::push_byte(&mut builder, 44);
+                StringBuilder::append_u128(
+                    &mut builder,
+                    bit_not(wrapping_convert_to_u128(0))
+                );
+                StringBuilder::push_byte(&mut builder, 44);
+                StringBuilder::append_i128(
+                    &mut builder,
+                    shift_left(wrapping_convert_to_i128(1), 127)
+                );
                 handle perform Finished::inspect(StringBuilder::finish(move builder)) {
                     Finished::inspect(Result::Ok(text)) => move text,
                     Finished::inspect(Result::Err(_)) => "invalid utf-8"
@@ -169,6 +198,13 @@ fn string_builder_integer_formatting_has_recovery_parity() {
     .unwrap();
     assert_eq!(
         value,
-        RecoveryValue::String("value=-2048,18446744073709551615".into()),
+        RecoveryValue::String(
+            concat!(
+                "value=-2048,18446744073709551615,",
+                "340282366920938463463374607431768211455,",
+                "-170141183460469231731687303715884105728",
+            )
+            .into(),
+        ),
     );
 }

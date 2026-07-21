@@ -242,7 +242,9 @@ impl TrustedRuntimeManifest {
             }
             if !matches!(
                 declaration.primitive,
-                Primitive::TextByteLen
+                Primitive::CharFromU32Checked
+                    | Primitive::CharToU32
+                    | Primitive::TextByteLen
                     | Primitive::TextConcat
                     | Primitive::TextEq
                     | Primitive::TextFromUtf8Checked
@@ -266,17 +268,56 @@ impl TrustedRuntimeManifest {
                     | Primitive::ArrayCapacity
                     | Primitive::ArrayReserve
                     | Primitive::ArrayFinishDrained
+                    | Primitive::FloatAdd
+                    | Primitive::FloatSub
+                    | Primitive::FloatMul
+                    | Primitive::FloatDiv
+                    | Primitive::FloatRem
+                    | Primitive::FloatNeg
+                    | Primitive::FloatEq
+                    | Primitive::FloatNe
+                    | Primitive::FloatLt
+                    | Primitive::FloatLe
+                    | Primitive::FloatGt
+                    | Primitive::FloatGe
+                    | Primitive::FloatConvert
+                    | Primitive::IntToFloat
+                    | Primitive::FloatToIntChecked
+                    | Primitive::FloatToBits
+                    | Primitive::FloatFromBits
             ) {
                 errors.push(Diagnostic::plain(format!(
                     "trusted primitive leaf `{}` is outside the generation-1 Text/Bytes/Array frontend slice",
                     declaration.display_name
                 )));
             }
-            if !primitives.insert(declaration.primitive as u32) {
+            let repeatable_typed_float = matches!(
+                declaration.primitive,
+                Primitive::FloatAdd
+                    | Primitive::FloatSub
+                    | Primitive::FloatMul
+                    | Primitive::FloatDiv
+                    | Primitive::FloatRem
+                    | Primitive::FloatNeg
+                    | Primitive::FloatEq
+                    | Primitive::FloatNe
+                    | Primitive::FloatLt
+                    | Primitive::FloatLe
+                    | Primitive::FloatGt
+                    | Primitive::FloatGe
+                    | Primitive::FloatConvert
+                    | Primitive::IntToFloat
+                    | Primitive::FloatToIntChecked
+                    | Primitive::FloatToBits
+                    | Primitive::FloatFromBits
+            );
+            if !repeatable_typed_float && !primitives.insert(declaration.primitive as u32) {
                 errors.push(Diagnostic::plain(format!(
                     "trusted runtime manifest contains duplicate primitive identity {:?}",
                     declaration.primitive
                 )));
+            } else {
+                primitives.insert(declaration.primitive as u32);
             }
         }
         let requires_array = primitive_leaves.iter().any(|declaration| {
@@ -351,7 +392,13 @@ impl TrustedRuntimeManifest {
             parameters: vec![GenericParameterKind::Type],
             role: MachineTypeRole::Array,
         }];
-        let leaves = [
+        let mut leaves = [
+            (
+                0x0030,
+                "__g1_char_from_u32_checked",
+                Primitive::CharFromU32Checked,
+            ),
+            (0x0031, "__g1_char_to_u32", Primitive::CharToU32),
             (0x0040, "__g1_text_byte_len", Primitive::TextByteLen),
             (0x0041, "__g1_text_concat", Primitive::TextConcat),
             (0x0042, "__g1_text_eq", Primitive::TextEq),
@@ -403,7 +450,60 @@ impl TrustedRuntimeManifest {
             display_name: display_name.into(),
             primitive,
         })
-        .collect();
+        .collect::<Vec<_>>();
+        let mut next_float_leaf_id = 0x0200_u64;
+        let mut push_float_leaf = |display_name: String, primitive: Primitive| {
+            leaves.push(ManifestPrimitiveLeaf {
+                id: next_float_leaf_id,
+                display_name,
+                primitive,
+            });
+            next_float_leaf_id += 1;
+        };
+        for width in ["f32", "f64"] {
+            for (operation, primitive) in [
+                ("add", Primitive::FloatAdd),
+                ("sub", Primitive::FloatSub),
+                ("mul", Primitive::FloatMul),
+                ("div", Primitive::FloatDiv),
+                ("rem", Primitive::FloatRem),
+                ("neg", Primitive::FloatNeg),
+                ("eq", Primitive::FloatEq),
+                ("ne", Primitive::FloatNe),
+                ("lt", Primitive::FloatLt),
+                ("le", Primitive::FloatLe),
+                ("gt", Primitive::FloatGt),
+                ("ge", Primitive::FloatGe),
+            ] {
+                push_float_leaf(format!("__g1_{width}_{operation}"), primitive);
+            }
+        }
+        push_float_leaf("__g1_f32_to_f64".into(), Primitive::FloatConvert);
+        push_float_leaf("__g1_f64_to_f32".into(), Primitive::FloatConvert);
+        let integers = [
+            "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
+        ];
+        for target in ["f32", "f64"] {
+            for source in integers {
+                push_float_leaf(format!("__g1_{source}_to_{target}"), Primitive::IntToFloat);
+            }
+        }
+        for source in ["f32", "f64"] {
+            for target in integers {
+                push_float_leaf(
+                    format!("__g1_{source}_to_{target}_checked"),
+                    Primitive::FloatToIntChecked,
+                );
+            }
+        }
+        for (name, primitive) in [
+            ("__g1_f32_to_bits", Primitive::FloatToBits),
+            ("__g1_f32_from_bits", Primitive::FloatFromBits),
+            ("__g1_f64_to_bits", Primitive::FloatToBits),
+            ("__g1_f64_from_bits", Primitive::FloatFromBits),
+        ] {
+            push_float_leaf(name.into(), primitive);
+        }
         let host_imports = [
             (
                 0x0100,
@@ -901,6 +1001,40 @@ impl ParamEnv {
         self.conflicts.is_empty() && self.equality_conflicts.is_empty()
     }
 
+    /// Returns whether lexical positive `Use` evidence contains the requested
+    /// interval. Quantity evidence is an interval contract rather than an
+    /// invariant ordinary trait argument: `Use<[0,infinity]>` therefore
+    /// entails `Use<[0,0]>` for the same symbolic subject.
+    pub(crate) fn use_quantity_contains(
+        &self,
+        trait_key: &TraitKey,
+        subject: &ProvisionalType,
+        lower: u32,
+        upper: Option<u32>,
+    ) -> bool {
+        self.facts.iter().any(|fact| {
+            let [
+                GenericArg::Const(ConstValue::Quantity {
+                    lower: available_lower,
+                    upper: available_upper,
+                }),
+            ] = fact.arguments.as_slice()
+            else {
+                return false;
+            };
+            fact.polarity == GoalPolarity::Positive
+                && &fact.trait_key == trait_key
+                && &fact.subject == subject
+                && fact.bindings.is_empty()
+                && *available_lower <= lower
+                && match (*available_upper, upper) {
+                    (None, _) => true,
+                    (Some(_), None) => false,
+                    (Some(available), Some(requested)) => available >= requested,
+                }
+        })
+    }
+
     #[cfg(test)]
     fn canonical_text(&self) -> String {
         let mut text = self
@@ -1105,6 +1239,8 @@ pub(crate) struct TraitDb {
     type_const_arguments: BTreeMap<(usize, usize), Vec<crate::ast::ConstAssociatedArgumentSyntax>>,
     impls: Vec<ImplEntry>,
     candidates: BTreeMap<CandidateKey, Vec<usize>>,
+    intrinsic_use_key: Option<TraitKey>,
+    array_nominal: Option<NominalKey>,
     compilation_tables: Arc<Mutex<BTreeSet<TableKey>>>,
 }
 
@@ -1128,6 +1264,9 @@ enum HeadConstructor {
     Any,
     Predefined(String),
     Nominal(NominalKey),
+    Tuple(usize),
+    Shared,
+    Unique,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -1456,6 +1595,19 @@ impl TraitDb {
                 )
             }))
             .collect::<BTreeMap<_, _>>();
+        let mut array_nominal = None;
+        for machine in &manifest.runtime.machine_types {
+            let identity = NominalKey(machine.display_name.clone());
+            if machine.role == MachineTypeRole::Array {
+                array_nominal = Some(identity.clone());
+            }
+            nominals
+                .entry(machine.display_name.clone())
+                .or_insert_with(|| NominalSchema {
+                    parameters: machine.parameters.clone(),
+                    identity,
+                });
+        }
         let mut local_owners = nominals.keys().cloned().collect::<BTreeSet<_>>();
         let generic_aliases = program
             .type_aliases
@@ -1705,6 +1857,8 @@ impl TraitDb {
                 type_const_arguments,
                 impls,
                 candidates,
+                intrinsic_use_key: Some(intrinsic_use_key),
+                array_nominal,
                 compilation_tables: Arc::new(Mutex::new(BTreeSet::new())),
             };
             let validation_errors = validate_supertrait_impls(&database, &impl_spans);
@@ -2247,6 +2401,28 @@ impl TraitDb {
             tables.insert(table_key, TableState::Complete(lexical.clone()));
             diagnostics.active.pop();
             return lexical;
+        }
+        if goal.polarity == GoalPolarity::Positive
+            && self.intrinsic_use_key.as_ref() == Some(&goal.trait_key)
+            && let ProvisionalType::Nominal(instance) = &goal.subject
+            && self.array_nominal.as_ref() == Some(&instance.declaration)
+            && let [element] = instance.arguments.as_slice()
+        {
+            let answer = self.solve_inner(
+                GroundGoal {
+                    subject: element.clone(),
+                    ..goal.clone()
+                },
+                param_env,
+                tables,
+                depth + 1,
+                steps,
+                projection_steps,
+                diagnostics,
+            );
+            tables.insert(table_key, TableState::Complete(answer.clone()));
+            diagnostics.active.pop();
+            return answer;
         }
         let mut answers = 0usize;
         let mut distinct_answers = BTreeSet::new();
@@ -4671,7 +4847,11 @@ fn pattern_with_const_arguments(
                 }
             } else if is_predefined(&path[0].name) {
                 Ok(Pattern::Ground(ProvisionalType::Predefined(
-                    path[0].name.clone(),
+                    if path[0].name == "char" {
+                        "Char".to_owned()
+                    } else {
+                        path[0].name.clone()
+                    },
                 )))
             } else if let Some(schema) = nominals.get(&path[0].name) {
                 if !schema.parameters.is_empty() {
@@ -4802,7 +4982,7 @@ fn pattern_with_const_arguments(
             }
             Ok(Pattern::Nominal(schema.identity.clone(), lowered))
         }
-        TypeSyntaxKind::SharedReference(referent) if !head => {
+        TypeSyntaxKind::SharedReference(referent) => {
             Ok(Pattern::Shared(Box::new(pattern_with_const_arguments(
                 referent,
                 binders,
@@ -4812,7 +4992,7 @@ fn pattern_with_const_arguments(
                 type_const_arguments,
             )?)))
         }
-        TypeSyntaxKind::UniqueReference(referent) if !head => {
+        TypeSyntaxKind::UniqueReference(referent) => {
             Ok(Pattern::Unique(Box::new(pattern_with_const_arguments(
                 referent,
                 binders,
@@ -4822,7 +5002,10 @@ fn pattern_with_const_arguments(
                 type_const_arguments,
             )?)))
         }
-        TypeSyntaxKind::Tuple(elements) if !head => Ok(Pattern::Tuple(
+        TypeSyntaxKind::Tuple(elements) if elements.is_empty() => {
+            Ok(Pattern::Ground(ProvisionalType::Predefined("Unit".into())))
+        }
+        TypeSyntaxKind::Tuple(elements) => Ok(Pattern::Tuple(
             elements
                 .iter()
                 .map(|element| {
@@ -4927,6 +5110,10 @@ pub(crate) fn is_predefined(name: &str) -> bool {
             | "i128"
             | "usize"
             | "isize"
+            | "f32"
+            | "f64"
+            | "char"
+            | "Char"
             | "Text"
             | "Bytes"
     )
@@ -5388,6 +5575,9 @@ fn pattern_constructor(pattern: &Pattern) -> Option<HeadConstructor> {
             Some(HeadConstructor::Predefined(name.clone()))
         }
         Pattern::Nominal(name, _) => Some(HeadConstructor::Nominal(name.clone())),
+        Pattern::Tuple(elements) => Some(HeadConstructor::Tuple(elements.len())),
+        Pattern::Shared(_) => Some(HeadConstructor::Shared),
+        Pattern::Unique(_) => Some(HeadConstructor::Unique),
         _ => None,
     }
 }
@@ -5398,6 +5588,9 @@ fn ground_constructor(ty: &ProvisionalType) -> Option<HeadConstructor> {
         ProvisionalType::Nominal(instance) => {
             Some(HeadConstructor::Nominal(instance.declaration.clone()))
         }
+        ProvisionalType::Tuple(elements) => Some(HeadConstructor::Tuple(elements.len())),
+        ProvisionalType::Shared(_) => Some(HeadConstructor::Shared),
+        ProvisionalType::Unique(_) => Some(HeadConstructor::Unique),
         _ => None,
     }
 }
@@ -5763,7 +5956,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn distributed_runtime_manifest_freezes_the_text_bytes_and_array_layer_one_table() {
+    fn distributed_runtime_manifest_freezes_scalar_text_bytes_and_array_table() {
         let runtime = TrustedRuntimeManifest::distributed_generation_1();
         assert_eq!(
             runtime.machine_types,
@@ -5774,7 +5967,13 @@ mod tests {
                 role: MachineTypeRole::Array,
             }]
         );
-        let expected = [
+        let mut expected = [
+            (
+                0x0030,
+                "__g1_char_from_u32_checked",
+                Primitive::CharFromU32Checked,
+            ),
+            (0x0031, "__g1_char_to_u32", Primitive::CharToU32),
             (0x0040, "__g1_text_byte_len", Primitive::TextByteLen),
             (0x0041, "__g1_text_concat", Primitive::TextConcat),
             (0x0042, "__g1_text_eq", Primitive::TextEq),
@@ -5819,7 +6018,59 @@ mod tests {
                 "__g1_array_finish_drained",
                 Primitive::ArrayFinishDrained,
             ),
+        ]
+        .into_iter()
+        .map(|(id, name, primitive)| (id, name.to_owned(), primitive))
+        .collect::<Vec<_>>();
+        let mut next_float_leaf_id = 0x0200_u64;
+        let mut push_float = |name: String, primitive: Primitive| {
+            expected.push((next_float_leaf_id, name, primitive));
+            next_float_leaf_id += 1;
+        };
+        for width in ["f32", "f64"] {
+            for (operation, primitive) in [
+                ("add", Primitive::FloatAdd),
+                ("sub", Primitive::FloatSub),
+                ("mul", Primitive::FloatMul),
+                ("div", Primitive::FloatDiv),
+                ("rem", Primitive::FloatRem),
+                ("neg", Primitive::FloatNeg),
+                ("eq", Primitive::FloatEq),
+                ("ne", Primitive::FloatNe),
+                ("lt", Primitive::FloatLt),
+                ("le", Primitive::FloatLe),
+                ("gt", Primitive::FloatGt),
+                ("ge", Primitive::FloatGe),
+            ] {
+                push_float(format!("__g1_{width}_{operation}"), primitive);
+            }
+        }
+        push_float("__g1_f32_to_f64".into(), Primitive::FloatConvert);
+        push_float("__g1_f64_to_f32".into(), Primitive::FloatConvert);
+        let integers = [
+            "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
         ];
+        for target in ["f32", "f64"] {
+            for source in integers {
+                push_float(format!("__g1_{source}_to_{target}"), Primitive::IntToFloat);
+            }
+        }
+        for source in ["f32", "f64"] {
+            for target in integers {
+                push_float(
+                    format!("__g1_{source}_to_{target}_checked"),
+                    Primitive::FloatToIntChecked,
+                );
+            }
+        }
+        for (name, primitive) in [
+            ("__g1_f32_to_bits", Primitive::FloatToBits),
+            ("__g1_f32_from_bits", Primitive::FloatFromBits),
+            ("__g1_f64_to_bits", Primitive::FloatToBits),
+            ("__g1_f64_from_bits", Primitive::FloatFromBits),
+        ] {
+            push_float(name.into(), primitive);
+        }
         assert_eq!(runtime.primitive_leaves.len(), expected.len());
         for (actual, (id, name, primitive)) in runtime.primitive_leaves.iter().zip(expected) {
             assert_eq!(actual.id, id);
@@ -6373,6 +6624,46 @@ mod tests {
     }
 
     #[test]
+    fn lexical_use_quantity_facts_entail_contained_intervals_only() {
+        let key = TraitKey::Local("Use".into());
+        let subject = ProvisionalType::Param(crate::compiler_typeck::GenericParamKey {
+            owner: crate::compiler_typeck::DeclarationKey::Function("owner".into()),
+            ordinal: 0,
+        });
+        let environment = ParamEnv {
+            facts: vec![TraitFact {
+                polarity: GoalPolarity::Positive,
+                trait_key: key.clone(),
+                subject: subject.clone(),
+                arguments: vec![GenericArg::Const(ConstValue::Quantity {
+                    lower: 0,
+                    upper: None,
+                })],
+                bindings: vec![],
+            }],
+            ..ParamEnv::default()
+        };
+        assert!(environment.use_quantity_contains(&key, &subject, 0, Some(0)));
+        assert!(environment.use_quantity_contains(&key, &subject, 1, None));
+
+        let affine = ParamEnv {
+            facts: vec![TraitFact {
+                polarity: GoalPolarity::Positive,
+                trait_key: key.clone(),
+                subject: subject.clone(),
+                arguments: vec![GenericArg::Const(ConstValue::Quantity {
+                    lower: 0,
+                    upper: Some(1),
+                })],
+                bindings: vec![],
+            }],
+            ..ParamEnv::default()
+        };
+        assert!(!affine.use_quantity_contains(&key, &subject, 0, None));
+        assert!(!affine.use_quantity_contains(&key, &subject, 2, Some(2)));
+    }
+
+    #[test]
     fn lexical_polarity_and_associated_equalities_are_exact_and_conflicts_ambiguous() {
         let db = database("trait Value { type Item; }");
         let parameter = ProvisionalType::Param(crate::compiler_typeck::GenericParamKey {
@@ -6839,8 +7130,6 @@ mod tests {
             "impl !Drop for i64 {} main() -> { () }",
             "trait Marker {} impl Marker for Missing {} main() -> { () }",
             "trait Marker {} struct Box<T> { value: T } impl<T, U> Marker for Box<T> {} main() -> { () }",
-            "trait Marker {} impl Marker for &i64 {} main() -> { () }",
-            "trait Marker {} impl Marker for (i64, i64) {} main() -> { () }",
             "trait Marker {} impl Unknown for i64 {} main() -> { () }",
         ];
         for source in cases {
@@ -7114,17 +7403,27 @@ mod tests {
             SolveResult::Proven
         );
 
-        for source in [
-            "trait Marker{} type Borrowed=&i64; impl Marker for Borrowed{} main()->{()}",
-            "trait Marker{} type Pair=(i64,i64); impl Marker for Pair{} main()->{()}",
-        ] {
-            let program = crate::parser::parse(crate::lexer::lex(source).unwrap()).unwrap();
-            let errors = TraitDb::build(&program).unwrap_err();
-            assert!(errors.iter().any(|error| {
-                error.message.contains("unsupported marker impl head")
-                    && error.code.as_deref() == Some("G1TR001")
-            }));
-        }
+        let borrowed =
+            database("trait Marker{} type Borrowed=&i64; impl Marker for Borrowed{} main()->{()}");
+        assert_eq!(
+            borrowed.solve(
+                "Marker",
+                &ProvisionalType::Shared(Box::new(ProvisionalType::Predefined("i64".into())))
+            ),
+            SolveResult::Proven
+        );
+        let pair =
+            database("trait Marker{} type Pair=(i64,i64); impl Marker for Pair{} main()->{()}");
+        assert_eq!(
+            pair.solve(
+                "Marker",
+                &ProvisionalType::Tuple(vec![
+                    ProvisionalType::Predefined("i64".into()),
+                    ProvisionalType::Predefined("i64".into()),
+                ])
+            ),
+            SolveResult::Proven
+        );
     }
 
     #[test]

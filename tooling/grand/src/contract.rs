@@ -4,14 +4,18 @@
 //! eventually implement (docs/compiler-changes-for-tooling.md items 1-5, 7):
 //!
 //! - `grc --capabilities` prints a [`Capabilities`] JSON object on stdout.
-//!   Legacy compilers (today's `grc`) fail this probe and get
+//!   Legacy compilers fail this probe and get
 //!   [`Capabilities::legacy`]: single-file input, rendered-text diagnostics.
-//! - Compilation: `grc --diagnostics json [--phase check] [-o OUT] SOURCE...`
+//! - Compilation: `grc --diagnostics json [--phase resolve|check] [-o OUT] SOURCE...`
 //!   Diagnostics are emitted on stderr, one [`Diagnostic`] JSON object per
 //!   line; non-JSON stderr lines pass through to the user untouched.
 //! - Interface scan: `grc --emit interfaces-json SOURCE...` prints a JSON
 //!   array of [`Declaration`] on stdout; `--emit std-interfaces-json` does
 //!   the same for the implicit prelude.
+//! - Persistent session: an optional bounded versioned `grc --serve`
+//!   JSON-lines transport, described by [`ServeCapabilities`]. Grand validates
+//!   this contract but remains a batch client because one build has no request
+//!   stream to amortize.
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -27,6 +31,25 @@ pub struct Capabilities {
     /// Contract revision; bump on incompatible CLI changes.
     #[serde(default)]
     pub contract: u32,
+    #[serde(default, rename = "contract-min")]
+    pub contract_min: Option<u32>,
+    #[serde(default, rename = "contract-max")]
+    pub contract_max: Option<u32>,
+    #[serde(default, rename = "artifact-major")]
+    pub artifact_major: Option<u16>,
+    #[serde(default, rename = "artifact-minor")]
+    pub artifact_minor: Option<u16>,
+    /// Compatibility identity of the released seed/artifact contract used by
+    /// this compiler. Both fields are absent for pre-negotiation compilers.
+    #[serde(default, rename = "seed-identity-version")]
+    pub seed_identity_version: Option<u32>,
+    #[serde(default, rename = "seed-identity")]
+    pub seed_identity: Option<String>,
+    /// Optional persistent subprocess protocol. Grand currently remains a
+    /// batch client, but records and validates this shape for editor/build
+    /// clients that can amortize multiple requests.
+    #[serde(default)]
+    pub serve: Option<ServeCapabilities>,
     #[serde(default, rename = "multi-file")]
     pub multi_file: bool,
     #[serde(default)]
@@ -37,8 +60,22 @@ pub struct Capabilities {
     pub diagnostics_json: bool,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct ServeCapabilities {
+    pub protocol: u32,
+    pub transport: String,
+    #[serde(rename = "max-request-bytes")]
+    pub max_request_bytes: usize,
+    #[serde(rename = "max-arguments")]
+    pub max_arguments: usize,
+    #[serde(rename = "max-inputs")]
+    pub max_inputs: usize,
+    #[serde(rename = "max-source-bytes")]
+    pub max_source_bytes: usize,
+}
+
 impl Capabilities {
-    /// What today's `grc` supports: `grc <input.gr> <output.ll>`, nothing else.
+    /// Compatibility shape for an unversioned legacy compiler.
     pub fn legacy() -> Capabilities {
         Capabilities::default()
     }
@@ -107,10 +144,9 @@ impl Diagnostic {
     pub fn remap(&mut self, bundle_path: &Path, segments: &[Segment]) {
         if let Some(fix) = &mut self.fix {
             if fix.file == bundle_path {
-                if let Some(segment) = segments
-                    .iter()
-                    .find(|s| fix.start_byte >= s.start_byte && fix.start_byte < s.start_byte + s.byte_len)
-                {
+                if let Some(segment) = segments.iter().find(|s| {
+                    fix.start_byte >= s.start_byte && fix.start_byte < s.start_byte + s.byte_len
+                }) {
                     fix.file = segment.file.clone();
                     fix.start_byte -= segment.start_byte;
                     fix.end_byte = fix.end_byte.saturating_sub(segment.start_byte);
@@ -122,8 +158,12 @@ impl Diagnostic {
                 continue;
             }
             let segment = match (label.start_byte, label.line) {
-                (Some(byte), _) => segments.iter().find(|s| byte >= s.start_byte && byte < s.start_byte + s.byte_len),
-                (None, Some(line)) => segments.iter().find(|s| line >= s.start_line && line < s.start_line + s.line_count),
+                (Some(byte), _) => segments
+                    .iter()
+                    .find(|s| byte >= s.start_byte && byte < s.start_byte + s.byte_len),
+                (None, Some(line)) => segments
+                    .iter()
+                    .find(|s| line >= s.start_line && line < s.start_line + s.line_count),
                 _ => None,
             };
             let Some(segment) = segment else { continue };
@@ -148,8 +188,12 @@ impl Diagnostic {
             Severity::Advice => "advice",
         };
         match &self.code {
-            Some(code) => { let _ = write!(out, "{severity}[{code}]: {}", self.title); }
-            None => { let _ = write!(out, "{severity}: {}", self.title); }
+            Some(code) => {
+                let _ = write!(out, "{severity}[{code}]: {}", self.title);
+            }
+            None => {
+                let _ = write!(out, "{severity}: {}", self.title);
+            }
         }
         for label in &self.labels {
             let _ = write!(out, "\n  --> {}", label.file.display());
@@ -183,7 +227,11 @@ fn snippet(label: &Label) -> String {
     let Some(line_text) = text.lines().nth(line_number.saturating_sub(1)) else {
         return String::new();
     };
-    let line_start: usize = text.lines().take(line_number - 1).map(|l| l.len() + 1).sum();
+    let line_start: usize = text
+        .lines()
+        .take(line_number - 1)
+        .map(|l| l.len() + 1)
+        .sum();
     let column = label
         .col
         .or_else(|| label.start_byte.map(|b| b.saturating_sub(line_start) + 1))
@@ -209,6 +257,7 @@ pub enum DeclarationKind {
     Type,
     Effect,
     Trait,
+    Impl,
     Global,
     Fixity,
 }

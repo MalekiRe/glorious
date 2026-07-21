@@ -103,6 +103,31 @@ fn integer_bases_and_separators_lex_with_deferred_payloads() {
 }
 
 #[test]
+fn integer_conversion_preserves_the_full_u128_source_domain() {
+    for (source, expected) in [
+        ("340282366920938463463374607431768211455", u128::MAX),
+        ("0xffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff", u128::MAX),
+    ] {
+        let tokens = lex(source).unwrap();
+        let TokenKind::Number(literal) = &tokens[0].kind else {
+            panic!("{source}");
+        };
+        assert_eq!(literal.as_u128(tokens[0].span).unwrap(), expected);
+        assert!(literal.as_u64(tokens[0].span).is_err());
+        assert!(literal.as_i64(tokens[0].span).is_err());
+    }
+
+    let source = "340282366920938463463374607431768211456";
+    let tokens = lex(source).unwrap();
+    let TokenKind::Number(literal) = &tokens[0].kind else {
+        panic!("{source}");
+    };
+    let error = literal.as_u128(tokens[0].span).unwrap_err();
+    assert_eq!(error.title, "integer is too large");
+    assert_eq!(error.message, "this integer does not fit in 128 bits");
+}
+
+#[test]
 fn float_literals_lex_fractions_and_exponents() {
     for (source, fraction, exponent) in [
         ("1.5", Some("5"), None),
@@ -126,6 +151,38 @@ fn float_literals_lex_fractions_and_exponents() {
             "{source}"
         );
     }
+}
+
+#[test]
+fn floats_round_directly_to_the_contextual_ieee_width() {
+    // Just above the midpoint between 1.0f32 and its successor. Parsing as
+    // f64 first loses the final decimal increment and would double-round down.
+    let source = "1.00000005960464477539062500000000000000000000000001";
+    let tokens = lex(source).unwrap();
+    let TokenKind::Number(literal) = &tokens[0].kind else {
+        panic!("{source}");
+    };
+    assert_eq!(
+        literal.as_f32(tokens[0].span).unwrap().to_bits(),
+        0x3f80_0001
+    );
+
+    let source = "4.9406564584124654e-324";
+    let tokens = lex(source).unwrap();
+    let TokenKind::Number(literal) = &tokens[0].kind else {
+        panic!("{source}");
+    };
+    assert_eq!(literal.as_f64(tokens[0].span).unwrap().to_bits(), 1);
+
+    let source = "1e400";
+    let tokens = lex(source).unwrap();
+    let TokenKind::Number(literal) = &tokens[0].kind else {
+        panic!("{source}");
+    };
+    assert_eq!(
+        literal.as_f64(tokens[0].span).unwrap_err().title,
+        "float literal is out of range"
+    );
 }
 
 #[test]

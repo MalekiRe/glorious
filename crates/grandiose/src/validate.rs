@@ -298,9 +298,45 @@ pub fn validate(program: &Program) -> Result<(), Vec<Diagnostic>> {
                 .map(|declaration| declaration.name.as_str()),
         )
         .collect::<HashSet<_>>();
-    let mut drop_targets = HashMap::<&str, Span>::new();
+    let type_aliases = program
+        .type_aliases
+        .iter()
+        .map(|declaration| (declaration.name.as_str(), declaration))
+        .collect::<HashMap<_, _>>();
+    fn canonical_drop_target(
+        name: &str,
+        aliases: &HashMap<&str, &crate::ast::TypeAliasDecl>,
+        nominals: &HashSet<&str>,
+        visiting: &mut HashSet<String>,
+    ) -> Option<String> {
+        if nominals.contains(name) {
+            return Some(name.to_owned());
+        }
+        let alias = aliases.get(name)?;
+        if !visiting.insert(name.to_owned()) {
+            return None;
+        }
+        let target = match &alias.target.kind {
+            crate::ast::TypeSyntaxKind::Path(path) if path.len() == 1 => {
+                canonical_drop_target(&path[0].name, aliases, nominals, visiting)
+            }
+            crate::ast::TypeSyntaxKind::Application { constructor, .. } => constructor
+                .simple_name()
+                .and_then(|target| canonical_drop_target(target, aliases, nominals, visiting)),
+            _ => None,
+        };
+        visiting.remove(name);
+        target
+    }
+    let mut drop_targets = HashMap::<String, Span>::new();
     for declaration in &program.drops {
-        if !nominal_types.contains(declaration.target.as_str()) {
+        let canonical_target = canonical_drop_target(
+            &declaration.target,
+            &type_aliases,
+            &nominal_types,
+            &mut HashSet::new(),
+        );
+        if canonical_target.is_none() {
             errors.push(
                 Diagnostic::error(
                     "Drop target is not nominal",
@@ -311,7 +347,10 @@ pub fn validate(program: &Program) -> Result<(), Vec<Diagnostic>> {
                 .with_help("implement Drop for a nominal struct or enum declared in this module"),
             );
         }
-        if let Some(original) = drop_targets.insert(&declaration.target, declaration.span) {
+        if declaration.generics.is_none()
+            && let Some(canonical_target) = canonical_target
+            && let Some(original) = drop_targets.insert(canonical_target, declaration.span)
+        {
             errors.push(
                 Diagnostic::error(
                     "Drop implemented more than once",
@@ -2309,7 +2348,7 @@ fn validate_pattern(
         | PatternKind::Char(_)
         | PatternKind::Byte(_)
         | PatternKind::String(_) => {}
-        PatternKind::Variant { path, fields } => {
+        PatternKind::Variant { path, fields, .. } => {
             if let [enum_name, variant_name] = path.as_slice() {
                 // Qualified value-subnamespace bindings may alias enum
                 // constructors through type-alias owners. Their canonical
@@ -2349,11 +2388,11 @@ fn validate_pattern(
                             .with_code("G0135")
                             .with_related(declaration.span, "the enum is declared here"),
                         ),
-                        Some(variant) if variant.fields.len() != fields.len() => errors.push(
+                        Some(variant) if fields.len() > variant.fields.len() => errors.push(
                             Diagnostic::error(
                                 "wrong enum pattern arity",
                                 format!(
-                                    "`{enum_name}::{variant_name}` has {} field(s), but this pattern supplies {}",
+                                    "`{enum_name}::{variant_name}` has {} field(s), but this pattern supplies {} explicit field pattern(s)",
                                     variant.fields.len(),
                                     fields.len()
                                 ),
@@ -2382,7 +2421,7 @@ fn validate_pattern(
         PatternKind::Tuple { elements, .. } => elements
             .iter()
             .for_each(|element| validate_pattern(program, element, errors)),
-        PatternKind::Struct { name, fields, rest } => {
+        PatternKind::Struct { name, fields, .. } => {
             if let Some(declaration) = program.structs.iter().find(|decl| decl.name == *name) {
                 for field in fields {
                     if !declaration
@@ -2398,30 +2437,6 @@ fn validate_pattern(
                             )
                             .with_code("G0129")
                             .with_related(declaration.span, format!("`{name}` is declared here")),
-                        );
-                    }
-                }
-                if rest.is_none() {
-                    let missing = declaration
-                        .fields
-                        .iter()
-                        .filter(|declared| !fields.iter().any(|field| field.field == declared.name))
-                        .map(|declared| format!("`{}`", declared.name))
-                        .collect::<Vec<_>>();
-                    if !missing.is_empty() {
-                        errors.push(
-                            Diagnostic::error(
-                                "missing struct pattern fields",
-                                format!(
-                                    "struct pattern for `{name}` does not mention {}",
-                                    missing.join(", ")
-                                ),
-                                pattern.span,
-                            )
-                            .with_code("G0129")
-                            .with_help(
-                                "name every field, or end the pattern with `..` to discard the remainder",
-                            ),
                         );
                     }
                 }

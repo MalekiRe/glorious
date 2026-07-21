@@ -107,6 +107,32 @@ fn options_default_is_explicit_o0_and_o1_removes_only_cleanup_free_constant_drop
     assert_eq!(default.optimization_report, explicit_o0.optimization_report);
     assert_eq!(explicit_o0.optimization_report.level, OptimizationLevel::O0);
     assert_eq!(o1.optimization_report.level, OptimizationLevel::O1);
+    let backend = explicit_o0
+        .optimization_report
+        .passes
+        .iter()
+        .filter(|pass| {
+            matches!(
+                pass.pass,
+                OptimizationPass::LowerRegistersAndEdges
+                    | OptimizationPass::LayoutAndPeephole
+                    | OptimizationPass::ValidateFinalArtifact
+            )
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(
+        backend.iter().map(|pass| pass.pass).collect::<Vec<_>>(),
+        [
+            OptimizationPass::LowerRegistersAndEdges,
+            OptimizationPass::LayoutAndPeephole,
+            OptimizationPass::ValidateFinalArtifact,
+        ]
+    );
+    assert!(backend.iter().all(|pass| pass.work_units > 0));
+    assert_eq!(
+        backend.last().unwrap().outcome,
+        OptimizationPassOutcome::Unchanged
+    );
     assert!(
         o1.optimization_report.passes.iter().any(|pass| {
             pass.pass == OptimizationPass::SparseSimplify
@@ -292,7 +318,7 @@ fn o2_terminal_specialization_preserves_partial_fallback_to_the_outer_handler() 
 }
 
 #[test]
-fn o2_keeps_one_shot_resume_and_cancel_dynamic() {
+fn o2_statically_composes_canonical_one_shot_resume_and_cancel() {
     let source = r#"
         effect Ask { [0,1] ask() -> i64 }
         resumed() -> i64 {
@@ -325,7 +351,14 @@ fn o2_keeps_one_shot_resume_and_cancel_dynamic() {
         assert!(
             function_code(&o2, function)
                 .iter()
-                .any(|instruction| matches!(instruction, Instruction::Handle { .. }))
+                .all(|instruction| !matches!(
+                    instruction,
+                    Instruction::MakeHandler { .. }
+                        | Instruction::Handle { .. }
+                        | Instruction::Perform { .. }
+                        | Instruction::Resume { .. }
+                        | Instruction::Cancel { .. }
+                ))
         );
     }
 }

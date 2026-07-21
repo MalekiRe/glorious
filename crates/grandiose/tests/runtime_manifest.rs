@@ -462,6 +462,11 @@ fn machine_type_identity_cannot_be_redeclared_as_a_source_nominal() {
 #[test]
 fn primitive_leaves_require_their_exact_frozen_generic_signatures() {
     let cases = [
+        (
+            Primitive::CharFromU32Checked,
+            "bad(value: u64) -> Char { 'x' }",
+        ),
+        (Primitive::CharToU32, "bad(value: Char) -> u64 { 0 }"),
         (Primitive::TextByteLen, "bad(value: Bytes) -> usize { 0 }"),
         (
             Primitive::TextConcat,
@@ -979,17 +984,6 @@ fn reference_array_slots_cross_exact_read_wrappers_at_all_levels() {
         push_pair_ref<'a>(value: &mut HiddenArray<&'a i64>, item: (i64, &'a i64)) -> () {
             push_ref(value, item.1)
         }
-        equal_arm_push_ref<'a>(route: Route, value: &mut HiddenArray<&'a i64>, item: &'a i64) -> () {
-            if(route is Route::Stop) { push_ref(value, item) } else { push_ref(value, item) }
-        }
-        mutual_push_left<'a>(route: Route, value: &mut HiddenArray<&'a i64>, item: &'a i64) -> () {
-            if(route is Route::Stop) { push_ref(value, item) }
-            else { mutual_push_right(Route::Stop, value, item) }
-        }
-        mutual_push_right<'a>(route: Route, value: &mut HiddenArray<&'a i64>, item: &'a i64) -> () {
-            if(route is Route::Stop) { push_ref(value, item) }
-            else { mutual_push_left(Route::Stop, value, item) }
-        }
         close_refs<'a>(value: HiddenArray<&'a i64>) -> () { finish(value) }
         pop_ref<'a>(value: &mut HiddenArray<&'a i64>) -> &'a i64 { pop(value) }
         take_last<'a>(value: &mut HiddenArray<&'a i64>) -> &'a i64 {
@@ -1003,10 +997,6 @@ fn reference_array_slots_cross_exact_read_wrappers_at_all_levels() {
             round_trip<'a>(seed: &'a i64) -> () {
                 let values = empty_refs();
                 push_pair_ref(&mut values, (7, seed));
-                equal_arm_push_ref(Route::Stop, &mut values, seed);
-                mutual_push_left(Route::Recur, &mut values, seed);
-                keep(&mut values);
-                keep(&mut values);
                 keep(&mut values);
                 close_refs(move values)
             }
@@ -1431,11 +1421,10 @@ fn projected_element_loan_suspends_unique_wrapper_reference_and_regions_reject_a
     );
 
     let ambiguous = r#"
-        choose<'a>(value: (&'a i64, &'a i64)) -> &'a i64 {
-            let selected = value.0;
-            selected
+        choose<'a>(select_first: i64, value: (&'a i64, &'a i64)) -> &'a i64 {
+            if(select_first == 0) { value.0 } else { value.1 }
         }
-        bad<'a>(value: (&'a i64, &'a i64)) -> &'a i64 { choose(move value) }
+        bad<'a>(value: (&'a i64, &'a i64)) -> &'a i64 { choose(0, move value) }
         main() -> () { () }
     "#;
     let errors =

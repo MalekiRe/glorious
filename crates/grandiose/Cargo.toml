@@ -8,6 +8,9 @@ description = "Interpreter and bootstrap runner for the Grandiose language"
 ariadne = "0.5"
 im = "15.1"
 grandiose-vm = { path = "../grandiose-vm" }
+blake3 = "1"
+serde_json = "1"
+serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 tempfile = "3"

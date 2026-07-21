@@ -502,20 +502,130 @@ fn monomorphic_typed_callable_forms_at_an_unplanned_generic_wrapper_site() {
 
 #[test]
 fn runtime_callable_fallback_rejects_unproven_region_and_effect_contracts() {
+    let exact_reference = r#"
+            struct Receiver { selected: &i64 }
+            apply<F, T, R>(value: T, body: F) -> R
+                where F: Fn<(T), Output=R> { body(value) }
+            answer() -> i64 {
+                let value = 42;
+                *apply(Receiver { selected: &value }, (input: Receiver) -> &i64 {
+                    if(true) { input.selected } else { input.selected }
+                })
+            }
+            main() -> { () }
+        "#;
+    for optimization_level in [
+        OptimizationLevel::O0,
+        OptimizationLevel::O1,
+        OptimizationLevel::O2,
+        OptimizationLevel::O3,
+    ] {
+        let artifact = compile_source_to_bytecode_with_options(
+            "typed-runtime-reference-exact.gr",
+            exact_reference,
+            CompileOptions { optimization_level },
+        )
+        .unwrap_or_else(|errors| panic!("{optimization_level:?}: {errors:#?}"));
+        assert!(
+            artifact
+                .functions
+                .iter()
+                .any(|function| function.name.starts_with("$runtime$closure$"))
+        );
+        let answer = artifact
+            .functions
+            .iter()
+            .position(|function| function.name == "answer")
+            .unwrap() as u32;
+        assert_eq!(
+            Vm::new(verify(artifact).unwrap())
+                .run(answer, vec![])
+                .unwrap(),
+            Value::I64(42),
+            "{optimization_level:?}"
+        );
+    }
+    let recovery = exact_reference.replace("main() -> { () }", "main() -> i64 { answer() }");
+    assert_eq!(
+        run_source(
+            "typed-runtime-reference-recovery.gr",
+            &recovery,
+            vec![],
+            &mut NoHost,
+        )
+        .unwrap(),
+        RecoveryValue::Int(42)
+    );
+
     has_message(
-        "typed-runtime-reference-negative.gr",
+        "typed-runtime-reference-opaque.gr",
         r#"
             apply<F, T, R>(value: T, body: F) -> R
                 where F: Fn<(T), Output=R> { body(value) }
-            bad<'a>(value: &'a i64) -> &'a i64 {
+            bad<'a>(value: &'a i64, other: &'a i64) -> &'a i64 {
                 apply(value, (input: &i64) -> &i64 {
-                    if(true) { input } else { input }
+                    if(true) { input } else { other }
                 })
             }
             main() -> { () }
         "#,
-        &["runtime callable fallback", "reference-free"],
+        &["VM-sealed callable", "exact symbolic parameter path"],
     );
+    for (name, source, needle) in [
+        (
+            "typed-runtime-reference-escape.gr",
+            r#"
+                apply<F, T, R>(value: T, body: F) -> R
+                    where F: Fn<(T), Output=R> { body(value) }
+                escape<'a>(other: &'a i64) -> &'a i64 {
+                    let local = 42;
+                    other;
+                    apply(&local, (input: &i64) -> &i64 {
+                        if(true) { input } else { input }
+                    })
+                }
+                main() -> { () }
+            "#,
+            "escape",
+        ),
+        (
+            "typed-runtime-reference-alias.gr",
+            r#"
+                apply<F, T, R>(value: T, body: F) -> R
+                    where F: Fn<(T), Output=R> { body(value) }
+                bad() -> {
+                    let value = 42;
+                    let selected = apply(&mut value, (input: &mut i64) -> &mut i64 {
+                        if(true) { input } else { input }
+                    });
+                    let conflicting = &mut value;
+                    selected;
+                    conflicting;
+                    ()
+                }
+                main() -> { () }
+            "#,
+            "incompatible live loan",
+        ),
+    ] {
+        for optimization_level in [
+            OptimizationLevel::O0,
+            OptimizationLevel::O1,
+            OptimizationLevel::O2,
+            OptimizationLevel::O3,
+        ] {
+            let errors = compile_source_to_bytecode_with_options(
+                name,
+                source,
+                CompileOptions { optimization_level },
+            )
+            .expect_err("unsafe sealed runtime reference route compiled");
+            assert!(
+                errors.iter().any(|error| error.message.contains(needle)),
+                "{optimization_level:?}: {errors:#?}"
+            );
+        }
+    }
     has_message(
         "typed-runtime-effect-negative.gr",
         r#"

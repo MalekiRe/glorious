@@ -3,6 +3,15 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
+/// Canonical source suffix plus the legacy compatibility suffix accepted
+/// during the G1 tooling migration.
+pub fn is_source_path(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("glorious" | "gr")
+    )
+}
+
 /// XDG-respecting cache root for grand (`~/.cache/grandiose` by default).
 pub fn cache_root() -> Result<PathBuf> {
     if let Ok(dir) = std::env::var("GRAND_CACHE_DIR") {
@@ -35,8 +44,9 @@ pub fn blake3_hex(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }
 
-/// Deterministic content hash of a package directory: every `.gr` file plus
-/// `grandiose.toml`, in sorted relative-path order, `.git` excluded.
+/// Deterministic content hash of a package directory: every `.glorious` or
+/// legacy `.gr` file plus `grandiose.toml`, in sorted relative-path order,
+/// `.git` excluded.
 pub fn hash_package_dir(dir: &Path) -> Result<String> {
     let mut files: Vec<PathBuf> = Vec::new();
     for entry in walkdir::WalkDir::new(dir)
@@ -48,7 +58,7 @@ pub fn hash_package_dir(dir: &Path) -> Result<String> {
             continue;
         }
         let path = entry.into_path();
-        let is_source = path.extension().is_some_and(|ext| ext == "gr");
+        let is_source = is_source_path(&path);
         let is_manifest = path.file_name().is_some_and(|n| n == "grandiose.toml");
         if is_source || is_manifest {
             files.push(path);
@@ -60,7 +70,8 @@ pub fn hash_package_dir(dir: &Path) -> Result<String> {
         let relative = file.strip_prefix(dir).unwrap_or(&file);
         hasher.update(relative.to_string_lossy().as_bytes());
         hasher.update(b"\0");
-        hasher.update(&std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?);
+        hasher
+            .update(&std::fs::read(&file).with_context(|| format!("reading {}", file.display()))?);
         hasher.update(b"\0");
     }
     Ok(format!("blake3:{}", hasher.finalize().to_hex()))

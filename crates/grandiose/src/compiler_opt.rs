@@ -15,13 +15,20 @@ use grandiose_vm::{
 };
 
 use super::{
-    BasicBlock, BlockParam, BlockParamRole, CleanupAction, CleanupEdge, CleanupPlanFact,
+    BasicBlock, BlockKind, BlockParam, BlockParamRole, CleanupAction, CleanupEdge, CleanupPlanFact,
     CleanupPlanId, DropGlueKind, Edge, FlowProvenance, Function, HandlerSiteFact, Instruction,
-    InstructionKind, LoanId, LocalFact, MovePaths, Operand, PerformSiteFact, Program, Projection,
-    Register, ResumptionSiteFact, ScopeId, Terminator, UseMode, analysis,
+    InstructionKind, LabelId, LoanId, LocalFact, MovePathId, MovePaths, Operand, PerformSiteFact,
+    Program, Projection, RegionId, Register, ResumptionSiteFact, ScopeId, SourceInfoId, Terminator,
+    UseMode, analysis,
 };
+use crate::compiler_mir::analyses::{
+    AnalysisErrorKind, ControlFlowAnalysis, EdgeLiveness, PhysicalRegisterAllocation,
+    RegisterClass, RegisterIntervals,
+};
+use crate::compiler_mir::mutation::{CheckedCfg, ResourceLimits, check_resource_limits};
 use crate::compiler_regions as regions;
 use crate::compiler_traits::HostImportRole;
+use crate::span::Span;
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub enum OptimizationLevel {
@@ -107,6 +114,7 @@ pub enum PassId {
     LowerRegistersAndEdges,
     LayoutAndPeephole,
     ValidateBytecodeInput,
+    ValidateFinalArtifact,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -124,10 +132,10 @@ pub struct PassReport {
     pub work_units: u64,
 }
 
-/// Deterministic report for the MIR optimizer only. Frontend ownership/cleanup
-/// construction and post-MIR bytecode lowering are outside this report; a pass
-/// which is named here but not implemented by this MIR optimizer is reported as
-/// `SkippedUnavailable`, never as though it ran successfully.
+/// Deterministic pass report. The MIR optimizer constructs the semantic pass
+/// prefix; the enclosing compiler appends bytecode lowering, layout/peephole,
+/// and final-artifact verification entries only after those stages actually
+/// run. A named pass is never reported as successful speculatively.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct OptimizationReport {
     pub level: OptimizationLevel,
@@ -217,6 +225,7 @@ fn for_each_edge(terminator: &Terminator, mut visit: impl FnMut(&Edge)) {
         | Terminator::TailCallSelf { .. }
         | Terminator::TailCallKnownReceiver { .. }
         | Terminator::TailCallIndirect { .. }
+        | Terminator::Abort { .. }
         | Terminator::Unreachable => {}
     }
 }
@@ -252,6 +261,7 @@ fn for_each_edge_mut(terminator: &mut Terminator, mut visit: impl FnMut(&mut Edg
         | Terminator::TailCallSelf { .. }
         | Terminator::TailCallKnownReceiver { .. }
         | Terminator::TailCallIndirect { .. }
+        | Terminator::Abort { .. }
         | Terminator::Unreachable => {}
     }
 }
@@ -265,6 +275,7 @@ pub(crate) fn infer_feature_bits(function: &Function) -> FeatureBits {
         for statement in &block.statements {
             match &statement.kind {
                 InstructionKind::Construct { .. }
+                | InstructionKind::MakeBindingPack { .. }
                 | InstructionKind::ProjectCopy { .. }
                 | InstructionKind::ProjectMove { .. }
                 | InstructionKind::Deconstruct { .. }
@@ -321,6 +332,7 @@ pub(crate) fn infer_feature_bits(function: &Function) -> FeatureBits {
             | Terminator::CallSelf { .. }
             | Terminator::CallKnownReceiver { .. }
             | Terminator::HostCall { .. }
+            | Terminator::Abort { .. }
             | Terminator::Unreachable => {}
         }
     }
@@ -491,6 +503,13 @@ pub(crate) fn validate_program(
         }
     }
     for function in &program.functions {
+        check_resource_limits(function, ResourceLimits::default()).map_err(|mutation| {
+            error(
+                function,
+                mutation.block.map(|block| block.0),
+                mutation.to_string(),
+            )
+        })?;
         if function.phase != expected_phase {
             return Err(error(
                 function,
@@ -560,6 +579,7 @@ pub(crate) fn validate_program(
             ));
         }
         let mut definitions = BTreeMap::<Register, String>::new();
+        let mut definition_blocks = BTreeMap::<Register, u32>::new();
         if function.receiver_mode.is_some() {
             definitions.insert(0, "receiver ABI register".into());
         }
@@ -567,6 +587,7 @@ pub(crate) fn validate_program(
             definitions.insert(register, format!("parameter ABI register r{register}"));
         }
         for block in &function.blocks {
+            let mut physically_empty = BTreeSet::new();
             let lowered_backedge_assignments = matches!(
                 expected_phase,
                 MirPhase::Cleanup | MirPhase::Optimized | MirPhase::Lowered
@@ -597,6 +618,7 @@ pub(crate) fn validate_program(
                     param.register,
                     format!("block {} parameter", block.id),
                 )?;
+                definition_blocks.insert(param.register, block.id);
             }
             for (index, statement) in block.statements.iter().enumerate() {
                 if let Some(dst) = instruction_destination(&statement.kind) {
@@ -619,6 +641,12 @@ pub(crate) fn validate_program(
                     if lowered_backedge_assignments.is_some_and(|start| index >= start) {
                         continue;
                     }
+                    if expected_phase == MirPhase::Lowered
+                        && physically_empty.remove(&dst)
+                        && definition_blocks.get(&dst) == Some(&block.id)
+                    {
+                        definitions.remove(&dst);
+                    }
                     record_definition(
                         function,
                         block.id,
@@ -626,7 +654,9 @@ pub(crate) fn validate_program(
                         dst,
                         format!("{:?} destination in block {}", statement.kind, block.id),
                     )?;
+                    definition_blocks.insert(dst, block.id);
                 }
+                physically_empty.extend(instruction_consumed_registers(&statement.kind));
             }
             validate_statements(function, block, program, types)?;
             validate_terminator(function, block, &blocks, program, types)?;
@@ -684,6 +714,7 @@ fn used_registers(block: &BasicBlock) -> Vec<Register> {
             InstructionKind::MakeCallable { captures, .. } => operands(&mut used, captures),
             InstructionKind::MakeHandler { clauses, .. } => operands(&mut used, clauses),
             InstructionKind::MakeHandlerShared { captures, .. } => operands(&mut used, captures),
+            InstructionKind::MakeBindingPack { payloads, .. } => operands(&mut used, payloads),
             InstructionKind::LabelPush { .. } | InstructionKind::LabelPop { .. } => {}
         }
     }
@@ -792,7 +823,7 @@ fn used_registers(block: &BasicBlock) -> Vec<Register> {
             operands(&mut used, args);
         }
         Terminator::Leave { target, .. } => edge(&mut used, target),
-        Terminator::Unreachable => {}
+        Terminator::Abort { .. } | Terminator::Unreachable => {}
     }
     used
 }
@@ -867,7 +898,8 @@ fn instruction_destination(instruction: &InstructionKind) -> Option<Register> {
         | InstructionKind::Primitive { dst, .. }
         | InstructionKind::MakeCallable { dst, .. }
         | InstructionKind::MakeHandler { dst, .. }
-        | InstructionKind::MakeHandlerShared { dst, .. } => Some(*dst),
+        | InstructionKind::MakeHandlerShared { dst, .. }
+        | InstructionKind::MakeBindingPack { dst, .. } => Some(*dst),
         InstructionKind::EndBorrow { .. }
         | InstructionKind::DerefStore { .. }
         | InstructionKind::Deconstruct { .. }
@@ -875,6 +907,54 @@ fn instruction_destination(instruction: &InstructionKind) -> Option<Register> {
         | InstructionKind::LabelPop { .. }
         | InstructionKind::Drop { .. } => None,
     }
+}
+
+fn instruction_consumed_registers(instruction: &InstructionKind) -> BTreeSet<Register> {
+    let mut consumed = BTreeSet::new();
+    let mut operand = |value: &Operand| {
+        if value.mode == UseMode::Move {
+            consumed.insert(value.register);
+        }
+    };
+    match instruction {
+        InstructionKind::Move { src, .. } | InstructionKind::Drop { owner: src } => operand(src),
+        InstructionKind::EndBorrow { reference }
+        | InstructionKind::Deconstruct { src: reference } => {
+            consumed.insert(*reference);
+        }
+        InstructionKind::Construct { fields, .. }
+        | InstructionKind::Primitive { args: fields, .. }
+        | InstructionKind::MakeCallable {
+            captures: fields, ..
+        }
+        | InstructionKind::MakeHandler {
+            clauses: fields, ..
+        }
+        | InstructionKind::MakeHandlerShared {
+            captures: fields, ..
+        }
+        | InstructionKind::MakeBindingPack {
+            payloads: fields, ..
+        } => {
+            for value in fields {
+                operand(value);
+            }
+        }
+        InstructionKind::DerefStore { src, .. } => operand(src),
+        InstructionKind::Const { .. }
+        | InstructionKind::Copy { .. }
+        | InstructionKind::Borrow { .. }
+        | InstructionKind::ProjectBorrow { .. }
+        | InstructionKind::Reborrow { .. }
+        | InstructionKind::DerefCopy { .. }
+        | InstructionKind::DerefMove { .. }
+        | InstructionKind::ProjectCopy { .. }
+        | InstructionKind::ProjectMove { .. }
+        | InstructionKind::EnumTag { .. }
+        | InstructionKind::LabelPush { .. }
+        | InstructionKind::LabelPop { .. } => {}
+    }
+    consumed
 }
 
 fn record_definition(
@@ -1040,6 +1120,32 @@ fn validate_statements(
                     operand(field)?;
                 }
             }
+            InstructionKind::MakeBindingPack {
+                dst,
+                binding_type,
+                payloads,
+            } => {
+                if *binding_type as usize >= types.len() || ty(*dst)? != *binding_type {
+                    return Err(error(
+                        function,
+                        Some(block.id),
+                        "binding-pack destination type mismatch",
+                    ));
+                }
+                if !matches!(
+                    types[*binding_type as usize].representation(),
+                    Type::BindingPack { .. }
+                ) {
+                    return Err(error(
+                        function,
+                        Some(block.id),
+                        "MakeBindingPack type is not a binding pack",
+                    ));
+                }
+                for payload in payloads {
+                    operand(payload)?;
+                }
+            }
             InstructionKind::ProjectCopy { dst, src, .. }
             | InstructionKind::ProjectMove { dst, src, .. } => {
                 ty(*dst)?;
@@ -1067,6 +1173,10 @@ fn validate_statements(
                     ));
                 }
                 let source = ty(*src)?;
+                let source = match types[source as usize].representation() {
+                    Type::RefShared { referent } | Type::RefUnique { referent } => *referent,
+                    _ => source,
+                };
                 if !matches!(types[source as usize].representation(), Type::Enum { .. }) {
                     return Err(error(
                         function,
@@ -2042,7 +2152,7 @@ fn validate_terminator(
             }
             validate_edge(function, blocks, block.id, target, None)
         }
-        Terminator::Unreachable => Ok(()),
+        Terminator::Abort { .. } | Terminator::Unreachable => Ok(()),
     }
 }
 
@@ -2079,6 +2189,7 @@ fn for_each_edge_with_implicit(terminator: &Terminator, mut visit: impl FnMut(&E
         | Terminator::TailCallSelf { .. }
         | Terminator::TailCallKnownReceiver { .. }
         | Terminator::TailCallIndirect { .. }
+        | Terminator::Abort { .. }
         | Terminator::Unreachable => {}
     }
 }
@@ -2119,6 +2230,7 @@ fn for_each_edge_with_implicit_mut(
         | Terminator::TailCallSelf { .. }
         | Terminator::TailCallKnownReceiver { .. }
         | Terminator::TailCallIndirect { .. }
+        | Terminator::Abort { .. }
         | Terminator::Unreachable => {}
     }
 }
@@ -2178,6 +2290,11 @@ fn replace_block_uses(block: &mut BasicBlock, from: Register, to: Register) {
             }
             InstructionKind::MakeHandler { clauses, .. } => {
                 for operand in clauses {
+                    replace_operand_register(operand, from, to);
+                }
+            }
+            InstructionKind::MakeBindingPack { payloads, .. } => {
+                for operand in payloads {
                     replace_operand_register(operand, from, to);
                 }
             }
@@ -2257,7 +2374,7 @@ fn replace_block_uses(block: &mut BasicBlock, from: Register, to: Register) {
                 replace_operand_register(operand, from, to);
             }
         }
-        Terminator::Goto(_) | Terminator::Unreachable => {}
+        Terminator::Goto(_) | Terminator::Abort { .. } | Terminator::Unreachable => {}
     }
     for_each_edge_mut(&mut block.terminator, |edge| {
         for operand in &mut edge.args {
@@ -2290,6 +2407,11 @@ fn reachable_from(function: &Function, start: u32, sought: u32) -> bool {
 /// loop backedge avoids relying on dominance or Use facts absent from compact
 /// generation-1 MIR.
 fn simplify_identity_block_parameter(function: &mut Function, target_id: u32) -> bool {
+    let Ok(liveness) = EdgeLiveness::compute(function, u64::MAX) else {
+        return false;
+    };
+    debug_assert!(!EdgeLiveness::invalidated_by(analysis::VALUES));
+    let _analysis_work = liveness.work();
     let Some(target_index) = function
         .blocks
         .iter()
@@ -2330,6 +2452,13 @@ fn simplify_identity_block_parameter(function: &mut Function, target_id: u32) ->
             || incoming
                 .iter()
                 .any(|(source, _, _)| reachable_from(function, target_id, *source))
+            || incoming.iter().any(|(source, _, _)| {
+                !liveness.live_on_any_edge(
+                    super::BlockId(*source),
+                    super::BlockId(target_id),
+                    identity.register,
+                )
+            })
         {
             continue;
         }
@@ -2372,7 +2501,10 @@ fn simplify_identity_block_parameter(function: &mut Function, target_id: u32) ->
             .sum::<usize>();
         if parameter_uses == 0
             || function.blocks.iter().enumerate().any(|(index, block)| {
-                index != target_index && used_registers(block).contains(&parameter.register)
+                index != target_index
+                    && liveness
+                        .live_in(super::BlockId(block.id))
+                        .is_some_and(|live| live.contains(&parameter.register))
             })
             || register_uses(function)[identity.register as usize] != incoming.len() as u32
         {
@@ -2557,9 +2689,30 @@ fn normalize_cfg(function: &mut Function, budget: u64) -> (PassOutcome, u64) {
             }
         }
     }
-    let before = scratch.blocks.len();
-    scratch.blocks.retain(|block| reachable.contains(&block.id));
-    let mut changed = scratch.blocks.len() != before;
+    let unreachable = scratch
+        .blocks
+        .iter()
+        .filter(|block| !reachable.contains(&block.id))
+        .map(|block| super::BlockId(block.id))
+        .collect::<Vec<_>>();
+    let mut changed = !unreachable.is_empty();
+    if changed {
+        // NormalizeCfg runs only after structural validation. The checked
+        // editor retains stable slots as tombstones during this transaction,
+        // verifies that no live edge/label targets a deletion, and commits the
+        // precise invalidation mask with the surviving IDs unchanged.
+        let mut editor = CheckedCfg::new(&scratch, ResourceLimits::default())
+            .expect("validated MIR must open in the checked CFG editor");
+        debug_assert!(unreachable.iter().all(|id| editor.block_kind(*id).is_ok()));
+        editor
+            .tombstone_many(unreachable.iter().copied())
+            .expect("reachability deletion never removes the entry block");
+        debug_assert!(unreachable.iter().all(|id| editor.is_tombstone(*id)));
+        debug_assert_eq!(editor.invalidated(), analysis::ALL);
+        editor
+            .commit(&mut scratch)
+            .expect("unreachable deletion cannot leave a live dangling edge");
+    }
 
     // Fold only ownership-preserving Move aliases. The compact MIR has no
     // general dominance/Use proof attached to parameters, so Copy phis,
@@ -2750,6 +2903,11 @@ fn register_uses(function: &Function) -> Vec<u32> {
                         note_operand(&mut uses, clause);
                     }
                 }
+                InstructionKind::MakeBindingPack { payloads, .. } => {
+                    for payload in payloads {
+                        note_operand(&mut uses, payload);
+                    }
+                }
                 InstructionKind::Drop { owner } => note_operand(&mut uses, owner),
                 InstructionKind::DerefStore { dst, src } => {
                     uses[*dst as usize] = uses[*dst as usize].saturating_add(1);
@@ -2834,7 +2992,7 @@ fn register_uses(function: &Function) -> Vec<u32> {
                     note_operand(&mut uses, argument);
                 }
             }
-            Terminator::Goto(_) | Terminator::Unreachable => {}
+            Terminator::Goto(_) | Terminator::Abort { .. } | Terminator::Unreachable => {}
         }
         for_each_edge(&block.terminator, |edge| {
             for arg in &edge.args {
@@ -2916,7 +3074,8 @@ fn scalarize_locals(function: &mut Function, types: &[Type], budget: u64) -> (Pa
                 | InstructionKind::Primitive { dst, .. }
                 | InstructionKind::MakeCallable { dst, .. }
                 | InstructionKind::MakeHandler { dst, .. }
-                | InstructionKind::MakeHandlerShared { dst, .. } => Some(*dst),
+                | InstructionKind::MakeHandlerShared { dst, .. }
+                | InstructionKind::MakeBindingPack { dst, .. } => Some(*dst),
                 InstructionKind::EndBorrow { .. }
                 | InstructionKind::DerefStore { .. }
                 | InstructionKind::Deconstruct { .. }
@@ -3904,7 +4063,8 @@ fn sparse_statement_value(
         | InstructionKind::ProjectMove { .. }
         | InstructionKind::MakeCallable { .. }
         | InstructionKind::MakeHandler { .. }
-        | InstructionKind::MakeHandlerShared { .. } => SparseConstant::Overdefined,
+        | InstructionKind::MakeHandlerShared { .. }
+        | InstructionKind::MakeBindingPack { .. } => SparseConstant::Overdefined,
         InstructionKind::EndBorrow { .. }
         | InstructionKind::DerefStore { .. }
         | InstructionKind::Deconstruct { .. }
@@ -3939,7 +4099,8 @@ fn sparse_statement_variant(
         | InstructionKind::Primitive { .. }
         | InstructionKind::MakeCallable { .. }
         | InstructionKind::MakeHandler { .. }
-        | InstructionKind::MakeHandlerShared { .. } => SparseVariant::Overdefined,
+        | InstructionKind::MakeHandlerShared { .. }
+        | InstructionKind::MakeBindingPack { .. } => SparseVariant::Overdefined,
         InstructionKind::EndBorrow { .. }
         | InstructionKind::DerefStore { .. }
         | InstructionKind::Deconstruct { .. }
@@ -4438,6 +4599,7 @@ fn instruction_register_use_count(instruction: &InstructionKind, register: Regis
         InstructionKind::MakeCallable { captures, .. }
         | InstructionKind::MakeHandlerShared { captures, .. } => operands(captures),
         InstructionKind::MakeHandler { clauses, .. } => operands(clauses),
+        InstructionKind::MakeBindingPack { payloads, .. } => operands(payloads),
         InstructionKind::LabelPush { .. } | InstructionKind::LabelPop { .. } => 0,
     }
 }
@@ -4578,8 +4740,21 @@ fn local_forward_moves(function: &mut Function, budget: u64) -> (PassOutcome, u6
         let Some((block_index, statement_index, destination, source)) = candidate else {
             break;
         };
-        let block = &mut scratch.blocks[block_index];
-        block.statements.remove(statement_index);
+        let block_id = super::BlockId(scratch.blocks[block_index].id);
+        let mut editor = CheckedCfg::new(&scratch, ResourceLimits::default())
+            .expect("validated MIR must open in the checked CFG editor");
+        editor
+            .remove_statement(block_id, statement_index)
+            .expect("selected statement exists");
+        debug_assert_eq!(editor.invalidated() & analysis::CFG, 0);
+        editor
+            .commit(&mut scratch)
+            .expect("statement removal cannot invalidate CFG targets");
+        let block = scratch
+            .blocks
+            .iter_mut()
+            .find(|block| block.id == block_id.0)
+            .expect("checked editor preserves the containing block identity");
         replace_block_uses(block, destination, source);
         changed = true;
     }
@@ -5248,27 +5423,70 @@ fn simple_block_exit_states(function: &Function) -> Option<BTreeMap<u32, Vec<boo
                     write(&mut state, *dst)?;
                 }
                 InstructionKind::Drop { owner } => consume(&mut state, owner.register)?,
-                // Aggregates, loans, callable environments, handlers, and
-                // resumptions need richer place/cleanup facts. Keep their
-                // existing frame-replacing tail calls until those analyses
-                // are available.
-                InstructionKind::Borrow { .. }
-                | InstructionKind::ProjectBorrow { .. }
-                | InstructionKind::Reborrow { .. }
-                | InstructionKind::DerefCopy { .. }
-                | InstructionKind::DerefMove { .. }
-                | InstructionKind::DerefStore { .. }
-                | InstructionKind::EndBorrow { .. }
-                | InstructionKind::Construct { .. }
-                | InstructionKind::ProjectCopy { .. }
-                | InstructionKind::ProjectMove { .. }
-                | InstructionKind::Deconstruct { .. }
-                | InstructionKind::EnumTag { .. }
-                | InstructionKind::MakeCallable { .. }
-                | InstructionKind::MakeHandler { .. }
-                | InstructionKind::MakeHandlerShared { .. }
-                | InstructionKind::LabelPush { .. }
-                | InstructionKind::LabelPop { .. } => return None,
+                InstructionKind::Borrow { dst, src, .. }
+                | InstructionKind::ProjectBorrow { dst, src, .. }
+                | InstructionKind::Reborrow { dst, src, .. }
+                | InstructionKind::DerefCopy { dst, src }
+                | InstructionKind::DerefMove { dst, src }
+                | InstructionKind::EnumTag { dst, src } => {
+                    read(&state, *src)?;
+                    write(&mut state, *dst)?;
+                }
+                InstructionKind::DerefStore { dst, src } => {
+                    read(&state, *dst)?;
+                    match src.mode {
+                        UseMode::Copy => read(&state, src.register)?,
+                        UseMode::Move => consume(&mut state, src.register)?,
+                    }
+                }
+                InstructionKind::EndBorrow { reference }
+                | InstructionKind::Deconstruct { src: reference } => {
+                    consume(&mut state, *reference)?;
+                }
+                InstructionKind::Construct { dst, fields, .. }
+                | InstructionKind::MakeCallable {
+                    dst,
+                    captures: fields,
+                    ..
+                }
+                | InstructionKind::MakeHandlerShared {
+                    dst,
+                    captures: fields,
+                    ..
+                }
+                | InstructionKind::MakeBindingPack {
+                    dst,
+                    payloads: fields,
+                    ..
+                }
+                | InstructionKind::MakeHandler {
+                    dst,
+                    clauses: fields,
+                    ..
+                } => {
+                    for field in fields {
+                        match field.mode {
+                            UseMode::Copy => read(&state, field.register)?,
+                            UseMode::Move => consume(&mut state, field.register)?,
+                        }
+                    }
+                    write(&mut state, *dst)?;
+                }
+                InstructionKind::ProjectCopy { dst, src, .. } => {
+                    read(&state, src.register)?;
+                    write(&mut state, *dst)?;
+                }
+                // Moving a field initializes the projection result but leaves
+                // a residual aggregate shell in the source register.
+                InstructionKind::ProjectMove { dst, src, .. } => {
+                    read(&state, src.register)?;
+                    write(&mut state, *dst)?;
+                }
+                // Label activation changes dynamic control state rather than
+                // register initialization. It still needs label-arena cloning
+                // before an enclosing CFG may be inlined.
+                InstructionKind::LabelPush { result, .. } => read(&state, *result)?,
+                InstructionKind::LabelPop { .. } => {}
             }
         }
 
@@ -5396,7 +5614,7 @@ fn simple_block_exit_states(function: &Function) -> Option<BTreeMap<u32, Vec<boo
                 read(&state, receiver.register)?;
             }
             Terminator::Leave { .. } => return None,
-            Terminator::Return { .. } | Terminator::Unreachable => {}
+            Terminator::Return { .. } | Terminator::Abort { .. } | Terminator::Unreachable => {}
             // Preserve states at an indirect call itself so conservative tail
             // discovery can inspect it. Do not propagate through indirect
             // control until receiver-aware call effects are modeled here.
@@ -5675,6 +5893,7 @@ fn discover_tail_calls(function: &mut Function, budget: u64) -> (PassOutcome, u6
 /// registers, which gives true parallel-assignment behavior for swaps/cycles.
 fn form_self_tail_backedges(function: &mut Function, budget: u64) -> (PassOutcome, u64) {
     if function.receiver_mode.is_some()
+        || function.features.contains(FeatureBits::LOANS)
         || !function.features.contains(FeatureBits::TAIL_CALLS)
         || function
             .blocks
@@ -5834,86 +6053,19 @@ fn hoist_loop_invariant_primitives(function: &mut Function, budget: u64) -> (Pas
     if work > budget {
         return (PassOutcome::BudgetExhausted, work);
     }
-    let block_ids = function
-        .blocks
-        .iter()
-        .map(|block| block.id)
-        .collect::<BTreeSet<_>>();
-    let mut predecessors = block_ids
-        .iter()
-        .copied()
-        .map(|block| (block, BTreeSet::new()))
-        .collect::<BTreeMap<_, _>>();
-    for block in &function.blocks {
-        for successor in successors(&block.terminator) {
-            if let Some(incoming) = predecessors.get_mut(&successor) {
-                incoming.insert(block.id);
+    let cfg = match ControlFlowAnalysis::compute(function, budget.saturating_sub(work)) {
+        Ok(cfg) => cfg,
+        Err(error) => match error.kind {
+            AnalysisErrorKind::BudgetExceeded { attempted, .. } => {
+                return (PassOutcome::BudgetExhausted, work.saturating_add(attempted));
             }
-        }
-    }
-
-    let mut reachable = BTreeSet::new();
-    let mut queue = VecDeque::from([function.entry]);
-    while let Some(block) = queue.pop_front() {
-        work = work.saturating_add(1);
-        if work > budget {
-            return (PassOutcome::BudgetExhausted, work);
-        }
-        if !reachable.insert(block) {
-            continue;
-        }
-        if let Some(body) = function.blocks.iter().find(|body| body.id == block) {
-            queue.extend(successors(&body.terminator));
-        }
-    }
-    if reachable.len() < 2 {
+            _ => panic!("validated MIR rejected by control-flow analysis: {error}"),
+        },
+    };
+    debug_assert!(!ControlFlowAnalysis::invalidated_by(analysis::USES));
+    work = work.saturating_add(cfg.work());
+    if cfg.rpo().len() < 2 {
         return (PassOutcome::Unchanged, work);
-    }
-
-    let mut dominators = reachable
-        .iter()
-        .copied()
-        .map(|block| {
-            let set = if block == function.entry {
-                BTreeSet::from([block])
-            } else {
-                reachable.clone()
-            };
-            (block, set)
-        })
-        .collect::<BTreeMap<_, _>>();
-    loop {
-        let mut changed = false;
-        for block in reachable
-            .iter()
-            .copied()
-            .filter(|block| *block != function.entry)
-        {
-            work = work.saturating_add(1);
-            if work > budget {
-                return (PassOutcome::BudgetExhausted, work);
-            }
-            let incoming = predecessors[&block]
-                .iter()
-                .filter(|predecessor| reachable.contains(predecessor))
-                .copied()
-                .collect::<Vec<_>>();
-            let mut next = incoming
-                .first()
-                .map(|predecessor| dominators[predecessor].clone())
-                .unwrap_or_default();
-            for predecessor in &incoming[1..] {
-                next.retain(|candidate| dominators[predecessor].contains(candidate));
-            }
-            next.insert(block);
-            if next != dominators[&block] {
-                dominators.insert(block, next);
-                changed = true;
-            }
-        }
-        if !changed {
-            break;
-        }
     }
 
     let mut definitions = BTreeMap::<Register, Option<u32>>::new();
@@ -5945,45 +6097,23 @@ fn hoist_loop_invariant_primitives(function: &mut Function, budget: u64) -> (Pas
         }
     }
 
-    let mut backedges = Vec::new();
-    for block in &function.blocks {
-        if !reachable.contains(&block.id) {
-            continue;
-        }
-        for successor in successors(&block.terminator) {
-            if dominators
-                .get(&block.id)
-                .is_some_and(|set| set.contains(&successor))
-            {
-                backedges.push((successor, block.id));
-            }
-        }
-    }
-    backedges.sort_unstable();
-
     let mut scratch = function.clone();
     let mut changed = false;
-    let mut processed_headers = BTreeSet::new();
-    for (header, _) in backedges.clone() {
-        if !processed_headers.insert(header) {
+    for natural_loop in cfg.loops() {
+        if natural_loop.latches.is_empty()
+            || natural_loop
+                .blocks
+                .iter()
+                .any(|block| cfg.irreducible().contains(block))
+        {
             continue;
         }
-        let latches = backedges
+        let header = natural_loop.header.0;
+        let loop_blocks = natural_loop
+            .blocks
             .iter()
-            .filter_map(|(candidate, latch)| (*candidate == header).then_some(*latch))
-            .collect::<Vec<_>>();
-        let mut loop_blocks = BTreeSet::from([header]);
-        let mut reverse = VecDeque::from(latches);
-        while let Some(block) = reverse.pop_front() {
-            if loop_blocks.insert(block) {
-                reverse.extend(predecessors[&block].iter().copied());
-            }
-        }
-        let outside = predecessors[&header]
-            .iter()
-            .filter(|predecessor| !loop_blocks.contains(predecessor))
-            .copied()
-            .collect::<Vec<_>>();
+            .map(|block| block.0)
+            .collect::<BTreeSet<_>>();
         let Some(header_block) = scratch.blocks.iter().find(|block| block.id == header) else {
             continue;
         };
@@ -5993,11 +6123,18 @@ fn hoist_loop_invariant_primitives(function: &mut Function, budget: u64) -> (Pas
         // NormalizeCfg can legally merge a trivial function-entry preheader
         // into the loop header. Recreate that structural edge only if LICM
         // actually finds work; ABI inputs are already live before the entry.
-        let (existing_preheader, synthesize_entry_preheader) = match outside.as_slice() {
-            [preheader] => (Some(*preheader), false),
-            [] if header == scratch.entry => (None, true),
+        let (existing_preheader, synthesize_entry_preheader) = match natural_loop.preheader {
+            Some(preheader) => (Some(preheader.0), false),
+            None if header == scratch.entry => (None, true),
             _ => continue,
         };
+        debug_assert_eq!(
+            natural_loop.preheader.is_some(),
+            cfg.predecessors(natural_loop.header)
+                .is_some_and(|incoming| incoming
+                    .iter()
+                    .any(|block| !natural_loop.blocks.contains(block)))
+        );
         if let Some(preheader) = existing_preheader {
             let Some(preheader_index) = scratch
                 .blocks
@@ -6037,7 +6174,10 @@ fn hoist_loop_invariant_primitives(function: &mut Function, budget: u64) -> (Pas
                                 Some(Some(definition)) => {
                                     loop_blocks.contains(definition)
                                         || existing_preheader.is_none_or(|preheader| {
-                                            !dominators[&preheader].contains(definition)
+                                            !cfg.dominates(
+                                                super::BlockId(*definition),
+                                                super::BlockId(preheader),
+                                            )
                                         })
                                 }
                                 None => true,
@@ -6399,6 +6539,12 @@ fn global_simplify_exact_callables(
                 }
                 facts.remove(*dst);
             }
+            InstructionKind::MakeBindingPack { dst, payloads, .. } => {
+                for payload in payloads {
+                    facts.consume(payload);
+                }
+                facts.remove(*dst);
+            }
             InstructionKind::ProjectCopy { dst, src, .. }
             | InstructionKind::ProjectMove { dst, src, .. } => {
                 facts.consume(src);
@@ -6563,6 +6709,7 @@ fn global_simplify_exact_callables(
             | Terminator::TailCallSelf { .. }
             | Terminator::TailCallKnownReceiver { .. }
             | Terminator::TailCallIndirect { .. }
+            | Terminator::Abort { .. }
             | Terminator::Unreachable => vec![],
         }
     }
@@ -6751,7 +6898,8 @@ fn remap_instruction(kind: &mut InstructionKind, registers: &[Option<Register>])
         | InstructionKind::Primitive { dst, .. }
         | InstructionKind::MakeCallable { dst, .. }
         | InstructionKind::MakeHandler { dst, .. }
-        | InstructionKind::MakeHandlerShared { dst, .. } => Some(dst),
+        | InstructionKind::MakeHandlerShared { dst, .. }
+        | InstructionKind::MakeBindingPack { dst, .. } => Some(dst),
         InstructionKind::EndBorrow { .. }
         | InstructionKind::DerefStore { .. }
         | InstructionKind::Deconstruct { .. }
@@ -6802,6 +6950,11 @@ fn remap_instruction(kind: &mut InstructionKind, registers: &[Option<Register>])
         InstructionKind::MakeHandler { clauses, .. } => {
             for clause in clauses {
                 remap_operand(clause, registers)?;
+            }
+        }
+        InstructionKind::MakeBindingPack { payloads, .. } => {
+            for payload in payloads {
+                remap_operand(payload, registers)?;
             }
         }
         InstructionKind::LabelPush { result, .. } => {
@@ -6929,6 +7082,11 @@ fn remap_terminator(terminator: &mut Terminator, registers: &[Option<Register>])
             for residual in &mut capture.captured_residuals {
                 residual.register = remap_register(residual.register, registers)?;
             }
+            capture.captured_owners.sort_unstable();
+            capture.captured_references.sort_unstable();
+            capture
+                .captured_residuals
+                .sort_by_key(|residual| residual.register);
             if let Some(resume) = resume {
                 remap_edge(resume, registers)?;
             }
@@ -6978,7 +7136,7 @@ fn remap_terminator(terminator: &mut Terminator, registers: &[Option<Register>])
             }
         }
         Terminator::Leave { target, .. } => remap_edge(target, registers)?,
-        Terminator::Unreachable => {}
+        Terminator::Abort { .. } | Terminator::Unreachable => {}
     }
     Some(())
 }
@@ -7003,8 +7161,255 @@ fn terminator_result(terminator: &Terminator) -> Option<Register> {
         | Terminator::TailCallKnownReceiver { .. }
         | Terminator::TailCallIndirect { .. }
         | Terminator::Leave { .. }
+        | Terminator::Abort { .. }
         | Terminator::Unreachable => None,
     }
+}
+
+fn note_operand_consumption(
+    register: Register,
+    operand: &Operand,
+    used: &mut bool,
+    all_consuming: &mut bool,
+) {
+    if operand.register == register {
+        *used = true;
+        *all_consuming &= operand.mode == UseMode::Move;
+    }
+}
+
+fn note_edge_consumption(
+    register: Register,
+    edge: &Edge,
+    used: &mut bool,
+    all_consuming: &mut bool,
+) {
+    for argument in &edge.args {
+        note_operand_consumption(register, argument, used, all_consuming);
+    }
+}
+
+/// Whether the final activity of a block-local virtual register empties it.
+/// Earlier reads are harmless; the strict interval inequality ensures the
+/// replacement definition is a later instruction. Partial projections and
+/// continuation captures do not empty their base and therefore fail closed.
+fn register_emptied_at_last_local_activity(
+    function: &Function,
+    register: Register,
+    block_id: super::BlockId,
+) -> bool {
+    let Some(block) = function.blocks.iter().find(|block| block.id == block_id.0) else {
+        return false;
+    };
+    let mut last = None;
+    for statement in &block.statements {
+        let mut used = false;
+        let mut consuming = true;
+        match &statement.kind {
+            InstructionKind::Copy { src, .. } | InstructionKind::Move { src, .. } => {
+                note_operand_consumption(register, src, &mut used, &mut consuming);
+            }
+            InstructionKind::EndBorrow { reference }
+            | InstructionKind::Deconstruct { src: reference } => {
+                if *reference == register {
+                    used = true;
+                }
+            }
+            InstructionKind::Drop { owner } => {
+                note_operand_consumption(register, owner, &mut used, &mut consuming);
+            }
+            InstructionKind::Construct { fields, .. }
+            | InstructionKind::Primitive { args: fields, .. }
+            | InstructionKind::MakeCallable {
+                captures: fields, ..
+            }
+            | InstructionKind::MakeHandler {
+                clauses: fields, ..
+            }
+            | InstructionKind::MakeHandlerShared {
+                captures: fields, ..
+            }
+            | InstructionKind::MakeBindingPack {
+                payloads: fields, ..
+            } => {
+                for operand in fields {
+                    note_operand_consumption(register, operand, &mut used, &mut consuming);
+                }
+            }
+            InstructionKind::DerefStore { dst, src } => {
+                if *dst == register {
+                    used = true;
+                    consuming = false;
+                }
+                note_operand_consumption(register, src, &mut used, &mut consuming);
+            }
+            InstructionKind::Borrow { src, .. }
+            | InstructionKind::ProjectBorrow { src, .. }
+            | InstructionKind::Reborrow { src, .. }
+            | InstructionKind::DerefCopy { src, .. }
+            | InstructionKind::DerefMove { src, .. }
+            | InstructionKind::EnumTag { src, .. } => {
+                if *src == register {
+                    used = true;
+                    consuming = false;
+                }
+            }
+            InstructionKind::ProjectCopy { src, .. } | InstructionKind::ProjectMove { src, .. } => {
+                if src.register == register {
+                    used = true;
+                    // Moving one field leaves a residual owner, not an empty
+                    // physical slot.
+                    consuming = false;
+                }
+            }
+            InstructionKind::Const { .. }
+            | InstructionKind::LabelPush { .. }
+            | InstructionKind::LabelPop { .. } => {}
+        }
+        if used {
+            last = Some(consuming);
+        }
+    }
+
+    let mut used = false;
+    let mut consuming = true;
+    match &block.terminator {
+        Terminator::Goto(target) | Terminator::Leave { target, .. } => {
+            note_edge_consumption(register, target, &mut used, &mut consuming);
+        }
+        Terminator::Switch {
+            discr,
+            cases,
+            otherwise,
+        } => {
+            if discr.register == register {
+                used = true;
+                consuming = false;
+            }
+            for (_, target) in cases {
+                note_edge_consumption(register, target, &mut used, &mut consuming);
+            }
+            note_edge_consumption(register, otherwise, &mut used, &mut consuming);
+        }
+        Terminator::Return { value } => {
+            if let Some(value) = value {
+                note_operand_consumption(register, value, &mut used, &mut consuming);
+            }
+        }
+        Terminator::Call { args, normal, .. }
+        | Terminator::CallSelf { args, normal, .. }
+        | Terminator::HostCall { args, normal, .. } => {
+            for value in args {
+                note_operand_consumption(register, value, &mut used, &mut consuming);
+            }
+            note_edge_consumption(register, normal, &mut used, &mut consuming);
+        }
+        Terminator::CallKnownReceiver {
+            receiver,
+            args,
+            normal,
+            ..
+        } => {
+            note_operand_consumption(register, receiver, &mut used, &mut consuming);
+            for value in args {
+                note_operand_consumption(register, value, &mut used, &mut consuming);
+            }
+            note_edge_consumption(register, normal, &mut used, &mut consuming);
+        }
+        Terminator::CallIndirect {
+            callable,
+            cleanup_callable,
+            args,
+            normal,
+            ..
+        } => {
+            note_operand_consumption(register, callable, &mut used, &mut consuming);
+            if *cleanup_callable && callable.register == register {
+                consuming = true;
+            }
+            for value in args {
+                note_operand_consumption(register, value, &mut used, &mut consuming);
+            }
+            note_edge_consumption(register, normal, &mut used, &mut consuming);
+        }
+        Terminator::Handle {
+            handler,
+            body,
+            normal,
+            ..
+        } => {
+            note_operand_consumption(register, handler, &mut used, &mut consuming);
+            note_operand_consumption(register, body, &mut used, &mut consuming);
+            note_edge_consumption(register, normal, &mut used, &mut consuming);
+        }
+        Terminator::Perform {
+            payloads,
+            capture,
+            resume,
+            ..
+        } => {
+            for value in payloads {
+                note_operand_consumption(register, value, &mut used, &mut consuming);
+            }
+            if capture.captured_owners.contains(&register)
+                || capture.captured_references.contains(&register)
+                || capture
+                    .captured_residuals
+                    .iter()
+                    .any(|residual| residual.register == register)
+            {
+                used = true;
+                consuming = false;
+            }
+            if let Some(resume) = resume {
+                note_edge_consumption(register, resume, &mut used, &mut consuming);
+            }
+        }
+        Terminator::Resume {
+            resumption,
+            value,
+            normal,
+            ..
+        } => {
+            note_operand_consumption(register, resumption, &mut used, &mut consuming);
+            note_operand_consumption(register, value, &mut used, &mut consuming);
+            note_edge_consumption(register, normal, &mut used, &mut consuming);
+        }
+        Terminator::Cancel {
+            resumption, normal, ..
+        } => {
+            note_operand_consumption(register, resumption, &mut used, &mut consuming);
+            note_edge_consumption(register, normal, &mut used, &mut consuming);
+        }
+        Terminator::TailResume {
+            resumption, value, ..
+        } => {
+            note_operand_consumption(register, resumption, &mut used, &mut consuming);
+            note_operand_consumption(register, value, &mut used, &mut consuming);
+        }
+        Terminator::TailCall { args, .. } | Terminator::TailCallSelf { args } => {
+            for value in args {
+                note_operand_consumption(register, value, &mut used, &mut consuming);
+            }
+        }
+        Terminator::TailCallKnownReceiver { receiver, args, .. } => {
+            note_operand_consumption(register, receiver, &mut used, &mut consuming);
+            for value in args {
+                note_operand_consumption(register, value, &mut used, &mut consuming);
+            }
+        }
+        Terminator::TailCallIndirect { callable, args, .. } => {
+            note_operand_consumption(register, callable, &mut used, &mut consuming);
+            for value in args {
+                note_operand_consumption(register, value, &mut used, &mut consuming);
+            }
+        }
+        Terminator::Abort { .. } | Terminator::Unreachable => {}
+    }
+    if used {
+        last = Some(consuming);
+    }
+    last == Some(true)
 }
 
 /// Compact the register namespace used by bytecode emission.
@@ -7031,6 +7436,7 @@ pub(crate) fn compact_live_registers_for_emission(
     validate_program(program, types, MirPhase::Optimized)?;
     let mut changed = false;
     for function in &mut program.functions {
+        changed |= layout_checked_blocks_for_emission(function)?;
         let old_len = function.register_types.len();
         if old_len == 0 {
             function.phase = MirPhase::Lowered;
@@ -7045,50 +7451,46 @@ pub(crate) fn compact_live_registers_for_emission(
                 "register compaction found a truncated receiver/parameter ABI prefix",
             ));
         }
-        let mut live = vec![false; old_len];
-        live[..abi_len].fill(true);
-        let mut mark = |register: Register| -> Result<(), ValidationError> {
-            let Some(slot) = live.get_mut(register as usize) else {
-                return Err(error(
+        let intervals =
+            RegisterIntervals::compute(function, types, u64::MAX).map_err(|failure| {
+                error(
                     function,
                     None,
-                    format!("register compaction found out-of-range register r{register}"),
-                ));
-            };
-            *slot = true;
-            Ok(())
-        };
-
-        for &register in &function.return_cleanup {
-            mark(register)?;
-        }
-        for block in &function.blocks {
-            for parameter in &block.params {
-                mark(parameter.register)?;
-            }
-            for statement in &block.statements {
-                if let Some(destination) = instruction_destination(&statement.kind) {
-                    mark(destination)?;
-                }
-            }
-            if let Some(result) = terminator_result(&block.terminator) {
-                mark(result)?;
-            }
-            for register in used_registers(block) {
-                mark(register)?;
+                    format!("register interval construction failed: {failure}"),
+                )
+            })?;
+        debug_assert!(!RegisterIntervals::invalidated_by(analysis::COST));
+        let _analysis_work = intervals.work();
+        let mut emptied = BTreeSet::new();
+        for interval in intervals.intervals() {
+            debug_assert!(interval.start <= interval.end);
+            debug_assert_eq!(
+                function.register_types[interval.register as usize],
+                interval.ty
+            );
+            debug_assert!(!interval.addressable || interval.class != RegisterClass::Erased);
+            if !interval.addressable
+                && interval.local_block.is_some_and(|block| {
+                    register_emptied_at_last_local_activity(function, interval.register, block)
+                })
+            {
+                emptied.insert(interval.register);
             }
         }
-
-        let mut registers = vec![None; old_len];
-        let mut register_types = Vec::with_capacity(live.iter().filter(|&&used| used).count());
-        for (old, (&used, &ty)) in live.iter().zip(&function.register_types).enumerate() {
-            if used {
-                let new = register_types.len() as Register;
-                registers[old] = Some(new);
-                register_types.push(ty);
-            }
-        }
-        if register_types.len() == old_len {
+        let allocation = PhysicalRegisterAllocation::exact(
+            &intervals,
+            &function.register_types,
+            abi_len,
+            &emptied,
+        );
+        let registers = allocation.map();
+        let register_types = allocation.register_types().to_vec();
+        let identity = register_types.len() == old_len
+            && registers
+                .iter()
+                .enumerate()
+                .all(|(old, physical)| *physical == Some(old as Register));
+        if identity {
             continue;
         }
 
@@ -7096,7 +7498,7 @@ pub(crate) fn compact_live_registers_for_emission(
         for block in &mut scratch.blocks {
             for parameter in &mut block.params {
                 parameter.register =
-                    remap_register(parameter.register, &registers).ok_or_else(|| {
+                    remap_register(parameter.register, registers).ok_or_else(|| {
                         error(
                             function,
                             Some(block.id),
@@ -7105,7 +7507,7 @@ pub(crate) fn compact_live_registers_for_emission(
                     })?;
             }
             for statement in &mut block.statements {
-                remap_instruction(&mut statement.kind, &registers).ok_or_else(|| {
+                remap_instruction(&mut statement.kind, registers).ok_or_else(|| {
                     error(
                         function,
                         Some(block.id),
@@ -7113,7 +7515,7 @@ pub(crate) fn compact_live_registers_for_emission(
                     )
                 })?;
             }
-            remap_terminator(&mut block.terminator, &registers).ok_or_else(|| {
+            remap_terminator(&mut block.terminator, registers).ok_or_else(|| {
                 error(
                     function,
                     Some(block.id),
@@ -7122,7 +7524,7 @@ pub(crate) fn compact_live_registers_for_emission(
             })?;
         }
         for register in &mut scratch.return_cleanup {
-            *register = remap_register(*register, &registers).ok_or_else(|| {
+            *register = remap_register(*register, registers).ok_or_else(|| {
                 error(
                     function,
                     None,
@@ -7131,23 +7533,184 @@ pub(crate) fn compact_live_registers_for_emission(
             })?;
         }
         // Remap the exported per-register facts to the compacted numbering and
-        // clear the derived arenas: loans, move paths, and cleanup plans name
-        // pre-compaction registers and are re-derived on demand by the
-        // emission-time flow analysis.
+        // remap register-bearing derived facts. Physical reuse is legal only
+        // across disjoint intervals, so exact cleanup actions retain their
+        // meaning under the allocation map.
         let bridged = bridged_locals(function, types);
-        scratch.flow.locals = bridged
-            .into_iter()
+        let mut physical_sources = vec![Vec::new(); register_types.len()];
+        for (old, physical) in registers.iter().copied().enumerate() {
+            if let Some(physical) = physical {
+                physical_sources[physical as usize].push(old);
+            }
+        }
+        scratch.flow.locals = physical_sources
+            .iter()
             .enumerate()
-            .filter(|(old, _)| registers[*old].is_some())
-            .map(|(_, fact)| fact)
+            .map(|(physical, sources)| {
+                if sources.len() == 1 && !allocation.reused().contains(&(physical as Register)) {
+                    bridged[sources[0]].clone()
+                } else {
+                    let ty = register_types[physical];
+                    LocalFact::conservative(ty, &types[ty as usize])
+                }
+            })
             .collect();
-        scratch.flow.loans.clear();
-        scratch.flow.move_paths = crate::compiler_mir::MovePaths::default();
-        scratch.flow.cleanup_plans.clear();
+        // Proof-only borrow/end pairs may already have been erased. Their
+        // exported loan facts are historical provenance rather than live
+        // lowered identities, so compact the loan arena alongside registers
+        // and repair every LoanId consumer. A loan with either endpoint still
+        // present must retain both endpoints; losing only one side would hide
+        // a live reference-origin bug.
+        let old_loans = std::mem::take(&mut scratch.flow.loans);
+        let mut loan_ids = vec![None; old_loans.len()];
+        for (old_id, loan) in old_loans.iter().enumerate() {
+            let reference = remap_register(loan.reference, registers);
+            let borrowed = remap_register(loan.borrowed.base, registers);
+            match (reference, borrowed) {
+                (None, None) => {}
+                (Some(_), None) => {
+                    return Err(error(
+                        function,
+                        Some(loan.issued_block),
+                        "register compaction lost a live exported borrowed place",
+                    ));
+                }
+                (None, Some(_)) => {
+                    // The owner can outlive a proof-only reference. The erased
+                    // loan has no runtime or cleanup identity after this point.
+                }
+                (Some(reference), Some(_)) => {
+                    let new_id = LoanId(scratch.flow.loans.len() as u32);
+                    loan_ids[old_id] = Some(new_id);
+                    let mut remapped = loan.clone();
+                    remapped.reference = reference;
+                    scratch.flow.loans.push(remapped);
+                }
+            }
+        }
+        for loan in &mut scratch.flow.loans {
+            loan.borrowed.base = remap_register(loan.borrowed.base, registers).ok_or_else(|| {
+                error(
+                    function,
+                    Some(loan.issued_block),
+                    "register compaction lost a live exported borrowed place",
+                )
+            })?;
+            loan.parent = match loan.parent {
+                Some(parent) => Some(
+                    loan_ids
+                        .get(parent.index())
+                        .copied()
+                        .flatten()
+                        .ok_or_else(|| {
+                            error(
+                                function,
+                                Some(loan.issued_block),
+                                "register compaction lost a live parent-loan identity",
+                            )
+                        })?,
+                ),
+                None => None,
+            };
+            loan.region = RegionId(loan_ids[loan.region.index()].expect(
+                "retained loan has a compacted one-to-one region identity",
+            ).0);
+        }
+        for scope in &mut scratch.flow.scopes {
+            scope.owners.retain_mut(|owner| {
+                if let Some(mapped) = remap_register(*owner, registers) {
+                    *owner = mapped;
+                    true
+                } else {
+                    false
+                }
+            });
+        }
+        for site in &mut scratch.flow.indirect_calls {
+            for register in site
+                .capture
+                .captured_owners
+                .iter_mut()
+                .chain(&mut site.capture.captured_references)
+            {
+                *register = remap_register(*register, registers).ok_or_else(|| {
+                    error(
+                        function,
+                        Some(site.block),
+                        "register compaction lost an indirect-call capture",
+                    )
+                })?;
+            }
+            for residual in &mut site.capture.captured_residuals {
+                residual.register =
+                    remap_register(residual.register, registers).ok_or_else(|| {
+                        error(
+                            function,
+                            Some(site.block),
+                            "register compaction lost an indirect-call residual capture",
+                        )
+                    })?;
+            }
+            site.capture.captured_owners.sort_unstable();
+            site.capture.captured_references.sort_unstable();
+            site.capture
+                .captured_residuals
+                .sort_by_key(|residual| residual.register);
+        }
+        for plan in &mut scratch.flow.cleanup_plans {
+            let mut actions = Vec::with_capacity(plan.actions.len());
+            for mut action in std::mem::take(&mut plan.actions) {
+                match &mut action {
+                    CleanupAction::Destroy(register) => {
+                        *register = remap_register(*register, registers).ok_or_else(|| {
+                            error(function, None, "register compaction lost a cleanup owner")
+                        })?;
+                    }
+                    CleanupAction::DestroyIf { local, flag } => {
+                        *local = remap_register(*local, registers).ok_or_else(|| {
+                            error(
+                                function,
+                                None,
+                                "register compaction lost a conditional cleanup owner",
+                            )
+                        })?;
+                        *flag = remap_register(*flag, registers).ok_or_else(|| {
+                            error(function, None, "register compaction lost a cleanup flag")
+                        })?;
+                    }
+                    CleanupAction::DestroyResidual { local, .. } => {
+                        *local = remap_register(*local, registers).ok_or_else(|| {
+                            error(
+                                function,
+                                None,
+                                "register compaction lost a residual cleanup owner",
+                            )
+                        })?;
+                    }
+                    CleanupAction::EndBorrow(loan) => {
+                        let Some(mapped) = loan_ids.get(loan.index()).copied().flatten() else {
+                            continue;
+                        };
+                        *loan = mapped;
+                    }
+                }
+                actions.push(action);
+            }
+            plan.actions = actions;
+            for register in &mut plan.protected {
+                *register = remap_register(*register, registers).ok_or_else(|| {
+                    error(
+                        function,
+                        None,
+                        "register compaction lost a cleanup-protected value",
+                    )
+                })?;
+            }
+        }
         scratch.flow.drop_flags.retain_mut(|fact| {
             match (
-                remap_register(fact.flag, &registers),
-                remap_register(fact.owner, &registers),
+                remap_register(fact.flag, registers),
+                remap_register(fact.owner, registers),
             ) {
                 (Some(flag), Some(owner)) => {
                     fact.flag = flag;
@@ -7157,7 +7720,16 @@ pub(crate) fn compact_live_registers_for_emission(
                 _ => false,
             }
         });
+        scratch
+            .flow
+            .drop_flags
+            .sort_by_key(|fact| (fact.flag, fact.owner));
+        scratch
+            .flow
+            .drop_flags
+            .dedup_by_key(|fact| (fact.flag, fact.owner));
         rebuild_site_facts(&mut scratch);
+        scratch.flow.move_paths = derive_move_paths(&scratch);
         scratch.invalid_analyses = 0;
         scratch.register_types = register_types;
         scratch.phase = MirPhase::Lowered;
@@ -7170,6 +7742,83 @@ pub(crate) fn compact_live_registers_for_emission(
     }
     validate_program(program, types, MirPhase::Lowered)?;
     Ok(changed)
+}
+
+/// Order compact MIR by typed control region while retaining stable BlockIds.
+/// Reachable order is the checked CFG's deterministic RPO; unreachable ties use
+/// the original identity. The legacy bytecode layout pass is consequently
+/// idempotent for ordinary bodies while cleanup/label/handler/resumption seeds
+/// retain explicit, contiguous cold regions.
+fn layout_checked_blocks_for_emission(function: &mut Function) -> Result<bool, ValidationError> {
+    if function.blocks.len() < 2 {
+        return Ok(false);
+    }
+    let editor = CheckedCfg::new(function, ResourceLimits::default()).map_err(|failure| {
+        error(
+            function,
+            failure.block.map(|block| block.0),
+            format!("checked block layout rejected its input: {failure}"),
+        )
+    })?;
+    let cfg = ControlFlowAnalysis::compute(function, u64::MAX).map_err(|failure| {
+        error(
+            function,
+            None,
+            format!("checked block layout analysis failed: {failure}"),
+        )
+    })?;
+    let rpo = cfg
+        .rpo()
+        .iter()
+        .enumerate()
+        .map(|(position, block)| (*block, position))
+        .collect::<BTreeMap<_, _>>();
+    let mut order = function
+        .blocks
+        .iter()
+        .map(|block| {
+            let id = super::BlockId(block.id);
+            let kind = editor
+                .block_kind(id)
+                .expect("checked editor retains every live block");
+            let region = match kind {
+                BlockKind::Entry => 0,
+                BlockKind::Normal => 1,
+                BlockKind::Label => 2,
+                BlockKind::Cleanup => 3,
+                BlockKind::Handler => 4,
+                BlockKind::Resumption => 5,
+            };
+            (region, rpo.get(&id).copied().unwrap_or(usize::MAX), id)
+        })
+        .collect::<Vec<_>>();
+    order.sort_unstable();
+    let ids = order
+        .into_iter()
+        .map(|(_, _, block)| block.0)
+        .collect::<Vec<_>>();
+    if ids
+        == function
+            .blocks
+            .iter()
+            .map(|block| block.id)
+            .collect::<Vec<_>>()
+    {
+        return Ok(false);
+    }
+    let mut blocks = std::mem::take(&mut function.blocks)
+        .into_iter()
+        .map(|block| (block.id, block))
+        .collect::<BTreeMap<_, _>>();
+    function.blocks = ids
+        .into_iter()
+        .map(|id| {
+            blocks
+                .remove(&id)
+                .expect("layout retains every checked block")
+        })
+        .collect();
+    Ok(true)
 }
 
 /// Clone an owned callable target without its receiver shell. This only
@@ -7538,6 +8187,279 @@ struct TerminalHandlerFusion {
     payloads: Vec<Operand>,
 }
 
+/// A statically delimited, single-performance nonterminal handler.  Unlike
+/// terminal fusion, this rewrite composes the clause's `Resume`/`Cancel` edge
+/// with the suspended body directly.  The deliberately small shape proof is
+/// important: it eliminates a real runtime resumption without manufacturing a
+/// fake resumption value, and rejects every case whose cancellation cleanup or
+/// deep reinstatement would not be represented by the transplanted CFG.
+#[derive(Clone)]
+struct DirectResumptiveHandlerFusion {
+    caller: usize,
+    block: usize,
+    statement_start: usize,
+    result: Register,
+    normal: Edge,
+    body: Function,
+    clause: Function,
+    clause_resumption: Register,
+}
+
+fn append_transplanted_statements(
+    source: &Function,
+    statements: &[Instruction],
+    registers: &mut [Option<Register>],
+    omitted: &mut BTreeSet<Register>,
+    destination_types: &mut Vec<TypeId>,
+    destination: &mut Vec<Instruction>,
+) -> Option<()> {
+    for statement in statements {
+        match &statement.kind {
+            InstructionKind::Move { dst, src } if omitted.contains(&src.register) => {
+                if registers.get(*dst as usize)?.is_some() || !omitted.insert(*dst) {
+                    return None;
+                }
+                continue;
+            }
+            InstructionKind::Drop { owner } if omitted.contains(&owner.register) => continue,
+            InstructionKind::EndBorrow { reference } if omitted.contains(reference) => continue,
+            InstructionKind::Deconstruct { src } if omitted.contains(src) => continue,
+            _ => {}
+        }
+
+        let old_destination = instruction_destination(&statement.kind);
+        if let Some(old_destination) = old_destination {
+            if registers.get(old_destination as usize)?.is_some()
+                || omitted.contains(&old_destination)
+            {
+                return None;
+            }
+            let new_destination = destination_types.len() as Register;
+            destination_types.push(*source.register_types.get(old_destination as usize)?);
+            registers[old_destination as usize] = Some(new_destination);
+        }
+        let mut transplanted = statement.clone();
+        remap_instruction(&mut transplanted.kind, registers)?;
+        destination.push(transplanted);
+    }
+    Some(())
+}
+
+fn bind_transplanted_edge(
+    source: &Function,
+    edge: &Edge,
+    registers: &mut [Option<Register>],
+) -> Option<u32> {
+    let target = source.blocks.iter().find(|block| block.id == edge.target)?;
+    let mut arguments = edge.args.iter();
+    for parameter in &target.params {
+        if matches!(
+            parameter.role,
+            BlockParamRole::CallResult | BlockParamRole::ResumeResult
+        ) && registers.get(parameter.register as usize)?.is_some()
+        {
+            continue;
+        }
+        let argument = arguments.next()?;
+        if argument.mode != UseMode::Move {
+            return None;
+        }
+        let mapped = remap_register(argument.register, registers)?;
+        let slot = registers.get_mut(parameter.register as usize)?;
+        if slot.is_some_and(|existing| existing != mapped) {
+            return None;
+        }
+        *slot = Some(mapped);
+    }
+    if arguments.next().is_some() {
+        return None;
+    }
+    Some(edge.target)
+}
+
+/// Transplant a straight-line CFG suffix made only from `Goto` edges and one
+/// `Return`.  This includes the protected-exit blocks emitted for handler
+/// clauses while refusing switches, calls, effects, labels, or cycles.
+fn append_transplanted_linear_suffix(
+    source: &Function,
+    first_edge: &Edge,
+    registers: &mut [Option<Register>],
+    omitted: &mut BTreeSet<Register>,
+    destination_types: &mut Vec<TypeId>,
+    destination: &mut Vec<Instruction>,
+) -> Option<Option<Operand>> {
+    let mut block_id = bind_transplanted_edge(source, first_edge, registers)?;
+    let mut visited = BTreeSet::new();
+    loop {
+        if !visited.insert(block_id) {
+            return None;
+        }
+        let block = source.blocks.iter().find(|block| block.id == block_id)?;
+        append_transplanted_statements(
+            source,
+            &block.statements,
+            registers,
+            omitted,
+            destination_types,
+            destination,
+        )?;
+        match &block.terminator {
+            Terminator::Goto(edge) => {
+                block_id = bind_transplanted_edge(source, edge, registers)?;
+            }
+            Terminator::Return { value } => {
+                let mut value = *value;
+                if let Some(value) = &mut value {
+                    remap_operand(value, registers)?;
+                }
+                return Some(value);
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// Expose a terminal `Perform` hidden behind one exact, no-return direct call.
+/// This is the forwarding shape emitted for `handle forward(payload)`: the
+/// body computes arguments, transfers them to a leaf, and its normal edge is
+/// unreachable.  Cleanup is remapped from the leaf rather than discarded.
+fn resolve_forwarded_terminal_body(
+    program: &Program,
+    body: &Function,
+    types: &[Type],
+) -> Option<Function> {
+    if body.blocks.len() == 1
+        && body.blocks[0].id == body.entry
+        && matches!(
+            body.blocks[0].terminator,
+            Terminator::Perform {
+                result: None,
+                resume: None,
+                ..
+            }
+        )
+    {
+        return Some(body.clone());
+    }
+    if body.blocks.len() != 2 || !body.params.is_empty() {
+        return None;
+    }
+    let entry = body.blocks.iter().find(|block| block.id == body.entry)?;
+    let Terminator::Call {
+        result: None,
+        function,
+        args,
+        normal,
+    } = &entry.terminator
+    else {
+        return None;
+    };
+    let unreachable = body.blocks.iter().find(|block| block.id == normal.target)?;
+    if !normal.args.is_empty()
+        || !unreachable.params.is_empty()
+        || !unreachable.statements.is_empty()
+        || !matches!(unreachable.terminator, Terminator::Unreachable)
+    {
+        return None;
+    }
+    let forwarded = direct_target(program, *function)?;
+    if forwarded.receiver_mode.is_some()
+        || forwarded.params.len() != args.len()
+        || !forwarded.no_return
+        || !forwarded.return_cleanup.is_empty()
+        || forwarded.blocks.len() != 1
+        || forwarded.blocks[0].id != forwarded.entry
+        || !forwarded.blocks[0].params.is_empty()
+    {
+        return None;
+    }
+    let forwarded_block = &forwarded.blocks[0];
+    if !matches!(
+        forwarded_block.terminator,
+        Terminator::Perform {
+            result: None,
+            resume: None,
+            ..
+        }
+    ) {
+        return None;
+    }
+
+    let mut flattened = body.clone();
+    flattened.blocks = vec![entry.clone()];
+    let flattened_entry = &mut flattened.blocks[0];
+    let mut registers = vec![None; forwarded.register_types.len()];
+    for (index, argument) in args.iter().enumerate() {
+        if argument.mode != UseMode::Move
+            || forwarded.params.get(index) != body.register_types.get(argument.register as usize)
+        {
+            return None;
+        }
+        registers[index + 1] = Some(argument.register);
+    }
+    for statement in &forwarded_block.statements {
+        let old_destination = instruction_destination(&statement.kind)?;
+        let new_destination = flattened.register_types.len() as Register;
+        flattened
+            .register_types
+            .push(*forwarded.register_types.get(old_destination as usize)?);
+        registers[old_destination as usize] = Some(new_destination);
+        let mut statement = statement.clone();
+        remap_instruction(&mut statement.kind, &registers)?;
+        flattened_entry.statements.push(statement);
+    }
+    let mut terminator = forwarded_block.terminator.clone();
+    remap_terminator(&mut terminator, &registers)?;
+    flattened_entry.terminator = terminator;
+
+    let (_, cleanup) = forwarded.flow.plan_for(&CleanupEdge::TerminalPerform {
+        block: forwarded_block.id,
+    })?;
+    let mut actions = Vec::with_capacity(cleanup.actions.len());
+    for action in &cleanup.actions {
+        let CleanupAction::Destroy(owner) = action else {
+            return None;
+        };
+        if forwarded
+            .flow
+            .locals
+            .get(*owner as usize)
+            .is_some_and(|fact| fact.drop_glue == DropGlueKind::Custom)
+        {
+            return None;
+        }
+        actions.push(CleanupAction::Destroy(remap_register(*owner, &registers)?));
+    }
+    let protected = cleanup
+        .protected
+        .iter()
+        .map(|register| remap_register(*register, &registers))
+        .collect::<Option<Vec<_>>>()?;
+    flattened.flow.cleanup_plans = vec![CleanupPlanFact {
+        edge: CleanupEdge::TerminalPerform {
+            block: flattened_entry.id,
+        },
+        source_scope: cleanup.source_scope,
+        target_scope: cleanup.target_scope,
+        actions,
+        protected,
+    }];
+    flattened.no_return = true;
+    flattened.features = infer_feature_bits(&flattened);
+    // The later checked pass rebuilds all derived flow facts.  We nevertheless
+    // retain conservative local descriptors for newly transplanted registers
+    // because terminal fusion consults their custom-drop classification.
+    while flattened.flow.locals.len() < flattened.register_types.len() {
+        let register = flattened.flow.locals.len();
+        let ty = flattened.register_types[register];
+        flattened
+            .flow
+            .locals
+            .push(LocalFact::conservative(ty, &types[ty as usize]));
+    }
+    Some(flattened)
+}
+
 fn specialize_terminal_handlers(
     program: &mut Program,
     types: &[Type],
@@ -7673,7 +8595,11 @@ fn specialize_terminal_handlers(
                     Type::RefUnique { .. }
                 );
                 if unique_reference {
-                    !matches!(statement.kind, InstructionKind::Move { .. })
+                    !matches!(
+                        statement.kind,
+                        InstructionKind::Move { .. }
+                            | InstructionKind::Reborrow { unique: true, .. }
+                    )
                 } else {
                     !types[dst_ty as usize].claimed_duplicable()
                         || !types[dst_ty as usize].claimed_zero_use_allowed()
@@ -7708,9 +8634,15 @@ fn specialize_terminal_handlers(
                 continue;
             }
 
-            let Some(body_function) = direct_target(program, *body_declaration) else {
+            let Some(raw_body_function) = direct_target(program, *body_declaration) else {
                 continue;
             };
+            let Some(resolved_body_function) =
+                resolve_forwarded_terminal_body(program, raw_body_function, types)
+            else {
+                continue;
+            };
+            let body_function = &resolved_body_function;
             if !body_function.params.is_empty()
                 || body_function.receiver_mode != Some(2)
                 || body_function.receiver_type != *body_capture
@@ -8050,6 +8982,480 @@ fn specialize_terminal_handlers(
     (PassOutcome::Changed, total_work)
 }
 
+fn rewrite_direct_resumptive_handler(
+    function: &mut Function,
+    candidate: &DirectResumptiveHandlerFusion,
+) -> Option<()> {
+    let body_entry = candidate
+        .body
+        .blocks
+        .iter()
+        .find(|block| block.id == candidate.body.entry)?;
+    let Terminator::Perform {
+        result: Some(body_perform_result),
+        payloads,
+        resume: Some(body_resume),
+        ..
+    } = &body_entry.terminator
+    else {
+        return None;
+    };
+    let clause_entry = candidate
+        .clause
+        .blocks
+        .iter()
+        .find(|block| block.id == candidate.clause.entry)?;
+
+    let block = function.blocks.get_mut(candidate.block)?;
+    block.statements.truncate(candidate.statement_start);
+
+    let mut body_registers = vec![None; candidate.body.register_types.len()];
+    let mut body_omitted = BTreeSet::from([0]);
+    append_transplanted_statements(
+        &candidate.body,
+        &body_entry.statements,
+        &mut body_registers,
+        &mut body_omitted,
+        &mut function.register_types,
+        &mut block.statements,
+    )?;
+    let mut mapped_payloads = payloads.clone();
+    for payload in &mut mapped_payloads {
+        remap_operand(payload, &body_registers)?;
+        if payload.mode != UseMode::Move {
+            return None;
+        }
+    }
+    if mapped_payloads.len() + 1 != candidate.clause.params.len() {
+        return None;
+    }
+
+    let mut clause_registers = vec![None; candidate.clause.register_types.len()];
+    let mut clause_omitted = BTreeSet::from([0, candidate.clause_resumption]);
+    for (index, payload) in mapped_payloads.iter().enumerate() {
+        let parameter = (index + 1) as Register;
+        if candidate.clause.register_types.get(parameter as usize)
+            != function.register_types.get(payload.register as usize)
+        {
+            return None;
+        }
+        clause_registers[parameter as usize] = Some(payload.register);
+    }
+    append_transplanted_statements(
+        &candidate.clause,
+        &clause_entry.statements,
+        &mut clause_registers,
+        &mut clause_omitted,
+        &mut function.register_types,
+        &mut block.statements,
+    )?;
+
+    let clause_result = match &clause_entry.terminator {
+        Terminator::Resume {
+            result,
+            resumption,
+            value,
+            normal,
+            ..
+        } => {
+            if !clause_omitted.contains(&resumption.register) || value.mode != UseMode::Move {
+                return None;
+            }
+            let mut value = *value;
+            remap_operand(&mut value, &clause_registers)?;
+            body_registers[*body_perform_result as usize] = Some(value.register);
+            let body_result = append_transplanted_linear_suffix(
+                &candidate.body,
+                body_resume,
+                &mut body_registers,
+                &mut body_omitted,
+                &mut function.register_types,
+                &mut block.statements,
+            )??;
+            if body_result.mode != UseMode::Move
+                || candidate.clause.register_types.get(*result as usize)
+                    != function.register_types.get(body_result.register as usize)
+            {
+                return None;
+            }
+            clause_registers[*result as usize] = Some(body_result.register);
+            append_transplanted_linear_suffix(
+                &candidate.clause,
+                normal,
+                &mut clause_registers,
+                &mut clause_omitted,
+                &mut function.register_types,
+                &mut block.statements,
+            )??
+        }
+        Terminator::Cancel {
+            result,
+            resumption,
+            normal,
+        } => {
+            if !clause_omitted.contains(&resumption.register)
+                || candidate
+                    .clause
+                    .register_types
+                    .get(*result as usize)
+                    .copied()
+                    != Some(UNIT)
+            {
+                return None;
+            }
+            let unit = function.register_types.len() as Register;
+            function.register_types.push(UNIT);
+            block.statements.push(Instruction {
+                span: clause_entry
+                    .statements
+                    .last()
+                    .map_or(Span::default(), |statement| statement.span),
+                kind: InstructionKind::Const {
+                    dst: unit,
+                    value: Constant::Unit,
+                },
+            });
+            clause_registers[*result as usize] = Some(unit);
+            append_transplanted_linear_suffix(
+                &candidate.clause,
+                normal,
+                &mut clause_registers,
+                &mut clause_omitted,
+                &mut function.register_types,
+                &mut block.statements,
+            )??
+        }
+        _ => return None,
+    };
+    if clause_result.mode != UseMode::Move
+        || function.register_types.get(clause_result.register as usize)
+            != function.register_types.get(candidate.result as usize)
+    {
+        return None;
+    }
+    let mut normal = candidate.normal.clone();
+    normal.args.insert(0, clause_result);
+    block.terminator = Terminator::Goto(normal);
+    Some(())
+}
+
+/// Eliminate a canonical one-shot nonterminal handler by statically composing
+/// its clause with the suspended continuation.  This handles both `resume` and
+/// `cancel`, selected clauses in multi-operation definitions, and known hits in
+/// partial handlers.  Captured continuation state, multiple resumptions, and a
+/// continued body which can perform again remain explicit barriers.
+fn specialize_direct_resumptive_handlers(
+    program: &mut Program,
+    types: &[Type],
+    protocols: &[Protocol],
+    handler_defs: &[HandlerDef],
+    budget: u64,
+) -> (PassOutcome, u64) {
+    let mut scan_work = 0_u64;
+    let mut candidates = Vec::new();
+    for (caller_index, caller) in program.functions.iter().enumerate() {
+        let mut use_counts = BTreeMap::<Register, u32>::new();
+        for block in &caller.blocks {
+            for register in used_registers(block) {
+                *use_counts.entry(register).or_default() += 1;
+            }
+        }
+        for (block_index, block) in caller.blocks.iter().enumerate() {
+            scan_work = scan_work.saturating_add(block.statements.len() as u64 + 1);
+            let Terminator::Handle {
+                result,
+                handler,
+                body,
+                normal,
+            } = &block.terminator
+            else {
+                continue;
+            };
+            if handler.mode != UseMode::Move || body.mode != UseMode::Move {
+                continue;
+            }
+            let Some(body_statement) = block.statements.last() else {
+                continue;
+            };
+            let InstructionKind::MakeCallable {
+                dst: body_register,
+                callable_type: body_type,
+                function: body_declaration,
+                captures: body_captures,
+            } = &body_statement.kind
+            else {
+                continue;
+            };
+            if *body_register != body.register
+                || !body_captures.is_empty()
+                || use_counts.get(body_register).copied() != Some(1)
+            {
+                continue;
+            }
+            let Some(handler_statement_index) = block.statements[..block.statements.len() - 1]
+                .iter()
+                .rposition(|statement| {
+                    matches!(statement.kind, InstructionKind::MakeHandler { dst, .. } if dst == handler.register)
+                })
+            else {
+                continue;
+            };
+            let InstructionKind::MakeHandler {
+                dst: handler_register,
+                handler_def,
+                clauses,
+            } = &block.statements[handler_statement_index].kind
+            else {
+                continue;
+            };
+            let Some(definition) = handler_defs.get(*handler_def as usize) else {
+                continue;
+            };
+            if *handler_register != handler.register
+                || use_counts.get(handler_register).copied() != Some(1)
+                || clauses.len() != definition.clauses.len()
+                || definition.clauses.is_empty()
+                || handler_statement_index < definition.clauses.len()
+                || handler_statement_index + 1 != block.statements.len() - 1
+            {
+                continue;
+            }
+            let statement_start = handler_statement_index - definition.clauses.len();
+            let clause_statements = &block.statements[statement_start..handler_statement_index];
+            let mut clause_values = Vec::new();
+            let mut clauses_safe = true;
+            for (index, statement) in clause_statements.iter().enumerate() {
+                let InstructionKind::MakeCallable {
+                    dst,
+                    callable_type,
+                    function,
+                    captures,
+                } = &statement.kind
+                else {
+                    clauses_safe = false;
+                    break;
+                };
+                let Some(Type::Callable {
+                    capture_type,
+                    receiver_mode,
+                    ..
+                }) = types.get(*callable_type as usize).map(Type::representation)
+                else {
+                    clauses_safe = false;
+                    break;
+                };
+                if clauses.get(index)
+                    != Some(&Operand {
+                        register: *dst,
+                        mode: UseMode::Move,
+                    })
+                    || use_counts.get(dst).copied() != Some(1)
+                    || !captures.is_empty()
+                    || *capture_type != UNIT
+                    || !types[*callable_type as usize].claimed_zero_use_allowed()
+                {
+                    clauses_safe = false;
+                    break;
+                }
+                clause_values.push((*function, *receiver_mode));
+            }
+            if !clauses_safe {
+                continue;
+            }
+            let Some(Type::Callable {
+                capture_type: body_capture,
+                receiver_mode: body_mode,
+                ..
+            }) = types.get(*body_type as usize).map(Type::representation)
+            else {
+                continue;
+            };
+            if *body_capture != UNIT || *body_mode != 2 {
+                continue;
+            }
+            let Some(body_function) = direct_target(program, *body_declaration) else {
+                continue;
+            };
+            if !body_function.params.is_empty()
+                || body_function.receiver_mode != Some(2)
+                || body_function.blocks.len() != 2
+                || body_function
+                    .return_cleanup
+                    .iter()
+                    .any(|register| *register != 0)
+            {
+                continue;
+            }
+            let Some(body_entry) = body_function
+                .blocks
+                .iter()
+                .find(|body_block| body_block.id == body_function.entry)
+            else {
+                continue;
+            };
+            let Terminator::Perform {
+                result: Some(_),
+                protocol,
+                operation,
+                payloads,
+                capture,
+                resume: Some(_),
+            } = &body_entry.terminator
+            else {
+                continue;
+            };
+            let Some(selected_index) = definition
+                .clauses
+                .iter()
+                .position(|clause| clause.protocol == *protocol && clause.operation == *operation)
+            else {
+                // This is the partial-handler fallback path: preserve the
+                // delimiter so the operation continues outward unchanged.
+                continue;
+            };
+            let descriptor = &definition.clauses[selected_index];
+            let Some(operation_definition) = protocols
+                .get(descriptor.protocol as usize)
+                .and_then(|protocol| protocol.operations.get(descriptor.operation as usize))
+            else {
+                continue;
+            };
+            if operation_definition.terminal
+                || operation_definition.resumption_upper != Some(1)
+                || descriptor.resumption_type.is_none()
+                || payloads.len() + 1 != descriptor.callable_signature.params.len()
+            {
+                continue;
+            }
+            let Some((clause_declaration, clause_mode)) = clause_values.get(selected_index) else {
+                continue;
+            };
+            let Some(clause_function) = direct_target(program, *clause_declaration) else {
+                continue;
+            };
+            if *clause_mode != clause_function.receiver_mode.unwrap_or(u32::MAX)
+                || clause_function.blocks.is_empty()
+                || clause_function.params.len() != payloads.len() + 1
+                || clause_function
+                    .return_cleanup
+                    .iter()
+                    .any(|register| *register != 0)
+            {
+                continue;
+            }
+            let clause_resumption = clause_function.params.len() as Register;
+            if clause_function.params.last().copied() != descriptor.resumption_type {
+                continue;
+            }
+            let Some(clause_entry) = clause_function
+                .blocks
+                .iter()
+                .find(|clause_block| clause_block.id == clause_function.entry)
+            else {
+                continue;
+            };
+            if !matches!(
+                clause_entry.terminator,
+                Terminator::Resume { .. } | Terminator::Cancel { .. }
+            ) {
+                continue;
+            }
+            if !capture.cancellation_safe
+                || !capture.captured_references.is_empty()
+                || !capture.captured_residuals.is_empty()
+                || capture.captured_owners.iter().any(|owner| *owner != 0)
+            {
+                continue;
+            }
+            if matches!(clause_entry.terminator, Terminator::Cancel { .. })
+                && operation_definition.resumption_lower != 0
+            {
+                continue;
+            }
+            candidates.push(DirectResumptiveHandlerFusion {
+                caller: caller_index,
+                block: block_index,
+                statement_start,
+                result: *result,
+                normal: normal.clone(),
+                body: body_function.clone(),
+                clause: clause_function.clone(),
+                clause_resumption,
+            });
+        }
+    }
+    let rewrite_work = candidates
+        .iter()
+        .map(|candidate| {
+            body_size(&candidate.body)
+                .saturating_add(body_size(&candidate.clause))
+                .saturating_add(4)
+        })
+        .sum::<u64>();
+    let total_work = scan_work.saturating_add(rewrite_work);
+    if total_work > budget {
+        return (PassOutcome::BudgetExhausted, scan_work.min(budget));
+    }
+    if candidates.is_empty() {
+        return (PassOutcome::Unchanged, scan_work);
+    }
+
+    let mut scratch = program.clone();
+    let mut changed = false;
+    for candidate in &candidates {
+        let Some(function) = scratch.functions.get_mut(candidate.caller) else {
+            continue;
+        };
+        let mut rewritten = function.clone();
+        if rewrite_direct_resumptive_handler(&mut rewritten, candidate).is_some() {
+            *function = rewritten;
+            changed = true;
+        }
+    }
+    if !changed {
+        return (PassOutcome::Unchanged, total_work);
+    }
+    for function in &mut scratch.functions {
+        function.features = infer_feature_bits(function);
+    }
+    *program = scratch;
+    (PassOutcome::Changed, total_work)
+}
+
+fn specialize_static_handlers(
+    program: &mut Program,
+    types: &[Type],
+    protocols: &[Protocol],
+    handler_defs: &[HandlerDef],
+    budget: u64,
+) -> (PassOutcome, u64) {
+    let mut scratch = program.clone();
+    let (terminal, terminal_work) =
+        specialize_terminal_handlers(&mut scratch, types, protocols, handler_defs, budget);
+    if terminal == PassOutcome::BudgetExhausted {
+        return (terminal, terminal_work);
+    }
+    let remaining = budget.saturating_sub(terminal_work);
+    let (resumptive, resumptive_work) = specialize_direct_resumptive_handlers(
+        &mut scratch,
+        types,
+        protocols,
+        handler_defs,
+        remaining,
+    );
+    let work = terminal_work.saturating_add(resumptive_work);
+    if resumptive == PassOutcome::BudgetExhausted {
+        return (resumptive, work);
+    }
+    let outcome = if terminal == PassOutcome::Changed || resumptive == PassOutcome::Changed {
+        *program = scratch;
+        PassOutcome::Changed
+    } else {
+        PassOutcome::Unchanged
+    };
+    (outcome, work)
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 struct InlineCandidate {
     caller: u32,
@@ -8198,7 +9604,8 @@ fn inline_weight(function: &Function) -> u64 {
                     | Terminator::Resume { .. }
                     | Terminator::TailResume { .. }
                     | Terminator::Cancel { .. }
-                    | Terminator::Leave { .. } => 20,
+                    | Terminator::Leave { .. }
+                    | Terminator::Abort { .. } => 20,
                     Terminator::Return { .. } | Terminator::Unreachable => 1,
                 }
         })
@@ -8309,7 +9716,6 @@ fn inline_multiblock_exit_survivors(target: &Function) -> Option<BTreeSet<Regist
         || !target.outward_protocols.is_empty()
         || target.blocks.len() < 2
         || !target.return_cleanup.is_empty()
-        || target.features.contains(FeatureBits::LOANS)
         || target.features.contains(FeatureBits::HANDLERS)
         || target.features.contains(FeatureBits::RESUMPTIONS)
     {
@@ -8384,6 +9790,223 @@ fn inline_multiblock_exit_survivors(target: &Function) -> Option<BTreeSet<Regist
 
 fn inline_multiblock_legal(target: &Function) -> bool {
     inline_multiblock_exit_survivors(target).is_some()
+}
+
+#[derive(Clone, Debug)]
+struct InlineArenaMap {
+    labels: BTreeMap<LabelId, LabelId>,
+}
+
+/// Transplant the callee's persistent ownership/control arenas into the
+/// caller. Every identity is fresh and all cross-arena references are remapped
+/// in one transaction. The caller clone is discarded if any ID space or
+/// referential mapping cannot be represented.
+fn append_inline_arenas(
+    caller: &mut Function,
+    target: &Function,
+    registers: &[Option<Register>],
+    blocks: &BTreeMap<u32, u32>,
+) -> Option<InlineArenaMap> {
+    let add = |base: usize, old: u32| u32::try_from(base).ok()?.checked_add(old);
+    let register = |old| remap_register(old, registers);
+    let block = |old| blocks.get(&old).copied();
+
+    // Per-local facts are positional. Refuse to manufacture provenance when a
+    // preexisting pass already left a sparse bridge; ImportPlaceFlow will
+    // conservatively rebuild that shape on a later phase boundary.
+    let append_locals = caller.flow.locals.len()
+        == caller.register_types.len() - (registers.len() - 1)
+        && target.flow.locals.len() == target.register_types.len();
+
+    let source_base = caller.flow.sources.len();
+    let source = |old: SourceInfoId| {
+        if target.flow.sources.is_empty() {
+            Some(SourceInfoId(0))
+        } else {
+            add(source_base, old.0).map(SourceInfoId)
+        }
+    };
+    caller
+        .flow
+        .sources
+        .extend(target.flow.sources.iter().copied());
+
+    let scope_base = caller.flow.scopes.len();
+    let scope = |old: ScopeId| add(scope_base, old.0).map(ScopeId);
+    for mut fact in target.flow.scopes.clone() {
+        fact.parent = match fact.parent {
+            Some(parent) => Some(scope(parent)?),
+            None => None,
+        };
+        for owner in &mut fact.owners {
+            *owner = register(*owner)?;
+        }
+        caller.flow.scopes.push(fact);
+    }
+
+    if append_locals {
+        for mut fact in target.flow.locals.iter().skip(1).cloned() {
+            fact.scope = scope(fact.scope)?;
+            fact.source = source(fact.source)?;
+            caller.flow.locals.push(fact);
+        }
+    }
+
+    let path_base = caller.flow.move_paths.facts.len();
+    let path = |old: MovePathId| add(path_base, old.0).map(MovePathId);
+    for mut fact in target.flow.move_paths.facts.clone() {
+        fact.parent = match fact.parent {
+            Some(parent) => Some(path(parent)?),
+            None => None,
+        };
+        fact.base = register(fact.base)?;
+        for child in &mut fact.children {
+            *child = path(*child)?;
+        }
+        caller.flow.move_paths.facts.push(fact);
+    }
+
+    let loan_base = caller.flow.loans.len();
+    let loan = |old: LoanId| add(loan_base, old.0).map(LoanId);
+    for mut fact in target.flow.loans.clone() {
+        fact.reference = register(fact.reference)?;
+        fact.borrowed.base = register(fact.borrowed.base)?;
+        fact.parent = match fact.parent {
+            Some(parent) => Some(loan(parent)?),
+            None => None,
+        };
+        fact.region = RegionId(add(loan_base, fact.region.0)?);
+        fact.issued_block = block(fact.issued_block)?;
+        fact.source = source(fact.source)?;
+        caller.flow.loans.push(fact);
+    }
+
+    let label_base = caller.flow.labels.len();
+    let label = |old: LabelId| add(label_base, old.0).map(LabelId);
+    let labels = (0..target.flow.labels.len())
+        .map(|old| {
+            let old = LabelId(u32::try_from(old).ok()?);
+            Some((old, label(old)?))
+        })
+        .collect::<Option<BTreeMap<_, _>>>()?;
+    for mut fact in target.flow.labels.clone() {
+        fact.scope = scope(fact.scope)?;
+        fact.destination = block(fact.destination)?;
+        caller.flow.labels.push(fact);
+    }
+
+    let cleanup_base = caller.flow.cleanup_plans.len();
+    let cleanup = |old: CleanupPlanId| add(cleanup_base, old.0).map(CleanupPlanId);
+    for mut fact in target.flow.handlers.clone() {
+        fact.block = block(fact.block)?;
+        fact.scope = scope(fact.scope)?;
+        caller.flow.handlers.push(fact);
+    }
+    for mut fact in target.flow.performs.clone() {
+        fact.block = block(fact.block)?;
+        fact.frame_cleanup = match fact.frame_cleanup {
+            Some(plan) => Some(cleanup(plan)?),
+            None => None,
+        };
+        caller.flow.performs.push(fact);
+    }
+    for mut fact in target.flow.resumptions.clone() {
+        fact.block = block(fact.block)?;
+        fact.cancellation_cleanup = match fact.cancellation_cleanup {
+            Some(plan) => Some(cleanup(plan)?),
+            None => None,
+        };
+        caller.flow.resumptions.push(fact);
+    }
+    for mut fact in target.flow.indirect_calls.clone() {
+        fact.block = block(fact.block)?;
+        for owner in fact
+            .capture
+            .captured_owners
+            .iter_mut()
+            .chain(&mut fact.capture.captured_references)
+        {
+            *owner = register(*owner)?;
+        }
+        for residual in &mut fact.capture.captured_residuals {
+            residual.register = register(residual.register)?;
+        }
+        caller.flow.indirect_calls.push(fact);
+    }
+    for mut fact in target.flow.joins.clone() {
+        fact.block = block(fact.block)?;
+        for incoming in &mut fact.incoming {
+            *incoming = block(*incoming)?;
+        }
+        caller.flow.joins.push(fact);
+    }
+    for mut fact in target.flow.drop_flags.clone() {
+        fact.flag = register(fact.flag)?;
+        fact.owner = register(fact.owner)?;
+        caller.flow.drop_flags.push(fact);
+    }
+    for mut plan in target.flow.cleanup_plans.clone() {
+        plan.edge = match plan.edge {
+            CleanupEdge::Return { block: at } => CleanupEdge::Return { block: block(at)? },
+            CleanupEdge::TailCall { block: at } => CleanupEdge::TailCall { block: block(at)? },
+            CleanupEdge::TerminalPerform { block: at } => {
+                CleanupEdge::TerminalPerform { block: block(at)? }
+            }
+            CleanupEdge::Cancel { block: at } => CleanupEdge::Cancel { block: block(at)? },
+            CleanupEdge::Leave {
+                block: at,
+                label: id,
+            } => CleanupEdge::Leave {
+                block: block(at)?,
+                label: label(id)?,
+            },
+        };
+        plan.source_scope = scope(plan.source_scope)?;
+        plan.target_scope = scope(plan.target_scope)?;
+        for action in &mut plan.actions {
+            match action {
+                CleanupAction::EndBorrow(id) => *id = loan(*id)?,
+                CleanupAction::Destroy(local) | CleanupAction::DestroyResidual { local, .. } => {
+                    *local = register(*local)?
+                }
+                CleanupAction::DestroyIf { local, flag } => {
+                    *local = register(*local)?;
+                    *flag = register(*flag)?;
+                }
+            }
+        }
+        for protected in &mut plan.protected {
+            *protected = register(*protected)?;
+        }
+        caller.flow.cleanup_plans.push(plan);
+    }
+    Some(InlineArenaMap { labels })
+}
+
+fn remap_cloned_control_identities(
+    instruction: &mut InstructionKind,
+    arenas: &InlineArenaMap,
+    blocks: &BTreeMap<u32, u32>,
+) -> Option<()> {
+    match instruction {
+        InstructionKind::LabelPush { label, target, .. } => {
+            *label = *arenas.labels.get(label)?;
+            *target = *blocks.get(target)?;
+        }
+        InstructionKind::LabelPop { label } => *label = *arenas.labels.get(label)?,
+        _ => {}
+    }
+    Some(())
+}
+
+fn remap_cloned_terminator_identities(
+    terminator: &mut Terminator,
+    arenas: &InlineArenaMap,
+) -> Option<()> {
+    if let Terminator::Leave { label, .. } = terminator {
+        *label = *arenas.labels.get(label)?;
+    }
+    Some(())
 }
 
 fn remap_cloned_cfg_targets(
@@ -8814,6 +10437,10 @@ fn inline_by_cost_with_policy(
                 scratch.functions[caller_index] = old_caller;
                 continue;
             };
+            let Some(arenas) = append_inline_arenas(caller, &target, &registers, &blocks) else {
+                scratch.functions[caller_index] = old_caller;
+                continue;
+            };
 
             let span = caller.blocks[block_index]
                 .statements
@@ -8853,8 +10480,18 @@ fn inline_by_cost_with_policy(
                         remap_failed = true;
                         break;
                     }
+                    if remap_cloned_control_identities(&mut statement.kind, &arenas, &blocks)
+                        .is_none()
+                    {
+                        remap_failed = true;
+                        break;
+                    }
                 }
                 if remap_failed || remap_terminator(&mut block.terminator, &registers).is_none() {
+                    remap_failed = true;
+                    break;
+                }
+                if remap_cloned_terminator_identities(&mut block.terminator, &arenas).is_none() {
                     remap_failed = true;
                     break;
                 }
@@ -8984,7 +10621,7 @@ fn run_transactional_whole_program_pass(
 ) -> PassReport {
     let (outcome, work_units) = match pass {
         PassId::ScalarizeCallables => scalarize_callables(program, tables.types, *global_remaining),
-        PassId::SpecializeControl => specialize_terminal_handlers(
+        PassId::SpecializeControl => specialize_static_handlers(
             program,
             tables.types,
             tables.protocols,
@@ -9441,6 +11078,7 @@ fn derive_cleanup_elaboration(
         loans: regions::loan_table(function, types),
         array_calls: &BTreeMap::new(),
         strict: strict_flow(function),
+        refine_enum_switches: true,
     };
     let solution = regions::solve(&context).map_err(|error| flow_to_validation(function, error))?;
     let mut elaboration = CleanupElaboration {
@@ -9452,7 +11090,61 @@ fn derive_cleanup_elaboration(
     ordered.sort_by_key(|block| block.id);
     for block in ordered {
         let Some(entry) = solution.entries.get(&block.id) else {
-            // Unreachable blocks have no ownership state and exit nothing.
+            // A generated terminal handler body can reach its terminal
+            // perform only through a call-return edge that the conservative
+            // ownership solver has classified as non-returning.  The
+            // terminator's continuation capture is the exact lowering-time
+            // ownership snapshot, so retain its abandonment plan rather than
+            // silently losing residual-field cleanup with the missing entry.
+            if let Terminator::Perform {
+                resume: None,
+                payloads,
+                capture,
+                ..
+            } = &block.terminator
+            {
+                let protected = payloads
+                    .iter()
+                    .map(|operand| operand.register)
+                    .collect::<BTreeSet<_>>();
+                let actions = capture
+                    .captured_owners
+                    .iter()
+                    .rev()
+                    .copied()
+                    .filter(|register| {
+                        !protected.contains(register)
+                            && function
+                                .flow
+                                .locals
+                                .get(*register as usize)
+                                .is_none_or(|fact| fact.drop_glue != DropGlueKind::None)
+                    })
+                    .map(|register| {
+                        capture
+                            .captured_residuals
+                            .iter()
+                            .find(|residual| residual.register == register)
+                            .map_or(CleanupAction::Destroy(register), |residual| {
+                                CleanupAction::DestroyResidual {
+                                    local: register,
+                                    initialized_fields: residual.initialized_fields.clone(),
+                                }
+                            })
+                    })
+                    .collect();
+                let id = CleanupPlanId(elaboration.plans.len() as u32);
+                elaboration.perform_plans.insert(block.id, id);
+                elaboration.plans.push(CleanupPlanFact {
+                    edge: CleanupEdge::TerminalPerform { block: block.id },
+                    source_scope: ScopeId(0),
+                    target_scope: ScopeId(0),
+                    actions,
+                    protected: protected.into_iter().collect(),
+                });
+            }
+            // Other unreachable blocks have no ownership state and exit
+            // nothing.
             continue;
         };
         let states = regions::block_states(&context, block, entry)
@@ -9722,6 +11414,7 @@ fn import_and_validate_place_flow(
             loans: regions::loan_table(function, types),
             array_calls: &array_calls,
             strict: strict_flow(function),
+            refine_enum_switches: true,
         };
         regions::solve(&context).map_err(|error| {
             if std::env::var_os("GRANDIOSE_DEBUG_FLOW").is_some() {
@@ -9838,6 +11531,17 @@ pub(crate) fn derive_cleanup_lists(
     function: &Function,
     types: &[Type],
 ) -> Result<BTreeMap<u32, Vec<Vec<Register>>>, ValidationError> {
+    Ok(derive_cleanup_state_analysis(function, types)?.lists)
+}
+
+/// Derive physical cleanup states for final bytecode serialization. Semantic
+/// ownership validation may prune a statically impossible enum-switch arm;
+/// the bytecode verifier still structurally checks that encoded target, so
+/// serialization follows every arm without applying tag refinement.
+pub(crate) fn derive_serialization_cleanup_lists(
+    function: &Function,
+    types: &[Type],
+) -> Result<BTreeMap<u32, Vec<Vec<Register>>>, ValidationError> {
     let locals = bridged_locals(function, types);
     let context = regions::FlowContext {
         function,
@@ -9846,9 +11550,279 @@ pub(crate) fn derive_cleanup_lists(
         loans: regions::loan_table(function, types),
         array_calls: &BTreeMap::new(),
         strict: strict_flow(function),
+        refine_enum_switches: false,
+    };
+    Ok(regions::solve(&context)
+        .map_err(|error| flow_to_validation(function, error))?
+        .cleanup_lists)
+}
+
+struct CleanupStateAnalysis {
+    lists: BTreeMap<u32, Vec<Vec<Register>>>,
+    /// Blocks reached by the ownership interpreter after enum/tag and other
+    /// path refinements. Structural CFG reachability intentionally
+    /// over-approximates this set for compiled pattern decision trees.
+    reachable: BTreeSet<u32>,
+}
+
+fn derive_cleanup_state_analysis(
+    function: &Function,
+    types: &[Type],
+) -> Result<CleanupStateAnalysis, ValidationError> {
+    let locals = bridged_locals(function, types);
+    let context = regions::FlowContext {
+        function,
+        types,
+        locals: &locals,
+        loans: regions::loan_table(function, types),
+        array_calls: &BTreeMap::new(),
+        strict: strict_flow(function),
+        refine_enum_switches: true,
     };
     let solution = regions::solve(&context).map_err(|error| flow_to_validation(function, error))?;
-    Ok(solution.cleanup_lists)
+    let reachable = solution.entries.keys().copied().collect();
+    Ok(CleanupStateAnalysis {
+        lists: solution.cleanup_lists,
+        reachable,
+    })
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct LeaveCleanupBoundary {
+    source: Vec<Register>,
+    target: Vec<Register>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct LeaveCleanupAnchors {
+    pub(crate) source: Vec<Register>,
+    pub(crate) target: Vec<Register>,
+}
+
+/// Infer `LEAVE` cleanup boundaries solely from MIR ownership states. Public
+/// labels therefore do not need compiler-seeded bytecode cleanup anchors to
+/// establish the source/target relationship: after protected transfer values
+/// are removed, the target owner order must be a suffix of the source order.
+fn derive_leave_cleanup_boundaries(
+    function: &Function,
+    lists: &BTreeMap<u32, Vec<Vec<Register>>>,
+) -> Result<BTreeMap<u32, LeaveCleanupBoundary>, ValidationError> {
+    let mut result = BTreeMap::new();
+    for block in &function.blocks {
+        let Terminator::Leave { target, .. } = &block.terminator else {
+            continue;
+        };
+        let (Some(source_points), Some(target_points)) =
+            (lists.get(&block.id), lists.get(&target.target))
+        else {
+            continue;
+        };
+        let protected_sources = target
+            .args
+            .iter()
+            .map(|operand| operand.register)
+            .collect::<BTreeSet<_>>();
+        let target_block = function
+            .blocks
+            .iter()
+            .find(|candidate| candidate.id == target.target)
+            .ok_or_else(|| error(function, Some(block.id), "Leave target block is missing"))?;
+        let protected_targets = target_block
+            .params
+            .iter()
+            .filter(|parameter| parameter.role == BlockParamRole::ProtectedExitValue)
+            .map(|parameter| parameter.register)
+            .collect::<BTreeSet<_>>();
+        let source = source_points
+            .last()
+            .into_iter()
+            .flatten()
+            .filter(|register| !protected_sources.contains(register))
+            .copied()
+            .collect::<Vec<_>>();
+        let target = target_points
+            .first()
+            .into_iter()
+            .flatten()
+            .filter(|register| !protected_targets.contains(register))
+            .copied()
+            .collect::<Vec<_>>();
+        if !source.ends_with(&target) {
+            return Err(error(
+                function,
+                Some(block.id),
+                format!(
+                    "Leave cleanup target {target:?} is not a suffix of source {source:?} after protected transfer"
+                ),
+            ));
+        }
+        result.insert(block.id, LeaveCleanupBoundary { source, target });
+    }
+    Ok(result)
+}
+
+/// Produce the exact bytecode cleanup lists for each public `LEAVE` source and
+/// destination after proving the normalized MIR owner suffix relation. The
+/// source protected value remains present in the source anchor because the VM
+/// atomically takes it before running the cleanup prefix; the destination
+/// protected slot replaces it in the serialized suffix.
+pub(crate) fn derive_leave_cleanup_anchors(
+    function: &Function,
+    lists: &BTreeMap<u32, Vec<Vec<Register>>>,
+) -> Result<BTreeMap<u32, LeaveCleanupAnchors>, ValidationError> {
+    derive_leave_cleanup_boundaries(function, lists)?;
+    let mut result = BTreeMap::new();
+    for block in &function.blocks {
+        let Terminator::Leave { target, .. } = &block.terminator else {
+            continue;
+        };
+        let (Some(source_points), Some(target_points)) =
+            (lists.get(&block.id), lists.get(&target.target))
+        else {
+            continue;
+        };
+        let destination = target_points.first().cloned().unwrap_or_default();
+        let destination_registers = destination.iter().copied().collect::<BTreeSet<_>>();
+        let mut source = source_points
+            .last()
+            .cloned()
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|register| !destination_registers.contains(register))
+            .collect::<Vec<_>>();
+        source.extend(destination.iter().copied());
+        result.insert(
+            block.id,
+            LeaveCleanupAnchors {
+                source,
+                target: destination,
+            },
+        );
+    }
+    Ok(result)
+}
+
+/// Distinct optimized-MIR checkpoint immediately before representation
+/// lowering. It revalidates structural MIR and cleanup elaboration, derives the
+/// exact owner list at every statement/terminator point, proves every recorded
+/// destruction refers to a live source-block owner, validates conditional-drop
+/// evidence, and infers every public `LEAVE` boundary from MIR alone.
+fn validate_bytecode_input_checkpoint(
+    program: &Program,
+    types: &[Type],
+) -> Result<PassReport, ValidationError> {
+    validate_program(program, types, MirPhase::Optimized)?;
+    validate_flow_and_cleanup(program, types)?;
+    let mut work = 0_u64;
+    for function in &program.functions {
+        let cleanup = derive_cleanup_state_analysis(function, types)?;
+        let lists = &cleanup.lists;
+        for block in &function.blocks {
+            let Some(points) = lists.get(&block.id) else {
+                if !cleanup.reachable.contains(&block.id) {
+                    continue;
+                }
+                return Err(error(
+                    function,
+                    Some(block.id),
+                    "bytecode-input validation lacks MIR-derived cleanup states",
+                ));
+            };
+            if points.len() != block.statements.len() + 1 {
+                return Err(error(
+                    function,
+                    Some(block.id),
+                    format!(
+                        "MIR-derived cleanup states have {} points, expected {}",
+                        points.len(),
+                        block.statements.len() + 1
+                    ),
+                ));
+            }
+            for point in points {
+                work = work.saturating_add(point.len() as u64 + 1);
+                let mut unique = BTreeSet::new();
+                for &register in point {
+                    if register as usize >= function.register_types.len() {
+                        return Err(error(
+                            function,
+                            Some(block.id),
+                            format!("cleanup state references out-of-range register r{register}"),
+                        ));
+                    }
+                    if !unique.insert(register) {
+                        return Err(error(
+                            function,
+                            Some(block.id),
+                            format!("cleanup state contains duplicate owner r{register}"),
+                        ));
+                    }
+                }
+            }
+        }
+        for plan in &function.flow.cleanup_plans {
+            let source_block = match plan.edge {
+                CleanupEdge::Return { block }
+                | CleanupEdge::TailCall { block }
+                | CleanupEdge::TerminalPerform { block }
+                | CleanupEdge::Cancel { block }
+                | CleanupEdge::Leave { block, .. } => block,
+            };
+            let Some(points) = lists.get(&source_block) else {
+                if !cleanup.reachable.contains(&source_block) {
+                    continue;
+                }
+                return Err(error(
+                    function,
+                    Some(source_block),
+                    "cleanup plan source lacks MIR-derived ownership states",
+                ));
+            };
+            let mut destroyed = BTreeSet::new();
+            for action in &plan.actions {
+                work = work.saturating_add(1);
+                let local = match action {
+                    CleanupAction::Destroy(local)
+                    | CleanupAction::DestroyResidual { local, .. }
+                    | CleanupAction::DestroyIf { local, .. } => Some(*local),
+                    CleanupAction::EndBorrow(_) => None,
+                };
+                let Some(local) = local else { continue };
+                if !destroyed.insert(local) {
+                    return Err(error(
+                        function,
+                        Some(source_block),
+                        format!("cleanup plan destroys r{local} more than once"),
+                    ));
+                }
+                if !points.iter().any(|point| point.contains(&local)) {
+                    return Err(error(
+                        function,
+                        Some(source_block),
+                        format!(
+                            "cleanup plan destroys r{local}, which is never live in its source block"
+                        ),
+                    ));
+                }
+                if let CleanupAction::DestroyIf { flag, .. } = action
+                    && *flag as usize >= function.register_types.len()
+                {
+                    return Err(error(
+                        function,
+                        Some(source_block),
+                        format!("conditional cleanup of r{local} uses out-of-range flag r{flag}"),
+                    ));
+                }
+            }
+        }
+        let boundaries = derive_leave_cleanup_boundaries(function, lists)?;
+        work = work.saturating_add(boundaries.len() as u64);
+    }
+    Ok(PassReport {
+        pass: PassId::ValidateBytecodeInput,
+        outcome: PassOutcome::Unchanged,
+        work_units: work,
+    })
 }
 
 /// Recompute derived ownership facts for bodies whose analyses were
@@ -9889,6 +11863,27 @@ fn validate_cleanup_checkpoint(
         validate_flow_and_cleanup(program, types)?;
     }
     Ok(())
+}
+
+/// Validate a checked-builder product through the complete ownership import
+/// and cleanup-elaboration boundary without retaining any transformed state.
+/// Test generators and future frontend builders use this as their commit
+/// predicate: a structurally well-formed CFG is not accepted unless PlaceFlow
+/// can derive and validate its ownership and cleanup obligations as well.
+#[allow(dead_code)] // Used by the checked MIR builder during frontend migration.
+pub(crate) fn validate_generated_function(
+    function: &Function,
+    types: &[Type],
+) -> Result<(), ValidationError> {
+    let mut program = Program {
+        functions: vec![function.clone()],
+    };
+    validate_program(&program, types, MirPhase::Raw)?;
+    import_and_validate_place_flow(&mut program, types)?;
+    validate_program(&program, types, MirPhase::Owned)?;
+    elaborate_cleanup(&mut program, types)?;
+    validate_program(&program, types, MirPhase::Cleanup)?;
+    validate_flow_and_cleanup(&program, types)
 }
 
 fn push_checked(
@@ -10164,6 +12159,7 @@ pub(crate) fn optimize_program_with_control_tables(
     }
     validate_program(program, types, MirPhase::Optimized)?;
     validate_flow_and_cleanup(program, types)?;
+    passes.push(validate_bytecode_input_checkpoint(program, types)?);
     Ok(OptimizationReport {
         level,
         initial_operations,
@@ -10762,6 +12758,10 @@ mod tests {
             kind: InstructionKind::Drop { owner: operand(0) },
         });
         body.register_types.push(UNIT);
+        // r0 is an initialized receiver at entry; scratch registers are no
+        // longer implicitly live in lenient hand-assembled MIR.
+        body.receiver_mode = Some(2);
+        body.receiver_type = UNIT;
         let mut program = program(body);
         optimize_program(&mut program, &types, OptimizationLevel::O0).unwrap();
         assert_eq!(program.functions[0].blocks.len(), 1);
@@ -13304,6 +15304,39 @@ mod tests {
             pass.pass == PassId::EraseLoanProofsAndScalarizedReferences
                 && pass.outcome == PassOutcome::Changed
         }));
+
+        // Exported provenance intentionally survives the proof-erasure pass.
+        // Mandatory physical lowering must compact those historical facts
+        // rather than trying to allocate their now-dead reference registers.
+        use crate::compiler_mir::{LoanFact, LoanKind, Place, SourceInfoId};
+        program.functions[0].flow.loans = vec![
+            LoanFact {
+                kind: LoanKind::Shared,
+                reference: 1,
+                borrowed: Place {
+                    base: 0,
+                    projection: vec![],
+                },
+                parent: None,
+                region: RegionId(0),
+                issued_block: 0,
+                source: SourceInfoId(0),
+            },
+            LoanFact {
+                kind: LoanKind::Shared,
+                reference: 2,
+                borrowed: Place {
+                    base: 1,
+                    projection: vec![],
+                },
+                parent: Some(LoanId(0)),
+                region: RegionId(1),
+                issued_block: 0,
+                source: SourceInfoId(0),
+            },
+        ];
+        compact_live_registers_for_emission(&mut program, &types).unwrap();
+        assert!(program.functions[0].flow.loans.is_empty());
     }
 
     #[test]
@@ -13440,6 +15473,21 @@ mod tests {
                 .any(|pass| pass.pass == PassId::SpecializeControl
                     && pass.outcome == PassOutcome::Unchanged)
         );
+    }
+
+    #[test]
+    fn static_handler_specialization_budget_exhaustion_is_transactional() {
+        let types = Type::predefined();
+        let mut candidate = program(function(
+            vec![block(0, Terminator::Return { value: None })],
+            vec![],
+        ));
+        let original = candidate.clone();
+        assert_eq!(
+            specialize_static_handlers(&mut candidate, &types, &[], &[], 0),
+            (PassOutcome::BudgetExhausted, 0)
+        );
+        assert_eq!(candidate, original);
     }
 
     #[test]
@@ -14319,6 +16367,129 @@ mod tests {
             PassOutcome::Unchanged,
             "an alternate continuation predecessor cannot join a cloned live survivor"
         );
+    }
+
+    #[test]
+    fn inline_arena_clone_freshens_move_paths_loans_scopes_and_sources() {
+        use crate::compiler_mir::{LoanFact, LoanKind, Place, ScopeFact, SourceInfoId};
+
+        let mut caller = function(vec![block(0, Terminator::Unreachable)], vec![UNIT; 5]);
+        caller.flow.sources.push(Span::new(1, 2));
+        caller.flow.scopes.push(ScopeFact {
+            parent: None,
+            owners: vec![],
+        });
+        caller.flow.move_paths.root(4);
+        let mut target = function(vec![block(7, Terminator::Unreachable)], vec![UNIT; 3]);
+        target.flow.sources.push(Span::new(10, 20));
+        target.flow.scopes.push(ScopeFact {
+            parent: None,
+            owners: vec![1],
+        });
+        let root = target.flow.move_paths.root(1);
+        target.flow.move_paths.child(
+            root,
+            Projection::Field {
+                variant: None,
+                field: 0,
+            },
+        );
+        target.flow.loans.push(LoanFact {
+            kind: LoanKind::Shared,
+            reference: 2,
+            borrowed: Place {
+                base: 1,
+                projection: vec![],
+            },
+            parent: None,
+            region: RegionId(0),
+            issued_block: 7,
+            source: SourceInfoId(0),
+        });
+
+        let registers = vec![None, Some(5), Some(6)];
+        let blocks = BTreeMap::from([(7, 11)]);
+        let arenas = append_inline_arenas(&mut caller, &target, &registers, &blocks).unwrap();
+
+        assert!(arenas.labels.is_empty());
+        assert_eq!(
+            caller.flow.sources,
+            vec![Span::new(1, 2), Span::new(10, 20)]
+        );
+        assert_eq!(caller.flow.scopes[1].owners, vec![5]);
+        assert_eq!(caller.flow.move_paths.facts[1].base, 5);
+        assert_eq!(
+            caller.flow.move_paths.facts[1].children,
+            vec![MovePathId(2)]
+        );
+        assert_eq!(caller.flow.move_paths.facts[2].parent, Some(MovePathId(1)));
+        assert_eq!(caller.flow.loans[0].reference, 6);
+        assert_eq!(caller.flow.loans[0].borrowed.base, 5);
+        assert_eq!(caller.flow.loans[0].issued_block, 11);
+        assert_eq!(caller.flow.loans[0].source, SourceInfoId(1));
+    }
+
+    #[test]
+    fn tail_discovery_tracks_ended_loans_and_aggregate_environments() {
+        let mut call = block(
+            0,
+            Terminator::Call {
+                result: Some(5),
+                function: 9,
+                args: vec![move_operand(4)],
+                normal: Edge {
+                    target: 1,
+                    args: vec![],
+                },
+            },
+        );
+        call.statements = vec![
+            instruction(InstructionKind::Const {
+                dst: 1,
+                value: Constant::I64(1),
+            }),
+            instruction(InstructionKind::Borrow {
+                dst: 2,
+                src: 1,
+                unique: false,
+            }),
+            instruction(InstructionKind::EndBorrow { reference: 2 }),
+            instruction(InstructionKind::Construct {
+                dst: 4,
+                ty: I64,
+                variant: None,
+                fields: vec![move_operand(1)],
+            }),
+        ];
+        let continuation = BasicBlock {
+            id: 1,
+            params: vec![BlockParam {
+                register: 5,
+                ty: I64,
+                role: BlockParamRole::CallResult,
+            }],
+            statements: vec![],
+            terminator: Terminator::Return {
+                value: Some(move_operand(5)),
+            },
+        };
+        let mut body = function(
+            vec![call, continuation],
+            vec![UNIT, I64, I64, I64, I64, I64],
+        );
+        body.result = I64;
+
+        assert_eq!(
+            discover_tail_calls(&mut body, u64::MAX).0,
+            PassOutcome::Changed
+        );
+        assert!(matches!(
+            body.blocks[0].terminator,
+            Terminator::TailCall {
+                function: 9,
+                ref args,
+            } if args == &[move_operand(4)]
+        ));
     }
 
     #[test]
@@ -15683,6 +17854,7 @@ mod tests {
             SparseSimplify,
         ];
         let proof_erasure = [EraseLoanProofsAndScalarizedReferences];
+        let bytecode_input = [ValidateBytecodeInput];
         let tail = [FormTailCallsAndHoist];
         let o3_second = [
             GlobalSimplify,
@@ -15703,6 +17875,7 @@ mod tests {
             mandatory
                 .into_iter()
                 .chain(proof_erasure)
+                .chain(bytecode_input)
                 .collect::<Vec<_>>()
         );
         assert_eq!(
@@ -15711,6 +17884,7 @@ mod tests {
                 .into_iter()
                 .chain(o1)
                 .chain(proof_erasure)
+                .chain(bytecode_input)
                 .collect::<Vec<_>>()
         );
         assert_eq!(
@@ -15721,6 +17895,7 @@ mod tests {
                 .chain(o2)
                 .chain(proof_erasure)
                 .chain(tail)
+                .chain(bytecode_input)
                 .collect::<Vec<_>>()
         );
         assert_eq!(
@@ -15732,6 +17907,7 @@ mod tests {
                 .chain(o3_second)
                 .chain(proof_erasure)
                 .chain(tail)
+                .chain(bytecode_input)
                 .collect::<Vec<_>>()
         );
     }
@@ -15942,7 +18118,12 @@ mod tests {
         };
 
         let mut outputs = Vec::new();
-        for level in [OptimizationLevel::O0, OptimizationLevel::O1] {
+        for level in [
+            OptimizationLevel::O0,
+            OptimizationLevel::O1,
+            OptimizationLevel::O2,
+            OptimizationLevel::O3,
+        ] {
             let mut first = fixture();
             let mut second = fixture();
             optimize_program(&mut first, &types, level).unwrap();
@@ -15963,7 +18144,325 @@ mod tests {
             ));
             outputs.push(first);
         }
-        assert_eq!(outputs[0], outputs[1]);
+        assert!(outputs.windows(2).all(|pair| pair[0] == pair[1]));
+    }
+
+    #[test]
+    fn physical_register_reuse_requires_a_proven_empty_slot() {
+        let types = Type::predefined();
+        let mut entry = block(
+            0,
+            Terminator::Return {
+                value: Some(move_operand(2)),
+            },
+        );
+        entry.statements.extend([
+            instruction(InstructionKind::Const {
+                dst: 1,
+                value: Constant::I64(10),
+            }),
+            instruction(InstructionKind::Drop {
+                owner: move_operand(1),
+            }),
+            instruction(InstructionKind::Const {
+                dst: 2,
+                value: Constant::I64(20),
+            }),
+        ]);
+        let mut body = function(vec![entry], vec![UNIT, I64, I64]);
+        body.result = I64;
+        body.phase = MirPhase::Optimized;
+        body.features = infer_feature_bits(&body);
+        let mut candidate = program(body);
+
+        assert!(compact_live_registers_for_emission(&mut candidate, &types).unwrap());
+        let lowered = &candidate.functions[0];
+        assert_eq!(lowered.register_types, vec![UNIT, I64]);
+        assert!(matches!(
+            lowered.blocks[0].statements.as_slice(),
+            [
+                Instruction {
+                    kind: InstructionKind::Const { dst: 1, .. },
+                    ..
+                },
+                Instruction {
+                    kind: InstructionKind::Drop {
+                        owner: Operand { register: 1, .. }
+                    },
+                    ..
+                },
+                Instruction {
+                    kind: InstructionKind::Const { dst: 1, .. },
+                    ..
+                },
+            ]
+        ));
+
+        let mut not_empty = candidate.clone();
+        not_empty.functions[0].phase = MirPhase::Optimized;
+        not_empty.functions[0].register_types = vec![UNIT, I64, I64];
+        not_empty.functions[0].blocks[0].statements.remove(1);
+        not_empty.functions[0].blocks[0].statements[1] = instruction(InstructionKind::Const {
+            dst: 2,
+            value: Constant::I64(20),
+        });
+        if let Terminator::Return { value: Some(value) } =
+            &mut not_empty.functions[0].blocks[0].terminator
+        {
+            value.register = 2;
+        }
+        not_empty.functions[0].flow.locals = vec![];
+        not_empty.functions[0].features = infer_feature_bits(&not_empty.functions[0]);
+        compact_live_registers_for_emission(&mut not_empty, &types).unwrap();
+        assert_eq!(not_empty.functions[0].register_types, vec![UNIT, I64, I64]);
+    }
+
+    #[test]
+    fn ended_reference_slots_reuse_but_referent_places_remain_pinned() {
+        let mut types = Type::predefined();
+        let shared = types.len() as TypeId;
+        types.push(Type::RefShared { referent: I64 });
+        let mut entry = block(0, Terminator::Return { value: None });
+        entry.statements.extend([
+            instruction(InstructionKind::Borrow {
+                dst: 2,
+                src: 1,
+                unique: false,
+            }),
+            instruction(InstructionKind::EndBorrow { reference: 2 }),
+            instruction(InstructionKind::Borrow {
+                dst: 3,
+                src: 1,
+                unique: false,
+            }),
+            instruction(InstructionKind::EndBorrow { reference: 3 }),
+        ]);
+        let mut body = function(vec![entry], vec![UNIT, I64, shared, shared]);
+        body.params = vec![I64];
+        body.phase = MirPhase::Optimized;
+        body.flow.locals = body
+            .register_types
+            .iter()
+            .map(|&ty| LocalFact::conservative(ty, &types[ty as usize]))
+            .collect();
+        body.flow.locals[1].storage = crate::compiler_mir::StorageClass::Place;
+        body.flow.loans = vec![
+            crate::compiler_mir::LoanFact {
+                kind: crate::compiler_mir::LoanKind::Shared,
+                reference: 2,
+                borrowed: crate::compiler_mir::Place {
+                    base: 1,
+                    projection: vec![],
+                },
+                parent: None,
+                region: RegionId(0),
+                issued_block: 0,
+                source: SourceInfoId(0),
+            },
+            crate::compiler_mir::LoanFact {
+                kind: crate::compiler_mir::LoanKind::Shared,
+                reference: 3,
+                borrowed: crate::compiler_mir::Place {
+                    base: 1,
+                    projection: vec![],
+                },
+                parent: None,
+                region: RegionId(1),
+                issued_block: 0,
+                source: SourceInfoId(0),
+            },
+        ];
+        body.features = infer_feature_bits(&body);
+        let mut candidate = program(body);
+
+        compact_live_registers_for_emission(&mut candidate, &types).unwrap();
+        let lowered = &candidate.functions[0];
+        assert_eq!(lowered.register_types, vec![UNIT, I64, shared]);
+        assert_eq!(
+            lowered
+                .flow
+                .loans
+                .iter()
+                .map(|loan| (loan.reference, loan.borrowed.base, loan.region))
+                .collect::<Vec<_>>(),
+            vec![(2, 1, RegionId(0)), (2, 1, RegionId(1))]
+        );
+        assert!(matches!(
+            lowered.blocks[0].statements.as_slice(),
+            [
+                Instruction {
+                    kind: InstructionKind::Borrow { dst: 2, src: 1, .. },
+                    ..
+                },
+                Instruction {
+                    kind: InstructionKind::EndBorrow { reference: 2 },
+                    ..
+                },
+                Instruction {
+                    kind: InstructionKind::Borrow { dst: 2, src: 1, .. },
+                    ..
+                },
+                Instruction {
+                    kind: InstructionKind::EndBorrow { reference: 2 },
+                    ..
+                },
+            ]
+        ));
+    }
+
+    #[test]
+    fn hostile_lowered_register_overwrite_without_emptying_is_rejected() {
+        let types = Type::predefined();
+        let mut entry = block(0, Terminator::Return { value: None });
+        entry.statements.extend([
+            instruction(InstructionKind::Const {
+                dst: 1,
+                value: Constant::I64(1),
+            }),
+            instruction(InstructionKind::Const {
+                dst: 1,
+                value: Constant::I64(2),
+            }),
+        ]);
+        let mut body = function(vec![entry], vec![UNIT, I64]);
+        body.phase = MirPhase::Lowered;
+        body.features = infer_feature_bits(&body);
+        let mut hostile = program(body);
+
+        let failure = compact_live_registers_for_emission(&mut hostile, &types).unwrap_err();
+        assert!(failure.message.contains("defined by both"), "{failure}");
+    }
+
+    #[test]
+    fn abi_register_order_is_pinned_independent_of_last_use_order() {
+        let types = Type::predefined();
+        let mut entry = block(
+            0,
+            Terminator::Return {
+                value: Some(move_operand(3)),
+            },
+        );
+        entry.statements.extend([
+            instruction(InstructionKind::Drop {
+                owner: Operand {
+                    register: 2,
+                    mode: UseMode::Move,
+                },
+            }),
+            instruction(InstructionKind::Move {
+                dst: 3,
+                src: move_operand(1),
+            }),
+        ]);
+        let mut body = function(vec![entry], vec![UNIT, I64, U32, I64]);
+        body.params = vec![I64, U32];
+        body.result = I64;
+        body.phase = MirPhase::Optimized;
+        body.features = infer_feature_bits(&body);
+        let mut candidate = program(body);
+
+        compact_live_registers_for_emission(&mut candidate, &types).unwrap();
+        assert_eq!(
+            &candidate.functions[0].register_types[..3],
+            &[UNIT, I64, U32]
+        );
+    }
+
+    #[test]
+    fn non_abi_address_taken_owner_is_never_recolored() {
+        let mut types = Type::predefined();
+        let shared = types.len() as TypeId;
+        types.push(Type::RefShared { referent: I64 });
+        let mut entry = block(0, Terminator::Return { value: None });
+        entry.statements.extend([
+            instruction(InstructionKind::Const {
+                dst: 1,
+                value: Constant::I64(1),
+            }),
+            instruction(InstructionKind::Borrow {
+                dst: 2,
+                src: 1,
+                unique: false,
+            }),
+            instruction(InstructionKind::EndBorrow { reference: 2 }),
+            instruction(InstructionKind::Drop {
+                owner: move_operand(1),
+            }),
+            instruction(InstructionKind::Const {
+                dst: 3,
+                value: Constant::I64(2),
+            }),
+            instruction(InstructionKind::Drop {
+                owner: move_operand(3),
+            }),
+        ]);
+        let mut body = function(vec![entry], vec![UNIT, I64, shared, I64]);
+        body.phase = MirPhase::Optimized;
+        body.features = infer_feature_bits(&body);
+        let mut candidate = program(body);
+
+        compact_live_registers_for_emission(&mut candidate, &types).unwrap();
+        assert_eq!(
+            candidate.functions[0].register_types,
+            vec![UNIT, I64, shared, I64]
+        );
+        assert!(matches!(
+            candidate.functions[0].blocks[0].statements[4].kind,
+            InstructionKind::Const { dst: 3, .. }
+        ));
+    }
+
+    #[test]
+    fn checked_layout_groups_typed_control_regions_after_hot_rpo() {
+        let mut entry = block(
+            0,
+            Terminator::Goto(Edge {
+                target: 1,
+                args: vec![],
+            }),
+        );
+        entry
+            .statements
+            .push(instruction(InstructionKind::LabelPush {
+                label: crate::compiler_mir::LabelId(0),
+                result: 1,
+                target: 2,
+            }));
+        let normal = block(1, Terminator::Return { value: None });
+        let label = block(2, Terminator::Return { value: None });
+        let mut cleanup = block(3, Terminator::Return { value: None });
+        cleanup.params.push(BlockParam {
+            register: 1,
+            ty: I64,
+            role: BlockParamRole::ProtectedExitValue,
+        });
+        let handler = block(4, Terminator::Return { value: None });
+        let mut resumption = block(5, Terminator::Return { value: None });
+        resumption.params.push(BlockParam {
+            register: 1,
+            ty: I64,
+            role: BlockParamRole::ResumeResult,
+        });
+        let mut body = function(
+            vec![resumption, handler, cleanup, label, normal, entry],
+            vec![UNIT, I64],
+        );
+        body.flow.labels.push(crate::compiler_mir::LabelFact {
+            result_type: I64,
+            scope: ScopeId(0),
+            destination: 2,
+        });
+        body.flow.handlers.push(HandlerSiteFact {
+            block: 4,
+            scope: ScopeId(0),
+        });
+
+        assert!(layout_checked_blocks_for_emission(&mut body).unwrap());
+        assert_eq!(
+            body.blocks.iter().map(|block| block.id).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4, 5]
+        );
+        assert!(!layout_checked_blocks_for_emission(&mut body).unwrap());
     }
 
     #[test]
@@ -16156,6 +18655,7 @@ mod tests {
         let mut returns = function(vec![return_block], vec![UNIT, I64]);
         let mut aborts = function(vec![terminal], vec![UNIT, I64]);
         aborts.declaration = 1;
+        aborts.params = vec![I64];
         aborts.outward_protocols = vec![0];
         let mut program = Program {
             functions: vec![returns.clone(), aborts.clone()],
@@ -16301,6 +18801,35 @@ mod tests {
             .expect("Leave has a cleanup plan");
         assert_eq!(plan.protected, vec![1]);
 
+        let mut optimized = program(body.clone());
+        let report = optimize_program(&mut optimized, &types, OptimizationLevel::O0).unwrap();
+        assert!(report.passes.iter().any(|entry| {
+            entry.pass == PassId::ValidateBytecodeInput
+                && entry.outcome == PassOutcome::Unchanged
+                && entry.work_units > 0
+        }));
+        let lists = derive_cleanup_lists(&optimized.functions[0], &types).unwrap();
+        let boundaries = derive_leave_cleanup_boundaries(&optimized.functions[0], &lists).unwrap();
+        assert_eq!(
+            boundaries.get(&0),
+            Some(&LeaveCleanupBoundary {
+                source: vec![],
+                target: vec![],
+            })
+        );
+        let anchors = derive_leave_cleanup_anchors(&optimized.functions[0], &lists).unwrap();
+        assert_eq!(
+            anchors.get(&0),
+            Some(&LeaveCleanupAnchors {
+                source: vec![1, 2],
+                target: vec![2],
+            })
+        );
+
+        let hostile_lists = BTreeMap::from([(0, vec![vec![1], vec![3]]), (1, vec![vec![4]])]);
+        let error = derive_leave_cleanup_boundaries(&body, &hostile_lists).unwrap_err();
+        assert!(error.message.contains("not a suffix"), "{error}");
+
         let mut invalid = body;
         let InstructionKind::LabelPush { target, .. } = &mut invalid.blocks[0].statements[0].kind
         else {
@@ -16382,6 +18911,48 @@ mod tests {
     }
 
     #[test]
+    fn every_local_optimizer_pass_is_transactional_at_a_zero_budget() {
+        let types = Type::predefined();
+        let mut body = function(
+            vec![
+                block(
+                    0,
+                    Terminator::Goto(Edge {
+                        target: 1,
+                        args: vec![],
+                    }),
+                ),
+                block(1, Terminator::Return { value: None }),
+            ],
+            vec![UNIT],
+        );
+        body.phase = MirPhase::Cleanup;
+        body.features = infer_feature_bits(&body);
+        let original = program(body);
+        for pass in [
+            PassId::NormalizeCfg,
+            PassId::SparseSimplify,
+            PassId::ScalarizeLocals,
+            PassId::SimplifyCleanup,
+            PassId::GlobalSimplify,
+            PassId::SpecializeCleanup,
+            PassId::EraseLoanProofsAndScalarizedReferences,
+            PassId::FormTailCallsAndHoist,
+        ] {
+            let mut candidate = original.clone();
+            let before = candidate.canonical_text();
+            let fingerprint = candidate.fingerprint();
+            let mut budget = 0;
+            let report = run_transactional_pass(&mut candidate, pass, &types, &mut budget);
+            assert_eq!(report.pass, pass);
+            assert_eq!(report.outcome, PassOutcome::BudgetExhausted, "{pass:?}");
+            assert_eq!(candidate.canonical_text(), before, "{pass:?}");
+            assert_eq!(candidate.fingerprint(), fingerprint, "{pass:?}");
+            assert_eq!(candidate.functions[0].invalid_analyses, 0, "{pass:?}");
+        }
+    }
+
+    #[test]
     fn mir_report_does_not_claim_frontend_or_bytecode_lowering_ran() {
         let report = schedule_for(OptimizationLevel::O3);
         // The place-flow import and cleanup elaboration phases are real: they
@@ -16393,11 +18964,12 @@ mod tests {
                     && entry.work_units > 0
             }));
         }
-        for bytecode_pass in [
-            PassId::LowerRegistersAndEdges,
-            PassId::LayoutAndPeephole,
-            PassId::ValidateBytecodeInput,
-        ] {
+        assert!(report.passes.iter().any(|entry| {
+            entry.pass == PassId::ValidateBytecodeInput
+                && entry.outcome == PassOutcome::Unchanged
+                && entry.work_units > 0
+        }));
+        for bytecode_pass in [PassId::LowerRegistersAndEdges, PassId::LayoutAndPeephole] {
             assert!(
                 report
                     .passes

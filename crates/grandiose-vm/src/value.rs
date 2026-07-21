@@ -1009,6 +1009,44 @@ mod slot_tests {
     }
 
     #[test]
+    fn boundary_reclamation_breaks_a_mixed_recursive_receiver_resumption_cycle() {
+        let scope = ReclamationScope::begin();
+        let capture = ArenaObject::new_tracked(None);
+        let callable = ControlHandle::new(CallableValue {
+            callable_type: 0,
+            function: 0,
+            capture: capture.clone(),
+        });
+        let resumption = ControlHandle::new(None::<ResumptionValue>);
+        *resumption.borrow_mut() = Some(ResumptionValue {
+            resumption_type: 0,
+            frames: vec![RuntimeFrame {
+                function: 0,
+                pc: 0,
+                registers: vec![Some(Value::Callable(callable.clone()))],
+                return_dst: None,
+                delimiter: None,
+                guards: vec![],
+                labels: vec![],
+            }],
+        });
+        *capture.borrow_mut() = Some(Value::Resumption(resumption.clone()));
+
+        let weak_capture = Rc::downgrade(&capture.identity);
+        let weak_callable = Rc::downgrade(&callable.object.identity);
+        let weak_resumption = Rc::downgrade(&resumption.object.identity);
+        drop(resumption);
+        drop(callable);
+        drop(capture);
+
+        scope.finish();
+
+        assert!(weak_capture.upgrade().is_none());
+        assert!(weak_callable.upgrade().is_none());
+        assert!(weak_resumption.upgrade().is_none());
+    }
+
+    #[test]
     fn consuming_a_place_reclaims_it_and_stales_every_alias() {
         let store = SlotStore::default();
         let place = store.insert(Some(Value::I64(9))).unwrap();

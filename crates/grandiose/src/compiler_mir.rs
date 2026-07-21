@@ -6,6 +6,10 @@ use grandiose_vm::{Constant, Primitive, Type, TypeId};
 use crate::compiler_traits::HostImportRole;
 use crate::{compiler_core::stable_fingerprint, span::Span};
 
+#[path = "compiler_mir_analysis.rs"]
+pub(crate) mod analyses;
+#[path = "compiler_mir_mutation.rs"]
+pub(crate) mod mutation;
 #[path = "compiler_opt.rs"]
 pub(crate) mod optimizer;
 
@@ -35,6 +39,10 @@ macro_rules! mir_id {
     };
 }
 
+mir_id!(
+    /// Stable identity of one MIR control-flow block.
+    BlockId
+);
 mir_id!(
     /// Identity of one statically distinguishable owned projection subtree.
     MovePathId
@@ -142,6 +150,20 @@ pub struct BasicBlock {
     pub params: Vec<BlockParam>,
     pub statements: Vec<Instruction>,
     pub terminator: Terminator,
+}
+
+/// Typed region classification retained by the checked CFG editor. The compact
+/// compatibility MIR still serializes blocks in one vector; this classification
+/// prevents transformations from silently treating cleanup/control boundaries
+/// as ordinary forwarding blocks.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BlockKind {
+    Entry,
+    Normal,
+    Cleanup,
+    Handler,
+    Resumption,
+    Label,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -295,6 +317,11 @@ pub enum Terminator {
         label: LabelId,
         target: Edge,
     },
+    /// Terminate immediately without running ordinary scope cleanup. This is
+    /// the MIR form of the frozen VM abort operation, not an effect perform.
+    Abort {
+        message: Option<String>,
+    },
     Unreachable,
 }
 
@@ -397,6 +424,12 @@ pub enum InstructionKind {
         handler_def: u32,
         functions: Vec<u32>,
         captures: Vec<Operand>,
+    },
+    /// Construct a runtime binding environment from its moved payload fields.
+    MakeBindingPack {
+        dst: Register,
+        binding_type: TypeId,
+        payloads: Vec<Operand>,
     },
     /// Activate one typed label destination. `target` is the destination block
     /// reached by `Leave`; ordinary execution continues in the same block.

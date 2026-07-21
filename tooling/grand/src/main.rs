@@ -21,7 +21,10 @@ struct LintArgs {
 impl LintArgs {
     fn levels(&self) -> Vec<(String, LintLevel)> {
         let tag = |codes: &[String], level| {
-            codes.iter().map(move |c| (c.clone(), level)).collect::<Vec<_>>()
+            codes
+                .iter()
+                .map(move |c| (c.clone(), level))
+                .collect::<Vec<_>>()
         };
         [
             tag(&self.allow, LintLevel::Allow),
@@ -51,8 +54,8 @@ enum Command {
     Init,
     /// Compile the current package and its dependencies
     Build {
-        /// interp (lli, the working path today) or native (clang-linked executable)
-        #[arg(long, default_value = "interp")]
+        /// auto (G1 VM when available), vm, interp (legacy LLVM), or native
+        #[arg(long, default_value = "auto")]
         target: String,
         /// Optimization level (forwarded as -O<n> once the compiler supports it)
         #[arg(short = 'O', long = "opt")]
@@ -62,7 +65,7 @@ enum Command {
     },
     /// Build and execute the current package
     Run {
-        #[arg(long, default_value = "interp")]
+        #[arg(long, default_value = "auto")]
         target: String,
         #[arg(short = 'O', long = "opt")]
         opt: Option<u8>,
@@ -77,12 +80,12 @@ enum Command {
         #[command(flatten)]
         lints: LintArgs,
     },
-    /// Run tests: tests/*.gr as executables (exit 0 = pass), in parallel,
-    /// and tests/compile-fail/*.gr against golden .stderr files
+    /// Run tests: tests/*.glorious as executables (exit 0 = pass), in parallel,
+    /// and tests/compile-fail/*.glorious against golden .stderr files
     Test {
         /// Only run tests whose name contains this substring
         filter: Option<String>,
-        #[arg(long, default_value = "interp")]
+        #[arg(long, default_value = "auto")]
         target: String,
         /// Rewrite compile-fail golden .stderr files with current output
         #[arg(long)]
@@ -163,18 +166,36 @@ fn dispatch(cli: Cli) -> Result<i32> {
         Command::Build { target, opt, lints } => {
             ops::build(Target::parse(&target)?, opt, &lints.levels()).map(|()| 0)
         }
-        Command::Run { target, opt, lints, arguments } => {
-            ops::run(Target::parse(&target)?, arguments, opt, &lints.levels())
-        }
+        Command::Run {
+            target,
+            opt,
+            lints,
+            arguments,
+        } => ops::run(Target::parse(&target)?, arguments, opt, &lints.levels()),
         Command::Check { lints } => ops::check(&lints.levels()).map(|()| 0),
-        Command::Test { filter, target, bless, lints } => {
-            ops::test(Target::parse(&target)?, filter.as_deref(), bless, &lints.levels())
-        }
+        Command::Test {
+            filter,
+            target,
+            bless,
+            lints,
+        } => ops::test(
+            Target::parse(&target)?,
+            filter.as_deref(),
+            bless,
+            &lints.levels(),
+        ),
         Command::Fix { lints } => ops::fix(&lints.levels()).map(|()| 0),
         Command::Doc { open } => ops::doc(open).map(|()| 0),
-        Command::Fmt { check, stdin, paths } => {
-            if stdin { ops::fmt_stdin() } else { ops::fmt(check, paths) }.map(|()| 0)
+        Command::Fmt {
+            check,
+            stdin,
+            paths,
+        } => if stdin {
+            ops::fmt_stdin()
+        } else {
+            ops::fmt(check, paths)
         }
+        .map(|()| 0),
         Command::Lsp => {
             // Prefer a grand-lsp sitting next to this binary, then PATH.
             let sibling = std::env::current_exe()
@@ -185,9 +206,24 @@ fn dispatch(cli: Cli) -> Result<i32> {
             let status = std::process::Command::new(program).status()?;
             Ok(status.code().unwrap_or(1))
         }
-        Command::Add { name, path, git, github, tag, rev, branch } => {
-            ops::add(ops::AddSpec { name, path, git, github, tag, rev, branch }).map(|()| 0)
-        }
+        Command::Add {
+            name,
+            path,
+            git,
+            github,
+            tag,
+            rev,
+            branch,
+        } => ops::add(ops::AddSpec {
+            name,
+            path,
+            git,
+            github,
+            tag,
+            rev,
+            branch,
+        })
+        .map(|()| 0),
         Command::Update { packages } => ops::update(packages).map(|()| 0),
         Command::Lock => ops::lock().map(|()| 0),
         Command::Vendor => ops::vendor().map(|()| 0),

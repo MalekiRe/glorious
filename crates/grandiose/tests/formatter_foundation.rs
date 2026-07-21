@@ -66,6 +66,7 @@ const SURFACE: &str = r#"
         let separator = ", signed=";
         Formatter::literal(&mut formatter, &separator);
         Formatter::append_i64(&mut formatter, -42);
+        Formatter::append_char(&mut formatter, '☃');
         Formatter::newline(&mut formatter);
 
         Formatter::indent(&mut formatter);
@@ -120,7 +121,7 @@ const SURFACE: &str = r#"
 fn formatter_emits_nested_indentation_and_integers_at_o0_through_o3() {
     let nested = concat!(
         "root\n",
-        "    child=7, signed=-42\n",
+        "    child=7, signed=-42☃\n",
         "        nested=99\n",
         "    sibling\n",
         "\n",
@@ -182,6 +183,7 @@ fn formatter_has_recovery_parity() {
                 Formatter::newline(&mut formatter);
                 Formatter::indent(&mut formatter);
                 Formatter::append_i64(&mut formatter, -2048);
+                Formatter::append_char(&mut formatter, '☃');
                 Formatter::newline(&mut formatter);
                 Formatter::newline(&mut formatter);
                 Formatter::dedent(&mut formatter);
@@ -199,7 +201,7 @@ fn formatter_has_recovery_parity() {
     .unwrap();
     assert_eq!(
         value,
-        RecoveryValue::String("answer\n    -2048\n\ndone".into()),
+        RecoveryValue::String("answer\n    -2048☃\n\ndone".into()),
     );
 }
 

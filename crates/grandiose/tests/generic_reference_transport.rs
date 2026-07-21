@@ -30,6 +30,21 @@ fn run_i64_at_all_levels(source: &str, function: &str) {
     }
 }
 
+fn run_i64_at_all_levels_and_recovery(source: &str, function: &str) {
+    run_i64_at_all_levels(source, function);
+    let recovery_source = source.replace("main() -> { () }", "main() -> i64 { answer() }");
+    assert_eq!(
+        grandiose::run_source(
+            "generic-reference-transport-recovery.gr",
+            &recovery_source,
+            vec![],
+            &mut grandiose::eval::SystemHost::default(),
+        )
+        .unwrap(),
+        grandiose::eval::Value::Int(42),
+    );
+}
+
 #[test]
 fn generic_pair_constructor_transports_two_distinct_reference_origins() {
     let source = r#"
@@ -494,6 +509,121 @@ fn higher_order_callback_projects_a_reference_leaf_from_an_aggregate_parameter()
 }
 
 #[test]
+fn higher_order_callback_projects_reference_from_receiver_environment() {
+    let source = r#"
+        struct Receiver<T> { selected: T }
+        apply<F, T, R>(value: T, body: F) -> R
+            where F: Fn<(T), Output=R> { body(value) }
+
+        select<'a>(receiver: Receiver<&'a i64>) -> &'a i64 {
+            apply(receiver, { current => current.selected })
+        }
+
+        answer() -> i64 {
+            let value = 42;
+            *select(Receiver { selected: &value })
+        }
+        main() -> { () }
+    "#;
+    run_i64_at_all_levels_and_recovery(source, "answer");
+}
+
+#[test]
+fn higher_order_callback_deconstructs_an_enum_reference_payload() {
+    let source = r#"
+        enum Envelope<T> { Selected(T) }
+        apply<F, T, R>(value: T, body: F) -> R
+            where F: Fn<(T), Output=R> { body(value) }
+        never<'a>(fallback: &'a i64) -> &'a i64 { never(fallback) }
+
+        select<'a>(envelope: Envelope<&'a i64>, fallback: &'a i64) -> &'a i64 {
+            apply(envelope, { current =>
+                if(current is Envelope::Selected(selected)) {
+                    selected
+                } else { never(fallback) }
+            })
+        }
+
+        answer() -> i64 {
+            let value = 42;
+            *select(Envelope::Selected(&value), &value)
+        }
+        main() -> { () }
+    "#;
+    run_i64_at_all_levels_and_recovery(source, "answer");
+}
+
+#[test]
+fn higher_order_callback_preserves_reference_routes_through_recursive_wrappers() {
+    let source = r#"
+        enum Step { Done, Again }
+        apply_recursive<F, T, R>(step: Step, value: T, body: F) -> R
+            where F: Fn<(T), Output=R> {
+            if(step is Step::Done) {
+                body(value)
+            } else {
+                apply_recursive(Step::Done(), value, body)
+            }
+        }
+
+        select<'a>(value: &'a i64) -> &'a i64 {
+            apply_recursive(Step::Again(), value, { current => current })
+        }
+
+        answer() -> i64 {
+            let value = 42;
+            *select(&value)
+        }
+        main() -> { () }
+    "#;
+    run_i64_at_all_levels_and_recovery(source, "answer");
+}
+
+#[test]
+fn higher_order_recursive_wrapper_with_an_altered_reference_state_fails_closed() {
+    let source = r#"
+        enum Step { Done, Again }
+        apply_recursive<F, T, R>(step: Step, left: T, right: T, body: F) -> R
+            where F: Fn<(T, T), Output=R> {
+            if(step is Step::Done) {
+                body(left, right)
+            } else {
+                apply_recursive(Step::Done(), right, left, body)
+            }
+        }
+        bad<'a>(left: &'a i64, right: &'a i64) -> &'a i64 {
+            apply_recursive(
+                Step::Again(),
+                left,
+                right,
+                { first, second => first }
+            )
+        }
+        main() -> { () }
+    "#;
+    for optimization_level in [
+        OptimizationLevel::O0,
+        OptimizationLevel::O1,
+        OptimizationLevel::O2,
+        OptimizationLevel::O3,
+    ] {
+        let errors = compile_source_to_phases_with_options(
+            "recursive-wrapper-altered-reference-state.gr",
+            source,
+            CompileOptions { optimization_level },
+        )
+        .expect_err("an altered recursive reference environment compiled as an invariant route");
+        assert!(
+            errors.iter().any(|error| {
+                error.message.contains("exactly one compatible reference")
+                    || error.message.contains("uniquely selected")
+            }),
+            "{optimization_level:?}: {errors:#?}"
+        );
+    }
+}
+
+#[test]
 fn higher_order_callback_selects_an_exact_capture_over_a_compatible_parameter() {
     let source = r#"
         apply<F, T, R>(value: T, body: F) -> R
@@ -510,6 +640,110 @@ fn higher_order_callback_selects_an_exact_capture_over_a_compatible_parameter() 
         main() -> { () }
     "#;
     run_i64_at_all_levels(source, "answer");
+}
+
+#[test]
+fn higher_order_callback_equal_cfg_arms_preserve_one_symbolic_lifetime() {
+    let source = r#"
+        enum Flag { Yes, No }
+
+        apply<F, T, R>(value: T, body: F) -> R
+            where F: Fn<(T), Output=R> { body(value) }
+
+        select_first<'a>(flag: Flag, pair: (&'a i64, &'a i64)) -> &'a i64 {
+            apply(pair, { projected =>
+                if(flag is Flag::Yes) { projected.0 } else { projected.0 }
+            })
+        }
+
+        answer() -> i64 {
+            let selected = 42;
+            let ignored = 7;
+            *select_first(Flag::Yes(), (&selected, &ignored))
+        }
+
+        main() -> { () }
+    "#;
+    run_i64_at_all_levels(source, "answer");
+}
+
+#[test]
+fn higher_order_callback_composes_proved_opaque_wrapper_edges() {
+    let source = r#"
+        apply2<F, T, R>(left: T, right: T, body: F) -> R
+            where F: Fn<(T, T), Output=R> { body(left, right) }
+
+        inner<'a>(value: &'a i64) -> &'a i64 { value }
+        outer<'a>(value: &'a i64) -> &'a i64 { inner(value) }
+
+        answer() -> i64 {
+            let selected = 42;
+            let ignored = 7;
+            let returned = apply2(
+                &selected,
+                &ignored,
+                { first, second => outer(first) }
+            );
+            *returned
+        }
+
+        main() -> { () }
+    "#;
+    run_i64_at_all_levels(source, "answer");
+}
+
+#[test]
+fn higher_order_callback_divergent_cfg_origins_fail_closed() {
+    let source = r#"
+        enum Flag { Yes, No }
+
+        apply<F, T, R>(value: T, body: F) -> R
+            where F: Fn<(T), Output=R> { body(value) }
+
+        choose<'a>(
+            flag: Flag,
+            pair: (&'a mut i64, &'a mut i64)
+        ) -> &'a mut i64 {
+            apply(
+                pair,
+                { projected =>
+                    if(flag is Flag::Yes) { projected.0 } else { projected.1 }
+                }
+            )
+        }
+
+        bad() -> {
+            let left = 40;
+            let right = 2;
+            let selected = choose(Flag::Yes(), (&mut left, &mut right));
+            let conflicting = &mut left;
+            selected;
+            conflicting;
+            ()
+        }
+
+        main() -> { () }
+    "#;
+    for optimization_level in [
+        OptimizationLevel::O0,
+        OptimizationLevel::O1,
+        OptimizationLevel::O2,
+        OptimizationLevel::O3,
+    ] {
+        let errors = compile_source_to_phases_with_options(
+            "higher-order-divergent-cfg-origin.gr",
+            source,
+            CompileOptions { optimization_level },
+        )
+        .expect_err("divergent callback origins compiled as one symbolic lifetime");
+        assert!(
+            errors.iter().any(|error| {
+                error.message.contains("exactly one compatible reference")
+                    || error.message.contains("incompatible live loan")
+            }),
+            "{optimization_level:?}: {errors:#?}"
+        );
+    }
 }
 
 #[test]
@@ -542,11 +776,14 @@ fn higher_order_selected_lifetime_cannot_escape_or_alias_its_owner() {
         main() -> { () }
     "#;
     let opaque_route = r#"
+        enum Flag { Yes, No }
         apply2<F, T, R>(left: T, right: T, body: F) -> R
             where F: Fn<(T, T), Output=R> { body(left, right) }
-        relay<'a>(value: &'a i64) -> &'a i64 { value }
-        bad<'a>(left: &'a i64, right: &'a i64) -> &'a i64 {
-            apply2(left, right, { first, second => relay(first) })
+        choose<'a>(flag: Flag, left: &'a i64, right: &'a i64) -> &'a i64 {
+            if(flag is Flag::Yes) { left } else { right }
+        }
+        bad<'a>(flag: Flag, left: &'a i64, right: &'a i64) -> &'a i64 {
+            apply2(left, right, { first, second => choose(flag, first, second) })
         }
         main() -> { () }
     "#;

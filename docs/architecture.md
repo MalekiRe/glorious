@@ -28,10 +28,14 @@ compiler artifacts must be byte-for-byte identical. Compactness is pursued throu
 representations, arenas, table-driven logic, and few abstraction layers. The
 stretch budgets are 6,000 nonblank noncomment Grandiose lines for the
 frontend/static core, 3,000–5,000 for MIR optimization and bytecode emission, and
-1,500–2,500 for the complete bootstrap standard library. Thus 9,000–12,000
+6,000–9,000 for the complete bootstrap standard library. Thus 9,000–12,000
 compiler lines is the expected complete range, plus the standard library.
 Crossing 14,000 compiler lines triggers an architecture review;
 conformance or optimization is never removed merely to meet a budget.
+The library budget includes the deliberately explicit checked-conversion
+matrix, deterministic collections, diagnostic/source-map support, and the
+compiler toolkit; mechanically repetitive APIs are reviewed for generation or
+generic expression but are not deleted merely to hit a line count.
 
 The implementation does not provide modules, packages, FFI, unsafe Grandiose,
 threads, distributed builds, or a native backend in generation 1. The compiler
@@ -291,13 +295,22 @@ correctness lowering and bytecode cleanup; `-O1` enables local simplification;
 
 ### 4.1 Load boundary
 
-The loader validates section slices without copying, then decodes each function
-once into a compact instruction array. Verification retains dataflow states only
-at block leaders, simulating straight-line instructions in place. Raw code bytes
-and temporary verification states are released before execution. Execution never
-branches on untrusted offsets or unchecked table indices. Unknown required
-features or critical sections are compatibility errors; unknown noncritical
-sections are skipped.
+The loader copies an encoded artifact once into an immutable owned container,
+validates borrowed section slices, and verifies private decoded tables without
+constructing the public mutable `Artifact`. The frozen execution image keeps
+text/blob constants, descriptor names, and inline abort messages as checked
+ranges into that container. It stores opcodes in packed words, variable register
+lists in one shared operand array, and instruction offsets in a compact index;
+the public representation is materialized only on an explicit compatibility
+request. Verification retains dataflow states only at block leaders, while the
+runtime layout retains only function ranges and continuation-boundary capture
+plans. Capture register sets are delta-compressed verifier products. Multi-shot
+plans retain exactly the proved continuation-live set; cancellation-only plans
+also retain every dead value whose early destruction could run an observable
+hook or violate a positive use obligation. Execution never branches on untrusted
+offsets or unchecked table indices.
+Unknown required features or critical sections are compatibility errors; unknown
+noncritical sections are skipped.
 
 ### 4.2 Values, places, and frames
 
@@ -318,14 +331,15 @@ are destroyed deterministically. Statically shareable immutable storage may use
 reference counting; no tracing garbage collector is required. Cyclic owned type
 layouts are rejected.
 
-The bytecode format currently infers a reference-return relation rather than
-encoding named lifetimes: every returning path must carry one reference
-parameter's origin. Recursive call graphs are solved with a provisional relation
-only when the signature has exactly one compatible reference parameter, then
-every body in the cycle is checked against that relation. A local borrow,
-different parameter, or inconsistent path invalidates the whole cycle. This
-keeps monomorphic and generic recursive relays usable without allowing an
-undeclared lifetime to escape.
+The bytecode format carries structural reference-return contracts rather than
+named source lifetimes. A contract maps every reference result leaf to an exact
+parameter or receiver leaf path. The verifier independently proves each
+declared mapping from function bodies, including calls, callable targets,
+handlers, `perform`, and `resume`; forged, duplicate, path-incompatible, or
+branch-inconsistent mappings fail closed. Recursive call graphs converge over
+whole multi-leaf mappings rather than guessing one compatible root. A local
+borrow, inconsistent path, ambiguous producer set, or overlapping unique-origin
+split invalidates the contract.
 
 A frame contains its verified function, registers, instruction ordinal, active
 labels, and handler/cleanup state. Tail call replaces the frame after required
@@ -380,13 +394,12 @@ that chain.
 
 The residual shell itself must not have custom `Drop`: a hook is entitled to a
 fully initialized owner and cannot be replayed over a shell whose fields were
-already transferred. The bytecode verifier and VM also preserve the active
-variant and empty slots of enum residuals, and preserve empty machine-array
-slots when cloning a snapshot. The current bootstrap frontend emits residual
-capture facts only for tuple and struct fields. Enum pattern move paths need an
-active-variant fact in MIR capture metadata, while dynamically indexed array
-moves need a slot-initialization summary; until those facts exist, the frontend
-does not claim either optimization and the verifier remains conservative.
+already transferred. The compiler, bytecode verifier, and VM preserve active
+variants and empty slots of enum residuals, exact statically indexed
+machine-array slots, and the nested tuple/struct shells that contain them.
+Dynamic or path-dependent array indices still require a slot-initialization
+summary and therefore remain conservative; the compiler never claims an exact
+transport fact for those cases.
 
 For a terminal operation no resumption is created. The abandoned continuation is
 destroyed before clause code starts only when every captured subtree permits
@@ -409,9 +422,17 @@ the boundary; bytecode never receives a Rust pointer.
 
 `grvm run --time-limit 120s --memory-limit 4096MiB` is a supervisor. It launches
 a hidden worker, applies OS memory limits, watches wall time, and terminates the
-worker on violation. The VM loop does not charge instruction fuel. Safe Rust is
+worker on violation. A close-on-exec status pipe lets the worker distinguish a
+reported allocation-limit failure from an otherwise identical internal signal;
+the allocation hook resolves that inherited pipe without allocating even before
+`main`, so startup allocation failures do not lose their classification. The
+two cases have separate diagnostics and exit classifications. The VM loop
+does not charge instruction fuel. Safe Rust is
 used throughout execution; narrowly isolated process-limit setup is the only
-permitted unsafe Rust.
+permitted unsafe Rust. The generation-1 supervisor distribution is explicitly
+Linux-only: it relies on Unix process groups, `SIGKILL`, and Linux address-space
+limits. The bytecode format and in-process VM remain portable; non-Linux worker
+supervision requires a future platform adapter and is not claimed here.
 
 ## 5. Bootstrap and compatibility
 
