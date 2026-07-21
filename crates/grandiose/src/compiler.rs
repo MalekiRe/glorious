@@ -5781,6 +5781,49 @@ fn compile_program_with_phases(
             SyntheticBody::Expr { .. }
         ) && synthetic.name.starts_with("$handler$")
             && synthetic.name.ends_with("$body");
+        if lowerer.defer_perform_reference_result {
+            let owner = synthetic.body_instance.as_ref().and_then(|body| match body {
+                specialization::BodyInstanceKey::Root(typeck::DeclarationKey::Function(name)) => {
+                    Some(name)
+                }
+                specialization::BodyInstanceKey::Specialization(key) => match &key.template {
+                    typeck::DeclarationKey::Function(name) => Some(name),
+                    typeck::DeclarationKey::Global(_) => None,
+                },
+                specialization::BodyInstanceKey::Closure(request) => match &request.site.owner {
+                    typeck::DeclarationKey::Function(name) => Some(name),
+                    typeck::DeclarationKey::Global(_) => None,
+                },
+                specialization::BodyInstanceKey::Root(typeck::DeclarationKey::Global(_))
+                | specialization::BodyInstanceKey::Drop(_) => None,
+            });
+            let inherited = owner
+                .and_then(|name| core_tables.signatures.get(name).map(|signature| (name, signature)))
+                .and_then(|(name, signature)| {
+                    let function = core_tables
+                        .function_templates
+                        .iter()
+                        .find(|function| &function.name == name)?;
+                    let plan = core_tables.reference_return_plans.get(&signature.id)?;
+                    plan.iter()
+                        .map(|route| {
+                            let parameter = function.params.get(route.source.parameter)?;
+                            let capture = synthetic
+                                .captures
+                                .iter()
+                                .position(|(name, _, _)| name == &parameter.name)?;
+                            Some(ReferenceReturnRoute {
+                                result_prefix: route.result_prefix.clone(),
+                                source: ReferenceLeafSource {
+                                    parameter: synthetic.params.len() + capture,
+                                    path: route.source.path.clone(),
+                                },
+                            })
+                        })
+                        .collect::<Option<Vec<_>>>()
+                });
+            lowerer.active_reference_return_plan = inherited;
+        }
         match &synthetic.body {
             SyntheticBody::Expr { body, root_ordinal } => {
                 if let Some(ordinal) = root_ordinal {
@@ -25588,6 +25631,10 @@ impl<'a> CoreLowerer<'a> {
                     },
                 );
                 if !self.reference_leaf_paths(info.result).is_empty() {
+                    if let Some(fields) = self.active_reference_result_fields(info.result) {
+                        Self::set_expression_reference_fields(&mut expression, fields);
+                        return Ok(expression);
+                    }
                     let payload_candidates = match &expression.kind {
                         core::ExprKind::Perform { payloads, .. } => payloads
                             .iter()
@@ -26932,8 +26979,14 @@ impl<'a> CoreLowerer<'a> {
                 body_captures: body_capture_plan.values,
             },
         );
-        if self.reference_carrier(result).is_some() && handler_reference_candidates.len() == 1 {
-            expression.reference = handler_reference_candidates.pop();
+        if !self.reference_leaf_paths(result).is_empty() {
+            if let Some(fields) = self.active_reference_result_fields(result) {
+                Self::set_expression_reference_fields(&mut expression, fields);
+            } else if self.reference_carrier(result).is_some()
+                && handler_reference_candidates.len() == 1
+            {
+                expression.reference = handler_reference_candidates.pop();
+            }
         }
         Ok(expression)
     }

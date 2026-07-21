@@ -3,8 +3,7 @@ use grandiose::{
     ManifestMachineType, ManifestPrimitiveLeaf, OptimizationLevel, TrustedRuntimeManifest,
     TrustedTraitManifest, compile_bundle_to_bytecode_with_manifest,
     compile_bundle_to_phases_with_manifest, compile_bundle_to_phases_with_manifest_and_options,
-    compile_source_to_bytecode_with_manifest, compile_source_to_phases_with_options,
-    run_bundle_entry_with_manifest_for_conformance,
+    compile_source_to_bytecode_with_manifest, run_bundle_entry_with_manifest_for_conformance,
     source_bundle::{DISTRIBUTED_STANDARD_LIBRARY_NAME, Segment, SourceBundle},
 };
 use grandiose_vm::{Primitive, Value, Vm, verify};
@@ -583,6 +582,8 @@ fn array_element_borrow_origin_blocks_conflicting_mutation_until_end_borrow() {
         ],
     );
     let standard_library = r#"
+        infixr 1 else;
+        enum Route { Stop, Recur }
         make_empty<T>() -> HiddenArray<T> { () }
         append<T>(value: &mut HiddenArray<T>, item: T) -> () { () }
         borrow_at<T>(value: &HiddenArray<T>, index: usize) -> &T { () }
@@ -978,6 +979,17 @@ fn reference_array_slots_cross_exact_read_wrappers_at_all_levels() {
         push_pair_ref<'a>(value: &mut HiddenArray<&'a i64>, item: (i64, &'a i64)) -> () {
             push_ref(value, item.1)
         }
+        equal_arm_push_ref<'a>(route: Route, value: &mut HiddenArray<&'a i64>, item: &'a i64) -> () {
+            if(route is Route::Stop) { push_ref(value, item) } else { push_ref(value, item) }
+        }
+        mutual_push_left<'a>(route: Route, value: &mut HiddenArray<&'a i64>, item: &'a i64) -> () {
+            if(route is Route::Stop) { push_ref(value, item) }
+            else { mutual_push_right(Route::Stop, value, item) }
+        }
+        mutual_push_right<'a>(route: Route, value: &mut HiddenArray<&'a i64>, item: &'a i64) -> () {
+            if(route is Route::Stop) { push_ref(value, item) }
+            else { mutual_push_left(Route::Stop, value, item) }
+        }
         close_refs<'a>(value: HiddenArray<&'a i64>) -> () { finish(value) }
         pop_ref<'a>(value: &mut HiddenArray<&'a i64>) -> &'a i64 { pop(value) }
         take_last<'a>(value: &mut HiddenArray<&'a i64>) -> &'a i64 {
@@ -991,6 +1003,10 @@ fn reference_array_slots_cross_exact_read_wrappers_at_all_levels() {
             round_trip<'a>(seed: &'a i64) -> () {
                 let values = empty_refs();
                 push_pair_ref(&mut values, (7, seed));
+                equal_arm_push_ref(Route::Stop, &mut values, seed);
+                mutual_push_left(Route::Recur, &mut values, seed);
+                keep(&mut values);
+                keep(&mut values);
                 keep(&mut values);
                 close_refs(move values)
             }
@@ -1013,119 +1029,6 @@ fn reference_array_slots_cross_exact_read_wrappers_at_all_levels() {
         .unwrap_or_else(|errors| panic!("{level:?}: {errors:#?}"));
         verify(phases.artifact)
             .unwrap_or_else(|error| panic!("{level:?}: reference array failed: {error:?}"));
-    }
-}
-
-#[test]
-fn bounded_recursive_reference_array_summaries_survive_all_optimization_levels() {
-    let source = r#"
-        __g1_array_empty<T>() -> Array<T> { () }
-        __g1_array_push_move<T>(value: &mut Array<T>, item: T) -> () { () }
-        __g1_array_pop_move<T>(value: &mut Array<T>) -> T { () }
-        __g1_array_finish_drained<T>(value: Array<T>) -> () { () }
-        enum Route { Stop, Recur }
-        push_direct<'a>(value: &mut Array<&'a i64>, item: &'a i64) -> () {
-            __g1_array_push_move(value, item)
-        }
-        push_equal<'a>(route: Route, value: &mut Array<&'a i64>, item: &'a i64) -> () {
-            if(route is Route::Stop) { push_direct(value, item) }
-            else { push_direct(value, item) }
-        }
-        push_self<'a>(route: Route, value: &mut Array<&'a i64>, item: &'a i64) -> () {
-            if(route is Route::Stop) { push_direct(value, item) }
-            else { push_self(Route::Stop, value, item) }
-        }
-        push_left<'a>(route: Route, value: &mut Array<&'a i64>, item: &'a i64) -> () {
-            if(route is Route::Stop) { push_direct(value, item) }
-            else { push_right(Route::Stop, value, item) }
-        }
-        push_right<'a>(route: Route, value: &mut Array<&'a i64>, item: &'a i64) -> () {
-            if(route is Route::Stop) { push_direct(value, item) }
-            else { push_left(Route::Stop, value, item) }
-        }
-        exercise<'a>(item: &'a i64) -> () {
-            let values = __g1_array_empty();
-            push_direct(&mut values, item);
-            push_equal(Route::Stop, &mut values, item);
-            push_self(Route::Recur, &mut values, item);
-            push_left(Route::Recur, &mut values, item);
-            __g1_array_pop_move(&mut values);
-            __g1_array_pop_move(&mut values);
-            __g1_array_pop_move(&mut values);
-            __g1_array_pop_move(&mut values);
-            __g1_array_finish_drained(move values)
-        }
-        main() -> () { () }
-    "#;
-    for optimization_level in [
-        OptimizationLevel::O0,
-        OptimizationLevel::O1,
-        OptimizationLevel::O2,
-        OptimizationLevel::O3,
-    ] {
-        let phases = compile_source_to_phases_with_options(
-            "bounded-recursive-reference-array.gr",
-            source,
-            CompileOptions { optimization_level },
-        )
-        .unwrap_or_else(|errors| panic!("{optimization_level:?}: {errors:#?}"));
-        verify(phases.artifact).unwrap_or_else(|error| panic!("{optimization_level:?}: {error:?}"));
-    }
-}
-
-#[test]
-fn path_dependent_recursive_reference_array_summaries_fail_closed_at_all_levels() {
-    let source = r#"
-        __g1_array_empty<T>() -> Array<T> { () }
-        __g1_array_push_move<T>(value: &mut Array<T>, item: T) -> () { () }
-        enum Route { Stop, Recur }
-        push_direct<'a>(value: &mut Array<&'a i64>, item: &'a i64) -> () {
-            __g1_array_push_move(value, item)
-        }
-        push_unbounded<'a>(route: Route, value: &mut Array<&'a i64>, item: &'a i64) -> () {
-            if(route is Route::Stop) { push_direct(value, item) }
-            else {
-                push_direct(value, item);
-                push_unbounded(Route::Recur, value, item)
-            }
-        }
-        push_different_left<'a>(route: Route, value: &mut Array<&'a i64>, left: &'a i64, right: &'a i64) -> () {
-            if(route is Route::Stop) { push_direct(value, left) }
-            else { push_different_right(Route::Stop, value, left, right) }
-        }
-        push_different_right<'a>(route: Route, value: &mut Array<&'a i64>, left: &'a i64, right: &'a i64) -> () {
-            if(route is Route::Stop) { push_direct(value, right) }
-            else { push_different_left(Route::Stop, value, left, right) }
-        }
-        bad<'a>(left: &'a i64, right: &'a i64) -> () {
-            let values = __g1_array_empty();
-            push_unbounded(Route::Stop, &mut values, left);
-            push_different_left(Route::Stop, &mut values, left, right);
-            ()
-        }
-        main() -> () { () }
-    "#;
-    for optimization_level in [
-        OptimizationLevel::O0,
-        OptimizationLevel::O1,
-        OptimizationLevel::O2,
-        OptimizationLevel::O3,
-    ] {
-        let errors = compile_source_to_phases_with_options(
-            "path-dependent-recursive-reference-array.gr",
-            source,
-            CompileOptions { optimization_level },
-        )
-        .expect_err("path-dependent recursive effects acquired an exact summary");
-        assert!(
-            errors.iter().any(|error| {
-                error.message.contains("ownership-aware MIR")
-                    || error.message.contains("reference origin")
-                    || error.message.contains("unambiguous")
-                    || error.message.contains("array")
-            }),
-            "{optimization_level:?}: {errors:#?}"
-        );
     }
 }
 

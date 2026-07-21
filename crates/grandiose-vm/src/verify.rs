@@ -1004,7 +1004,10 @@ fn verify_function(
     let label_states = verify_labels(a, fid, f)?;
     let continuation_live = continuation_live_registers(a, f, &label_states)?;
     let callable_targets = callable_targets_at_pcs(a, fid, f, &label_states)?;
-    verify_resumption_quantities(a, fid, f, &label_states)?;
+    verify_resumption_quantities(a, fid, f, &label_states).map_err(|error| {
+        eprintln!("quantity verification failed for {fid}: {error:?}");
+        error
+    })?;
     let enum_facts = verify_enum_dominance(a, fid, f, &label_states)?;
     let move_path_states = verify_move_paths(a, fid, f, &enum_facts, &label_states)?;
     let result_leaves = reference_leaves(a, f.return_type);
@@ -4176,11 +4179,14 @@ fn verify_resumption_quantities_for_variants(
                 if dst.is_some_and(|dst| !leaf_types[dst as usize].is_empty()) {
                     return Err(VerifyError::InvalidFunction(fid));
                 }
-                let deltas = borrowed_receiver_resume_deltas(a, fid)
-                    .ok_or(VerifyError::InvalidFunction(fid))?;
+                let deltas = borrowed_receiver_resume_deltas(a, fid).ok_or_else(|| {
+                    eprintln!("missing borrowed recursive delta summary for {fid}");
+                    VerifyError::InvalidFunction(fid)
+                })?;
                 if deltas.len() != state.registers[0].len() {
                     return Err(VerifyError::InvalidFunction(fid));
                 }
+                let mut terminal_groups = Vec::new();
                 for ((slot, &delta), &leaf_ty) in state.registers[0]
                     .iter_mut()
                     .zip(&deltas)
@@ -4209,6 +4215,26 @@ fn verify_resumption_quantities_for_variants(
                     // observes after the call.
                     if upper_uses == &Some(1) && delta == 1 {
                         *slot = None;
+                        terminal_groups.push((group, leaf_ty));
+                    }
+                }
+                for (group, leaf_ty) in terminal_groups {
+                    let final_alias = !state
+                        .registers
+                        .iter()
+                        .flatten()
+                        .any(|slot| *slot == Some(group));
+                    if final_alias {
+                        let Type::Resumption { lower_uses, .. } =
+                            a.types[leaf_ty as usize].representation()
+                        else {
+                            unreachable!()
+                        };
+                        let count = state.counts[group].ok_or(VerifyError::InvalidFunction(fid))?;
+                        if count.min < u64::from(*lower_uses) {
+                            return Err(VerifyError::InvalidFunction(fid));
+                        }
+                        state.counts[group] = None;
                     }
                 }
                 transfer_pristine(&mut state, args)?;
