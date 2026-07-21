@@ -1279,6 +1279,10 @@ struct CoreLowerer<'a> {
     owner_types: BTreeMap<core::LocalId, TypeId>,
     next_local: core::LocalId,
     moved: BTreeSet<core::LocalId>,
+    /// Early, source-spanned diagnostic mirror of the authoritative MIR
+    /// PlaceFlow quantity solver. It is also lowering bookkeeping for effect
+    /// performance factors; accepting a program never relies on this map
+    /// without the exported LocalFact interval being rechecked after lowering.
     actual_uses: BTreeMap<core::LocalId, u64>,
     /// Minimum whole-owner uses among the currently possible control-flow
     /// paths. Missing entries are exact and therefore equal to
@@ -1291,6 +1295,9 @@ struct CoreLowerer<'a> {
     /// Minimum counterpart of `resumption_use_weights` when an effectful
     /// edge has more than one possible normal continuation multiplier.
     resumption_use_weight_lowers: BTreeMap<core::LocalId, u64>,
+    /// Source-spanned lowering bookkeeping used to choose residual/join MIR
+    /// shapes. The authoritative move-path state is derived independently
+    /// from MIR by ImportAndValidatePlaceFlow/compiler_regions.
     moved_paths: BTreeMap<core::LocalId, BTreeSet<Vec<u32>>>,
     /// Named unique-reference handles whose referent has been moved out and
     /// must be restored before any normal exit or ordinary handle use.
@@ -19272,9 +19279,9 @@ impl<'a> CoreLowerer<'a> {
         else {
             return false;
         };
-        self.residual_remaining_subtrees_satisfy(ty, moved, &|this, remaining| {
-            this.use_interval(remaining) == UseInterval::UNRESTRICTED
-                && this.is_multishot_capture_safe(remaining, &mut BTreeSet::new())
+        self.residual_remaining_subtrees_satisfy(ty, moved, &|remaining| {
+            self.use_interval(remaining) == UseInterval::UNRESTRICTED
+                && self.is_multishot_capture_safe(remaining, &mut BTreeSet::new())
         })
     }
 
@@ -19286,8 +19293,8 @@ impl<'a> CoreLowerer<'a> {
         else {
             return false;
         };
-        self.residual_remaining_subtrees_satisfy(ty, moved, &|this, remaining| {
-            this.is_multishot_capture_safe(remaining, &mut BTreeSet::new())
+        self.residual_remaining_subtrees_satisfy(ty, moved, &|remaining| {
+            self.is_multishot_capture_safe(remaining, &mut BTreeSet::new())
         })
     }
 
@@ -19295,8 +19302,8 @@ impl<'a> CoreLowerer<'a> {
         if moved.is_empty() {
             return false;
         }
-        self.residual_remaining_subtrees_satisfy(ty, moved, &|this, remaining| {
-            this.use_interval(remaining).lower == 0
+        self.residual_remaining_subtrees_satisfy(ty, moved, &|remaining| {
+            self.use_interval(remaining).lower == 0
         })
     }
 
@@ -19304,14 +19311,14 @@ impl<'a> CoreLowerer<'a> {
         &self,
         ty: TypeId,
         moved: &BTreeSet<Vec<u32>>,
-        predicate: &impl Fn(&Self, TypeId) -> bool,
+        predicate: &impl Fn(TypeId) -> bool,
     ) -> bool {
         fn visit(
-            this: &TypeChecker<'_>,
+            this: &CoreLowerer<'_>,
             ty: TypeId,
             prefix: &mut Vec<u32>,
             moved: &BTreeSet<Vec<u32>>,
-            predicate: &impl Fn(&TypeChecker<'_>, TypeId) -> bool,
+            predicate: &impl Fn(TypeId) -> bool,
         ) -> bool {
             if moved.contains(prefix) {
                 return true;
@@ -19320,7 +19327,7 @@ impl<'a> CoreLowerer<'a> {
                 .iter()
                 .any(|path| path.len() > prefix.len() && path.starts_with(prefix.as_slice()));
             if !has_moved_descendant {
-                return predicate(this, ty);
+                return predicate(ty);
             }
             if this.custom_drop_types.contains(&ty) {
                 return false;
@@ -19640,11 +19647,64 @@ impl<'a> CoreLowerer<'a> {
             .filter(|local| !self.moved.contains(&local.local))
             .map(|local| (local.local, local.ty))
             .collect::<BTreeSet<_>>();
+        let residuals = live
+            .iter()
+            .copied()
+            .filter(|(local, _)| {
+                self.moved_paths
+                    .get(local)
+                    .is_some_and(|paths| !paths.is_empty())
+            })
+            .collect::<Vec<_>>();
+        let mut errors = Vec::new();
+        for (local, ty) in residuals {
+            let moved = &self.moved_paths[&local];
+            let replay_safe = self.residual_remaining_subtrees_satisfy(ty, moved, &|remaining| {
+                let interval = self.use_interval(remaining);
+                interval
+                    .upper
+                    .is_none_or(|upper| u64::from(upper) >= multiplier_upper)
+                    && (multiplier_upper <= 1
+                        || self.is_multishot_capture_safe(remaining, &mut BTreeSet::new()))
+            });
+            if !replay_safe {
+                errors.push(unsupported(
+                    span,
+                    "restricted residual at multi-shot call",
+                    "every still-initialized residual subtree must admit the exact continuation multiplier and be snapshot-cloneable",
+                ));
+            }
+            let abandoned_interval = std::cell::Cell::new(None);
+            if factors.may_abandon
+                && !self.residual_remaining_subtrees_satisfy(ty, moved, &|remaining| {
+                    let interval = self.use_interval(remaining);
+                    if interval.lower != 0 && abandoned_interval.get().is_none() {
+                        abandoned_interval.set(Some(interval));
+                    }
+                    interval.lower == 0
+                })
+            {
+                let interval = abandoned_interval
+                    .get()
+                    .expect("a failed zero-use residual predicate records its interval");
+                errors.push(unsupported(
+                    span,
+                    "owner on a cancellation/abandonment path",
+                    format!(
+                        "a positive-use residual has actual Use count 0, outside principal interval {}; every still-initialized residual subtree must admit zero uses when the continuation may be abandoned",
+                        Self::interval_text(interval)
+                    ),
+                ));
+            }
+            // The shell itself is not replayed as a whole owner. Its remaining
+            // subtrees were checked above; weighting the shell's principal
+            // interval would incorrectly apply Pair's Use to Ticket.
+            live.remove(&(local, ty));
+        }
         live.retain(|(local, ty)| {
             self.is_use_restricted(*ty)
                 && !self.residual_is_unrestricted_multishot_safe(*local, *ty)
         });
-        let mut errors = Vec::new();
         for (local, ty) in &live {
             let interval = self.use_interval(*ty);
             if interval
@@ -20179,6 +20239,41 @@ impl<'a> CoreLowerer<'a> {
         self.end_region(origin.region);
     }
 
+    /// A temporary parent reference consumed solely to create a projected
+    /// child has no independently usable handle after this point. Narrow its
+    /// whole-place frontend loan to the child's field loan while retaining its
+    /// region fact: MIR keeps the actual parent reference alive and ends it
+    /// only after the child/carrier chain has ended.
+    fn transfer_temporary_parent_loan(&mut self, origin: &core::ReferenceOrigin) {
+        if origin.external {
+            return;
+        }
+        let loans = if origin.path.is_empty() {
+            self.loans.get_mut(&origin.root)
+        } else {
+            self.projected_loans
+                .get_mut(&origin.root)
+                .and_then(|fields| fields.get_mut(&origin.path))
+        };
+        if let Some(loans) = loans {
+            if origin.unique {
+                loans.unique = false;
+            } else {
+                loans.shared = loans.shared.saturating_sub(1);
+            }
+            if loans.shared == 0 && !loans.unique {
+                if origin.path.is_empty() {
+                    self.loans.remove(&origin.root);
+                } else if let Some(fields) = self.projected_loans.get_mut(&origin.root) {
+                    fields.remove(&origin.path);
+                    if fields.is_empty() {
+                        self.projected_loans.remove(&origin.root);
+                    }
+                }
+            }
+        }
+    }
+
     fn adjust_transferred_reference_kind(
         &mut self,
         origin: &core::ReferenceOrigin,
@@ -20404,6 +20499,89 @@ impl<'a> CoreLowerer<'a> {
                 span: operand.span,
             };
             return self.borrow(&dereference, true, span, expected);
+        }
+        if let ExprKind::Field(subject, field) = &operand.kind {
+            let mut names = vec![field.as_str()];
+            let mut base = subject.as_ref();
+            while let ExprKind::Field(parent, name) = &base.kind {
+                names.push(name.as_str());
+                base = parent.as_ref();
+            }
+            names.reverse();
+            if let ExprKind::Unary {
+                op: UnaryOp::Dereference,
+                operand: reference,
+            } = &base.kind
+                && !matches!(&reference.kind, ExprKind::Variable(path) if path.len() == 1)
+            {
+                let parent = self.expression(reference, None)?;
+                let Some(parent_origin) = parent.reference.clone() else {
+                    return Err(self.borrow_error(
+                        reference.span,
+                        "projected reborrowing requires a temporary expression with a tracked reference origin",
+                    ));
+                };
+                if unique && !parent_origin.unique {
+                    return Err(self.borrow_error(
+                        reference.span,
+                        "a unique field reborrow requires a unique parent reference",
+                    ));
+                }
+                let mut referent = match self.resolved_type(parent.ty) {
+                    ResolvedType::Shared(referent) | ResolvedType::Unique(referent) => {
+                        self.structural_id(&referent)
+                    }
+                    ResolvedType::Concrete(_) | ResolvedType::Tuple(_) | ResolvedType::Array(_) => {
+                        return Err(self.borrow_error(
+                            reference.span,
+                            "projected reborrowing requires a reference-valued temporary",
+                        ));
+                    }
+                };
+                self.mark_region_live(parent_origin.region);
+                let mut path = parent_origin.path.clone();
+                let mut projection_types = parent_origin.projection_types.clone();
+                let mut steps = Vec::with_capacity(names.len());
+                for name in names {
+                    let (field, next, variant) =
+                        self.projected_field(referent, name, operand.span, None)?;
+                    referent = next;
+                    path.push(field);
+                    let reference = self.reference_id(referent, unique);
+                    projection_types.push(reference);
+                    steps.push(core::ProjectBorrowStep {
+                        field,
+                        variant,
+                        reference,
+                    });
+                }
+                let parent_region = (parent_origin.region != 0).then_some(parent_origin.region);
+                let region = self.allocate_region(parent_region);
+                let ty = self.reference_id(referent, unique);
+                self.check(span, expected, ty)?;
+                let origin = core::ReferenceOrigin {
+                    region,
+                    root: parent_origin.root,
+                    path,
+                    projection_types,
+                    external: parent_origin.external,
+                    unique,
+                    parent: None,
+                };
+                self.transfer_temporary_parent_loan(&parent_origin);
+                let mut expression = self.typed(
+                    span,
+                    ty,
+                    core::ExprKind::TemporaryProjectBorrow {
+                        source: Box::new(parent),
+                        path: steps,
+                        unique,
+                    },
+                );
+                expression.reference = Some(origin.clone());
+                expression.reference_fields = singleton_reference_fields(Some(origin));
+                return Ok(expression);
+            }
         }
         let (source, referent, mut origin, reborrow, projected_steps) = match &operand.kind {
             ExprKind::Variable(path) if path.len() == 1 => {
@@ -20739,6 +20917,7 @@ impl<'a> CoreLowerer<'a> {
             expression.kind,
             core::ExprKind::Borrow { .. }
                 | core::ExprKind::ProjectBorrow { .. }
+                | core::ExprKind::TemporaryProjectBorrow { .. }
                 | core::ExprKind::Reborrow { .. }
         ) {
             for origin in Self::expression_reference_fields(expression).into_values() {
@@ -20758,6 +20937,7 @@ impl<'a> CoreLowerer<'a> {
         match expression.kind {
             core::ExprKind::Borrow { .. }
             | core::ExprKind::ProjectBorrow { .. }
+            | core::ExprKind::TemporaryProjectBorrow { .. }
             | core::ExprKind::Reborrow { .. }
             | core::ExprKind::Call { .. } => {
                 for origin in origins.into_values() {
@@ -20805,6 +20985,7 @@ impl<'a> CoreLowerer<'a> {
         match expression.kind {
             core::ExprKind::Borrow { .. }
             | core::ExprKind::ProjectBorrow { .. }
+            | core::ExprKind::TemporaryProjectBorrow { .. }
             | core::ExprKind::Reborrow { .. }
             | core::ExprKind::Call { .. } => {
                 for origin in discarded {
@@ -26676,6 +26857,7 @@ impl<'a> CoreLowerer<'a> {
                         &value.kind,
                         core::ExprKind::Borrow { .. }
                             | core::ExprKind::ProjectBorrow { .. }
+                            | core::ExprKind::TemporaryProjectBorrow { .. }
                             | core::ExprKind::Reborrow { .. }
                             | core::ExprKind::Call { .. }
                             | core::ExprKind::Construct { .. }
@@ -26685,6 +26867,7 @@ impl<'a> CoreLowerer<'a> {
                         &value.kind,
                         core::ExprKind::Borrow { .. }
                             | core::ExprKind::ProjectBorrow { .. }
+                            | core::ExprKind::TemporaryProjectBorrow { .. }
                             | core::ExprKind::Reborrow { .. }
                     ) {
                         for origin in Self::expression_reference_fields(&value).into_values() {
@@ -27246,6 +27429,7 @@ struct MirLowerer {
     flow: mir::PlaceFlow,
     duplicable_types: BTreeSet<TypeId>,
     custom_drop_types: BTreeSet<TypeId>,
+    callable_outward_protocols: BTreeMap<TypeId, Vec<u32>>,
     /// Live loan identity per reference register, tracked at issue time so
     /// reborrows and chained projections record their parent loans.
     loan_of: BTreeMap<u32, mir::LoanId>,
@@ -27353,6 +27537,39 @@ enum MirFlow {
     Diverged,
 }
 
+fn mir_successors(terminator: &mir::Terminator) -> Vec<u32> {
+    let mut successors = match terminator {
+        mir::Terminator::Goto(edge) => vec![edge.target],
+        mir::Terminator::Switch {
+            cases, otherwise, ..
+        } => cases
+            .iter()
+            .map(|(_, edge)| edge.target)
+            .chain(std::iter::once(otherwise.target))
+            .collect(),
+        mir::Terminator::Call { normal, .. }
+        | mir::Terminator::CallSelf { normal, .. }
+        | mir::Terminator::CallKnownReceiver { normal, .. }
+        | mir::Terminator::HostCall { normal, .. }
+        | mir::Terminator::CallIndirect { normal, .. }
+        | mir::Terminator::Handle { normal, .. }
+        | mir::Terminator::Resume { normal, .. }
+        | mir::Terminator::Cancel { normal, .. }
+        | mir::Terminator::Leave { target: normal, .. } => vec![normal.target],
+        mir::Terminator::Perform { resume, .. } => resume.iter().map(|edge| edge.target).collect(),
+        mir::Terminator::TailCall { .. }
+        | mir::Terminator::TailCallSelf { .. }
+        | mir::Terminator::TailCallKnownReceiver { .. }
+        | mir::Terminator::TailResume { .. }
+        | mir::Terminator::TailCallIndirect { .. }
+        | mir::Terminator::Return { .. }
+        | mir::Terminator::Unreachable => vec![],
+    };
+    successors.sort_unstable();
+    successors.dedup();
+    successors
+}
+
 impl MirFlow {
     fn value(self) -> Option<u32> {
         match self {
@@ -27458,6 +27675,16 @@ impl MirLowerer {
                 })
                 .collect(),
             custom_drop_types: custom_drop_types.clone(),
+            callable_outward_protocols: types
+                .iter()
+                .enumerate()
+                .filter_map(|(id, ty)| match ty.representation() {
+                    Type::Callable { signature, .. } => {
+                        Some((id as TypeId, signature.outward_protocols.clone()))
+                    }
+                    _ => None,
+                })
+                .collect(),
             loan_of: BTreeMap::new(),
             current_block: 0,
             active_labels: BTreeMap::new(),
@@ -27921,6 +28148,20 @@ impl MirLowerer {
                 _ => {}
             }
         }
+        let mut predecessors = BTreeMap::<u32, Vec<u32>>::new();
+        for block in blocks {
+            for successor in mir_successors(&block.terminator) {
+                predecessors.entry(successor).or_default().push(block.id);
+            }
+        }
+        flow.joins = predecessors
+            .into_iter()
+            .filter_map(|(block, mut incoming)| {
+                incoming.sort_unstable();
+                incoming.dedup();
+                (incoming.len() > 1).then_some(mir::JoinSiteFact { block, incoming })
+            })
+            .collect();
         flow.scopes[0].owners = flow
             .locals
             .iter()
@@ -29523,6 +29764,38 @@ impl MirLowerer {
                 }
                 MirFlow::Value(Some(src))
             }
+            core::ExprKind::TemporaryProjectBorrow {
+                source,
+                path,
+                unique,
+            } => {
+                let source_span = source.span;
+                let value = self.expression(source).value();
+                let parent_reference = self.materialize(value, source_span);
+                debug_assert!(
+                    self.borrowed.contains(&parent_reference),
+                    "a temporary projected-reborrow parent must be a live reference"
+                );
+                let mut src = parent_reference;
+                let mut parent = parent_reference;
+                for step in path {
+                    let dst = self.allocate(step.reference);
+                    self.push(
+                        expression.span,
+                        mir::InstructionKind::ProjectBorrow {
+                            dst,
+                            src,
+                            field: step.field,
+                            unique: *unique,
+                        },
+                    );
+                    self.borrowed.insert(dst);
+                    self.borrow_parents.insert(dst, parent);
+                    parent = dst;
+                    src = dst;
+                }
+                MirFlow::Value(Some(src))
+            }
             core::ExprKind::Reborrow { source, unique } => {
                 let src = self.locals[source];
                 let dst = self.allocate(expression.ty);
@@ -29784,6 +30057,28 @@ impl MirLowerer {
                         Self::operand(self.materialize(value, span), mir::UseMode::Move)
                     })
                     .collect::<Vec<_>>();
+                let mut capture = self.continuation_capture();
+                let mut transferred = args.iter().map(|arg| arg.register).collect::<BTreeSet<_>>();
+                if callable.mode == mir::UseMode::Move {
+                    transferred.insert(callable.register);
+                }
+                capture.captured_owners.retain(|r| !transferred.contains(r));
+                capture
+                    .captured_references
+                    .retain(|r| !transferred.contains(r));
+                capture
+                    .captured_residuals
+                    .retain(|r| !transferred.contains(&r.register));
+                let outward_protocols = self
+                    .callable_outward_protocols
+                    .get(&self.register_types[callable.register as usize])
+                    .cloned()
+                    .unwrap_or_default();
+                self.flow.indirect_calls.push(mir::IndirectCallSiteFact {
+                    block: self.current_block,
+                    outward_protocols,
+                    capture,
+                });
                 let dst =
                     (!matches!(expression.ty, UNIT | NEVER)).then(|| self.allocate(expression.ty));
                 let normal = self.label();
@@ -32921,6 +33216,9 @@ fn drop_body_reaches_unsafe_control(expression: &core::Expr, unsafe_calls: &BTre
         core::ExprKind::PatternTest { subject, .. } | core::ExprKind::Project { subject, .. } => {
             drop_body_reaches_unsafe_control(subject, unsafe_calls)
         }
+        core::ExprKind::TemporaryProjectBorrow { source, .. } => {
+            drop_body_reaches_unsafe_control(source, unsafe_calls)
+        }
         core::ExprKind::RefinementBranch {
             subject,
             positive,
@@ -32980,6 +33278,9 @@ fn validate_drop_core(
             | core::ExprKind::Reborrow { .. }
             | core::ExprKind::ProjectBorrow { .. }
             | core::ExprKind::DerefCopy { .. } => Ok(()),
+            core::ExprKind::TemporaryProjectBorrow { source, .. } => {
+                visit(source, false, unsafe_calls)
+            }
             core::ExprKind::DerefMove { .. } => Err(vec![unsupported(
                 expression.span,
                 "moving through a reference in Drop::drop",

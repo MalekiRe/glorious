@@ -767,10 +767,16 @@ are rejected early unless they are valid auto-trait recursion.
 
 ### 7.1 Region model and NLL input
 
-Elaboration emits Typed Core plus the shared sparse `PlaceFlow` CFG. NLL, move
-checking, quantitative use, environments, captures, and cleanup consume this one
-graph; MIR lowering reuses its place and edge IDs rather than reconstructing
-facts. `PlaceFlow` is proof metadata indexed by Core/MIR locations, not a fourth
+Elaboration emits Typed Core and MIR lowering exports the shared sparse
+`PlaceFlow` facts. NLL, move checking, quantitative use, environments, captures,
+and cleanup consume this one graph. Every multi-predecessor join carries a
+canonical predecessor fact, and every indirect-call suspension carries its
+exact outward row plus the source ownership snapshot. Import recomputes the CFG
+joins, callable row, move paths, use intervals, residual bitmaps, live loans, and
+cancellation safety before trusting those facts. The source lowerer's
+`moved_paths`/`actual_uses` maps remain only source-spanned diagnostic and MIR
+shape bookkeeping; successful acceptance is decided again by the PlaceFlow
+fixed point. `PlaceFlow` is proof metadata indexed by MIR locations, not a fourth
 semantic IR.
 
 Regions are sets of CFG points. Constraints arise from reference creation/use,
@@ -796,8 +802,7 @@ projected places and permits an owner, including a custom-`Drop` owner, to be
 used after its loan's actual last use. Closure-containing blocks remain
 conservatively lexical. Resumptive suspension is accepted only through the
 existing handler/continuation capture checks, and loop/backedge liveness widens
-to the least fixed point; there is not yet source loop syntax or a complete
-multi-block `PlaceFlow` construction for arbitrary control. Local-reference
+to the least fixed point. Local-reference
 escape remains rejected independently of early loan ending.
 
 A first-class callable may carry shared-reference captures across value aliases
@@ -881,6 +886,11 @@ same proof can authorize a duplicable payload projection through `&Enum`; the
 fresh MIR register created by dereferencing the enum carries the exact variant
 proof into that projection. Aggregate deconstruction transfers each tracked
 reference-field origin to the corresponding binding before retiring its owner.
+A projected reborrow through a temporary reference expression materializes the
+parent reference as the root of the MIR borrow-parent chain. The frontend
+narrows its consumed whole-place loan to the selected child path, while MIR
+retains and ends the parent only after every child and intermediate projection
+carrier has ended.
 
 ### 7.3 Escape and variance checks
 

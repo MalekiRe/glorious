@@ -111,6 +111,14 @@ pub enum ExprKind {
         path: Vec<ProjectBorrowStep>,
         unique: bool,
     },
+    /// A projected reborrow whose parent reference is itself an expression.
+    /// MIR retains the materialized parent as the first link in the generated
+    /// borrow-parent chain, so it cannot be ended before the leaf loan.
+    TemporaryProjectBorrow {
+        source: Box<Expr>,
+        path: Vec<ProjectBorrowStep>,
+        unique: bool,
+    },
     Reborrow {
         source: LocalId,
         unique: bool,
@@ -506,6 +514,22 @@ impl Expr {
                 unique,
             } => {
                 writeln!(output, "project-borrow l{source} unique={unique}").unwrap();
+                for step in path {
+                    writeln!(
+                        output,
+                        "{pad}  field#{} variant={:?} t{}",
+                        step.field, step.variant, step.reference
+                    )
+                    .unwrap();
+                }
+            }
+            ExprKind::TemporaryProjectBorrow {
+                source,
+                path,
+                unique,
+            } => {
+                writeln!(output, "temporary-project-borrow unique={unique}").unwrap();
+                source.write(output, depth + 1);
                 for step in path {
                     writeln!(
                         output,

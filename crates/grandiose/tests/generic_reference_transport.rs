@@ -212,6 +212,46 @@ fn reference_to_enum_projection_uses_the_dominating_variant_proof() {
 }
 
 #[test]
+fn projected_shared_reborrow_retains_a_temporary_parent_reference() {
+    let source = r#"
+        struct Point { x: i64, y: i64 }
+
+        relay<'a>(point: &'a Point) -> &'a Point { point }
+
+        answer() -> i64 {
+            let point = Point { x: 40, y: 2 };
+            let x = &(*relay(&point)).x;
+            *x + point.y
+        }
+
+        main() -> { () }
+    "#;
+    run_i64_at_all_levels(source, "answer");
+}
+
+#[test]
+fn projected_unique_reborrow_retains_a_temporary_parent_reference() {
+    let source = r#"
+        struct Point { x: i64, y: i64 }
+
+        relay<'a>(point: &'a mut Point) -> &'a mut Point { point }
+
+        answer() -> i64 {
+            let point = Point { x: 0, y: 2 };
+            let result = {
+                let x = &mut (*relay(&mut point)).x;
+                *x = 40;
+                *x
+            };
+            result + point.y
+        }
+
+        main() -> { () }
+    "#;
+    run_i64_at_all_levels(source, "answer");
+}
+
+#[test]
 fn enum_reference_payload_access_requires_proof_and_preserves_escape_safety() {
     let without_proof = r#"
         enum Choice { Yes(&i64), No }
@@ -258,6 +298,28 @@ fn enum_reference_payload_access_requires_proof_and_preserves_escape_safety() {
         }
         main() -> { () }
     "#;
+    let temporary_reborrow_escape = r#"
+        struct Point { x: i64 }
+        relay<'a>(point: &'a Point) -> &'a Point { point }
+        escape() -> &i64 {
+            let point = Point { x: 42 };
+            &(*relay(&point)).x
+        }
+        main() -> { () }
+    "#;
+    let temporary_unique_reborrow_alias = r#"
+        struct Point { x: i64 }
+        relay<'a>(point: &'a mut Point) -> &'a mut Point { point }
+        bad() -> {
+            let point = Point { x: 42 };
+            let projected = &mut (*relay(&mut point)).x;
+            let conflicting = &mut point.x;
+            projected;
+            conflicting;
+            ()
+        }
+        main() -> { () }
+    "#;
     for (name, source, needle) in [
         (
             "enum-reference-without-proof.gr",
@@ -278,6 +340,16 @@ fn enum_reference_payload_access_requires_proof_and_preserves_escape_safety() {
         (
             "reference-deconstruction-alias.gr",
             deconstruction_alias,
+            "incompatible live loan",
+        ),
+        (
+            "temporary-projected-reborrow-escape.gr",
+            temporary_reborrow_escape,
+            "escape",
+        ),
+        (
+            "temporary-unique-reborrow-alias.gr",
+            temporary_unique_reborrow_alias,
             "incompatible live loan",
         ),
     ] {

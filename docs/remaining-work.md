@@ -59,28 +59,7 @@ item from the backlog.
 - contextual `u64`/`u128` selection without eager narrowing;
 - exact source-level IEEE float parsing and rounding verification.
 
-## 2. Ownership, `Use`, borrowing, and places
-
-### 2.1 Frontend PlaceFlow unification
-
-Some frontend ownership checking remains split across specialized paths. Move
-all supported source forms onto one arbitrary-CFG analysis covering joins,
-initialization and moves, quantitative actual use, loans, partial aggregates,
-cleanup eligibility, handlers/resumptions, labels, normal and abandoning exits,
-cancellation, tail calls, and unreachable branches.
-
-### 2.4 Reference expression breadth
-
-- projected reborrowing through a temporary reference expression while keeping
-  its materialized parent reference live for the complete child region.
-
 ## 3. Effects, handlers, and resumptions
-
-### 3.1 Suspension and handler-environment breadth
-
-- nested-path residual shells across optional or unknown-multiplicity indirect
-  effectful calls; top-level residuals and mandatory one-shot nested residuals
-  carry exact capture/cleanup facts today.
 
 ### 3.2 Reference payload/result breadth
 

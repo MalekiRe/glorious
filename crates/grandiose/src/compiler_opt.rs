@@ -9188,6 +9188,66 @@ fn validate_exported_facts(function: &Function, types: &[Type]) -> Result<(), Va
             Terminator::Resume { .. } | Terminator::TailResume { .. } | Terminator::Cancel { .. }
         )
     });
+    let indirect_calls = ordered
+        .iter()
+        .filter_map(|block| match &block.terminator {
+            Terminator::CallIndirect { callable, .. } => {
+                let outward = match types
+                    .get(function.register_types[callable.register as usize] as usize)
+                    .map(Type::representation)
+                {
+                    Some(Type::Callable { signature, .. }) => signature.outward_protocols.clone(),
+                    _ => return None,
+                };
+                Some((block.id, outward))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let fact_indirect_calls = function
+        .flow
+        .indirect_calls
+        .iter()
+        .map(|site| (site.block, site.outward_protocols.clone()))
+        .collect::<Vec<_>>();
+    if fact_indirect_calls != indirect_calls {
+        return Err(error(
+            function,
+            None,
+            format!(
+                "imported PlaceFlow indirect-call sites {fact_indirect_calls:?} do not match callable terminators {indirect_calls:?}"
+            ),
+        ));
+    }
+    let mut incoming = BTreeMap::<u32, Vec<u32>>::new();
+    for block in &ordered {
+        for target in successors(&block.terminator) {
+            incoming.entry(target).or_default().push(block.id);
+        }
+    }
+    let actual_joins = incoming
+        .into_iter()
+        .filter_map(|(block, mut incoming)| {
+            incoming.sort_unstable();
+            incoming.dedup();
+            (incoming.len() > 1).then_some((block, incoming))
+        })
+        .collect::<Vec<_>>();
+    let fact_joins = function
+        .flow
+        .joins
+        .iter()
+        .map(|site| (site.block, site.incoming.clone()))
+        .collect::<Vec<_>>();
+    if fact_joins != actual_joins {
+        return Err(error(
+            function,
+            None,
+            format!(
+                "imported PlaceFlow join sites {fact_joins:?} do not match CFG joins {actual_joins:?}"
+            ),
+        ));
+    }
     let mut fact_performs = function
         .flow
         .performs
@@ -15934,6 +15994,119 @@ mod tests {
                 .contains("imported PlaceFlow local fact for r1 names type"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn import_rejects_a_hostile_exported_join_predecessor_set() {
+        let types = Type::predefined();
+        let mut entry = block(
+            0,
+            Terminator::Switch {
+                discr: operand(1),
+                cases: vec![(
+                    Constant::U32(1),
+                    Edge {
+                        target: 1,
+                        args: vec![],
+                    },
+                )],
+                otherwise: Edge {
+                    target: 2,
+                    args: vec![],
+                },
+            },
+        );
+        entry.statements.push(Instruction {
+            span: Span::default(),
+            kind: InstructionKind::Const {
+                dst: 1,
+                value: Constant::U32(1),
+            },
+        });
+        let mut body = function(
+            vec![
+                entry,
+                block(
+                    1,
+                    Terminator::Goto(Edge {
+                        target: 3,
+                        args: vec![],
+                    }),
+                ),
+                block(
+                    2,
+                    Terminator::Goto(Edge {
+                        target: 3,
+                        args: vec![],
+                    }),
+                ),
+                block(3, Terminator::Return { value: None }),
+            ],
+            vec![UNIT, U32],
+        );
+        body.flow.provenance = crate::compiler_mir::FlowProvenance::Exported;
+        body.flow.joins.push(crate::compiler_mir::JoinSiteFact {
+            block: 3,
+            incoming: vec![1],
+        });
+        let mut program = program(body);
+        let error = optimize_program(&mut program, &types, OptimizationLevel::O0).unwrap_err();
+        assert!(error.message.contains("do not match CFG joins"), "{error}");
+    }
+
+    #[test]
+    fn import_rejects_a_hostile_indirect_call_outward_row() {
+        let mut types = Type::predefined();
+        let callable = types.len() as TypeId;
+        types.push(Type::Callable {
+            signature: Signature {
+                params: vec![],
+                result: UNIT,
+                outward_protocols: vec![],
+            },
+            capture_type: UNIT,
+            receiver_mode: 0,
+            identity_name: "hostile-row".into(),
+            copy: true,
+            zero_use_allowed: true,
+        });
+        let mut body = function(
+            vec![
+                block(
+                    0,
+                    Terminator::CallIndirect {
+                        result: None,
+                        callable: operand(1),
+                        known_function: None,
+                        receiver_mode: 0,
+                        cleanup_callable: false,
+                        args: vec![],
+                        normal: Edge {
+                            target: 1,
+                            args: vec![],
+                        },
+                    },
+                ),
+                block(1, Terminator::Return { value: None }),
+            ],
+            vec![UNIT, callable],
+        );
+        body.flow.provenance = crate::compiler_mir::FlowProvenance::Exported;
+        body.flow
+            .indirect_calls
+            .push(crate::compiler_mir::IndirectCallSiteFact {
+                block: 0,
+                outward_protocols: vec![7],
+                capture: ContinuationCapture {
+                    captured_owners: vec![],
+                    captured_references: vec![],
+                    captured_residuals: vec![],
+                    cancellation_safe: true,
+                },
+            });
+        let mut program = program(body);
+        let error = optimize_program(&mut program, &types, OptimizationLevel::O0).unwrap_err();
+        assert!(error.message.contains("indirect-call sites"), "{error}");
     }
 
     #[test]

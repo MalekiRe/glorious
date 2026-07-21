@@ -180,6 +180,131 @@ fn indirect_effectful_calls_preserve_partial_residual_frames_at_all_levels() {
 }
 
 #[test]
+fn nested_indirect_residuals_support_optional_cancellation_and_unknown_multiplicity() {
+    let optional = r#"
+        effect Maybe { [0,1] ask() -> i64 }
+        struct Resource { marker: i64 }
+        impl Use<[0,1]> for Resource {}
+        consume(value: Resource) -> { () }
+        selected() -> i64 {
+            handle {
+                let outer = ((Resource { marker: 1 }, Resource { marker: 2 }), Resource { marker: 3 });
+                let inner = outer.0;
+                let removed = inner.0;
+                consume(removed);
+                let f = () -> i64 / {Maybe} { perform Maybe::ask() };
+                f()
+            } {
+                Maybe::ask() with continuation => { cancel(continuation); 42 }
+            }
+        }
+        main() -> { selected(); () }
+    "#;
+    let multishot = r#"
+        effect Choose { [2,2] choose() -> i64 }
+        struct Resource { marker: i64 }
+        impl Use<[0,1]> for Resource {}
+        consume(value: Resource) -> { () }
+        selected() -> i64 {
+            handle {
+                let outer = ((Resource { marker: 1 }, 20), 20);
+                let inner = outer.0;
+                let removed = inner.0;
+                consume(removed);
+                let f = () -> i64 / {Choose} { perform Choose::choose() };
+                f() + inner.1 + outer.1
+            } {
+                Choose::choose() with continuation => {
+                    let first = resume(continuation, 1);
+                    let second = resume(move continuation, 2);
+                    first + second
+                }
+            }
+        }
+        main() -> { selected(); () }
+    "#;
+    for (name, source, expected) in [
+        (
+            "typed-indirect-nested-optional.gr",
+            optional,
+            Value::I64(42),
+        ),
+        (
+            "typed-indirect-nested-multishot.gr",
+            multishot,
+            Value::I64(83),
+        ),
+    ] {
+        for optimization_level in [
+            OptimizationLevel::O0,
+            OptimizationLevel::O1,
+            OptimizationLevel::O2,
+            OptimizationLevel::O3,
+        ] {
+            let artifact = compile_source_to_bytecode_with_options(
+                name,
+                source,
+                CompileOptions { optimization_level },
+            )
+            .unwrap_or_else(|errors| panic!("{optimization_level:?}: {errors:#?}"));
+            let selected = artifact
+                .functions
+                .iter()
+                .position(|function| function.name == "selected")
+                .unwrap() as u32;
+            assert_eq!(
+                Vm::new(verify(artifact).unwrap())
+                    .run(selected, vec![])
+                    .unwrap(),
+                expected,
+                "{optimization_level:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn nested_indirect_optional_capture_rejects_a_remaining_ticket() {
+    let source = r#"
+        effect Maybe { [0,1] ask() -> i64 }
+        struct Resource { marker: i64 }
+        impl Use<[0,1]> for Resource {}
+        struct Ticket { marker: i64 }
+        impl Use<[1,1]> for Ticket {}
+        consume(value: Resource) -> { () }
+        bad(outer: ((Resource, Ticket), Resource)) -> i64 / {Maybe} {
+            let inner = outer.0;
+            let removed = inner.0;
+            consume(removed);
+            let f = () -> i64 / {Maybe} { perform Maybe::ask() };
+            f()
+        }
+        main() -> { () }
+    "#;
+    for optimization_level in [
+        OptimizationLevel::O0,
+        OptimizationLevel::O1,
+        OptimizationLevel::O2,
+        OptimizationLevel::O3,
+    ] {
+        let errors = compile_source_to_bytecode_with_options(
+            "typed-indirect-nested-hostile.gr",
+            source,
+            CompileOptions { optimization_level },
+        )
+        .unwrap_err();
+        assert!(
+            errors.iter().any(|error| {
+                error
+                    .message
+                    .contains("restricted-use value at an indirect effectful call")
+            }),
+            "{optimization_level:?}: {errors:#?}"
+        );
+    }
+}
+
+#[test]
 fn indirect_optional_effect_rejects_a_positive_residual_on_every_level() {
     let source = r#"
         effect Maybe { [0,1] ask() -> i64 }

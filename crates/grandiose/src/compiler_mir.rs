@@ -169,14 +169,14 @@ pub struct Edge {
 ///
 /// Both register lists are canonical sets (strictly increasing), and
 /// `captured_references` is a subset of `captured_owners`.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ResidualCapture {
     pub register: Register,
     /// One entry per runtime aggregate field; `true` means still initialized.
     pub initialized_fields: Vec<bool>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ContinuationCapture {
     pub captured_owners: Vec<Register>,
     pub captured_references: Vec<Register>,
@@ -751,6 +751,24 @@ pub struct ResumptionSiteFact {
     pub cancellation_cleanup: Option<CleanupPlanId>,
 }
 
+/// The source ownership snapshot and effect row at an indirect-call
+/// suspension boundary.  The ownership solver independently reconstructs the
+/// snapshot before trusting the frontend's cancellation decision.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct IndirectCallSiteFact {
+    pub block: u32,
+    pub outward_protocols: Vec<u32>,
+    pub capture: ContinuationCapture,
+}
+
+/// One source-lowered control-flow join. Incoming block ids are canonical and
+/// let PlaceFlow reject a frontend/CFG mismatch before ownership dataflow.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JoinSiteFact {
+    pub block: u32,
+    pub incoming: Vec<u32>,
+}
+
 /// One drop flag: a compiler-created `u32` local guarding conditional
 /// initialization of `owner`. The VM `Empty` register state realizes the flag
 /// at runtime, so no separate flag value is serialized.
@@ -833,6 +851,8 @@ pub struct PlaceFlow {
     pub handlers: Vec<HandlerSiteFact>,
     pub performs: Vec<PerformSiteFact>,
     pub resumptions: Vec<ResumptionSiteFact>,
+    pub indirect_calls: Vec<IndirectCallSiteFact>,
+    pub joins: Vec<JoinSiteFact>,
     pub drop_flags: Vec<DropFlagFact>,
     /// Move paths discovered/validated during import.
     pub move_paths: MovePaths,
@@ -905,7 +925,7 @@ impl PlaceFlow {
     pub fn canonical_summary(&self) -> String {
         format!(
             "{:?} locals={} scopes={} loans={} labels={} handlers={} performs={} \
-             resumptions={} flags={} move_paths={} plans={}",
+             resumptions={} indirect_calls={} joins={} flags={} move_paths={} plans={}",
             self.provenance,
             self.locals.len(),
             self.scopes.len(),
@@ -914,6 +934,8 @@ impl PlaceFlow {
             self.handlers.len(),
             self.performs.len(),
             self.resumptions.len(),
+            self.indirect_calls.len(),
+            self.joins.len(),
             self.drop_flags.len(),
             self.move_paths.facts.len(),
             self.cleanup_plans.len(),

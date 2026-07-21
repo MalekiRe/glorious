@@ -2820,6 +2820,103 @@ fn terminator_transfer(
             for argument in args {
                 interpreter.operand(argument, "CallIndirect argument")?;
             }
+            if context.strict
+                && context
+                    .function
+                    .flow
+                    .indirect_calls
+                    .iter()
+                    .any(|site| site.block == interpreter.block)
+            {
+                let site = context
+                    .function
+                    .flow
+                    .indirect_calls
+                    .iter()
+                    .find(|site| site.block == interpreter.block)
+                    .expect("site existence checked above");
+                let mut live = interpreter.state.order.clone();
+                if let Some(result) = result {
+                    live.retain(|register| register != result);
+                }
+                live.sort_unstable();
+                if site
+                    .capture
+                    .captured_owners
+                    .iter()
+                    .any(|r| !live.contains(r))
+                    || live.iter().any(|r| {
+                        !site.capture.captured_owners.contains(r) && !context.admits_zero_use(*r)
+                    })
+                {
+                    return Err(interpreter.error(format!(
+                        "CallIndirect captured owners {:?} do not soundly account for live owners {live:?}",
+                        site.capture.captured_owners
+                    )));
+                }
+                let references = site
+                    .capture
+                    .captured_owners
+                    .iter()
+                    .copied()
+                    .filter(|register| interpreter.state.loans.contains_key(register))
+                    .collect::<Vec<_>>();
+                if site.capture.captured_references != references {
+                    return Err(interpreter.error(format!(
+                        "CallIndirect captured references {:?} do not match live loans {references:?}",
+                        site.capture.captured_references
+                    )));
+                }
+                let residuals = site
+                    .capture
+                    .captured_owners
+                    .iter()
+                    .filter_map(
+                        |register| match &interpreter.state.regs[*register as usize] {
+                            RegState::Partial(initialized_fields) => {
+                                Some((*register, initialized_fields))
+                            }
+                            _ => None,
+                        },
+                    )
+                    .collect::<Vec<_>>();
+                if residuals.len() != site.capture.captured_residuals.len()
+                    || residuals.iter().zip(&site.capture.captured_residuals).any(
+                        |((register, fields), recorded)| {
+                            *register != recorded.register
+                                || *fields != &recorded.initialized_fields
+                        },
+                    )
+                {
+                    return Err(interpreter.error(
+                        "CallIndirect residual capture does not match exact partial-owner state",
+                    ));
+                }
+                let cancellation_safe = site.capture.captured_owners.iter().all(|register| {
+                    match &interpreter.state.regs[*register as usize] {
+                        RegState::Partial(initialized) => {
+                            let ty = context.register_type(*register);
+                            let variant = interpreter.state.active_variants[*register as usize];
+                            context.aggregate_fields(ty, variant).is_some_and(|fields| {
+                                fields
+                                    .iter()
+                                    .zip(initialized)
+                                    .all(|(field_ty, initialized)| {
+                                        !*initialized || context.type_admits_zero_use(*field_ty)
+                                    })
+                            })
+                        }
+                        RegState::Live | RegState::MaybeLive => context.admits_zero_use(*register),
+                        RegState::Undefined | RegState::Consumed => false,
+                    }
+                });
+                if site.capture.cancellation_safe != cancellation_safe {
+                    return Err(interpreter.error(format!(
+                        "CallIndirect cancellation-safety fact is {}, but exact cleanup safety is {cancellation_safe}",
+                        site.capture.cancellation_safe
+                    )));
+                }
+            }
             let state = apply_edge(interpreter, normal, params_of(normal.target), *result)?;
             successors.push((normal.target, state));
         }
