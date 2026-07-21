@@ -1,0 +1,4852 @@
+// Layer 1: manifest-bound immutable Text/Bytes leaves. Their bodies are never
+// executed by a compiled program; exact declaration identity lowers each call
+// to its frozen bytecode primitive. Checked UTF-8 remains internal until an
+// ordinary source validator can prove validity; indexed access and slicing are
+// exposed only through the bounds-checking wrappers below.
+__g1_text_byte_len(value: Text) -> usize { () }
+__g1_text_concat(left: Text, right: Text) -> Text { () }
+__g1_text_eq(left: Text, right: Text) -> u32 { () }
+__g1_text_from_utf8_checked(value: Bytes) -> Text { () }
+__g1_text_as_bytes(value: Text) -> Bytes { () }
+__g1_bytes_len(value: Bytes) -> usize { () }
+__g1_bytes_concat(left: Bytes, right: Bytes) -> Bytes { () }
+__g1_bytes_get(value: Bytes, index: usize) -> u8 { () }
+__g1_bytes_slice(value: Bytes, start: usize, end: usize) -> Bytes { () }
+__g1_bytes_from_array_move(value: Array<u8>) -> Bytes { () }
+__g1_bytes_to_array(value: Bytes) -> Array<u8> { () }
+
+// Manifest-bound Array leaves. Their bodies are never executed by a
+// compiled program; exact declaration identity lowers each call to its frozen
+// bytecode primitive. User source cannot invoke these leaves directly.
+__g1_array_new<T>(length: usize, fill: T) -> Array<T>
+    where T: Use<[0,infinity]> { () }
+__g1_array_len<T>(value: &Array<T>) -> usize { () }
+__g1_array_get_copy<T>(value: &Array<T>, index: usize) -> T
+    where T: Use<[0,infinity]> { () }
+__g1_array_get_move<T>(value: &mut Array<T>, index: usize) -> T { () }
+__g1_array_get_borrow_shared<T>(value: &Array<T>, index: usize) -> &T { () }
+__g1_array_get_borrow_unique<T>(value: &mut Array<T>, index: usize) -> &mut T { () }
+__g1_array_set_move<T>(value: &mut Array<T>, index: usize, item: T) -> () { () }
+__g1_array_empty<T>() -> Array<T> { () }
+__g1_array_push_move<T>(value: &mut Array<T>, item: T) -> () { () }
+__g1_array_pop_move<T>(value: &mut Array<T>) -> T { () }
+__g1_array_capacity<T>(value: &Array<T>) -> usize { () }
+__g1_array_reserve<T>(value: &mut Array<T>, additional: usize) -> () { () }
+__g1_array_finish_drained<T>(value: Array<T>) -> () { () }
+
+// Manifest-independent frozen scalar leaves. Exact declaration identity in
+// this trusted source segment selects the primitive; copying one of these
+// spellings into user source creates only an ordinary function. Public source
+// calls go through the ordinary generic wrappers immediately below.
+__g1_int_wrapping_add<T>(left: T, right: T) -> T { () }
+__g1_int_wrapping_sub<T>(left: T, right: T) -> T { () }
+__g1_int_wrapping_mul<T>(left: T, right: T) -> T { () }
+__g1_int_bit_and<T>(left: T, right: T) -> T { () }
+__g1_int_bit_or<T>(left: T, right: T) -> T { () }
+__g1_int_bit_xor<T>(left: T, right: T) -> T { () }
+__g1_int_bit_not<T>(value: T) -> T { () }
+__g1_int_shl<T>(value: T, count: u32) -> T { () }
+__g1_int_shr<T>(value: T, count: u32) -> T { () }
+__g1_int_convert_checked_to_u8<T>(value: T) -> u8 { () }
+__g1_int_convert_checked_to_u16<T>(value: T) -> u16 { () }
+__g1_int_convert_checked_to_u32<T>(value: T) -> u32 { () }
+__g1_int_convert_checked_to_u64<T>(value: T) -> u64 { () }
+__g1_int_convert_checked_to_u128<T>(value: T) -> u128 { () }
+__g1_int_convert_checked_to_usize<T>(value: T) -> usize { () }
+__g1_int_convert_checked_to_i8<T>(value: T) -> i8 { () }
+__g1_int_convert_checked_to_i16<T>(value: T) -> i16 { () }
+__g1_int_convert_checked_to_i32<T>(value: T) -> i32 { () }
+__g1_int_convert_checked_to_i64<T>(value: T) -> i64 { () }
+__g1_int_convert_checked_to_i128<T>(value: T) -> i128 { () }
+__g1_int_convert_checked_to_isize<T>(value: T) -> isize { () }
+__g1_int_convert_wrapping_to_u8<T>(value: T) -> u8 { () }
+__g1_int_convert_wrapping_to_u16<T>(value: T) -> u16 { () }
+__g1_int_convert_wrapping_to_u32<T>(value: T) -> u32 { () }
+__g1_int_convert_wrapping_to_u64<T>(value: T) -> u64 { () }
+__g1_int_convert_wrapping_to_u128<T>(value: T) -> u128 { () }
+__g1_int_convert_wrapping_to_usize<T>(value: T) -> usize { () }
+__g1_int_convert_wrapping_to_i8<T>(value: T) -> i8 { () }
+__g1_int_convert_wrapping_to_i16<T>(value: T) -> i16 { () }
+__g1_int_convert_wrapping_to_i32<T>(value: T) -> i32 { () }
+__g1_int_convert_wrapping_to_i64<T>(value: T) -> i64 { () }
+__g1_int_convert_wrapping_to_i128<T>(value: T) -> i128 { () }
+__g1_int_convert_wrapping_to_isize<T>(value: T) -> isize { () }
+
+wrapping_add<T>(left: T, right: T) -> T {
+    __g1_int_wrapping_add(move left, move right)
+}
+wrapping_sub<T>(left: T, right: T) -> T {
+    __g1_int_wrapping_sub(move left, move right)
+}
+wrapping_mul<T>(left: T, right: T) -> T {
+    __g1_int_wrapping_mul(move left, move right)
+}
+bit_and<T>(left: T, right: T) -> T {
+    __g1_int_bit_and(move left, move right)
+}
+bit_or<T>(left: T, right: T) -> T {
+    __g1_int_bit_or(move left, move right)
+}
+bit_xor<T>(left: T, right: T) -> T {
+    __g1_int_bit_xor(move left, move right)
+}
+bit_not<T>(value: T) -> T { __g1_int_bit_not(move value) }
+shift_left<T>(value: T, count: u32) -> T {
+    __g1_int_shl(move value, move count)
+}
+shift_right<T>(value: T, count: u32) -> T {
+    __g1_int_shr(move value, move count)
+}
+wrapping_convert_to_u8<T>(value: T) -> u8 {
+    __g1_int_convert_wrapping_to_u8(move value)
+}
+wrapping_convert_to_u16<T>(value: T) -> u16 {
+    __g1_int_convert_wrapping_to_u16(move value)
+}
+wrapping_convert_to_u32<T>(value: T) -> u32 {
+    __g1_int_convert_wrapping_to_u32(move value)
+}
+wrapping_convert_to_u64<T>(value: T) -> u64 {
+    __g1_int_convert_wrapping_to_u64(move value)
+}
+wrapping_convert_to_u128<T>(value: T) -> u128 {
+    __g1_int_convert_wrapping_to_u128(move value)
+}
+wrapping_convert_to_usize<T>(value: T) -> usize {
+    __g1_int_convert_wrapping_to_usize(move value)
+}
+wrapping_convert_to_i8<T>(value: T) -> i8 {
+    __g1_int_convert_wrapping_to_i8(move value)
+}
+wrapping_convert_to_i16<T>(value: T) -> i16 {
+    __g1_int_convert_wrapping_to_i16(move value)
+}
+wrapping_convert_to_i32<T>(value: T) -> i32 {
+    __g1_int_convert_wrapping_to_i32(move value)
+}
+wrapping_convert_to_i64<T>(value: T) -> i64 {
+    __g1_int_convert_wrapping_to_i64(move value)
+}
+wrapping_convert_to_i128<T>(value: T) -> i128 {
+    __g1_int_convert_wrapping_to_i128(move value)
+}
+wrapping_convert_to_isize<T>(value: T) -> isize {
+    __g1_int_convert_wrapping_to_isize(move value)
+}
+
+// Manifest-bound host leaves. Their declaration identities, not these source
+// spellings, select the four frozen Host ABI G1 imports.
+__g1_process_args_get() -> Array<Text> { () }
+__g1_fs_read(path: Text) -> Bytes { () }
+__g1_fs_write(path: Text, bytes: Bytes) -> () { () }
+__g1_diagnostic_write(text: Text) -> () { () }
+
+// Whole-value ownership utilities. `replace` and `swap` are deliberately
+// expressed through unique-reference move-out plus exact reinitialization, so
+// they work for values whose principal Use interval forbids implicit destroy.
+identity<T>(value: T) -> T { move value }
+
+replace<T>(target: &mut T, incoming: T) -> T {
+    let previous = move *target;
+    *target = move incoming;
+    move previous
+}
+
+swap<T>(left: &mut T, right: &mut T) -> () {
+    let left_value = move *left;
+    let right_value = move *right;
+    *left = move right_value;
+    *right = move left_value;
+}
+
+enum Result<T, E> { Ok(T), Err(E) }
+
+type Option<T> = Result<T, ()>;
+let Option::Some = Result::Ok;
+let None = Result::Err(());
+
+type Bool = Option<()>;
+__g1_bool(value: Bool) -> Bool { value }
+let true = __g1_bool(Option::Some(()));
+let false = __g1_bool(None);
+type String = Text;
+struct Range<T> { start: T, end: T }
+impl<T> Use<[0,infinity]> for Range<T> where T: Use<[0,infinity]> {}
+struct Utf8Error { valid_up_to: usize }
+enum TextRangeError { Reversed, OutOfBounds, NotCharBoundary }
+
+// Layer 2: result-based control. These are ordinary source declarations: the
+// fixities determine grouping, and the Fn constraints are the only source of
+// right-hand laziness.
+infixr 1 else;
+infixl 2 or;
+infixl 3 and;
+prefix 4 not;
+
+effect __ResultCase<A, E> { inspect(value: Result<A, E>) -> !; }
+
+if<A, E, B, F>(condition: Result<A, E>, body: F) -> Result<B, E>
+    where F: Fn<(), Output=B>, A: Use<[0,0]> {
+    handle perform __ResultCase<A, E>::inspect(condition) {
+        __ResultCase<A, E>::inspect(Result::Ok(_)) => Result::Ok(body()),
+        __ResultCase<A, E>::inspect(Result::Err(error)) => Result::Err(error)
+    }
+}
+
+else<A, E, F>(value: Result<A, E>, fallback: F) -> A
+    where F: Fn<(), Output=A>, E: Use<[0,0]> {
+    handle perform __ResultCase<A, E>::inspect(value) {
+        __ResultCase<A, E>::inspect(Result::Ok(result)) => result,
+        __ResultCase<A, E>::inspect(Result::Err(_)) => fallback()
+    }
+}
+
+and<A, E, B, F>(value: Result<A, E>, next: F) -> Result<B, E>
+    where F: Fn<(), Output=Result<B, E>>, A: Use<[0,0]> {
+    handle perform __ResultCase<A, E>::inspect(value) {
+        __ResultCase<A, E>::inspect(Result::Ok(_)) => next(),
+        __ResultCase<A, E>::inspect(Result::Err(error)) => Result::Err(error)
+    }
+}
+
+or<A, E, E2, F>(value: Result<A, E>, alternative: F) -> Result<A, E2>
+    where F: Fn<(), Output=Result<A, E2>>, E: Use<[0,0]> {
+    handle perform __ResultCase<A, E>::inspect(value) {
+        __ResultCase<A, E>::inspect(Result::Ok(result)) => Result::Ok(result),
+        __ResultCase<A, E>::inspect(Result::Err(_)) => alternative()
+    }
+}
+
+not<A, E>(value: Result<A, E>) -> Result<E, A> {
+    handle perform __ResultCase<A, E>::inspect(value) {
+        __ResultCase<A, E>::inspect(Result::Ok(result)) => Result::Err(result),
+        __ResultCase<A, E>::inspect(Result::Err(error)) => Result::Ok(error)
+    }
+}
+
+// Result/Option ownership combinators. These are free source callables bound
+// into the nominal namespaces below; callbacks receive payloads by move, and
+// only predicates/defaulting operations require zero-use evidence for values
+// they intentionally discard.
+__g1_result_is_ok<A, E>(value: Result<A, E>) -> Bool
+    where A: Use<[0,0]>, E: Use<[0,0]> {
+    handle perform __ResultCase<A, E>::inspect(value) {
+        __ResultCase<A, E>::inspect(Result::Ok(_)) => true,
+        __ResultCase<A, E>::inspect(Result::Err(_)) => false
+    }
+}
+
+__g1_result_is_err<A, E>(value: Result<A, E>) -> Bool
+    where A: Use<[0,0]>, E: Use<[0,0]> {
+    not(__g1_result_is_ok(move value))
+}
+
+__g1_result_map<A, E, B, F>(value: Result<A, E>, transform: F) -> Result<B, E>
+    where F: Fn<(A), Output=B>, F: Use<[0,0]> {
+    handle perform __ResultCase<A, E>::inspect(value) {
+        __ResultCase<A, E>::inspect(Result::Ok(result)) =>
+            Result::Ok(transform(move result)),
+        __ResultCase<A, E>::inspect(Result::Err(error)) => Result::Err(error)
+    }
+}
+
+__g1_result_map_err<A, E, E2, F>(value: Result<A, E>, transform: F) -> Result<A, E2>
+    where F: Fn<(E), Output=E2>, F: Use<[0,0]> {
+    handle perform __ResultCase<A, E>::inspect(value) {
+        __ResultCase<A, E>::inspect(Result::Ok(result)) => Result::Ok(result),
+        __ResultCase<A, E>::inspect(Result::Err(error)) =>
+            Result::Err(transform(move error))
+    }
+}
+
+__g1_result_and_then<A, E, B, F>(
+    value: Result<A, E>,
+    transform: F
+) -> Result<B, E> where F: Fn<(A), Output=Result<B, E>>, F: Use<[0,0]> {
+    handle perform __ResultCase<A, E>::inspect(value) {
+        __ResultCase<A, E>::inspect(Result::Ok(result)) => transform(move result),
+        __ResultCase<A, E>::inspect(Result::Err(error)) => Result::Err(error)
+    }
+}
+
+__g1_result_or_else<A, E, E2, F>(
+    value: Result<A, E>,
+    transform: F
+) -> Result<A, E2> where F: Fn<(E), Output=Result<A, E2>>, F: Use<[0,0]> {
+    handle perform __ResultCase<A, E>::inspect(value) {
+        __ResultCase<A, E>::inspect(Result::Ok(result)) => Result::Ok(result),
+        __ResultCase<A, E>::inspect(Result::Err(error)) => transform(move error)
+    }
+}
+
+__g1_result_unwrap_or<A, E>(value: Result<A, E>, fallback: A) -> A
+    where A: Use<[0,0]>, E: Use<[0,0]> {
+    handle perform __ResultCase<A, E>::inspect(value) {
+        __ResultCase<A, E>::inspect(Result::Ok(result)) => result,
+        __ResultCase<A, E>::inspect(Result::Err(_)) => fallback
+    }
+}
+
+__g1_option_map<A, B, F>(value: Option<A>, transform: F) -> Option<B>
+    where F: Fn<(A), Output=B>, F: Use<[0,0]> {
+    handle perform __ResultCase<A, ()>::inspect(value) {
+        __ResultCase<A, ()>::inspect(Result::Ok(result)) =>
+            Option::Some(transform(move result)),
+        __ResultCase<A, ()>::inspect(Result::Err(_)) => None
+    }
+}
+
+__g1_option_and_then<A, B, F>(value: Option<A>, transform: F) -> Option<B>
+    where F: Fn<(A), Output=Option<B>>, F: Use<[0,0]> {
+    handle perform __ResultCase<A, ()>::inspect(value) {
+        __ResultCase<A, ()>::inspect(Result::Ok(result)) => transform(move result),
+        __ResultCase<A, ()>::inspect(Result::Err(_)) => None
+    }
+}
+
+__g1_option_or_else<A, F>(value: Option<A>, fallback: F) -> Option<A>
+    where F: Fn<(), Output=Option<A>>, F: Use<[0,0]> {
+    handle perform __ResultCase<A, ()>::inspect(value) {
+        __ResultCase<A, ()>::inspect(Result::Ok(result)) => Option::Some(result),
+        __ResultCase<A, ()>::inspect(Result::Err(_)) => fallback()
+    }
+}
+
+__g1_option_unwrap_or<A>(value: Option<A>, fallback: A) -> A
+    where A: Use<[0,0]> {
+    handle perform __ResultCase<A, ()>::inspect(value) {
+        __ResultCase<A, ()>::inspect(Result::Ok(result)) => result,
+        __ResultCase<A, ()>::inspect(Result::Err(_)) => fallback
+    }
+}
+
+let Result::is_ok = __g1_result_is_ok;
+let Result::is_err = __g1_result_is_err;
+let Result::map = __g1_result_map;
+let Result::map_err = __g1_result_map_err;
+let Result::and_then = __g1_result_and_then;
+let Result::or_else = __g1_result_or_else;
+let Result::unwrap_or = __g1_result_unwrap_or;
+let Option::is_some = __g1_result_is_ok;
+let Option::is_none = __g1_result_is_err;
+let Option::map = __g1_option_map;
+let Option::and_then = __g1_option_and_then;
+let Option::or_else = __g1_option_or_else;
+let Option::unwrap_or = __g1_result_unwrap_or;
+
+// Layer 3a: non-trapping public Text/Bytes operations. These are ordinary
+// source functions so public call sites never acquire manifest authority.
+// Frozen comparison primitives return the canonical u32 discriminator 0 or 1.
+// Translate it to the result-based Bool through ordinary exhaustive handling;
+// this helper carries no manifest authority of its own.
+effect __U32BooleanCase { inspect(value: u32) -> !; }
+
+__g1_bool_from_u32(value: u32) -> Bool {
+    handle perform __U32BooleanCase::inspect(value) {
+        __U32BooleanCase::inspect(0) => false,
+        __U32BooleanCase::inspect(_) => true
+    }
+}
+
+effect __ScalarBoolCase { inspect(value: Bool) -> !; }
+
+__g1_checked_conversion_valid<T, U>(
+    value: T,
+    candidate: U,
+    roundtrip: T
+) -> Bool
+    where T: Use<[0,infinity]>, U: Use<[0,infinity]> {
+    handle perform __ScalarBoolCase::inspect(value == roundtrip) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) =>
+            handle perform __ScalarBoolCase::inspect(value < 0) {
+                __ScalarBoolCase::inspect(Result::Ok(_)) => candidate < 0,
+                __ScalarBoolCase::inspect(Result::Err(_)) =>
+                    handle perform __ScalarBoolCase::inspect(candidate < 0) {
+                        __ScalarBoolCase::inspect(Result::Ok(_)) => false,
+                        __ScalarBoolCase::inspect(Result::Err(_)) => true
+                    }
+            },
+        __ScalarBoolCase::inspect(Result::Err(_)) => false
+    }
+}
+
+__g1_usize_successor(value: usize) -> usize { move value + 1 }
+
+checked_u8_to_u8(value: u8) -> Option<u8> {
+    let candidate = __g1_int_convert_wrapping_to_u8(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u8(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u8(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u8_to_u16(value: u8) -> Option<u16> {
+    let candidate = __g1_int_convert_wrapping_to_u16(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u8(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u16(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u8_to_u32(value: u8) -> Option<u32> {
+    let candidate = __g1_int_convert_wrapping_to_u32(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u8(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u32(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u8_to_u64(value: u8) -> Option<u64> {
+    let candidate = __g1_int_convert_wrapping_to_u64(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u8(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u64(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u8_to_u128(value: u8) -> Option<u128> {
+    let candidate = __g1_int_convert_wrapping_to_u128(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u8(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u128(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u8_to_usize(value: u8) -> Option<usize> {
+    let candidate = __g1_int_convert_wrapping_to_usize(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u8(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_usize(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u8_to_i8(value: u8) -> Option<i8> {
+    let candidate = __g1_int_convert_wrapping_to_i8(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u8(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i8(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u8_to_i16(value: u8) -> Option<i16> {
+    let candidate = __g1_int_convert_wrapping_to_i16(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u8(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i16(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u8_to_i32(value: u8) -> Option<i32> {
+    let candidate = __g1_int_convert_wrapping_to_i32(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u8(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i32(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u8_to_i64(value: u8) -> Option<i64> {
+    let candidate = __g1_int_convert_wrapping_to_i64(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u8(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i64(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u8_to_i128(value: u8) -> Option<i128> {
+    let candidate = __g1_int_convert_wrapping_to_i128(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u8(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i128(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u8_to_isize(value: u8) -> Option<isize> {
+    let candidate = __g1_int_convert_wrapping_to_isize(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u8(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_isize(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u16_to_u8(value: u16) -> Option<u8> {
+    let candidate = __g1_int_convert_wrapping_to_u8(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u16(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u8(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u16_to_u16(value: u16) -> Option<u16> {
+    let candidate = __g1_int_convert_wrapping_to_u16(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u16(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u16(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u16_to_u32(value: u16) -> Option<u32> {
+    let candidate = __g1_int_convert_wrapping_to_u32(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u16(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u32(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u16_to_u64(value: u16) -> Option<u64> {
+    let candidate = __g1_int_convert_wrapping_to_u64(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u16(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u64(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u16_to_u128(value: u16) -> Option<u128> {
+    let candidate = __g1_int_convert_wrapping_to_u128(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u16(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u128(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u16_to_usize(value: u16) -> Option<usize> {
+    let candidate = __g1_int_convert_wrapping_to_usize(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u16(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_usize(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u16_to_i8(value: u16) -> Option<i8> {
+    let candidate = __g1_int_convert_wrapping_to_i8(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u16(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i8(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u16_to_i16(value: u16) -> Option<i16> {
+    let candidate = __g1_int_convert_wrapping_to_i16(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u16(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i16(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u16_to_i32(value: u16) -> Option<i32> {
+    let candidate = __g1_int_convert_wrapping_to_i32(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u16(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i32(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u16_to_i64(value: u16) -> Option<i64> {
+    let candidate = __g1_int_convert_wrapping_to_i64(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u16(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i64(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u16_to_i128(value: u16) -> Option<i128> {
+    let candidate = __g1_int_convert_wrapping_to_i128(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u16(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i128(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u16_to_isize(value: u16) -> Option<isize> {
+    let candidate = __g1_int_convert_wrapping_to_isize(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u16(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_isize(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u32_to_u8(value: u32) -> Option<u8> {
+    let candidate = __g1_int_convert_wrapping_to_u8(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u32(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u8(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u32_to_u16(value: u32) -> Option<u16> {
+    let candidate = __g1_int_convert_wrapping_to_u16(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u32(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u16(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u32_to_u32(value: u32) -> Option<u32> {
+    let candidate = __g1_int_convert_wrapping_to_u32(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u32(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u32(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u32_to_u64(value: u32) -> Option<u64> {
+    let candidate = __g1_int_convert_wrapping_to_u64(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u32(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u64(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u32_to_u128(value: u32) -> Option<u128> {
+    let candidate = __g1_int_convert_wrapping_to_u128(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u32(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u128(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u32_to_usize(value: u32) -> Option<usize> {
+    let candidate = __g1_int_convert_wrapping_to_usize(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u32(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_usize(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u32_to_i8(value: u32) -> Option<i8> {
+    let candidate = __g1_int_convert_wrapping_to_i8(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u32(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i8(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u32_to_i16(value: u32) -> Option<i16> {
+    let candidate = __g1_int_convert_wrapping_to_i16(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u32(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i16(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u32_to_i32(value: u32) -> Option<i32> {
+    let candidate = __g1_int_convert_wrapping_to_i32(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u32(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i32(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u32_to_i64(value: u32) -> Option<i64> {
+    let candidate = __g1_int_convert_wrapping_to_i64(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u32(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i64(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u32_to_i128(value: u32) -> Option<i128> {
+    let candidate = __g1_int_convert_wrapping_to_i128(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u32(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i128(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u32_to_isize(value: u32) -> Option<isize> {
+    let candidate = __g1_int_convert_wrapping_to_isize(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u32(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_isize(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u64_to_u8(value: u64) -> Option<u8> {
+    let candidate = __g1_int_convert_wrapping_to_u8(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u64(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u8(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u64_to_u16(value: u64) -> Option<u16> {
+    let candidate = __g1_int_convert_wrapping_to_u16(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u64(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u16(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u64_to_u32(value: u64) -> Option<u32> {
+    let candidate = __g1_int_convert_wrapping_to_u32(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u64(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u32(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u64_to_u64(value: u64) -> Option<u64> {
+    let candidate = __g1_int_convert_wrapping_to_u64(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u64(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u64(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u64_to_u128(value: u64) -> Option<u128> {
+    let candidate = __g1_int_convert_wrapping_to_u128(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u64(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u128(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u64_to_usize(value: u64) -> Option<usize> {
+    let candidate = __g1_int_convert_wrapping_to_usize(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u64(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_usize(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u64_to_i8(value: u64) -> Option<i8> {
+    let candidate = __g1_int_convert_wrapping_to_i8(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u64(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i8(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u64_to_i16(value: u64) -> Option<i16> {
+    let candidate = __g1_int_convert_wrapping_to_i16(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u64(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i16(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u64_to_i32(value: u64) -> Option<i32> {
+    let candidate = __g1_int_convert_wrapping_to_i32(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u64(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i32(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u64_to_i64(value: u64) -> Option<i64> {
+    let candidate = __g1_int_convert_wrapping_to_i64(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u64(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i64(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u64_to_i128(value: u64) -> Option<i128> {
+    let candidate = __g1_int_convert_wrapping_to_i128(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u64(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i128(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u64_to_isize(value: u64) -> Option<isize> {
+    let candidate = __g1_int_convert_wrapping_to_isize(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u64(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_isize(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u128_to_u8(value: u128) -> Option<u8> {
+    let candidate = __g1_int_convert_wrapping_to_u8(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u128(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u8(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u128_to_u16(value: u128) -> Option<u16> {
+    let candidate = __g1_int_convert_wrapping_to_u16(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u128(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u16(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u128_to_u32(value: u128) -> Option<u32> {
+    let candidate = __g1_int_convert_wrapping_to_u32(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u128(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u32(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u128_to_u64(value: u128) -> Option<u64> {
+    let candidate = __g1_int_convert_wrapping_to_u64(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u128(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u64(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u128_to_u128(value: u128) -> Option<u128> {
+    let candidate = __g1_int_convert_wrapping_to_u128(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u128(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u128(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u128_to_usize(value: u128) -> Option<usize> {
+    let candidate = __g1_int_convert_wrapping_to_usize(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u128(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_usize(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u128_to_i8(value: u128) -> Option<i8> {
+    let candidate = __g1_int_convert_wrapping_to_i8(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u128(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i8(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u128_to_i16(value: u128) -> Option<i16> {
+    let candidate = __g1_int_convert_wrapping_to_i16(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u128(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i16(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u128_to_i32(value: u128) -> Option<i32> {
+    let candidate = __g1_int_convert_wrapping_to_i32(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u128(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i32(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u128_to_i64(value: u128) -> Option<i64> {
+    let candidate = __g1_int_convert_wrapping_to_i64(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u128(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i64(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u128_to_i128(value: u128) -> Option<i128> {
+    let candidate = __g1_int_convert_wrapping_to_i128(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u128(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i128(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_u128_to_isize(value: u128) -> Option<isize> {
+    let candidate = __g1_int_convert_wrapping_to_isize(value);
+    let roundtrip = __g1_int_convert_wrapping_to_u128(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_isize(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_usize_to_u8(value: usize) -> Option<u8> {
+    let candidate = __g1_int_convert_wrapping_to_u8(value);
+    let roundtrip = __g1_int_convert_wrapping_to_usize(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u8(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_usize_to_u16(value: usize) -> Option<u16> {
+    let candidate = __g1_int_convert_wrapping_to_u16(value);
+    let roundtrip = __g1_int_convert_wrapping_to_usize(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u16(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_usize_to_u32(value: usize) -> Option<u32> {
+    let candidate = __g1_int_convert_wrapping_to_u32(value);
+    let roundtrip = __g1_int_convert_wrapping_to_usize(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u32(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_usize_to_u64(value: usize) -> Option<u64> {
+    let candidate = __g1_int_convert_wrapping_to_u64(value);
+    let roundtrip = __g1_int_convert_wrapping_to_usize(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u64(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_usize_to_u128(value: usize) -> Option<u128> {
+    let candidate = __g1_int_convert_wrapping_to_u128(value);
+    let roundtrip = __g1_int_convert_wrapping_to_usize(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u128(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_usize_to_usize(value: usize) -> Option<usize> {
+    let candidate = __g1_int_convert_wrapping_to_usize(value);
+    let roundtrip = __g1_int_convert_wrapping_to_usize(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_usize(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_usize_to_i8(value: usize) -> Option<i8> {
+    let candidate = __g1_int_convert_wrapping_to_i8(value);
+    let roundtrip = __g1_int_convert_wrapping_to_usize(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i8(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_usize_to_i16(value: usize) -> Option<i16> {
+    let candidate = __g1_int_convert_wrapping_to_i16(value);
+    let roundtrip = __g1_int_convert_wrapping_to_usize(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i16(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_usize_to_i32(value: usize) -> Option<i32> {
+    let candidate = __g1_int_convert_wrapping_to_i32(value);
+    let roundtrip = __g1_int_convert_wrapping_to_usize(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i32(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_usize_to_i64(value: usize) -> Option<i64> {
+    let candidate = __g1_int_convert_wrapping_to_i64(value);
+    let roundtrip = __g1_int_convert_wrapping_to_usize(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i64(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_usize_to_i128(value: usize) -> Option<i128> {
+    let candidate = __g1_int_convert_wrapping_to_i128(value);
+    let roundtrip = __g1_int_convert_wrapping_to_usize(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i128(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_usize_to_isize(value: usize) -> Option<isize> {
+    let candidate = __g1_int_convert_wrapping_to_isize(value);
+    let roundtrip = __g1_int_convert_wrapping_to_usize(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_isize(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i8_to_u8(value: i8) -> Option<u8> {
+    let candidate = __g1_int_convert_wrapping_to_u8(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i8(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u8(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i8_to_u16(value: i8) -> Option<u16> {
+    let candidate = __g1_int_convert_wrapping_to_u16(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i8(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u16(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i8_to_u32(value: i8) -> Option<u32> {
+    let candidate = __g1_int_convert_wrapping_to_u32(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i8(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u32(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i8_to_u64(value: i8) -> Option<u64> {
+    let candidate = __g1_int_convert_wrapping_to_u64(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i8(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u64(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i8_to_u128(value: i8) -> Option<u128> {
+    let candidate = __g1_int_convert_wrapping_to_u128(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i8(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u128(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i8_to_usize(value: i8) -> Option<usize> {
+    let candidate = __g1_int_convert_wrapping_to_usize(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i8(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_usize(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i8_to_i8(value: i8) -> Option<i8> {
+    let candidate = __g1_int_convert_wrapping_to_i8(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i8(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i8(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i8_to_i16(value: i8) -> Option<i16> {
+    let candidate = __g1_int_convert_wrapping_to_i16(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i8(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i16(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i8_to_i32(value: i8) -> Option<i32> {
+    let candidate = __g1_int_convert_wrapping_to_i32(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i8(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i32(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i8_to_i64(value: i8) -> Option<i64> {
+    let candidate = __g1_int_convert_wrapping_to_i64(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i8(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i64(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i8_to_i128(value: i8) -> Option<i128> {
+    let candidate = __g1_int_convert_wrapping_to_i128(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i8(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i128(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i8_to_isize(value: i8) -> Option<isize> {
+    let candidate = __g1_int_convert_wrapping_to_isize(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i8(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_isize(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i16_to_u8(value: i16) -> Option<u8> {
+    let candidate = __g1_int_convert_wrapping_to_u8(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i16(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u8(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i16_to_u16(value: i16) -> Option<u16> {
+    let candidate = __g1_int_convert_wrapping_to_u16(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i16(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u16(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i16_to_u32(value: i16) -> Option<u32> {
+    let candidate = __g1_int_convert_wrapping_to_u32(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i16(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u32(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i16_to_u64(value: i16) -> Option<u64> {
+    let candidate = __g1_int_convert_wrapping_to_u64(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i16(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u64(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i16_to_u128(value: i16) -> Option<u128> {
+    let candidate = __g1_int_convert_wrapping_to_u128(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i16(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u128(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i16_to_usize(value: i16) -> Option<usize> {
+    let candidate = __g1_int_convert_wrapping_to_usize(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i16(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_usize(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i16_to_i8(value: i16) -> Option<i8> {
+    let candidate = __g1_int_convert_wrapping_to_i8(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i16(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i8(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i16_to_i16(value: i16) -> Option<i16> {
+    let candidate = __g1_int_convert_wrapping_to_i16(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i16(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i16(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i16_to_i32(value: i16) -> Option<i32> {
+    let candidate = __g1_int_convert_wrapping_to_i32(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i16(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i32(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i16_to_i64(value: i16) -> Option<i64> {
+    let candidate = __g1_int_convert_wrapping_to_i64(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i16(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i64(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i16_to_i128(value: i16) -> Option<i128> {
+    let candidate = __g1_int_convert_wrapping_to_i128(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i16(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i128(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i16_to_isize(value: i16) -> Option<isize> {
+    let candidate = __g1_int_convert_wrapping_to_isize(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i16(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_isize(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i32_to_u8(value: i32) -> Option<u8> {
+    let candidate = __g1_int_convert_wrapping_to_u8(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i32(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u8(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i32_to_u16(value: i32) -> Option<u16> {
+    let candidate = __g1_int_convert_wrapping_to_u16(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i32(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u16(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i32_to_u32(value: i32) -> Option<u32> {
+    let candidate = __g1_int_convert_wrapping_to_u32(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i32(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u32(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i32_to_u64(value: i32) -> Option<u64> {
+    let candidate = __g1_int_convert_wrapping_to_u64(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i32(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u64(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i32_to_u128(value: i32) -> Option<u128> {
+    let candidate = __g1_int_convert_wrapping_to_u128(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i32(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u128(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i32_to_usize(value: i32) -> Option<usize> {
+    let candidate = __g1_int_convert_wrapping_to_usize(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i32(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_usize(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i32_to_i8(value: i32) -> Option<i8> {
+    let candidate = __g1_int_convert_wrapping_to_i8(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i32(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i8(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i32_to_i16(value: i32) -> Option<i16> {
+    let candidate = __g1_int_convert_wrapping_to_i16(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i32(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i16(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i32_to_i32(value: i32) -> Option<i32> {
+    let candidate = __g1_int_convert_wrapping_to_i32(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i32(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i32(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i32_to_i64(value: i32) -> Option<i64> {
+    let candidate = __g1_int_convert_wrapping_to_i64(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i32(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i64(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i32_to_i128(value: i32) -> Option<i128> {
+    let candidate = __g1_int_convert_wrapping_to_i128(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i32(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i128(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i32_to_isize(value: i32) -> Option<isize> {
+    let candidate = __g1_int_convert_wrapping_to_isize(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i32(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_isize(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i64_to_u8(value: i64) -> Option<u8> {
+    let candidate = __g1_int_convert_wrapping_to_u8(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i64(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u8(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i64_to_u16(value: i64) -> Option<u16> {
+    let candidate = __g1_int_convert_wrapping_to_u16(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i64(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u16(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i64_to_u32(value: i64) -> Option<u32> {
+    let candidate = __g1_int_convert_wrapping_to_u32(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i64(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u32(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i64_to_u64(value: i64) -> Option<u64> {
+    let candidate = __g1_int_convert_wrapping_to_u64(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i64(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u64(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i64_to_u128(value: i64) -> Option<u128> {
+    let candidate = __g1_int_convert_wrapping_to_u128(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i64(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u128(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i64_to_usize(value: i64) -> Option<usize> {
+    let candidate = __g1_int_convert_wrapping_to_usize(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i64(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_usize(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i64_to_i8(value: i64) -> Option<i8> {
+    let candidate = __g1_int_convert_wrapping_to_i8(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i64(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i8(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i64_to_i16(value: i64) -> Option<i16> {
+    let candidate = __g1_int_convert_wrapping_to_i16(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i64(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i16(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i64_to_i32(value: i64) -> Option<i32> {
+    let candidate = __g1_int_convert_wrapping_to_i32(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i64(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i32(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i64_to_i64(value: i64) -> Option<i64> {
+    let candidate = __g1_int_convert_wrapping_to_i64(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i64(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i64(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i64_to_i128(value: i64) -> Option<i128> {
+    let candidate = __g1_int_convert_wrapping_to_i128(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i64(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i128(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i64_to_isize(value: i64) -> Option<isize> {
+    let candidate = __g1_int_convert_wrapping_to_isize(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i64(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_isize(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i128_to_u8(value: i128) -> Option<u8> {
+    let candidate = __g1_int_convert_wrapping_to_u8(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i128(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u8(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i128_to_u16(value: i128) -> Option<u16> {
+    let candidate = __g1_int_convert_wrapping_to_u16(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i128(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u16(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i128_to_u32(value: i128) -> Option<u32> {
+    let candidate = __g1_int_convert_wrapping_to_u32(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i128(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u32(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i128_to_u64(value: i128) -> Option<u64> {
+    let candidate = __g1_int_convert_wrapping_to_u64(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i128(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u64(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i128_to_u128(value: i128) -> Option<u128> {
+    let candidate = __g1_int_convert_wrapping_to_u128(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i128(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u128(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i128_to_usize(value: i128) -> Option<usize> {
+    let candidate = __g1_int_convert_wrapping_to_usize(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i128(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_usize(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i128_to_i8(value: i128) -> Option<i8> {
+    let candidate = __g1_int_convert_wrapping_to_i8(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i128(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i8(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i128_to_i16(value: i128) -> Option<i16> {
+    let candidate = __g1_int_convert_wrapping_to_i16(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i128(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i16(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i128_to_i32(value: i128) -> Option<i32> {
+    let candidate = __g1_int_convert_wrapping_to_i32(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i128(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i32(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i128_to_i64(value: i128) -> Option<i64> {
+    let candidate = __g1_int_convert_wrapping_to_i64(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i128(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i64(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i128_to_i128(value: i128) -> Option<i128> {
+    let candidate = __g1_int_convert_wrapping_to_i128(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i128(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i128(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_i128_to_isize(value: i128) -> Option<isize> {
+    let candidate = __g1_int_convert_wrapping_to_isize(value);
+    let roundtrip = __g1_int_convert_wrapping_to_i128(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_isize(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_isize_to_u8(value: isize) -> Option<u8> {
+    let candidate = __g1_int_convert_wrapping_to_u8(value);
+    let roundtrip = __g1_int_convert_wrapping_to_isize(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u8(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_isize_to_u16(value: isize) -> Option<u16> {
+    let candidate = __g1_int_convert_wrapping_to_u16(value);
+    let roundtrip = __g1_int_convert_wrapping_to_isize(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u16(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_isize_to_u32(value: isize) -> Option<u32> {
+    let candidate = __g1_int_convert_wrapping_to_u32(value);
+    let roundtrip = __g1_int_convert_wrapping_to_isize(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u32(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_isize_to_u64(value: isize) -> Option<u64> {
+    let candidate = __g1_int_convert_wrapping_to_u64(value);
+    let roundtrip = __g1_int_convert_wrapping_to_isize(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u64(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_isize_to_u128(value: isize) -> Option<u128> {
+    let candidate = __g1_int_convert_wrapping_to_u128(value);
+    let roundtrip = __g1_int_convert_wrapping_to_isize(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_u128(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_isize_to_usize(value: isize) -> Option<usize> {
+    let candidate = __g1_int_convert_wrapping_to_usize(value);
+    let roundtrip = __g1_int_convert_wrapping_to_isize(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_usize(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_isize_to_i8(value: isize) -> Option<i8> {
+    let candidate = __g1_int_convert_wrapping_to_i8(value);
+    let roundtrip = __g1_int_convert_wrapping_to_isize(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i8(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_isize_to_i16(value: isize) -> Option<i16> {
+    let candidate = __g1_int_convert_wrapping_to_i16(value);
+    let roundtrip = __g1_int_convert_wrapping_to_isize(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i16(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_isize_to_i32(value: isize) -> Option<i32> {
+    let candidate = __g1_int_convert_wrapping_to_i32(value);
+    let roundtrip = __g1_int_convert_wrapping_to_isize(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i32(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_isize_to_i64(value: isize) -> Option<i64> {
+    let candidate = __g1_int_convert_wrapping_to_i64(value);
+    let roundtrip = __g1_int_convert_wrapping_to_isize(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i64(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_isize_to_i128(value: isize) -> Option<i128> {
+    let candidate = __g1_int_convert_wrapping_to_i128(value);
+    let roundtrip = __g1_int_convert_wrapping_to_isize(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_i128(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+checked_isize_to_isize(value: isize) -> Option<isize> {
+    let candidate = __g1_int_convert_wrapping_to_isize(value);
+    let roundtrip = __g1_int_convert_wrapping_to_isize(candidate);
+    handle perform __ScalarBoolCase::inspect(__g1_checked_conversion_valid(value, candidate, roundtrip)) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(__g1_int_convert_checked_to_isize(value)),
+        __ScalarBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+__g1_usize_add(left: usize, right: usize) -> usize { move left + move right }
+
+checked_usize_add(left: usize, right: usize) -> Option<usize> {
+    let candidate = wrapping_add(left, right);
+    handle perform __ScalarBoolCase::inspect(candidate < left) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => None,
+        __ScalarBoolCase::inspect(Result::Err(_)) => Option::Some(candidate)
+    }
+}
+
+checked_usize_sub(left: usize, right: usize) -> Option<usize> {
+    handle perform __ScalarBoolCase::inspect(left < right) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => None,
+        __ScalarBoolCase::inspect(Result::Err(_)) => Option::Some(left - right)
+    }
+}
+
+checked_usize_mul(left: usize, right: usize) -> Option<usize> {
+    handle perform __ScalarBoolCase::inspect(left == 0) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(0),
+        __ScalarBoolCase::inspect(Result::Err(_)) => {
+            let candidate = wrapping_mul(left, right);
+            handle perform __ScalarBoolCase::inspect(candidate / left == right) {
+                __ScalarBoolCase::inspect(Result::Ok(_)) => Option::Some(candidate),
+                __ScalarBoolCase::inspect(Result::Err(_)) => None
+            }
+        }
+    }
+}
+
+// Total queries over half-open usize ranges. Reversed ranges are empty, so
+// `len` is saturating. Intersection excludes empty/touching overlap. A checked
+// offset is relative to `start` and returns the absolute in-range position.
+__g1_range_len(value: &Range<usize>) -> usize {
+    handle perform __ScalarBoolCase::inspect(value.start <= value.end) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => value.end - value.start,
+        __ScalarBoolCase::inspect(Result::Err(_)) => 0
+    }
+}
+
+__g1_range_is_empty(value: &Range<usize>) -> Bool {
+    value.end <= value.start
+}
+
+__g1_range_contains(value: &Range<usize>, candidate: usize) -> Bool {
+    handle perform __ScalarBoolCase::inspect(value.start <= candidate) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => candidate < value.end,
+        __ScalarBoolCase::inspect(Result::Err(_)) => false
+    }
+}
+
+__g1_range_usize(start: usize, end: usize) -> Range<usize> {
+    Range { start: move start, end: move end }
+}
+
+__g1_range_some(value: Range<usize>) -> Option<Range<usize>> {
+    Option::Some(move value)
+}
+
+__g1_range_none() -> Option<Range<usize>> { None }
+
+__g1_range_offset_some(value: usize) -> Option<usize> {
+    Option::Some(move value)
+}
+
+__g1_range_offset_none() -> Option<usize> { None }
+
+__g1_range_max(left: usize, right: usize) -> usize {
+    handle perform __ScalarBoolCase::inspect(left < right) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => right,
+        __ScalarBoolCase::inspect(Result::Err(_)) => left
+    }
+}
+
+__g1_range_min(left: usize, right: usize) -> usize {
+    handle perform __ScalarBoolCase::inspect(left < right) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => left,
+        __ScalarBoolCase::inspect(Result::Err(_)) => right
+    }
+}
+
+__g1_range_intersection(
+    left: &Range<usize>,
+    right: &Range<usize>
+) -> Option<Range<usize>> {
+    let start = __g1_range_max(left.start, right.start);
+    let end = __g1_range_min(left.end, right.end);
+    handle perform __ScalarBoolCase::inspect(start < end) {
+        __ScalarBoolCase::inspect(Result::Ok(_)) => __g1_range_some(
+            __g1_range_usize(move start, move end)
+        ),
+        __ScalarBoolCase::inspect(Result::Err(_)) => __g1_range_none()
+    }
+}
+
+__g1_range_checked_offset(
+    value: &Range<usize>,
+    offset: usize
+) -> Option<usize> {
+    handle perform __ResultCase<usize, ()>::inspect(
+        checked_usize_add(value.start, move offset)
+    ) {
+        __ResultCase<usize, ()>::inspect(Result::Ok(candidate)) =>
+            handle perform __ScalarBoolCase::inspect(candidate < value.end) {
+                __ScalarBoolCase::inspect(Result::Ok(_)) =>
+                    __g1_range_offset_some(move candidate),
+                __ScalarBoolCase::inspect(Result::Err(_)) =>
+                    __g1_range_offset_none()
+            },
+        __ResultCase<usize, ()>::inspect(Result::Err(_)) =>
+            __g1_range_offset_none()
+    }
+}
+
+let Range::len = __g1_range_len;
+let Range::is_empty = __g1_range_is_empty;
+let Range::contains = __g1_range_contains;
+let Range::intersection = __g1_range_intersection;
+let Range::checked_offset = __g1_range_checked_offset;
+
+__g1_utf8_valid() -> Result<(), Utf8Error> { Result::Ok(()) }
+__g1_utf8_invalid(valid_up_to: usize) -> Result<(), Utf8Error> {
+    Result::Err(Utf8Error { valid_up_to: move valid_up_to })
+}
+__g1_utf8_string_ok(value: String) -> Result<String, Utf8Error> {
+    Result::Ok(move value)
+}
+__g1_utf8_string_err(error: Utf8Error) -> Result<String, Utf8Error> {
+    Result::Err(move error)
+}
+effect __Utf8ValidationCase { inspect(value: Result<(), Utf8Error>) -> !; }
+
+__g1_string_byte_len(value: &String) -> usize {
+    __g1_text_byte_len(*value)
+}
+
+__g1_string_empty() -> String { "" }
+
+__g1_string_is_empty(value: &String) -> Bool {
+    __g1_string_byte_len(value) == 0
+}
+
+__g1_string_concat(left: String, right: String) -> String {
+    __g1_text_concat(move left, move right)
+}
+
+__g1_string_as_bytes(value: &String) -> Bytes {
+    __g1_text_as_bytes(*value)
+}
+
+__g1_string_eq(left: &String, right: &String) -> Bool {
+    __g1_bool_from_u32(__g1_text_eq(*left, *right))
+}
+
+__g1_bytes_len_public(value: &Bytes) -> usize {
+    __g1_bytes_len(*value)
+}
+
+__g1_bytes_concat_public(left: Bytes, right: Bytes) -> Bytes {
+    __g1_bytes_concat(move left, move right)
+}
+
+__g1_bytes_is_empty(value: &Bytes) -> Bool {
+    __g1_bytes_len_public(value) == 0
+}
+
+// The raw byte operations below trap on invalid indices. Their public wrappers
+// validate every bound in ordinary source before reaching those leaves.
+enum BytesIndexError { OutOfBounds }
+enum BytesRangeError { Reversed, OutOfBounds }
+effect __BytesBoolCase { inspect(value: Bool) -> !; }
+
+__g1_bytes_get_public(value: &Bytes, index: usize) -> Result<u8, BytesIndexError> {
+    let owned = *value;
+    handle perform __BytesBoolCase::inspect(index < __g1_bytes_len(owned)) {
+        __BytesBoolCase::inspect(Result::Ok(_)) =>
+            Result::Ok(__g1_bytes_get(owned, index)),
+        __BytesBoolCase::inspect(Result::Err(_)) =>
+            Result::Err(BytesIndexError::OutOfBounds)
+    }
+}
+
+__g1_bytes_slice_public(
+    value: &Bytes,
+    start: usize,
+    end: usize
+) -> Result<Bytes, BytesRangeError> {
+    let owned = *value;
+    handle perform __BytesBoolCase::inspect(start <= end) {
+        __BytesBoolCase::inspect(Result::Ok(_)) =>
+            handle perform __BytesBoolCase::inspect(
+                end <= __g1_bytes_len(owned)
+            ) {
+                __BytesBoolCase::inspect(Result::Ok(_)) =>
+                    Result::Ok(__g1_bytes_slice(owned, start, end)),
+                __BytesBoolCase::inspect(Result::Err(_)) =>
+                    Result::Err(BytesRangeError::OutOfBounds)
+            },
+        __BytesBoolCase::inspect(Result::Err(_)) =>
+            Result::Err(BytesRangeError::Reversed)
+    }
+}
+
+__g1_bytes_eq_at(
+    left: Bytes,
+    right: Bytes,
+    index: usize,
+    length: usize
+) -> Bool {
+    handle perform __BytesBoolCase::inspect(index == length) {
+        __BytesBoolCase::inspect(Result::Ok(_)) => true,
+        __BytesBoolCase::inspect(Result::Err(_)) =>
+            handle perform __BytesBoolCase::inspect(
+                __g1_bytes_get(left, index) == __g1_bytes_get(right, index)
+            ) {
+                __BytesBoolCase::inspect(Result::Ok(_)) =>
+                    __g1_bytes_eq_at(
+                        move left,
+                        move right,
+                        move index + 1,
+                        move length
+                    ),
+                __BytesBoolCase::inspect(Result::Err(_)) => false
+            }
+    }
+}
+
+__g1_bytes_eq(left: &Bytes, right: &Bytes) -> Bool {
+    let left_owned = *left;
+    let right_owned = *right;
+    let left_length = __g1_bytes_len(left_owned);
+    let right_length = __g1_bytes_len(right_owned);
+    handle perform __BytesBoolCase::inspect(left_length == right_length) {
+        __BytesBoolCase::inspect(Result::Ok(_)) =>
+            __g1_bytes_eq_at(left_owned, right_owned, 0, left_length),
+        __BytesBoolCase::inspect(Result::Err(_)) => false
+    }
+}
+
+// Validate one UTF-8 sequence's unconstrained continuation tail. `cursor` is
+// always checked before the private trapping byte leaf. Invalid and truncated
+// sequences report the byte offset of their lead byte, matching `valid_up_to`.
+__g1_utf8_continuations(
+    value: Bytes,
+    sequence_start: usize,
+    cursor: usize,
+    sequence_end: usize
+) -> Result<(), Utf8Error> {
+    let length = __g1_bytes_len(value);
+    handle perform __BytesBoolCase::inspect(cursor == sequence_end) {
+        __BytesBoolCase::inspect(Result::Ok(_)) =>
+            __g1_utf8_validate_at(move value, move cursor),
+        __BytesBoolCase::inspect(Result::Err(_)) =>
+            handle perform __BytesBoolCase::inspect(cursor < length) {
+                __BytesBoolCase::inspect(Result::Ok(_)) => {
+                    let byte = __g1_bytes_get(value, cursor);
+                    handle perform __BytesBoolCase::inspect(128 <= byte) {
+                        __BytesBoolCase::inspect(Result::Ok(_)) =>
+                            handle perform __BytesBoolCase::inspect(byte <= 191) {
+                                __BytesBoolCase::inspect(Result::Ok(_)) =>
+                                    __g1_utf8_continuations(
+                                        move value,
+                                        move sequence_start,
+                                        __g1_usize_successor(move cursor),
+                                        move sequence_end
+                                    ),
+                                __BytesBoolCase::inspect(Result::Err(_)) =>
+                                    __g1_utf8_invalid(move sequence_start)
+                            },
+                        __BytesBoolCase::inspect(Result::Err(_)) =>
+                            __g1_utf8_invalid(move sequence_start)
+                    }
+                },
+                __BytesBoolCase::inspect(Result::Err(_)) =>
+                    __g1_utf8_invalid(move sequence_start)
+            }
+    }
+}
+
+// Validate the specially constrained second byte of a multibyte sequence.
+// The remaining continuation bytes all use the ordinary 0x80..=0xbf range.
+__g1_utf8_second(
+    value: Bytes,
+    sequence_start: usize,
+    minimum: u8,
+    maximum: u8,
+    sequence_end: usize
+) -> Result<(), Utf8Error> {
+    let length = __g1_bytes_len(value);
+    handle perform __BytesBoolCase::inspect(sequence_start < length) {
+        __BytesBoolCase::inspect(Result::Ok(_)) => {
+            let second_index = __g1_usize_successor(sequence_start);
+            handle perform __BytesBoolCase::inspect(second_index < length) {
+                __BytesBoolCase::inspect(Result::Ok(_)) => {
+                    let second = __g1_bytes_get(value, second_index);
+                    handle perform __BytesBoolCase::inspect(minimum <= second) {
+                        __BytesBoolCase::inspect(Result::Ok(_)) =>
+                            handle perform __BytesBoolCase::inspect(second <= maximum) {
+                                __BytesBoolCase::inspect(Result::Ok(_)) => {
+                                    __g1_utf8_continuations(
+                                        move value,
+                                        move sequence_start,
+                                        __g1_usize_successor(move second_index),
+                                        move sequence_end
+                                    )
+                                },
+                                __BytesBoolCase::inspect(Result::Err(_)) =>
+                                    __g1_utf8_invalid(move sequence_start)
+                            },
+                        __BytesBoolCase::inspect(Result::Err(_)) =>
+                            __g1_utf8_invalid(move sequence_start)
+                    }
+                },
+                __BytesBoolCase::inspect(Result::Err(_)) =>
+                    __g1_utf8_invalid(move sequence_start)
+            }
+        },
+        __BytesBoolCase::inspect(Result::Err(_)) =>
+            __g1_utf8_invalid(move sequence_start)
+    }
+}
+
+__g1_utf8_validate_at(value: Bytes, index: usize) -> Result<(), Utf8Error> {
+    let length = __g1_bytes_len(value);
+    handle perform __BytesBoolCase::inspect(index <= length) {
+        __BytesBoolCase::inspect(Result::Ok(_)) =>
+            handle perform __BytesBoolCase::inspect(index == length) {
+                __BytesBoolCase::inspect(Result::Ok(_)) =>
+                    __g1_utf8_valid(),
+                __BytesBoolCase::inspect(Result::Err(_)) => {
+            // `index` begins at zero and advances only within `length`, so this
+            // read is safe after the equality test above.
+            let lead = __g1_bytes_get(value, index);
+            handle perform __BytesBoolCase::inspect(lead <= 127) {
+                __BytesBoolCase::inspect(Result::Ok(_)) =>
+                    __g1_utf8_validate_at(
+                        move value,
+                        __g1_usize_successor(move index)
+                    ),
+                __BytesBoolCase::inspect(Result::Err(_)) =>
+                    handle perform __BytesBoolCase::inspect(194 <= lead) {
+                        __BytesBoolCase::inspect(Result::Ok(_)) =>
+                            handle perform __BytesBoolCase::inspect(lead <= 223) {
+                                __BytesBoolCase::inspect(Result::Ok(_)) =>
+                                    __g1_utf8_second(
+                                        move value, index, 128, 191,
+                                        __g1_usize_add(index, 2)
+                                    ),
+                                __BytesBoolCase::inspect(Result::Err(_)) =>
+                                    handle perform __BytesBoolCase::inspect(
+                                        lead == 224
+                                    ) {
+                                        __BytesBoolCase::inspect(Result::Ok(_)) =>
+                                            __g1_utf8_second(
+                                                move value, index, 160, 191,
+                                                __g1_usize_add(index, 3)
+                                            ),
+                                        __BytesBoolCase::inspect(Result::Err(_)) =>
+                                            handle perform __BytesBoolCase::inspect(
+                                                lead == 237
+                                            ) {
+                                                __BytesBoolCase::inspect(Result::Ok(_)) =>
+                                                    __g1_utf8_second(
+                                                        move value, index, 128, 159,
+                                                        __g1_usize_add(index, 3)
+                                                    ),
+                                                __BytesBoolCase::inspect(Result::Err(_)) =>
+                                                    handle perform __BytesBoolCase::inspect(
+                                                        225 <= lead
+                                                    ) {
+                                                        __BytesBoolCase::inspect(Result::Ok(_)) =>
+                                                            handle perform __BytesBoolCase::inspect(
+                                                                lead <= 239
+                                                            ) {
+                                                                __BytesBoolCase::inspect(Result::Ok(_)) =>
+                                                                    __g1_utf8_second(
+                                                                        move value, index, 128, 191,
+                                                                        __g1_usize_add(index, 3)
+                                                                    ),
+                                                                __BytesBoolCase::inspect(Result::Err(_)) =>
+                                                                    __g1_utf8_validate_four(
+                                                                        move value, move index,
+                                                                        move lead
+                                                                    )
+                                                            },
+                                                        __BytesBoolCase::inspect(Result::Err(_)) =>
+                                                            __g1_utf8_invalid(move index)
+                                                    }
+                                            }
+                                    }
+                            },
+                        __BytesBoolCase::inspect(Result::Err(_)) =>
+                            __g1_utf8_invalid(move index)
+                    }
+            }
+        },
+            },
+        __BytesBoolCase::inspect(Result::Err(_)) =>
+            __g1_utf8_invalid(move length)
+    }
+}
+
+__g1_utf8_validate_four(
+    value: Bytes,
+    index: usize,
+    lead: u8
+) -> Result<(), Utf8Error> {
+    let length = __g1_bytes_len(value);
+    handle perform __BytesBoolCase::inspect(index < length) {
+        __BytesBoolCase::inspect(Result::Ok(_)) =>
+            handle perform __BytesBoolCase::inspect(lead == 240) {
+                __BytesBoolCase::inspect(Result::Ok(_)) =>
+                    __g1_utf8_second(
+                        move value, index, 144, 191,
+                        __g1_usize_add(index, 4)
+                    ),
+                __BytesBoolCase::inspect(Result::Err(_)) =>
+                    handle perform __BytesBoolCase::inspect(lead == 244) {
+                        __BytesBoolCase::inspect(Result::Ok(_)) =>
+                            __g1_utf8_second(
+                                move value, index, 128, 143,
+                                __g1_usize_add(index, 4)
+                            ),
+                        __BytesBoolCase::inspect(Result::Err(_)) =>
+                            handle perform __BytesBoolCase::inspect(241 <= lead) {
+                                __BytesBoolCase::inspect(Result::Ok(_)) =>
+                                    handle perform __BytesBoolCase::inspect(
+                                        lead <= 243
+                                    ) {
+                                        __BytesBoolCase::inspect(Result::Ok(_)) =>
+                                            __g1_utf8_second(
+                                                move value, index, 128, 191,
+                                                __g1_usize_add(index, 4)
+                                            ),
+                                        __BytesBoolCase::inspect(Result::Err(_)) =>
+                                            __g1_utf8_invalid(move index)
+                                    },
+                                __BytesBoolCase::inspect(Result::Err(_)) =>
+                                    __g1_utf8_invalid(move index)
+                            }
+                    }
+            },
+        __BytesBoolCase::inspect(Result::Err(_)) =>
+            __g1_utf8_invalid(move length)
+    }
+}
+
+__g1_string_from_utf8(value: Bytes) -> Result<String, Utf8Error> {
+    handle perform __Utf8ValidationCase::inspect(
+        __g1_utf8_validate_at(value, 0)
+    ) {
+        __Utf8ValidationCase::inspect(Result::Ok(_)) =>
+            __g1_utf8_string_ok(__g1_text_from_utf8_checked(move value)),
+        __Utf8ValidationCase::inspect(Result::Err(error)) =>
+            __g1_utf8_string_err(move error)
+    }
+}
+
+__g1_utf8_boundary(value: Bytes, offset: usize) -> Bool {
+    let length = __g1_bytes_len(value);
+    handle perform __BytesBoolCase::inspect(offset == length) {
+        __BytesBoolCase::inspect(Result::Ok(_)) => true,
+        __BytesBoolCase::inspect(Result::Err(_)) =>
+            handle perform __BytesBoolCase::inspect(offset < length) {
+                __BytesBoolCase::inspect(Result::Ok(_)) => {
+                    let byte = __g1_bytes_get(value, offset);
+                    handle perform __BytesBoolCase::inspect(byte < 128) {
+                        __BytesBoolCase::inspect(Result::Ok(_)) => true,
+                        __BytesBoolCase::inspect(Result::Err(_)) => 192 <= byte
+                    }
+                },
+                __BytesBoolCase::inspect(Result::Err(_)) => false
+            }
+    }
+}
+
+__g1_text_slice_ok(value: String) -> Result<String, TextRangeError> {
+    Result::Ok(move value)
+}
+
+__g1_text_slice_err(error: TextRangeError) -> Result<String, TextRangeError> {
+    Result::Err(move error)
+}
+effect __Utf8SliceConversionCase {
+    inspect(value: Result<String, Utf8Error>) -> !;
+}
+
+__g1_text_slice_from_bytes(bytes: Bytes) -> Result<String, TextRangeError> {
+    handle perform __Utf8SliceConversionCase::inspect(
+        __g1_string_from_utf8(move bytes)
+    ) {
+        __Utf8SliceConversionCase::inspect(Result::Ok(text)) =>
+            __g1_text_slice_ok(move text),
+        __Utf8SliceConversionCase::inspect(Result::Err(_)) =>
+            __g1_text_slice_err(TextRangeError::NotCharBoundary)
+    }
+}
+
+__g1_string_slice_bounds(
+    bytes: Bytes,
+    start: usize,
+    end: usize
+) -> Result<String, TextRangeError> {
+    let length = __g1_bytes_len(bytes);
+    handle perform __BytesBoolCase::inspect(start <= end) {
+        __BytesBoolCase::inspect(Result::Ok(_)) =>
+            handle perform __BytesBoolCase::inspect(end <= length) {
+                __BytesBoolCase::inspect(Result::Ok(_)) =>
+                    handle perform __BytesBoolCase::inspect(
+                        __g1_utf8_boundary(bytes, start)
+                    ) {
+                        __BytesBoolCase::inspect(Result::Ok(_)) =>
+                            handle perform __BytesBoolCase::inspect(
+                                __g1_utf8_boundary(bytes, end)
+                            ) {
+                                __BytesBoolCase::inspect(Result::Ok(_)) =>
+                                    __g1_text_slice_from_bytes(
+                                        __g1_bytes_slice(
+                                            move bytes,
+                                            move start,
+                                            move end
+                                        )
+                                    ),
+                                __BytesBoolCase::inspect(Result::Err(_)) =>
+                                    __g1_text_slice_err(
+                                        TextRangeError::NotCharBoundary
+                                    )
+                            },
+                        __BytesBoolCase::inspect(Result::Err(_)) =>
+                            __g1_text_slice_err(
+                                TextRangeError::NotCharBoundary
+                            )
+                    },
+                __BytesBoolCase::inspect(Result::Err(_)) =>
+                    __g1_text_slice_err(TextRangeError::OutOfBounds)
+            },
+        __BytesBoolCase::inspect(Result::Err(_)) =>
+            __g1_text_slice_err(TextRangeError::Reversed)
+    }
+}
+
+__g1_string_slice(
+    value: &String,
+    range: Range<usize>
+) -> Result<String, TextRangeError> {
+    let start = range.start;
+    let end = range.end;
+    let bytes = __g1_text_as_bytes(*value);
+    handle perform __BytesBoolCase::inspect(start <= end) {
+        __BytesBoolCase::inspect(Result::Ok(_)) =>
+            __g1_string_slice_bounds(
+                move bytes, move start, move end
+            ),
+        __BytesBoolCase::inspect(Result::Err(_)) =>
+            __g1_text_slice_err(TextRangeError::Reversed)
+    }
+}
+
+let String::empty = __g1_string_empty;
+let String::byte_len = __g1_string_byte_len;
+let String::is_empty = __g1_string_is_empty;
+let String::concat = __g1_string_concat;
+let String::as_bytes = __g1_string_as_bytes;
+let String::from_utf8 = __g1_string_from_utf8;
+let String::eq = __g1_string_eq;
+let String::slice = __g1_string_slice;
+let Bytes::len = __g1_bytes_len_public;
+let Bytes::is_empty = __g1_bytes_is_empty;
+let Bytes::eq = __g1_bytes_eq;
+let Bytes::get = __g1_bytes_get_public;
+let Bytes::slice = __g1_bytes_slice_public;
+let Bytes::concat = __g1_bytes_concat_public;
+
+// Layer 3: the public dense collection is an ordinary private-field wrapper.
+// Every public return boundary preserves Array's initialized-prefix invariant;
+// the drained-shell leaf deliberately has no public Vec alias.
+struct Vec<T> { private storage: Array<T> }
+
+// A shared slice is a checked, non-owning window into Vec's dense Array.
+// All representation fields are private: only this defining source segment
+// can establish the start/length invariant or recover the backing Array.
+struct Slice<'a, T> {
+    private base: &'a Array<T>,
+    private start: usize,
+    private length: usize
+}
+
+// Shared iteration threads its checked cursor through an owned state value.
+// `next` yields a relative index rather than a reference so its result carries
+// only the iterator's one backing reference; callers retain the duplicable
+// Slice and obtain the element through Slice::get.
+struct SliceIter<'a, T> {
+    private base: &'a Array<T>,
+    private start: usize,
+    private length: usize,
+    private index: usize
+}
+
+// By-value iteration owns every element not yet yielded. The backing Array is
+// private so only `next` can move an element out or finish the drained shell.
+struct VecIntoIter<T> { private remaining: Vec<T> }
+
+// Iterator state is affine only when abandoning its resident elements is
+// legal. It is never duplicable because that would duplicate the Array owner.
+impl<T> Use<[0,1]> for VecIntoIter<T>
+    where Vec<T>: Use<[0,1]>, T: Use<[0,0]> {}
+
+enum __VecDequeSlot<T> { Empty, Full(T) }
+
+impl<T> Use<[0,1]> for __VecDequeSlot<T> where T: Use<[0,1]> {}
+
+// Every slot below `slots.len` is initialized. `head` is zero when capacity is
+// zero and otherwise remains in range; `length <= capacity`.
+struct VecDeque<T> {
+    private slots: Vec<__VecDequeSlot<T>>,
+    private head: usize,
+    private length: usize
+}
+
+impl<T> Use<[0,1]> for VecDeque<T>
+    where Vec<__VecDequeSlot<T>>: Use<[0,1]>, T: Use<[0,0]> {}
+
+// Mutable views carry the unique Array loan itself and are therefore linear:
+// they cannot be copied or forged outside this authority domain.
+struct SliceMut<'a, T> {
+    private base: &'a mut Array<T>,
+    private start: usize,
+    private length: usize
+}
+
+// Vec's checked operations guard the frozen trapping Array leaves in ordinary
+// source. `true` is Result::Ok and `false` is Result::Err in the public Bool
+// encoding, so the terminal handler selects exactly one access path.
+effect __VecBoolCase { inspect(value: Bool) -> !; }
+effect __VecDequeSlotCase<T> { inspect(value: __VecDequeSlot<T>) -> !; }
+
+__g1_vec_new<T>() -> Vec<T> {
+    Vec { storage: __g1_array_empty() }
+}
+
+__g1_vec_reserve_owned<T>(value: Vec<T>, additional: usize) -> Vec<T> {
+    __g1_vec_reserve(&mut value, additional);
+    value
+}
+
+__g1_vec_with_capacity<T>(capacity: usize) -> Vec<T> {
+    __g1_vec_reserve_owned(
+        Vec { storage: __g1_array_empty() },
+        capacity
+    )
+}
+
+__g1_vec_len<T>(value: &Vec<T>) -> usize {
+    __g1_array_len(&value.storage)
+}
+
+__g1_vec_capacity<T>(value: &Vec<T>) -> usize {
+    __g1_array_capacity(&value.storage)
+}
+
+__g1_vec_reserve<T>(value: &mut Vec<T>, additional: usize) -> () {
+    __g1_array_reserve(&mut value.storage, additional)
+}
+
+__g1_vec_push<T>(value: &mut Vec<T>, item: T) -> () {
+    __g1_array_push_move(&mut value.storage, move item)
+}
+
+__g1_vec_is_empty<T>(value: &Vec<T>) -> Bool {
+    let length = __g1_vec_len(value);
+    length == 0
+}
+
+__g1_vec_pop<'a, T>(value: &'a mut Vec<T>) -> Option<T> {
+    let length = __g1_array_len(&value.storage);
+    let empty = length == 0;
+    handle perform __VecBoolCase::inspect(empty) {
+        __VecBoolCase::inspect(Result::Ok(_)) => None,
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            Option::Some(__g1_array_pop_move(&mut value.storage))
+    }
+}
+
+__g1_vec_get<'a, T>(value: &'a Vec<T>, index: usize) -> Option<&'a T> {
+    let length = __g1_array_len(&value.storage);
+    let in_bounds = index < length;
+    handle perform __VecBoolCase::inspect(in_bounds) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            Option::Some(__g1_array_get_borrow_shared(&value.storage, index)),
+        __VecBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+__g1_vec_get_mut<'a, T>(
+    value: &'a mut Vec<T>,
+    index: usize
+) -> Option<&'a mut T> {
+    let length = __g1_array_len(&value.storage);
+    let in_bounds = index < length;
+    handle perform __VecBoolCase::inspect(in_bounds) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            Option::Some(__g1_array_get_borrow_unique(&mut value.storage, index)),
+        __VecBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+__g1_vec_first<'a, T>(value: &'a Vec<T>) -> Option<&'a T> {
+    __g1_vec_get(value, 0)
+}
+
+__g1_vec_last<'a, T>(value: &'a Vec<T>) -> Option<&'a T> {
+    let length = __g1_array_len(&value.storage);
+    handle perform __VecBoolCase::inspect(length == 0) {
+        __VecBoolCase::inspect(Result::Ok(_)) => None,
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            __g1_vec_get(value, move length - 1)
+    }
+}
+
+__g1_vec_as_slice<'a, T>(value: &'a Vec<T>) -> Slice<'a, T> {
+    Slice {
+        base: &value.storage,
+        start: 0,
+        length: __g1_array_len(&value.storage)
+    }
+}
+
+__g1_vec_as_mut_slice<'a, T>(value: &'a mut Vec<T>) -> SliceMut<'a, T> {
+    let length = __g1_array_len(&value.storage);
+    SliceMut {
+        base: &mut value.storage,
+        start: 0,
+        length: length
+    }
+}
+
+__g1_slice_len<'a, T>(value: Slice<'a, T>) -> usize {
+    value.length
+}
+
+__g1_slice_is_empty<'a, T>(value: Slice<'a, T>) -> Bool {
+    let length = __g1_slice_len(value);
+    length == 0
+}
+
+__g1_slice_get<'a, T>(
+    value: Slice<'a, T>,
+    index: usize
+) -> Option<&'a T> {
+    let Slice { base, start, length } = value;
+    handle perform __VecBoolCase::inspect(index < length) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            Option::Some(__g1_array_get_borrow_shared(
+                base,
+                start + index
+            )),
+        __VecBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+__g1_slice_first<'a, T>(value: Slice<'a, T>) -> Option<&'a T> {
+    __g1_slice_get(value, 0)
+}
+
+__g1_slice_subslice_length<'a, T>(
+    base: &'a Array<T>,
+    base_start: usize,
+    available: usize,
+    start: usize,
+    length: usize
+) -> Option<Slice<'a, T>> {
+    handle perform __VecBoolCase::inspect(length <= available - start) {
+        __VecBoolCase::inspect(Result::Ok(_)) => Option::Some(Slice {
+            base: base,
+            start: base_start + start,
+            length: length
+        }),
+        __VecBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+__g1_slice_subslice<'a, T>(
+    value: Slice<'a, T>,
+    start: usize,
+    length: usize
+) -> Option<Slice<'a, T>> {
+    let Slice { base, start: base_start, length: available } = value;
+    handle perform __VecBoolCase::inspect(start <= available) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_slice_subslice_length(
+                base,
+                base_start,
+                available,
+                start,
+                length
+            ),
+        __VecBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+__g1_slice_iter<'a, T>(value: Slice<'a, T>) -> SliceIter<'a, T> {
+    let Slice { base, start, length } = value;
+    SliceIter {
+        base: base,
+        start: start,
+        length: length,
+        index: 0
+    }
+}
+
+__g1_slice_iter_len<'a, T>(value: &SliceIter<'a, T>) -> usize {
+    value.length - value.index
+}
+
+__g1_slice_iter_is_empty<'a, T>(value: &SliceIter<'a, T>) -> Bool {
+    let remaining = __g1_slice_iter_len(value);
+    remaining == 0
+}
+
+__g1_slice_iter_next<'a, T>(
+    value: SliceIter<'a, T>
+) -> Option<(usize, SliceIter<'a, T>)> {
+    let SliceIter { base, start, length, index } = value;
+    handle perform __VecBoolCase::inspect(index < length) {
+        __VecBoolCase::inspect(Result::Ok(_)) => Option::Some((
+            index,
+            SliceIter {
+                base: base,
+                start: start,
+                length: length,
+                index: index + 1
+            }
+        )),
+        __VecBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+__g1_slice_mut_len<'a, T>(value: &SliceMut<'a, T>) -> usize {
+    value.length
+}
+
+__g1_slice_mut_is_empty<'a, T>(value: &SliceMut<'a, T>) -> Bool {
+    let length = __g1_slice_mut_len(value);
+    length == 0
+}
+
+__g1_slice_mut_get_mut<'a, T>(
+    value: SliceMut<'a, T>,
+    index: usize
+) -> Option<&'a mut T> {
+    let SliceMut { base, start, length } = move value;
+    handle perform __VecBoolCase::inspect(index < length) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            Option::Some(__g1_array_get_borrow_unique(
+                base,
+                start + index
+            )),
+        __VecBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+__g1_slice_mut_first_mut<'a, T>(
+    value: SliceMut<'a, T>
+) -> Option<&'a mut T> {
+    __g1_slice_mut_get_mut(move value, 0)
+}
+
+__g1_slice_mut_get<'a, T>(
+    value: SliceMut<'a, T>,
+    index: usize
+) -> Option<&'a T> {
+    let SliceMut { base, start, length } = move value;
+    handle perform __VecBoolCase::inspect(index < length) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            Option::Some(__g1_array_get_borrow_shared(
+                &*base,
+                start + index
+            )),
+        __VecBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+__g1_slice_mut_first<'a, T>(value: SliceMut<'a, T>) -> Option<&'a T> {
+    __g1_slice_mut_get(move value, 0)
+}
+
+__g1_slice_mut_subslice_mut_length<'a, T>(
+    base: &'a mut Array<T>,
+    base_start: usize,
+    available: usize,
+    start: usize,
+    length: usize
+) -> Option<SliceMut<'a, T>> {
+    handle perform __VecBoolCase::inspect(length <= available - start) {
+        __VecBoolCase::inspect(Result::Ok(_)) => Option::Some(SliceMut {
+            base: base,
+            start: base_start + start,
+            length: length
+        }),
+        __VecBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+__g1_slice_mut_subslice_mut<'a, T>(
+    value: SliceMut<'a, T>,
+    start: usize,
+    length: usize
+) -> Option<SliceMut<'a, T>> {
+    let SliceMut { base, start: base_start, length: available } = move value;
+    handle perform __VecBoolCase::inspect(start <= available) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_slice_mut_subslice_mut_length(
+                base,
+                base_start,
+                available,
+                start,
+                length
+            ),
+        __VecBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+__g1_slice_mut_subslice_length<'a, T>(
+    base: &'a mut Array<T>,
+    base_start: usize,
+    available: usize,
+    start: usize,
+    length: usize
+) -> Option<Slice<'a, T>> {
+    handle perform __VecBoolCase::inspect(length <= available - start) {
+        __VecBoolCase::inspect(Result::Ok(_)) => Option::Some(Slice {
+            base: &*base,
+            start: base_start + start,
+            length: length
+        }),
+        __VecBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+__g1_slice_mut_subslice<'a, T>(
+    value: SliceMut<'a, T>,
+    start: usize,
+    length: usize
+) -> Option<Slice<'a, T>> {
+    let SliceMut { base, start: base_start, length: available } = move value;
+    handle perform __VecBoolCase::inspect(start <= available) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_slice_mut_subslice_length(
+                base,
+                base_start,
+                available,
+                start,
+                length
+            ),
+        __VecBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+// Destructive shrinking is available only when the element's declared use
+// interval includes zero. The private Array pop transfers each removed value
+// into this function, where the bound permits that obligation to end.
+__g1_vec_truncate<T>(value: &mut Vec<T>, length: usize) -> ()
+    where T: Use<[0,0]> {
+    let current = __g1_array_len(&value.storage);
+    handle perform __VecBoolCase::inspect(length < current) {
+        __VecBoolCase::inspect(Result::Ok(_)) => {
+            let removed = __g1_array_pop_move(&mut value.storage);
+            removed;
+            __g1_vec_truncate(move value, length)
+        },
+        __VecBoolCase::inspect(Result::Err(_)) => ()
+    }
+}
+
+__g1_vec_clear<T>(value: &mut Vec<T>) -> ()
+    where T: Use<[0,0]> {
+    let current = __g1_array_len(&value.storage);
+    handle perform __VecBoolCase::inspect(0 < current) {
+        __VecBoolCase::inspect(Result::Ok(_)) => {
+            let removed = __g1_array_pop_move(&mut value.storage);
+            removed;
+            __g1_vec_clear(move value)
+        },
+        __VecBoolCase::inspect(Result::Err(_)) => ()
+    }
+}
+
+// Resize's fill value may be unused, used once per new slot, or copied an
+// unbounded number of times. The same bound also admits zero-use disposal when
+// shrinking, so no Clone or Default contract is implied by this operation.
+__g1_vec_resize_shrink<T>(
+    value: &mut Vec<T>,
+    length: usize,
+    fill: T,
+    current: usize
+) -> ()
+    where T: Use<[0,infinity]> {
+    handle perform __VecBoolCase::inspect(length < current) {
+        __VecBoolCase::inspect(Result::Ok(_)) => {
+            let removed = __g1_array_pop_move(&mut value.storage);
+            removed;
+            __g1_vec_resize(move value, length, fill)
+        },
+        __VecBoolCase::inspect(Result::Err(_)) => {
+            fill;
+            ()
+        }
+    }
+}
+
+__g1_vec_resize<T>(value: &mut Vec<T>, length: usize, fill: T) -> ()
+    where T: Use<[0,infinity]> {
+    let current = __g1_array_len(&value.storage);
+    handle perform __VecBoolCase::inspect(current < length) {
+        __VecBoolCase::inspect(Result::Ok(_)) => {
+            __g1_array_push_move(&mut value.storage, fill);
+            __g1_vec_resize(move value, length, fill)
+        },
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            __g1_vec_resize_shrink(move value, length, fill, current)
+    }
+}
+
+__g1_vec_copy_from_array_step<T>(
+    output: Vec<T>,
+    source: &Array<T>,
+    cursor: usize,
+    end: usize
+) -> Vec<T>
+    where T: Use<[0,infinity]> {
+    let item = __g1_array_get_copy(source, cursor);
+    __g1_array_push_move(&mut output.storage, move item);
+    __g1_vec_copy_from_array(move output, source, cursor + 1, end)
+}
+
+__g1_vec_copy_from_array<T>(
+    output: Vec<T>,
+    source: &Array<T>,
+    cursor: usize,
+    end: usize
+) -> Vec<T>
+    where T: Use<[0,infinity]> {
+    handle perform __VecBoolCase::inspect(cursor < end) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_vec_copy_from_array_step(
+                move output,
+                source,
+                cursor,
+                end
+            ),
+        __VecBoolCase::inspect(Result::Err(_)) => move output
+    }
+}
+
+// Extending from a shared slice copies its initialized window in order. The
+// source remains borrowed and retains all of its ownership obligations.
+__g1_vec_extend_from_slice<'a, T>(
+    value: &mut Vec<T>,
+    source: Slice<'a, T>
+) -> ()
+    where T: Use<[0,infinity]> {
+    let Slice { base, start, length } = source;
+    let copied = __g1_vec_copy_from_array(
+        __g1_vec_new(),
+        base,
+        start,
+        start + length
+    );
+    __g1_vec_append(move value, move copied)
+}
+
+// Checked whole-element rearrangement never exposes Array's temporary empty
+// slots across a function call. Both indices are proven first; the two moves
+// and two writes then form one uninterrupted ownership transaction. Each
+// bounds decision has its own terminal helper so no outer handler retains a
+// unique loan while an inner handler executes.
+__g1_vec_swap_distinct<T>(
+    value: &mut Vec<T>,
+    left: usize,
+    right: usize
+) -> Bool {
+    let left_item = __g1_array_get_move(&mut value.storage, left);
+    let right_item = __g1_array_get_move(&mut value.storage, right);
+    __g1_array_set_move(&mut value.storage, left, move right_item);
+    __g1_array_set_move(&mut value.storage, right, move left_item);
+    true
+}
+
+__g1_vec_swap_equal<T>(
+    value: &mut Vec<T>,
+    left: usize,
+    right: usize
+) -> Bool {
+    handle perform __VecBoolCase::inspect(left == right) {
+        __VecBoolCase::inspect(Result::Ok(_)) => true,
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            __g1_vec_swap_distinct(&mut *value, left, right)
+    }
+}
+
+__g1_vec_swap_right<T>(
+    value: &mut Vec<T>,
+    left: usize,
+    right: usize,
+    length: usize
+) -> Bool {
+    handle perform __VecBoolCase::inspect(right < length) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_vec_swap_equal(&mut *value, left, right),
+        __VecBoolCase::inspect(Result::Err(_)) => false
+    }
+}
+
+__g1_vec_swap<T>(value: &mut Vec<T>, left: usize, right: usize) -> Bool {
+    let length = __g1_array_len(&value.storage);
+    handle perform __VecBoolCase::inspect(left < length) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_vec_swap_right(&mut *value, left, right, length),
+        __VecBoolCase::inspect(Result::Err(_)) => false
+    }
+}
+
+__g1_vec_reverse_between<T>(
+    value: &mut Vec<T>,
+    left: usize,
+    right: usize
+) -> () {
+    handle perform __VecBoolCase::inspect(left < right) {
+        __VecBoolCase::inspect(Result::Ok(_)) => {
+            __g1_vec_swap(&mut *value, left, right);
+            __g1_vec_reverse_between(move value, left + 1, right - 1)
+        },
+        __VecBoolCase::inspect(Result::Err(_)) => ()
+    }
+}
+
+__g1_vec_reverse<T>(value: &mut Vec<T>) -> () {
+    let length = __g1_array_len(&value.storage);
+    handle perform __VecBoolCase::inspect(length == 0) {
+        __VecBoolCase::inspect(Result::Ok(_)) => (),
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            __g1_vec_reverse_between(move value, 0, length - 1)
+    }
+}
+
+// Reversing once lets the private iterator transfer elements through the
+// Array's initialized-suffix pop primitive in original insertion order.
+__g1_vec_into_iter<T>(value: Vec<T>) -> VecIntoIter<T> {
+    __g1_vec_reverse(&mut value);
+    VecIntoIter { remaining: move value }
+}
+
+__g1_vec_into_iter_next<T>(
+    value: VecIntoIter<T>
+) -> Option<(T, VecIntoIter<T>)> {
+    let VecIntoIter { remaining } = move value;
+    let length = __g1_array_len(&remaining.storage);
+    handle perform __VecBoolCase::inspect(length == 0) {
+        __VecBoolCase::inspect(Result::Ok(_)) => {
+            let Vec { storage } = move remaining;
+            __g1_array_finish_drained(move storage);
+            None
+        },
+        __VecBoolCase::inspect(Result::Err(_)) => {
+            let item = __g1_array_pop_move(&mut remaining.storage);
+            Option::Some((
+                move item,
+                VecIntoIter { remaining: move remaining }
+            ))
+        }
+    }
+}
+
+__g1_vec_deque_new<T>() -> VecDeque<T> {
+    VecDeque {
+        slots: __g1_vec_new(),
+        head: 0,
+        length: 0
+    }
+}
+
+__g1_vec_deque_empty_slot<T>() -> __VecDequeSlot<T> {
+    __VecDequeSlot::Empty
+}
+
+__g1_vec_deque_empty_slots<T>(
+    like: &Vec<__VecDequeSlot<T>>
+) -> Vec<__VecDequeSlot<T>> {
+    like;
+    __g1_vec_new()
+}
+
+__g1_vec_deque_len<T>(value: &VecDeque<T>) -> usize { value.length }
+
+__g1_vec_deque_capacity<T>(value: &VecDeque<T>) -> usize {
+    __g1_vec_len(&value.slots)
+}
+
+__g1_vec_deque_is_empty<T>(value: &VecDeque<T>) -> Bool {
+    value.length == 0
+}
+
+__g1_vec_deque_usize_sub(left: usize, right: usize) -> usize {
+    move left - move right
+}
+
+// `offset < capacity` and `base < capacity`; subtraction before addition
+// keeps the non-wrapping branch within usize without computing base+offset.
+__g1_vec_deque_wrap_add(
+    base: usize,
+    offset: usize,
+    capacity: usize
+) -> usize {
+    let until_end = __g1_vec_deque_usize_sub(capacity, base);
+    handle perform __VecBoolCase::inspect(offset < until_end) {
+        __VecBoolCase::inspect(Result::Ok(_)) => base + offset,
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            __g1_vec_deque_usize_sub(offset, until_end)
+    }
+}
+
+__g1_vec_deque_wrap_previous(head: usize, capacity: usize) -> usize {
+    handle perform __VecBoolCase::inspect(head == 0) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_vec_deque_usize_sub(capacity, 1),
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            __g1_vec_deque_usize_sub(head, 1)
+    }
+}
+
+__g1_vec_deque_fill_empty<T>(
+    slots: Vec<__VecDequeSlot<T>>,
+    remaining: usize
+) -> Vec<__VecDequeSlot<T>> {
+    handle perform __VecBoolCase::inspect(remaining == 0) {
+        __VecBoolCase::inspect(Result::Ok(_)) => move slots,
+        __VecBoolCase::inspect(Result::Err(_)) => {
+            __g1_array_push_move(
+                &mut slots.storage,
+                __g1_vec_deque_empty_slot()
+            );
+            __g1_vec_deque_fill_empty(
+                move slots,
+                __g1_vec_deque_usize_sub(remaining, 1)
+            )
+        }
+    }
+}
+
+// Replacing through the unique slot borrow moves the old Slot and installs the
+// new one without exposing an empty Array cell across a call or handler.
+__g1_vec_deque_place<T>(
+    slots: &mut Vec<__VecDequeSlot<T>>,
+    index: usize,
+    capacity: usize,
+    item: T
+) -> () {
+    let previous = replace(
+        __g1_array_get_borrow_unique(&mut slots.storage, index),
+        __VecDequeSlot::Full(move item)
+    );
+    handle perform __VecDequeSlotCase<T>::inspect(move previous) {
+        __VecDequeSlotCase<T>::inspect(__VecDequeSlot::Empty) => (),
+        __VecDequeSlotCase<T>::inspect(__VecDequeSlot::Full(displaced)) => {
+            let next = __g1_vec_deque_wrap_add(index, 1, capacity);
+            __g1_vec_deque_place(
+                move slots,
+                next,
+                capacity,
+                move displaced
+            )
+        }
+    }
+}
+
+__g1_vec_deque_take<T>(
+    slots: &mut Vec<__VecDequeSlot<T>>,
+    index: usize
+) -> __VecDequeSlot<T> {
+    replace(
+        __g1_array_get_borrow_unique(&mut slots.storage, index),
+        __g1_vec_deque_empty_slot()
+    )
+}
+
+__g1_vec_deque_relocate_one<T>(
+    old: Vec<__VecDequeSlot<T>>,
+    fresh: Vec<__VecDequeSlot<T>>,
+    head: usize,
+    offset: usize,
+    old_capacity: usize,
+    moved: usize
+) -> (Vec<__VecDequeSlot<T>>, Vec<__VecDequeSlot<T>>, usize) {
+    let index = __g1_vec_deque_wrap_add(head, offset, old_capacity);
+    let previous = replace(
+        __g1_array_get_borrow_unique(&mut old.storage, index),
+        __g1_vec_deque_empty_slot()
+    );
+    handle perform __VecDequeSlotCase<T>::inspect(move previous) {
+        __VecDequeSlotCase<T>::inspect(__VecDequeSlot::Empty) =>
+            __g1_vec_deque_relocate(
+                move old,
+                move fresh,
+                head,
+                __g1_usize_add(offset, 1),
+                old_capacity,
+                moved
+            ),
+        __VecDequeSlotCase<T>::inspect(__VecDequeSlot::Full(item)) => {
+            let fresh_capacity = __g1_vec_len(&fresh);
+            __g1_vec_deque_place(
+                &mut fresh,
+                moved,
+                fresh_capacity,
+                move item
+            );
+            __g1_vec_deque_relocate(
+                move old,
+                move fresh,
+                head,
+                offset + 1,
+                old_capacity,
+                moved + 1
+            )
+        }
+    }
+}
+
+__g1_vec_deque_relocate<T>(
+    old: Vec<__VecDequeSlot<T>>,
+    fresh: Vec<__VecDequeSlot<T>>,
+    head: usize,
+    offset: usize,
+    old_capacity: usize,
+    moved: usize
+) -> (Vec<__VecDequeSlot<T>>, Vec<__VecDequeSlot<T>>, usize) {
+    handle perform __VecBoolCase::inspect(offset < old_capacity) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_vec_deque_relocate_one(
+                move old,
+                move fresh,
+                head,
+                offset,
+                old_capacity,
+                moved
+            ),
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            (move old, move fresh, moved)
+    }
+}
+
+__g1_vec_deque_drain_old_step<T>(
+    old: Vec<__VecDequeSlot<T>>,
+    fresh: Vec<__VecDequeSlot<T>>,
+    moved: usize
+) -> (Vec<__VecDequeSlot<T>>, usize) {
+    let slot = __g1_array_pop_move(&mut old.storage);
+    handle perform __VecDequeSlotCase<T>::inspect(move slot) {
+        __VecDequeSlotCase<T>::inspect(__VecDequeSlot::Empty) =>
+            __g1_vec_deque_drain_old(move old, move fresh, moved),
+        __VecDequeSlotCase<T>::inspect(__VecDequeSlot::Full(item)) => {
+            let fresh_capacity = __g1_vec_len(&fresh);
+            __g1_vec_deque_place(
+                &mut fresh,
+                moved,
+                fresh_capacity,
+                move item
+            );
+            __g1_vec_deque_drain_old(move old, move fresh, moved + 1)
+        }
+    }
+}
+
+__g1_vec_deque_drain_old<T>(
+    old: Vec<__VecDequeSlot<T>>,
+    fresh: Vec<__VecDequeSlot<T>>,
+    moved: usize
+) -> (Vec<__VecDequeSlot<T>>, usize) {
+    let remaining = __g1_vec_len(&old);
+    handle perform __VecBoolCase::inspect(remaining == 0) {
+        __VecBoolCase::inspect(Result::Ok(_)) => {
+            let Vec { storage } = move old;
+            __g1_array_finish_drained(move storage);
+            (move fresh, moved)
+        },
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            __g1_vec_deque_drain_old_step(move old, move fresh, moved)
+    }
+}
+
+__g1_vec_deque_grow<T>(
+    value: VecDeque<T>,
+    new_capacity: usize
+) -> VecDeque<T> {
+    let VecDeque { slots, head, length: _ } = move value;
+    let old_capacity = __g1_vec_len(&slots);
+    let fresh = __g1_vec_deque_fill_empty(
+        __g1_vec_deque_empty_slots(&slots),
+        new_capacity
+    );
+    let relocated = __g1_vec_deque_relocate(
+        move slots,
+        move fresh,
+        head,
+        0,
+        old_capacity,
+        0
+    );
+    let (old, fresh, moved) = move relocated;
+    let drained = __g1_vec_deque_drain_old(
+        move old,
+        move fresh,
+        moved
+    );
+    let (fresh, moved) = move drained;
+    VecDeque { slots: move fresh, head: 0, length: moved }
+}
+
+__g1_vec_deque_grow_once<T>(value: VecDeque<T>) -> VecDeque<T> {
+    let capacity = __g1_vec_deque_capacity(&value);
+    handle perform __VecBoolCase::inspect(capacity == 0) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_vec_deque_grow(move value, 1),
+        // Ordinary usize addition is checked; overflow terminates before any
+        // owned state is lost rather than producing a wrapped capacity.
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            __g1_vec_deque_grow(move value, capacity + capacity)
+    }
+}
+
+__g1_vec_deque_reserve_owned<T>(
+    value: VecDeque<T>,
+    additional: usize
+) -> VecDeque<T> {
+    let capacity = __g1_vec_deque_capacity(&value);
+    let available = __g1_vec_deque_usize_sub(capacity, value.length);
+    handle perform __VecBoolCase::inspect(additional <= available) {
+        __VecBoolCase::inspect(Result::Ok(_)) => move value,
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            __g1_vec_deque_reserve_owned(
+                __g1_vec_deque_grow_once(move value),
+                additional
+            )
+    }
+}
+
+__g1_vec_deque_finish_empty<T>(value: VecDeque<T>) -> () {
+    let VecDeque { slots, head: _, length: _ } = move value;
+    let Vec { storage } = move slots;
+    __g1_array_finish_drained(move storage)
+}
+
+__g1_vec_deque_reserve<T>(
+    value: &mut VecDeque<T>,
+    additional: usize
+) -> () {
+    let old = replace(&mut *value, __g1_vec_deque_new());
+    let grown = __g1_vec_deque_reserve_owned(move old, additional);
+    let placeholder = replace(&mut *value, move grown);
+    __g1_vec_deque_finish_empty(move placeholder)
+}
+
+__g1_vec_deque_push_back<T>(value: &mut VecDeque<T>, item: T) -> () {
+    __g1_vec_deque_reserve(&mut *value, 1);
+    let capacity = __g1_vec_deque_capacity(&*value);
+    let index = __g1_vec_deque_wrap_add(
+        value.head,
+        value.length,
+        capacity
+    );
+    __g1_vec_deque_place(
+        &mut value.slots,
+        index,
+        capacity,
+        move item
+    );
+    (*value).length = value.length + 1;
+    ()
+}
+
+__g1_vec_deque_push_front<T>(value: &mut VecDeque<T>, item: T) -> () {
+    __g1_vec_deque_reserve(&mut *value, 1);
+    let capacity = __g1_vec_deque_capacity(&*value);
+    let head = __g1_vec_deque_wrap_previous(value.head, capacity);
+    __g1_vec_deque_place(
+        &mut value.slots,
+        head,
+        capacity,
+        move item
+    );
+    (*value).head = head;
+    (*value).length = value.length + 1;
+    ()
+}
+
+__g1_vec_deque_pop_back_step<T>(value: &mut VecDeque<T>) -> Option<T> {
+    let capacity = __g1_vec_deque_capacity(&*value);
+    let index = __g1_vec_deque_wrap_add(
+        value.head,
+        __g1_vec_deque_usize_sub(value.length, 1),
+        capacity
+    );
+    let previous = __g1_vec_deque_take(&mut value.slots, index);
+    (*value).length = __g1_vec_deque_usize_sub(value.length, 1);
+    handle perform __VecDequeSlotCase<T>::inspect(move previous) {
+        __VecDequeSlotCase<T>::inspect(__VecDequeSlot::Empty) => None,
+        __VecDequeSlotCase<T>::inspect(__VecDequeSlot::Full(item)) =>
+            Option::Some(move item)
+    }
+}
+
+__g1_vec_deque_pop_back<T>(value: &mut VecDeque<T>) -> Option<T> {
+    let length = value.length;
+    handle perform __VecBoolCase::inspect(length == 0) {
+        __VecBoolCase::inspect(Result::Ok(_)) => None,
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            __g1_vec_deque_pop_back_step(move value)
+    }
+}
+
+__g1_vec_deque_pop_front_step<T>(value: &mut VecDeque<T>) -> Option<T> {
+    let capacity = __g1_vec_deque_capacity(&*value);
+    let head = value.head;
+    let previous = __g1_vec_deque_take(&mut value.slots, head);
+    (*value).head = __g1_vec_deque_wrap_add(head, 1, capacity);
+    (*value).length = __g1_vec_deque_usize_sub(value.length, 1);
+    handle perform __VecDequeSlotCase<T>::inspect(move previous) {
+        __VecDequeSlotCase<T>::inspect(__VecDequeSlot::Empty) => None,
+        __VecDequeSlotCase<T>::inspect(__VecDequeSlot::Full(item)) =>
+            Option::Some(move item)
+    }
+}
+
+__g1_vec_deque_pop_front<T>(value: &mut VecDeque<T>) -> Option<T> {
+    let length = value.length;
+    handle perform __VecBoolCase::inspect(length == 0) {
+        __VecBoolCase::inspect(Result::Ok(_)) => None,
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            __g1_vec_deque_pop_front_step(move value)
+    }
+}
+
+__g1_vec_deque_clear_step<T>(value: &mut VecDeque<T>) -> ()
+    where T: Use<[0,0]> {
+    let capacity = __g1_vec_deque_capacity(&*value);
+    let index = __g1_vec_deque_wrap_add(
+        value.head,
+        __g1_vec_deque_usize_sub(value.length, 1),
+        capacity
+    );
+    let previous = __g1_vec_deque_take(&mut value.slots, index);
+    (*value).length = __g1_vec_deque_usize_sub(value.length, 1);
+    handle perform __VecDequeSlotCase<T>::inspect(move previous) {
+        __VecDequeSlotCase<T>::inspect(__VecDequeSlot::Empty) =>
+            __g1_vec_deque_clear(move value),
+        __VecDequeSlotCase<T>::inspect(__VecDequeSlot::Full(item)) => {
+            item;
+            __g1_vec_deque_clear(move value)
+        }
+    }
+}
+
+__g1_vec_deque_clear<T>(value: &mut VecDeque<T>) -> ()
+    where T: Use<[0,0]> {
+    let length = value.length;
+    handle perform __VecBoolCase::inspect(length == 0) {
+        __VecBoolCase::inspect(Result::Ok(_)) => (),
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            __g1_vec_deque_clear_step(move value)
+    }
+}
+
+// Rotating the requested element to the initialized suffix and popping that
+// suffix implements stable removal without carrying an empty Array slot over a
+// recursive edge.
+__g1_vec_rotate_to_end<T>(
+    value: &mut Vec<T>,
+    cursor: usize,
+    last: usize
+) -> () {
+    handle perform __VecBoolCase::inspect(cursor < last) {
+        __VecBoolCase::inspect(Result::Ok(_)) => {
+            __g1_vec_swap(&mut *value, cursor, cursor + 1);
+            __g1_vec_rotate_to_end(move value, cursor + 1, last)
+        },
+        __VecBoolCase::inspect(Result::Err(_)) => ()
+    }
+}
+
+__g1_vec_remove<T>(value: &mut Vec<T>, index: usize) -> Option<T> {
+    let length = __g1_array_len(&value.storage);
+    handle perform __VecBoolCase::inspect(index < length) {
+        __VecBoolCase::inspect(Result::Ok(_)) => {
+            __g1_vec_rotate_to_end(&mut *value, index, length - 1);
+            Option::Some(__g1_array_pop_move(&mut value.storage))
+        },
+        __VecBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+__g1_vec_swap_remove<T>(value: &mut Vec<T>, index: usize) -> Option<T> {
+    let length = __g1_array_len(&value.storage);
+    handle perform __VecBoolCase::inspect(index < length) {
+        __VecBoolCase::inspect(Result::Ok(_)) => {
+            __g1_vec_swap(&mut *value, index, length - 1);
+            Option::Some(__g1_array_pop_move(&mut value.storage))
+        },
+        __VecBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+__g1_vec_rotate_inserted<T>(
+    value: &mut Vec<T>,
+    cursor: usize,
+    destination: usize
+) -> () {
+    handle perform __VecBoolCase::inspect(destination < cursor) {
+        __VecBoolCase::inspect(Result::Ok(_)) => {
+            __g1_vec_swap(&mut *value, cursor, cursor - 1);
+            __g1_vec_rotate_inserted(move value, cursor - 1, destination)
+        },
+        __VecBoolCase::inspect(Result::Err(_)) => ()
+    }
+}
+
+// A failed insertion returns the item, preserving its use obligation.
+__g1_vec_insert<T>(
+    value: &mut Vec<T>,
+    index: usize,
+    item: T
+) -> Result<(), T> {
+    let length = __g1_array_len(&value.storage);
+    handle perform __VecBoolCase::inspect(index <= length) {
+        __VecBoolCase::inspect(Result::Ok(_)) => {
+            __g1_array_push_move(&mut value.storage, move item);
+            __g1_vec_rotate_inserted(&mut *value, length, index);
+            Result::Ok(())
+        },
+        __VecBoolCase::inspect(Result::Err(_)) => Result::Err(move item)
+    }
+}
+
+__g1_vec_append_drain<T>(target: &mut Vec<T>, source: Vec<T>) -> () {
+    let length = __g1_array_len(&source.storage);
+    handle perform __VecBoolCase::inspect(length == 0) {
+        __VecBoolCase::inspect(Result::Ok(_)) => {
+            let Vec { storage } = move source;
+            __g1_array_finish_drained(move storage)
+        },
+        __VecBoolCase::inspect(Result::Err(_)) => {
+            let item = __g1_array_pop_move(&mut source.storage);
+            __g1_array_push_move(&mut target.storage, move item);
+            __g1_vec_append_drain(move target, move source)
+        }
+    }
+}
+
+// Reverse once so the tail-draining loop appends in the source's original
+// order. The exhausted private shell is then consumed by finish_drained.
+__g1_vec_append<T>(target: &mut Vec<T>, source: Vec<T>) -> () {
+    __g1_vec_reverse(&mut source);
+    __g1_vec_append_drain(target, move source)
+}
+
+__g1_vec_index<'a, T>(value: &'a Vec<T>, index: usize) -> &'a T {
+    __g1_array_get_borrow_shared(&value.storage, index)
+}
+
+__g1_vec_index_mut<'a, T>(value: &'a mut Vec<T>, index: usize) -> &'a mut T {
+    __g1_array_get_borrow_unique(&mut value.storage, index)
+}
+
+let Vec::new = __g1_vec_new;
+let Vec::with_capacity = __g1_vec_with_capacity;
+let Vec::len = __g1_vec_len;
+let Vec::capacity = __g1_vec_capacity;
+let Vec::reserve = __g1_vec_reserve;
+let Vec::push = __g1_vec_push;
+let Vec::is_empty = __g1_vec_is_empty;
+let Vec::pop = __g1_vec_pop;
+let Vec::truncate = __g1_vec_truncate;
+let Vec::clear = __g1_vec_clear;
+let Vec::resize = __g1_vec_resize;
+let Vec::get = __g1_vec_get;
+let Vec::get_mut = __g1_vec_get_mut;
+let Vec::first = __g1_vec_first;
+let Vec::last = __g1_vec_last;
+let Vec::as_slice = __g1_vec_as_slice;
+let Vec::as_mut_slice = __g1_vec_as_mut_slice;
+let Vec::swap = __g1_vec_swap;
+let Vec::reverse = __g1_vec_reverse;
+let Vec::into_iter = __g1_vec_into_iter;
+let Vec::remove = __g1_vec_remove;
+let Vec::swap_remove = __g1_vec_swap_remove;
+let Vec::insert = __g1_vec_insert;
+let Vec::append = __g1_vec_append;
+let Vec::extend_from_slice = __g1_vec_extend_from_slice;
+let Vec::index = __g1_vec_index;
+let Vec::index_mut = __g1_vec_index_mut;
+
+let Slice::len = __g1_slice_len;
+let Slice::is_empty = __g1_slice_is_empty;
+let Slice::get = __g1_slice_get;
+let Slice::first = __g1_slice_first;
+let Slice::subslice = __g1_slice_subslice;
+let Slice::iter = __g1_slice_iter;
+
+let SliceIter::len = __g1_slice_iter_len;
+let SliceIter::is_empty = __g1_slice_iter_is_empty;
+let SliceIter::next = __g1_slice_iter_next;
+
+let VecIntoIter::next = __g1_vec_into_iter_next;
+
+let VecDeque::new = __g1_vec_deque_new;
+let VecDeque::len = __g1_vec_deque_len;
+let VecDeque::capacity = __g1_vec_deque_capacity;
+let VecDeque::is_empty = __g1_vec_deque_is_empty;
+let VecDeque::reserve = __g1_vec_deque_reserve;
+let VecDeque::push_back = __g1_vec_deque_push_back;
+let VecDeque::push_front = __g1_vec_deque_push_front;
+let VecDeque::pop_back = __g1_vec_deque_pop_back;
+let VecDeque::pop_front = __g1_vec_deque_pop_front;
+let VecDeque::clear = __g1_vec_deque_clear;
+
+let SliceMut::len = __g1_slice_mut_len;
+let SliceMut::is_empty = __g1_slice_mut_is_empty;
+let SliceMut::get_mut = __g1_slice_mut_get_mut;
+let SliceMut::first_mut = __g1_slice_mut_first_mut;
+let SliceMut::subslice_mut = __g1_slice_mut_subslice_mut;
+let SliceMut::get = __g1_slice_mut_get;
+let SliceMut::first = __g1_slice_mut_first;
+let SliceMut::subslice = __g1_slice_mut_subslice;
+
+// Stack is deliberately only a source alias over Vec: the compiler frontend
+// gets the familiar LIFO vocabulary without introducing another nominal or VM
+// type. Pop transfers its element obligation exactly as Vec::pop does.
+type Stack<T> = Vec<T>;
+let Stack::new = __g1_vec_new;
+let Stack::with_capacity = __g1_vec_with_capacity;
+let Stack::len = __g1_vec_len;
+let Stack::capacity = __g1_vec_capacity;
+let Stack::is_empty = __g1_vec_is_empty;
+let Stack::reserve = __g1_vec_reserve;
+let Stack::push = __g1_vec_push;
+let Stack::pop = __g1_vec_pop;
+let Stack::top = __g1_vec_last;
+
+type WorkList<T> = VecDeque<T>;
+let WorkList::new = __g1_vec_deque_new;
+let WorkList::len = __g1_vec_deque_len;
+let WorkList::capacity = __g1_vec_deque_capacity;
+let WorkList::is_empty = __g1_vec_deque_is_empty;
+let WorkList::reserve = __g1_vec_deque_reserve;
+let WorkList::push = __g1_vec_deque_push_back;
+let WorkList::pop = __g1_vec_deque_pop_front;
+let WorkList::clear = __g1_vec_deque_clear;
+
+// Whole-shell byte conversion is the only public bridge to the internal
+// Array<u8> primitives. Vec's private-field authority is exercised here, and
+// the moved dense shell cannot be observed or reused by the caller.
+__g1_vec_u8_into_array(value: Vec<u8>) -> Array<u8> {
+    let Vec { storage } = move value;
+    storage
+}
+
+__g1_bytes_from_vec(value: Vec<u8>) -> Bytes {
+    __g1_bytes_from_array_move(__g1_vec_u8_into_array(move value))
+}
+
+__g1_bytes_to_vec(value: Bytes) -> Vec<u8> {
+    __g1_vec_from_array(__g1_bytes_to_array(move value))
+}
+
+let Bytes::from_vec = __g1_bytes_from_vec;
+let Bytes::to_vec = __g1_bytes_to_vec;
+
+// Validated immutable views retain the cheap Text/Bytes handle and a half-open
+// byte range. Private fields are the authority boundary: user source can move
+// or borrow a view, but cannot forge a range that reaches the trapping slice
+// leaves below.
+struct TextView {
+    private text: String,
+    private start: usize,
+    private end: usize
+}
+
+struct ByteView {
+    private bytes: Bytes,
+    private start: usize,
+    private end: usize
+}
+
+__g1_text_view_ok(value: TextView) -> Result<TextView, TextRangeError> {
+    Result::Ok(move value)
+}
+
+__g1_text_view_err(error: TextRangeError) -> Result<TextView, TextRangeError> {
+    Result::Err(move error)
+}
+
+__g1_text_view_new_owned(
+    text: String,
+    range: Range<usize>
+) -> Result<TextView, TextRangeError> {
+    let start = range.start;
+    let end = range.end;
+    let bytes = __g1_text_as_bytes(text);
+    let candidate = TextView {
+        text: move text,
+        start: start,
+        end: end
+    };
+    handle perform __BytesBoolCase::inspect(start <= end) {
+        __BytesBoolCase::inspect(Result::Ok(_)) =>
+            handle perform __BytesBoolCase::inspect(
+                end <= __g1_bytes_len(bytes)
+            ) {
+                __BytesBoolCase::inspect(Result::Ok(_)) =>
+                    handle perform __BytesBoolCase::inspect(
+                        __g1_utf8_boundary(bytes, start)
+                    ) {
+                        __BytesBoolCase::inspect(Result::Ok(_)) =>
+                            handle perform __BytesBoolCase::inspect(
+                                __g1_utf8_boundary(bytes, end)
+                            ) {
+                                __BytesBoolCase::inspect(Result::Ok(_)) =>
+                                    __g1_text_view_ok(move candidate),
+                                __BytesBoolCase::inspect(Result::Err(_)) =>
+                                    __g1_text_view_err(
+                                        TextRangeError::NotCharBoundary
+                                    )
+                            },
+                        __BytesBoolCase::inspect(Result::Err(_)) =>
+                            __g1_text_view_err(
+                                TextRangeError::NotCharBoundary
+                            )
+                    },
+                __BytesBoolCase::inspect(Result::Err(_)) =>
+                    __g1_text_view_err(TextRangeError::OutOfBounds)
+            },
+        __BytesBoolCase::inspect(Result::Err(_)) =>
+            __g1_text_view_err(TextRangeError::Reversed)
+    }
+}
+
+__g1_text_view_new(
+    text: &String,
+    range: Range<usize>
+) -> Result<TextView, TextRangeError> {
+    __g1_text_view_new_owned(*text, move range)
+}
+
+__g1_text_view_all(text: &String) -> TextView {
+    TextView {
+        text: *text,
+        start: 0,
+        end: __g1_string_byte_len(text)
+    }
+}
+
+__g1_text_view_byte_len(value: &TextView) -> usize {
+    value.end - value.start
+}
+
+__g1_text_view_is_empty(value: &TextView) -> Bool {
+    value.start == value.end
+}
+
+__g1_text_view_as_bytes(value: &TextView) -> Bytes {
+    __g1_bytes_slice(
+        __g1_text_as_bytes(value.text),
+        value.start,
+        value.end
+    )
+}
+
+__g1_text_view_to_string(value: &TextView) -> String {
+    // Construction proved both UTF-8 boundaries, so this private conversion
+    // cannot fault and need not validate the complete parent text again.
+    __g1_text_from_utf8_checked(__g1_text_view_as_bytes(value))
+}
+
+__g1_text_view_eq(left: &TextView, right: &TextView) -> Bool {
+    let left_bytes = __g1_text_view_as_bytes(left);
+    let right_bytes = __g1_text_view_as_bytes(right);
+    __g1_bytes_eq(&left_bytes, &right_bytes)
+}
+
+__g1_byte_view_ok(value: ByteView) -> Result<ByteView, BytesRangeError> {
+    Result::Ok(move value)
+}
+
+__g1_byte_view_err(error: BytesRangeError) -> Result<ByteView, BytesRangeError> {
+    Result::Err(move error)
+}
+
+__g1_byte_view_new_owned(
+    bytes: Bytes,
+    range: Range<usize>
+) -> Result<ByteView, BytesRangeError> {
+    let start = range.start;
+    let end = range.end;
+    let parent_length = __g1_bytes_len(bytes);
+    let candidate = ByteView {
+        bytes: move bytes,
+        start: start,
+        end: end
+    };
+    handle perform __BytesBoolCase::inspect(start <= end) {
+        __BytesBoolCase::inspect(Result::Ok(_)) =>
+            handle perform __BytesBoolCase::inspect(end <= parent_length) {
+                __BytesBoolCase::inspect(Result::Ok(_)) =>
+                    __g1_byte_view_ok(move candidate),
+                __BytesBoolCase::inspect(Result::Err(_)) =>
+                    __g1_byte_view_err(BytesRangeError::OutOfBounds)
+            },
+        __BytesBoolCase::inspect(Result::Err(_)) =>
+            __g1_byte_view_err(BytesRangeError::Reversed)
+    }
+}
+
+__g1_byte_view_new(
+    bytes: &Bytes,
+    range: Range<usize>
+) -> Result<ByteView, BytesRangeError> {
+    __g1_byte_view_new_owned(*bytes, move range)
+}
+
+__g1_byte_view_all(bytes: &Bytes) -> ByteView {
+    ByteView { bytes: *bytes, start: 0, end: __g1_bytes_len(*bytes) }
+}
+
+__g1_byte_view_len(value: &ByteView) -> usize {
+    value.end - value.start
+}
+
+__g1_byte_view_is_empty(value: &ByteView) -> Bool {
+    value.start == value.end
+}
+
+__g1_byte_view_to_bytes(value: &ByteView) -> Bytes {
+    __g1_bytes_slice(value.bytes, value.start, value.end)
+}
+
+__g1_byte_view_eq(left: &ByteView, right: &ByteView) -> Bool {
+    let left_bytes = __g1_byte_view_to_bytes(left);
+    let right_bytes = __g1_byte_view_to_bytes(right);
+    __g1_bytes_eq(&left_bytes, &right_bytes)
+}
+
+__g1_byte_view_get(value: &ByteView, index: usize) -> Result<u8, BytesIndexError> {
+    let length = __g1_byte_view_len(value);
+    handle perform __BytesBoolCase::inspect(index < length) {
+        __BytesBoolCase::inspect(Result::Ok(_)) =>
+            Result::Ok(__g1_bytes_get(value.bytes, value.start + move index)),
+        __BytesBoolCase::inspect(Result::Err(_)) =>
+            Result::Err(BytesIndexError::OutOfBounds)
+    }
+}
+
+let TextView::new = __g1_text_view_new;
+let TextView::all = __g1_text_view_all;
+let TextView::byte_len = __g1_text_view_byte_len;
+let TextView::is_empty = __g1_text_view_is_empty;
+let TextView::as_bytes = __g1_text_view_as_bytes;
+let TextView::to_string = __g1_text_view_to_string;
+let TextView::eq = __g1_text_view_eq;
+let ByteView::new = __g1_byte_view_new;
+let ByteView::all = __g1_byte_view_all;
+let ByteView::len = __g1_byte_view_len;
+let ByteView::is_empty = __g1_byte_view_is_empty;
+let ByteView::get = __g1_byte_view_get;
+let ByteView::to_bytes = __g1_byte_view_to_bytes;
+let ByteView::eq = __g1_byte_view_eq;
+
+
+// The two compiler-facing builders own their byte vectors. Appending deep-copies
+// the immutable byte handle through the public Bytes/Vec bridge and then uses
+// Vec's ownership-moving append; no VM-only bulk-copy convenience is required.
+struct StringBuilder { private bytes: Vec<u8> }
+struct ByteBuf { private bytes: Vec<u8> }
+struct Formatter {
+    private builder: StringBuilder,
+    private indentation: usize,
+    private line_start: Bool
+}
+
+__g1_vec_append_bytes(
+    target: &mut Vec<u8>,
+    bytes: Bytes
+) -> () {
+    let copied = __g1_bytes_to_vec(move bytes);
+    __g1_vec_append(move target, move copied)
+}
+
+__g1_string_builder_new() -> StringBuilder {
+    StringBuilder { bytes: __g1_vec_new() }
+}
+
+__g1_string_builder_with_capacity(capacity: usize) -> StringBuilder {
+    StringBuilder { bytes: __g1_vec_with_capacity(move capacity) }
+}
+
+__g1_string_builder_len(value: &StringBuilder) -> usize {
+    __g1_vec_len(&value.bytes)
+}
+
+__g1_string_builder_is_empty(value: &StringBuilder) -> Bool {
+    __g1_vec_is_empty(&value.bytes)
+}
+
+__g1_string_builder_reserve(value: &mut StringBuilder, additional: usize) -> () {
+    __g1_vec_reserve(&mut value.bytes, move additional)
+}
+
+__g1_string_builder_push_byte(value: &mut StringBuilder, byte: u8) -> () {
+    __g1_vec_push(&mut value.bytes, move byte)
+}
+
+__g1_string_builder_append_bytes(value: &mut StringBuilder, bytes: &Bytes) -> () {
+    __g1_vec_append_bytes(&mut value.bytes, *bytes)
+}
+
+__g1_string_builder_append_string(value: &mut StringBuilder, text: &String) -> () {
+    __g1_vec_append_bytes(
+        &mut value.bytes,
+        __g1_text_as_bytes(*text)
+    )
+}
+
+__g1_string_builder_append_view(value: &mut StringBuilder, view: &TextView) -> () {
+    __g1_vec_append_bytes(
+        &mut value.bytes,
+        __g1_text_view_as_bytes(view)
+    )
+}
+
+__g1_u64_add(left: u64, right: u64) -> u64 { move left + move right }
+__g1_u64_div(left: u64, right: u64) -> u64 { move left / move right }
+__g1_u64_rem(left: u64, right: u64) -> u64 { move left % move right }
+__g1_i64_div(left: i64, right: i64) -> i64 { move left / move right }
+__g1_i64_rem(left: i64, right: i64) -> i64 { move left % move right }
+__g1_i64_negate_digit(value: i64) -> i64 { 0 - move value }
+
+__g1_string_builder_push_digit(
+    value: &mut StringBuilder,
+    digit: u64
+) -> () {
+    __g1_string_builder_push_byte(
+        move value,
+        wrapping_convert_to_u8(__g1_u64_add(move digit, 48))
+    )
+}
+
+__g1_string_builder_append_u64_digits(
+    builder: &mut StringBuilder,
+    value: u64
+) -> () {
+    handle perform __VecBoolCase::inspect(value < 10) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_string_builder_push_digit(move builder, move value),
+        __VecBoolCase::inspect(Result::Err(_)) => {
+            let quotient = __g1_u64_div(value, 10);
+            let remainder = __g1_u64_rem(value, 10);
+            __g1_string_builder_append_u64_digits(
+                &mut *builder,
+                move quotient
+            );
+            __g1_string_builder_push_digit(move builder, move remainder)
+        }
+    }
+}
+
+__g1_string_builder_append_u64(
+    value: &mut StringBuilder,
+    integer: u64
+) -> () {
+    __g1_string_builder_append_u64_digits(move value, move integer)
+}
+
+__g1_string_builder_push_negative_digit(
+    value: &mut StringBuilder,
+    remainder: i64
+) -> () {
+    __g1_string_builder_push_digit(
+        move value,
+        wrapping_convert_to_u64(__g1_i64_negate_digit(move remainder))
+    )
+}
+
+__g1_string_builder_append_negative_digits(
+    builder: &mut StringBuilder,
+    value: i64
+) -> () {
+    let quotient = __g1_i64_div(value, 10);
+    let remainder = __g1_i64_rem(value, 10);
+    handle perform __VecBoolCase::inspect(quotient == 0) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_string_builder_push_negative_digit(
+                move builder,
+                move remainder
+            ),
+        __VecBoolCase::inspect(Result::Err(_)) => {
+            __g1_string_builder_append_negative_digits(
+                &mut *builder,
+                move quotient
+            );
+            __g1_string_builder_push_negative_digit(
+                move builder,
+                move remainder
+            )
+        }
+    }
+}
+
+__g1_string_builder_append_i64_negative(
+    value: &mut StringBuilder,
+    integer: i64
+) -> () {
+    __g1_string_builder_push_byte(&mut *value, 45);
+    __g1_string_builder_append_negative_digits(move value, move integer)
+}
+
+__g1_string_builder_append_i64(
+    value: &mut StringBuilder,
+    integer: i64
+) -> () {
+    handle perform __VecBoolCase::inspect(integer < 0) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_string_builder_append_i64_negative(
+                move value,
+                move integer
+            ),
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            __g1_string_builder_append_u64(
+                move value,
+                wrapping_convert_to_u64(move integer)
+            )
+    }
+}
+
+effect __FormatterUsizeCase { inspect(value: Result<usize, ()>) -> !; }
+
+__g1_formatter_new() -> Formatter {
+    Formatter {
+        builder: __g1_string_builder_new(),
+        indentation: 0,
+        line_start: true
+    }
+}
+
+__g1_formatter_emit_spaces(
+    builder: &mut StringBuilder,
+    remaining: usize
+) -> () {
+    handle perform __VecBoolCase::inspect(remaining == 0) {
+        __VecBoolCase::inspect(Result::Ok(_)) => (),
+        __VecBoolCase::inspect(Result::Err(_)) => {
+            __g1_string_builder_push_byte(&mut *builder, 32);
+            __g1_formatter_emit_spaces(
+                move builder,
+                __g1_vec_deque_usize_sub(remaining, 1)
+            )
+        }
+    }
+}
+
+__g1_formatter_emit_indent_levels(
+    builder: &mut StringBuilder,
+    remaining: usize
+) -> () {
+    handle perform __VecBoolCase::inspect(remaining == 0) {
+        __VecBoolCase::inspect(Result::Ok(_)) => (),
+        __VecBoolCase::inspect(Result::Err(_)) => {
+            __g1_formatter_emit_spaces(&mut *builder, 4);
+            __g1_formatter_emit_indent_levels(
+                move builder,
+                __g1_vec_deque_usize_sub(remaining, 1)
+            )
+        }
+    }
+}
+
+__g1_formatter_prepare_line_start(value: &mut Formatter) -> () {
+    let indentation = value.indentation;
+    __g1_formatter_emit_indent_levels(
+        &mut value.builder,
+        move indentation
+    );
+    (*value).line_start = false;
+    ()
+}
+
+__g1_formatter_prepare(value: &mut Formatter) -> () {
+    let line_start = value.line_start;
+    handle perform __VecBoolCase::inspect(move line_start) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_formatter_prepare_line_start(move value),
+        __VecBoolCase::inspect(Result::Err(_)) => ()
+    }
+}
+
+__g1_formatter_literal_nonempty(
+    value: &mut Formatter,
+    text: String
+) -> () {
+    __g1_formatter_prepare(&mut *value);
+    __g1_string_builder_append_string(&mut value.builder, &text)
+}
+
+__g1_formatter_literal(value: &mut Formatter, text: &String) -> () {
+    let empty = __g1_string_is_empty(text);
+    let owned = *text;
+    handle perform __VecBoolCase::inspect(move empty) {
+        __VecBoolCase::inspect(Result::Ok(_)) => (),
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            __g1_formatter_literal_nonempty(move value, move owned)
+    }
+}
+
+__g1_formatter_append_u64(value: &mut Formatter, integer: u64) -> () {
+    __g1_formatter_prepare(&mut *value);
+    __g1_string_builder_append_u64(&mut value.builder, move integer)
+}
+
+__g1_formatter_append_i64(value: &mut Formatter, integer: i64) -> () {
+    __g1_formatter_prepare(&mut *value);
+    __g1_string_builder_append_i64(&mut value.builder, move integer)
+}
+
+__g1_formatter_newline(value: &mut Formatter) -> () {
+    __g1_string_builder_push_byte(&mut value.builder, 10);
+    (*value).line_start = true;
+    ()
+}
+
+__g1_formatter_indent_valid(value: &mut Formatter, next: usize) -> Bool {
+    (*value).indentation = move next;
+    true
+}
+
+__g1_formatter_indent(value: &mut Formatter) -> Bool {
+    let current = value.indentation;
+    handle perform __FormatterUsizeCase::inspect(
+        checked_usize_add(current, 1)
+    ) {
+        __FormatterUsizeCase::inspect(Result::Ok(next)) =>
+            __g1_formatter_indent_valid(move value, move next),
+        __FormatterUsizeCase::inspect(Result::Err(_)) => false
+    }
+}
+
+__g1_formatter_dedent_valid(value: &mut Formatter, current: usize) -> Bool {
+    (*value).indentation = __g1_vec_deque_usize_sub(current, 1);
+    true
+}
+
+__g1_formatter_dedent(value: &mut Formatter) -> Bool {
+    let current = value.indentation;
+    handle perform __VecBoolCase::inspect(current == 0) {
+        __VecBoolCase::inspect(Result::Ok(_)) => false,
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            __g1_formatter_dedent_valid(move value, move current)
+    }
+}
+
+__g1_formatter_finish(value: Formatter) -> Result<String, Utf8Error> {
+    let Formatter { builder, indentation: _, line_start: _ } = move value;
+    __g1_string_builder_finish(move builder)
+}
+
+__g1_string_builder_finish(
+    value: StringBuilder
+) -> Result<String, Utf8Error> {
+    let StringBuilder { bytes } = move value;
+    __g1_string_from_utf8(__g1_bytes_from_vec(move bytes))
+}
+
+__g1_byte_buf_new() -> ByteBuf { ByteBuf { bytes: __g1_vec_new() } }
+
+__g1_byte_buf_with_capacity(capacity: usize) -> ByteBuf {
+    ByteBuf { bytes: __g1_vec_with_capacity(move capacity) }
+}
+
+__g1_byte_buf_len(value: &ByteBuf) -> usize { __g1_vec_len(&value.bytes) }
+
+__g1_byte_buf_is_empty(value: &ByteBuf) -> Bool {
+    __g1_vec_is_empty(&value.bytes)
+}
+
+__g1_byte_buf_reserve(value: &mut ByteBuf, additional: usize) -> () {
+    __g1_vec_reserve(&mut value.bytes, move additional)
+}
+
+__g1_byte_buf_push(value: &mut ByteBuf, byte: u8) -> () {
+    __g1_vec_push(&mut value.bytes, move byte)
+}
+
+__g1_byte_buf_pop_byte(bytes: &mut Vec<u8>) -> u8 {
+    __g1_array_pop_move(&mut bytes.storage)
+}
+
+__g1_byte_buf_resize_shrink(
+    value: &mut ByteBuf,
+    length: usize,
+    current: usize
+) -> () {
+    handle perform __VecBoolCase::inspect(length < current) {
+        __VecBoolCase::inspect(Result::Ok(_)) => {
+            let removed = __g1_byte_buf_pop_byte(&mut value.bytes);
+            removed;
+            __g1_byte_buf_resize_zeroed(move value, move length)
+        },
+        __VecBoolCase::inspect(Result::Err(_)) => ()
+    }
+}
+
+__g1_byte_buf_resize_zeroed(value: &mut ByteBuf, length: usize) -> () {
+    let current = __g1_byte_buf_len(&*value);
+    handle perform __VecBoolCase::inspect(current < length) {
+        __VecBoolCase::inspect(Result::Ok(_)) => {
+            __g1_byte_buf_push(&mut *value, 0);
+            __g1_byte_buf_resize_zeroed(move value, move length)
+        },
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            __g1_byte_buf_resize_shrink(
+                move value,
+                move length,
+                move current
+            )
+    }
+}
+
+__g1_byte_buf_write_word_le(
+    value: &mut ByteBuf,
+    word: u128,
+    remaining: usize
+) -> () {
+    handle perform __VecBoolCase::inspect(remaining == 0) {
+        __VecBoolCase::inspect(Result::Ok(_)) => (),
+        __VecBoolCase::inspect(Result::Err(_)) => {
+            __g1_byte_buf_push(
+                &mut *value,
+                wrapping_convert_to_u8(word)
+            );
+            __g1_byte_buf_write_word_le(
+                move value,
+                shift_right(word, 8),
+                __g1_vec_deque_usize_sub(remaining, 1)
+            )
+        }
+    }
+}
+
+__g1_byte_buf_write_u16_le(value: &mut ByteBuf, word: u16) -> () {
+    __g1_byte_buf_write_word_le(
+        move value,
+        wrapping_convert_to_u128(move word),
+        2
+    )
+}
+
+__g1_byte_buf_write_u32_le(value: &mut ByteBuf, word: u32) -> () {
+    __g1_byte_buf_write_word_le(
+        move value,
+        wrapping_convert_to_u128(move word),
+        4
+    )
+}
+
+__g1_byte_buf_write_u64_le(value: &mut ByteBuf, word: u64) -> () {
+    __g1_byte_buf_write_word_le(
+        move value,
+        wrapping_convert_to_u128(move word),
+        8
+    )
+}
+
+__g1_byte_buf_write_u128_le(value: &mut ByteBuf, word: u128) -> () {
+    __g1_byte_buf_write_word_le(move value, move word, 16)
+}
+
+__g1_byte_buf_replace_byte(
+    bytes: &mut Vec<u8>,
+    offset: usize,
+    incoming: u8
+) -> () {
+    let previous = replace(
+        __g1_array_get_borrow_unique(&mut bytes.storage, offset),
+        move incoming
+    );
+    previous;
+    ()
+}
+
+__g1_byte_buf_patch_word_le(
+    value: &mut ByteBuf,
+    offset: usize,
+    word: u128,
+    remaining: usize
+) -> () {
+    handle perform __VecBoolCase::inspect(remaining == 0) {
+        __VecBoolCase::inspect(Result::Ok(_)) => (),
+        __VecBoolCase::inspect(Result::Err(_)) => {
+            __g1_byte_buf_replace_byte(
+                &mut value.bytes,
+                offset,
+                wrapping_convert_to_u8(word)
+            );
+            __g1_byte_buf_patch_word_le(
+                move value,
+                offset + 1,
+                shift_right(word, 8),
+                remaining - 1
+            )
+        }
+    }
+}
+
+__g1_byte_buf_patch_valid(
+    value: &mut ByteBuf,
+    offset: usize,
+    word: u128,
+    width: usize
+) -> Bool {
+    __g1_byte_buf_patch_word_le(
+        move value,
+        move offset,
+        move word,
+        move width
+    );
+    true
+}
+
+__g1_byte_buf_patch_after_offset(
+    value: &mut ByteBuf,
+    offset: usize,
+    word: u128,
+    width: usize,
+    length: usize
+) -> Bool {
+    handle perform __VecBoolCase::inspect(width <= length - offset) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_byte_buf_patch_valid(
+                move value,
+                move offset,
+                move word,
+                move width
+            ),
+        __VecBoolCase::inspect(Result::Err(_)) => false
+    }
+}
+
+__g1_byte_buf_patch(
+    value: &mut ByteBuf,
+    offset: usize,
+    word: u128,
+    width: usize
+) -> Bool {
+    let length = __g1_byte_buf_len(&*value);
+    handle perform __VecBoolCase::inspect(offset <= length) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_byte_buf_patch_after_offset(
+                move value,
+                move offset,
+                move word,
+                move width,
+                move length
+            ),
+        __VecBoolCase::inspect(Result::Err(_)) => false
+    }
+}
+
+__g1_byte_buf_patch_u16_le(
+    value: &mut ByteBuf,
+    offset: usize,
+    word: u16
+) -> Bool {
+    __g1_byte_buf_patch(
+        move value,
+        move offset,
+        wrapping_convert_to_u128(move word),
+        2
+    )
+}
+
+__g1_byte_buf_patch_u32_le(
+    value: &mut ByteBuf,
+    offset: usize,
+    word: u32
+) -> Bool {
+    __g1_byte_buf_patch(
+        move value,
+        move offset,
+        wrapping_convert_to_u128(move word),
+        4
+    )
+}
+
+__g1_byte_buf_patch_u64_le(
+    value: &mut ByteBuf,
+    offset: usize,
+    word: u64
+) -> Bool {
+    __g1_byte_buf_patch(
+        move value,
+        move offset,
+        wrapping_convert_to_u128(move word),
+        8
+    )
+}
+
+effect __ByteBufUsizeCase { inspect(value: Result<usize, ()>) -> !; }
+
+__g1_byte_buf_align_padding(
+    value: &mut ByteBuf,
+    alignment: usize,
+    remainder: usize,
+    length: usize
+) -> Bool {
+    let padding = __g1_vec_deque_usize_sub(alignment, remainder);
+    handle perform __ByteBufUsizeCase::inspect(
+        checked_usize_add(length, padding)
+    ) {
+        __ByteBufUsizeCase::inspect(Result::Ok(aligned)) => {
+            __g1_byte_buf_resize_zeroed(move value, move aligned);
+            true
+        },
+        __ByteBufUsizeCase::inspect(Result::Err(_)) => false
+    }
+}
+
+__g1_byte_buf_usize_remainder(left: usize, right: usize) -> usize {
+    move left % move right
+}
+
+__g1_byte_buf_align_power_of_two(
+    value: &mut ByteBuf,
+    alignment: usize
+) -> Bool {
+    let length = __g1_byte_buf_len(&*value);
+    let remainder = __g1_byte_buf_usize_remainder(length, alignment);
+    handle perform __VecBoolCase::inspect(remainder == 0) {
+        __VecBoolCase::inspect(Result::Ok(_)) => true,
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            __g1_byte_buf_align_padding(
+                move value,
+                move alignment,
+                move remainder,
+                move length
+            )
+    }
+}
+
+__g1_byte_buf_power_of_two_next(
+    candidate: usize,
+    current: usize
+) -> Bool {
+    handle perform __ByteBufUsizeCase::inspect(
+        checked_usize_add(current, current)
+    ) {
+        __ByteBufUsizeCase::inspect(Result::Ok(next)) =>
+            __g1_byte_buf_is_power_of_two(move candidate, move next),
+        __ByteBufUsizeCase::inspect(Result::Err(_)) => false
+    }
+}
+
+__g1_byte_buf_power_of_two_greater(
+    candidate: usize,
+    current: usize
+) -> Bool {
+    handle perform __VecBoolCase::inspect(current < candidate) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_byte_buf_power_of_two_next(
+                move candidate,
+                move current
+            ),
+        __VecBoolCase::inspect(Result::Err(_)) => false
+    }
+}
+
+__g1_byte_buf_is_power_of_two(
+    candidate: usize,
+    current: usize
+) -> Bool {
+    handle perform __VecBoolCase::inspect(current == candidate) {
+        __VecBoolCase::inspect(Result::Ok(_)) => true,
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            __g1_byte_buf_power_of_two_greater(
+                move candidate,
+                move current
+            )
+    }
+}
+
+__g1_byte_buf_align_nonzero(
+    value: &mut ByteBuf,
+    alignment: usize
+) -> Bool {
+    handle perform __VecBoolCase::inspect(
+        __g1_byte_buf_is_power_of_two(alignment, 1)
+    ) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_byte_buf_align_power_of_two(move value, move alignment),
+        __VecBoolCase::inspect(Result::Err(_)) => false
+    }
+}
+
+__g1_byte_buf_align_zeroed(
+    value: &mut ByteBuf,
+    alignment: usize
+) -> Bool {
+    handle perform __VecBoolCase::inspect(alignment == 0) {
+        __VecBoolCase::inspect(Result::Ok(_)) => false,
+        __VecBoolCase::inspect(Result::Err(_)) =>
+            __g1_byte_buf_align_nonzero(move value, move alignment)
+    }
+}
+
+__g1_byte_buf_append_bytes(value: &mut ByteBuf, bytes: &Bytes) -> () {
+    __g1_vec_append_bytes(&mut value.bytes, *bytes)
+}
+
+__g1_byte_buf_append_view(value: &mut ByteBuf, view: &ByteView) -> () {
+    __g1_vec_append_bytes(
+        &mut value.bytes,
+        __g1_byte_view_to_bytes(view)
+    )
+}
+
+__g1_byte_buf_finish(value: ByteBuf) -> Bytes {
+    let ByteBuf { bytes } = move value;
+    __g1_bytes_from_vec(move bytes)
+}
+
+let StringBuilder::new = __g1_string_builder_new;
+let StringBuilder::with_capacity = __g1_string_builder_with_capacity;
+let StringBuilder::len = __g1_string_builder_len;
+let StringBuilder::is_empty = __g1_string_builder_is_empty;
+let StringBuilder::reserve = __g1_string_builder_reserve;
+let StringBuilder::push_byte = __g1_string_builder_push_byte;
+let StringBuilder::append_bytes = __g1_string_builder_append_bytes;
+let StringBuilder::append_string = __g1_string_builder_append_string;
+let StringBuilder::append_view = __g1_string_builder_append_view;
+let StringBuilder::append_u64 = __g1_string_builder_append_u64;
+let StringBuilder::append_i64 = __g1_string_builder_append_i64;
+let StringBuilder::finish = __g1_string_builder_finish;
+let Formatter::new = __g1_formatter_new;
+let Formatter::literal = __g1_formatter_literal;
+let Formatter::append_u64 = __g1_formatter_append_u64;
+let Formatter::append_i64 = __g1_formatter_append_i64;
+let Formatter::newline = __g1_formatter_newline;
+let Formatter::indent = __g1_formatter_indent;
+let Formatter::dedent = __g1_formatter_dedent;
+let Formatter::finish = __g1_formatter_finish;
+let ByteBuf::new = __g1_byte_buf_new;
+let ByteBuf::with_capacity = __g1_byte_buf_with_capacity;
+let ByteBuf::len = __g1_byte_buf_len;
+let ByteBuf::is_empty = __g1_byte_buf_is_empty;
+let ByteBuf::reserve = __g1_byte_buf_reserve;
+let ByteBuf::push = __g1_byte_buf_push;
+let ByteBuf::resize_zeroed = __g1_byte_buf_resize_zeroed;
+let ByteBuf::write_u16_le = __g1_byte_buf_write_u16_le;
+let ByteBuf::write_u32_le = __g1_byte_buf_write_u32_le;
+let ByteBuf::write_u64_le = __g1_byte_buf_write_u64_le;
+let ByteBuf::write_u128_le = __g1_byte_buf_write_u128_le;
+let ByteBuf::patch_u16_le = __g1_byte_buf_patch_u16_le;
+let ByteBuf::patch_u32_le = __g1_byte_buf_patch_u32_le;
+let ByteBuf::patch_u64_le = __g1_byte_buf_patch_u64_le;
+let ByteBuf::align_zeroed = __g1_byte_buf_align_zeroed;
+let ByteBuf::append_bytes = __g1_byte_buf_append_bytes;
+let ByteBuf::append_view = __g1_byte_buf_append_view;
+let ByteBuf::finish = __g1_byte_buf_finish;
+
+// Checked binary decoding mirrors ByteBuf's canonical little-endian writers.
+// A failed read leaves the cursor unchanged, so callers may safely probe a
+// malformed or truncated artifact before choosing a diagnostic path.
+struct ByteReader {
+    private bytes: Bytes,
+    private cursor: usize
+}
+
+__g1_byte_reader_new(bytes: &Bytes) -> ByteReader {
+    ByteReader { bytes: *bytes, cursor: 0 }
+}
+
+__g1_byte_reader_position(value: &ByteReader) -> usize { value.cursor }
+
+__g1_byte_reader_remaining(value: &ByteReader) -> usize {
+    __g1_bytes_len(value.bytes) - value.cursor
+}
+
+__g1_byte_reader_is_empty(value: &ByteReader) -> Bool {
+    __g1_byte_reader_remaining(value) == 0
+}
+
+__g1_byte_reader_word_at(
+    bytes: Bytes,
+    cursor: usize,
+    remaining: usize,
+    shift: u32,
+    result: u128
+) -> u128 {
+    handle perform __VecBoolCase::inspect(remaining == 0) {
+        __VecBoolCase::inspect(Result::Ok(_)) => move result,
+        __VecBoolCase::inspect(Result::Err(_)) => {
+            let byte = wrapping_convert_to_u128(
+                __g1_bytes_get(bytes, cursor)
+            );
+            __g1_byte_reader_word_at(
+                move bytes,
+                cursor + 1,
+                remaining - 1,
+                shift + 8,
+                bit_or(move result, shift_left(move byte, shift))
+            )
+        }
+    }
+}
+
+__g1_byte_reader_take_word(value: &mut ByteReader, width: usize) -> u128 {
+    let start = value.cursor;
+    let result = __g1_byte_reader_word_at(value.bytes, start, width, 0, 0);
+    (*value).cursor = start + width;
+    move result
+}
+
+__g1_byte_reader_read_u8_valid(value: &mut ByteReader) -> Option<u8> {
+    Option::Some(wrapping_convert_to_u8(
+        __g1_byte_reader_take_word(move value, 1)
+    ))
+}
+
+__g1_byte_reader_read_u16_valid(value: &mut ByteReader) -> Option<u16> {
+    Option::Some(wrapping_convert_to_u16(
+        __g1_byte_reader_take_word(move value, 2)
+    ))
+}
+
+__g1_byte_reader_read_u32_valid(value: &mut ByteReader) -> Option<u32> {
+    Option::Some(wrapping_convert_to_u32(
+        __g1_byte_reader_take_word(move value, 4)
+    ))
+}
+
+__g1_byte_reader_read_u64_valid(value: &mut ByteReader) -> Option<u64> {
+    Option::Some(wrapping_convert_to_u64(
+        __g1_byte_reader_take_word(move value, 8)
+    ))
+}
+
+__g1_byte_reader_read_u128_valid(value: &mut ByteReader) -> Option<u128> {
+    Option::Some(__g1_byte_reader_take_word(move value, 16))
+}
+
+__g1_byte_reader_read_u8(value: &mut ByteReader) -> Option<u8> {
+    let remaining = __g1_byte_reader_remaining(&*value);
+    handle perform __VecBoolCase::inspect(1 <= remaining) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_byte_reader_read_u8_valid(move value),
+        __VecBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+__g1_byte_reader_read_u16_le(value: &mut ByteReader) -> Option<u16> {
+    let remaining = __g1_byte_reader_remaining(&*value);
+    handle perform __VecBoolCase::inspect(2 <= remaining) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_byte_reader_read_u16_valid(move value),
+        __VecBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+__g1_byte_reader_read_u32_le(value: &mut ByteReader) -> Option<u32> {
+    let remaining = __g1_byte_reader_remaining(&*value);
+    handle perform __VecBoolCase::inspect(4 <= remaining) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_byte_reader_read_u32_valid(move value),
+        __VecBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+__g1_byte_reader_read_u64_le(value: &mut ByteReader) -> Option<u64> {
+    let remaining = __g1_byte_reader_remaining(&*value);
+    handle perform __VecBoolCase::inspect(8 <= remaining) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_byte_reader_read_u64_valid(move value),
+        __VecBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+__g1_byte_reader_read_u128_le(value: &mut ByteReader) -> Option<u128> {
+    let remaining = __g1_byte_reader_remaining(&*value);
+    handle perform __VecBoolCase::inspect(16 <= remaining) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_byte_reader_read_u128_valid(move value),
+        __VecBoolCase::inspect(Result::Err(_)) => None
+    }
+}
+
+let ByteReader::new = __g1_byte_reader_new;
+let ByteReader::position = __g1_byte_reader_position;
+let ByteReader::remaining = __g1_byte_reader_remaining;
+let ByteReader::is_empty = __g1_byte_reader_is_empty;
+let ByteReader::read_u8 = __g1_byte_reader_read_u8;
+let ByteReader::read_u16_le = __g1_byte_reader_read_u16_le;
+let ByteReader::read_u32_le = __g1_byte_reader_read_u32_le;
+let ByteReader::read_u64_le = __g1_byte_reader_read_u64_le;
+let ByteReader::read_u128_le = __g1_byte_reader_read_u128_le;
+
+// A fixed FNV-1a stream supplies deterministic, compiler-owned hashing.  The
+// byte order of every integer writer is explicitly little endian, so hashes do
+// not depend on the host running the VM.  Hash values are table-local details;
+// they are never used as stable artifact identifiers.
+struct Hasher { private state: u64 }
+
+__g1_hasher_new() -> Hasher {
+    Hasher { state: wrapping_convert_to_u64(-3750763034362895579) }
+}
+
+__g1_hasher_write_u8(value: &mut Hasher, byte: u8) -> () {
+    let widened = wrapping_convert_to_u64(move byte);
+    (*value).state = __g1_int_wrapping_mul(
+        __g1_int_bit_xor(value.state, move widened),
+        wrapping_convert_to_u64(1099511628211)
+    );
+    ()
+}
+
+__g1_hasher_write_word_bytes(
+    value: &mut Hasher,
+    word: u128,
+    remaining: usize
+) -> () {
+    handle perform __VecBoolCase::inspect(remaining == 0) {
+        __VecBoolCase::inspect(Result::Ok(_)) => (),
+        __VecBoolCase::inspect(Result::Err(_)) => {
+            __g1_hasher_write_u8(
+                &mut *value,
+                wrapping_convert_to_u8(word)
+            );
+            __g1_hasher_write_word_bytes(
+                move value,
+                shift_right(word, 8),
+                remaining - 1
+            )
+        }
+    }
+}
+
+__g1_hasher_write_u16(value: &mut Hasher, word: u16) -> () {
+    __g1_hasher_write_word_bytes(
+        move value,
+        wrapping_convert_to_u128(move word),
+        2
+    )
+}
+
+__g1_hasher_write_u32(value: &mut Hasher, word: u32) -> () {
+    __g1_hasher_write_word_bytes(
+        move value,
+        wrapping_convert_to_u128(move word),
+        4
+    )
+}
+
+__g1_hasher_write_u64(value: &mut Hasher, word: u64) -> () {
+    __g1_hasher_write_word_bytes(
+        move value,
+        wrapping_convert_to_u128(move word),
+        8
+    )
+}
+
+__g1_hasher_write_u128(value: &mut Hasher, word: u128) -> () {
+    __g1_hasher_write_word_bytes(move value, move word, 16)
+}
+
+__g1_hasher_write_usize(value: &mut Hasher, word: usize) -> () {
+    // Generation 1 fixes `usize` to the bytecode VM's 64-bit address domain.
+    __g1_hasher_write_u64(
+        move value,
+        wrapping_convert_to_u64(move word)
+    )
+}
+
+__g1_hasher_write_bytes_step(
+    value: Hasher,
+    bytes: Bytes,
+    cursor: usize,
+    length: usize
+) -> Hasher {
+    __g1_hasher_write_u8(
+        &mut value,
+        __g1_bytes_get(bytes, cursor)
+    );
+    __g1_hasher_write_bytes_at(
+        move value,
+        move bytes,
+        cursor + 1,
+        length
+    )
+}
+
+__g1_hasher_write_bytes_at(
+    value: Hasher,
+    bytes: Bytes,
+    cursor: usize,
+    length: usize
+) -> Hasher {
+    handle perform __VecBoolCase::inspect(cursor < length) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_hasher_write_bytes_step(
+                move value,
+                move bytes,
+                cursor,
+                length
+            ),
+        __VecBoolCase::inspect(Result::Err(_)) => move value
+    }
+}
+
+__g1_hasher_write_bytes(value: &mut Hasher, bytes: &Bytes) -> () {
+    let updated = __g1_hasher_write_bytes_at(
+        *value,
+        *bytes,
+        0,
+        __g1_bytes_len(*bytes)
+    );
+    (*value).state = updated.state;
+    ()
+}
+
+__g1_hasher_finish(value: &Hasher) -> u64 { value.state }
+
+let Hasher::new = __g1_hasher_new;
+let Hasher::write_u8 = __g1_hasher_write_u8;
+let Hasher::write_u16 = __g1_hasher_write_u16;
+let Hasher::write_u32 = __g1_hasher_write_u32;
+let Hasher::write_u64 = __g1_hasher_write_u64;
+let Hasher::write_u128 = __g1_hasher_write_u128;
+let Hasher::write_usize = __g1_hasher_write_usize;
+let Hasher::write_bytes = __g1_hasher_write_bytes;
+let Hasher::finish = __g1_hasher_finish;
+
+// Layer 3c: compiler resource accounting. StepBudget is deliberately based on
+// deterministic logical work rather than wall time. Its state is private so a
+// compiler phase can spend or inspect a budget but cannot replenish it.
+struct StepBudget { private remaining: usize }
+
+__g1_step_budget_new(limit: usize) -> StepBudget {
+    StepBudget { remaining: move limit }
+}
+
+__g1_step_budget_remaining(value: &StepBudget) -> usize {
+    value.remaining
+}
+
+__g1_step_budget_is_exhausted(value: &StepBudget) -> Bool {
+    value.remaining == 0
+}
+
+__g1_step_budget_spend(value: &mut StepBudget, steps: usize) -> Bool {
+    let remaining = __g1_step_budget_remaining(&*value);
+    (*value).remaining = move remaining - move steps;
+    true
+}
+
+__g1_step_budget_try_take(value: &mut StepBudget, steps: usize) -> Bool {
+    let available = __g1_step_budget_remaining(&*value);
+    handle perform __VecBoolCase::inspect(steps <= available) {
+        __VecBoolCase::inspect(Result::Ok(_)) =>
+            __g1_step_budget_spend(move value, move steps),
+        __VecBoolCase::inspect(Result::Err(_)) => false
+    }
+}
+
+let StepBudget::new = __g1_step_budget_new;
+let StepBudget::remaining = __g1_step_budget_remaining;
+let StepBudget::is_exhausted = __g1_step_budget_is_exhausted;
+let StepBudget::try_take = __g1_step_budget_try_take;
+
+// Layer 4: compiler-host protocols. String remains an ordinary source alias;
+// only this standard-library source entry has the authority to seal the host's
+// initialized Array<Text> result inside Vec's private representation.
+effect ProcessArgs { [1,1] get() -> Vec<String>; }
+effect FileRead { [1,1] read(path: String) -> Bytes; }
+effect FileWrite { [1,1] write(path: String, bytes: Bytes) -> (); }
+effect Diagnostic { [1,1] write(text: String) -> (); }
+
+process_args() -> Vec<String> / {ProcessArgs} {
+    perform ProcessArgs::get()
+}
+
+read_file(path: String) -> Bytes / {FileRead} {
+    perform FileRead::read(move path)
+}
+
+write_file(path: String, bytes: Bytes) -> () / {FileWrite} {
+    perform FileWrite::write(move path, move bytes)
+}
+
+write_diagnostic(text: String) -> () / {Diagnostic} {
+    perform Diagnostic::write(move text)
+}
+
+__g1_vec_from_array<T>(storage: Array<T>) -> Vec<T> {
+    Vec { storage: move storage }
+}
+
+run_compiler_host<F, R>(main: F) -> R
+    where F: Fn<
+        (),
+        Output=R,
+        Effects={ProcessArgs, FileRead, FileWrite, Diagnostic}
+    > {
+    handle { main() } {
+        ProcessArgs::get() with continuation => {
+            resume(
+                move continuation,
+                __g1_vec_from_array(__g1_process_args_get())
+            )
+        },
+        FileRead::read(path) with continuation => {
+            resume(move continuation, __g1_fs_read(move path))
+        },
+        FileWrite::write(path, bytes) with continuation => {
+            __g1_fs_write(move path, move bytes);
+            resume(move continuation, ())
+        },
+        Diagnostic::write(text) with continuation => {
+            __g1_diagnostic_write(move text);
+            resume(move continuation, ())
+        }
+    }
+}

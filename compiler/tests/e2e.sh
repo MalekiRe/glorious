@@ -5,6 +5,11 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
+runtime_library="$tmp/libgrandiose-native-runtime.so"
+clang -shared -fPIC -O2 -o "$runtime_library" \
+  "$root/compiler/runtime/native_entry.c"
+lli() { command lli --dlopen="$runtime_library" "$@"; }
+
 "$root/compiler/grc" \
   "$root/compiler/examples/arithmetic.gr" \
   "$tmp/arithmetic.ll"
@@ -183,10 +188,10 @@ echo "compiler ordered nested terminal-pattern LLVM test passed"
   "$root/compiler/examples/locals.gr" \
   "$tmp/locals.ll"
 llvm-as "$tmp/locals.ll" -o "$tmp/locals.bc"
-grep -q '%local_pair = select i1 true, %struct.Pair' "$tmp/locals.ll"
-grep -q '%local_left = select i1 true, i32' "$tmp/locals.ll"
-grep -q 'extractvalue %struct.Pair %local_pair, 0' "$tmp/locals.ll"
-grep -q 'extractvalue %struct.Pair %local_pair, 1' "$tmp/locals.ll"
+grep -Eq '%local_pair[_0-9]* = select i1 true, %struct.Pair' "$tmp/locals.ll"
+grep -Eq '%local_left[_0-9]* = select i1 true, i32' "$tmp/locals.ll"
+grep -Eq 'extractvalue %struct.Pair %local_pair[_0-9]*, 0' "$tmp/locals.ll"
+grep -Eq 'extractvalue %struct.Pair %local_pair[_0-9]*, 1' "$tmp/locals.ll"
 set +e
 lli "$tmp/locals.bc"
 locals_status=$?
@@ -199,8 +204,8 @@ echo "compiler typed lexical block/SSA local end-to-end test passed"
   "$root/compiler/examples/inferred-locals.gr" \
   "$tmp/inferred-locals.ll"
 llvm-as "$tmp/inferred-locals.ll" -o "$tmp/inferred-locals.bc"
-grep -q '%local_base = select i1 true, i64' "$tmp/inferred-locals.ll"
-grep -q '%local_offset = select i1 true, i64 2, i64 2' \
+grep -Eq '%local_base[_0-9]* = select i1 true, i64' "$tmp/inferred-locals.ll"
+grep -Eq '%local_offset[_0-9]* = select i1 true, i64 2, i64 2' \
   "$tmp/inferred-locals.ll"
 set +e
 lli "$tmp/inferred-locals.bc"
@@ -216,17 +221,17 @@ echo "compiler inferred lexical-local end-to-end test passed"
 llvm-as "$tmp/generics.ll" -o "$tmp/generics.bc"
 grep -q '%enum.Result__i32__unit = type { i32, i32, {} }' "$tmp/generics.ll"
 grep -q '%enum.Result__unit__unit = type { i32, {}, {} }' "$tmp/generics.ll"
-grep -q 'define i32 @grandiose_identity__i32(i32 %arg_value)' "$tmp/generics.ll"
+grep -q 'define internal i32 @grandiose_identity__i32(i32 %arg_value)' "$tmp/generics.ll"
 grep -q 'call i32 @grandiose_identity__i32(i32 40)' "$tmp/generics.ll"
 grep -q 'icmp sgt i32 %arg_value, 0' "$tmp/generics.ll"
 grep -q 'select i1 %t0, %enum.Result__unit__unit' "$tmp/generics.ll"
-grep -q 'define i32 @grandiose_run__i32__fn0_value__i32({ ptr, ptr, ptr } %arg_body)' "$tmp/generics.ll"
+grep -q 'define internal i32 @grandiose_run__i32__fn0_value__i32({ ptr, ptr, ptr } %arg_body)' "$tmp/generics.ll"
 grep -q '%closure_captures = load { i32 }, ptr %closure_env' "$tmp/generics.ll"
 grep -q 'call i32 %t0(ptr %t1)' "$tmp/generics.ll"
 grep -q 'call i32 @grandiose_run__i32__fn0_value__i32({ ptr, ptr, ptr }' "$tmp/generics.ll"
-grep -q 'define %enum.Result__i32__unit @grandiose_if__unit__unit__i32__fn0_value__i32' "$tmp/generics.ll"
-grep -q 'define i32 @grandiose_else__i32__unit__fn0_value__i32' "$tmp/generics.ll"
-test "$(grep -c 'switch i32' "$tmp/generics.ll")" -eq 2
+grep -q 'define internal %enum.Result__i32__unit @grandiose_if__unit__unit__i32__fn0_value__i32' "$tmp/generics.ll"
+grep -q 'define internal i32 @grandiose_else__i32__unit__fn0_value__i32' "$tmp/generics.ll"
+test "$(grep -c 'switch i32' "$tmp/generics.ll")" -eq 4
 grep -q 'phi %enum.Result__i32__unit' "$tmp/generics.ll"
 grep -q 'phi i32' "$tmp/generics.ll"
 set +e
@@ -241,7 +246,7 @@ echo "compiler generic Result/alias/monomorphization end-to-end test passed"
   "$root/compiler/examples/polymorphic-globals.gr" \
   "$tmp/polymorphic-globals.ll"
 llvm-as "$tmp/polymorphic-globals.ll" -o "$tmp/polymorphic-globals.bc"
-grep -q 'define %enum.Result__i64__unit @grandiose_\$grandiose.global\$None__i64()' \
+grep -q 'define internal %enum.Result__i64__unit @grandiose_\$grandiose.global\$None__i64()' \
   "$tmp/polymorphic-globals.ll"
 grep -q 'call %enum.Result__i64__unit @grandiose_\$grandiose.global\$None__i64()' \
   "$tmp/polymorphic-globals.ll"
@@ -259,7 +264,7 @@ echo "compiler polymorphic immutable-global end-to-end test passed"
 llvm-as "$tmp/effectful-callback.ll" -o "$tmp/effectful-callback.bc"
 grep -q 'define %grandiose.effect_step @grandiose_closure_.*_step__i32' \
   "$tmp/effectful-callback.ll"
-grep -q 'define %grandiose.effect_step @grandiose_run__i32__fn0_step__i32' \
+grep -q 'define internal %grandiose.effect_step @grandiose_run__i32__fn0_step__i32' \
   "$tmp/effectful-callback.ll"
 set +e
 lli "$tmp/effectful-callback.bc"
@@ -270,13 +275,49 @@ test "$effectful_callback_status" -eq 42
 echo "compiler effect-polymorphic Fn ABI end-to-end test passed"
 
 "$root/compiler/grc" \
+  "$root/compiler/examples/direct-resumptive.gr" \
+  "$tmp/direct-resumptive.ll"
+llvm-as "$tmp/direct-resumptive.ll" -o "$tmp/direct-resumptive.bc"
+if grep -q 'call %grandiose.effect_step @grandiose_ask' \
+  "$tmp/direct-resumptive.ll"; then
+  echo "statically handled [1,1] operation unexpectedly used the step ABI" >&2
+  exit 1
+fi
+set +e
+lli "$tmp/direct-resumptive.bc"
+direct_resumptive_status=$?
+set -e
+test "$direct_resumptive_status" -eq 42
+
+echo "compiler direct [1,1] resumption-evidence test passed"
+
+"$root/compiler/grc" \
+  "$root/compiler/examples/direct-resumptive-transitive.gr" \
+  "$tmp/direct-resumptive-transitive.ll"
+llvm-as "$tmp/direct-resumptive-transitive.ll" \
+  -o "$tmp/direct-resumptive-transitive.bc"
+if sed -n '/define i32 @grandiose_main/,/^}/p' \
+  "$tmp/direct-resumptive-transitive.ll" | \
+  grep -q 'call %grandiose.effect_step'; then
+  echo "transitive [1,1] evidence unexpectedly used the step ABI" >&2
+  exit 1
+fi
+set +e
+lli "$tmp/direct-resumptive-transitive.bc"
+direct_resumptive_transitive_status=$?
+set -e
+test "$direct_resumptive_transitive_status" -eq 42
+
+echo "compiler transitive [1,1] resumption-evidence test passed"
+
+"$root/compiler/grc" \
   "$root/compiler/examples/unused-effectful-callback.gr" \
   "$tmp/unused-effectful-callback.ll"
 llvm-as "$tmp/unused-effectful-callback.ll" \
   -o "$tmp/unused-effectful-callback.bc"
 grep -q 'define %grandiose.effect_step @grandiose_closure_.*_step__i32' \
   "$tmp/unused-effectful-callback.ll"
-grep -q 'define i32 @grandiose_ignore__i32__fn0_step__i32' \
+grep -q 'define internal i32 @grandiose_ignore__i32__fn0_step__i32' \
   "$tmp/unused-effectful-callback.ll"
 set +e
 lli "$tmp/unused-effectful-callback.bc"
@@ -290,14 +331,19 @@ echo "compiler unused delayed-effect evidence test passed"
   "$root/compiler/examples/effectful-if.gr" \
   "$tmp/effectful-if.ll"
 llvm-as "$tmp/effectful-if.ll" -o "$tmp/effectful-if.bc"
-grep -q 'define %grandiose.effect_step @grandiose_if_.*fn0_step__i32' \
+grep -q 'define internal %grandiose.effect_step @grandiose_if_.*fn0_step__i32' \
   "$tmp/effectful-if.ll"
-grep -q 'define i32 @grandiose_else_.*fn0_value__i32' \
+grep -q 'define internal i32 @grandiose_else_.*fn0_value__i32' \
   "$tmp/effectful-if.ll"
-grep -q 'define %enum.Result__i32__unit @grandiose_if_.*fn0_value__i32' \
+grep -q 'define internal %enum.Result__i32__unit @grandiose_if_.*fn0_value__i32' \
   "$tmp/effectful-if.ll"
-grep -q 'define %grandiose.effect_step @grandiose_else_.*fn0_step__i32' \
+grep -q 'define internal %grandiose.effect_step @grandiose_else_.*fn0_step__i32' \
   "$tmp/effectful-if.ll"
+if grep -Eq 'call %grandiose.effect_step @grandiose_(if|else)_' \
+  "$tmp/effectful-if.ll"; then
+  echo "effectful lazy selector escaped the step inliner" >&2
+  exit 1
+fi
 set +e
 lli "$tmp/effectful-if.bc"
 effectful_if_status=$?
@@ -315,7 +361,7 @@ test "$(grep -c 'define %grandiose.effect_step @grandiose_closure_.*_step__i32' 
   "$tmp/correlated-resumption-branches.ll")" -eq 2
 grep -q 'call ptr @grandiose_new_resumption' \
   "$tmp/correlated-resumption-branches.ll"
-grep -q 'define %grandiose.effect_step @grandiose_choose_.*fn0_step__i32' \
+grep -q 'define internal %grandiose.effect_step @grandiose_choose_.*fn0_step__i32' \
   "$tmp/correlated-resumption-branches.ll"
 set +e
 lli "$tmp/correlated-resumption-branches.bc"
@@ -360,12 +406,9 @@ llvm-as "$tmp/conditional-parameter-drop.ll" \
   -o "$tmp/conditional-parameter-drop.bc"
 grep -q '%drop_active_arg_resource_' \
   "$tmp/conditional-parameter-drop.ll"
-grep -q 'insertvalue { %struct.Resource, ptr } .*ptr %drop_active_arg_resource_' \
+grep -q 'call i1 @grandiose_claim_drop_state(ptr %drop_active_arg_resource_' \
   "$tmp/conditional-parameter-drop.ll"
-grep -A16 'define void @grandiose_closure_drop_' \
-  "$tmp/conditional-parameter-drop.ll" | \
-  grep -q 'call i1 @grandiose_claim_drop_state'
-grep -q 'call void @grandiose_retain_drop_state' \
+grep -q 'call void @grandiose_release_drop_state(ptr %drop_active_arg_resource_' \
   "$tmp/conditional-parameter-drop.ll"
 grep -q 'call void @free(ptr %closure_env)' \
   "$tmp/conditional-parameter-drop.ll"
@@ -397,9 +440,9 @@ echo "compiler fresh RunsIn environment/post-environment test passed"
   "$root/compiler/examples/incremental-available.gr" \
   "$tmp/incremental-available.ll"
 llvm-as "$tmp/incremental-available.ll" -o "$tmp/incremental-available.bc"
-grep -q 'define {} @grandiose_defer_available__environment__incoming_defer_available_' \
+grep -q 'define internal {} @grandiose_defer_available__environment__incoming_defer_available_' \
   "$tmp/incremental-available.ll"
-grep -q 'define i32 @grandiose_continue_available__environment__incoming_defer_available_' \
+grep -q 'define internal i32 @grandiose_continue_available__environment__incoming_defer_available_' \
   "$tmp/incremental-available.ll"
 set +e
 lli "$tmp/incremental-available.bc"
@@ -413,17 +456,17 @@ echo "compiler incremental Available/RunsIn ownership-chain test passed"
   "$root/compiler/examples/explicit-destroy.gr" \
   "$tmp/explicit-destroy.ll"
 llvm-as "$tmp/explicit-destroy.ll" -o "$tmp/explicit-destroy.bc"
-grep -q 'define {} @grandiose_destroy__struct_Holder__fn0_value__i32' \
+grep -q 'define internal {} @grandiose_destroy__struct_Holder__fn0_value__i32' \
   "$tmp/explicit-destroy.ll"
-grep -A8 'define {} @grandiose_destroy__struct_Holder__fn0_value__i32' \
+grep -A8 'define internal {} @grandiose_destroy__struct_Holder__fn0_value__i32' \
   "$tmp/explicit-destroy.ll" | grep -q 'call void %t'
-grep -q 'define {} @grandiose_destroy__enum_Resource__fn0_value__i32' \
+grep -q 'define internal {} @grandiose_destroy__enum_Resource__fn0_value__i32' \
   "$tmp/explicit-destroy.ll"
-grep -A16 'define {} @grandiose_destroy__enum_Resource__fn0_value__i32' \
+grep -A16 'define internal {} @grandiose_destroy__enum_Resource__fn0_value__i32' \
   "$tmp/explicit-destroy.ll" | grep -q 'switch i32'
-grep -A20 'define {} @grandiose_destroy__enum_Resource__fn0_value__i32' \
+grep -A20 'define internal {} @grandiose_destroy__enum_Resource__fn0_value__i32' \
   "$tmp/explicit-destroy.ll" | grep -q 'call void %t'
-grep -A20 'define i32 @grandiose_make_and_ignore' \
+grep -A20 'define internal i32 @grandiose_make_and_ignore' \
   "$tmp/explicit-destroy.ll" | grep -q 'call void %t'
 set +e
 lli "$tmp/explicit-destroy.bc"
@@ -495,9 +538,9 @@ if grep -A8 'define i32 @grandiose_reborrow_unique' \
   exit 1
 fi
 grep -A12 'define i32 @grandiose_reuse_parent_after_reborrow' \
-  "$tmp/references.ll" | grep -q 'load i32, ptr %local_child'
+  "$tmp/references.ll" | grep -Eq 'load i32, ptr %local_child[_0-9]*'
 grep -A12 'define i32 @grandiose_reuse_parent_after_reborrow' \
-  "$tmp/references.ll" | grep -q 'load i32, ptr %local_parent'
+  "$tmp/references.ll" | grep -Eq 'load i32, ptr %local_parent[_0-9]*'
 set +e
 lli "$tmp/references.bc"
 references_status=$?
@@ -510,7 +553,7 @@ echo "compiler shared/unique reference LLVM test passed"
   "$root/compiler/examples/available-to-unit.gr" \
   "$tmp/available-to-unit.ll"
 llvm-as "$tmp/available-to-unit.ll" -o "$tmp/available-to-unit.bc"
-grep -q 'define {} @grandiose_available_to_unit__struct_OptionalEnvironment' \
+grep -q 'define internal {} @grandiose_available_to_unit__struct_OptionalEnvironment' \
   "$tmp/available-to-unit.ll"
 grep -q 'define {} @grandiose_close_available({}' \
   "$tmp/available-to-unit.ll"
@@ -526,7 +569,7 @@ echo "compiler Available-to-unit intrinsic test passed"
   "$root/compiler/examples/effect-row.gr" \
   "$tmp/effect-row.ll"
 llvm-as "$tmp/effect-row.ll" -o "$tmp/effect-row.bc"
-grep -q 'define %grandiose.effect_step @grandiose_answer()' "$tmp/effect-row.ll"
+grep -Eq 'define (%grandiose.effect_step|i32) @grandiose_answer\(\)' "$tmp/effect-row.ll"
 set +e
 lli "$tmp/effect-row.bc"
 effect_row_status=$?
@@ -534,6 +577,18 @@ set -e
 test "$effect_row_status" -eq 42
 
 echo "compiler generic callable effect-row end-to-end test passed"
+
+"$root/compiler/grc" \
+  "$root/compiler/examples/effect-row-alias.gr" \
+  "$tmp/effect-row-alias.ll"
+llvm-as "$tmp/effect-row-alias.ll" -o "$tmp/effect-row-alias.bc"
+set +e
+lli "$tmp/effect-row-alias.bc"
+effect_row_alias_status=$?
+set -e
+test "$effect_row_alias_status" -eq 42
+
+echo "compiler effect-row alias expansion test passed"
 
 "$root/compiler/grc" \
   "$root/compiler/examples/effect-request.gr" \
@@ -608,9 +663,7 @@ echo "compiler recursive multi-suspension block-MIR test passed"
 llvm-as "$tmp/prefix-before-handler.ll" \
   -o "$tmp/prefix-before-handler.bc"
 grep -q '%local_adjusted_' "$tmp/prefix-before-handler.ll"
-grep -q '%handler_payload = extractvalue %grandiose.shared_environment' \
-  "$tmp/prefix-before-handler.ll"
-grep -q 'add i32 %runtime_pattern_value_.*, %local_adjusted_' \
+grep -q 'add i32 %pattern_value_.*, %local_adjusted_' \
   "$tmp/prefix-before-handler.ll"
 set +e
 lli "$tmp/prefix-before-handler.bc"
@@ -1114,8 +1167,9 @@ fi
 
 echo "compiler deep/multi-shot/cancel resumptive LLVM tests passed"
 
-# The lexer advances one character at a time in Grandiose. This padding checks
-# that guaranteed tail calls keep large scans off the native stack.
+# `compiler/grc` runs this legacy compiler source through the Rust bootstrap
+# interpreter. This padding is therefore an interpreter lexer-traversal stress
+# test; it does not prove tail-call formation in the generated LLVM output.
 {
   printf 'main() -> i64 { 42'
   head -c 10000 /dev/zero | tr '\0' ' '
@@ -1124,4 +1178,4 @@ echo "compiler deep/multi-shot/cancel resumptive LLVM tests passed"
 "$root/compiler/grc" "$tmp/tail-call-stress.gr" "$tmp/stress.ll" >/dev/null
 llvm-as "$tmp/stress.ll" -o "$tmp/stress.bc"
 
-echo "compiler tail-call lexer stress test passed"
+echo "bootstrap-interpreter lexer stress test passed"

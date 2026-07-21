@@ -1,0 +1,13 @@
+[package]
+name = "grandiose"
+version = "0.1.0"
+edition = "2024"
+description = "Interpreter and bootstrap runner for the Grandiose language"
+
+[dependencies]
+ariadne = "0.5"
+im = "15.1"
+grandiose-vm = { path = "../grandiose-vm" }
+
+[dev-dependencies]
+tempfile = "3"

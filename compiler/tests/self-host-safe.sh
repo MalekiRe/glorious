@@ -6,7 +6,7 @@ grandiose="$root/target/release/grandiose"
 
 memory_limit_mib="${GRANDIOSE_MEMORY_LIMIT_MIB:-4096}"
 max_eval_frames="${GRANDIOSE_MAX_EVAL_FRAMES:-4000000}"
-telemetry_seconds="${GRANDIOSE_TELEMETRY_SECONDS:-120}"
+telemetry_seconds="${GRANDIOSE_TELEMETRY_SECONDS:-600}"
 program="${1:-$root/compiler/src/main.gr}"
 input="${2:-$root/compiler/src/main.gr}"
 output="${3:-/tmp/grandiose-self.ll}"
@@ -39,4 +39,5 @@ ulimit -S -v "$((memory_limit_mib * 1024))"
 
 exec env GRANDIOSE_MAX_EVAL_FRAMES="$max_eval_frames" \
     GRANDIOSE_TELEMETRY_SECONDS="$telemetry_seconds" \
+    GRANDIOSE_BOOTSTRAP_FAST_PATHS=1 \
     "$grandiose" "$program" -- "$input" "$output"

@@ -1,0 +1,229 @@
+use grandiose::{
+    CompileOptions, OptimizationLevel, compile_bundle_to_bytecode, compile_source_to_bytecode,
+    compile_source_to_bytecode_with_options,
+    eval::{Host, Value as RecoveryValue},
+    run_bundle,
+    source_bundle::{Segment, SourceBundle},
+    span::Span,
+};
+use grandiose_vm::{Value, Vm, verify};
+
+#[derive(Default)]
+struct NoHost;
+
+impl Host for NoHost {
+    fn perform(
+        &mut self,
+        _effect: &str,
+        _operation: &str,
+        _args: Vec<RecoveryValue>,
+        span: Span,
+    ) -> Result<RecoveryValue, grandiose::diagnostic::Diagnostic> {
+        Err(grandiose::diagnostic::Diagnostic::error(
+            "unexpected effect",
+            "stored-lifetime recovery test performed a host effect",
+            span,
+        ))
+    }
+}
+
+const SHARED: &str = r#"
+    struct Cell { value: i64 }
+    struct View<'a, T> { private base: &'a T, start: usize }
+
+    make<'a, T>(base: &'a T) -> View<'a, T> {
+        View { base: base, start: 0 }
+    }
+
+    forward<'a, T>(value: View<'a, T>) -> View<'a, T> {
+        move value
+    }
+
+    into_base<'a, T>(value: View<'a, T>) -> &'a T {
+        value.base
+    }
+
+    answer() -> i64 {
+        let cell = Cell { value: 42 };
+        let view = make(&cell);
+        let carried = forward(move view);
+        let base = into_base(move carried);
+        base.value
+    }
+
+    main() -> () { () }
+"#;
+
+#[test]
+fn stored_shared_origin_survives_construction_forwarding_and_projection() {
+    for level in [
+        OptimizationLevel::O0,
+        OptimizationLevel::O1,
+        OptimizationLevel::O2,
+        OptimizationLevel::O3,
+    ] {
+        let artifact = compile_source_to_bytecode_with_options(
+            "stored-shared.glorious",
+            SHARED,
+            CompileOptions {
+                optimization_level: level,
+            },
+        )
+        .unwrap_or_else(|errors| panic!("{level:?}: {errors:#?}"));
+        let answer = artifact
+            .functions
+            .iter()
+            .position(|function| function.name == "answer")
+            .unwrap() as u32;
+        assert_eq!(
+            Vm::new(verify(artifact).unwrap())
+                .run(answer, vec![])
+                .unwrap(),
+            Value::I64(42),
+            "{level:?}"
+        );
+    }
+}
+
+#[test]
+fn private_stored_reference_cannot_be_projected_outside_its_authority_domain() {
+    let bundle = SourceBundle::new(
+        Segment::new("views.glorious", "struct View<'a,T>{private base:&'a T}\n"),
+        Segment::new(
+            "user.glorious",
+            "steal<'a>(value:View<'a,i64>)->&'a i64{value.base}\nmain()->(){()}\n",
+        ),
+        [],
+    );
+    let errors = compile_bundle_to_bytecode(&bundle)
+        .expect_err("a private stored reference escaped its defining source segment");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message.contains("private field `base`")),
+        "{errors:#?}"
+    );
+}
+
+#[test]
+fn stored_regions_enforce_escape_covariance_and_unique_invariance() {
+    let accepted = r#"
+        struct View<'a, T> { base: &'a T }
+        shorten<'long, 'short>(value: View<'long, i64>) -> View<'short, i64>
+            where 'long: 'short { move value }
+        main() -> () { () }
+    "#;
+    compile_source_to_bytecode("stored-covariance.glorious", accepted).unwrap();
+    compile_source_to_bytecode(
+        "stored-nested-covariance.glorious",
+        "struct Cov<T>{value:T} shorten<'long,'short>(value:Cov<&'long i64>)->Cov<&'short i64> where 'long:'short {move value} main()->(){()}",
+    )
+    .unwrap();
+    for (name, source, expected) in [
+        (
+            "stored-escape.glorious",
+            "struct View<'a,T>{base:&'a T} bad<'a>(base:&'a i64)->View<'static,i64>{View{base:base}} main()->(){()}",
+            "outlive",
+        ),
+        (
+            "stored-no-outlives.glorious",
+            "struct View<'a,T>{base:&'a T} bad<'long,'short>(value:View<'long,i64>)->View<'short,i64>{move value} main()->(){()}",
+            "outlive",
+        ),
+        (
+            "stored-unique-region-invariant.glorious",
+            "struct ViewMut<'a,T>{base:&'a mut T} bad<'long,'short>(value:ViewMut<'long,i64>)->ViewMut<'short,i64> where 'long:'short {move value} main()->(){()}",
+            "outlive",
+        ),
+        (
+            "stored-nested-unique-invariant.glorious",
+            "struct Cell<T>{value:&mut T} bad<'long,'short>(value:Cell<&'long i64>)->Cell<&'short i64> where 'long:'short {move value} main()->(){()}",
+            "outlive",
+        ),
+        (
+            "stored-unique-referent-invariant.glorious",
+            "struct Left{n:i64} struct Right{n:i64} struct ViewMut<'a,T>{base:&'a mut T} bad<'a>(value:ViewMut<'a,Left>)->ViewMut<'a,Right>{move value} main()->(){()}",
+            "expected ViewMut",
+        ),
+    ] {
+        let errors = compile_source_to_bytecode(name, source)
+            .expect_err("an invalid stored-reference region conversion compiled");
+        assert!(
+            errors.iter().any(|error| error.message.contains(expected)),
+            "{name}: {errors:#?}"
+        );
+    }
+}
+
+#[test]
+fn stored_lifetime_must_be_bound_by_its_nominal() {
+    let errors = compile_source_to_bytecode(
+        "unbound-stored.glorious",
+        "struct Bad<T>{base:&'missing T} main()->(){()}",
+    )
+    .expect_err("an unbound stored lifetime compiled");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message.contains("containing nominal")),
+        "{errors:#?}"
+    );
+}
+
+#[test]
+fn unique_origin_remains_live_while_stored_in_an_aggregate() {
+    let source = r#"
+        struct Cell { value: i64 }
+        struct ViewMut<'a, T> { base: &'a mut T }
+        make<'a, T>(base: &'a mut T) -> ViewMut<'a, T> {
+            ViewMut { base: base }
+        }
+        into_base<'a, T>(value: ViewMut<'a, T>) -> &'a mut T {
+            let ViewMut { base } = move value;
+            base
+        }
+        bad() -> i64 {
+            let cell = Cell { value: 7 };
+            let view = make(&mut cell);
+            let observed = cell.value;
+            let base = into_base(move view);
+            observed + base.value
+        }
+        main() -> () { () }
+    "#;
+    let errors = compile_source_to_bytecode("stored-unique-loan.glorious", source)
+        .expect_err("the owner was accessed while its unique loan lived in ViewMut");
+    assert!(
+        errors
+            .iter()
+            .any(|error| { error.message.contains("borrow") || error.message.contains("loan") }),
+        "{errors:#?}"
+    );
+}
+
+#[test]
+fn stored_reference_construction_and_projection_have_recovery_parity() {
+    let bundle = SourceBundle::raw_for_conformance(
+        Segment::new("empty.glorious", ""),
+        Segment::new(
+            "stored-recovery.glorious",
+            r#"
+                struct Cell { value: i64 }
+                struct Slice<'a> { base: &'a Cell }
+                make<'a>(base: &'a Cell) -> Slice<'a> { Slice { base: base } }
+                into_base<'a>(value: Slice<'a>) -> &'a Cell { value.base }
+                main() -> i64 {
+                    let cell = Cell { value: 42 };
+                    let view = make(&cell);
+                    let base = into_base(move view);
+                    base.value
+                }
+            "#,
+        ),
+        [],
+    );
+    assert_eq!(
+        run_bundle(&bundle, vec![], &mut NoHost).unwrap(),
+        RecoveryValue::Int(42)
+    );
+}

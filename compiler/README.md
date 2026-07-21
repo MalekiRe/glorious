@@ -1,5 +1,9 @@
 # Grandiose LLVM compiler
 
+> **Legacy:** this directory predates the greenfield bytecode architecture. It is
+> retained as historical/bootstrap test material only and is not an input to the
+> compiler design in `docs/` or part of the new self-hosting chain.
+
 This is a standalone Grandiose project (`grandiose.toml`) whose compiler source
 is itself Grandiose. It uses the `Files` and `Console` algebraic effects for all
 observable I/O, so a future in-language handler can redirect or pipe the same
@@ -133,18 +137,27 @@ correlation. Thus one exact-linear value may be consumed in either of two
 exclusive branches, while an unused `[1,1]` value and a duplicated `[0,1]`
 value receive structured ownership diagnostics.
 
-Explicit destruction is represented by a compiler-only `Destroy` expression
-and exposed through the injected generic `destroy(value)` callable. It counts
-as exactly one ordinary owned use, so it satisfies an exact-linear obligation
-while repeated destruction is rejected by the same path-sensitive interval
-checker. LLVM lowering destroys struct fields in reverse declaration order and
-destroys only the active enum variant's payloads, also in reverse order, while
-recursively invoking capture-specific closure drop glue. Closure values carry
+Owned values finish in one of three ways. `Transfer` moves the whole owner into
+a call, return, control payload, or aggregate. `Deconstruct` splits an owner only
+when its definition is visible and pattern coverage proves the complete layout;
+the resulting payload bindings are independently accounted owners. `Destroy`
+is disposal with zero ordinary owned uses and is legal only with
+`Use<[0,0]>` evidence. It cannot satisfy an exact-linear or other positive-lower
+obligation. A normal generic `destroy(value)` callable would transfer its
+argument before its body ran and therefore cannot express this zero-use outcome;
+any source-facing disposal entry requires a special compiler disposal argument
+mode and a zero-use bound.
+
+LLVM lowering zero-destroys struct fields in reverse declaration order and only
+the active enum variant's payloads, also in reverse order, while recursively
+invoking capture-specific closure drop glue. Closure values carry
 function, environment, and drop pointers. Capturing environments are heap-owned
 and their drop glue releases both captured values and storage. Values that may
 be consumed on only some paths use a shared, reference-counted ownership cell:
 moves claim the cell, alternative closures retain the same cell, and the final
-owner performs destruction exactly once. Callable storage itself is affine
+owner performs zero-use destruction exactly once only when the captured type
+proves `Use<[0,0]>`; otherwise correlation must prove a transfer or complete
+deconstruction on every continuing path. Callable storage itself is affine
 even though invoking an `Fn` does not consume it. Affine parameters and locals
 receive implicit reverse-order cleanup at normal lexical scope exit. Generic struct and enum
 constructors are contextually specialized from their expected nominal type,
@@ -153,32 +166,43 @@ construction, monomorphization, closure emission, and destruction on one
 concrete layout.
 
 Source-defined `impl Drop for T { drop(&mut self) -> { ... } }` hooks are
-validated independently from principal `Use`: the target must be nominal and
-support `[1,1]`, implementations are coherent, outward effects and suspension
-are rejected, and non-unrestricted fields cannot be partially moved. Effects
+validated independently from transfer and deconstruction: the target must be
+nominal and prove `Use<[0,0]>`, implementations are coherent, outward effects
+and suspension are rejected, and fields cannot be partially moved. Effects
 handled completely inside the hook remain legal. LLVM lowering invokes the
 hook exactly once through unique access before reverse structural destruction;
-this applies to explicit `destroy` and implicit zero-use lexical cleanup, and
-hook bodies participate in generic specialization and closure emission.
+this applies only to otherwise legal explicit or implicit zero-use destruction,
+and hook bodies participate in generic specialization and closure emission.
 Effectful parameters, locals, and suspension-result bindings use the same
 ownership cells. A generic `%grandiose.effect_step` cleanup wrapper retains
 their capture environment until completion, deep resumption, or cancellation;
 shared continuation environments carry a destructor callback and release
-captures on their final reference. Destructible operation arguments transfer
-ownership through request storage: handler bindings receive a fresh ownership
-cell, non-binding patterns destroy the payload value, and destructible values
-returned by resumption are owned by the continuation-result binding. Nested
-variant patterns transfer bound fields into independent cells and destroy only
-the unbound structural remainder in reverse order. Restricted field bindings
-from a custom-`Drop` value are rejected because its hook requires the complete
-value. Cleanup is no longer decided independently at each LLVM emission site.
-Explicit `destroy`, nested pattern remainders, lexical locals, callable
-parameters, closure captures, and effect-owner state releases first produce a
-typed `OwnershipPlan`. Its guarded `OwnershipDestroyProjection` and
+captures on their final reference. Operation arguments transfer ownership
+through request storage: handler bindings receive a fresh ownership cell, while
+non-binding patterns request zero-use destruction and require `Use<[0,0]>`.
+Values returned by resumption are owned by the continuation-result binding.
+The implemented source ownership-deconstruction slice currently covers named-
+struct and tuple patterns. Struct patterns check source-entry field visibility;
+both forms transfer bound fields into independent owners and lower `_`, `..`,
+and omitted fields as zero-use destruction. Exact-`[0,0]` fields without
+observable drop behavior are erased from aggregate runtime layouts, while
+runtime remainders are projected first and destroyed in reverse declaration
+order. Binding a reference-bearing or erased field, or discarding a reference-
+bearing field, remains rejected until its ownership origin can be transported
+or safely ended, and
+custom-`Drop` aggregate shells remain opaque because deconstruction would bypass
+their hook. Enum ownership deconstruction and recursively nested remainders
+remain to be lowered under the same rules. Cleanup is
+no longer decided independently at each LLVM emission site.
+Compiler-mediated zero destruction, nested pattern remainders, lexical locals,
+callable parameters, closure captures, and effect-owner state releases first
+produce a typed `OwnershipPlan`. Its guarded `OwnershipDestroyProjection` and
 `OwnershipReleaseState` actions are then lowered into projection, destruction,
 and drop-state instructions. This is the first ownership-MIR slice used by the
 backend: ordinary return and nonlocal continuation drop now converge on the same
-cleanup glue.
+cleanup glue. The plan and portable verifier require every owner to be
+transferred, completely deconstructed, or destroyed with zero-use evidence.
+Terminal abort is the explicit exception and performs no cleanup or hooks.
 
 Shared `&T` and unique `&mut T` references are parsed and checked as distinct
 source types, lower to LLVM pointers, and have principal use intervals
@@ -259,16 +283,22 @@ an unbounded upper limit), reject quantities on terminal `!` operations, and
 handler clauses retain an optional explicit `with k` resumption binding. The
 Rust interpreter already executes these bindings as quantity-checked delimited
 continuations: `resume(k, value)` deeply reinstalls the handler (and replays it
-for multi-shot quantities), while `cancel(k)` destroys the remaining
-computation only after the declared lower bound is met. The compiler assigns
+for multi-shot quantities), while `cancel(k)` closes the resumption only after
+the declared lower bound is met. The legacy AST interpreter does not execute
+Grandiose structural or custom cleanup for values retained solely by the closed
+continuation, so it is not a cleanup-conformance oracle. The compiler assigns
 each `with k` a typed `Resumption<OperationResult, HandlerResult>`, infers its
 use interval, and rejects clauses outside the operation's declared quantity.
 The LLVM backend now reifies lexical block suffixes as deep continuations and
 executes one-shot, bounded multi-shot, and cancellation examples natively.
 Effectful LLVM functions now use the first slice of the runtime CPS ABI: they
 return a `%grandiose.effect_step` containing either a boxed completed value or
-a suspended nominal effect request with a replayable continuation. Direct
-effectful tail calls forward that step unchanged across function boundaries.
+a suspended nominal effect request with a replayable continuation. A direct
+effectful call whose result is immediately returned forwards that step unchanged
+across the boundary. The generated source callable still uses an ordinary LLVM
+`call` followed by `ret`; only a limited set of generated continuation/runtime
+helpers carries LLVM's `tail` eligibility marker. This legacy backend therefore
+does not provide the language's general guaranteed-tail-call stack bound.
 Non-tail calls compose a heap-owned, capture-bearing suffix onto the request,
 and a recursive runtime dispatcher can handle and deeply resume requests
 originating in another function. Operation arguments are lowered into typed,
@@ -347,6 +377,37 @@ discovery consume that shared fact instead of independently repeating type and
 suspension queries. Together with `OwnershipPlan` and
 `ResumptiveHandlerControlPlan`, this forms the initial Typed Core/control-MIR
 spine while the remaining expression forms are migrated incrementally.
+
+Two backend optimizations run during lowering. First, calls to terminal-case
+selector callables — a callable whose body is exactly one exhaustive
+`handle perform Effect::operation(parameters)` over its own parameters, with
+literal argument blocks for its `Fn` parameters — are inlined at their
+monomorphized call sites instead of emitting a specialized function, closure
+environments, and indirect calls. The source-defined `if`, `else`, `and`,
+`or`, and `not` all have this shape, so a pure conditional lowers to the same
+`switch`/branch/`phi` structure a compiler-known conditional would produce,
+with no heap allocation. Self-recursive conditionals can consequently expose an
+ordinary call/return shape that an optimizing LLVM pipeline may convert to a
+loop, but this is not `musttail` and is not the language's guaranteed-tail-call
+implementation. Inlining is conservative: it requires
+callback parameters to be invoked exactly once from binding-free clauses,
+refuses any name that would be captured or shadowed at the inline site, and
+leaves every step-valued (suspending) composition on the general closure and
+effect-step path. Second, a peephole pass over each emitted function removes
+drop-state cells that provably never escape the function — a heap-allocated
+reference-counted cell whose only uses are one creation, one claim, and one
+release folds to a constant claim, which LLVM then eliminates together with
+the guarded drop branches.
+
+Closures may declare parameters. A block written `{ item => expression }`
+lowers to a closure whose function receives the environment pointer followed
+by the declared arguments, and an `Fn` constraint spells the argument tuple:
+`where P: Fn<(T), Output = Bool>` accepts `{ candidate => candidate.name ==
+needle }` and is invoked as `matches(item)`. Closure bodies are currently a
+single expression. The prelude uses this for the generic list combinators —
+`list_any`, `list_all`, `list_find`, `list_find_index`, `list_count`,
+`list_map`, and `list_text` — which replaced the hand-rolled
+lookup/`is_present` recursion pairs throughout the compiler.
 
 Frontend failures are performed through the terminal `Diagnostics::abort`
 effect. Its payload includes the input path, complete source, byte span, title,

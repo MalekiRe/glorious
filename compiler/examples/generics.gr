@@ -12,7 +12,7 @@ effect ResultCase<T, E> {
     inspect(value: Result<T, E>) -> !;
 }
 
-identity<T>(value: T) -> T {
+example_identity<T>(value: T) -> T {
     value
 }
 
@@ -46,7 +46,7 @@ main() -> i32 {
     let result: Result<i32, ()> = Result::Ok(42);
     let falsity: Bool = Result::Err(());
     let condition: Bool = positive(1);
-    let base: i32 = identity(40);
+    let base: i32 = example_identity(40);
     let computed: i32 = run() {
         base + 2
     };
