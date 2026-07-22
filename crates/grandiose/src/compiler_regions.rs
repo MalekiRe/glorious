@@ -1017,20 +1017,34 @@ fn infer_array_call_summary(
 }
 
 fn bounded_recursive_groups(program: &crate::compiler_mir::Program) -> Vec<BTreeSet<u32>> {
-    fn reaches(
+    fn postorder(
         graph: &BTreeMap<u32, BTreeSet<u32>>,
-        from: u32,
-        target: u32,
-        visiting: &mut BTreeSet<u32>,
-    ) -> bool {
-        if from == target {
-            return true;
+        node: u32,
+        visited: &mut BTreeSet<u32>,
+        order: &mut Vec<u32>,
+    ) {
+        if !visited.insert(node) {
+            return;
         }
-        visiting.insert(from)
-            && graph.get(&from).is_some_and(|next| {
-                next.iter()
-                    .any(|next| reaches(graph, *next, target, visiting))
-            })
+        for &successor in &graph[&node] {
+            postorder(graph, successor, visited, order);
+        }
+        order.push(node);
+    }
+
+    fn collect_component(
+        reverse: &BTreeMap<u32, BTreeSet<u32>>,
+        node: u32,
+        visited: &mut BTreeSet<u32>,
+        component: &mut BTreeSet<u32>,
+    ) {
+        if !visited.insert(node) {
+            return;
+        }
+        component.insert(node);
+        for &predecessor in &reverse[&node] {
+            collect_component(reverse, predecessor, visited, component);
+        }
     }
 
     let declarations = program
@@ -1057,26 +1071,36 @@ fn bounded_recursive_groups(program: &crate::compiler_mir::Program) -> Vec<BTree
             (function.declaration, edges)
         })
         .collect::<BTreeMap<_, BTreeSet<_>>>();
-    let mut assigned = BTreeSet::<u32>::new();
+    let mut reverse = declarations
+        .iter()
+        .map(|declaration| (*declaration, BTreeSet::new()))
+        .collect::<BTreeMap<_, _>>();
+    for (&source, targets) in &graph {
+        for target in targets {
+            reverse
+                .get_mut(target)
+                .expect("known call target")
+                .insert(source);
+        }
+    }
+    let mut visited = BTreeSet::new();
+    let mut order = Vec::with_capacity(declarations.len());
+    for &declaration in &declarations {
+        postorder(&graph, declaration, &mut visited, &mut order);
+    }
+    visited.clear();
     let mut groups = Vec::new();
-    for declaration in declarations {
-        if assigned.contains(&declaration) {
+    for declaration in order.into_iter().rev() {
+        if visited.contains(&declaration) {
             continue;
         }
-        let group = graph
-            .keys()
-            .copied()
-            .filter(|candidate| {
-                reaches(&graph, declaration, *candidate, &mut BTreeSet::new())
-                    && reaches(&graph, *candidate, declaration, &mut BTreeSet::new())
-            })
-            .collect::<BTreeSet<_>>();
+        let mut group = BTreeSet::new();
+        collect_component(&reverse, declaration, &mut visited, &mut group);
         let cyclic = group.len() > 1
             || graph
                 .get(&declaration)
                 .is_some_and(|edges| edges.contains(&declaration));
         if cyclic {
-            assigned.extend(&group);
             groups.push(group);
         }
     }
