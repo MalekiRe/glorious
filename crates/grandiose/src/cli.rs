@@ -7,6 +7,7 @@ use std::{
 
 use grandiose::{
     CompileOptions, OptimizationLevel, compile_bundle_to_phases_with_options,
+    compiler_session::IncrementalCompilerSession,
     diagnostic::{Diagnostic, Severity},
     interface::{InterfaceSelection, scan_interfaces},
     lexer,
@@ -499,12 +500,13 @@ fn compile(command: CompileCommand, stdout: &mut dyn Write, stderr: &mut dyn Wri
             return 1;
         }
     };
-    compile_loaded(command, segments, stdout, stderr)
+    compile_loaded(command, segments, None, stdout, stderr)
 }
 
 fn compile_loaded(
     command: CompileCommand,
     mut segments: Vec<Segment>,
+    incremental: Option<&mut IncrementalCompilerSession>,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> u8 {
@@ -564,12 +566,14 @@ fn compile_loaded(
             }
         };
     }
-    let phases = match compile_bundle_to_phases_with_options(
-        &bundle,
-        CompileOptions {
-            optimization_level: command.optimization_level,
-        },
-    ) {
+    let options = CompileOptions {
+        optimization_level: command.optimization_level,
+    };
+    let compiled = match incremental {
+        Some(session) => session.compile_bundle(&bundle, options),
+        None => compile_bundle_to_phases_with_options(&bundle, options),
+    };
+    let phases = match compiled {
         Ok(phases) => phases,
         Err(diagnostics) => {
             return report_diagnostics(&bundle, diagnostics, command.json_diagnostics, stderr);
@@ -646,6 +650,7 @@ struct SessionSnapshot {
 struct SessionState {
     generation: u64,
     last_good: Option<SessionSnapshot>,
+    compiler: IncrementalCompilerSession,
 }
 
 enum BoundedLine {
@@ -1025,7 +1030,13 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
         };
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let status = compile_loaded(command, segments, &mut stdout, &mut stderr);
+        let status = compile_loaded(
+            command,
+            segments,
+            Some(&mut state.compiler),
+            &mut stdout,
+            &mut stderr,
+        );
         let stdout = String::from_utf8_lossy(&stdout).into_owned();
         let stderr = String::from_utf8_lossy(&stderr).into_owned();
         let current_source_fingerprint = snapshot.source_fingerprint.clone();
