@@ -33,6 +33,29 @@ fn identity_generic_alias_impl_head_normalizes_associated_projection() {
 }
 
 #[test]
+fn generic_aliases_expand_through_every_projection_type_position() {
+    let source = r#"
+        trait Family<C> { type Member<T>; }
+        struct Wrap<T> { value: T }
+        type Alias<T> = Wrap<T>;
+        impl<S, C> Family<C> for Wrap<S> { type Member<T> = T; }
+        project_alias(
+            value: <Alias<i64> as Family<Alias<Text>>>::Member<Alias<u16>>
+        ) -> Alias<u16> { value }
+        main() -> { () }
+    "#;
+    let phases = compile_source_to_phases("alias-projection-positions.glorious", source)
+        .expect("aliases in projection subject and arguments should normalize structurally");
+    assert!(
+        phases
+            .artifact
+            .functions
+            .iter()
+            .any(|function| function.name == "project_alias")
+    );
+}
+
+#[test]
 fn alias_and_nominal_impl_heads_overlap_after_normalization() {
     let source = r#"
         trait Marker {}

@@ -61,7 +61,6 @@ pub struct ModuleResolution {
     declaration_defs: BTreeMap<(usize, usize), DefId>,
     definition_public: BTreeMap<DefId, bool>,
     prelude_definitions: BTreeSet<DefId>,
-    syntax_path_spans: BTreeMap<(usize, usize), Span>,
 }
 
 impl ModuleResolution {
@@ -566,14 +565,9 @@ fn rewrite_value_path(
         errors,
     ) {
         let spelling = resolution.backend_spelling(&definition);
-        let exact = resolution
-            .syntax_path_spans
-            .get(&(span.start, span.end))
-            .copied()
-            .unwrap_or(span);
         resolution
             .resolved_paths
-            .insert((exact.start, exact.end), definition);
+            .insert((span.start, span.end), definition);
         return Some(vec![spelling]);
     }
     let (member, owner) = path.split_last()?;
@@ -582,14 +576,9 @@ fn rewrite_value_path(
             resolve_definition(resolution, scopes, current, namespace, owner, span, errors)
         {
             let spelling = resolution.backend_spelling(&definition);
-            let exact = resolution
-                .syntax_path_spans
-                .get(&(span.start, span.end))
-                .copied()
-                .unwrap_or(span);
             resolution
                 .resolved_paths
-                .insert((exact.start, exact.end), definition);
+                .insert((span.start, span.end), definition);
             return Some(vec![spelling, member.clone()]);
         }
     }
@@ -638,9 +627,9 @@ fn rewrite_pattern(
     match &mut pattern.kind {
         PatternKind::Variant { path, fields, .. } => {
             if let Some(rewritten) =
-                rewrite_value_path(path, pattern.span, current, resolution, scopes, errors)
+                rewrite_value_path(path, path.span, current, resolution, scopes, errors)
             {
-                *path = rewritten;
+                path.segments = rewritten;
             }
             for field in fields {
                 rewrite_pattern(field, current, resolution, scopes, errors);
@@ -651,20 +640,25 @@ fn rewrite_pattern(
                 rewrite_pattern(element, current, resolution, scopes, errors);
             }
         }
-        PatternKind::Struct { name, fields, .. } => {
+        PatternKind::Struct {
+            name,
+            name_span,
+            fields,
+            ..
+        } => {
             if let Some(definition) = resolve_definition(
                 resolution,
                 scopes,
                 current,
                 Namespace::Type,
                 std::slice::from_ref(name),
-                pattern.span,
+                *name_span,
                 errors,
             ) {
                 *name = resolution.backend_spelling(&definition);
                 resolution
                     .resolved_paths
-                    .insert((pattern.span.start, pattern.span.end), definition);
+                    .insert((name_span.start, name_span.end), definition);
             }
             for field in fields {
                 rewrite_pattern(&mut field.pattern, current, resolution, scopes, errors);
@@ -1245,12 +1239,6 @@ fn rewrite_program_ast(
     scopes: &Scopes,
 ) -> Vec<Diagnostic> {
     let mut errors = Vec::new();
-    resolution.syntax_path_spans.extend(
-        program
-            .name_paths
-            .iter()
-            .map(|entry| ((entry.site.start, entry.site.end), entry.path)),
-    );
     let mut effect_sites = BTreeMap::new();
     for entry in &mut program.effect_paths {
         let Some(current) = resolution.owner(bundle, entry.site) else {

@@ -1,6 +1,7 @@
 #![allow(clippy::result_large_err)]
 
 pub mod ast;
+pub(crate) mod ast_visit;
 mod builtins;
 mod compiler;
 pub mod compiler_core;

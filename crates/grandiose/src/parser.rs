@@ -49,7 +49,6 @@ pub fn parse_recovering(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         type_const_arguments: Vec::new(),
         fixed_array_types: Vec::new(),
         numeric_literals: Vec::new(),
-        name_paths: Vec::new(),
     }
     .program(diagnostics)
 }
@@ -83,7 +82,6 @@ pub fn parse_recovering_with_fixity_regions(
         type_const_arguments: Vec::new(),
         fixed_array_types: Vec::new(),
         numeric_literals: Vec::new(),
-        name_paths: Vec::new(),
     }
     .program(diagnostics)
 }
@@ -221,7 +219,6 @@ struct Parser {
     type_const_arguments: Vec<crate::ast::TypeConstApplicationSyntax>,
     fixed_array_types: Vec<crate::ast::FixedArrayTypeSyntax>,
     numeric_literals: Vec<crate::ast::NumericLiteralSyntax>,
-    name_paths: Vec<crate::ast::NamePathSyntax>,
 }
 
 impl Parser {
@@ -279,7 +276,6 @@ impl Parser {
             type_const_arguments: self.type_const_arguments,
             fixed_array_types: self.fixed_array_types,
             numeric_literals: self.numeric_literals,
-            name_paths: self.name_paths,
         };
         (program, diagnostics)
     }
@@ -2760,7 +2756,10 @@ impl Parser {
                 } else {
                     Pattern {
                         kind: PatternKind::Variant {
-                            path,
+                            path: crate::ast::PatternPath {
+                                segments: path,
+                                span: token.span.join(end),
+                            },
                             fields: Vec::new(),
                             rest: None,
                         },
@@ -2814,8 +2813,6 @@ impl Parser {
                 ));
             }
         };
-        let named_path =
-            matches!(pattern.kind, PatternKind::Variant { .. }).then_some(pattern.span);
         if matches!(pattern.kind, PatternKind::Variant { .. }) && self.eat(&TokenKind::LParen) {
             let mut fields = Vec::new();
             let mut rest: Option<PatternRest> = None;
@@ -2851,12 +2848,6 @@ impl Parser {
                 kind: PatternKind::Variant { path, fields, rest },
                 span: pattern.span.join(end),
             };
-        }
-        if let Some(path) = named_path {
-            self.name_paths.push(crate::ast::NamePathSyntax {
-                site: pattern.span,
-                path,
-            });
         }
         Ok(pattern)
     }
@@ -2971,13 +2962,14 @@ impl Parser {
             .expect(TokenKind::RBrace, "expected `}` after the struct pattern")?
             .span;
         let pattern = Pattern {
-            kind: PatternKind::Struct { name, fields, rest },
+            kind: PatternKind::Struct {
+                name,
+                name_span: start,
+                fields,
+                rest,
+            },
             span: start.join(end),
         };
-        self.name_paths.push(crate::ast::NamePathSyntax {
-            site: pattern.span,
-            path: start,
-        });
         Ok(pattern)
     }
 

@@ -16,6 +16,7 @@ use crate::ast::{
     PatternKind, Program, Stmt, TypeSyntax, TypeSyntaxKind, UnaryOp, pattern_field_index,
     walk_expr,
 };
+use crate::ast_visit::TypeSyntaxVisitor;
 use crate::compiler_core as core;
 use crate::span::Span;
 
@@ -94,57 +95,37 @@ pub(crate) fn infer_nominal_variance(program: &Program) -> BTreeMap<String, Vec<
         .collect::<BTreeMap<_, _>>();
 
     fn mentions(program: &Program, syntax: &TypeSyntax, name: &str) -> bool {
-        match &syntax.kind {
-            TypeSyntaxKind::Path(_) => syntax.simple_name() == Some(name),
-            TypeSyntaxKind::SharedReference(inner) | TypeSyntaxKind::UniqueReference(inner) => {
-                program
-                    .reference_lifetime(syntax.span)
-                    .is_some_and(|lifetime| lifetime.name == name)
-                    || mentions(program, inner, name)
-            }
-            TypeSyntaxKind::Tuple(elements) => elements
-                .iter()
-                .any(|element| mentions(program, element, name)),
-            TypeSyntaxKind::Application {
-                constructor,
-                arguments,
-                lifetime_arguments,
-            } => {
-                mentions(program, constructor, name)
-                    || arguments
-                        .iter()
-                        .any(|argument| mentions(program, argument, name))
-                    || lifetime_arguments
-                        .iter()
-                        .any(|argument| argument.lifetime.name == name)
-            }
-            TypeSyntaxKind::Projection {
-                subject,
-                trait_ref,
-                arguments,
-                ..
-            } => {
-                mentions(program, subject, name)
-                    || trait_ref.arguments.iter().any(|argument| match argument {
-                        crate::ast::GoalArgument::Type(argument) => {
-                            mentions(program, argument, name)
-                        }
-                        crate::ast::GoalArgument::Lifetime { name: lifetime, .. } => {
-                            lifetime == name
-                        }
-                        _ => false,
-                    })
-                    || arguments.iter().any(|argument| match argument {
-                        crate::ast::AssociatedArgumentSyntax::Type(argument) => {
-                            mentions(program, argument, name)
-                        }
-                        crate::ast::AssociatedArgumentSyntax::Lifetime {
-                            name: lifetime, ..
-                        } => lifetime == name,
-                    })
-            }
-            TypeSyntaxKind::Never => false,
+        struct Mentions<'a> {
+            program: &'a Program,
+            name: &'a str,
         }
+        impl TypeSyntaxVisitor for Mentions<'_> {
+            type Break = ();
+
+            fn visit_type(&mut self, syntax: &TypeSyntax) -> ControlFlow<()> {
+                let direct = syntax.simple_name() == Some(self.name)
+                    || matches!(
+                        syntax.kind,
+                        TypeSyntaxKind::SharedReference(_) | TypeSyntaxKind::UniqueReference(_)
+                    ) && self
+                        .program
+                        .reference_lifetime(syntax.span)
+                        .is_some_and(|lifetime| lifetime.name == self.name)
+                    || matches!(&syntax.kind, TypeSyntaxKind::Application { lifetime_arguments, .. }
+                        if lifetime_arguments.iter().any(|argument| argument.lifetime.name == self.name))
+                    || matches!(&syntax.kind, TypeSyntaxKind::Projection { trait_ref, arguments, .. }
+                        if trait_ref.arguments.iter().any(|argument| matches!(argument,
+                            crate::ast::GoalArgument::Lifetime { name, .. } if name == self.name))
+                        || arguments.iter().any(|argument| matches!(argument,
+                            crate::ast::AssociatedArgumentSyntax::Lifetime { name, .. } if name == self.name)));
+                if direct {
+                    ControlFlow::Break(())
+                } else {
+                    crate::ast_visit::walk_type(self, syntax)
+                }
+            }
+        }
+        Mentions { program, name }.visit_type(syntax).is_break()
     }
 
     fn visit(

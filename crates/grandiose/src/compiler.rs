@@ -28,6 +28,7 @@ use crate::{
         HandlerClause, Param, PatternKind, Program, Stmt, StructDecl, TypeSyntax, TypeSyntaxKind,
         UnaryOp, pattern_field_index,
     },
+    ast_visit::{TypeSyntaxFolder, TypeSyntaxVisitor, type_syntax_any},
     compiler_core as core, compiler_mir as mir, compiler_regions,
     compiler_specialization as specialization,
     compiler_traits::{
@@ -7935,166 +7936,121 @@ fn normalize_ground_projections(
         trait_db: &TraitDb,
         budget: &mut SolverBudget,
     ) -> Result<(), Diagnostic> {
-        match &mut syntax.kind {
-            TypeSyntaxKind::SharedReference(referent)
-            | TypeSyntaxKind::UniqueReference(referent) => normalize(referent, trait_db, budget)?,
-            TypeSyntaxKind::Tuple(elements) => {
-                for element in elements {
-                    normalize(element, trait_db, budget)?;
-                }
-            }
-            TypeSyntaxKind::Application {
-                constructor,
-                arguments,
-                ..
-            } => {
-                normalize(constructor, trait_db, budget)?;
-                for argument in arguments {
-                    normalize(argument, trait_db, budget)?;
-                }
-            }
-            TypeSyntaxKind::Projection {
-                subject,
-                trait_ref,
-                item,
-                arguments: item_arguments,
-                const_arguments: item_const_arguments,
-            } => {
-                normalize(subject, trait_db, budget)?;
-                for argument in &mut trait_ref.arguments {
-                    if let crate::ast::GoalArgument::Type(argument) = argument {
-                        normalize(argument, trait_db, budget)?;
-                    }
-                }
-                for argument in item_arguments.iter_mut() {
-                    if let crate::ast::AssociatedArgumentSyntax::Type(argument) = argument {
-                        normalize(argument, trait_db, budget)?;
-                    }
-                }
+        struct Normalize<'a> {
+            trait_db: &'a TraitDb,
+            budget: &'a mut SolverBudget,
+        }
+        impl TypeSyntaxFolder for Normalize<'_> {
+            type Error = Diagnostic;
+
+            fn fold_type(&mut self, syntax: TypeSyntax) -> Result<TypeSyntax, Self::Error> {
+                let syntax = crate::ast_visit::fold_type(self, syntax)?;
+                let TypeSyntaxKind::Projection {
+                    trait_ref,
+                    item,
+                    arguments,
+                    const_arguments,
+                    ..
+                } = &syntax.kind
+                else {
+                    return Ok(syntax);
+                };
                 if trait_ref.path.len() == 1 {
                     let trait_name = &trait_ref.path[0].name;
-                    if let Some(expected) = trait_db.associated_type_arity(trait_name, &item.name)
-                        && expected != item_arguments.len() + item_const_arguments.len()
+                    if let Some(expected) =
+                        self.trait_db.associated_type_arity(trait_name, &item.name)
+                        && expected != arguments.len() + const_arguments.len()
                     {
                         return Err(type_error(
                             syntax.span,
                             format!(
                                 "wrong arity for associated type `{}`; expected {expected}, found {}",
                                 item.name,
-                                item_arguments.len() + item_const_arguments.len()
+                                arguments.len() + const_arguments.len()
                             ),
                         ));
                     }
                 }
-                let normalized = trait_db
-                    .normalize_type_detailed_with_budget(syntax, budget)
+                let normalized = self
+                    .trait_db
+                    .normalize_type_detailed_with_budget(&syntax, self.budget)
                     .map_err(|report| {
-                    let message = match report.result {
-                        SolveResult::Ambiguous => {
-                            "associated type projection is ambiguous or recursively cyclic"
-                        }
-                        SolveResult::Overflow => {
-                            "associated type projection normalization overflow"
-                        }
-                        SolveResult::Refuted => "associated type projection is explicitly refuted",
-                        SolveResult::NoEvidence => {
-                            "associated type projection is unresolved, unknown, or not fully ground"
-                        }
-                        SolveResult::Proven => unreachable!(),
-                    };
-                    let detail = report
-                        .failure
-                        .as_ref()
-                        .map(|failure| format!("; {}", failure.diagnostic_text()))
-                        .unwrap_or_default();
-                    type_error(syntax.span, format!("{message}{detail}"))
-                })?;
-                *syntax = from_type(&normalized, syntax.span);
+                        let message = match report.result {
+                            SolveResult::Ambiguous => {
+                                "associated type projection is ambiguous or recursively cyclic"
+                            }
+                            SolveResult::Overflow => {
+                                "associated type projection normalization overflow"
+                            }
+                            SolveResult::Refuted => {
+                                "associated type projection is explicitly refuted"
+                            }
+                            SolveResult::NoEvidence => {
+                                "associated type projection is unresolved, unknown, or not fully ground"
+                            }
+                            SolveResult::Proven => unreachable!(),
+                        };
+                        let detail = report
+                            .failure
+                            .as_ref()
+                            .map(|failure| format!("; {}", failure.diagnostic_text()))
+                            .unwrap_or_default();
+                        type_error(syntax.span, format!("{message}{detail}"))
+                    })?;
+                Ok(from_type(&normalized, syntax.span))
             }
-            TypeSyntaxKind::Path(_) | TypeSyntaxKind::Never => {}
         }
+        let placeholder = TypeSyntax {
+            kind: TypeSyntaxKind::Never,
+            span: syntax.span,
+        };
+        let owned = std::mem::replace(syntax, placeholder);
+        *syntax = Normalize { trait_db, budget }.fold_type(owned)?;
         Ok(())
     }
 
     fn references_binder(syntax: &TypeSyntax, binders: &BTreeSet<String>) -> bool {
-        match &syntax.kind {
-            TypeSyntaxKind::Path(path) => {
-                path.len() == 1 && binders.contains(path[0].name.as_str())
-            }
-            TypeSyntaxKind::SharedReference(referent)
-            | TypeSyntaxKind::UniqueReference(referent) => references_binder(referent, binders),
-            TypeSyntaxKind::Tuple(elements) => elements
-                .iter()
-                .any(|element| references_binder(element, binders)),
-            TypeSyntaxKind::Application {
-                constructor,
-                arguments,
-                ..
-            } => {
-                references_binder(constructor, binders)
-                    || arguments
+        struct References<'a>(&'a BTreeSet<String>);
+        impl TypeSyntaxVisitor for References<'_> {
+            type Break = ();
+
+            fn visit_type(&mut self, syntax: &TypeSyntax) -> std::ops::ControlFlow<()> {
+                if syntax
+                    .simple_name()
+                    .is_some_and(|name| self.0.contains(name))
+                {
+                    return std::ops::ControlFlow::Break(());
+                }
+                if let TypeSyntaxKind::Projection {
+                    trait_ref,
+                    arguments,
+                    ..
+                } = &syntax.kind
+                    && trait_ref
+                        .bindings
                         .iter()
-                        .any(|argument| references_binder(argument, binders))
+                        .flat_map(|binding| &binding.arguments)
+                        .chain(arguments)
+                        .any(|argument| {
+                            matches!(
+                                argument,
+                                crate::ast::AssociatedArgumentSyntax::Lifetime { name, .. }
+                                    if self.0.contains(name)
+                            )
+                        })
+                {
+                    return std::ops::ControlFlow::Break(());
+                }
+                crate::ast_visit::walk_type(self, syntax)
             }
-            TypeSyntaxKind::Projection {
-                subject,
-                trait_ref,
-                arguments,
-                ..
-            } => {
-                references_binder(subject, binders)
-                    || trait_ref.arguments.iter().any(|argument| match argument {
-                        crate::ast::GoalArgument::Type(argument) => {
-                            references_binder(argument, binders)
-                        }
-                        crate::ast::GoalArgument::Quantity(_)
-                        | crate::ast::GoalArgument::U32 { .. }
-                        | crate::ast::GoalArgument::Lifetime { .. } => false,
-                    })
-                    || trait_ref.bindings.iter().any(|binding| {
-                        binding.arguments.iter().any(|argument| match argument {
-                            crate::ast::AssociatedArgumentSyntax::Type(argument) => {
-                                references_binder(argument, binders)
-                            }
-                            crate::ast::AssociatedArgumentSyntax::Lifetime { name, .. } => {
-                                binders.contains(name)
-                            }
-                        }) || match &binding.value {
-                            crate::ast::AssociatedBindingValue::Type(value) => {
-                                references_binder(value, binders)
-                            }
-                            crate::ast::AssociatedBindingValue::EffectRow(row) => row
-                                .effects
-                                .iter()
-                                .any(|effect| references_binder(effect, binders)),
-                        }
-                    })
-                    || arguments.iter().any(|argument| match argument {
-                        crate::ast::AssociatedArgumentSyntax::Type(argument) => {
-                            references_binder(argument, binders)
-                        }
-                        crate::ast::AssociatedArgumentSyntax::Lifetime { name, .. } => {
-                            binders.contains(name)
-                        }
-                    })
-            }
-            TypeSyntaxKind::Never => false,
         }
+        References(binders).visit_type(syntax).is_break()
     }
 
     fn contains_projection(syntax: &TypeSyntax) -> bool {
-        match &syntax.kind {
-            TypeSyntaxKind::Projection { .. } => true,
-            TypeSyntaxKind::SharedReference(referent)
-            | TypeSyntaxKind::UniqueReference(referent) => contains_projection(referent),
-            TypeSyntaxKind::Tuple(elements) => elements.iter().any(contains_projection),
-            TypeSyntaxKind::Application {
-                constructor,
-                arguments,
-                ..
-            } => contains_projection(constructor) || arguments.iter().any(contains_projection),
-            TypeSyntaxKind::Path(_) | TypeSyntaxKind::Never => false,
-        }
+        type_syntax_any(syntax, |syntax| {
+            matches!(syntax.kind, TypeSyntaxKind::Projection { .. })
+        })
     }
 
     fn normalize_in_context(
@@ -10698,7 +10654,7 @@ pub(crate) fn normalize_constructor_aliases(program: &Program) -> Result<Program
                     && let Some(AssociatedTarget::Constructor(target)) =
                         aliases.get(&(path[0].to_string(), path[1].to_string()))
                 {
-                    *path = vec![target.0.clone(), target.1.clone()];
+                    path.segments = vec![target.0.clone(), target.1.clone()];
                 }
                 for field in fields {
                     rewrite_pattern(field, aliases);
@@ -10904,40 +10860,21 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
         .collect::<BTreeSet<_>>();
 
     fn substitute(syntax: &TypeSyntax, values: &BTreeMap<&str, TypeSyntax>) -> TypeSyntax {
-        if let Some(name) = syntax.simple_name()
-            && let Some(value) = values.get(name)
-        {
-            return value.clone();
+        struct Substitute<'a, 'b>(&'a BTreeMap<&'b str, TypeSyntax>);
+        impl TypeSyntaxFolder for Substitute<'_, '_> {
+            type Error = std::convert::Infallible;
+
+            fn fold_type(&mut self, syntax: TypeSyntax) -> Result<TypeSyntax, Self::Error> {
+                if let Some(value) = syntax.simple_name().and_then(|name| self.0.get(name)) {
+                    Ok(value.clone())
+                } else {
+                    crate::ast_visit::fold_type(self, syntax)
+                }
+            }
         }
-        let mut syntax = syntax.clone();
-        syntax.kind = match &syntax.kind {
-            TypeSyntaxKind::SharedReference(referent) => {
-                TypeSyntaxKind::SharedReference(Box::new(substitute(referent, values)))
-            }
-            TypeSyntaxKind::UniqueReference(referent) => {
-                TypeSyntaxKind::UniqueReference(Box::new(substitute(referent, values)))
-            }
-            TypeSyntaxKind::Tuple(elements) => TypeSyntaxKind::Tuple(
-                elements
-                    .iter()
-                    .map(|element| substitute(element, values))
-                    .collect(),
-            ),
-            TypeSyntaxKind::Application {
-                constructor,
-                arguments,
-                lifetime_arguments,
-            } => TypeSyntaxKind::Application {
-                constructor: Box::new(substitute(constructor, values)),
-                arguments: arguments
-                    .iter()
-                    .map(|argument| substitute(argument, values))
-                    .collect(),
-                lifetime_arguments: lifetime_arguments.clone(),
-            },
-            other => other.clone(),
-        };
-        syntax
+        Substitute(values)
+            .fold_type(syntax.clone())
+            .expect("infallible type substitution")
     }
 
     fn lower_const_defaults_and_fixed_arrays(
@@ -11502,30 +11439,24 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
         syntax: &TypeSyntax,
         aliases: &BTreeMap<&str, &crate::ast::TypeAliasDecl>,
     ) -> bool {
-        match &syntax.kind {
-            TypeSyntaxKind::Path(path) => {
-                path.len() == 1 && aliases.contains_key(path[0].name.as_str())
+        struct Contains<'a, 'b>(&'a BTreeMap<&'b str, &'a crate::ast::TypeAliasDecl>);
+        impl TypeSyntaxVisitor for Contains<'_, '_> {
+            type Break = ();
+
+            fn visit_type(&mut self, syntax: &TypeSyntax) -> std::ops::ControlFlow<()> {
+                if syntax
+                    .simple_name()
+                    .is_some_and(|name| self.0.contains_key(name))
+                {
+                    std::ops::ControlFlow::Break(())
+                } else if matches!(syntax.kind, TypeSyntaxKind::Projection { .. }) {
+                    std::ops::ControlFlow::Continue(())
+                } else {
+                    crate::ast_visit::walk_type(self, syntax)
+                }
             }
-            TypeSyntaxKind::SharedReference(referent)
-            | TypeSyntaxKind::UniqueReference(referent) => {
-                contains_alias_application(referent, aliases)
-            }
-            TypeSyntaxKind::Tuple(elements) => elements
-                .iter()
-                .any(|element| contains_alias_application(element, aliases)),
-            TypeSyntaxKind::Application {
-                constructor,
-                arguments,
-                ..
-            } => {
-                contains_alias_application(constructor, aliases)
-                    || arguments
-                        .iter()
-                        .any(|argument| contains_alias_application(argument, aliases))
-            }
-            TypeSyntaxKind::Never => false,
-            TypeSyntaxKind::Projection { .. } => false,
         }
+        Contains(aliases).visit_type(syntax).is_break()
     }
     let composed_monomorphic_aliases = program
         .type_aliases
@@ -12001,49 +11932,35 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
         bound: &BTreeSet<String>,
         visiting: &mut BTreeSet<String>,
     ) -> TypeSyntax {
-        if let Some(name) = syntax.simple_name()
-            && !bound.contains(name)
-            && let Some(target) = aliases.get(name)
-            && visiting.insert(name.to_owned())
-        {
-            let expanded = expand_monomorphic_alias(target, aliases, bound, visiting);
-            visiting.remove(name);
-            return expanded;
+        struct Expand<'a, 'b, 'c> {
+            aliases: &'a BTreeMap<&'b str, &'c TypeSyntax>,
+            bound: &'a BTreeSet<String>,
+            visiting: &'a mut BTreeSet<String>,
         }
-        let mut expanded = syntax.clone();
-        expanded.kind = match &syntax.kind {
-            TypeSyntaxKind::SharedReference(referent) => TypeSyntaxKind::SharedReference(Box::new(
-                expand_monomorphic_alias(referent, aliases, bound, visiting),
-            )),
-            TypeSyntaxKind::UniqueReference(referent) => TypeSyntaxKind::UniqueReference(Box::new(
-                expand_monomorphic_alias(referent, aliases, bound, visiting),
-            )),
-            TypeSyntaxKind::Tuple(elements) => TypeSyntaxKind::Tuple(
-                elements
-                    .iter()
-                    .map(|element| expand_monomorphic_alias(element, aliases, bound, visiting))
-                    .collect(),
-            ),
-            TypeSyntaxKind::Application {
-                constructor,
-                arguments,
-                lifetime_arguments,
-            } => TypeSyntaxKind::Application {
-                constructor: Box::new(expand_monomorphic_alias(
-                    constructor,
-                    aliases,
-                    bound,
-                    visiting,
-                )),
-                arguments: arguments
-                    .iter()
-                    .map(|argument| expand_monomorphic_alias(argument, aliases, bound, visiting))
-                    .collect(),
-                lifetime_arguments: lifetime_arguments.clone(),
-            },
-            other => other.clone(),
-        };
-        expanded
+        impl TypeSyntaxFolder for Expand<'_, '_, '_> {
+            type Error = std::convert::Infallible;
+
+            fn fold_type(&mut self, syntax: TypeSyntax) -> Result<TypeSyntax, Self::Error> {
+                if let Some(name) = syntax.simple_name()
+                    && !self.bound.contains(name)
+                    && let Some(target) = self.aliases.get(name)
+                    && self.visiting.insert(name.to_owned())
+                {
+                    let expanded = self.fold_type((*target).clone());
+                    self.visiting.remove(name);
+                    expanded
+                } else {
+                    crate::ast_visit::fold_type(self, syntax)
+                }
+            }
+        }
+        Expand {
+            aliases,
+            bound,
+            visiting,
+        }
+        .fold_type(syntax.clone())
+        .expect("infallible alias expansion")
     }
     for function in &mut normalized.functions {
         let bound = function
@@ -12153,30 +12070,22 @@ fn normalize_value_restricted_globals(program: &Program) -> Program {
     type GenericVariantFacts = BTreeMap<(String, String), (BTreeSet<String>, BTreeSet<String>)>;
 
     fn mentions(syntax: &TypeSyntax, names: &mut BTreeSet<String>) {
-        match &syntax.kind {
-            TypeSyntaxKind::Path(path) if path.len() == 1 => {
-                names.insert(path[0].name.clone());
-            }
-            TypeSyntaxKind::SharedReference(referent)
-            | TypeSyntaxKind::UniqueReference(referent) => mentions(referent, names),
-            TypeSyntaxKind::Tuple(elements) => {
-                for element in elements {
-                    mentions(element, names);
+        struct Mentions<'a>(&'a mut BTreeSet<String>);
+        impl TypeSyntaxVisitor for Mentions<'_> {
+            type Break = std::convert::Infallible;
+
+            fn visit_type(&mut self, syntax: &TypeSyntax) -> std::ops::ControlFlow<Self::Break> {
+                if let Some(name) = syntax.simple_name() {
+                    self.0.insert(name.to_owned());
                 }
-            }
-            TypeSyntaxKind::Application {
-                constructor,
-                arguments,
-                ..
-            } => {
-                mentions(constructor, names);
-                for argument in arguments {
-                    mentions(argument, names);
+                if matches!(syntax.kind, TypeSyntaxKind::Projection { .. }) {
+                    std::ops::ControlFlow::Continue(())
+                } else {
+                    crate::ast_visit::walk_type(self, syntax)
                 }
-            }
-            TypeSyntaxKind::Never | TypeSyntaxKind::Path(_) | TypeSyntaxKind::Projection { .. } => {
             }
         }
+        let _ = Mentions(names).visit_type(syntax);
     }
 
     let generic_variants = program
@@ -13466,21 +13375,9 @@ fn instantiate_ground_nominals(
     }
 
     fn contains_type_projection(syntax: &TypeSyntax) -> bool {
-        match &syntax.kind {
-            TypeSyntaxKind::Projection { .. } => true,
-            TypeSyntaxKind::SharedReference(referent)
-            | TypeSyntaxKind::UniqueReference(referent) => contains_type_projection(referent),
-            TypeSyntaxKind::Tuple(elements) => elements.iter().any(contains_type_projection),
-            TypeSyntaxKind::Application {
-                constructor,
-                arguments,
-                ..
-            } => {
-                contains_type_projection(constructor)
-                    || arguments.iter().any(contains_type_projection)
-            }
-            TypeSyntaxKind::Never | TypeSyntaxKind::Path(_) => false,
-        }
+        type_syntax_any(syntax, |syntax| {
+            matches!(syntax.kind, TypeSyntaxKind::Projection { .. })
+        })
     }
 
     fn ground_type_syntax(ty: &typeck::ProvisionalType, span: Span) -> Option<TypeSyntax> {
@@ -13538,94 +13435,19 @@ fn instantiate_ground_nominals(
         syntax: &TypeSyntax,
         substitutions: &BTreeMap<&str, typeck::ProvisionalType>,
     ) -> Option<TypeSyntax> {
-        if let Some(name) = syntax.simple_name()
-            && let Some(ty) = substitutions.get(name)
-        {
-            return ground_type_syntax(ty, syntax.span);
-        }
-        fn associated_argument(
-            argument: &crate::ast::AssociatedArgumentSyntax,
-            substitutions: &BTreeMap<&str, typeck::ProvisionalType>,
-        ) -> Option<crate::ast::AssociatedArgumentSyntax> {
-            Some(match argument {
-                crate::ast::AssociatedArgumentSyntax::Type(ty) => {
-                    crate::ast::AssociatedArgumentSyntax::Type(substitute_projection_syntax(
-                        ty,
-                        substitutions,
-                    )?)
-                }
-                argument @ crate::ast::AssociatedArgumentSyntax::Lifetime { .. } => {
-                    argument.clone()
-                }
-            })
-        }
-        fn trait_ref(
-            relation: &crate::ast::TraitRefSyntax,
-            substitutions: &BTreeMap<&str, typeck::ProvisionalType>,
-        ) -> Option<crate::ast::TraitRefSyntax> {
-            let mut relation = relation.clone();
-            for argument in &mut relation.arguments {
-                if let crate::ast::GoalArgument::Type(ty) = argument {
-                    *ty = substitute_projection_syntax(ty, substitutions)?;
+        struct Substitute<'a, 'b>(&'a BTreeMap<&'b str, typeck::ProvisionalType>);
+        impl TypeSyntaxFolder for Substitute<'_, '_> {
+            type Error = ();
+
+            fn fold_type(&mut self, syntax: TypeSyntax) -> Result<TypeSyntax, Self::Error> {
+                if let Some(ty) = syntax.simple_name().and_then(|name| self.0.get(name)) {
+                    ground_type_syntax(ty, syntax.span).ok_or(())
+                } else {
+                    crate::ast_visit::fold_type(self, syntax)
                 }
             }
-            for binding in &mut relation.bindings {
-                binding.arguments = binding
-                    .arguments
-                    .iter()
-                    .map(|argument| associated_argument(argument, substitutions))
-                    .collect::<Option<Vec<_>>>()?;
-                if let crate::ast::AssociatedBindingValue::Type(ty) = &mut binding.value {
-                    *ty = substitute_projection_syntax(ty, substitutions)?;
-                }
-            }
-            Some(relation)
         }
-        let mut result = syntax.clone();
-        result.kind = match &syntax.kind {
-            TypeSyntaxKind::SharedReference(referent) => TypeSyntaxKind::SharedReference(Box::new(
-                substitute_projection_syntax(referent, substitutions)?,
-            )),
-            TypeSyntaxKind::UniqueReference(referent) => TypeSyntaxKind::UniqueReference(Box::new(
-                substitute_projection_syntax(referent, substitutions)?,
-            )),
-            TypeSyntaxKind::Tuple(elements) => TypeSyntaxKind::Tuple(
-                elements
-                    .iter()
-                    .map(|element| substitute_projection_syntax(element, substitutions))
-                    .collect::<Option<Vec<_>>>()?,
-            ),
-            TypeSyntaxKind::Application {
-                constructor,
-                arguments,
-                lifetime_arguments,
-            } => TypeSyntaxKind::Application {
-                constructor: Box::new(substitute_projection_syntax(constructor, substitutions)?),
-                arguments: arguments
-                    .iter()
-                    .map(|argument| substitute_projection_syntax(argument, substitutions))
-                    .collect::<Option<Vec<_>>>()?,
-                lifetime_arguments: lifetime_arguments.clone(),
-            },
-            TypeSyntaxKind::Projection {
-                subject,
-                trait_ref: relation,
-                item,
-                arguments,
-                const_arguments,
-            } => TypeSyntaxKind::Projection {
-                subject: Box::new(substitute_projection_syntax(subject, substitutions)?),
-                trait_ref: trait_ref(relation, substitutions)?,
-                item: item.clone(),
-                arguments: arguments
-                    .iter()
-                    .map(|argument| associated_argument(argument, substitutions))
-                    .collect::<Option<Vec<_>>>()?,
-                const_arguments: const_arguments.clone(),
-            },
-            TypeSyntaxKind::Never | TypeSyntaxKind::Path(_) => syntax.kind.clone(),
-        };
-        Some(result)
+        Substitute(substitutions).fold_type(syntax.clone()).ok()
     }
 
     fn instantiated_type_with_projections(
@@ -15305,95 +15127,69 @@ fn instantiate_ground_nominals(
             };
             TypeSyntax { kind, span }
         }
-        if matches!(
-            &syntax.kind,
-            TypeSyntaxKind::Application { constructor, .. }
-                if constructor
-                    .simple_name()
-                    .is_some_and(|name| generic_heads.contains(name))
-        ) {
-            let owned_substitutions = substitutions
-                .iter()
-                .map(|(name, ty)| (*name, (*ty).clone()))
-                .collect::<BTreeMap<_, _>>();
-            if let Some(ty) =
-                instantiated_type(syntax, &owned_substitutions, monomorphic, generic_heads)
-            {
-                return from_type(&ty, syntax.span);
-            }
+        struct Specialize<'a, 'b, 'c> {
+            program: &'a Program,
+            substitutions: &'a BTreeMap<&'b str, &'c typeck::ProvisionalType>,
+            generic_heads: &'a BTreeSet<&'b str>,
+            monomorphic: &'a BTreeSet<&'b str>,
         }
-        if let Some(name) = syntax.simple_name()
-            && let Some(value) = substitutions.get(name)
-        {
-            return from_type(value, syntax.span);
-        }
-        let mut result = syntax.clone();
-        match &syntax.kind {
-            TypeSyntaxKind::SharedReference(referent) => {
-                result.kind = TypeSyntaxKind::SharedReference(Box::new(specialized_syntax(
-                    program,
-                    referent,
-                    substitutions,
-                    generic_heads,
-                    monomorphic,
-                )));
-            }
-            TypeSyntaxKind::UniqueReference(referent) => {
-                result.kind = TypeSyntaxKind::UniqueReference(Box::new(specialized_syntax(
-                    program,
-                    referent,
-                    substitutions,
-                    generic_heads,
-                    monomorphic,
-                )));
-            }
-            TypeSyntaxKind::Tuple(elements) => {
-                result.kind = TypeSyntaxKind::Tuple(
-                    elements
-                        .iter()
-                        .map(|element| {
-                            specialized_syntax(
-                                program,
-                                element,
-                                substitutions,
-                                generic_heads,
-                                monomorphic,
-                            )
-                        })
-                        .collect(),
-                );
-            }
-            TypeSyntaxKind::Application {
-                constructor,
-                arguments,
-                lifetime_arguments,
-            } => {
-                result.kind = TypeSyntaxKind::Application {
-                    constructor: constructor.clone(),
-                    arguments: arguments
-                        .iter()
-                        .map(|argument| {
-                            specialized_syntax(
-                                program,
-                                argument,
-                                substitutions,
-                                generic_heads,
-                                monomorphic,
-                            )
-                        })
-                        .collect(),
-                    lifetime_arguments: lifetime_arguments.clone(),
-                };
-                if let Some(typeck::ProvisionalType::Nominal(instance)) =
-                    syntax_type(program, &result, generic_heads, monomorphic)
+        impl TypeSyntaxFolder for Specialize<'_, '_, '_> {
+            type Error = std::convert::Infallible;
+
+            fn fold_type(&mut self, mut syntax: TypeSyntax) -> Result<TypeSyntax, Self::Error> {
+                if matches!(&syntax.kind, TypeSyntaxKind::Application { constructor, .. }
+                    if constructor.simple_name().is_some_and(|name| self.generic_heads.contains(name)))
                 {
-                    return from_type(&typeck::ProvisionalType::Nominal(instance), syntax.span);
+                    let substitutions = self
+                        .substitutions
+                        .iter()
+                        .map(|(name, ty)| (*name, (*ty).clone()))
+                        .collect::<BTreeMap<_, _>>();
+                    if let Some(ty) = instantiated_type(
+                        &syntax,
+                        &substitutions,
+                        self.monomorphic,
+                        self.generic_heads,
+                    ) {
+                        return Ok(from_type(&ty, syntax.span));
+                    }
+                }
+                if let Some(value) = syntax
+                    .simple_name()
+                    .and_then(|name| self.substitutions.get(name))
+                {
+                    return Ok(from_type(value, syntax.span));
+                }
+                if matches!(syntax.kind, TypeSyntaxKind::Projection { .. }) {
+                    return Ok(syntax);
+                }
+                if let TypeSyntaxKind::Application { arguments, .. } = &mut syntax.kind {
+                    *arguments = std::mem::take(arguments)
+                        .into_iter()
+                        .map(|argument| self.fold_type(argument))
+                        .collect::<Result<_, _>>()?;
+                    if let Some(typeck::ProvisionalType::Nominal(instance)) =
+                        syntax_type(self.program, &syntax, self.generic_heads, self.monomorphic)
+                    {
+                        return Ok(from_type(
+                            &typeck::ProvisionalType::Nominal(instance),
+                            syntax.span,
+                        ));
+                    }
+                    Ok(syntax)
+                } else {
+                    crate::ast_visit::fold_type(self, syntax)
                 }
             }
-            TypeSyntaxKind::Never | TypeSyntaxKind::Path(_) | TypeSyntaxKind::Projection { .. } => {
-            }
         }
-        result
+        Specialize {
+            program,
+            substitutions,
+            generic_heads,
+            monomorphic,
+        }
+        .fold_type(syntax.clone())
+        .expect("infallible type specialization")
     }
     let mut normalized = program.clone();
     normalized
@@ -29458,7 +29254,10 @@ impl<'a> CoreLowerer<'a> {
                         } else {
                             synthetic_pattern = crate::ast::Pattern {
                                 kind: crate::ast::PatternKind::Variant {
-                                    path: vec!["Result".to_owned(), "Ok".to_owned()],
+                                    path: crate::ast::PatternPath {
+                                        segments: vec!["Result".to_owned(), "Ok".to_owned()],
+                                        span: condition.span,
+                                    },
                                     fields: vec![crate::ast::Pattern {
                                         kind: crate::ast::PatternKind::Wildcard,
                                         span: condition.span,

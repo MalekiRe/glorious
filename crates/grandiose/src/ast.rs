@@ -1,4 +1,7 @@
-use std::{ops::ControlFlow, rc::Rc};
+use std::{
+    ops::{ControlFlow, Deref},
+    rc::Rc,
+};
 
 use crate::{lexer::NumberLiteral, span::Span};
 
@@ -41,15 +44,6 @@ pub struct Program {
     /// Exact numeric token payloads keyed by expression/pattern span. The
     /// scalar enum payloads remain compatibility shadows only.
     pub numeric_literals: Vec<NumericLiteralSyntax>,
-    /// Exact source path spans for syntax nodes whose compatibility AST stores
-    /// only path spellings (not per-segment spans), currently named patterns.
-    pub name_paths: Vec<NamePathSyntax>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NamePathSyntax {
-    pub site: Span,
-    pub path: Span,
 }
 
 impl Program {
@@ -899,7 +893,7 @@ pub enum PatternKind {
     Char(char),
     Byte(u8),
     Variant {
-        path: Vec<String>,
+        path: PatternPath,
         fields: Vec<Pattern>,
         rest: Option<PatternRest>,
     },
@@ -911,9 +905,27 @@ pub enum PatternKind {
     /// `Name { field: pattern, shorthand, .. }` — a named-struct pattern.
     Struct {
         name: String,
+        /// Exact span of the struct name, excluding its field patterns.
+        name_span: Span,
         fields: Vec<StructFieldPattern>,
         rest: Option<PatternRest>,
     },
+}
+
+/// A named pattern's segments and their exact source extent. Keeping these
+/// together prevents payload spans from becoming a parallel lookup key.
+#[derive(Clone, Debug)]
+pub struct PatternPath {
+    pub segments: Vec<String>,
+    pub span: Span,
+}
+
+impl Deref for PatternPath {
+    type Target = Vec<String>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.segments
+    }
 }
 
 #[derive(Clone, Debug)]
