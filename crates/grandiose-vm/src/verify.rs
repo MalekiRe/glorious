@@ -1016,6 +1016,10 @@ fn verify_artifact(
     {
         return Err(VerifyError::InvalidFunction(u32::MAX));
     }
+    // Quantity summaries are whole-artifact fixed points. Computing them while
+    // verifying each individual function repeats the same expensive analysis
+    // once per function, so build them once at the artifact boundary.
+    let quantity_cache = QuantityVerificationCache::new(artifact);
     let mut cleanups = Vec::new();
     for (i, f) in artifact.functions.iter().enumerate() {
         cleanups.extend(verify_function(
@@ -1024,9 +1028,10 @@ fn verify_artifact(
             f,
             require_cleanup_metadata,
             allow_seeded_leave_generation,
+            &quantity_cache,
         )?);
     }
-    verify_handler_parameter_quantity_dispositions(artifact)?;
+    verify_handler_parameter_quantity_dispositions(artifact, &quantity_cache.owned)?;
     Ok(cleanups)
 }
 
@@ -1535,6 +1540,7 @@ fn verify_function(
     f: &Function,
     require_cleanup_metadata: bool,
     allow_seeded_leave_generation: bool,
+    quantity_cache: &QuantityVerificationCache,
 ) -> Result<Vec<crate::bytecode::CleanupPlan>, VerifyError> {
     if f.outward_protocols
         .iter()
@@ -1580,7 +1586,14 @@ fn verify_function(
     let continuation_live = continuation_live_registers(a, f, &label_states)?;
     let loan_live = loan_live_registers(a, f, &label_states)?;
     let callable_targets = callable_targets_at_pcs(a, fid, f, &label_states)?;
-    verify_resumption_quantities(a, fid, f, &label_states)?;
+    verify_resumption_quantities_with_cache(
+        a,
+        fid,
+        f,
+        &label_states,
+        &callable_targets,
+        quantity_cache,
+    )?;
     let (enum_facts, _, _) = verify_enum_dominance(a, fid, f, &label_states)?;
     let move_path_states = verify_move_paths(a, fid, f, &enum_facts, &label_states)?;
     let result_leaves = reference_leaves(a, f.return_type);
@@ -1703,6 +1716,8 @@ fn verify_function(
                     .get(pc as usize + 1)
                     .map_or(&[], Vec::as_slice),
                 callable_targets: &callable_targets[pc as usize],
+                may_cancel: &quantity_cache.may_cancel,
+                may_multishot: &quantity_cache.may_multishot,
             },
             ins,
             &mut state,
@@ -2775,6 +2790,44 @@ struct TerminalEffectPayloadSummary {
     resumes: Vec<u64>,
 }
 
+struct QuantityVerificationCache {
+    transport: Vec<Option<Vec<usize>>>,
+    owned: Vec<Option<OwnedReceiverQuantitySummary>>,
+    terminal_effects: Vec<Option<TerminalEffectPayloadSummary>>,
+    may_cancel: Vec<bool>,
+    may_multishot: Vec<bool>,
+}
+
+impl QuantityVerificationCache {
+    fn new(artifact: &Artifact) -> Self {
+        let callable_targets = quantity_callable_target_facts(artifact);
+        let terminal_effects =
+            terminal_effect_payload_summaries_with_targets(artifact, &callable_targets);
+        let owned = owned_receiver_quantity_summaries_with_facts(
+            artifact,
+            &terminal_effects,
+            &callable_targets,
+        );
+        let may_cancel = function_effect_summaries_with_targets(
+            artifact,
+            &callable_targets,
+            operation_is_cancellable,
+        );
+        let may_multishot = function_effect_summaries_with_targets(
+            artifact,
+            &callable_targets,
+            operation_is_multishot,
+        );
+        Self {
+            transport: quantity_transport_summaries(artifact),
+            owned,
+            terminal_effects,
+            may_cancel,
+            may_multishot,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ArrayQuantityAction {
     Set {
@@ -2818,7 +2871,10 @@ type InstantiatedQuantityOutcome = (
 /// effect. This deliberately accepts only transport operations; quantity use
 /// remains visible to the ordinary quantity verifier and cannot be hidden in
 /// this summary.
-fn terminal_effect_payload_summaries(a: &Artifact) -> Vec<Option<TerminalEffectPayloadSummary>> {
+fn terminal_effect_payload_summaries_with_targets(
+    a: &Artifact,
+    target_facts: &[Option<Vec<Vec<CallableTargets>>>],
+) -> Vec<Option<TerminalEffectPayloadSummary>> {
     fn analyze(
         a: &Artifact,
         function_id: u32,
@@ -3084,15 +3140,6 @@ fn terminal_effect_payload_summaries(a: &Artifact) -> Vec<Option<TerminalEffectP
         effect
     }
 
-    let target_facts = a
-        .functions
-        .iter()
-        .enumerate()
-        .map(|(function, descriptor)| {
-            let labels = verify_labels(a, function as u32, descriptor).ok()?;
-            callable_targets_at_pcs(a, function as u32, descriptor, &labels).ok()
-        })
-        .collect::<Vec<_>>();
     let mut summaries = vec![None; a.functions.len()];
     let iterations = a
         .functions
@@ -3128,6 +3175,12 @@ fn terminal_effect_payload_summaries(a: &Artifact) -> Vec<Option<TerminalEffectP
         .collect()
 }
 
+#[cfg(test)]
+fn terminal_effect_payload_summaries(a: &Artifact) -> Vec<Option<TerminalEffectPayloadSummary>> {
+    let target_facts = quantity_callable_target_facts(a);
+    terminal_effect_payload_summaries_with_targets(a, &target_facts)
+}
+
 fn canonical_terminal_effect_payload_summary<'a>(
     summaries: &'a [Option<TerminalEffectPayloadSummary>],
     targets: &CallableTargets,
@@ -3145,7 +3198,11 @@ fn canonical_terminal_effect_payload_summary<'a>(
 /// transport-only summary, this records resumes and the terminal disposition of
 /// every receiver leaf. The fixed point is deliberately exact: recursive or
 /// dynamic alternatives which do not converge to one mapping are uncertified.
-fn owned_receiver_quantity_summaries(a: &Artifact) -> Vec<Option<OwnedReceiverQuantitySummary>> {
+fn owned_receiver_quantity_summaries_with_facts(
+    a: &Artifact,
+    terminal_summaries: &[Option<TerminalEffectPayloadSummary>],
+    target_facts: &[Option<Vec<Vec<CallableTargets>>>],
+) -> Vec<Option<OwnedReceiverQuantitySummary>> {
     #[derive(Clone, Debug, Eq, PartialEq)]
     struct State {
         origins: Vec<Vec<Option<usize>>>,
@@ -4156,16 +4213,6 @@ fn owned_receiver_quantity_summaries(a: &Artifact) -> Vec<Option<OwnedReceiverQu
         returned
     }
 
-    let target_facts = a
-        .functions
-        .iter()
-        .enumerate()
-        .map(|(fid, function)| {
-            let labels = verify_labels(a, fid as u32, function).ok()?;
-            callable_targets_at_pcs(a, fid as u32, function, &labels).ok()
-        })
-        .collect::<Vec<_>>();
-    let terminal_summaries = terminal_effect_payload_summaries(a);
     let mut summaries = a
         .functions
         .iter()
@@ -4199,7 +4246,7 @@ fn owned_receiver_quantity_summaries(a: &Artifact) -> Vec<Option<OwnedReceiverQu
                 (!pinned[fid])
                     .then(|| {
                         target_facts[fid].as_ref().and_then(|targets| {
-                            analyze(a, fid as u32, &summaries, &terminal_summaries, targets)
+                            analyze(a, fid as u32, &summaries, terminal_summaries, targets)
                         })
                     })
                     .flatten()
@@ -4233,6 +4280,13 @@ fn owned_receiver_quantity_summaries(a: &Artifact) -> Vec<Option<OwnedReceiverQu
     summaries
 }
 
+#[cfg(test)]
+fn owned_receiver_quantity_summaries(a: &Artifact) -> Vec<Option<OwnedReceiverQuantitySummary>> {
+    let target_facts = quantity_callable_target_facts(a);
+    let terminal_summaries = terminal_effect_payload_summaries_with_targets(a, &target_facts);
+    owned_receiver_quantity_summaries_with_facts(a, &terminal_summaries, &target_facts)
+}
+
 fn canonical_owned_receiver_quantity_summary<'a>(
     summaries: &'a [Option<OwnedReceiverQuantitySummary>],
     targets: &CallableTargets,
@@ -4263,7 +4317,9 @@ fn finite_handler_clause_targets(
         .ok()?
         .into_iter()
         .map(|callable_type| {
-            let targets = callable_type_producers(a, callable_type);
+            let targets = callable_type_producers(a, callable_type)
+                .into_iter()
+                .collect::<CallableTargets>();
             (!targets.is_empty()).then_some(targets)
         })
         .collect()
@@ -4273,8 +4329,10 @@ fn finite_handler_clause_targets(
 /// fresh resumption supplied to a concrete handler clause. Payload ownership
 /// crosses `Perform` without changing logical quantity identity; this exact
 /// parameter summary is the receiving half of that transport proof.
-fn verify_handler_parameter_quantity_dispositions(a: &Artifact) -> Result<(), VerifyError> {
-    let summaries = owned_receiver_quantity_summaries(a);
+fn verify_handler_parameter_quantity_dispositions(
+    a: &Artifact,
+    summaries: &[Option<OwnedReceiverQuantitySummary>],
+) -> Result<(), VerifyError> {
     for descriptor in &a.types {
         let Type::Handler {
             handler_def,
@@ -4566,22 +4624,53 @@ fn canonical_array_quantity_call_summary(
         .then_some(first)
 }
 
+#[cfg(test)]
 fn verify_resumption_quantities(
     a: &Artifact,
     fid: u32,
     f: &Function,
     label_states: &[Vec<LabelEntry>],
 ) -> Result<(), VerifyError> {
+    let callable_targets = callable_targets_at_pcs(a, fid, f, label_states)?;
+    let quantity_cache = QuantityVerificationCache::new(a);
+    verify_resumption_quantities_with_cache(
+        a,
+        fid,
+        f,
+        label_states,
+        &callable_targets,
+        &quantity_cache,
+    )
+}
+
+fn verify_resumption_quantities_with_cache(
+    a: &Artifact,
+    fid: u32,
+    f: &Function,
+    label_states: &[Vec<LabelEntry>],
+    callable_targets: &[Vec<CallableTargets>],
+    quantity_cache: &QuantityVerificationCache,
+) -> Result<(), VerifyError> {
     fn visit_variants(
         a: &Artifact,
         fid: u32,
         f: &Function,
         label_states: &[Vec<LabelEntry>],
+        callable_targets: &[Vec<CallableTargets>],
+        quantity_cache: &QuantityVerificationCache,
         register: usize,
         choices: &mut Vec<Option<u32>>,
     ) -> Result<(), VerifyError> {
         if register > f.params.len() {
-            return verify_resumption_quantities_for_variants(a, fid, f, label_states, choices);
+            return verify_resumption_quantities_for_variants(
+                a,
+                fid,
+                f,
+                label_states,
+                callable_targets,
+                quantity_cache,
+                choices,
+            );
         }
         if let Type::Enum { variants, .. } =
             a.types[f.register_types[register] as usize].representation()
@@ -4589,17 +4678,44 @@ fn verify_resumption_quantities(
         {
             for variant in 0..variants.len() as u32 {
                 choices[register] = Some(variant);
-                visit_variants(a, fid, f, label_states, register + 1, choices)?;
+                visit_variants(
+                    a,
+                    fid,
+                    f,
+                    label_states,
+                    callable_targets,
+                    quantity_cache,
+                    register + 1,
+                    choices,
+                )?;
             }
             choices[register] = None;
             Ok(())
         } else {
-            visit_variants(a, fid, f, label_states, register + 1, choices)
+            visit_variants(
+                a,
+                fid,
+                f,
+                label_states,
+                callable_targets,
+                quantity_cache,
+                register + 1,
+                choices,
+            )
         }
     }
 
     let mut choices = vec![None; f.params.len() + 1];
-    visit_variants(a, fid, f, label_states, 0, &mut choices)
+    visit_variants(
+        a,
+        fid,
+        f,
+        label_states,
+        callable_targets,
+        quantity_cache,
+        0,
+        &mut choices,
+    )
 }
 
 fn verify_resumption_quantities_for_variants(
@@ -4607,12 +4723,13 @@ fn verify_resumption_quantities_for_variants(
     fid: u32,
     f: &Function,
     label_states: &[Vec<LabelEntry>],
+    finite_callable_targets: &[Vec<CallableTargets>],
+    quantity_cache: &QuantityVerificationCache,
     entry_variants: &[Option<u32>],
 ) -> Result<(), VerifyError> {
-    let transport_summaries = quantity_transport_summaries(a);
-    let owned_summaries = owned_receiver_quantity_summaries(a);
-    let terminal_effect_summaries = terminal_effect_payload_summaries(a);
-    let finite_callable_targets = callable_targets_at_pcs(a, fid, f, label_states)?;
+    let transport_summaries = &quantity_cache.transport;
+    let owned_summaries = &quantity_cache.owned;
+    let terminal_effect_summaries = &quantity_cache.terminal_effects;
     let constants = constant_u64_registers_at_pcs(a, fid, f, label_states)?;
     let finite_handler_representatives = |handler_type: TypeId| -> Option<Vec<u32>> {
         finite_handler_clause_targets(a, handler_type)?
@@ -7931,7 +8048,116 @@ enum CarrierOrigin {
 }
 
 type CarrierOrigins = Vec<(Vec<u32>, CarrierOrigin)>;
-type CallableTargets = std::collections::BTreeSet<u32>;
+
+/// A small finite set of function ids propagated through verifier dataflow.
+///
+/// These sets are cloned with every per-PC abstract state. A `BTreeSet` made
+/// each clone rebuild an allocation-heavy tree; a sorted vector keeps the same
+/// deterministic set semantics while making clones and equality contiguous.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+enum CallableTargets {
+    #[default]
+    Empty,
+    Shared(Arc<[u32]>),
+}
+
+impl CallableTargets {
+    fn new() -> Self {
+        Self::default()
+    }
+
+    fn clear(&mut self) {
+        *self = Self::Empty;
+    }
+
+    fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
+    }
+
+    fn len(&self) -> usize {
+        self.as_slice().len()
+    }
+
+    fn first(&self) -> Option<&u32> {
+        self.as_slice().first()
+    }
+
+    fn iter(&self) -> std::slice::Iter<'_, u32> {
+        self.as_slice().iter()
+    }
+
+    fn as_slice(&self) -> &[u32] {
+        match self {
+            Self::Empty => &[],
+            Self::Shared(values) => values,
+        }
+    }
+}
+
+impl Extend<u32> for CallableTargets {
+    fn extend<T: IntoIterator<Item = u32>>(&mut self, iter: T) {
+        let mut incoming = iter.into_iter().collect::<Vec<_>>();
+        if incoming.is_empty() {
+            return;
+        }
+        incoming.sort_unstable();
+        incoming.dedup();
+        if self.is_empty() {
+            *self = Self::Shared(incoming.into());
+            return;
+        }
+        let mut merged = Vec::with_capacity(self.len() + incoming.len());
+        let mut left = self.as_slice().iter().copied().peekable();
+        let mut right = incoming.into_iter().peekable();
+        while let (Some(&a), Some(&b)) = (left.peek(), right.peek()) {
+            match a.cmp(&b) {
+                std::cmp::Ordering::Less => merged.push(left.next().unwrap()),
+                std::cmp::Ordering::Greater => merged.push(right.next().unwrap()),
+                std::cmp::Ordering::Equal => {
+                    merged.push(left.next().unwrap());
+                    right.next();
+                }
+            }
+        }
+        merged.extend(left);
+        merged.extend(right);
+        *self = Self::Shared(merged.into());
+    }
+}
+
+impl<const N: usize> From<[u32; N]> for CallableTargets {
+    fn from(values: [u32; N]) -> Self {
+        values.into_iter().collect()
+    }
+}
+
+impl FromIterator<u32> for CallableTargets {
+    fn from_iter<T: IntoIterator<Item = u32>>(iter: T) -> Self {
+        let mut result = Self::new();
+        result.extend(iter);
+        result
+    }
+}
+
+impl<'a> IntoIterator for &'a CallableTargets {
+    type Item = &'a u32;
+    type IntoIter = std::slice::Iter<'a, u32>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+fn quantity_callable_target_facts(a: &Artifact) -> Vec<Option<Vec<Vec<CallableTargets>>>> {
+    a.functions
+        .iter()
+        .enumerate()
+        .map(|(fid, function)| {
+            let labels = verify_labels(a, fid as u32, function).ok()?;
+            callable_targets_at_pcs(a, fid as u32, function, &labels).ok()
+        })
+        .collect()
+}
 
 fn declared_carrier_contract(
     a: &Artifact,
@@ -8003,7 +8229,7 @@ fn callable_targets_at_pcs(
         .take(f.params.len() + 1)
     {
         if matches!(type_at(a, ty)?, Type::Callable { .. }) {
-            entry[register] = callable_type_producers(a, ty);
+            entry[register] = callable_type_producers(a, ty).into_iter().collect();
         }
     }
     entries[0] = Some(entry);
@@ -8027,7 +8253,7 @@ fn callable_targets_at_pcs(
                 let targets = fields
                     .iter()
                     .flat_map(|field| state[*field as usize].iter().copied())
-                    .collect::<std::collections::BTreeSet<_>>();
+                    .collect::<CallableTargets>();
                 state[*dst as usize] = targets;
                 for field in fields {
                     state[*field as usize].clear();
@@ -8091,7 +8317,7 @@ fn callable_targets_at_pcs(
                     let mut changed = false;
                     for (old, incoming) in existing.iter_mut().zip(&state) {
                         let old_len = old.len();
-                        old.extend(incoming);
+                        old.extend(incoming.iter().copied());
                         changed |= old.len() != old_len;
                     }
                     if changed {
@@ -12816,6 +13042,8 @@ struct TransferContext<'a> {
     labels: &'a [LabelEntry],
     continuation_live: &'a [bool],
     callable_targets: &'a [CallableTargets],
+    may_cancel: &'a [bool],
+    may_multishot: &'a [bool],
 }
 
 fn transfer(
@@ -12834,7 +13062,12 @@ fn transfer(
         labels,
         continuation_live,
         callable_targets,
+        may_cancel,
+        may_multishot,
     } = context;
+    let cached_effect = |summaries: &[bool], function: u32| {
+        summaries.get(function as usize).copied().unwrap_or(true)
+    };
     let err_empty = |r| VerifyError::UseOfEmpty {
         function: fid,
         instruction: pc,
@@ -12900,7 +13133,7 @@ fn transfer(
             payloads,
             ..
         } if operation_is_multishot(a, *protocol, *operation) => Some(payloads.clone()),
-        Instruction::Call { function, args, .. } if function_body_may_multishot(a, *function) => {
+        Instruction::Call { function, args, .. } if cached_effect(may_multishot, *function) => {
             Some(args.clone())
         }
         Instruction::CallIndirect { callable, args, .. } => {
@@ -12919,7 +13152,7 @@ fn transfer(
             } else {
                 targets
                     .iter()
-                    .any(|target| function_body_may_multishot(a, *target))
+                    .any(|target| cached_effect(may_multishot, *target))
             };
             may_multishot.then(|| {
                 let mut excluded = args.clone();
@@ -12964,7 +13197,7 @@ fn transfer(
             ..
         } if operation_is_cancellable(a, *protocol, *operation) => Some(payloads.clone()),
         Instruction::Call { function, args, .. }
-            if function_body_may_cancel(a, *function)
+            if cached_effect(may_cancel, *function)
                 && !call_cancellation_discharged_by_handler(a, fid, *function) =>
         {
             Some(args.clone())
@@ -12986,7 +13219,7 @@ fn transfer(
             } else {
                 targets
                     .iter()
-                    .any(|target| function_body_may_cancel(a, *target))
+                    .any(|target| cached_effect(may_cancel, *target))
             };
             may_cancel.then(|| {
                 let mut excluded = args.clone();
@@ -13023,14 +13256,14 @@ fn transfer(
         } else {
             targets
                 .iter()
-                .any(|target| function_body_may_multishot(a, *target))
+                .any(|target| cached_effect(may_multishot, *target))
         };
         let body_may_cancel = if targets.is_empty() {
             signature_may_cancel(a, signature)
         } else {
             targets
                 .iter()
-                .any(|target| function_body_may_cancel(a, *target))
+                .any(|target| cached_effect(may_cancel, *target))
         };
         if body_may_multishot && !handler_snapshot_cloneable(a, f.register_types[*handler as usize])
         {
@@ -14641,6 +14874,7 @@ fn call_cancellation_discharged_by_handler(a: &Artifact, body_function: u32, cal
     saw_context
 }
 
+#[cfg(test)]
 fn function_body_may_cancel(a: &Artifact, function: u32) -> bool {
     function_body_has_effect(
         a,
@@ -14749,6 +14983,7 @@ fn signature_may_multishot(a: &Artifact, signature: &Signature) -> bool {
     })
 }
 
+#[cfg(test)]
 fn function_body_may_multishot(a: &Artifact, function: u32) -> bool {
     function_body_has_effect(
         a,
@@ -14759,6 +14994,7 @@ fn function_body_may_multishot(a: &Artifact, function: u32) -> bool {
     )
 }
 
+#[cfg(test)]
 fn function_body_has_effect(
     a: &Artifact,
     function: u32,
@@ -14766,6 +15002,18 @@ fn function_body_has_effect(
     operation_has_effect: fn(&Artifact, u32, u32) -> bool,
     _signature_has_effect: fn(&Artifact, &Signature) -> bool,
 ) -> bool {
+    let dynamic_targets = quantity_callable_target_facts(a);
+    function_effect_summaries_with_targets(a, &dynamic_targets, operation_has_effect)
+        .get(function as usize)
+        .copied()
+        .unwrap_or(true)
+}
+
+fn function_effect_summaries_with_targets(
+    a: &Artifact,
+    dynamic_targets: &[Option<Vec<Vec<CallableTargets>>>],
+    operation_has_effect: fn(&Artifact, u32, u32) -> bool,
+) -> Vec<bool> {
     let signature_effects = |signature: &Signature| {
         signature
             .outward_protocols
@@ -14779,15 +15027,6 @@ fn function_body_has_effect(
             })
             .collect::<BTreeSet<_>>()
     };
-    let dynamic_targets = a
-        .functions
-        .iter()
-        .enumerate()
-        .map(|(fid, descriptor)| {
-            let labels = verify_labels(a, fid as u32, descriptor).ok()?;
-            callable_targets_at_pcs(a, fid as u32, descriptor, &labels).ok()
-        })
-        .collect::<Vec<_>>();
     let mut summaries = vec![BTreeSet::<(u32, u32)>::new(); a.functions.len()];
     loop {
         let mut changed = false;
@@ -14954,11 +15193,14 @@ fn function_body_has_effect(
             }
         }
         if !changed {
-            return summaries.get(function as usize).is_none_or(|effects| {
-                effects
-                    .iter()
-                    .any(|(protocol, operation)| operation_has_effect(a, *protocol, *operation))
-            });
+            return summaries
+                .into_iter()
+                .map(|effects| {
+                    effects
+                        .iter()
+                        .any(|(protocol, operation)| operation_has_effect(a, *protocol, *operation))
+                })
+                .collect();
         }
     }
 }
