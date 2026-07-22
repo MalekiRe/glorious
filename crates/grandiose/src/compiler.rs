@@ -34771,6 +34771,48 @@ impl MirLowerer {
         }
     }
 
+    /// Branch on one exact discriminant value and retire the temporary on
+    /// both outgoing paths. Pattern lowering uses this shape for literal,
+    /// enum-tag, and refinement decisions; keeping it here makes the CFG and
+    /// ownership cleanup an atomic lowering operation.
+    fn switch_and_destroy(
+        &mut self,
+        discr: u32,
+        expected: Constant,
+        matched: u32,
+        otherwise: u32,
+        span: Span,
+    ) {
+        let matched_cleanup = self.label();
+        let otherwise_cleanup = self.label();
+        self.terminate(mir::Terminator::Switch {
+            discr: Self::operand(discr, mir::UseMode::Copy),
+            cases: vec![(
+                expected,
+                mir::Edge {
+                    target: matched_cleanup,
+                    args: vec![],
+                },
+            )],
+            otherwise: mir::Edge {
+                target: otherwise_cleanup,
+                args: vec![],
+            },
+        });
+        self.mark(matched_cleanup, span);
+        self.destroy(discr, span);
+        self.terminate(mir::Terminator::Goto(mir::Edge {
+            target: matched,
+            args: vec![],
+        }));
+        self.mark(otherwise_cleanup, span);
+        self.destroy(discr, span);
+        self.terminate(mir::Terminator::Goto(mir::Edge {
+            target: otherwise,
+            args: vec![],
+        }));
+    }
+
     fn retire_reference_handle(&mut self, register: u32, span: Span) {
         self.borrowed.remove(&register);
         self.borrow_parents.remove(&register);
@@ -35120,35 +35162,8 @@ impl MirLowerer {
                 ],
             },
         );
-        let pass_cleanup = self.label();
-        let fail_cleanup = self.label();
         let next = self.label();
-        self.terminate(mir::Terminator::Switch {
-            discr: Self::operand(equal, mir::UseMode::Copy),
-            cases: vec![(
-                Constant::U32(1),
-                mir::Edge {
-                    target: pass_cleanup,
-                    args: vec![],
-                },
-            )],
-            otherwise: mir::Edge {
-                target: fail_cleanup,
-                args: vec![],
-            },
-        });
-        self.mark(pass_cleanup, pattern.span);
-        self.destroy(equal, pattern.span);
-        self.terminate(mir::Terminator::Goto(mir::Edge {
-            target: next,
-            args: vec![],
-        }));
-        self.mark(fail_cleanup, pattern.span);
-        self.destroy(equal, pattern.span);
-        self.terminate(mir::Terminator::Goto(mir::Edge {
-            target: failure,
-            args: vec![],
-        }));
+        self.switch_and_destroy(equal, Constant::U32(1), next, failure, pattern.span);
         self.mark(next, pattern.span);
     }
 
@@ -35224,35 +35239,8 @@ impl MirLowerer {
                 );
                 self.close_pattern_path(shells, pattern.span);
                 failures.push((failure, owner_history.to_vec()));
-                let pass_cleanup = self.label();
-                let fail_cleanup = self.label();
                 let next = self.label();
-                self.terminate(mir::Terminator::Switch {
-                    discr: Self::operand(tag, mir::UseMode::Copy),
-                    cases: vec![(
-                        Constant::U32(*variant),
-                        mir::Edge {
-                            target: pass_cleanup,
-                            args: vec![],
-                        },
-                    )],
-                    otherwise: mir::Edge {
-                        target: fail_cleanup,
-                        args: vec![],
-                    },
-                });
-                self.mark(pass_cleanup, pattern.span);
-                self.destroy(tag, pattern.span);
-                self.terminate(mir::Terminator::Goto(mir::Edge {
-                    target: next,
-                    args: vec![],
-                }));
-                self.mark(fail_cleanup, pattern.span);
-                self.destroy(tag, pattern.span);
-                self.terminate(mir::Terminator::Goto(mir::Edge {
-                    target: failure,
-                    args: vec![],
-                }));
+                self.switch_and_destroy(tag, Constant::U32(*variant), next, failure, pattern.span);
                 self.mark(next, pattern.span);
                 for (field, child) in fields.iter().enumerate() {
                     path.push(PatternPathStep {
@@ -35414,23 +35402,15 @@ impl MirLowerer {
                 let matched_block = self.label();
                 let unmatched_block = self.label();
                 let join = self.label();
-                self.terminate(mir::Terminator::Switch {
-                    discr: Self::operand(tag, mir::UseMode::Copy),
-                    cases: vec![(
-                        Constant::U32(*variant),
-                        mir::Edge {
-                            target: matched_block,
-                            args: vec![],
-                        },
-                    )],
-                    otherwise: mir::Edge {
-                        target: unmatched_block,
-                        args: vec![],
-                    },
-                });
+                self.switch_and_destroy(
+                    tag,
+                    Constant::U32(*variant),
+                    matched_block,
+                    unmatched_block,
+                    span,
+                );
 
                 self.mark(matched_block, span);
-                self.destroy(tag, span);
                 let mut matched = self.borrowed_pattern_constant(1, span);
                 for (field, child) in fields.iter().enumerate() {
                     if matches!(
@@ -35463,7 +35443,6 @@ impl MirLowerer {
                 }));
 
                 self.mark(unmatched_block, span);
-                self.destroy(tag, span);
                 let unmatched = self.borrowed_pattern_constant(0, span);
                 self.terminate(mir::Terminator::Goto(mir::Edge {
                     target: join,
@@ -35613,34 +35592,7 @@ impl MirLowerer {
                     // aggregate-state fact into the verifier. Re-establish
                     // the proof on the successful edge before projecting an
                     // enum payload.
-                    let tag = self.allocate(U32);
-                    self.push(
-                        binding.span,
-                        mir::InstructionKind::EnumTag {
-                            dst: tag,
-                            src: source,
-                        },
-                    );
-                    let proven = self.label();
-                    let impossible = self.label();
-                    self.terminate(mir::Terminator::Switch {
-                        discr: Self::operand(tag, mir::UseMode::Copy),
-                        cases: vec![(
-                            Constant::U32(variant),
-                            mir::Edge {
-                                target: proven,
-                                args: vec![],
-                            },
-                        )],
-                        otherwise: mir::Edge {
-                            target: impossible,
-                            args: vec![],
-                        },
-                    });
-                    self.mark(impossible, binding.span);
-                    self.terminate(mir::Terminator::Unreachable);
-                    self.mark(proven, binding.span);
-                    self.destroy(tag, binding.span);
+                    self.prove_enum_variant(source, variant, binding.span);
                 }
                 let ty = projection.field_types[projection.field as usize];
                 let dst = self.allocate(ty);
@@ -35715,34 +35667,7 @@ impl MirLowerer {
                 // The decision DAG may have inspected a reconstructed or
                 // ancestor-owned value. Establish the active-variant fact on
                 // the exact owner that PROJECT_MOVE will consume.
-                let tag = self.allocate(U32);
-                self.push(
-                    pattern.span,
-                    mir::InstructionKind::EnumTag {
-                        dst: tag,
-                        src: register,
-                    },
-                );
-                let proven = self.label();
-                let impossible = self.label();
-                self.terminate(mir::Terminator::Switch {
-                    discr: Self::operand(tag, mir::UseMode::Copy),
-                    cases: vec![(
-                        Constant::U32(*variant),
-                        mir::Edge {
-                            target: proven,
-                            args: vec![],
-                        },
-                    )],
-                    otherwise: mir::Edge {
-                        target: impossible,
-                        args: vec![],
-                    },
-                });
-                self.mark(impossible, pattern.span);
-                self.terminate(mir::Terminator::Unreachable);
-                self.mark(proven, pattern.span);
-                self.destroy(tag, pattern.span);
+                self.prove_enum_variant(register, *variant, pattern.span);
                 let mut projected = Vec::with_capacity(fields.len());
                 for (field, child) in fields.iter().enumerate() {
                     let dst = self.allocate(child.ty);
@@ -36155,34 +36080,7 @@ impl MirLowerer {
                     // the already-proven variant with a redundant exact tag
                     // switch so payload assignment carries a dominating proof
                     // in every downstream representation.
-                    let tag = self.allocate(grandiose_vm::U32);
-                    self.push(
-                        expression.span,
-                        mir::InstructionKind::EnumTag {
-                            dst: tag,
-                            src: subject_register,
-                        },
-                    );
-                    let proven = self.label();
-                    let impossible = self.label();
-                    self.terminate(mir::Terminator::Switch {
-                        discr: Self::operand(tag, mir::UseMode::Copy),
-                        cases: vec![(
-                            Constant::U32(*variant),
-                            mir::Edge {
-                                target: proven,
-                                args: vec![],
-                            },
-                        )],
-                        otherwise: mir::Edge {
-                            target: impossible,
-                            args: vec![],
-                        },
-                    });
-                    self.mark(impossible, expression.span);
-                    self.terminate(mir::Terminator::Unreachable);
-                    self.mark(proven, expression.span);
-                    self.destroy(tag, expression.span);
+                    self.prove_enum_variant(subject_register, *variant, expression.span);
                 }
                 // A temporary refinement subject has no source-level name that
                 // can observe its residual shell. Retire that shell before
