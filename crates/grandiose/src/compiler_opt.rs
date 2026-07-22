@@ -94,6 +94,36 @@ impl fmt::Debug for FeatureBits {
     }
 }
 
+/// FIFO worklist for dense compiler arenas. Scheduling an item already pending
+/// is a no-op; popping it makes the item eligible to be scheduled again. This
+/// is the common fixpoint discipline used by sparse register and block flows.
+struct DenseWorklist {
+    pending: VecDeque<usize>,
+    scheduled: Vec<bool>,
+}
+
+impl DenseWorklist {
+    fn new(capacity: usize) -> Self {
+        Self {
+            pending: VecDeque::new(),
+            scheduled: vec![false; capacity],
+        }
+    }
+
+    fn schedule(&mut self, index: usize) {
+        if !self.scheduled[index] {
+            self.scheduled[index] = true;
+            self.pending.push_back(index);
+        }
+    }
+
+    fn pop(&mut self) -> Option<usize> {
+        let index = self.pending.pop_front()?;
+        self.scheduled[index] = false;
+        Some(index)
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PassId {
     ValidateRawMir,
@@ -4122,21 +4152,13 @@ fn sparse_statement_variant(
     }
 }
 
-fn enqueue_sparse_block(index: usize, queued: &mut [bool], queue: &mut VecDeque<usize>) {
-    if !queued[index] {
-        queued[index] = true;
-        queue.push_back(index);
-    }
-}
-
 fn enqueue_sparse_users(
     register: Register,
     users: &[BTreeSet<usize>],
-    queued: &mut [bool],
-    queue: &mut VecDeque<usize>,
+    worklist: &mut DenseWorklist,
 ) {
     for &index in &users[register as usize] {
-        enqueue_sparse_block(index, queued, queue);
+        worklist.schedule(index);
     }
 }
 
@@ -4211,12 +4233,10 @@ fn eliminate_dead_nontrapping_scalar_primitives(
     }
 
     let mut uses = register_uses(&scratch);
-    let mut queued = vec![false; uses.len()];
-    let mut queue = VecDeque::new();
+    let mut worklist = DenseWorklist::new(uses.len());
     for register in 0..uses.len() {
         if uses[register] == 0 && candidate_arguments[register].is_some() {
-            queued[register] = true;
-            queue.push_back(register);
+            worklist.schedule(register);
         }
     }
     let mut removed = scratch
@@ -4225,8 +4245,7 @@ fn eliminate_dead_nontrapping_scalar_primitives(
         .map(|block| vec![false; block.statements.len()])
         .collect::<Vec<_>>();
     let mut changed = false;
-    while let Some(register) = queue.pop_front() {
-        queued[register] = false;
+    while let Some(register) = worklist.pop() {
         work = work.saturating_add(1);
         if work > budget {
             return (PassOutcome::BudgetExhausted, work);
@@ -4244,12 +4263,8 @@ fn eliminate_dead_nontrapping_scalar_primitives(
         changed = true;
         for argument in arguments {
             uses[argument as usize] = uses[argument as usize].saturating_sub(1);
-            if uses[argument as usize] == 0
-                && candidate_arguments[argument as usize].is_some()
-                && !queued[argument as usize]
-            {
-                queued[argument as usize] = true;
-                queue.push_back(argument as usize);
+            if uses[argument as usize] == 0 && candidate_arguments[argument as usize].is_some() {
+                worklist.schedule(argument as usize);
             }
         }
     }
@@ -4380,14 +4395,12 @@ fn sparse_simplify(function: &mut Function, types: &[Type], budget: u64) -> (Pas
             users[register as usize].insert(block_index);
         }
     }
-    let mut queue = VecDeque::new();
-    let mut queued = vec![false; scratch.blocks.len()];
+    let mut worklist = DenseWorklist::new(scratch.blocks.len());
     let entry_index = block_indices[&scratch.entry];
     reachable[entry_index] = true;
-    enqueue_sparse_block(entry_index, &mut queued, &mut queue);
+    worklist.schedule(entry_index);
 
-    while let Some(block_index) = queue.pop_front() {
-        queued[block_index] = false;
+    while let Some(block_index) = worklist.pop() {
         if !reachable[block_index] {
             continue;
         }
@@ -4411,7 +4424,7 @@ fn sparse_simplify(function: &mut Function, types: &[Type], budget: u64) -> (Pas
             let variant_changed =
                 merge_sparse_variant(&mut variants[destination as usize], incoming_variant);
             if constant_changed || variant_changed {
-                enqueue_sparse_users(destination, &users, &mut queued, &mut queue);
+                enqueue_sparse_users(destination, &users, &mut worklist);
             }
         }
 
@@ -4449,7 +4462,7 @@ fn sparse_simplify(function: &mut Function, types: &[Type], budget: u64) -> (Pas
             let target_index = block_indices[&edge.target];
             if !reachable[target_index] {
                 reachable[target_index] = true;
-                enqueue_sparse_block(target_index, &mut queued, &mut queue);
+                worklist.schedule(target_index);
             }
             let parameters = &scratch.blocks[target_index].params;
             let implicit = parameters.len().saturating_sub(edge.args.len());
@@ -4461,7 +4474,7 @@ fn sparse_simplify(function: &mut Function, types: &[Type], budget: u64) -> (Pas
                     &mut variants[parameter.register as usize],
                     SparseVariant::Overdefined,
                 ) {
-                    enqueue_sparse_users(parameter.register, &users, &mut queued, &mut queue);
+                    enqueue_sparse_users(parameter.register, &users, &mut worklist);
                 }
             }
             for (parameter, argument) in parameters[implicit..].iter().zip(edge.args.iter()) {
@@ -4473,7 +4486,7 @@ fn sparse_simplify(function: &mut Function, types: &[Type], budget: u64) -> (Pas
                         incoming_variant,
                     )
                 {
-                    enqueue_sparse_users(parameter.register, &users, &mut queued, &mut queue);
+                    enqueue_sparse_users(parameter.register, &users, &mut worklist);
                 }
             }
         }
@@ -6763,12 +6776,18 @@ fn global_simplify_exact_callables(
     // Solve exact incoming must-facts before rewriting. Starting a newly seen
     // block from its first predecessor and then intersecting can only remove
     // facts, so loops and joins converge deterministically.
+    let block_indices = function
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| (block.id, index))
+        .collect::<BTreeMap<_, _>>();
     let mut incoming = BTreeMap::from([(function.entry, GlobalFacts::default())]);
-    let mut queue = VecDeque::from([function.entry]);
-    while let Some(block_id) = queue.pop_front() {
-        let Some(block) = function.blocks.iter().find(|block| block.id == block_id) else {
-            continue;
-        };
+    let mut worklist = DenseWorklist::new(function.blocks.len());
+    worklist.schedule(block_indices[&function.entry]);
+    while let Some(block_index) = worklist.pop() {
+        let block = &function.blocks[block_index];
+        let block_id = block.id;
         work = work.saturating_add(block.statements.len() as u64 + 1);
         if work > budget {
             return (PassOutcome::BudgetExhausted, work);
@@ -6794,8 +6813,8 @@ fn global_simplify_exact_callables(
                     true
                 }
             };
-            if changed && !queue.contains(&target) {
-                queue.push_back(target);
+            if changed {
+                worklist.schedule(block_indices[&target]);
             }
         }
     }
