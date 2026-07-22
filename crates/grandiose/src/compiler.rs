@@ -3826,140 +3826,6 @@ fn bind_runtime_manifest(
                     [GoalArgument::Quantity(quantity)]
                         if quantity.lower == 0 && quantity.upper.is_none()))
     }
-    fn is_integer_scalar(name: &str) -> bool {
-        crate::builtins::INTEGER_SCALAR_NAMES.contains(&name)
-    }
-    fn concrete_float_leaf_signature(
-        name: &str,
-        primitive: Primitive,
-        params: &[&TypeSyntax],
-        result: Option<&TypeSyntax>,
-    ) -> Option<bool> {
-        let binary_suffix = match primitive {
-            Primitive::FloatAdd => Some("_add"),
-            Primitive::FloatSub => Some("_sub"),
-            Primitive::FloatMul => Some("_mul"),
-            Primitive::FloatDiv => Some("_div"),
-            Primitive::FloatRem => Some("_rem"),
-            _ => None,
-        };
-        if let Some(suffix) = binary_suffix {
-            let Some(width) = name
-                .strip_prefix("__g1_")
-                .and_then(|name| name.strip_suffix(suffix))
-            else {
-                return Some(false);
-            };
-            return Some(
-                matches!(width, "f32" | "f64")
-                    && matches!(params, [left, right]
-                        if path_is(left, width) && path_is(right, width))
-                    && result.is_some_and(|result| path_is(result, width)),
-            );
-        }
-        if primitive == Primitive::FloatNeg {
-            let Some(width) = name
-                .strip_prefix("__g1_")
-                .and_then(|name| name.strip_suffix("_neg"))
-            else {
-                return Some(false);
-            };
-            return Some(
-                matches!(width, "f32" | "f64")
-                    && matches!(params, [value] if path_is(value, width))
-                    && result.is_some_and(|result| path_is(result, width)),
-            );
-        }
-        let comparison_suffix = match primitive {
-            Primitive::FloatEq => Some("_eq"),
-            Primitive::FloatNe => Some("_ne"),
-            Primitive::FloatLt => Some("_lt"),
-            Primitive::FloatLe => Some("_le"),
-            Primitive::FloatGt => Some("_gt"),
-            Primitive::FloatGe => Some("_ge"),
-            _ => None,
-        };
-        if let Some(suffix) = comparison_suffix {
-            let Some(width) = name
-                .strip_prefix("__g1_")
-                .and_then(|name| name.strip_suffix(suffix))
-            else {
-                return Some(false);
-            };
-            return Some(
-                matches!(width, "f32" | "f64")
-                    && matches!(params, [left, right]
-                        if path_is(left, width) && path_is(right, width))
-                    && result.is_some_and(|result| path_is(result, "u32")),
-            );
-        }
-        match primitive {
-            Primitive::FloatConvert => {
-                let (source, target) = match name {
-                    "__g1_f32_to_f64" => ("f32", "f64"),
-                    "__g1_f64_to_f32" => ("f64", "f32"),
-                    _ => return Some(false),
-                };
-                Some(
-                    matches!(params, [value] if path_is(value, source))
-                        && result.is_some_and(|result| path_is(result, target)),
-                )
-            }
-            Primitive::IntToFloat => {
-                let Some((source, target)) = name
-                    .strip_prefix("__g1_")
-                    .and_then(|body| body.rsplit_once("_to_"))
-                else {
-                    return Some(false);
-                };
-                Some(
-                    is_integer_scalar(source)
-                        && matches!(target, "f32" | "f64")
-                        && matches!(params, [value] if path_is(value, source))
-                        && result.is_some_and(|result| path_is(result, target)),
-                )
-            }
-            Primitive::FloatToIntChecked => {
-                let Some((source, target)) = name
-                    .strip_prefix("__g1_")
-                    .and_then(|body| body.strip_suffix("_checked"))
-                    .and_then(|body| body.split_once("_to_"))
-                else {
-                    return Some(false);
-                };
-                Some(
-                    matches!(source, "f32" | "f64")
-                        && is_integer_scalar(target)
-                        && matches!(params, [value] if path_is(value, source))
-                        && result.is_some_and(|result| path_is(result, target)),
-                )
-            }
-            Primitive::FloatToBits => {
-                let (source, target) = match name {
-                    "__g1_f32_to_bits" => ("f32", "u32"),
-                    "__g1_f64_to_bits" => ("f64", "u64"),
-                    _ => return Some(false),
-                };
-                Some(
-                    matches!(params, [value] if path_is(value, source))
-                        && result.is_some_and(|result| path_is(result, target)),
-                )
-            }
-            Primitive::FloatFromBits => {
-                let (source, target) = match name {
-                    "__g1_f32_from_bits" => ("u32", "f32"),
-                    "__g1_f64_from_bits" => ("u64", "f64"),
-                    _ => return Some(false),
-                };
-                Some(
-                    matches!(params, [value] if path_is(value, source))
-                        && result.is_some_and(|result| path_is(result, target)),
-                )
-            }
-            _ => None,
-        }
-    }
-
     let mut leaves = BTreeMap::new();
     for leaf in runtime.primitive_leaves() {
         let Some(function) = program
@@ -3973,26 +3839,9 @@ fn bind_runtime_manifest(
             // allowed to expose only the runtime leaves they use; preserve that
             // policy for this newly added family.  A declaration that is
             // present is still domain- and signature-checked below.
-            if matches!(
-                leaf.primitive,
-                Primitive::FloatAdd
-                    | Primitive::FloatSub
-                    | Primitive::FloatMul
-                    | Primitive::FloatDiv
-                    | Primitive::FloatRem
-                    | Primitive::FloatNeg
-                    | Primitive::FloatEq
-                    | Primitive::FloatNe
-                    | Primitive::FloatLt
-                    | Primitive::FloatLe
-                    | Primitive::FloatGt
-                    | Primitive::FloatGe
-                    | Primitive::FloatConvert
-                    | Primitive::IntToFloat
-                    | Primitive::FloatToIntChecked
-                    | Primitive::FloatToBits
-                    | Primitive::FloatFromBits
-            ) {
+            if crate::builtins::runtime_primitive_family(leaf.primitive)
+                == Some(crate::builtins::RuntimePrimitiveFamily::TypedFloat)
+            {
                 continue;
             }
             errors.push(Diagnostic::plain(format!(
@@ -4020,59 +3869,23 @@ fn bind_runtime_manifest(
             .collect::<Vec<_>>();
         let result = function.return_type.as_ref();
         let concrete_signature =
-            concrete_float_leaf_signature(&leaf.display_name, leaf.primitive, &params, result)
+            crate::builtins::runtime_leaf_signature(&leaf.display_name, leaf.primitive)
+                .map(|signature| {
+                    let params = params
+                        .iter()
+                        .map(|parameter| parameter.simple_name())
+                        .collect::<Option<Vec<_>>>();
+                    signature.matches(
+                        params.as_deref().unwrap_or_default(),
+                        result.and_then(TypeSyntax::simple_name),
+                    )
+                })
+                .or_else(|| {
+                    (crate::builtins::runtime_primitive_family(leaf.primitive)
+                        == Some(crate::builtins::RuntimePrimitiveFamily::TypedFloat))
+                    .then_some(false)
+                })
                 .or_else(|| match leaf.primitive {
-                    Primitive::CharFromU32Checked => Some(
-                        matches!(params.as_slice(), [value] if path_is(value, "u32"))
-                            && result.is_some_and(|result| path_is(result, "char")),
-                    ),
-                    Primitive::CharToU32 => Some(
-                        matches!(params.as_slice(), [value] if path_is(value, "char"))
-                            && result.is_some_and(|result| path_is(result, "u32")),
-                    ),
-                    Primitive::TextByteLen => Some(
-                        matches!(params.as_slice(), [value] if path_is(value, "Text"))
-                            && result.is_some_and(|result| path_is(result, "usize")),
-                    ),
-                    Primitive::TextConcat => Some(
-                        matches!(params.as_slice(), [left, right]
-                    if path_is(left, "Text") && path_is(right, "Text"))
-                            && result.is_some_and(|result| path_is(result, "Text")),
-                    ),
-                    Primitive::TextEq => Some(
-                        matches!(params.as_slice(), [left, right]
-                    if path_is(left, "Text") && path_is(right, "Text"))
-                            && result.is_some_and(|result| path_is(result, "u32")),
-                    ),
-                    Primitive::TextFromUtf8Checked => Some(
-                        matches!(params.as_slice(), [value] if path_is(value, "Bytes"))
-                            && result.is_some_and(|result| path_is(result, "Text")),
-                    ),
-                    Primitive::TextAsBytes => Some(
-                        matches!(params.as_slice(), [value] if path_is(value, "Text"))
-                            && result.is_some_and(|result| path_is(result, "Bytes")),
-                    ),
-                    Primitive::BytesLen => Some(
-                        matches!(params.as_slice(), [value] if path_is(value, "Bytes"))
-                            && result.is_some_and(|result| path_is(result, "usize")),
-                    ),
-                    Primitive::BytesConcat => Some(
-                        matches!(params.as_slice(), [left, right]
-                    if path_is(left, "Bytes") && path_is(right, "Bytes"))
-                            && result.is_some_and(|result| path_is(result, "Bytes")),
-                    ),
-                    Primitive::BytesGet => Some(
-                        matches!(params.as_slice(), [value, index]
-                    if path_is(value, "Bytes") && path_is(index, "usize"))
-                            && result.is_some_and(|result| path_is(result, "u8")),
-                    ),
-                    Primitive::BytesSlice => Some(
-                        matches!(params.as_slice(), [value, start, end]
-                    if path_is(value, "Bytes")
-                        && path_is(start, "usize")
-                        && path_is(end, "usize"))
-                            && result.is_some_and(|result| path_is(result, "Bytes")),
-                    ),
                     Primitive::BytesFromArrayMove => {
                         Some(array_name.as_deref().is_some_and(|array| {
                             matches!(params.as_slice(), [value] if array_of(value, array, "u8"))

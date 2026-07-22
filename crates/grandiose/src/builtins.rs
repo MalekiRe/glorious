@@ -5,6 +5,52 @@
 
 use grandiose_vm::Primitive;
 
+/// The exact, monomorphic source signature attached to a runtime leaf.
+///
+/// Keeping this next to the leaf registry prevents the compiler's authority
+/// checks and the recovery interpreter from independently reverse-engineering
+/// the ABI from primitive names and AST types.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RuntimeLeafSignature<'a> {
+    parameters: [Option<&'a str>; 3],
+    result: &'a str,
+}
+
+impl<'a> RuntimeLeafSignature<'a> {
+    const fn new(parameters: [Option<&'a str>; 3], result: &'a str) -> Self {
+        Self { parameters, result }
+    }
+
+    pub(crate) fn parameters(self) -> impl Iterator<Item = &'a str> {
+        self.parameters.into_iter().flatten()
+    }
+
+    pub(crate) const fn result(self) -> &'a str {
+        self.result
+    }
+
+    pub(crate) fn matches(self, parameters: &[&str], result: Option<&str>) -> bool {
+        self.parameters().eq(parameters.iter().copied()) && result == Some(self.result)
+    }
+}
+
+const fn unary<'a>(value: &'a str, result: &'a str) -> RuntimeLeafSignature<'a> {
+    RuntimeLeafSignature::new([Some(value), None, None], result)
+}
+
+const fn binary<'a>(left: &'a str, right: &'a str, result: &'a str) -> RuntimeLeafSignature<'a> {
+    RuntimeLeafSignature::new([Some(left), Some(right), None], result)
+}
+
+const fn ternary<'a>(
+    first: &'a str,
+    second: &'a str,
+    third: &'a str,
+    result: &'a str,
+) -> RuntimeLeafSignature<'a> {
+    RuntimeLeafSignature::new([Some(first), Some(second), Some(third)], result)
+}
+
 /// The semantic family of a primitive admitted by the generation-1 runtime
 /// manifest.  This is the single classification used by manifest validation
 /// and the recovery interpreter.
@@ -153,6 +199,99 @@ pub(crate) fn runtime_primitive_family(primitive: Primitive) -> Option<RuntimePr
     .then_some(RuntimePrimitiveFamily::TypedFloat)
 }
 
+/// Return the frozen monomorphic ABI for a manifest-bound leaf. Generic Array
+/// leaves intentionally remain in the compiler because their signatures also
+/// carry source-level type parameters and `Use` evidence.
+pub(crate) fn runtime_leaf_signature<'a>(
+    name: &'a str,
+    primitive: Primitive,
+) -> Option<RuntimeLeafSignature<'a>> {
+    let fixed = match primitive {
+        Primitive::CharFromU32Checked => unary("u32", "char"),
+        Primitive::CharToU32 => unary("char", "u32"),
+        Primitive::TextByteLen => unary("Text", "usize"),
+        Primitive::TextConcat => binary("Text", "Text", "Text"),
+        Primitive::TextEq => binary("Text", "Text", "u32"),
+        Primitive::TextFromUtf8Checked => unary("Bytes", "Text"),
+        Primitive::TextAsBytes => unary("Text", "Bytes"),
+        Primitive::BytesLen => unary("Bytes", "usize"),
+        Primitive::BytesConcat => binary("Bytes", "Bytes", "Bytes"),
+        Primitive::BytesGet => binary("Bytes", "usize", "u8"),
+        Primitive::BytesSlice => ternary("Bytes", "usize", "usize", "Bytes"),
+        _ => return typed_float_leaf_signature(name, primitive),
+    };
+    Some(fixed)
+}
+
+fn typed_float_leaf_signature<'a>(
+    name: &'a str,
+    primitive: Primitive,
+) -> Option<RuntimeLeafSignature<'a>> {
+    let width_for = |suffix| {
+        name.strip_prefix("__g1_")
+            .and_then(|name| name.strip_suffix(suffix))
+            .filter(|width| matches!(*width, "f32" | "f64"))
+    };
+    let binary_suffix = match primitive {
+        Primitive::FloatAdd => Some("_add"),
+        Primitive::FloatSub => Some("_sub"),
+        Primitive::FloatMul => Some("_mul"),
+        Primitive::FloatDiv => Some("_div"),
+        Primitive::FloatRem => Some("_rem"),
+        _ => None,
+    };
+    if let Some(width) = binary_suffix.and_then(width_for) {
+        return Some(binary(width, width, width));
+    }
+    if primitive == Primitive::FloatNeg {
+        let width = width_for("_neg")?;
+        return Some(unary(width, width));
+    }
+    let comparison_suffix = match primitive {
+        Primitive::FloatEq => Some("_eq"),
+        Primitive::FloatNe => Some("_ne"),
+        Primitive::FloatLt => Some("_lt"),
+        Primitive::FloatLe => Some("_le"),
+        Primitive::FloatGt => Some("_gt"),
+        Primitive::FloatGe => Some("_ge"),
+        _ => None,
+    };
+    if let Some(width) = comparison_suffix.and_then(width_for) {
+        return Some(binary(width, width, "u32"));
+    }
+    match primitive {
+        Primitive::FloatConvert => match name {
+            "__g1_f32_to_f64" => Some(unary("f32", "f64")),
+            "__g1_f64_to_f32" => Some(unary("f64", "f32")),
+            _ => None,
+        },
+        Primitive::IntToFloat => {
+            let (source, target) = name.strip_prefix("__g1_")?.rsplit_once("_to_")?;
+            (INTEGER_SCALAR_NAMES.contains(&source) && matches!(target, "f32" | "f64"))
+                .then(|| unary(source, target))
+        }
+        Primitive::FloatToIntChecked => {
+            let (source, target) = name
+                .strip_prefix("__g1_")?
+                .strip_suffix("_checked")?
+                .split_once("_to_")?;
+            (matches!(source, "f32" | "f64") && INTEGER_SCALAR_NAMES.contains(&target))
+                .then(|| unary(source, target))
+        }
+        Primitive::FloatToBits => match name {
+            "__g1_f32_to_bits" => Some(unary("f32", "u32")),
+            "__g1_f64_to_bits" => Some(unary("f64", "u64")),
+            _ => None,
+        },
+        Primitive::FloatFromBits => match name {
+            "__g1_f32_from_bits" => Some(unary("u32", "f32")),
+            "__g1_f64_from_bits" => Some(unary("u64", "f64")),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Materialize the canonical distributed table. IDs are intentionally assigned
 /// here so adding a float leaf cannot update the manifest and interpreter maps
 /// independently.
@@ -257,6 +396,24 @@ pub(crate) const INTEGER_PRIMITIVE_LEAVES: &[(&str, Primitive, IntegerLeafShape)
 pub(crate) const INTEGER_SCALAR_NAMES: &[&str] = &[
     "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
 ];
+
+/// Canonical generation-1 integer representation used by interpreter
+/// coercions and generated conversion leaves.
+pub(crate) fn integer_scalar_layout(name: &str) -> Option<(bool, u8)> {
+    Some(match name {
+        "u8" => (false, 8),
+        "u16" => (false, 16),
+        "u32" => (false, 32),
+        "u64" | "usize" => (false, 64),
+        "u128" => (false, 128),
+        "i8" => (true, 8),
+        "i16" => (true, 16),
+        "i32" => (true, 32),
+        "i64" | "isize" => (true, 64),
+        "i128" => (true, 128),
+        _ => return None,
+    })
+}
 
 pub(crate) const INTEGER_CONVERSION_KINDS: &[(&str, Primitive)] = &[
     ("checked", Primitive::IntConvertChecked),
@@ -392,6 +549,39 @@ mod tests {
         assert_eq!(
             actual.last().unwrap(),
             &("__g1_int_convert_wrapping_to_isize".into(), 0x0015)
+        );
+    }
+
+    #[test]
+    fn runtime_leaf_signatures_are_canonical_across_fixed_and_generated_leaves() {
+        assert!(
+            runtime_leaf_signature("custom_text_concat", Primitive::TextConcat)
+                .unwrap()
+                .matches(&["Text", "Text"], Some("Text"))
+        );
+        assert!(
+            runtime_leaf_signature("__g1_f32_add", Primitive::FloatAdd)
+                .unwrap()
+                .matches(&["f32", "f32"], Some("f32"))
+        );
+        assert!(
+            runtime_leaf_signature("__g1_i128_to_f64", Primitive::IntToFloat)
+                .unwrap()
+                .matches(&["i128"], Some("f64"))
+        );
+        assert!(
+            runtime_leaf_signature("__g1_f64_to_usize_checked", Primitive::FloatToIntChecked)
+                .unwrap()
+                .matches(&["f64"], Some("usize"))
+        );
+
+        assert!(runtime_leaf_signature("__g1_f16_add", Primitive::FloatAdd).is_none());
+        assert!(runtime_leaf_signature("__g1_u8_to_f16", Primitive::IntToFloat).is_none());
+        assert!(runtime_leaf_signature("__g1_f32_add", Primitive::FloatSub).is_none());
+        assert!(
+            !runtime_leaf_signature("__g1_f64_from_bits", Primitive::FloatFromBits)
+                .unwrap()
+                .matches(&["u32"], Some("f64"))
         );
     }
 }

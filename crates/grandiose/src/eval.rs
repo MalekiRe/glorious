@@ -1765,24 +1765,20 @@ pub(crate) enum FloatKind {
 }
 
 fn integer_kind(ty: &crate::ast::TypeSyntax) -> Option<IntegerKind> {
-    let (signed, bits) = match ty.simple_name()? {
-        "u8" => (false, 8),
-        "u16" => (false, 16),
-        "u32" => (false, 32),
-        "u64" | "usize" => (false, 64),
-        "u128" => (false, 128),
-        "i8" => (true, 8),
-        "i16" => (true, 16),
-        "i32" => (true, 32),
-        "i64" | "isize" => (true, 64),
-        "i128" => (true, 128),
-        _ => return None,
-    };
+    integer_kind_name(ty.simple_name()?)
+}
+
+fn integer_kind_name(name: &str) -> Option<IntegerKind> {
+    let (signed, bits) = crate::builtins::integer_scalar_layout(name)?;
     Some(IntegerKind { signed, bits })
 }
 
 fn float_kind(ty: &crate::ast::TypeSyntax) -> Option<FloatKind> {
-    match ty.simple_name()? {
+    float_kind_name(ty.simple_name()?)
+}
+
+fn float_kind_name(name: &str) -> Option<FloatKind> {
+    match name {
         "f32" => Some(FloatKind::F32),
         "f64" => Some(FloatKind::F64),
         _ => None,
@@ -1790,111 +1786,57 @@ fn float_kind(ty: &crate::ast::TypeSyntax) -> Option<FloatKind> {
 }
 
 fn float_runtime_leaf(function: &Function, primitive: Primitive) -> Option<FloatRuntimeLeaf> {
+    let signature = crate::builtins::runtime_leaf_signature(&function.name, primitive)?;
     let params = function
         .params
         .iter()
-        .map(|parameter| &parameter.ty)
-        .collect::<Vec<_>>();
-    let result = function.return_type.as_ref()?;
+        .map(|parameter| parameter.ty.simple_name())
+        .collect::<Option<Vec<_>>>()?;
+    let result = function.return_type.as_ref()?.simple_name()?;
+    if !signature.matches(&params, Some(result)) {
+        return None;
+    }
+    let expected = signature.parameters().collect::<Vec<_>>();
     match primitive {
-        Primitive::FloatNeg => {
-            let [value] = params.as_slice() else {
-                return None;
-            };
-            let width = float_kind(value)?;
-            (float_kind(result) == Some(width))
-                .then_some(FloatRuntimeLeaf::Unary { primitive, width })
-        }
+        Primitive::FloatNeg => Some(FloatRuntimeLeaf::Unary {
+            primitive,
+            width: float_kind_name(expected[0])?,
+        }),
         Primitive::FloatAdd
         | Primitive::FloatSub
         | Primitive::FloatMul
         | Primitive::FloatDiv
-        | Primitive::FloatRem => {
-            let [left, right] = params.as_slice() else {
-                return None;
-            };
-            let width = float_kind(left)?;
-            (float_kind(right) == Some(width) && float_kind(result) == Some(width))
-                .then_some(FloatRuntimeLeaf::Binary { primitive, width })
-        }
+        | Primitive::FloatRem => Some(FloatRuntimeLeaf::Binary {
+            primitive,
+            width: float_kind_name(expected[0])?,
+        }),
         Primitive::FloatEq
         | Primitive::FloatNe
         | Primitive::FloatLt
         | Primitive::FloatLe
         | Primitive::FloatGt
-        | Primitive::FloatGe => {
-            let [left, right] = params.as_slice() else {
-                return None;
-            };
-            let width = float_kind(left)?;
-            (float_kind(right) == Some(width)
-                && integer_kind(result)
-                    == Some(IntegerKind {
-                        signed: false,
-                        bits: 32,
-                    }))
-            .then_some(FloatRuntimeLeaf::Comparison { primitive, width })
-        }
-        Primitive::FloatConvert => {
-            let [value] = params.as_slice() else {
-                return None;
-            };
-            let source = float_kind(value)?;
-            let target = float_kind(result)?;
-            (source != target).then_some(FloatRuntimeLeaf::Convert { source, target })
-        }
-        Primitive::IntToFloat => {
-            let [value] = params.as_slice() else {
-                return None;
-            };
-            Some(FloatRuntimeLeaf::IntToFloat {
-                source: integer_kind(value)?,
-                target: float_kind(result)?,
-            })
-        }
-        Primitive::FloatToIntChecked => {
-            let [value] = params.as_slice() else {
-                return None;
-            };
-            Some(FloatRuntimeLeaf::FloatToIntChecked {
-                source: float_kind(value)?,
-                target: integer_kind(result)?,
-            })
-        }
-        Primitive::FloatToBits => {
-            let [value] = params.as_slice() else {
-                return None;
-            };
-            let source = float_kind(value)?;
-            let expected = match source {
-                FloatKind::F32 => IntegerKind {
-                    signed: false,
-                    bits: 32,
-                },
-                FloatKind::F64 => IntegerKind {
-                    signed: false,
-                    bits: 64,
-                },
-            };
-            (integer_kind(result) == Some(expected)).then_some(FloatRuntimeLeaf::ToBits { source })
-        }
-        Primitive::FloatFromBits => {
-            let [value] = params.as_slice() else {
-                return None;
-            };
-            let target = float_kind(result)?;
-            let expected = match target {
-                FloatKind::F32 => IntegerKind {
-                    signed: false,
-                    bits: 32,
-                },
-                FloatKind::F64 => IntegerKind {
-                    signed: false,
-                    bits: 64,
-                },
-            };
-            (integer_kind(value) == Some(expected)).then_some(FloatRuntimeLeaf::FromBits { target })
-        }
+        | Primitive::FloatGe => Some(FloatRuntimeLeaf::Comparison {
+            primitive,
+            width: float_kind_name(expected[0])?,
+        }),
+        Primitive::FloatConvert => Some(FloatRuntimeLeaf::Convert {
+            source: float_kind_name(expected[0])?,
+            target: float_kind_name(signature.result())?,
+        }),
+        Primitive::IntToFloat => Some(FloatRuntimeLeaf::IntToFloat {
+            source: integer_kind_name(expected[0])?,
+            target: float_kind_name(signature.result())?,
+        }),
+        Primitive::FloatToIntChecked => Some(FloatRuntimeLeaf::FloatToIntChecked {
+            source: float_kind_name(expected[0])?,
+            target: integer_kind_name(signature.result())?,
+        }),
+        Primitive::FloatToBits => Some(FloatRuntimeLeaf::ToBits {
+            source: float_kind_name(expected[0])?,
+        }),
+        Primitive::FloatFromBits => Some(FloatRuntimeLeaf::FromBits {
+            target: float_kind_name(signature.result())?,
+        }),
         _ => None,
     }
 }
