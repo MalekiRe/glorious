@@ -444,16 +444,11 @@ impl Parser {
     fn import_tree(&mut self) -> Result<ImportTree, Diagnostic> {
         if self.at(&TokenKind::LBrace) {
             let open = self.bump().span;
-            let mut items = Vec::new();
-            while !self.at(&TokenKind::RBrace) {
-                items.push(self.import_tree()?);
-                if !self.eat(&TokenKind::Comma) {
-                    break;
-                }
-            }
-            let close = self
-                .expect(TokenKind::RBrace, "expected `}` after grouped imports")?
-                .span;
+            let (items, close) = self.collect_comma_delimited(
+                TokenKind::RBrace,
+                "expected `}` after grouped imports",
+                Self::import_tree,
+            )?;
             return Ok(ImportTree::Group {
                 items,
                 span: open.join(close),
@@ -737,21 +732,11 @@ impl Parser {
         let (name, start) = self.ident("expected a trait method name")?;
         let generics = self.generic_params()?;
         self.expect(TokenKind::LParen, "expected `(` after the method name")?;
-        let mut params = Vec::new();
-        while !self.at(&TokenKind::RParen) {
-            let (name, param_start) = self.ident("expected a method parameter name")?;
-            self.expect(TokenKind::Colon, "expected `:` and a parameter type")?;
-            let ty = self.type_syntax()?;
-            params.push(Param {
-                name,
-                span: param_start.join(ty.span),
-                ty,
-            });
-            if !self.eat(&TokenKind::Comma) {
-                break;
-            }
-        }
-        self.expect(TokenKind::RParen, "expected `)` after method parameters")?;
+        let (params, _) = self.collect_comma_delimited(
+            TokenKind::RParen,
+            "expected `)` after method parameters",
+            |parser| parser.typed_parameter("expected a method parameter name"),
+        )?;
         self.expect(TokenKind::Arrow, "every method signature must contain `->`")?;
         let return_type = if self.at(&TokenKind::LBrace)
             || self.at(&TokenKind::Slash)
@@ -1106,16 +1091,16 @@ impl Parser {
         let mut variants = Vec::new();
         while !self.at(&TokenKind::RBrace) {
             let (variant, variant_span) = self.ident("expected a variant name")?;
-            let mut fields = Vec::new();
-            if self.eat(&TokenKind::LParen) {
-                while !self.at(&TokenKind::RParen) {
-                    fields.push(self.type_syntax()?);
-                    if !self.eat(&TokenKind::Comma) {
-                        break;
-                    }
-                }
-                self.expect(TokenKind::RParen, "expected `)` after variant fields")?;
-            }
+            let fields = if self.eat(&TokenKind::LParen) {
+                self.collect_comma_delimited(
+                    TokenKind::RParen,
+                    "expected `)` after variant fields",
+                    Self::type_syntax,
+                )?
+                .0
+            } else {
+                Vec::new()
+            };
             variants.push(VariantDecl {
                 name: variant,
                 fields,
@@ -1191,21 +1176,11 @@ impl Parser {
                 };
             let (operation, operation_span) = self.ident("expected an operation name")?;
             self.expect(TokenKind::LParen, "expected `(` after the operation name")?;
-            let mut params = Vec::new();
-            while !self.at(&TokenKind::RParen) {
-                let (name, span) = self.ident("expected an operation parameter name")?;
-                self.expect(TokenKind::Colon, "expected `:` and a parameter type")?;
-                let ty = self.type_syntax()?;
-                params.push(Param {
-                    name,
-                    span: span.join(ty.span),
-                    ty,
-                });
-                if !self.eat(&TokenKind::Comma) {
-                    break;
-                }
-            }
-            self.expect(TokenKind::RParen, "expected `)` after operation parameters")?;
+            let (params, _) = self.collect_comma_delimited(
+                TokenKind::RParen,
+                "expected `)` after operation parameters",
+                |parser| parser.typed_parameter("expected an operation parameter name"),
+            )?;
             self.expect(TokenKind::Arrow, "expected `->` in the operation signature")?;
             let terminal = self.at(&TokenKind::Bang);
             let return_type = if self.at(&TokenKind::Semicolon) || self.at(&TokenKind::RBrace) {
@@ -1239,22 +1214,11 @@ impl Parser {
         let (name, name_span) = self.ident("expected a callable declaration")?;
         let generics = self.generic_params()?;
         self.expect(TokenKind::LParen, "expected `(` after the callable name")?;
-        let mut params = Vec::new();
-        while !self.at(&TokenKind::RParen) {
-            let (param_name, span) = self.ident("expected a parameter name")?;
-            self.expect(TokenKind::Colon, "expected `:` and a parameter type")?;
-            let ty = self.type_syntax()?;
-            let span = span.join(ty.span);
-            params.push(Param {
-                name: param_name,
-                ty,
-                span,
-            });
-            if !self.eat(&TokenKind::Comma) {
-                break;
-            }
-        }
-        self.expect(TokenKind::RParen, "expected `)` after parameters")?;
+        let (params, _) = self.collect_comma_delimited(
+            TokenKind::RParen,
+            "expected `)` after parameters",
+            |parser| parser.typed_parameter("expected a parameter name"),
+        )?;
         self.expect(
             TokenKind::Arrow,
             "every callable signature must contain `->`",
@@ -2142,21 +2106,11 @@ impl Parser {
     /// named callable declaration, as an anonymous expression.
     fn typed_closure(&mut self) -> Result<Expr, Diagnostic> {
         let start = self.bump().span;
-        let mut params = Vec::new();
-        while !self.at(&TokenKind::RParen) {
-            let (name, span) = self.ident("expected a typed closure parameter name")?;
-            self.expect(TokenKind::Colon, "expected `:` and a parameter type")?;
-            let ty = self.type_syntax()?;
-            params.push(Param {
-                name,
-                span: span.join(ty.span),
-                ty,
-            });
-            if !self.eat(&TokenKind::Comma) {
-                break;
-            }
-        }
-        self.expect(TokenKind::RParen, "expected `)` after closure parameters")?;
+        let (params, _) = self.collect_comma_delimited(
+            TokenKind::RParen,
+            "expected `)` after closure parameters",
+            |parser| parser.typed_parameter("expected a typed closure parameter name"),
+        )?;
         self.expect(TokenKind::Arrow, "expected `->` in the closure signature")?;
         let return_type = if self.at(&TokenKind::LBrace) || self.at(&TokenKind::Slash) {
             None
@@ -2189,16 +2143,11 @@ impl Parser {
             TokenKind::LParen,
             "expected `(` after the resumption operation",
         )?;
-        let mut args = Vec::new();
-        while !self.at(&TokenKind::RParen) {
-            args.push(self.expression(0)?);
-            if !self.eat(&TokenKind::Comma) {
-                break;
-            }
-        }
-        let end = self
-            .expect(TokenKind::RParen, "expected `)` after the resumption")?
-            .span;
+        let (mut args, end) = self.collect_comma_delimited(
+            TokenKind::RParen,
+            "expected `)` after the resumption",
+            |parser| parser.expression(0),
+        )?;
         let span = start.join(end);
         let kind = match (keyword, args.len()) {
             (Kw::Resume, 1 | 2) => {
@@ -2470,13 +2419,12 @@ impl Parser {
                     let first = self.expression(0)?;
                     if self.eat(&TokenKind::Comma) {
                         let mut elements = vec![first];
-                        while !self.at(&TokenKind::RParen) {
-                            elements.push(self.expression(0)?);
-                            if !self.eat(&TokenKind::Comma) {
-                                break;
-                            }
-                        }
-                        let end = self.expect(TokenKind::RParen, "expected `)`")?.span;
+                        let (mut remaining, end) = self.collect_comma_delimited(
+                            TokenKind::RParen,
+                            "expected `)`",
+                            |parser| parser.expression(0),
+                        )?;
+                        elements.append(&mut remaining);
                         return Ok(Expr {
                             kind: ExprKind::Tuple(Rc::new(elements)),
                             span: token.span.join(end),
@@ -2490,16 +2438,11 @@ impl Parser {
                 }
             }
             TokenKind::LBracket => {
-                let mut values = Vec::new();
-                while !self.at(&TokenKind::RBracket) {
-                    values.push(self.expression(0)?);
-                    if !self.eat(&TokenKind::Comma) {
-                        break;
-                    }
-                }
-                let end = self
-                    .expect(TokenKind::RBracket, "expected `]` after list elements")?
-                    .span;
+                let (values, end) = self.collect_comma_delimited(
+                    TokenKind::RBracket,
+                    "expected `]` after list elements",
+                    |parser| parser.expression(0),
+                )?;
                 Expr {
                     kind: ExprKind::List(Rc::new(values)),
                     span: token.span.join(end),
@@ -2585,18 +2528,15 @@ impl Parser {
                 };
                 let name: Rc<str> = path[0].clone();
                 self.bump();
-                let mut fields = Vec::new();
-                while !self.at(&TokenKind::RBrace) {
-                    let (field, _) = self.ident("expected a struct field name")?;
-                    self.expect(TokenKind::Colon, "expected `:` after the field name")?;
-                    fields.push((field, self.expression(0)?));
-                    if !self.eat(&TokenKind::Comma) {
-                        break;
-                    }
-                }
-                let end = self
-                    .expect(TokenKind::RBrace, "expected `}` after struct fields")?
-                    .span;
+                let (fields, end) = self.collect_comma_delimited(
+                    TokenKind::RBrace,
+                    "expected `}` after struct fields",
+                    |parser| {
+                        let (field, _) = parser.ident("expected a struct field name")?;
+                        parser.expect(TokenKind::Colon, "expected `:` after the field name")?;
+                        Ok((field, parser.expression(0)?))
+                    },
+                )?;
                 let span = expr.span.join(end);
                 expr = Expr {
                     kind: ExprKind::Struct {
@@ -2630,16 +2570,11 @@ impl Parser {
                 };
             } else if self.at(&TokenKind::LParen) {
                 self.bump();
-                let mut args = Vec::new();
-                while !self.at(&TokenKind::RParen) {
-                    args.push(self.expression(0)?);
-                    if !self.eat(&TokenKind::Comma) {
-                        break;
-                    }
-                }
-                let end = self
-                    .expect(TokenKind::RParen, "expected `)` after arguments")?
-                    .span;
+                let (args, end) = self.collect_comma_delimited(
+                    TokenKind::RParen,
+                    "expected `)` after arguments",
+                    |parser| parser.expression(0),
+                )?;
                 let span = expr.span.join(end);
                 expr = Expr {
                     kind: ExprKind::Call(Rc::new(expr), Rc::new(args)),
@@ -2757,14 +2692,11 @@ impl Parser {
             )?;
             let (operation, _) = self.ident("expected an operation name in the handler clause")?;
             self.expect(TokenKind::LParen, "expected `(` before handler patterns")?;
-            let mut patterns = Vec::new();
-            while !self.at(&TokenKind::RParen) {
-                patterns.push(self.pattern()?);
-                if !self.eat(&TokenKind::Comma) {
-                    break;
-                }
-            }
-            self.expect(TokenKind::RParen, "expected `)` after handler patterns")?;
+            let (patterns, _) = self.collect_comma_delimited(
+                TokenKind::RParen,
+                "expected `)` after handler patterns",
+                Self::pattern,
+            )?;
             Self::reject_duplicate_binders(&patterns)?;
             let resumption = if self.at_ident("with") {
                 self.bump();
@@ -3104,16 +3036,11 @@ impl Parser {
         )?;
         let (operation, _) = self.ident("expected an operation name")?;
         self.expect(TokenKind::LParen, "expected `(` after the operation")?;
-        let mut args = Vec::new();
-        while !self.at(&TokenKind::RParen) {
-            args.push(self.expression(0)?);
-            if !self.eat(&TokenKind::Comma) {
-                break;
-            }
-        }
-        let end = self
-            .expect(TokenKind::RParen, "expected `)` after operation arguments")?
-            .span;
+        let (args, end) = self.collect_comma_delimited(
+            TokenKind::RParen,
+            "expected `)` after operation arguments",
+            |parser| parser.expression(0),
+        )?;
         let expression = Expr {
             kind: ExprKind::Perform {
                 effect: effect.into(),
@@ -3470,15 +3397,12 @@ impl Parser {
                 });
             }
             let mut elements = vec![first];
-            while !self.at(&TokenKind::RParen) {
-                elements.push(self.type_syntax()?);
-                if !self.eat(&TokenKind::Comma) {
-                    break;
-                }
-            }
-            let end = self
-                .expect(TokenKind::RParen, "expected `)` to close the tuple type")?
-                .span;
+            let (mut remaining, end) = self.collect_comma_delimited(
+                TokenKind::RParen,
+                "expected `)` to close the tuple type",
+                Self::type_syntax,
+            )?;
+            elements.append(&mut remaining);
             TypeSyntax {
                 kind: TypeSyntaxKind::Tuple(elements),
                 span: start.join(end),
@@ -3662,6 +3586,40 @@ impl Parser {
             _ => Err(Diagnostic::error("expected a name", message, token.span)),
         }
     }
+
+    /// Collect a comma-separated sequence after its opening delimiter and
+    /// consume the closing delimiter. This deliberately retains the parser's
+    /// established recovery behavior: a missing comma stops the sequence so
+    /// the closing-delimiter diagnostic points at the unexpected token, and a
+    /// trailing comma is accepted.
+    fn collect_comma_delimited<T>(
+        &mut self,
+        close: TokenKind,
+        close_message: &str,
+        mut parse_element: impl FnMut(&mut Self) -> Result<T, Diagnostic>,
+    ) -> Result<(Vec<T>, Span), Diagnostic> {
+        let mut elements = Vec::new();
+        while !self.at(&close) {
+            elements.push(parse_element(self)?);
+            if !self.eat(&TokenKind::Comma) {
+                break;
+            }
+        }
+        let end = self.expect(close, close_message)?.span;
+        Ok((elements, end))
+    }
+
+    fn typed_parameter(&mut self, name_message: &str) -> Result<Param, Diagnostic> {
+        let (name, start) = self.ident(name_message)?;
+        self.expect(TokenKind::Colon, "expected `:` and a parameter type")?;
+        let ty = self.type_syntax()?;
+        Ok(Param {
+            name,
+            span: start.join(ty.span),
+            ty,
+        })
+    }
+
     fn at_kw(&self, keyword: Kw) -> bool {
         matches!(&self.peek().kind, TokenKind::Keyword(found) if *found == keyword)
     }
