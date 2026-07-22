@@ -1808,6 +1808,7 @@ fn structural_reference_return_plans(
 fn generic_ast_reference_return_plans(
     program: &Program,
     seed: &BTreeMap<typeck::DeclarationKey, ReferenceReturnPlan>,
+    runtime_bindings: &RuntimeBindings,
 ) -> BTreeMap<typeck::DeclarationKey, ReferenceReturnPlan> {
     fn project_plan(plan: ReferenceReturnPlan, field: u32) -> ReferenceReturnPlan {
         plan.into_iter()
@@ -2287,7 +2288,58 @@ fn generic_ast_reference_return_plans(
             TypeSyntaxKind::Application { .. } | TypeSyntaxKind::Projection { .. } => None,
         }
     }
-    let mut known = seed.clone();
+    // An empty provisional plan carries no route evidence. Keep it out of the
+    // fixed-point table so generic source structure can establish a route;
+    // non-empty typed plans remain authoritative seeds.
+    let mut known = seed
+        .iter()
+        .filter(|(_, plan)| !plan.is_empty())
+        .map(|(owner, plan)| (owner.clone(), plan.clone()))
+        .collect::<BTreeMap<_, _>>();
+    // Trusted runtime leaves have opaque `()` source bodies, so provisional
+    // body analysis cannot discover their reference route. An opaque leaf
+    // with one compatible reference parameter still has an exact candidate:
+    // final artifact verification checks the runtime primitive against it and
+    // rejects metadata that does not match the actual leaf semantics.
+    for function in &program.functions {
+        if runtime_bindings.leaf(&function.name).is_none()
+            || !matches!(tail(&function.body).kind, ExprKind::Unit)
+        {
+            continue;
+        }
+        let result_unique = match function.return_type.as_ref().map(|ty| &ty.kind) {
+            Some(TypeSyntaxKind::SharedReference(_)) => false,
+            Some(TypeSyntaxKind::UniqueReference(_)) => true,
+            _ => continue,
+        };
+        let candidates = function
+            .params
+            .iter()
+            .enumerate()
+            .filter_map(|(parameter, param)| {
+                let compatible = match &param.ty.kind {
+                    TypeSyntaxKind::SharedReference(_) => !result_unique,
+                    TypeSyntaxKind::UniqueReference(_) => true,
+                    _ => false,
+                };
+                compatible.then_some(parameter)
+            })
+            .collect::<Vec<_>>();
+        let [parameter] = candidates.as_slice() else {
+            continue;
+        };
+        known
+            .entry(typeck::DeclarationKey::Function(function.name.clone()))
+            .or_insert_with(|| {
+                vec![ReferenceReturnRoute {
+                    result_prefix: Vec::new(),
+                    source: ReferenceLeafSource {
+                        parameter: *parameter,
+                        path: Vec::new(),
+                    },
+                }]
+            });
+    }
     loop {
         let before = known.len();
         for function in &program.functions {
@@ -6419,6 +6471,7 @@ fn compile_program_with_phases(
     let template_reference_return_plans = generic_ast_reference_return_plans(
         &constructor_alias_normalized_program,
         &typed_reference_return_plans,
+        &runtime_bindings,
     );
     let mut reference_return_plans = BTreeMap::new();
     for (_, key, emission) in &ordered {
@@ -18127,7 +18180,8 @@ fn generated_shapes(
     // AST-level reference routes are already available. Use only those proved
     // structural routes when disambiguating a reference-returning closure;
     // unsupported or branch-divergent callees remain absent and fail closed.
-    let closure_reference_plans = generic_ast_reference_return_plans(program, &BTreeMap::new());
+    let closure_reference_plans =
+        generic_ast_reference_return_plans(program, &BTreeMap::new(), &RuntimeBindings::default());
     let mut shapes = BTreeMap::new();
     let mut projection_budget = SolverBudget::default();
     for key in discovery.graph.requests.keys() {
@@ -38939,9 +38993,11 @@ fn serialize_mir_cleanup_plans(
     pc_maps: &[Option<PeepholePcMap>],
 ) -> Result<Vec<CleanupPlan>, String> {
     let mut plans = Vec::new();
-    for (fid, function) in mir_program.functions.iter().enumerate() {
-        let lists = mir::optimizer::derive_serialization_cleanup_lists(function, &artifact.types)
+    let cleanup_lists =
+        mir::optimizer::derive_program_serialization_cleanup_lists(mir_program, &artifact.types)
             .map_err(|error| error.to_string())?;
+    for (fid, function) in mir_program.functions.iter().enumerate() {
+        let lists = &cleanup_lists[fid];
         let leave_anchors = mir::optimizer::derive_leave_cleanup_anchors(function, &lists)
             .map_err(|error| error.to_string())?;
         let mut offsets = BTreeMap::new();
@@ -39168,9 +39224,10 @@ fn cross_validate_cleanup_maps(
     mir_program: &mir::Program,
     pc_maps: &[Option<PeepholePcMap>],
 ) -> Result<(), String> {
+    let cleanup_lists = mir::optimizer::derive_program_cleanup_lists(mir_program, &artifact.types)
+        .map_err(|error| error.to_string())?;
     for (fid, function) in mir_program.functions.iter().enumerate() {
-        let lists = mir::optimizer::derive_cleanup_lists(function, &artifact.types)
-            .map_err(|error| error.to_string())?;
+        let lists = &cleanup_lists[fid];
         let label_results = function
             .flow
             .labels

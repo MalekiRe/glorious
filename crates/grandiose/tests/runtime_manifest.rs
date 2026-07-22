@@ -698,6 +698,7 @@ fn complete_array_surface_executes_through_trusted_ordinary_code_with_tracked_bo
             .collect(),
     );
     let standard_library = r#"
+        infixl 30 +;
         make_filled<T>(length: usize, fill: T) -> HiddenArray<T>
             where T: Use<[0,infinity]> { () }
         array_length<T>(value: &HiddenArray<T>) -> usize { () }
@@ -798,6 +799,7 @@ fn source_array_slot_summaries_compose_through_nested_wrappers_at_all_levels() {
         ],
     );
     let standard_library = r#"
+        infixl 30 +;
         make_empty<T>() -> HiddenArray<T> { () }
         append<T>(value: &mut HiddenArray<T>, item: T) -> () { () }
         move_at<T>(value: &mut HiddenArray<T>, index: usize) -> T { () }

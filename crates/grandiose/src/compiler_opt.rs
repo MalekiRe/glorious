@@ -10613,9 +10613,18 @@ fn implicit_abandonment_actions(
 /// Compute the exact cleanup plans for every scope-exiting or abandoning
 /// edge: normal return, tail call, terminal perform frame abandonment, and
 /// continuation cancellation. Deterministic in block order.
+#[cfg(test)]
 fn derive_cleanup_elaboration(
     function: &Function,
     types: &[Type],
+) -> Result<CleanupElaboration, ValidationError> {
+    derive_cleanup_elaboration_with_array_calls(function, types, &BTreeMap::new())
+}
+
+fn derive_cleanup_elaboration_with_array_calls(
+    function: &Function,
+    types: &[Type],
+    array_calls: &BTreeMap<u32, regions::ArrayCallSummary>,
 ) -> Result<CleanupElaboration, ValidationError> {
     let locals = bridged_locals(function, types);
     let context = regions::FlowContext {
@@ -10623,7 +10632,7 @@ fn derive_cleanup_elaboration(
         types,
         locals: &locals,
         loans: regions::loan_table(function, types),
-        array_calls: &BTreeMap::new(),
+        array_calls,
         strict: strict_flow(function),
         refine_enum_switches: true,
     };
@@ -10992,9 +11001,11 @@ fn import_and_validate_place_flow(
 fn elaborate_cleanup(program: &mut Program, types: &[Type]) -> Result<PassReport, ValidationError> {
     let mut work = 0_u64;
     let mut changed = false;
+    let array_calls = regions::array_call_summaries(program, types);
     for function in &mut program.functions {
         work = work.saturating_add(body_size(function));
-        let elaboration = derive_cleanup_elaboration(function, types)?;
+        let elaboration =
+            derive_cleanup_elaboration_with_array_calls(function, types, &array_calls)?;
         changed |= apply_cleanup_elaboration(function, elaboration);
         function.phase = MirPhase::Cleanup;
         function.features = infer_feature_bits(function);
@@ -11015,8 +11026,10 @@ fn elaborate_cleanup(program: &mut Program, types: &[Type]) -> Result<PassReport
 /// fresh elaboration exactly, and require protected values to survive their
 /// own cleanup chains.
 fn validate_flow_and_cleanup(program: &Program, types: &[Type]) -> Result<(), ValidationError> {
+    let array_calls = regions::array_call_summaries(program, types);
     for function in &program.functions {
-        let elaboration = derive_cleanup_elaboration(function, types)?;
+        let elaboration =
+            derive_cleanup_elaboration_with_array_calls(function, types, &array_calls)?;
         if elaboration.plans != function.flow.cleanup_plans {
             return Err(error(
                 function,
@@ -11074,6 +11087,7 @@ fn validate_flow_and_cleanup(program: &Program, types: &[Type]) -> Result<(), Va
 /// cleanup list (live registers newest first) before each statement plus one
 /// before the terminator. Used by bytecode emission to cross-validate the
 /// serialized cleanup maps against MIR facts.
+#[cfg(test)]
 pub(crate) fn derive_cleanup_lists(
     function: &Function,
     types: &[Type],
@@ -11081,27 +11095,51 @@ pub(crate) fn derive_cleanup_lists(
     Ok(derive_cleanup_state_analysis(function, types)?.lists)
 }
 
+pub(crate) fn derive_program_cleanup_lists(
+    program: &Program,
+    types: &[Type],
+) -> Result<Vec<BTreeMap<u32, Vec<Vec<Register>>>>, ValidationError> {
+    let array_calls = regions::array_call_summaries(program, types);
+    program
+        .functions
+        .iter()
+        .map(|function| {
+            Ok(
+                derive_cleanup_state_analysis_with_array_calls(function, types, &array_calls)?
+                    .lists,
+            )
+        })
+        .collect()
+}
+
 /// Derive physical cleanup states for final bytecode serialization. Semantic
 /// ownership validation may prune a statically impossible enum-switch arm;
 /// the bytecode verifier still structurally checks that encoded target, so
 /// serialization follows every arm without applying tag refinement.
-pub(crate) fn derive_serialization_cleanup_lists(
-    function: &Function,
+pub(crate) fn derive_program_serialization_cleanup_lists(
+    program: &Program,
     types: &[Type],
-) -> Result<BTreeMap<u32, Vec<Vec<Register>>>, ValidationError> {
-    let locals = bridged_locals(function, types);
-    let context = regions::FlowContext {
-        function,
-        types,
-        locals: &locals,
-        loans: regions::loan_table(function, types),
-        array_calls: &BTreeMap::new(),
-        strict: strict_flow(function),
-        refine_enum_switches: false,
-    };
-    Ok(regions::solve(&context)
-        .map_err(|error| flow_to_validation(function, error))?
-        .cleanup_lists)
+) -> Result<Vec<BTreeMap<u32, Vec<Vec<Register>>>>, ValidationError> {
+    let array_calls = regions::array_call_summaries(program, types);
+    program
+        .functions
+        .iter()
+        .map(|function| {
+            let locals = bridged_locals(function, types);
+            let context = regions::FlowContext {
+                function,
+                types,
+                locals: &locals,
+                loans: regions::loan_table(function, types),
+                array_calls: &array_calls,
+                strict: strict_flow(function),
+                refine_enum_switches: false,
+            };
+            Ok(regions::solve(&context)
+                .map_err(|error| flow_to_validation(function, error))?
+                .cleanup_lists)
+        })
+        .collect()
 }
 
 struct CleanupStateAnalysis {
@@ -11112,9 +11150,18 @@ struct CleanupStateAnalysis {
     reachable: BTreeSet<u32>,
 }
 
+#[cfg(test)]
 fn derive_cleanup_state_analysis(
     function: &Function,
     types: &[Type],
+) -> Result<CleanupStateAnalysis, ValidationError> {
+    derive_cleanup_state_analysis_with_array_calls(function, types, &BTreeMap::new())
+}
+
+fn derive_cleanup_state_analysis_with_array_calls(
+    function: &Function,
+    types: &[Type],
+    array_calls: &BTreeMap<u32, regions::ArrayCallSummary>,
 ) -> Result<CleanupStateAnalysis, ValidationError> {
     let locals = bridged_locals(function, types);
     let context = regions::FlowContext {
@@ -11122,7 +11169,7 @@ fn derive_cleanup_state_analysis(
         types,
         locals: &locals,
         loans: regions::loan_table(function, types),
-        array_calls: &BTreeMap::new(),
+        array_calls,
         strict: strict_flow(function),
         refine_enum_switches: true,
     };
@@ -11260,9 +11307,11 @@ fn validate_bytecode_input_checkpoint(
 ) -> Result<PassReport, ValidationError> {
     validate_program(program, types, MirPhase::Optimized)?;
     validate_flow_and_cleanup(program, types)?;
+    let array_calls = regions::array_call_summaries(program, types);
     let mut work = 0_u64;
     for function in &program.functions {
-        let cleanup = derive_cleanup_state_analysis(function, types)?;
+        let cleanup =
+            derive_cleanup_state_analysis_with_array_calls(function, types, &array_calls)?;
         let lists = &cleanup.lists;
         for block in &function.blocks {
             let Some(points) = lists.get(&block.id) else {
@@ -11377,6 +11426,7 @@ fn validate_bytecode_input_checkpoint(
 /// change ORs the invalidation mask, and this refresh is the only way the
 /// facts become trusted again.
 fn refresh_invalidated_flow(program: &mut Program, types: &[Type]) -> Result<(), ValidationError> {
+    let array_calls = regions::array_call_summaries(program, types);
     for function in &mut program.functions {
         let invalidated = function.invalid_analyses;
         if invalidated == 0 {
@@ -11394,7 +11444,8 @@ fn refresh_invalidated_flow(program: &mut Program, types: &[Type]) -> Result<(),
         let locals = bridged_locals(function, types);
         function.flow.locals = locals;
         function.flow.move_paths = derive_move_paths(function);
-        let elaboration = derive_cleanup_elaboration(function, types)?;
+        let elaboration =
+            derive_cleanup_elaboration_with_array_calls(function, types, &array_calls)?;
         apply_cleanup_elaboration(function, elaboration);
         function.invalid_analyses = 0;
     }
