@@ -714,125 +714,15 @@ pub(crate) fn validate_program(
 
 #[allow(dead_code)]
 fn used_registers(block: &BasicBlock) -> Vec<Register> {
-    fn operands(used: &mut Vec<Register>, values: &[Operand]) {
-        used.extend(values.iter().map(|value| value.register));
-    }
-    fn edge(used: &mut Vec<Register>, value: &Edge) {
-        operands(used, &value.args);
-    }
     let mut used = Vec::new();
     for statement in &block.statements {
         statement
             .kind
             .for_each_register_use(|register, _| used.push(register));
     }
-    match &block.terminator {
-        Terminator::Goto(target) => edge(&mut used, target),
-        Terminator::Switch {
-            discr,
-            cases,
-            otherwise,
-        } => {
-            used.push(discr.register);
-            cases.iter().for_each(|(_, target)| edge(&mut used, target));
-            edge(&mut used, otherwise);
-        }
-        Terminator::Return { value } => used.extend(value.iter().map(|value| value.register)),
-        Terminator::Call { args, normal, .. } => {
-            operands(&mut used, args);
-            edge(&mut used, normal);
-        }
-        Terminator::CallSelf { args, normal, .. } => {
-            used.push(0);
-            operands(&mut used, args);
-            edge(&mut used, normal);
-        }
-        Terminator::CallKnownReceiver {
-            receiver,
-            args,
-            normal,
-            ..
-        } => {
-            used.push(receiver.register);
-            operands(&mut used, args);
-            edge(&mut used, normal);
-        }
-        Terminator::HostCall { args, normal, .. } => {
-            operands(&mut used, args);
-            edge(&mut used, normal);
-        }
-        Terminator::CallIndirect {
-            callable,
-            args,
-            normal,
-            ..
-        } => {
-            used.push(callable.register);
-            operands(&mut used, args);
-            edge(&mut used, normal);
-        }
-        Terminator::Handle {
-            handler,
-            body,
-            normal,
-            ..
-        } => {
-            used.push(handler.register);
-            used.push(body.register);
-            edge(&mut used, normal);
-        }
-        Terminator::Perform {
-            payloads,
-            capture,
-            resume,
-            ..
-        } => {
-            operands(&mut used, payloads);
-            used.extend(capture.captured_owners.iter().copied());
-            used.extend(capture.captured_references.iter().copied());
-            used.extend(capture.captured_residuals.iter().map(|fact| fact.register));
-            if let Some(resume) = resume {
-                edge(&mut used, resume);
-            }
-        }
-        Terminator::Resume {
-            resumption,
-            value,
-            normal,
-            ..
-        } => {
-            used.push(resumption.register);
-            used.push(value.register);
-            edge(&mut used, normal);
-        }
-        Terminator::TailResume {
-            resumption, value, ..
-        } => {
-            used.push(resumption.register);
-            used.push(value.register);
-        }
-        Terminator::Cancel {
-            resumption, normal, ..
-        } => {
-            used.push(resumption.register);
-            edge(&mut used, normal);
-        }
-        Terminator::TailCall { args, .. } => operands(&mut used, args),
-        Terminator::TailCallSelf { args } => {
-            used.push(0);
-            operands(&mut used, args);
-        }
-        Terminator::TailCallKnownReceiver { receiver, args, .. } => {
-            used.push(receiver.register);
-            operands(&mut used, args);
-        }
-        Terminator::TailCallIndirect { callable, args, .. } => {
-            used.push(callable.register);
-            operands(&mut used, args);
-        }
-        Terminator::Leave { target, .. } => edge(&mut used, target),
-        Terminator::Abort { .. } | Terminator::Unreachable => {}
-    }
+    block
+        .terminator
+        .for_each_register_use(|register, _| used.push(register));
     used
 }
 
@@ -2804,10 +2694,6 @@ fn normalize_cfg(function: &mut Function, budget: u64) -> (PassOutcome, u64) {
     )
 }
 
-fn note_operand(uses: &mut [u32], operand: &Operand) {
-    uses[operand.register as usize] = uses[operand.register as usize].saturating_add(1);
-}
-
 fn register_uses(function: &Function) -> Vec<u32> {
     let mut uses = vec![0_u32; function.register_types.len()];
     for &register in &function.return_cleanup {
@@ -2819,86 +2705,8 @@ fn register_uses(function: &Function) -> Vec<u32> {
                 uses[register as usize] = uses[register as usize].saturating_add(1);
             });
         }
-        match &block.terminator {
-            Terminator::Switch { discr, .. } => note_operand(&mut uses, discr),
-            Terminator::Return { value } => {
-                if let Some(value) = value {
-                    note_operand(&mut uses, value);
-                }
-            }
-            Terminator::Call { args, .. }
-            | Terminator::HostCall { args, .. }
-            | Terminator::TailCall { args, .. } => {
-                for arg in args {
-                    note_operand(&mut uses, arg);
-                }
-            }
-            Terminator::CallSelf { args, .. } | Terminator::TailCallSelf { args } => {
-                uses[0] = uses[0].saturating_add(1);
-                for arg in args {
-                    note_operand(&mut uses, arg);
-                }
-            }
-            Terminator::CallKnownReceiver { receiver, args, .. }
-            | Terminator::TailCallKnownReceiver { receiver, args, .. } => {
-                note_operand(&mut uses, receiver);
-                for arg in args {
-                    note_operand(&mut uses, arg);
-                }
-            }
-            Terminator::CallIndirect { callable, args, .. }
-            | Terminator::TailCallIndirect { callable, args, .. } => {
-                note_operand(&mut uses, callable);
-                for arg in args {
-                    note_operand(&mut uses, arg);
-                }
-            }
-            Terminator::Handle { handler, body, .. } => {
-                note_operand(&mut uses, handler);
-                note_operand(&mut uses, body);
-            }
-            Terminator::Perform {
-                payloads, capture, ..
-            } => {
-                for payload in payloads {
-                    note_operand(&mut uses, payload);
-                }
-                for &register in capture
-                    .captured_owners
-                    .iter()
-                    .chain(&capture.captured_references)
-                {
-                    uses[register as usize] = uses[register as usize].saturating_add(1);
-                }
-                for residual in &capture.captured_residuals {
-                    uses[residual.register as usize] =
-                        uses[residual.register as usize].saturating_add(1);
-                }
-            }
-            Terminator::Resume {
-                resumption, value, ..
-            } => {
-                note_operand(&mut uses, resumption);
-                note_operand(&mut uses, value);
-            }
-            Terminator::TailResume {
-                resumption, value, ..
-            } => {
-                note_operand(&mut uses, resumption);
-                note_operand(&mut uses, value);
-            }
-            Terminator::Cancel { resumption, .. } => note_operand(&mut uses, resumption),
-            Terminator::Leave { target, .. } => {
-                for argument in &target.args {
-                    note_operand(&mut uses, argument);
-                }
-            }
-            Terminator::Goto(_) | Terminator::Abort { .. } | Terminator::Unreachable => {}
-        }
-        for_each_edge(&block.terminator, |edge| {
-            for arg in &edge.args {
-                note_operand(&mut uses, arg);
-            }
+        block.terminator.for_each_register_use(|register, _| {
+            uses[register as usize] = uses[register as usize].saturating_add(1);
         });
     }
     uses
@@ -4429,52 +4237,15 @@ fn sparse_simplify(function: &mut Function, types: &[Type], budget: u64) -> (Pas
 }
 
 fn instruction_register_use_count(instruction: &InstructionKind, register: Register) -> usize {
-    let operands = |values: &[Operand]| {
-        values
-            .iter()
-            .filter(|operand| operand.register == register)
-            .count()
-    };
-    match instruction {
-        InstructionKind::Const { .. } => 0,
-        InstructionKind::Copy { src, .. } | InstructionKind::Move { src, .. } => {
-            usize::from(src.register == register)
-        }
-        InstructionKind::Borrow { src, .. }
-        | InstructionKind::ProjectBorrow { src, .. }
-        | InstructionKind::Reborrow { src, .. }
-        | InstructionKind::DerefCopy { src, .. }
-        | InstructionKind::DerefMove { src, .. }
-        | InstructionKind::EndBorrow { reference: src }
-        | InstructionKind::Deconstruct { src }
-        | InstructionKind::EnumTag { src, .. } => usize::from(*src == register),
-        InstructionKind::Construct { fields, .. } => operands(fields),
-        InstructionKind::DerefStore { dst, src } => {
-            usize::from(*dst == register) + usize::from(src.register == register)
-        }
-        InstructionKind::ProjectCopy { src, .. }
-        | InstructionKind::ProjectMove { src, .. }
-        | InstructionKind::Drop { owner: src } => usize::from(src.register == register),
-        InstructionKind::Primitive { args, .. } => operands(args),
-        InstructionKind::MakeCallable { captures, .. }
-        | InstructionKind::MakeHandlerShared { captures, .. } => operands(captures),
-        InstructionKind::MakeHandler { clauses, .. } => operands(clauses),
-        InstructionKind::MakeBindingPack { payloads, .. } => operands(payloads),
-        InstructionKind::LabelPush { .. } | InstructionKind::LabelPop { .. } => 0,
-    }
+    let mut count = 0;
+    instruction.for_each_register_use(|used, _| count += usize::from(used == register));
+    count
 }
 
 fn terminator_register_use_count(terminator: &Terminator, register: Register) -> usize {
-    let block = BasicBlock {
-        id: 0,
-        params: vec![],
-        statements: vec![],
-        terminator: terminator.clone(),
-    };
-    used_registers(&block)
-        .into_iter()
-        .filter(|used| *used == register)
-        .count()
+    let mut count = 0;
+    terminator.for_each_register_use(|used, _| count += usize::from(used == register));
+    count
 }
 
 fn predefined_no_drop_scalar(ty: TypeId) -> bool {
@@ -7053,29 +6824,6 @@ fn terminator_result(terminator: &Terminator) -> Option<Register> {
     }
 }
 
-fn note_operand_consumption(
-    register: Register,
-    operand: &Operand,
-    used: &mut bool,
-    all_consuming: &mut bool,
-) {
-    if operand.register == register {
-        *used = true;
-        *all_consuming &= operand.mode == UseMode::Move;
-    }
-}
-
-fn note_edge_consumption(
-    register: Register,
-    edge: &Edge,
-    used: &mut bool,
-    all_consuming: &mut bool,
-) {
-    for argument in &edge.args {
-        note_operand_consumption(register, argument, used, all_consuming);
-    }
-}
-
 /// Whether the final activity of a block-local virtual register empties it.
 /// Earlier reads are harmless; the strict interval inequality ensures the
 /// replacement definition is a later instruction. Partial projections and
@@ -7092,67 +6840,12 @@ fn register_emptied_at_last_local_activity(
     for statement in &block.statements {
         let mut used = false;
         let mut consuming = true;
-        match &statement.kind {
-            InstructionKind::Copy { src, .. } | InstructionKind::Move { src, .. } => {
-                note_operand_consumption(register, src, &mut used, &mut consuming);
+        statement.kind.for_each_register_use(|candidate, kind| {
+            if candidate == register {
+                used = true;
+                consuming &= kind == RegisterUseKind::Consume;
             }
-            InstructionKind::EndBorrow { reference }
-            | InstructionKind::Deconstruct { src: reference } => {
-                if *reference == register {
-                    used = true;
-                }
-            }
-            InstructionKind::Drop { owner } => {
-                note_operand_consumption(register, owner, &mut used, &mut consuming);
-            }
-            InstructionKind::Construct { fields, .. }
-            | InstructionKind::Primitive { args: fields, .. }
-            | InstructionKind::MakeCallable {
-                captures: fields, ..
-            }
-            | InstructionKind::MakeHandler {
-                clauses: fields, ..
-            }
-            | InstructionKind::MakeHandlerShared {
-                captures: fields, ..
-            }
-            | InstructionKind::MakeBindingPack {
-                payloads: fields, ..
-            } => {
-                for operand in fields {
-                    note_operand_consumption(register, operand, &mut used, &mut consuming);
-                }
-            }
-            InstructionKind::DerefStore { dst, src } => {
-                if *dst == register {
-                    used = true;
-                    consuming = false;
-                }
-                note_operand_consumption(register, src, &mut used, &mut consuming);
-            }
-            InstructionKind::Borrow { src, .. }
-            | InstructionKind::ProjectBorrow { src, .. }
-            | InstructionKind::Reborrow { src, .. }
-            | InstructionKind::DerefCopy { src, .. }
-            | InstructionKind::DerefMove { src, .. }
-            | InstructionKind::EnumTag { src, .. } => {
-                if *src == register {
-                    used = true;
-                    consuming = false;
-                }
-            }
-            InstructionKind::ProjectCopy { src, .. } | InstructionKind::ProjectMove { src, .. } => {
-                if src.register == register {
-                    used = true;
-                    // Moving one field leaves a residual owner, not an empty
-                    // physical slot.
-                    consuming = false;
-                }
-            }
-            InstructionKind::Const { .. }
-            | InstructionKind::LabelPush { .. }
-            | InstructionKind::LabelPop { .. } => {}
-        }
+        });
         if used {
             last = Some(consuming);
         }
@@ -7160,139 +6853,12 @@ fn register_emptied_at_last_local_activity(
 
     let mut used = false;
     let mut consuming = true;
-    match &block.terminator {
-        Terminator::Goto(target) | Terminator::Leave { target, .. } => {
-            note_edge_consumption(register, target, &mut used, &mut consuming);
+    block.terminator.for_each_register_use(|candidate, kind| {
+        if candidate == register {
+            used = true;
+            consuming &= kind == RegisterUseKind::Consume;
         }
-        Terminator::Switch {
-            discr,
-            cases,
-            otherwise,
-        } => {
-            if discr.register == register {
-                used = true;
-                consuming = false;
-            }
-            for (_, target) in cases {
-                note_edge_consumption(register, target, &mut used, &mut consuming);
-            }
-            note_edge_consumption(register, otherwise, &mut used, &mut consuming);
-        }
-        Terminator::Return { value } => {
-            if let Some(value) = value {
-                note_operand_consumption(register, value, &mut used, &mut consuming);
-            }
-        }
-        Terminator::Call { args, normal, .. }
-        | Terminator::CallSelf { args, normal, .. }
-        | Terminator::HostCall { args, normal, .. } => {
-            for value in args {
-                note_operand_consumption(register, value, &mut used, &mut consuming);
-            }
-            note_edge_consumption(register, normal, &mut used, &mut consuming);
-        }
-        Terminator::CallKnownReceiver {
-            receiver,
-            args,
-            normal,
-            ..
-        } => {
-            note_operand_consumption(register, receiver, &mut used, &mut consuming);
-            for value in args {
-                note_operand_consumption(register, value, &mut used, &mut consuming);
-            }
-            note_edge_consumption(register, normal, &mut used, &mut consuming);
-        }
-        Terminator::CallIndirect {
-            callable,
-            cleanup_callable,
-            args,
-            normal,
-            ..
-        } => {
-            note_operand_consumption(register, callable, &mut used, &mut consuming);
-            if *cleanup_callable && callable.register == register {
-                consuming = true;
-            }
-            for value in args {
-                note_operand_consumption(register, value, &mut used, &mut consuming);
-            }
-            note_edge_consumption(register, normal, &mut used, &mut consuming);
-        }
-        Terminator::Handle {
-            handler,
-            body,
-            normal,
-            ..
-        } => {
-            note_operand_consumption(register, handler, &mut used, &mut consuming);
-            note_operand_consumption(register, body, &mut used, &mut consuming);
-            note_edge_consumption(register, normal, &mut used, &mut consuming);
-        }
-        Terminator::Perform {
-            payloads,
-            capture,
-            resume,
-            ..
-        } => {
-            for value in payloads {
-                note_operand_consumption(register, value, &mut used, &mut consuming);
-            }
-            if capture.captured_owners.contains(&register)
-                || capture.captured_references.contains(&register)
-                || capture
-                    .captured_residuals
-                    .iter()
-                    .any(|residual| residual.register == register)
-            {
-                used = true;
-                consuming = false;
-            }
-            if let Some(resume) = resume {
-                note_edge_consumption(register, resume, &mut used, &mut consuming);
-            }
-        }
-        Terminator::Resume {
-            resumption,
-            value,
-            normal,
-            ..
-        } => {
-            note_operand_consumption(register, resumption, &mut used, &mut consuming);
-            note_operand_consumption(register, value, &mut used, &mut consuming);
-            note_edge_consumption(register, normal, &mut used, &mut consuming);
-        }
-        Terminator::Cancel {
-            resumption, normal, ..
-        } => {
-            note_operand_consumption(register, resumption, &mut used, &mut consuming);
-            note_edge_consumption(register, normal, &mut used, &mut consuming);
-        }
-        Terminator::TailResume {
-            resumption, value, ..
-        } => {
-            note_operand_consumption(register, resumption, &mut used, &mut consuming);
-            note_operand_consumption(register, value, &mut used, &mut consuming);
-        }
-        Terminator::TailCall { args, .. } | Terminator::TailCallSelf { args } => {
-            for value in args {
-                note_operand_consumption(register, value, &mut used, &mut consuming);
-            }
-        }
-        Terminator::TailCallKnownReceiver { receiver, args, .. } => {
-            note_operand_consumption(register, receiver, &mut used, &mut consuming);
-            for value in args {
-                note_operand_consumption(register, value, &mut used, &mut consuming);
-            }
-        }
-        Terminator::TailCallIndirect { callable, args, .. } => {
-            note_operand_consumption(register, callable, &mut used, &mut consuming);
-            for value in args {
-                note_operand_consumption(register, value, &mut used, &mut consuming);
-            }
-        }
-        Terminator::Abort { .. } | Terminator::Unreachable => {}
-    }
+    });
     if used {
         last = Some(consuming);
     }
@@ -12211,6 +11777,32 @@ mod tests {
         Program {
             functions: vec![function],
         }
+    }
+
+    #[test]
+    fn structural_use_facts_count_leave_arguments_once() {
+        let body = function(
+            vec![
+                block(
+                    0,
+                    Terminator::Leave {
+                        label: LabelId(0),
+                        target: Edge {
+                            target: 1,
+                            args: vec![operand(1)],
+                        },
+                    },
+                ),
+                block(1, Terminator::Return { value: None }),
+            ],
+            vec![UNIT, UNIT],
+        );
+
+        assert_eq!(register_uses(&body), vec![0, 1]);
+        assert_eq!(
+            terminator_register_use_count(&body.blocks[0].terminator, 1),
+            1
+        );
     }
 
     #[test]

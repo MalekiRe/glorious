@@ -325,6 +325,147 @@ pub enum Terminator {
     Unreachable,
 }
 
+impl Terminator {
+    /// Visit every register read by this terminator exactly once per structural
+    /// occurrence. Keeping edge arguments, continuation captures, and implicit
+    /// receiver reads here gives optimizer analyses one ownership-aware view of
+    /// the terminator algebra.
+    pub(crate) fn for_each_register_use(&self, mut visit: impl FnMut(Register, RegisterUseKind)) {
+        fn operand(value: &Operand, visit: &mut impl FnMut(Register, RegisterUseKind)) {
+            visit(
+                value.register,
+                match value.mode {
+                    UseMode::Copy => RegisterUseKind::Inspect,
+                    UseMode::Move => RegisterUseKind::Consume,
+                },
+            );
+        }
+        fn operands(values: &[Operand], visit: &mut impl FnMut(Register, RegisterUseKind)) {
+            values.iter().for_each(|value| operand(value, visit));
+        }
+        fn edge(value: &Edge, visit: &mut impl FnMut(Register, RegisterUseKind)) {
+            operands(&value.args, visit);
+        }
+
+        match self {
+            Self::Goto(target) | Self::Leave { target, .. } => edge(target, &mut visit),
+            Self::Switch {
+                discr,
+                cases,
+                otherwise,
+            } => {
+                operand(discr, &mut visit);
+                cases
+                    .iter()
+                    .for_each(|(_, target)| edge(target, &mut visit));
+                edge(otherwise, &mut visit);
+            }
+            Self::Return { value } => {
+                value.iter().for_each(|value| operand(value, &mut visit));
+            }
+            Self::Call { args, normal, .. } | Self::HostCall { args, normal, .. } => {
+                operands(args, &mut visit);
+                edge(normal, &mut visit);
+            }
+            Self::CallSelf { args, normal, .. } => {
+                visit(0, RegisterUseKind::Inspect);
+                operands(args, &mut visit);
+                edge(normal, &mut visit);
+            }
+            Self::CallKnownReceiver {
+                receiver,
+                args,
+                normal,
+                ..
+            } => {
+                operand(receiver, &mut visit);
+                operands(args, &mut visit);
+                edge(normal, &mut visit);
+            }
+            Self::CallIndirect {
+                callable,
+                cleanup_callable,
+                args,
+                normal,
+                ..
+            } => {
+                if *cleanup_callable {
+                    visit(callable.register, RegisterUseKind::Consume);
+                } else {
+                    operand(callable, &mut visit);
+                }
+                operands(args, &mut visit);
+                edge(normal, &mut visit);
+            }
+            Self::Handle {
+                handler,
+                body,
+                normal,
+                ..
+            } => {
+                operand(handler, &mut visit);
+                operand(body, &mut visit);
+                edge(normal, &mut visit);
+            }
+            Self::Perform {
+                payloads,
+                capture,
+                resume,
+                ..
+            } => {
+                operands(payloads, &mut visit);
+                capture
+                    .captured_owners
+                    .iter()
+                    .chain(&capture.captured_references)
+                    .for_each(|register| visit(*register, RegisterUseKind::Inspect));
+                capture.captured_residuals.iter().for_each(|residual| {
+                    visit(residual.register, RegisterUseKind::Inspect);
+                });
+                if let Some(resume) = resume {
+                    edge(resume, &mut visit);
+                }
+            }
+            Self::Resume {
+                resumption,
+                value,
+                normal,
+                ..
+            } => {
+                operand(resumption, &mut visit);
+                operand(value, &mut visit);
+                edge(normal, &mut visit);
+            }
+            Self::Cancel {
+                resumption, normal, ..
+            } => {
+                operand(resumption, &mut visit);
+                edge(normal, &mut visit);
+            }
+            Self::TailResume {
+                resumption, value, ..
+            } => {
+                operand(resumption, &mut visit);
+                operand(value, &mut visit);
+            }
+            Self::TailCall { args, .. } => operands(args, &mut visit),
+            Self::TailCallSelf { args } => {
+                visit(0, RegisterUseKind::Inspect);
+                operands(args, &mut visit);
+            }
+            Self::TailCallKnownReceiver { receiver, args, .. } => {
+                operand(receiver, &mut visit);
+                operands(args, &mut visit);
+            }
+            Self::TailCallIndirect { callable, args, .. } => {
+                operand(callable, &mut visit);
+                operands(args, &mut visit);
+            }
+            Self::Abort { .. } | Self::Unreachable => {}
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Instruction {
     pub span: Span,
