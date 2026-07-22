@@ -271,7 +271,8 @@ fn source_region_contract(program: &Program, function: &crate::ast::Function) ->
             param_regions.push(ids.get(&name).copied());
         } else if matches!(
             parameter.ty.kind,
-            TypeSyntaxKind::SharedReference(_) | TypeSyntaxKind::UniqueReference(_)
+            TypeSyntaxKind::SharedReference { referent: _, .. }
+                | TypeSyntaxKind::UniqueReference { referent: _, .. }
         ) {
             param_regions.push(Some(next));
             next += 1;
@@ -2245,7 +2246,8 @@ fn generic_ast_reference_return_plans(
         visiting: &mut BTreeSet<String>,
     ) -> Option<usize> {
         match &ty.kind {
-            TypeSyntaxKind::SharedReference(_) | TypeSyntaxKind::UniqueReference(_) => Some(1),
+            TypeSyntaxKind::SharedReference { referent: _, .. }
+            | TypeSyntaxKind::UniqueReference { referent: _, .. } => Some(1),
             TypeSyntaxKind::Tuple(elements) => elements.iter().try_fold(0usize, |count, ty| {
                 count.checked_add(source_reference_leaf_count(program, ty, visiting)?)
             }),
@@ -2311,8 +2313,8 @@ fn generic_ast_reference_return_plans(
             continue;
         }
         let result_unique = match function.return_type.as_ref().map(|ty| &ty.kind) {
-            Some(TypeSyntaxKind::SharedReference(_)) => false,
-            Some(TypeSyntaxKind::UniqueReference(_)) => true,
+            Some(TypeSyntaxKind::SharedReference { referent: _, .. }) => false,
+            Some(TypeSyntaxKind::UniqueReference { referent: _, .. }) => true,
             _ => continue,
         };
         let candidates = function
@@ -2321,8 +2323,8 @@ fn generic_ast_reference_return_plans(
             .enumerate()
             .filter_map(|(parameter, param)| {
                 let compatible = match &param.ty.kind {
-                    TypeSyntaxKind::SharedReference(_) => !result_unique,
-                    TypeSyntaxKind::UniqueReference(_) => true,
+                    TypeSyntaxKind::SharedReference { referent: _, .. } => !result_unique,
+                    TypeSyntaxKind::UniqueReference { referent: _, .. } => true,
                     _ => false,
                 };
                 compatible.then_some(parameter)
@@ -3857,10 +3859,10 @@ fn bind_runtime_manifest(
         )
     }
     fn shared_array_of(ty: &TypeSyntax, array: &str, element: &str) -> bool {
-        matches!(&ty.kind, TypeSyntaxKind::SharedReference(inner) if array_of(inner, array, element))
+        matches!(&ty.kind, TypeSyntaxKind::SharedReference { referent: inner, .. } if array_of(inner, array, element))
     }
     fn unique_array_of(ty: &TypeSyntax, array: &str, element: &str) -> bool {
-        matches!(&ty.kind, TypeSyntaxKind::UniqueReference(inner) if array_of(inner, array, element))
+        matches!(&ty.kind, TypeSyntaxKind::UniqueReference { referent: inner, .. } if array_of(inner, array, element))
     }
     fn returns_unit(function: &Function) -> bool {
         function.return_type.as_ref().is_none_or(|ty| {
@@ -4014,7 +4016,7 @@ fn bind_runtime_manifest(
                         && result.is_some_and(|result| {
                             matches!(
                                 &result.kind,
-                                TypeSyntaxKind::SharedReference(inner) if path_is(inner, element)
+                                TypeSyntaxKind::SharedReference { referent: inner, .. } if path_is(inner, element)
                             )
                         })
                 }
@@ -4025,7 +4027,7 @@ fn bind_runtime_manifest(
                         && result.is_some_and(|result| {
                             matches!(
                                 &result.kind,
-                                TypeSyntaxKind::UniqueReference(inner) if path_is(inner, element)
+                                TypeSyntaxKind::UniqueReference { referent: inner, .. } if path_is(inner, element)
                             )
                         })
                 }
@@ -4955,8 +4957,8 @@ fn compile_program_with_phases(
                     .collect::<Option<Vec<_>>>()?;
                 Some(reference_types.id(&ResolvedType::Tuple(fields)))
             }
-            TypeSyntaxKind::SharedReference(referent)
-            | TypeSyntaxKind::UniqueReference(referent) => {
+            TypeSyntaxKind::SharedReference { referent, .. }
+            | TypeSyntaxKind::UniqueReference { referent, .. } => {
                 let referent = closure_field_type(
                     referent,
                     generic_names,
@@ -4968,7 +4970,10 @@ fn compile_program_with_phases(
                     callable_types,
                     closure_nominal_types,
                 )?;
-                let resolved = if matches!(syntax.kind, TypeSyntaxKind::SharedReference(_)) {
+                let resolved = if matches!(
+                    syntax.kind,
+                    TypeSyntaxKind::SharedReference { referent: _, .. }
+                ) {
                     ResolvedType::Shared(Box::new(ResolvedType::Concrete(referent)))
                 } else {
                     ResolvedType::Unique(Box::new(ResolvedType::Concrete(referent)))
@@ -7831,12 +7836,14 @@ fn normalize_ground_projections(
                     lifetime_arguments: vec![],
                 }
             }
-            typeck::ProvisionalType::Shared(referent) => TypeSyntaxKind::SharedReference(Box::new(
-                from_type_with_names(referent, span, symbolic_names),
-            )),
-            typeck::ProvisionalType::Unique(referent) => TypeSyntaxKind::UniqueReference(Box::new(
-                from_type_with_names(referent, span, symbolic_names),
-            )),
+            typeck::ProvisionalType::Shared(referent) => TypeSyntaxKind::SharedReference {
+                lifetime: None,
+                referent: Box::new(from_type_with_names(referent, span, symbolic_names)),
+            },
+            typeck::ProvisionalType::Unique(referent) => TypeSyntaxKind::UniqueReference {
+                lifetime: None,
+                referent: Box::new(from_type_with_names(referent, span, symbolic_names)),
+            },
             typeck::ProvisionalType::Tuple(elements) => TypeSyntaxKind::Tuple(
                 elements
                     .iter()
@@ -7999,8 +8006,8 @@ fn normalize_ground_projections(
             return;
         }
         match &mut syntax.kind {
-            TypeSyntaxKind::SharedReference(referent)
-            | TypeSyntaxKind::UniqueReference(referent) => {
+            TypeSyntaxKind::SharedReference { referent, .. }
+            | TypeSyntaxKind::UniqueReference { referent, .. } => {
                 normalize_in_context(referent, binders, trait_db, budget, errors)
             }
             TypeSyntaxKind::Tuple(elements) => {
@@ -8867,8 +8874,8 @@ pub(crate) fn normalize_ground_trait_methods(
 
     fn receiver_access(method: &crate::ast::TraitMethod) -> Option<ReceiverAccess> {
         Some(match method.params.first()?.ty.kind {
-            TypeSyntaxKind::SharedReference(_) => ReceiverAccess::Shared,
-            TypeSyntaxKind::UniqueReference(_) => ReceiverAccess::Unique,
+            TypeSyntaxKind::SharedReference { referent: _, .. } => ReceiverAccess::Shared,
+            TypeSyntaxKind::UniqueReference { referent: _, .. } => ReceiverAccess::Unique,
             _ => ReceiverAccess::Owned,
         })
     }
@@ -8881,12 +8888,12 @@ pub(crate) fn normalize_ground_trait_methods(
                     .collect::<Vec<_>>()
                     .join("::"),
             )),
-            TypeSyntaxKind::SharedReference(referent) => Some(ReceiverType::Shared(Box::new(
-                source_receiver_type(program, referent)?,
-            ))),
-            TypeSyntaxKind::UniqueReference(referent) => Some(ReceiverType::Unique(Box::new(
-                source_receiver_type(program, referent)?,
-            ))),
+            TypeSyntaxKind::SharedReference { referent, .. } => Some(ReceiverType::Shared(
+                Box::new(source_receiver_type(program, referent)?),
+            )),
+            TypeSyntaxKind::UniqueReference { referent, .. } => Some(ReceiverType::Unique(
+                Box::new(source_receiver_type(program, referent)?),
+            )),
             TypeSyntaxKind::Tuple(elements) => Some(ReceiverType::Tuple(
                 elements
                     .iter()
@@ -10816,8 +10823,8 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
         generated_consts: &std::cell::RefCell<Vec<crate::ast::TypeConstApplicationSyntax>>,
     ) -> Result<(), Diagnostic> {
         match &mut syntax.kind {
-            TypeSyntaxKind::SharedReference(referent)
-            | TypeSyntaxKind::UniqueReference(referent) => {
+            TypeSyntaxKind::SharedReference { referent, .. }
+            | TypeSyntaxKind::UniqueReference { referent, .. } => {
                 lower_const_defaults_and_fixed_arrays(
                     referent,
                     program,
@@ -11042,26 +11049,32 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
             ));
         }
         match &syntax.kind {
-            TypeSyntaxKind::SharedReference(referent) => {
+            TypeSyntaxKind::SharedReference { lifetime, referent } => {
                 let mut expanded = syntax.clone();
-                expanded.kind = TypeSyntaxKind::SharedReference(Box::new(expand(
-                    referent,
-                    aliases,
-                    const_applications,
-                    generated_consts,
-                    visiting,
-                )?));
+                expanded.kind = TypeSyntaxKind::SharedReference {
+                    lifetime: lifetime.clone(),
+                    referent: Box::new(expand(
+                        referent,
+                        aliases,
+                        const_applications,
+                        generated_consts,
+                        visiting,
+                    )?),
+                };
                 return Ok(expanded);
             }
-            TypeSyntaxKind::UniqueReference(referent) => {
+            TypeSyntaxKind::UniqueReference { lifetime, referent } => {
                 let mut expanded = syntax.clone();
-                expanded.kind = TypeSyntaxKind::UniqueReference(Box::new(expand(
-                    referent,
-                    aliases,
-                    const_applications,
-                    generated_consts,
-                    visiting,
-                )?));
+                expanded.kind = TypeSyntaxKind::UniqueReference {
+                    lifetime: lifetime.clone(),
+                    referent: Box::new(expand(
+                        referent,
+                        aliases,
+                        const_applications,
+                        generated_consts,
+                        visiting,
+                    )?),
+                };
                 return Ok(expanded);
             }
             TypeSyntaxKind::Tuple(elements) => {
@@ -11154,8 +11167,8 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                 TypeSyntaxKind::Path(path) => path.len() == 1,
                 TypeSyntaxKind::Never => true,
                 TypeSyntaxKind::Tuple(elements) => elements.iter().all(bounded_argument),
-                TypeSyntaxKind::SharedReference(referent)
-                | TypeSyntaxKind::UniqueReference(referent) => bounded_argument(referent),
+                TypeSyntaxKind::SharedReference { referent, .. }
+                | TypeSyntaxKind::UniqueReference { referent, .. } => bounded_argument(referent),
                 TypeSyntaxKind::Application {
                     constructor,
                     arguments,
@@ -11328,8 +11341,8 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                                                 bounded(element, params, generic_nominals)
                                             })
                                         }
-                                        TypeSyntaxKind::SharedReference(referent)
-                                        | TypeSyntaxKind::UniqueReference(referent) => {
+                                        TypeSyntaxKind::SharedReference { referent, .. }
+                                        | TypeSyntaxKind::UniqueReference { referent, .. } => {
                                             bounded(referent, params, generic_nominals)
                                         }
                                         TypeSyntaxKind::Path(path) if path.len() == 1 => {
@@ -12934,12 +12947,22 @@ fn instantiate_ground_nominals(
                     .map(|element| syntax_type(program, element, generic_heads, monomorphic))
                     .collect::<Option<Vec<_>>>()?,
             )),
-            TypeSyntaxKind::SharedReference(referent) => Some(typeck::ProvisionalType::Shared(
-                Box::new(syntax_type(program, referent, generic_heads, monomorphic)?),
-            )),
-            TypeSyntaxKind::UniqueReference(referent) => Some(typeck::ProvisionalType::Unique(
-                Box::new(syntax_type(program, referent, generic_heads, monomorphic)?),
-            )),
+            TypeSyntaxKind::SharedReference { referent, .. } => {
+                Some(typeck::ProvisionalType::Shared(Box::new(syntax_type(
+                    program,
+                    referent,
+                    generic_heads,
+                    monomorphic,
+                )?)))
+            }
+            TypeSyntaxKind::UniqueReference { referent, .. } => {
+                Some(typeck::ProvisionalType::Unique(Box::new(syntax_type(
+                    program,
+                    referent,
+                    generic_heads,
+                    monomorphic,
+                )?)))
+            }
             TypeSyntaxKind::Never => Some(typeck::ProvisionalType::Predefined("Never".into())),
             TypeSyntaxKind::Path(_) => None,
             TypeSyntaxKind::Projection { .. } => None,
@@ -13106,8 +13129,8 @@ fn instantiate_ground_nominals(
                 TypeSyntaxKind::Tuple(elements) => elements.iter().all(|element| {
                     application_argument(element, params, monomorphic, generic_heads)
                 }),
-                TypeSyntaxKind::SharedReference(referent)
-                | TypeSyntaxKind::UniqueReference(referent) => {
+                TypeSyntaxKind::SharedReference { referent, .. }
+                | TypeSyntaxKind::UniqueReference { referent, .. } => {
                     application_argument(referent, params, monomorphic, generic_heads)
                 }
                 TypeSyntaxKind::Never => true,
@@ -13153,8 +13176,8 @@ fn instantiate_ground_nominals(
                 TypeSyntaxKind::Tuple(elements) => elements
                     .iter()
                     .all(|element| field_type(element, params, monomorphic, generic_heads)),
-                TypeSyntaxKind::SharedReference(referent)
-                | TypeSyntaxKind::UniqueReference(referent) => {
+                TypeSyntaxKind::SharedReference { referent, .. }
+                | TypeSyntaxKind::UniqueReference { referent, .. } => {
                     field_type(referent, params, monomorphic, generic_heads)
                 }
                 TypeSyntaxKind::Application {
@@ -13261,12 +13284,12 @@ fn instantiate_ground_nominals(
             });
         }
         match &syntax.kind {
-            TypeSyntaxKind::SharedReference(referent) => {
+            TypeSyntaxKind::SharedReference { referent, .. } => {
                 Some(typeck::ProvisionalType::Shared(Box::new(
                     instantiated_type(referent, substitutions, monomorphic, generic_heads)?,
                 )))
             }
-            TypeSyntaxKind::UniqueReference(referent) => {
+            TypeSyntaxKind::UniqueReference { referent, .. } => {
                 Some(typeck::ProvisionalType::Unique(Box::new(
                     instantiated_type(referent, substitutions, monomorphic, generic_heads)?,
                 )))
@@ -13359,12 +13382,14 @@ fn instantiate_ground_nominals(
                     .map(|element| ground_type_syntax(element, span))
                     .collect::<Option<Vec<_>>>()?,
             ),
-            typeck::ProvisionalType::Shared(referent) => {
-                TypeSyntaxKind::SharedReference(Box::new(ground_type_syntax(referent, span)?))
-            }
-            typeck::ProvisionalType::Unique(referent) => {
-                TypeSyntaxKind::UniqueReference(Box::new(ground_type_syntax(referent, span)?))
-            }
+            typeck::ProvisionalType::Shared(referent) => TypeSyntaxKind::SharedReference {
+                lifetime: None,
+                referent: Box::new(ground_type_syntax(referent, span)?),
+            },
+            typeck::ProvisionalType::Unique(referent) => TypeSyntaxKind::UniqueReference {
+                lifetime: None,
+                referent: Box::new(ground_type_syntax(referent, span)?),
+            },
             typeck::ProvisionalType::Param(_) | typeck::ProvisionalType::Callable(_) => {
                 return None;
             }
@@ -13848,7 +13873,7 @@ fn instantiate_ground_nominals(
                         .collect::<Option<Vec<_>>>()?,
                 ))
             }
-            TypeSyntaxKind::SharedReference(referent) => Some(OwnershipHeadPattern::Shared(
+            TypeSyntaxKind::SharedReference { referent, .. } => Some(OwnershipHeadPattern::Shared(
                 Box::new(ownership_head_pattern(
                     referent,
                     binders,
@@ -13857,7 +13882,7 @@ fn instantiate_ground_nominals(
                     generic_heads,
                 )?),
             )),
-            TypeSyntaxKind::UniqueReference(referent) => Some(OwnershipHeadPattern::Unique(
+            TypeSyntaxKind::UniqueReference { referent, .. } => Some(OwnershipHeadPattern::Unique(
                 Box::new(ownership_head_pattern(
                     referent,
                     binders,
@@ -14219,10 +14244,18 @@ fn instantiate_ground_nominals(
                         .zip(right)
                         .all(|(left, right)| left.name == right.name)
             }
-            (TypeSyntaxKind::SharedReference(left), TypeSyntaxKind::SharedReference(right))
-            | (TypeSyntaxKind::UniqueReference(left), TypeSyntaxKind::UniqueReference(right)) => {
-                same_use_type_syntax(left, right)
-            }
+            (
+                TypeSyntaxKind::SharedReference { referent: left, .. },
+                TypeSyntaxKind::SharedReference {
+                    referent: right, ..
+                },
+            )
+            | (
+                TypeSyntaxKind::UniqueReference { referent: left, .. },
+                TypeSyntaxKind::UniqueReference {
+                    referent: right, ..
+                },
+            ) => same_use_type_syntax(left, right),
             (TypeSyntaxKind::Tuple(left), TypeSyntaxKind::Tuple(right)) => {
                 left.len() == right.len()
                     && left
@@ -14325,10 +14358,18 @@ fn instantiate_ground_nominals(
                 .is_some_and(|target| same_use_type_syntax(target, subject));
         }
         match (&field.kind, &subject.kind) {
-            (TypeSyntaxKind::SharedReference(left), TypeSyntaxKind::SharedReference(right))
-            | (TypeSyntaxKind::UniqueReference(left), TypeSyntaxKind::UniqueReference(right)) => {
-                same_instantiated_use_field(left, right, template_params, target_arguments)
-            }
+            (
+                TypeSyntaxKind::SharedReference { referent: left, .. },
+                TypeSyntaxKind::SharedReference {
+                    referent: right, ..
+                },
+            )
+            | (
+                TypeSyntaxKind::UniqueReference { referent: left, .. },
+                TypeSyntaxKind::UniqueReference {
+                    referent: right, ..
+                },
+            ) => same_instantiated_use_field(left, right, template_params, target_arguments),
             (TypeSyntaxKind::Tuple(left), TypeSyntaxKind::Tuple(right)) => {
                 left.len() == right.len()
                     && left.iter().zip(right).all(|(left, right)| {
@@ -14368,13 +14409,13 @@ fn instantiate_ground_nominals(
     fn universally_unrestricted_use_field(syntax: &TypeSyntax) -> bool {
         match &syntax.kind {
             TypeSyntaxKind::Path(path) if path.len() == 1 => scalar_type(&path[0].name).is_some(),
-            TypeSyntaxKind::SharedReference(_) => true,
+            TypeSyntaxKind::SharedReference { referent: _, .. } => true,
             TypeSyntaxKind::Tuple(elements) => {
                 elements.iter().all(universally_unrestricted_use_field)
             }
             TypeSyntaxKind::Never => true,
             TypeSyntaxKind::Path(_)
-            | TypeSyntaxKind::UniqueReference(_)
+            | TypeSyntaxKind::UniqueReference { referent: _, .. }
             | TypeSyntaxKind::Application { .. }
             | TypeSyntaxKind::Projection { .. } => false,
         }
@@ -14407,8 +14448,8 @@ fn instantiate_ground_nominals(
             TypeSyntaxKind::Tuple(elements) => elements.iter().all(|element| {
                 supported_use_goal_subject(element, binders, monomorphic, generic_heads)
             }),
-            TypeSyntaxKind::SharedReference(referent)
-            | TypeSyntaxKind::UniqueReference(referent) => {
+            TypeSyntaxKind::SharedReference { referent, .. }
+            | TypeSyntaxKind::UniqueReference { referent, .. } => {
                 supported_use_goal_subject(referent, binders, monomorphic, generic_heads)
             }
             TypeSyntaxKind::Never => true,
@@ -14833,8 +14874,8 @@ fn instantiate_ground_nominals(
                 TypeSyntaxKind::Tuple(elements) => elements.iter().all(|element| {
                     supported_drop_goal_subject(element, binders, monomorphic, generic_heads)
                 }),
-                TypeSyntaxKind::SharedReference(referent)
-                | TypeSyntaxKind::UniqueReference(referent) => {
+                TypeSyntaxKind::SharedReference { referent, .. }
+                | TypeSyntaxKind::UniqueReference { referent, .. } => {
                     supported_drop_goal_subject(referent, binders, monomorphic, generic_heads)
                 }
                 TypeSyntaxKind::Never => true,
@@ -15068,12 +15109,14 @@ fn instantiate_ground_nominals(
                         .map(|element| from_type(element, span))
                         .collect(),
                 ),
-                typeck::ProvisionalType::Shared(referent) => {
-                    TypeSyntaxKind::SharedReference(Box::new(from_type(referent, span)))
-                }
-                typeck::ProvisionalType::Unique(referent) => {
-                    TypeSyntaxKind::UniqueReference(Box::new(from_type(referent, span)))
-                }
+                typeck::ProvisionalType::Shared(referent) => TypeSyntaxKind::SharedReference {
+                    lifetime: None,
+                    referent: Box::new(from_type(referent, span)),
+                },
+                typeck::ProvisionalType::Unique(referent) => TypeSyntaxKind::UniqueReference {
+                    lifetime: None,
+                    referent: Box::new(from_type(referent, span)),
+                },
                 typeck::ProvisionalType::Param(_) | typeck::ProvisionalType::Callable(_) => {
                     unreachable!("validated ground nominal layout type")
                 }
@@ -15649,8 +15692,8 @@ fn instantiate_ground_nominals(
             return;
         }
         match &mut syntax.kind {
-            TypeSyntaxKind::SharedReference(referent)
-            | TypeSyntaxKind::UniqueReference(referent) => {
+            TypeSyntaxKind::SharedReference { referent, .. }
+            | TypeSyntaxKind::UniqueReference { referent, .. } => {
                 rewrite(program, referent, generic_heads, monomorphic);
             }
             TypeSyntaxKind::Tuple(elements) => {
@@ -15749,8 +15792,8 @@ fn nominal_ids(program: &Program) -> BTreeMap<&str, TypeId> {
                     owned_dependencies(argument, found);
                 }
             }
-            TypeSyntaxKind::SharedReference(_)
-            | TypeSyntaxKind::UniqueReference(_)
+            TypeSyntaxKind::SharedReference { referent: _, .. }
+            | TypeSyntaxKind::UniqueReference { referent: _, .. }
             | TypeSyntaxKind::Never
             | TypeSyntaxKind::Path(_)
             | TypeSyntaxKind::Projection { .. } => {}
@@ -15856,7 +15899,7 @@ fn resolve_aliases(
             visiting: &mut BTreeSet<String>,
         ) -> Result<ResolvedType, Diagnostic> {
             match &syntax.kind {
-                TypeSyntaxKind::SharedReference(referent) => {
+                TypeSyntaxKind::SharedReference { referent, .. } => {
                     Ok(ResolvedType::Shared(Box::new(target(
                         referent,
                         alias_name,
@@ -15866,7 +15909,7 @@ fn resolve_aliases(
                         visiting,
                     )?)))
                 }
-                TypeSyntaxKind::UniqueReference(referent) => {
+                TypeSyntaxKind::UniqueReference { referent, .. } => {
                     Ok(ResolvedType::Unique(Box::new(target(
                         referent,
                         alias_name,
@@ -15954,10 +15997,10 @@ fn resolve_source_type(
 ) -> Result<ResolvedType, TypeResolutionError> {
     match &syntax.kind {
         TypeSyntaxKind::Never => Ok(ResolvedType::Concrete(NEVER)),
-        TypeSyntaxKind::SharedReference(referent) => Ok(ResolvedType::Shared(Box::new(
+        TypeSyntaxKind::SharedReference { referent, .. } => Ok(ResolvedType::Shared(Box::new(
             resolve_source_type(referent, ids, aliases, array_name)?,
         ))),
-        TypeSyntaxKind::UniqueReference(referent) => Ok(ResolvedType::Unique(Box::new(
+        TypeSyntaxKind::UniqueReference { referent, .. } => Ok(ResolvedType::Unique(Box::new(
             resolve_source_type(referent, ids, aliases, array_name)?,
         ))),
         TypeSyntaxKind::Tuple(elements) if elements.is_empty() => Ok(ResolvedType::Concrete(UNIT)),
@@ -16148,7 +16191,7 @@ fn resolve_effects(
                     .collect::<Result<Vec<_>, _>>()
                     .map(ResolvedType::Tuple);
             }
-            TypeSyntaxKind::SharedReference(referent) => {
+            TypeSyntaxKind::SharedReference { referent, .. } => {
                 return substituted_member_type(
                     referent,
                     substitutions,
@@ -16160,7 +16203,7 @@ fn resolve_effects(
                 .map(Box::new)
                 .map(ResolvedType::Shared);
             }
-            TypeSyntaxKind::UniqueReference(referent) => {
+            TypeSyntaxKind::UniqueReference { referent, .. } => {
                 return substituted_member_type(
                     referent,
                     substitutions,
@@ -16511,12 +16554,16 @@ fn resolve_effects(
                     .map(|element| symbolic_effect_argument(element, binders))
                     .collect::<Option<Vec<_>>>()?,
             )),
-            TypeSyntaxKind::SharedReference(referent) => Some(typeck::ProvisionalType::Shared(
-                Box::new(symbolic_effect_argument(referent, binders)?),
-            )),
-            TypeSyntaxKind::UniqueReference(referent) => Some(typeck::ProvisionalType::Unique(
-                Box::new(symbolic_effect_argument(referent, binders)?),
-            )),
+            TypeSyntaxKind::SharedReference { referent, .. } => {
+                Some(typeck::ProvisionalType::Shared(Box::new(
+                    symbolic_effect_argument(referent, binders)?,
+                )))
+            }
+            TypeSyntaxKind::UniqueReference { referent, .. } => {
+                Some(typeck::ProvisionalType::Unique(Box::new(
+                    symbolic_effect_argument(referent, binders)?,
+                )))
+            }
             TypeSyntaxKind::Never => Some(typeck::ProvisionalType::Predefined("Never".into())),
             TypeSyntaxKind::Path(_) | TypeSyntaxKind::Projection { .. } => None,
         }
@@ -17230,12 +17277,16 @@ fn resolve_specialized_effect_operation_sites(
                     .map(|element| symbolic_effect_argument(element, binders))
                     .collect::<Option<Vec<_>>>()?,
             )),
-            TypeSyntaxKind::SharedReference(referent) => Some(typeck::ProvisionalType::Shared(
-                Box::new(symbolic_effect_argument(referent, binders)?),
-            )),
-            TypeSyntaxKind::UniqueReference(referent) => Some(typeck::ProvisionalType::Unique(
-                Box::new(symbolic_effect_argument(referent, binders)?),
-            )),
+            TypeSyntaxKind::SharedReference { referent, .. } => {
+                Some(typeck::ProvisionalType::Shared(Box::new(
+                    symbolic_effect_argument(referent, binders)?,
+                )))
+            }
+            TypeSyntaxKind::UniqueReference { referent, .. } => {
+                Some(typeck::ProvisionalType::Unique(Box::new(
+                    symbolic_effect_argument(referent, binders)?,
+                )))
+            }
             TypeSyntaxKind::Never => Some(typeck::ProvisionalType::Predefined("Never".into())),
             TypeSyntaxKind::Path(_) | TypeSyntaxKind::Projection { .. } => None,
         }
@@ -21275,8 +21326,18 @@ impl<'a> CoreLowerer<'a> {
                     self.infer_late_substitutions(formal, actual, generic_names, substitutions)
                 })
             }
-            (TypeSyntaxKind::SharedReference(formal), ResolvedType::Shared(actual))
-            | (TypeSyntaxKind::UniqueReference(formal), ResolvedType::Unique(actual)) => {
+            (
+                TypeSyntaxKind::SharedReference {
+                    referent: formal, ..
+                },
+                ResolvedType::Shared(actual),
+            )
+            | (
+                TypeSyntaxKind::UniqueReference {
+                    referent: formal, ..
+                },
+                ResolvedType::Unique(actual),
+            ) => {
                 let Some(actual) = self.existing_structural_type_id(&actual) else {
                     return false;
                 };
@@ -23023,13 +23084,13 @@ impl<'a> CoreLowerer<'a> {
                     .collect::<Option<Vec<_>>>()?;
                 Some(self.structural_type_id(&ResolvedType::Tuple(elements)))
             }
-            TypeSyntaxKind::SharedReference(referent) => {
+            TypeSyntaxKind::SharedReference { referent, .. } => {
                 let referent = self.monomorphic_source_type(referent)?;
                 Some(self.structural_type_id(&ResolvedType::Shared(Box::new(
                     ResolvedType::Concrete(referent),
                 ))))
             }
-            TypeSyntaxKind::UniqueReference(referent) => {
+            TypeSyntaxKind::UniqueReference { referent, .. } => {
                 let referent = self.monomorphic_source_type(referent)?;
                 Some(self.structural_type_id(&ResolvedType::Unique(Box::new(
                     ResolvedType::Concrete(referent),

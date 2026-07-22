@@ -4354,7 +4354,8 @@ impl Evaluator<'_> {
         }
         if !matches!(
             ty.kind,
-            TypeSyntaxKind::SharedReference(_) | TypeSyntaxKind::UniqueReference(_)
+            TypeSyntaxKind::SharedReference { referent: _, .. }
+                | TypeSyntaxKind::UniqueReference { referent: _, .. }
         ) {
             match value {
                 Value::Reference { value, .. } => {
@@ -4368,19 +4369,19 @@ impl Evaluator<'_> {
             }
         }
         match (&ty.kind, value) {
-            (TypeSyntaxKind::SharedReference(referent), Value::Reference { value, .. })
-            | (TypeSyntaxKind::UniqueReference(referent), Value::Reference { value, .. }) => {
+            (TypeSyntaxKind::SharedReference { referent, .. }, Value::Reference { value, .. })
+            | (TypeSyntaxKind::UniqueReference { referent, .. }, Value::Reference { value, .. }) => {
                 self.value_matches_type(&value.borrow(), referent, depth + 1)
             }
             (
-                TypeSyntaxKind::SharedReference(referent)
-                | TypeSyntaxKind::UniqueReference(referent),
+                TypeSyntaxKind::SharedReference { referent, .. }
+                | TypeSyntaxKind::UniqueReference { referent, .. },
                 Value::ProjectedReference { root, fields, .. },
             ) => projected_reference_value(root, fields)
                 .is_some_and(|value| self.value_matches_type(&value, referent, depth + 1)),
             (
-                TypeSyntaxKind::SharedReference(referent)
-                | TypeSyntaxKind::UniqueReference(referent),
+                TypeSyntaxKind::SharedReference { referent, .. }
+                | TypeSyntaxKind::UniqueReference { referent, .. },
                 value,
             ) => self.value_matches_type(value, referent, depth + 1),
             (TypeSyntaxKind::Application { constructor, .. }, value) => {
@@ -4838,11 +4839,13 @@ fn infer_generic_witnesses(
             witnesses.insert(path[0].name.clone(), value.clone());
         }
         (
-            TypeSyntaxKind::SharedReference(referent) | TypeSyntaxKind::UniqueReference(referent),
+            TypeSyntaxKind::SharedReference { referent, .. }
+            | TypeSyntaxKind::UniqueReference { referent, .. },
             Value::Reference { value, .. },
         ) => infer_generic_witnesses(referent, &value.borrow(), generic_names, witnesses),
         (
-            TypeSyntaxKind::SharedReference(referent) | TypeSyntaxKind::UniqueReference(referent),
+            TypeSyntaxKind::SharedReference { referent, .. }
+            | TypeSyntaxKind::UniqueReference { referent, .. },
             Value::ProjectedReference { root, fields, .. },
         ) => {
             if let Some(value) = projected_reference_value(root, fields) {
@@ -4850,7 +4853,8 @@ fn infer_generic_witnesses(
             }
         }
         (
-            TypeSyntaxKind::SharedReference(referent) | TypeSyntaxKind::UniqueReference(referent),
+            TypeSyntaxKind::SharedReference { referent, .. }
+            | TypeSyntaxKind::UniqueReference { referent, .. },
             value,
         ) => infer_generic_witnesses(referent, value, generic_names, witnesses),
         _ => {}

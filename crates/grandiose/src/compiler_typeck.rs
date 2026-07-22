@@ -96,7 +96,6 @@ pub(crate) fn infer_nominal_variance(program: &Program) -> BTreeMap<String, Vec<
 
     fn mentions(program: &Program, syntax: &TypeSyntax, name: &str) -> bool {
         struct Mentions<'a> {
-            program: &'a Program,
             name: &'a str,
         }
         impl TypeSyntaxVisitor for Mentions<'_> {
@@ -104,13 +103,10 @@ pub(crate) fn infer_nominal_variance(program: &Program) -> BTreeMap<String, Vec<
 
             fn visit_type(&mut self, syntax: &TypeSyntax) -> ControlFlow<()> {
                 let direct = syntax.simple_name() == Some(self.name)
-                    || matches!(
-                        syntax.kind,
-                        TypeSyntaxKind::SharedReference(_) | TypeSyntaxKind::UniqueReference(_)
-                    ) && self
-                        .program
-                        .reference_lifetime(syntax.span)
-                        .is_some_and(|lifetime| lifetime.name == self.name)
+                    || matches!(&syntax.kind,
+                        TypeSyntaxKind::SharedReference { lifetime: Some(lifetime), .. }
+                        | TypeSyntaxKind::UniqueReference { lifetime: Some(lifetime), .. }
+                        if lifetime.name == self.name)
                     || matches!(&syntax.kind, TypeSyntaxKind::Application { lifetime_arguments, .. }
                         if lifetime_arguments.iter().any(|argument| argument.lifetime.name == self.name))
                     || matches!(&syntax.kind, TypeSyntaxKind::Projection { trait_ref, arguments, .. }
@@ -125,7 +121,8 @@ pub(crate) fn infer_nominal_variance(program: &Program) -> BTreeMap<String, Vec<
                 }
             }
         }
-        Mentions { program, name }.visit_type(syntax).is_break()
+        let _ = program;
+        Mentions { name }.visit_type(syntax).is_break()
     }
 
     fn visit(
@@ -143,17 +140,23 @@ pub(crate) fn infer_nominal_variance(program: &Program) -> BTreeMap<String, Vec<
             return;
         }
         match &syntax.kind {
-            TypeSyntaxKind::SharedReference(inner) => {
-                if let Some(lifetime) = program.reference_lifetime(syntax.span)
+            TypeSyntaxKind::SharedReference {
+                lifetime,
+                referent: inner,
+            } => {
+                if let Some(lifetime) = lifetime
                     && let Some(index) = params.get(lifetime.name.as_str())
                 {
                     found[*index] = merge_variance(found[*index], context);
                 }
                 visit(program, inner, context, params, evidence, found)
             }
-            TypeSyntaxKind::UniqueReference(inner) => {
+            TypeSyntaxKind::UniqueReference {
+                lifetime,
+                referent: inner,
+            } => {
                 let invariant = compose_variance(context, Variance::Invariant);
-                if let Some(lifetime) = program.reference_lifetime(syntax.span)
+                if let Some(lifetime) = lifetime
                     && let Some(index) = params.get(lifetime.name.as_str())
                 {
                     found[*index] = merge_variance(found[*index], invariant);
@@ -282,15 +285,15 @@ pub(crate) fn type_lifetime_variance(
         found: &mut BTreeMap<String, Variance>,
     ) {
         match &syntax.kind {
-            TypeSyntaxKind::SharedReference(referent) => {
-                if let Some(lifetime) = program.reference_lifetime(syntax.span) {
+            TypeSyntaxKind::SharedReference { lifetime, referent } => {
+                if let Some(lifetime) = lifetime {
                     record(found, &lifetime.name, context);
                 }
                 visit(program, referent, context, nominal_variance, found);
             }
-            TypeSyntaxKind::UniqueReference(referent) => {
+            TypeSyntaxKind::UniqueReference { lifetime, referent } => {
                 let invariant = compose_variance(context, Variance::Invariant);
-                if let Some(lifetime) = program.reference_lifetime(syntax.span) {
+                if let Some(lifetime) = lifetime {
                     record(found, &lifetime.name, invariant);
                 }
                 visit(program, referent, invariant, nominal_variance, found);
@@ -1583,10 +1586,10 @@ fn provisional_label_type(syntax: Option<&TypeSyntax>) -> Option<ProvisionalType
                 .map(|element| provisional_label_type(Some(element)))
                 .collect::<Option<Vec<_>>>()?,
         )),
-        TypeSyntaxKind::SharedReference(referent) => Some(ProvisionalType::shared(
+        TypeSyntaxKind::SharedReference { referent, .. } => Some(ProvisionalType::shared(
             provisional_label_type(Some(referent))?,
         )),
-        TypeSyntaxKind::UniqueReference(referent) => Some(ProvisionalType::unique(
+        TypeSyntaxKind::UniqueReference { referent, .. } => Some(ProvisionalType::unique(
             provisional_label_type(Some(referent))?,
         )),
         TypeSyntaxKind::Application {
@@ -2041,10 +2044,10 @@ impl<'a> Typer<'a> {
                     )))
                 }
             }
-            TypeSyntaxKind::SharedReference(referent) => self
+            TypeSyntaxKind::SharedReference { referent, .. } => self
                 .shadow_syntax_type(referent)
                 .map(ProvisionalType::shared),
-            TypeSyntaxKind::UniqueReference(referent) => self
+            TypeSyntaxKind::UniqueReference { referent, .. } => self
                 .shadow_syntax_type(referent)
                 .map(ProvisionalType::unique),
             TypeSyntaxKind::Tuple(elements) => elements

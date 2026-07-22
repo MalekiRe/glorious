@@ -19,9 +19,8 @@ pub(crate) fn walk_type<V: TypeSyntaxVisitor + ?Sized>(
 ) -> ControlFlow<V::Break> {
     match &syntax.kind {
         TypeSyntaxKind::Path(_) | TypeSyntaxKind::Never => {}
-        TypeSyntaxKind::SharedReference(referent) | TypeSyntaxKind::UniqueReference(referent) => {
-            visitor.visit_type(referent)?
-        }
+        TypeSyntaxKind::SharedReference { referent, .. }
+        | TypeSyntaxKind::UniqueReference { referent, .. } => visitor.visit_type(referent)?,
         TypeSyntaxKind::Tuple(elements) => {
             for element in elements {
                 visitor.visit_type(element)?;
@@ -115,12 +114,14 @@ pub(crate) fn fold_type<F: TypeSyntaxFolder + ?Sized>(
     syntax.kind = match syntax.kind {
         TypeSyntaxKind::Path(path) => TypeSyntaxKind::Path(path),
         TypeSyntaxKind::Never => TypeSyntaxKind::Never,
-        TypeSyntaxKind::SharedReference(referent) => {
-            TypeSyntaxKind::SharedReference(Box::new(folder.fold_type(*referent)?))
-        }
-        TypeSyntaxKind::UniqueReference(referent) => {
-            TypeSyntaxKind::UniqueReference(Box::new(folder.fold_type(*referent)?))
-        }
+        TypeSyntaxKind::SharedReference { lifetime, referent } => TypeSyntaxKind::SharedReference {
+            lifetime,
+            referent: Box::new(folder.fold_type(*referent)?),
+        },
+        TypeSyntaxKind::UniqueReference { lifetime, referent } => TypeSyntaxKind::UniqueReference {
+            lifetime,
+            referent: Box::new(folder.fold_type(*referent)?),
+        },
         TypeSyntaxKind::Tuple(elements) => TypeSyntaxKind::Tuple(fold_types(folder, elements)?),
         TypeSyntaxKind::Application {
             constructor,

@@ -732,10 +732,10 @@ fn symbolic_type(
                 .map(|element| symbolic_type(element, generics, callable_constraints))
                 .collect::<Option<Vec<_>>>()?,
         )),
-        TypeSyntaxKind::SharedReference(referent) => {
+        TypeSyntaxKind::SharedReference { referent, .. } => {
             symbolic_type(referent, generics, callable_constraints).map(ProvisionalType::shared)
         }
-        TypeSyntaxKind::UniqueReference(referent) => {
+        TypeSyntaxKind::UniqueReference { referent, .. } => {
             symbolic_type(referent, generics, callable_constraints).map(ProvisionalType::unique)
         }
         TypeSyntaxKind::Projection {
@@ -893,8 +893,18 @@ fn symbolic_type_in(
                 *target = symbolic_type_in(program, source, generics, callable_constraints)?;
             }
         }
-        (TypeSyntaxKind::SharedReference(source), ProvisionalType::Shared(target))
-        | (TypeSyntaxKind::UniqueReference(source), ProvisionalType::Unique(target)) => {
+        (
+            TypeSyntaxKind::SharedReference {
+                referent: source, ..
+            },
+            ProvisionalType::Shared(target),
+        )
+        | (
+            TypeSyntaxKind::UniqueReference {
+                referent: source, ..
+            },
+            ProvisionalType::Unique(target),
+        ) => {
             **target = symbolic_type_in(program, source, generics, callable_constraints)?;
         }
         _ => {}
@@ -946,12 +956,14 @@ pub(crate) fn normalize_projection_placeholders(
             ProvisionalType::Tuple(elements) => {
                 TypeSyntaxKind::Tuple(elements.iter().map(syntax).collect::<Option<Vec<_>>>()?)
             }
-            ProvisionalType::Shared(referent) => {
-                TypeSyntaxKind::SharedReference(Box::new(syntax(referent)?))
-            }
-            ProvisionalType::Unique(referent) => {
-                TypeSyntaxKind::UniqueReference(Box::new(syntax(referent)?))
-            }
+            ProvisionalType::Shared(referent) => TypeSyntaxKind::SharedReference {
+                lifetime: None,
+                referent: Box::new(syntax(referent)?),
+            },
+            ProvisionalType::Unique(referent) => TypeSyntaxKind::UniqueReference {
+                lifetime: None,
+                referent: Box::new(syntax(referent)?),
+            },
             ProvisionalType::Param(_) | ProvisionalType::Callable(_) => return None,
         };
         Some(TypeSyntax { kind, span })
@@ -1282,17 +1294,16 @@ fn callable_constraints(
                 GoalArgument::Type(
                     ty @ TypeSyntax {
                         kind:
-                            TypeSyntaxKind::SharedReference(_) | TypeSyntaxKind::UniqueReference(_),
+                            TypeSyntaxKind::SharedReference { referent: _, .. }
+                            | TypeSyntaxKind::UniqueReference { referent: _, .. },
                         ..
                     },
                 ),
-            ] if program.reference_lifetimes.iter().any(|lifetime| {
-                // Grouping is deliberately erased from `TypeSyntaxKind`, but
-                // the reference-lifetime side table retains the inner span.
-                // A strict containment therefore distinguishes `(&'a T)`
-                // from the unsupported ungrouped `Fn<&'a T>` form.
-                ty.span.start < lifetime.reference.start && lifetime.reference.end < ty.span.end
-            }) =>
+            ] if matches!(&ty.kind,
+                TypeSyntaxKind::SharedReference { lifetime: Some(lifetime), referent }
+                | TypeSyntaxKind::UniqueReference { lifetime: Some(lifetime), referent }
+                if ty.span.start < lifetime.span.start.saturating_sub(1)
+                    || referent.span.end < ty.span.end) =>
             {
                 singleton = [ty.clone()];
                 Some(singleton.as_slice())

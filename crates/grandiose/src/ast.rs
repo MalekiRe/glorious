@@ -25,9 +25,6 @@ pub struct Program {
     pub effects: Vec<EffectDecl>,
     pub drops: Vec<DropDecl>,
     pub functions: Vec<Function>,
-    /// Explicit source lifetimes attached to reference type spans. Elided
-    /// references are absent; runtime type identity continues to erase regions.
-    pub reference_lifetimes: Vec<ReferenceLifetimeSyntax>,
     /// Full source-level effect applications used by `perform` expressions and
     /// handler clauses. The compatibility `ExprKind::Perform::effect` and
     /// `HandlerClause::effect` fields retain their simple declaration name so
@@ -59,13 +56,6 @@ impl Program {
             .iter()
             .find(|entry| entry.span == span)
             .map(|entry| &entry.literal)
-    }
-
-    pub fn reference_lifetime(&self, reference: Span) -> Option<&LifetimeSyntax> {
-        self.reference_lifetimes
-            .iter()
-            .find(|entry| entry.reference == reference)
-            .map(|entry| &entry.lifetime)
     }
 
     pub fn effect_path(&self, site: Span) -> Option<&TypeSyntax> {
@@ -156,12 +146,6 @@ pub struct NumericLiteralSyntax {
 pub struct LifetimeSyntax {
     pub name: String,
     pub span: Span,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ReferenceLifetimeSyntax {
-    pub reference: Span,
-    pub lifetime: LifetimeSyntax,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -641,8 +625,14 @@ impl TypeSyntax {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum TypeSyntaxKind {
     Path(Vec<TypePathSegment>),
-    SharedReference(Box<TypeSyntax>),
-    UniqueReference(Box<TypeSyntax>),
+    SharedReference {
+        lifetime: Option<LifetimeSyntax>,
+        referent: Box<TypeSyntax>,
+    },
+    UniqueReference {
+        lifetime: Option<LifetimeSyntax>,
+        referent: Box<TypeSyntax>,
+    },
     Tuple(Vec<TypeSyntax>),
     Application {
         constructor: Box<TypeSyntax>,

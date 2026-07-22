@@ -447,8 +447,8 @@ impl AstRewriter<'_> {
                     }];
                 }
             }
-            TypeSyntaxKind::SharedReference(referent)
-            | TypeSyntaxKind::UniqueReference(referent) => self.rewrite_type(referent),
+            TypeSyntaxKind::SharedReference { referent, .. }
+            | TypeSyntaxKind::UniqueReference { referent, .. } => self.rewrite_type(referent),
             TypeSyntaxKind::Tuple(elements) => {
                 for element in elements {
                     self.rewrite_type(element);

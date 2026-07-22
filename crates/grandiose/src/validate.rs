@@ -13,6 +13,25 @@ use crate::{
     span::Span,
 };
 
+fn reference_lifetimes_in_type(syntax: &TypeSyntax, found: &mut Vec<crate::ast::LifetimeSyntax>) {
+    struct Lifetimes<'out>(&'out mut Vec<crate::ast::LifetimeSyntax>);
+    impl crate::ast_visit::TypeSyntaxVisitor for Lifetimes<'_> {
+        type Break = std::convert::Infallible;
+
+        fn visit_type(&mut self, syntax: &TypeSyntax) -> ControlFlow<Self::Break> {
+            match &syntax.kind {
+                TypeSyntaxKind::SharedReference { lifetime, .. }
+                | TypeSyntaxKind::UniqueReference { lifetime, .. } => {
+                    self.0.extend(lifetime.iter().cloned());
+                }
+                _ => {}
+            }
+            crate::ast_visit::walk_type(self, syntax)
+        }
+    }
+    let _ = crate::ast_visit::TypeSyntaxVisitor::visit_type(&mut Lifetimes(found), syntax);
+}
+
 fn const_expression_kind(
     expression: &crate::ast::ConstExprSyntax,
     scope: &HashMap<&str, crate::ast::ConstKind>,
@@ -584,10 +603,18 @@ fn validate_trait_methods(
                 .iter()
                 .map(|segment| mapped_name(&segment.name, binders))
                 .eq(right.iter().map(|segment| segment.name.as_str())),
-            (TypeSyntaxKind::SharedReference(left), TypeSyntaxKind::SharedReference(right))
-            | (TypeSyntaxKind::UniqueReference(left), TypeSyntaxKind::UniqueReference(right)) => {
-                same_type(left, right, self_ty, binders, trait_arguments)
-            }
+            (
+                TypeSyntaxKind::SharedReference { referent: left, .. },
+                TypeSyntaxKind::SharedReference {
+                    referent: right, ..
+                },
+            )
+            | (
+                TypeSyntaxKind::UniqueReference { referent: left, .. },
+                TypeSyntaxKind::UniqueReference {
+                    referent: right, ..
+                },
+            ) => same_type(left, right, self_ty, binders, trait_arguments),
             (TypeSyntaxKind::Tuple(left), TypeSyntaxKind::Tuple(right)) => {
                 left.len() == right.len()
                     && left.iter().zip(right).all(|(left, right)| {
@@ -1457,8 +1484,8 @@ fn validate_source_lifetimes(program: &Program, errors: &mut Vec<Diagnostic>) {
                     );
                 }
             }
-            TypeSyntaxKind::SharedReference(referent)
-            | TypeSyntaxKind::UniqueReference(referent) => {
+            TypeSyntaxKind::SharedReference { referent, .. }
+            | TypeSyntaxKind::UniqueReference { referent, .. } => {
                 validate_nominal_arguments(referent, scope, nominals, const_applications, errors)
             }
             TypeSyntaxKind::Tuple(elements) => {
@@ -1593,14 +1620,16 @@ fn validate_source_lifetimes(program: &Program, errors: &mut Vec<Diagnostic>) {
                     );
                 }
             }
-            TypeSyntaxKind::SharedReference(referent)
-            | TypeSyntaxKind::UniqueReference(referent) => reject_const_binder_in_type_position(
-                referent,
-                scope,
-                nominals,
-                const_applications,
-                errors,
-            ),
+            TypeSyntaxKind::SharedReference { referent, .. }
+            | TypeSyntaxKind::UniqueReference { referent, .. } => {
+                reject_const_binder_in_type_position(
+                    referent,
+                    scope,
+                    nominals,
+                    const_applications,
+                    errors,
+                )
+            }
             // Associated-type arguments are kind-checked against their GAT
             // schema during trait lowering, where const positions are known.
             TypeSyntaxKind::Projection { subject, .. } => reject_const_binder_in_type_position(
@@ -1705,11 +1734,20 @@ fn validate_source_lifetimes(program: &Program, errors: &mut Vec<Diagnostic>) {
             .map(|parameter| parameter.name.as_str())
             .collect::<HashSet<_>>();
         let known = |name: &str| name == "'static" || lifetime_binders.contains(name);
-        for annotation in program.reference_lifetimes.iter().filter(|annotation| {
-            function.span.start <= annotation.reference.start
-                && annotation.reference.end <= function.span.end
-        }) {
-            let name = annotation.lifetime.name.as_str();
+        let mut reference_lifetimes = Vec::new();
+        for parameter in &function.params {
+            reference_lifetimes_in_type(&parameter.ty, &mut reference_lifetimes);
+        }
+        if let Some(result) = &function.return_type {
+            reference_lifetimes_in_type(result, &mut reference_lifetimes);
+        }
+        if let Some(effects) = &function.outward_effects {
+            for effect in &effects.effects {
+                reference_lifetimes_in_type(effect, &mut reference_lifetimes);
+            }
+        }
+        for annotation in reference_lifetimes {
+            let name = annotation.name.as_str();
             if name == "'_" || known(name) {
                 continue;
             }
@@ -1722,13 +1760,9 @@ fn validate_source_lifetimes(program: &Program, errors: &mut Vec<Diagnostic>) {
                 )
             };
             errors.push(
-                Diagnostic::error(
-                    "unbound reference lifetime",
-                    detail,
-                    annotation.lifetime.span,
-                )
-                .with_code("G0008")
-                .with_help("bind the lifetime in the callable's generic parameter list"),
+                Diagnostic::error("unbound reference lifetime", detail, annotation.span)
+                    .with_code("G0008")
+                    .with_help("bind the lifetime in the callable's generic parameter list"),
             );
         }
         if let Some(where_clause) = &function.where_clause {
@@ -1806,47 +1840,48 @@ fn validate_source_lifetimes(program: &Program, errors: &mut Vec<Diagnostic>) {
         }
     }
 
-    for annotation in &program.reference_lifetimes {
-        if program.functions.iter().any(|function| {
-            function.span.start <= annotation.reference.start
-                && annotation.reference.end <= function.span.end
-        }) {
-            continue;
-        }
-        let containing_nominal = program
-            .structs
-            .iter()
-            .map(|declaration| (declaration.span, declaration.generics.as_ref()))
-            .chain(
-                program
-                    .enums
-                    .iter()
-                    .map(|declaration| (declaration.span, declaration.generics.as_ref())),
-            )
-            .find(|(span, _)| {
-                span.start <= annotation.reference.start && annotation.reference.end <= span.end
-            });
-        let bound_by_nominal = containing_nominal.is_some_and(|(_, generics)| {
-            generics.is_some_and(|generics| {
+    for (field, generics) in program
+        .structs
+        .iter()
+        .flat_map(|declaration| {
+            declaration
+                .fields
+                .iter()
+                .map(|field| (&field.ty, declaration.generics.as_ref()))
+        })
+        .chain(program.enums.iter().flat_map(|declaration| {
+            declaration
+                .variants
+                .iter()
+                .flat_map(|variant| &variant.fields)
+                .map(|field| (field, declaration.generics.as_ref()))
+        }))
+    {
+        let mut reference_lifetimes = Vec::new();
+        reference_lifetimes_in_type(field, &mut reference_lifetimes);
+        for annotation in reference_lifetimes {
+            let bound_by_nominal = generics.is_some_and(|generics| {
                 generics.params.iter().any(|parameter| {
                     parameter.kind == GenericParamKind::Lifetime
-                        && parameter.name == annotation.lifetime.name
+                        && parameter.name == annotation.name
                 })
-            })
-        });
-        if annotation.lifetime.name != "'static" && !bound_by_nominal {
-            errors.push(
-                Diagnostic::error(
-                    "unbound stored reference lifetime",
-                    format!(
-                        "lifetime `{}` is not bound by the containing nominal declaration",
-                        annotation.lifetime.name
+            });
+            if annotation.name != "'static" && !bound_by_nominal {
+                errors.push(
+                    Diagnostic::error(
+                        "unbound stored reference lifetime",
+                        format!(
+                            "lifetime `{}` is not bound by the containing nominal declaration",
+                            annotation.name
+                        ),
+                        annotation.span,
+                    )
+                    .with_code("G0008")
+                    .with_help(
+                        "bind the lifetime on the struct or enum that stores this reference",
                     ),
-                    annotation.lifetime.span,
-                )
-                .with_code("G0008")
-                .with_help("bind the lifetime on the struct or enum that stores this reference"),
-            );
+                );
+            }
         }
     }
 
@@ -1884,8 +1919,18 @@ fn validate_source_lifetimes(program: &Program, errors: &mut Vec<Diagnostic>) {
             .filter(|field| {
                 matches!(
                     field.kind,
-                    TypeSyntaxKind::SharedReference(_) | TypeSyntaxKind::UniqueReference(_)
-                ) && program.reference_lifetime(field.span).is_some()
+                    TypeSyntaxKind::SharedReference { referent: _, .. }
+                        | TypeSyntaxKind::UniqueReference { referent: _, .. }
+                ) && matches!(
+                    &field.kind,
+                    TypeSyntaxKind::SharedReference {
+                        lifetime: Some(_),
+                        ..
+                    } | TypeSyntaxKind::UniqueReference {
+                        lifetime: Some(_),
+                        ..
+                    }
+                )
             })
             .count();
         if stored > 1 {

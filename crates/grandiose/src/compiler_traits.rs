@@ -4860,7 +4860,7 @@ fn pattern_with_const_arguments(
             }
             Ok(Pattern::Nominal(schema.identity.clone(), lowered))
         }
-        TypeSyntaxKind::SharedReference(referent) => {
+        TypeSyntaxKind::SharedReference { referent, .. } => {
             Ok(Pattern::Shared(Box::new(pattern_with_const_arguments(
                 referent,
                 binders,
@@ -4870,7 +4870,7 @@ fn pattern_with_const_arguments(
                 type_const_arguments,
             )?)))
         }
-        TypeSyntaxKind::UniqueReference(referent) => {
+        TypeSyntaxKind::UniqueReference { referent, .. } => {
             Ok(Pattern::Unique(Box::new(pattern_with_const_arguments(
                 referent,
                 binders,

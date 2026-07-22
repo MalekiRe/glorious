@@ -30,19 +30,29 @@ fn retains_explicit_reference_lifetimes_and_named_outlives_constraints() {
     let source = "forward<'long, 'short>(left: &'long i64, right: &'short mut i64) -> &'short i64 where 'long: 'short { left } main() -> { () }";
     let program = parse(source);
     let function = &program.functions[0];
-    assert_eq!(program.reference_lifetimes.len(), 3);
+    let references = [
+        &function.params[0].ty,
+        &function.params[1].ty,
+        function.return_type.as_ref().unwrap(),
+    ];
     assert_eq!(
-        program
-            .reference_lifetimes
+        references
             .iter()
-            .map(|entry| entry.lifetime.name.as_str())
+            .map(|syntax| match &syntax.kind {
+                TypeSyntaxKind::SharedReference {
+                    lifetime: Some(lifetime),
+                    ..
+                }
+                | TypeSyntaxKind::UniqueReference {
+                    lifetime: Some(lifetime),
+                    ..
+                } => lifetime.name.as_str(),
+                _ => panic!("expected an explicit reference lifetime"),
+            })
             .collect::<Vec<_>>(),
         ["'long", "'short", "'short"]
     );
-    assert_eq!(
-        &source[program.reference_lifetimes[1].reference.range()],
-        "&'short mut i64"
-    );
+    assert_eq!(&source[references[1].span.range()], "&'short mut i64");
     let constraint = &function.where_clause.as_ref().unwrap().lifetime_outlives[0];
     assert!(constraint.higher_ranked_lifetimes.is_empty());
     assert_eq!(constraint.longer.name, "'long");
@@ -757,13 +767,16 @@ run(arg: &Alias) -> Result<(i64, Text), &mut Error> { () }
     assert_eq!(arguments.len(), 2);
     assert!(matches!(
         arguments[0].kind,
-        TypeSyntaxKind::UniqueReference(_)
+        TypeSyntaxKind::UniqueReference { referent: _, .. }
     ));
     assert!(matches!(arguments[1].kind, TypeSyntaxKind::Tuple(ref fields) if fields.is_empty()));
 
     let field = &program.structs[0].fields[0].ty;
     assert_eq!(source_text(source, field), "&Map<Text, (i64, &mut Bytes)>");
-    assert!(matches!(field.kind, TypeSyntaxKind::SharedReference(_)));
+    assert!(matches!(
+        field.kind,
+        TypeSyntaxKind::SharedReference { referent: _, .. }
+    ));
 
     let payload = &program.enums[0].variants[0].fields[0];
     assert_eq!(source_text(source, payload), "core::Packet<&Text>");

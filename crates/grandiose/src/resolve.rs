@@ -548,8 +548,8 @@ impl Context<'_> {
                     errors.push(unknown("type", &first.name, first.span));
                 }
             }
-            TypeSyntaxKind::SharedReference(referent)
-            | TypeSyntaxKind::UniqueReference(referent) => self.ty(referent, scope, errors),
+            TypeSyntaxKind::SharedReference { referent, .. }
+            | TypeSyntaxKind::UniqueReference { referent, .. } => self.ty(referent, scope, errors),
             TypeSyntaxKind::Tuple(elements) => {
                 for element in elements {
                     self.ty(element, scope, errors);

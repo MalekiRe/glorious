@@ -11,10 +11,10 @@ use crate::{
         FixityDecl, FixityKind, Function, GenericParam, GenericParamKind, GenericParams,
         GlobalBinding, GoalArgument, GoalPolarity, HandlerClause, ImplDecl, ImportDecl, ImportTree,
         ItemVisibility, LabelSyntax, LifetimeOutlivesSyntax, LifetimeSyntax, ModuleDecl,
-        ModuleKind, Param, Pattern, PatternKind, PatternRest, Program, QuantitySyntax,
-        ReferenceLifetimeSyntax, Stmt, StructDecl, StructFieldPattern, TraitDecl, TraitMethod,
-        TraitRefSyntax, TypeAliasDecl, TypePathSegment, TypeSyntax, TypeSyntaxKind, UnaryOp,
-        UseDecl, VariantDecl, Visibility, WhereClause, WhereGoal,
+        ModuleKind, Param, Pattern, PatternKind, PatternRest, Program, QuantitySyntax, Stmt,
+        StructDecl, StructFieldPattern, TraitDecl, TraitMethod, TraitRefSyntax, TypeAliasDecl,
+        TypePathSegment, TypeSyntax, TypeSyntaxKind, UnaryOp, UseDecl, VariantDecl, Visibility,
+        WhereClause, WhereGoal,
     },
     diagnostic::Diagnostic,
     lexer::{Kw, Token, TokenKind},
@@ -44,7 +44,6 @@ pub fn parse_recovering(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         cursor: 0,
         fixities,
         fixity_regions: Vec::new(),
-        reference_lifetimes: Vec::new(),
         effect_paths: Vec::new(),
         type_const_arguments: Vec::new(),
         fixed_array_types: Vec::new(),
@@ -77,7 +76,6 @@ pub fn parse_recovering_with_fixity_regions(
         cursor: 0,
         fixities,
         fixity_regions,
-        reference_lifetimes: Vec::new(),
         effect_paths: Vec::new(),
         type_const_arguments: Vec::new(),
         fixed_array_types: Vec::new(),
@@ -214,7 +212,6 @@ struct Parser {
     cursor: usize,
     fixities: HashMap<String, FixityEntry>,
     fixity_regions: Vec<FixityRegion>,
-    reference_lifetimes: Vec<ReferenceLifetimeSyntax>,
     effect_paths: Vec<EffectPathSyntax>,
     type_const_arguments: Vec<crate::ast::TypeConstApplicationSyntax>,
     fixed_array_types: Vec<crate::ast::FixedArrayTypeSyntax>,
@@ -271,7 +268,6 @@ impl Parser {
             effects: draft.effects,
             drops: draft.drops,
             functions: draft.functions,
-            reference_lifetimes: self.reference_lifetimes,
             effect_paths: self.effect_paths,
             type_const_arguments: self.type_const_arguments,
             fixed_array_types: self.fixed_array_types,
@@ -3358,17 +3354,17 @@ impl Parser {
             let ty = TypeSyntax {
                 span: start.join(referent.span),
                 kind: if unique {
-                    TypeSyntaxKind::UniqueReference(Box::new(referent))
+                    TypeSyntaxKind::UniqueReference {
+                        lifetime,
+                        referent: Box::new(referent),
+                    }
                 } else {
-                    TypeSyntaxKind::SharedReference(Box::new(referent))
+                    TypeSyntaxKind::SharedReference {
+                        lifetime,
+                        referent: Box::new(referent),
+                    }
                 },
             };
-            if let Some(lifetime) = lifetime {
-                self.reference_lifetimes.push(ReferenceLifetimeSyntax {
-                    reference: ty.span,
-                    lifetime,
-                });
-            }
             ty
         } else if self.at(&TokenKind::LParen) {
             let start = self.bump().span;
