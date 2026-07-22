@@ -17,7 +17,7 @@ use grandiose::interface::DeclarationKind;
 use grandiose::lossless::{LosslessKind, lex_lossless};
 use serde_json::{Value, json};
 
-use crate::analysis::{Local, SemanticDeclaration, Workspace};
+use crate::analysis::{Analysis, Local, SemanticDeclaration, Workspace};
 use crate::position::LineIndex;
 use crate::rpc::{path_to_uri, read_message, uri_to_path, write_message};
 
@@ -25,6 +25,12 @@ use crate::rpc::{path_to_uri, read_message, uri_to_path, write_message};
 const DEBOUNCE: Duration = Duration::from_millis(120);
 struct Server {
     workspace: Workspace,
+    analysis: std::rc::Rc<Analysis>,
+    analysis_sender: mpsc::Sender<AnalysisCommand>,
+    analysis_receiver: mpsc::Receiver<AnalysisResult>,
+    analysis_generation: Option<u64>,
+    analysis_in_flight: Option<u64>,
+    pending_requests: Vec<Value>,
     standard_library_path: PathBuf,
     output: Stdout,
     published: std::collections::BTreeSet<PathBuf>,
@@ -34,6 +40,19 @@ struct Server {
     document_versions: std::collections::BTreeMap<PathBuf, i64>,
     input_generation: Arc<AtomicU64>,
     applied_generation: u64,
+}
+
+enum AnalysisCommand {
+    SetRoots(Vec<PathBuf>),
+    Open(PathBuf, String),
+    Save(PathBuf, Option<String>),
+    Close(PathBuf),
+    Analyze(u64),
+}
+
+struct AnalysisResult {
+    generation: u64,
+    analysis: Analysis,
 }
 
 /// What the cursor resolves to, in scope order: local, workspace declaration,
@@ -149,8 +168,52 @@ fn main() -> Result<()> {
         }
     });
 
+    let initial_root = std::env::current_dir()?;
+    let (analysis_sender, analysis_commands) = mpsc::channel();
+    let (analysis_results, analysis_receiver) = mpsc::channel();
+    let worker_root = initial_root.clone();
+    std::thread::Builder::new()
+        .name("grandiose-lsp-analysis".into())
+        .stack_size(32 * 1024 * 1024)
+        .spawn(move || {
+            let mut workspace = Workspace::new(worker_root);
+            while let Ok(command) = analysis_commands.recv() {
+                match command {
+                    AnalysisCommand::SetRoots(roots) => workspace.set_roots(roots),
+                    AnalysisCommand::Open(path, text) => {
+                        workspace.open(path, text);
+                    }
+                    AnalysisCommand::Save(path, text) => {
+                        workspace.save(&path, text.as_deref());
+                    }
+                    AnalysisCommand::Close(path) => {
+                        workspace.close(&path);
+                    }
+                    AnalysisCommand::Analyze(generation) => {
+                        let analysis = (*workspace.analyze()).clone();
+                        if analysis_results
+                            .send(AnalysisResult {
+                                generation,
+                                analysis,
+                            })
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                }
+            }
+        })
+        .context("spawn LSP analysis worker")?;
+
     let mut server = Server {
-        workspace: Workspace::new(std::env::current_dir()?),
+        workspace: Workspace::new(initial_root),
+        analysis: std::rc::Rc::new(Analysis::default()),
+        analysis_sender,
+        analysis_receiver,
+        analysis_generation: None,
+        analysis_in_flight: None,
+        pending_requests: Vec::new(),
         standard_library_path: materialize_standard_library()?,
         output: std::io::stdout(),
         published: Default::default(),
@@ -161,12 +224,12 @@ fn main() -> Result<()> {
         applied_generation: 0,
     };
     loop {
+        server.accept_analysis()?;
         let message = match receiver.recv_timeout(DEBOUNCE) {
             Ok(message) => message,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if server.dirty && server.publish(None)? {
-                    server.dirty = false;
-                }
+                server.accept_analysis()?;
+                server.schedule_analysis();
                 continue;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => break,
@@ -188,20 +251,33 @@ impl Server {
         let id = message["id"].clone();
         let params = message["params"].clone();
         if method == "$/cancelRequest" {
+            let cancelled = params["id"].clone();
+            if let Some(key) = request_key(&cancelled) {
+                let before = self.pending_requests.len();
+                self.pending_requests
+                    .retain(|request| request_key(&request["id"]).as_deref() != Some(&key));
+                if self.pending_requests.len() != before {
+                    self.respond(&cancelled, Value::Null)?;
+                }
+            }
             return Ok(true);
         }
         if !id.is_null() && self.is_cancelled(&id) {
             self.respond(&id, Value::Null)?;
             return Ok(true);
         }
-        // Any request observes up-to-date diagnostics/state.
-        if !id.is_null() && self.dirty {
-            if self.publish(Some(&id))? {
-                self.dirty = false;
-            } else if self.is_cancelled(&id) {
-                self.respond(&id, Value::Null)?;
-                return Ok(true);
-            }
+        if !id.is_null()
+            && method != "initialize"
+            && method != "shutdown"
+            && self.dirty
+            && !(self.analysis_generation.is_some()
+                && self
+                    .analysis_in_flight
+                    .is_some_and(|generation| generation != self.applied_generation))
+        {
+            self.pending_requests.push(message);
+            self.schedule_analysis();
+            return Ok(true);
         }
         match method.as_str() {
             "initialize" => {
@@ -220,6 +296,10 @@ impl Server {
                     self.workspace = Workspace::new(root);
                     self.workspace.set_roots(roots);
                 }
+                self.analysis_sender
+                    .send(AnalysisCommand::SetRoots(self.workspace.roots().to_vec()))
+                    .ok();
+                self.dirty = true;
                 self.respond(
                     &id,
                     json!({
@@ -265,8 +345,12 @@ impl Server {
                 if let Some(version) = params["textDocument"]["version"].as_i64() {
                     self.document_versions.insert(path.clone(), version);
                 }
-                self.workspace.open(path, text.to_string());
-                self.publish(None)?;
+                let text = text.to_string();
+                let changed = self.workspace.open(path.clone(), text.clone());
+                self.analysis_sender
+                    .send(AnalysisCommand::Open(path, text))
+                    .ok();
+                self.dirty |= changed || self.analysis.diagnostics.is_empty();
             }
             "textDocument/didChange" => {
                 let path = doc_path(&params)?;
@@ -293,22 +377,34 @@ impl Server {
                 if let Some(version) = version {
                     self.document_versions.insert(path.clone(), version);
                 }
-                self.workspace.open(path, text.to_string());
-                self.dirty = true; // debounced publish
+                let text = text.to_string();
+                let changed = self.workspace.open(path.clone(), text.clone());
+                self.analysis_sender
+                    .send(AnalysisCommand::Open(path, text))
+                    .ok();
+                if changed {
+                    self.dirty = true; // debounced publish
+                }
             }
             "textDocument/didSave" => {
-                self.workspace.invalidate();
-                self.publish(None)?;
+                let path = doc_path(&params)?;
+                let text = params.get("text").and_then(Value::as_str);
+                let changed = self.workspace.save(&path, text);
+                self.analysis_sender
+                    .send(AnalysisCommand::Save(path, text.map(ToOwned::to_owned)))
+                    .ok();
+                self.dirty |= changed;
             }
             "textDocument/didClose" => {
                 let path = doc_path(&params)?;
                 self.document_versions.remove(&path);
-                self.workspace.close(&path);
-                self.publish(None)?;
+                let changed = self.workspace.close(&path);
+                self.analysis_sender.send(AnalysisCommand::Close(path)).ok();
+                self.dirty |= changed;
             }
             "textDocument/documentSymbol" => {
                 let path = doc_path(&params)?;
-                let analysis = self.workspace.analyze();
+                let analysis = std::rc::Rc::clone(&self.analysis);
                 let text = self.workspace.text(&path).unwrap_or_default();
                 let index = LineIndex::new(&text);
                 let symbols: Vec<Value> = analysis
@@ -393,15 +489,15 @@ impl Server {
                         let path = doc_path(&params)?;
                         let text = self.workspace.text(&path).unwrap_or_default();
                         let offset = cursor_offset(&params, &text);
-                        self.workspace
-                            .analyze()
-                            .expression_at(&path, offset)
-                            .map_or(Value::Null, |expression| {
+                        self.analysis.expression_at(&path, offset).map_or(
+                            Value::Null,
+                            |expression| {
                                 json!({"contents": {
                                     "kind": "markdown",
                                     "value": format!("`{}`", expression.inferred_type),
                                 }})
-                            })
+                            },
+                        )
                     }
                 };
                 self.respond(&id, result)?;
@@ -412,12 +508,7 @@ impl Server {
                     .workspace
                     .text(&path)
                     .and_then(|text| {
-                        signature_help(
-                            &self.workspace.analyze(),
-                            &path,
-                            &text,
-                            cursor_offset(&params, &text),
-                        )
+                        signature_help(&self.analysis, &path, &text, cursor_offset(&params, &text))
                     })
                     .unwrap_or(Value::Null);
                 self.respond(&id, result)?;
@@ -425,7 +516,7 @@ impl Server {
             "textDocument/semanticTokens/full" => {
                 let path = doc_path(&params)?;
                 let result = self.workspace.text(&path).map_or(Value::Null, |text| {
-                    semantic_tokens(&self.workspace.analyze(), &path, &text)
+                    semantic_tokens(&self.analysis, &path, &text)
                 });
                 self.respond(&id, result)?;
             }
@@ -450,8 +541,7 @@ impl Server {
                             )
                         });
                     let hints = self
-                        .workspace
-                        .analyze()
+                        .analysis
                         .inlay_locals(&path, start, end)
                         .into_iter()
                         .filter(|local| {
@@ -575,7 +665,7 @@ impl Server {
                 self.respond(&id, result)?;
             }
             "textDocument/completion" => {
-                let analysis = self.workspace.analyze();
+                let analysis = std::rc::Rc::clone(&self.analysis);
                 let mut items: Vec<Value> = Vec::new();
                 let request_path = doc_path(&params).ok();
                 if let Some(path) = request_path.as_ref()
@@ -650,22 +740,51 @@ impl Server {
         request_key(id).is_some_and(|key| self.cancellation.lock().unwrap().remove(&key))
     }
 
-    /// Re-analyze the workspace and publish diagnostics for every file that
-    /// has any (plus empty sets to clear files that no longer do).
-    fn publish(&mut self, cancel_id: Option<&Value>) -> Result<bool> {
-        let generation = self.applied_generation;
-        let analysis = self.workspace.analyze();
-        let cancellation = Arc::clone(&self.cancellation);
-        let cancellation_guard = cancellation.lock().unwrap();
-        if cancel_id
-            .and_then(request_key)
-            .is_some_and(|key| cancellation_guard.contains(&key))
+    fn schedule_analysis(&mut self) {
+        if !self.dirty
+            || self.analysis_in_flight.is_some()
+            || self.input_generation.load(Ordering::Acquire) != self.applied_generation
         {
-            return Ok(false);
+            return;
         }
-        if self.input_generation.load(Ordering::Acquire) != generation {
-            return Ok(false);
+        if self
+            .analysis_sender
+            .send(AnalysisCommand::Analyze(self.applied_generation))
+            .is_ok()
+        {
+            self.analysis_in_flight = Some(self.applied_generation);
         }
+    }
+
+    fn accept_analysis(&mut self) -> Result<()> {
+        while let Ok(result) = self.analysis_receiver.try_recv() {
+            self.analysis_in_flight = None;
+            if result.generation != self.applied_generation
+                || self.input_generation.load(Ordering::Acquire) != result.generation
+            {
+                // The worker may finish an old, expensive request after newer
+                // input arrives. Keep it as an internal compiler-session step,
+                // but never expose its diagnostics or semantic snapshot.
+                self.dirty = true;
+                continue;
+            }
+            self.analysis = std::rc::Rc::new(result.analysis);
+            self.analysis_generation = Some(result.generation);
+            self.publish_analysis()?;
+            self.dirty = false;
+            let pending = std::mem::take(&mut self.pending_requests);
+            for request in pending {
+                if !self.handle(request)? {
+                    break;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Publish one generation already completed by the background worker.
+    fn publish_analysis(&mut self) -> Result<()> {
+        let analysis = std::rc::Rc::clone(&self.analysis);
         let mut current = std::collections::BTreeSet::new();
         for (file, diagnostics) in &analysis.diagnostics {
             current.insert(file.clone());
@@ -711,8 +830,7 @@ impl Server {
             }))?;
         }
         self.published = current;
-        drop(cancellation_guard);
-        Ok(true)
+        Ok(())
     }
 
     /// Resolve the identifier under the cursor: locals of the enclosing
@@ -723,7 +841,7 @@ impl Server {
             return Ok(None);
         };
         let offset = cursor_offset(params, &text);
-        let analysis = self.workspace.analyze();
+        let analysis = std::rc::Rc::clone(&self.analysis);
         if let Some(occurrence) = analysis.local_occurrence_at(&path, offset)
             && let Some(local) = analysis.local(&occurrence.identity)
         {
@@ -761,7 +879,7 @@ impl Server {
         origin: &std::path::Path,
         include_declaration: bool,
     ) -> Vec<Value> {
-        let analysis = self.workspace.analyze();
+        let analysis = std::rc::Rc::clone(&self.analysis);
         let mut locations = Vec::new();
         for occurrence in analysis.references(identity) {
             if occurrence.definition && !include_declaration {
@@ -793,7 +911,7 @@ impl Server {
         path: &std::path::Path,
         include_declaration: bool,
     ) -> Vec<Value> {
-        let analysis = self.workspace.analyze();
+        let analysis = std::rc::Rc::clone(&self.analysis);
         analysis
             .local_references(&target.identity)
             .filter_map(|occurrence| {

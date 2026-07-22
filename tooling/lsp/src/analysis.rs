@@ -9,6 +9,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
@@ -16,9 +17,11 @@ use anyhow::Result;
 use grandiose::compiler_session::IncrementalCompilerSession;
 use grandiose::diagnostic::Severity;
 use grandiose::interface::{
-    DeclarationKind, InterfaceDeclaration, InterfaceOccurrence, InterfaceSelection,
-    InterfaceSnapshot, scan_interface_snapshot,
+    DeclarationKind, InterfaceDeclaration, InterfaceOccurrence, InterfaceSnapshot,
+    scan_interface_bundle,
 };
+#[cfg(test)]
+use grandiose::interface::{InterfaceSelection, scan_interface_snapshot};
 use grandiose::lossless::{LosslessKind, lex_lossless};
 use grandiose::semantic::SemanticSnapshot as CompilerSemanticSnapshot;
 use grandiose::source_bundle::{Segment, SourceBundle};
@@ -29,11 +32,22 @@ pub struct Workspace {
     overlays: HashMap<PathBuf, String>,
     revision: u64,
     cache: RefCell<Option<(u64, Rc<Analysis>)>>,
+    root_cache: RefCell<BTreeMap<PathBuf, CachedRootAnalysis>>,
     /// Successfully checked semantic state, independently transactional per
     /// workspace root.
     last_good: RefCell<BTreeMap<PathBuf, RootSnapshot>>,
     next_body_arena: Cell<u64>,
     compiler_sessions: RefCell<BTreeMap<PathBuf, IncrementalCompilerSession>>,
+    #[cfg(test)]
+    root_analysis_runs: Cell<u64>,
+}
+
+#[derive(Clone)]
+struct CachedRootAnalysis {
+    fingerprint: u64,
+    diagnostics: BTreeMap<PathBuf, Vec<FileDiagnostic>>,
+    initial_error_declarations: Vec<SemanticDeclaration>,
+    initial_error_occurrences: Vec<SemanticOccurrence>,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +59,7 @@ pub struct FileDiagnostic {
     pub code: Option<String>,
 }
 
+#[derive(Clone, Default)]
 pub struct Analysis {
     /// Every analyzed file has an entry (possibly empty) so stale diagnostics
     /// get cleared on publish.
@@ -272,9 +287,12 @@ impl Workspace {
             overlays: HashMap::new(),
             revision: 0,
             cache: RefCell::new(None),
+            root_cache: RefCell::new(BTreeMap::new()),
             last_good: RefCell::new(BTreeMap::new()),
             next_body_arena: Cell::new(0),
             compiler_sessions: RefCell::new(BTreeMap::new()),
+            #[cfg(test)]
+            root_analysis_runs: Cell::new(0),
         }
     }
 
@@ -287,18 +305,45 @@ impl Workspace {
         }
     }
 
-    pub fn open(&mut self, path: PathBuf, text: String) {
+    pub fn roots(&self) -> &[PathBuf] {
+        &self.roots
+    }
+
+    /// Install a full-document overlay, invalidating analysis only when the
+    /// effective source bytes actually change.
+    pub fn open(&mut self, path: PathBuf, text: String) -> bool {
+        let changed = self.text(&path).as_deref() != Some(text.as_str());
         self.overlays.insert(path, text);
-        self.revision += 1;
+        if changed {
+            self.revision += 1;
+        }
+        changed
     }
 
-    pub fn close(&mut self, path: &Path) {
-        self.overlays.remove(path);
-        self.revision += 1;
+    pub fn close(&mut self, path: &Path) -> bool {
+        let previous = self.overlays.remove(path);
+        let changed = previous.as_deref().is_some_and(|previous| {
+            std::fs::read_to_string(path).ok().as_deref() != Some(previous)
+        });
+        if changed {
+            self.revision += 1;
+        }
+        changed
     }
 
-    /// Files on disk can change behind our back; a publish after save should
-    /// recompute even if no overlay changed.
+    /// Apply optional text carried by didSave. An open full-text overlay is
+    /// already authoritative, so a save without text does not invalidate it.
+    pub fn save(&mut self, path: &Path, text: Option<&str>) -> bool {
+        if let Some(text) = text {
+            return self.open(path.to_path_buf(), text.to_string());
+        }
+        if self.overlays.contains_key(path) {
+            return false;
+        }
+        self.revision += 1;
+        true
+    }
+
     pub fn invalidate(&mut self) {
         self.revision += 1;
     }
@@ -407,6 +452,11 @@ impl Workspace {
         {
             return Rc::clone(analysis);
         }
+        if let Some(delay) = std::env::var_os("GRAND_LSP_TEST_ANALYSIS_DELAY_MS")
+            .and_then(|value| value.to_string_lossy().parse::<u64>().ok())
+        {
+            std::thread::sleep(std::time::Duration::from_millis(delay.min(5_000)));
+        }
         let analysis = Rc::new(self.compute());
         *self.cache.borrow_mut() = Some((self.revision, Rc::clone(&analysis)));
         analysis
@@ -414,6 +464,19 @@ impl Workspace {
 
     fn compute(&self) -> Analysis {
         let groups = self.project_groups();
+        let active_roots = groups
+            .iter()
+            .map(|(root, _, _)| root.clone())
+            .collect::<BTreeSet<_>>();
+        self.root_cache
+            .borrow_mut()
+            .retain(|root, _| active_roots.contains(root));
+        self.compiler_sessions
+            .borrow_mut()
+            .retain(|root, _| active_roots.contains(root));
+        self.last_good
+            .borrow_mut()
+            .retain(|root, _| active_roots.contains(root));
         let mut diagnostics: BTreeMap<PathBuf, Vec<FileDiagnostic>> = BTreeMap::new();
         let mut declarations = Vec::new();
         let mut std_declarations = Vec::new();
@@ -448,6 +511,42 @@ impl Workspace {
             };
             let bundle = SourceBundle::distributed(primary, segments.into_iter().skip(1));
             let fallback = group_files.first().cloned().unwrap_or_default();
+            let fingerprint = root_fingerprint(&group_sources, dependency_roots);
+            let cached = self
+                .root_cache
+                .borrow()
+                .get(root)
+                .filter(|cached| cached.fingerprint == fingerprint)
+                .cloned();
+            if let Some(cached) = cached {
+                diagnostics.extend(cached.diagnostics);
+                initial_error_declarations.extend(cached.initial_error_declarations);
+                initial_error_occurrences.extend(cached.initial_error_occurrences);
+                if let Some(snapshot) = self.last_good.borrow().get(root) {
+                    declarations.extend(snapshot.declarations.iter().cloned());
+                    std_declarations.extend(snapshot.std_declarations.iter().cloned());
+                    occurrences.extend(snapshot.occurrences.iter().cloned());
+                    locals.extend(snapshot.locals.iter().cloned());
+                    local_occurrences.extend(snapshot.local_occurrences.iter().cloned());
+                    expression_types.extend(snapshot.expression_types.iter().cloned());
+                    for (file, previous) in &snapshot.sources {
+                        let current = group_sources.get(file).map(String::as_str).unwrap_or("");
+                        semantic_prefixes
+                            .insert(file.clone(), common_prefix_len(previous, current));
+                    }
+                }
+                continue;
+            }
+            #[cfg(test)]
+            self.root_analysis_runs
+                .set(self.root_analysis_runs.get().saturating_add(1));
+            let mut root_diagnostics = group_files
+                .iter()
+                .cloned()
+                .map(|file| (file, Vec::new()))
+                .collect::<BTreeMap<_, _>>();
+            let mut root_initial_declarations = Vec::new();
+            let mut root_initial_occurrences = Vec::new();
             let checked = self
                 .compiler_sessions
                 .borrow_mut()
@@ -475,36 +574,42 @@ impl Workspace {
                     }
                     None => (fallback.clone(), 0, 0),
                 };
-                diagnostics.entry(file).or_default().push(FileDiagnostic {
-                    start_byte: start,
-                    end_byte: end.max(start),
-                    severity: diagnostic.severity,
-                    message: if diagnostic.message.is_empty() {
-                        diagnostic.title.clone()
-                    } else {
-                        format!("{}: {}", diagnostic.title, diagnostic.message)
-                    },
-                    code: diagnostic.code.clone(),
-                });
+                root_diagnostics
+                    .entry(file)
+                    .or_default()
+                    .push(FileDiagnostic {
+                        start_byte: start,
+                        end_byte: end.max(start),
+                        severity: diagnostic.severity,
+                        message: if diagnostic.message.is_empty() {
+                            diagnostic.title.clone()
+                        } else {
+                            format!("{}: {}", diagnostic.title, diagnostic.message)
+                        },
+                        code: diagnostic.code.clone(),
+                    });
             }
 
             // Both compiler checking and interface extraction must succeed
             // before the new side tables become visible. This is the semantic
             // transaction boundary for one workspace root.
-            let mut user_interfaces = scan_interface_snapshot(&bundle, InterfaceSelection::User);
-            let mut standard_interfaces =
-                scan_interface_snapshot(&bundle, InterfaceSelection::StandardLibrary);
-            if let (Ok(user), Ok(standard)) = (&mut user_interfaces, &mut standard_interfaces) {
-                augment_effect_operations(&bundle, user, standard);
-            }
+            let interfaces = scan_interface_bundle(&bundle).map(|mut interfaces| {
+                augment_effect_operations(
+                    &bundle,
+                    &interfaces.program,
+                    &mut interfaces.user,
+                    &mut interfaces.standard_library,
+                );
+                interfaces
+            });
             if let Ok(phases) = &checked
-                && let (Ok(user), Ok(standard)) = (&user_interfaces, &standard_interfaces)
+                && let Ok(interfaces) = &interfaces
             {
                 let compiler = grandiose::semantic::semantic_snapshot(&bundle, phases);
                 let previous = self.last_good.borrow().get(root).cloned();
                 let mut snapshot = semantic_snapshot(
-                    user.clone(),
-                    standard.clone(),
+                    interfaces.user.clone(),
+                    interfaces.standard_library.clone(),
                     compiler,
                     previous.as_ref(),
                     &self.next_body_arena,
@@ -520,13 +625,25 @@ impl Workspace {
             // semantic transaction with this narrower current-source view.
             if checked.is_err()
                 && !self.last_good.borrow().contains_key(root)
-                && let (Ok(user), Ok(standard)) = (user_interfaces, standard_interfaces)
+                && let Ok(interfaces) = interfaces
             {
-                let fallback = interface_snapshot(user, standard);
-                initial_error_declarations.extend(fallback.declarations);
-                initial_error_declarations.extend(fallback.std_declarations);
-                initial_error_occurrences.extend(fallback.occurrences);
+                let fallback = interface_snapshot(interfaces.user, interfaces.standard_library);
+                root_initial_declarations.extend(fallback.declarations);
+                root_initial_declarations.extend(fallback.std_declarations);
+                root_initial_occurrences.extend(fallback.occurrences);
             }
+            diagnostics.extend(root_diagnostics.clone());
+            initial_error_declarations.extend(root_initial_declarations.iter().cloned());
+            initial_error_occurrences.extend(root_initial_occurrences.iter().cloned());
+            self.root_cache.borrow_mut().insert(
+                root.clone(),
+                CachedRootAnalysis {
+                    fingerprint,
+                    diagnostics: root_diagnostics,
+                    initial_error_declarations: root_initial_declarations,
+                    initial_error_occurrences: root_initial_occurrences,
+                },
+            );
             if let Some(snapshot) = self.last_good.borrow().get(root) {
                 declarations.extend(snapshot.declarations.iter().cloned());
                 std_declarations.extend(snapshot.std_declarations.iter().cloned());
@@ -563,6 +680,19 @@ impl Workspace {
     }
 }
 
+fn root_fingerprint(
+    sources: &BTreeMap<PathBuf, String>,
+    dependency_roots: &BTreeMap<PathBuf, String>,
+) -> u64 {
+    let mut fingerprint = std::collections::hash_map::DefaultHasher::new();
+    for (path, source) in sources {
+        path.hash(&mut fingerprint);
+        source.hash(&mut fingerprint);
+        dependency_roots.get(path).hash(&mut fingerprint);
+    }
+    fingerprint.finish()
+}
+
 /// Add effect operations to the editor interface without weakening the
 /// compiler-owned effect identity. The compiler interface intentionally lists
 /// top-level effects only; an operation is namespaced by that exact identity,
@@ -570,12 +700,10 @@ impl Workspace {
 /// can never collide.
 fn augment_effect_operations(
     bundle: &SourceBundle,
+    program: &grandiose::ast::Program,
     user: &mut InterfaceSnapshot,
     standard: &mut InterfaceSnapshot,
 ) {
-    let Ok(program) = grandiose::modules::parse_bundle(bundle) else {
-        return;
-    };
     let effects = user
         .declarations
         .iter()
@@ -1046,6 +1174,24 @@ mod tests {
         assert!(!analysis.same_root(&first_main, &second_main));
         assert!(analysis.diagnostics[&first_main].is_empty());
         assert!(analysis.diagnostics[&second_main].is_empty());
+        assert_eq!(workspace.root_analysis_runs.get(), 2);
+
+        let original = std::fs::read_to_string(&first_main).unwrap();
+        assert!(!workspace.open(first_main.clone(), original));
+        assert!(!workspace.save(&first_main, None));
+        assert_eq!(workspace.root_analysis_runs.get(), 2);
+
+        assert!(workspace.open(
+            first_main.clone(),
+            "shared() -> () { () }\nmain() -> () {\n    shared()\n}\n".into(),
+        ));
+        let analysis = workspace.analyze();
+        assert!(analysis.diagnostics[&first_main].is_empty());
+        assert_eq!(
+            workspace.root_analysis_runs.get(),
+            3,
+            "editing one root must not recompile its sibling"
+        );
     }
 
     #[test]

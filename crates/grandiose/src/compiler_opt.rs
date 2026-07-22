@@ -2409,12 +2409,12 @@ fn reachable_from(function: &Function, start: u32, sought: u32) -> bool {
 /// Requiring all uses to be local to the target, no other source uses, and no
 /// loop backedge avoids relying on dominance or Use facts absent from compact
 /// generation-1 MIR.
-fn simplify_identity_block_parameter(function: &mut Function, target_id: u32) -> bool {
-    let Ok(liveness) = EdgeLiveness::compute(function, u64::MAX) else {
-        return false;
-    };
+fn simplify_identity_block_parameter(
+    function: &mut Function,
+    liveness: &EdgeLiveness,
+    target_id: u32,
+) -> bool {
     debug_assert!(!EdgeLiveness::invalidated_by(analysis::VALUES));
-    let _analysis_work = liveness.work();
     let Some(target_index) = function
         .blocks
         .iter()
@@ -2721,6 +2721,15 @@ fn normalize_cfg(function: &mut Function, budget: u64) -> (PassOutcome, u64) {
     // general dominance/Use proof attached to parameters, so Copy phis,
     // cross-block uses, loop phis, and every special parameter role remain.
     loop {
+        // Parameter simplification does not mutate the body until it commits
+        // one candidate, so every target in this iteration observes the same
+        // valid edge-liveness snapshot. A successful mutation immediately
+        // restarts the loop and recomputes the analysis before another target
+        // is inspected.
+        let Ok(liveness) = EdgeLiveness::compute(&scratch, u64::MAX) else {
+            break;
+        };
+        let _analysis_work = liveness.work();
         let mut targets = scratch
             .blocks
             .iter()
@@ -2733,7 +2742,7 @@ fn normalize_cfg(function: &mut Function, budget: u64) -> (PassOutcome, u64) {
             if work > budget {
                 return (PassOutcome::BudgetExhausted, work);
             }
-            if simplify_identity_block_parameter(&mut scratch, target) {
+            if simplify_identity_block_parameter(&mut scratch, &liveness, target) {
                 changed = true;
                 simplified = true;
                 break;
@@ -6793,6 +6802,7 @@ fn global_simplify_exact_callables(
 
     let mut scratch = function.clone();
     let mut changed = false;
+    let mut flow_changed = false;
     for block in &mut scratch.blocks {
         let Some(mut facts) = incoming.get(&block.id).cloned() else {
             continue;
@@ -6818,6 +6828,7 @@ fn global_simplify_exact_callables(
                     },
                 };
                 changed = true;
+                flow_changed = true;
             }
             match &statement.kind {
                 InstructionKind::Const { dst, value }
@@ -6841,6 +6852,7 @@ fn global_simplify_exact_callables(
                             },
                         };
                         changed = true;
+                        flow_changed = true;
                     }
                 }
                 _ => {}
@@ -6874,6 +6886,7 @@ fn global_simplify_exact_callables(
                         .clone();
                     block.terminator = Terminator::Goto(selected);
                     changed = true;
+                    flow_changed = true;
                 }
             }
             _ => {}
@@ -6881,6 +6894,14 @@ fn global_simplify_exact_callables(
     }
     if changed {
         scratch.features = infer_feature_bits(&scratch);
+        scratch.invalid_analyses |= if flow_changed {
+            analysis::ALL
+        } else {
+            // Updating an exact target annotation changes neither the CFG nor
+            // operands/ownership. Keep imported PlaceFlow trusted while
+            // invalidating only consumers of call semantics and cost.
+            analysis::EFFECTS | analysis::VALUES | analysis::COST
+        };
         *function = scratch;
         (PassOutcome::Changed, work)
     } else {
@@ -10668,6 +10689,7 @@ fn run_transactional_pass(
         let limit = (100_000_u64)
             .max(32 * body_size(function))
             .min(*global_remaining);
+        let invalidated_before = function.invalid_analyses;
         let (body_outcome, work) = match pass {
             PassId::NormalizeCfg => normalize_cfg(function, limit),
             PassId::SparseSimplify => sparse_simplify(function, types, limit),
@@ -10682,7 +10704,11 @@ fn run_transactional_pass(
             _ => (PassOutcome::SkippedUnavailable, 0),
         };
         if body_outcome == PassOutcome::Changed {
-            function.invalid_analyses |= analysis::ALL;
+            // Passes may publish a narrower, mutation-specific mask. Fall
+            // back to the conservative contract for older transformations.
+            if function.invalid_analyses == invalidated_before {
+                function.invalid_analyses |= pass_invalidation(pass);
+            }
         }
         total_work = total_work.saturating_add(work);
         *global_remaining = global_remaining.saturating_sub(work.min(*global_remaining));
@@ -10703,6 +10729,18 @@ fn run_transactional_pass(
         pass,
         outcome,
         work_units: total_work,
+    }
+}
+
+fn pass_invalidation(pass: PassId) -> u8 {
+    match pass {
+        // These preserve the block graph but rewrite register definitions and
+        // ownership events, so CFG analyses remain valid.
+        PassId::ScalarizeLocals | PassId::EraseLoanProofsAndScalarizedReferences => {
+            analysis::USES | analysis::FLOW | analysis::EFFECTS | analysis::VALUES | analysis::COST
+        }
+        // Every other implemented local pass may add/remove an edge or block.
+        _ => analysis::ALL,
     }
 }
 
@@ -11937,7 +11975,16 @@ fn validate_bytecode_input_checkpoint(
 /// facts become trusted again.
 fn refresh_invalidated_flow(program: &mut Program, types: &[Type]) -> Result<(), ValidationError> {
     for function in &mut program.functions {
-        if function.invalid_analyses == 0 {
+        let invalidated = function.invalid_analyses;
+        if invalidated == 0 {
+            continue;
+        }
+        if invalidated & (analysis::CFG | analysis::USES | analysis::FLOW) == 0 {
+            // EFFECTS, VALUES, and COST are ephemeral/on-demand analyses; no
+            // stored ownership fact depends on them. Clearing those bits at a
+            // checkpoint avoids a complete PlaceFlow rebuild for metadata-only
+            // mutations such as attaching an exact indirect-call target.
+            function.invalid_analyses = 0;
             continue;
         }
         rebuild_site_facts(function);
@@ -13087,7 +13134,8 @@ mod tests {
         body.params = vec![I64, U32];
         body.result = I64;
 
-        assert!(simplify_identity_block_parameter(&mut body, 3));
+        let liveness = EdgeLiveness::compute(&body, u64::MAX).unwrap();
+        assert!(simplify_identity_block_parameter(&mut body, &liveness, 3));
         let target = body.blocks.iter().find(|block| block.id == 3).unwrap();
         assert!(target.params.is_empty());
         assert!(matches!(
@@ -13174,9 +13222,72 @@ mod tests {
             true,
         );
         for mut body in [copy, distinct, protected, loop_phi] {
-            assert!(!simplify_identity_block_parameter(&mut body, 1));
+            let liveness = EdgeLiveness::compute(&body, u64::MAX).unwrap();
+            assert!(!simplify_identity_block_parameter(&mut body, &liveness, 1));
             assert_eq!(body.blocks[1].params.len(), 1);
         }
+    }
+
+    #[test]
+    fn normalize_cfg_recomputes_liveness_after_each_parameter_mutation() {
+        let mut target = block(
+            1,
+            Terminator::Return {
+                value: Some(move_operand(5)),
+            },
+        );
+        target.params = vec![
+            BlockParam {
+                register: 3,
+                ty: I64,
+                role: BlockParamRole::Ordinary,
+            },
+            BlockParam {
+                register: 4,
+                ty: I64,
+                role: BlockParamRole::Ordinary,
+            },
+        ];
+        target
+            .statements
+            .push(instruction(InstructionKind::Primitive {
+                dst: 5,
+                primitive: Primitive::IntCheckedAdd,
+                args: vec![move_operand(3), move_operand(4)],
+            }));
+        let entry = block(
+            0,
+            Terminator::Switch {
+                discr: operand(2),
+                cases: vec![(
+                    Constant::U32(0),
+                    Edge {
+                        target: 1,
+                        args: vec![move_operand(1), move_operand(6)],
+                    },
+                )],
+                otherwise: Edge {
+                    target: 1,
+                    args: vec![move_operand(1), move_operand(6)],
+                },
+            },
+        );
+        let mut body = function(
+            vec![entry, target],
+            vec![UNIT, I64, U32, I64, I64, I64, I64],
+        );
+        body.params = vec![I64, U32, I64, I64, I64, I64];
+        body.result = I64;
+
+        let (outcome, _) = normalize_cfg(&mut body, u64::MAX);
+
+        assert_eq!(outcome, PassOutcome::Changed);
+        let target = body.blocks.iter().find(|block| block.id == 1).unwrap();
+        assert!(target.params.is_empty());
+        let InstructionKind::Primitive { args, .. } = &target.statements[0].kind else {
+            unreachable!()
+        };
+        assert_eq!(args, &vec![move_operand(1), move_operand(6)]);
     }
 
     #[test]
@@ -17330,6 +17441,24 @@ mod tests {
                 pass.pass == PassId::GlobalSimplify && pass.outcome == PassOutcome::Changed
             }));
         }
+    }
+
+    #[test]
+    fn exact_callable_annotation_skips_place_flow_rebuild() {
+        let (mut candidate, types, _) = exact_callable_fixture(true);
+        let flow_before = candidate.functions[0].flow.clone();
+
+        let (outcome, _) =
+            global_simplify_exact_callables(&mut candidate.functions[0], &types, u64::MAX);
+
+        assert_eq!(outcome, PassOutcome::Changed);
+        assert_eq!(
+            candidate.functions[0].invalid_analyses,
+            analysis::EFFECTS | analysis::VALUES | analysis::COST
+        );
+        refresh_invalidated_flow(&mut candidate, &types).unwrap();
+        assert_eq!(candidate.functions[0].invalid_analyses, 0);
+        assert_eq!(candidate.functions[0].flow, flow_before);
     }
 
     #[test]

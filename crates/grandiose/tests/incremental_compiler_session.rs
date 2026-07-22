@@ -31,6 +31,8 @@ fn incremental_session_reuses_only_valid_unchanged_body_inference() {
     let first = session.stats();
     assert!(first.elaborated_bodies > 2, "std + user bodies: {first:?}");
     assert_eq!(first.reused_bodies, 0);
+    assert!(first.lowered_mir_bodies > 2, "{first:?}");
+    assert_eq!(first.reused_mir_bodies, 0);
 
     session
         .compile_bundle(&bundle("1", "i64"), options())
@@ -38,11 +40,13 @@ fn incremental_session_reuses_only_valid_unchanged_body_inference() {
     let unchanged = session.stats();
     assert_eq!(unchanged.elaborated_bodies, 0, "{unchanged:?}");
     assert_eq!(unchanged.reused_bodies, first.elaborated_bodies);
+    assert_eq!(unchanged.reused_phase_artifacts, 1, "{unchanged:?}");
 
     session
         .compile_bundle(&bundle("2", "i64"), options())
         .unwrap();
     let one_body_changed = session.stats();
+    assert_eq!(one_body_changed.reused_phase_artifacts, 0);
     assert_eq!(
         one_body_changed.elaborated_bodies, 1,
         "{one_body_changed:?}"
@@ -50,6 +54,15 @@ fn incremental_session_reuses_only_valid_unchanged_body_inference() {
     assert_eq!(
         one_body_changed.reused_bodies + 1,
         first.elaborated_bodies,
+        "{one_body_changed:?}"
+    );
+    assert_eq!(
+        one_body_changed.lowered_mir_bodies, 1,
+        "{one_body_changed:?}"
+    );
+    assert_eq!(
+        one_body_changed.reused_mir_bodies + 1,
+        first.lowered_mir_bodies,
         "{one_body_changed:?}"
     );
 
@@ -77,6 +90,7 @@ fn failed_revision_rolls_back_incremental_inference_transaction() {
         .compile_bundle(&bundle("1", "i64"), options())
         .unwrap();
     let total = session.stats().elaborated_bodies;
+    let total_mir = session.stats().lowered_mir_bodies;
     session
         .compile_bundle(&bundle("1", "i64"), options())
         .unwrap();
@@ -88,10 +102,60 @@ fn failed_revision_rolls_back_incremental_inference_transaction() {
     );
     assert!(session.compile_bundle(&broken, options()).is_err());
     assert_eq!(session.stats().reused_bodies, 0);
+    assert_eq!(session.stats().reused_mir_bodies, 0);
 
+    // Changing only the optimizer level bypasses the exact phase cache. The
+    // failed request must still leave all unoptimized per-body MIR reusable.
     session
-        .compile_bundle(&bundle("1", "i64"), options())
+        .compile_bundle(
+            &bundle("1", "i64"),
+            CompileOptions {
+                optimization_level: OptimizationLevel::O1,
+            },
+        )
         .unwrap();
     assert_eq!(session.stats().elaborated_bodies, 0);
     assert_eq!(session.stats().reused_bodies, total);
+    assert_eq!(session.stats().reused_phase_artifacts, 0);
+    assert_eq!(session.stats().reused_mir_bodies, total_mir);
+}
+
+#[test]
+fn verified_phase_cache_is_exact_and_compile_option_sensitive() {
+    let source = bundle("1", "i64");
+    let mut session = IncrementalCompilerSession::new();
+    let initial = session.compile_bundle(&source, options()).unwrap();
+
+    let cached = session.compile_bundle(&source, options()).unwrap();
+    assert_eq!(session.stats().reused_phase_artifacts, 1);
+    assert_eq!(cached.core_fingerprint(), initial.core_fingerprint());
+    assert_eq!(cached.mir_fingerprint(), initial.mir_fingerprint());
+    assert_eq!(cached.artifact, initial.artifact);
+
+    let different_options = CompileOptions {
+        optimization_level: OptimizationLevel::O1,
+    };
+    session.compile_bundle(&source, different_options).unwrap();
+    assert_eq!(session.stats().reused_phase_artifacts, 0);
+    session.compile_bundle(&source, options()).unwrap();
+    assert_eq!(session.stats().reused_phase_artifacts, 0);
+
+    let same_text_in_a_different_bundle = SourceBundle::raw_for_conformance(
+        Segment::new(
+            "<grandiose:std>",
+            grandiose::source_bundle::DISTRIBUTED_STANDARD_LIBRARY_SOURCE,
+        ),
+        Segment::new(
+            "main.glorious",
+            "helper() -> i64 { 1 }\nuntouched() -> i64 { 7 }\nmain() -> () { () }\n",
+        ),
+        [],
+    );
+    assert_eq!(same_text_in_a_different_bundle.source(), source.source());
+    assert!(
+        session
+            .compile_bundle(&same_text_in_a_different_bundle, options())
+            .is_err()
+    );
+    assert_eq!(session.stats().reused_phase_artifacts, 0);
 }

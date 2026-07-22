@@ -3214,7 +3214,22 @@ impl<'a> Walker<'a> {
             }
         }
 
-        if let (Some(expected), Some(Stmt::Expr(result))) = (block_expected, remaining.last()) {
+        let shadows_binding = |statement: &Stmt| match statement {
+            Stmt::Let { name, .. } => name == binding,
+            Stmt::Deconstruct { fields, .. } => fields
+                .iter()
+                .any(|field| field.binding.as_deref() == Some(binding)),
+            Stmt::Assign { .. } | Stmt::Expr(_) => false,
+        };
+        let visible_end = remaining
+            .iter()
+            .position(shadows_binding)
+            .map_or(remaining.len(), |index| index + 1);
+        let visible_remaining = &remaining[..visible_end];
+
+        if let (Some(expected), Some(Stmt::Expr(result))) =
+            (block_expected, visible_remaining.last())
+        {
             if moved_binding(result) == Some(binding) {
                 return Some(expected.clone());
             }
@@ -3251,15 +3266,19 @@ impl<'a> Walker<'a> {
         // constrained by a later borrow (`consume(&mut value)`). Discover that
         // exact ground parameter context before walking the initializer so its
         // specialization is retained rather than relying on declaration order.
-        let mut pending = remaining
-            .iter()
-            .flat_map(|statement| match statement {
+        let mut pending = Vec::new();
+        for statement in visible_remaining {
+            let value = match statement {
+                // A shadowing initializer still observes the old binding, but
+                // statements after it observe the new one and cannot constrain
+                // this initializer.
                 Stmt::Let { value, .. }
                 | Stmt::Deconstruct { value, .. }
                 | Stmt::Expr(value)
-                | Stmt::Assign { value, .. } => vec![value],
-            })
-            .collect::<Vec<_>>();
+                | Stmt::Assign { value, .. } => value,
+            };
+            pending.push(value);
+        }
         while let Some(expression) = pending.pop() {
             match &expression.kind {
                 ExprKind::Call(callee, arguments) => {
@@ -9671,6 +9690,25 @@ mod tests {
             panic!()
         };
         assert!(!recursive_closure_binding(value, "recurse"));
+    }
+
+    #[test]
+    fn later_shadow_does_not_constrain_an_earlier_initializer() {
+        let discovery = parse_discovery(
+            "make() -> i64 { 0 }
+             identity<T>(value: T) -> T { value }
+             consume(value: i64) -> Text { \"done\" }
+             probe() -> Text {
+                 let value = make();
+                 let kept = identity(value);
+                 let value = consume(move kept);
+                 move value
+             }",
+        );
+        assert!(discovery.errors.is_empty(), "{:#?}", discovery.errors);
+        assert!(discovery.graph.direct_calls.values().any(|target| {
+            matches!(&target.template, DeclarationKey::Function(name) if name == "identity")
+        }));
     }
 
     #[test]

@@ -3,6 +3,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 use tempfile::TempDir;
@@ -16,14 +17,21 @@ struct Session {
 
 impl Session {
     fn start(cwd: &Path) -> Session {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_grand-lsp"))
+        Self::start_with_delay(cwd, None)
+    }
+
+    fn start_with_delay(cwd: &Path, delay_ms: Option<u64>) -> Session {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_grand-lsp"));
+        command
             .current_dir(cwd)
             .env("GRAND_CACHE_DIR", cwd.join(".grand-cache"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .unwrap();
+            .stderr(Stdio::null());
+        if let Some(delay_ms) = delay_ms {
+            command.env("GRAND_LSP_TEST_ANALYSIS_DELAY_MS", delay_ms.to_string());
+        }
+        let mut child = command.spawn().unwrap();
         let stdin = child.stdin.take().unwrap();
         let stdout = BufReader::new(child.stdout.take().unwrap());
         Session {
@@ -97,6 +105,83 @@ impl Session {
         }
         panic!("no publishDiagnostics for {suffix}");
     }
+}
+
+#[test]
+fn superseded_background_analysis_neither_blocks_requests_nor_publishes() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join("app");
+    let main = project(&root, "app", "main() -> () { () }");
+    let mut session = Session::start_with_delay(&root, Some(700));
+    session.request("initialize", json!({"rootUri": uri(&root)}));
+    session.notify("initialized", json!({}));
+
+    session.notify(
+        "textDocument/didOpen",
+        json!({"textDocument": {
+            "uri": uri(&main), "languageId": "grandiose", "version": 1,
+            "text": "main() -> () { () }"
+        }}),
+    );
+    assert!(session.diagnostics_for("main.glorious").is_empty());
+    let started = Instant::now();
+    session.request(
+        "textDocument/hover",
+        json!({"textDocument": {"uri": uri(&main)},
+               "position": {"line": 0, "character": 0}}),
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(400),
+        "request after matching diagnostics triggered a second analysis"
+    );
+    let started = Instant::now();
+    session.request(
+        "textDocument/inlayHint",
+        json!({"textDocument": {"uri": uri(&main)},
+        "range": {
+            "start": {"line": 0, "character": 0},
+            "end": {"line": 0, "character": 24}
+        }}),
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(400),
+        "inlay hints after matching diagnostics triggered a second analysis"
+    );
+    session.notify(
+        "textDocument/didChange",
+        json!({"textDocument": {"uri": uri(&main), "version": 2},
+               "contentChanges": [{"text": "main( -> () {"}]}),
+    );
+    // Let the debounce expire so the broken generation is genuinely running, then
+    // supersede it while the artificial slow analysis is in flight.
+    std::thread::sleep(Duration::from_millis(250));
+    session.notify(
+        "textDocument/didChange",
+        json!({"textDocument": {"uri": uri(&main), "version": 3},
+               "contentChanges": [{"text": "main() -> () { () }"}]}),
+    );
+
+    let started = Instant::now();
+    let (_hover, notifications) = session.request(
+        "textDocument/hover",
+        json!({"textDocument": {"uri": uri(&main)},
+               "position": {"line": 0, "character": 1}}),
+    );
+    assert!(
+        started.elapsed() < Duration::from_millis(400),
+        "semantic request waited for stale background compilation"
+    );
+    assert!(
+        notifications
+            .iter()
+            .all(|message| { message["method"] != "textDocument/publishDiagnostics" })
+    );
+
+    let diagnostics = session.diagnostics_for("main.glorious");
+    assert!(
+        diagnostics.is_empty(),
+        "superseded broken generation was published: {diagnostics:?}"
+    );
 }
 
 impl Drop for Session {

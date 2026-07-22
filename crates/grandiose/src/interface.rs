@@ -75,6 +75,17 @@ pub struct InterfaceSnapshot {
     pub occurrences: Vec<InterfaceOccurrence>,
 }
 
+/// Both editor interface partitions plus the parsed program that produced
+/// them. Keeping these together lets tooling pay for parsing and module/name
+/// resolution once, and reuse the same syntax for auxiliary indexes such as
+/// effect operations.
+#[derive(Clone, Debug)]
+pub struct InterfaceBundleSnapshot {
+    pub user: InterfaceSnapshot,
+    pub standard_library: InterfaceSnapshot,
+    pub program: Program,
+}
+
 struct Collector<'a> {
     bundle: &'a SourceBundle,
     selection: InterfaceSelection,
@@ -369,20 +380,57 @@ pub fn scan_interface_snapshot(
 ) -> Result<InterfaceSnapshot, Vec<Diagnostic>> {
     let program = crate::modules::parse_bundle(bundle)?;
     let resolved = crate::modules::resolve_program_for_interfaces(bundle, program.clone())?;
+    Ok(interface_snapshot_from_resolved(
+        bundle,
+        &program,
+        &resolved.resolution,
+        selection,
+    ))
+}
+
+/// Scan user and distributed-standard-library interfaces with one parse and
+/// one resolver invocation.
+pub fn scan_interface_bundle(
+    bundle: &SourceBundle,
+) -> Result<InterfaceBundleSnapshot, Vec<Diagnostic>> {
+    let program = crate::modules::parse_bundle(bundle)?;
+    let resolved = crate::modules::resolve_program_for_interfaces(bundle, program.clone())?;
+    Ok(InterfaceBundleSnapshot {
+        user: interface_snapshot_from_resolved(
+            bundle,
+            &program,
+            &resolved.resolution,
+            InterfaceSelection::User,
+        ),
+        standard_library: interface_snapshot_from_resolved(
+            bundle,
+            &program,
+            &resolved.resolution,
+            InterfaceSelection::StandardLibrary,
+        ),
+        program,
+    })
+}
+
+fn interface_snapshot_from_resolved(
+    bundle: &SourceBundle,
+    program: &Program,
+    resolution: &crate::modules::ModuleResolution,
+    selection: InterfaceSelection,
+) -> InterfaceSnapshot {
     let declarations = Collector {
         bundle,
         selection,
-        resolution: Some(&resolved.resolution),
+        resolution: Some(resolution),
         declarations: Vec::new(),
     }
-    .collect(&program);
-    let occurrences = resolved
-        .resolution
+    .collect(program);
+    let occurrences = resolution
         .resolved_paths
         .iter()
         .filter_map(|(&(start, end), definition)| {
             let (definition_selection, identity) =
-                definition_identity(bundle, &resolved.resolution, definition)?;
+                definition_identity(bundle, resolution, definition)?;
             if definition_selection != selection {
                 return None;
             }
@@ -395,10 +443,10 @@ pub fn scan_interface_snapshot(
             })
         })
         .collect();
-    Ok(InterfaceSnapshot {
+    InterfaceSnapshot {
         declarations,
         occurrences,
-    })
+    }
 }
 
 pub fn scan_interfaces(
@@ -475,6 +523,33 @@ mod tests {
             declarations
                 .iter()
                 .all(|declaration| declaration.identity.starts_with("std:"))
+        );
+    }
+
+    #[test]
+    fn combined_scan_returns_both_partitions_and_parsed_effects() {
+        let bundle = SourceBundle::distributed(
+            Segment::new(
+                "primary.glorious",
+                "effect Choice { choose(value: i64) -> i64 }\nmain() -> () { () }",
+            ),
+            [],
+        );
+        let snapshots = scan_interface_bundle(&bundle).unwrap();
+        assert!(
+            snapshots
+                .user
+                .declarations
+                .iter()
+                .any(|declaration| declaration.name == "Choice")
+        );
+        assert!(!snapshots.standard_library.declarations.is_empty());
+        assert!(
+            snapshots
+                .program
+                .effects
+                .iter()
+                .any(|effect| effect.name == "Choice")
         );
     }
 

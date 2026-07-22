@@ -3653,6 +3653,7 @@ fn compile_stream_phases_with_manifest_and_domains(
             trusted_standard_library_domain,
             options,
             Some((&mut session.type_cache, fingerprints)),
+            Some(&mut session.mir_cache),
         ),
         _ => compile_program_with_phases(
             &program,
@@ -3660,6 +3661,7 @@ fn compile_stream_phases_with_manifest_and_domains(
             &domains,
             trusted_standard_library_domain,
             options,
+            None,
             None,
         ),
     };
@@ -4402,6 +4404,7 @@ fn compile_program_with_phases(
         &mut typeck::IncrementalTypeCache,
         &crate::compiler_session::IncrementalFingerprints,
     )>,
+    mut incremental_mir: Option<&mut crate::compiler_session::IncrementalMirCache>,
 ) -> Result<CompiledProgramOutput, Vec<Diagnostic>> {
     // Source lifetime binders are statically validated before this phase and
     // deliberately erased from runtime generic identity. A callable whose only
@@ -7337,10 +7340,25 @@ fn compile_program_with_phases(
         .iter()
         .map(|glue| glue.ty)
         .collect::<BTreeSet<_>>();
+    let custom_drop_type_ids = custom_drop_types.iter().copied().collect::<Vec<_>>();
+    if let Some(cache) = incremental_mir.as_mut() {
+        cache.prepare(&artifact.types, &custom_drop_type_ids);
+    }
     let mut mir_functions = core_program
         .functions
         .iter()
-        .map(|function| MirLowerer::function(function, &artifact.types, &custom_drop_types))
+        .map(|function| {
+            if let Some(cache) = incremental_mir.as_mut()
+                && let Some(lowered) = cache.reuse(function)
+            {
+                return lowered;
+            }
+            let lowered = MirLowerer::function(function, &artifact.types, &custom_drop_types);
+            if let Some(cache) = incremental_mir.as_mut() {
+                cache.insert(function.clone(), lowered.clone());
+            }
+            lowered
+        })
         .collect::<Vec<_>>();
     mir_functions.extend(typed_pattern_functions.iter().map(|function| {
         MirLowerer::pattern_function(function, &artifact.types, &custom_drop_types)
