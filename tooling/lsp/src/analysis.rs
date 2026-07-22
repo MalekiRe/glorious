@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use anyhow::Result;
-use grandiose::compiler_session::IncrementalCompilerSession;
+use grandiose::compiler_session::CompilationDriver;
 use grandiose::diagnostic::Severity;
 use grandiose::interface::{
     DeclarationKind, InterfaceDeclaration, InterfaceOccurrence, InterfaceSnapshot,
@@ -37,7 +37,7 @@ pub struct Workspace {
     /// workspace root.
     last_good: RefCell<BTreeMap<PathBuf, RootSnapshot>>,
     next_body_arena: Cell<u64>,
-    compiler_sessions: RefCell<BTreeMap<PathBuf, IncrementalCompilerSession>>,
+    compiler_sessions: RefCell<BTreeMap<PathBuf, CompilationDriver>>,
     #[cfg(test)]
     root_analysis_runs: Cell<u64>,
 }
@@ -552,7 +552,7 @@ impl Workspace {
                 .borrow_mut()
                 .entry(root.clone())
                 .or_default()
-                .compile_bundle(
+                .compile_bundle_with_interfaces(
                     &bundle,
                     CompileOptions {
                         optimization_level: OptimizationLevel::O2,
@@ -593,7 +593,11 @@ impl Workspace {
             // Both compiler checking and interface extraction must succeed
             // before the new side tables become visible. This is the semantic
             // transaction boundary for one workspace root.
-            let interfaces = scan_interface_bundle(&bundle).map(|mut interfaces| {
+            let interfaces = match &checked {
+                Ok(snapshot) => Ok(snapshot.interfaces.clone()),
+                Err(_) => scan_interface_bundle(&bundle),
+            }
+            .map(|mut interfaces| {
                 augment_effect_operations(
                     &bundle,
                     &interfaces.program,
@@ -602,10 +606,10 @@ impl Workspace {
                 );
                 interfaces
             });
-            if let Ok(phases) = &checked
+            if let Ok(compilation) = &checked
                 && let Ok(interfaces) = &interfaces
             {
-                let compiler = grandiose::semantic::semantic_snapshot(&bundle, phases);
+                let compiler = grandiose::semantic::semantic_snapshot(&bundle, &compilation.phases);
                 let previous = self.last_good.borrow().get(root).cloned();
                 let mut snapshot = semantic_snapshot(
                     interfaces.user.clone(),

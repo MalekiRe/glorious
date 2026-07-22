@@ -1,4 +1,4 @@
-use grandiose::compiler_session::IncrementalCompilerSession;
+use grandiose::compiler_session::{CompilationDriver, IncrementalCompilerSession};
 use grandiose::source_bundle::{Segment, SourceBundle};
 use grandiose::{CompileOptions, OptimizationLevel};
 
@@ -158,4 +158,43 @@ fn verified_phase_cache_is_exact_and_compile_option_sensitive() {
             .is_err()
     );
     assert_eq!(session.stats().reused_phase_artifacts, 0);
+}
+
+#[test]
+fn compilation_driver_shares_frontend_work_with_interface_snapshots() {
+    let first = bundle("1", "i64");
+    let changed = bundle("2", "i64");
+    let mut driver = CompilationDriver::new();
+
+    let initial = driver
+        .compile_bundle_with_interfaces(&first, options())
+        .unwrap();
+    let separately_scanned = grandiose::interface::scan_interface_bundle(&first).unwrap();
+    assert_eq!(initial.interfaces.user, separately_scanned.user);
+    assert_eq!(
+        initial.interfaces.standard_library,
+        separately_scanned.standard_library
+    );
+    assert!(
+        initial
+            .interfaces
+            .user
+            .declarations
+            .iter()
+            .any(|declaration| declaration.name == "helper")
+    );
+    assert_eq!(driver.stats().frontend.lexed_segments, 2);
+
+    let cached = driver
+        .compile_bundle_with_interfaces(&first, options())
+        .unwrap();
+    assert_eq!(driver.stats().reused_phase_artifacts, 1);
+    assert_eq!(cached.interfaces.user, initial.interfaces.user);
+
+    let edited = driver
+        .compile_bundle_with_interfaces(&changed, options())
+        .unwrap();
+    assert_eq!(driver.stats().frontend.lexed_segments, 1);
+    assert_eq!(driver.stats().frontend.reused_segments, 1);
+    assert_eq!(edited.interfaces.user, initial.interfaces.user);
 }

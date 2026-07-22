@@ -395,21 +395,36 @@ pub fn scan_interface_bundle(
 ) -> Result<InterfaceBundleSnapshot, Vec<Diagnostic>> {
     let program = crate::modules::parse_bundle(bundle)?;
     let resolved = crate::modules::resolve_program_for_interfaces(bundle, program.clone())?;
-    Ok(InterfaceBundleSnapshot {
+    Ok(interface_bundle_from_resolved(
+        bundle,
+        program,
+        &resolved.resolution,
+    ))
+}
+
+/// Build both interface partitions from syntax and semantic tables already
+/// produced by a compiler driver. This is the shared boundary that lets
+/// editor checks avoid parsing and resolving the same bundle a second time.
+pub(crate) fn interface_bundle_from_resolved(
+    bundle: &SourceBundle,
+    program: Program,
+    resolution: &crate::modules::ModuleResolution,
+) -> InterfaceBundleSnapshot {
+    InterfaceBundleSnapshot {
         user: interface_snapshot_from_resolved(
             bundle,
             &program,
-            &resolved.resolution,
+            resolution,
             InterfaceSelection::User,
         ),
         standard_library: interface_snapshot_from_resolved(
             bundle,
             &program,
-            &resolved.resolution,
+            resolution,
             InterfaceSelection::StandardLibrary,
         ),
         program,
-    })
+    }
 }
 
 fn interface_snapshot_from_resolved(

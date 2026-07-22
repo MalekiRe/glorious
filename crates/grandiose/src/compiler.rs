@@ -3593,8 +3593,10 @@ pub fn compile_bundle_to_phases_with_manifest_and_options(
         &domains,
         bundle.trusted_standard_segment_id(),
         options,
+        false,
         None,
     )
+    .map(|(phases, _)| phases)
 }
 
 pub(crate) fn compile_bundle_to_phases_incremental(
@@ -3614,8 +3616,38 @@ pub(crate) fn compile_bundle_to_phases_incremental(
         &domains,
         bundle.trusted_standard_segment_id(),
         options,
+        false,
         Some(session),
     )
+    .map(|(phases, _)| phases)
+}
+
+pub(crate) fn compile_bundle_to_phases_incremental_with_interfaces(
+    bundle: &SourceBundle,
+    options: CompileOptions,
+    session: &mut crate::compiler_session::IncrementalCompilerSession,
+) -> Result<(CompiledPhases, crate::interface::InterfaceBundleSnapshot), Vec<Diagnostic>> {
+    let manifest = if bundle.is_canonical_distribution() {
+        TrustedTraitManifest::trusted_distribution()
+    } else {
+        TrustedTraitManifest::trusted_default()
+    };
+    let domains = PrivacyDomains::bundle(bundle);
+    compile_stream_phases_with_manifest_and_domains(
+        bundle,
+        &manifest,
+        &domains,
+        bundle.trusted_standard_segment_id(),
+        options,
+        true,
+        Some(session),
+    )
+    .map(|(phases, interfaces)| {
+        (
+            phases,
+            interfaces.expect("interface-producing compilation returns a snapshot"),
+        )
+    })
 }
 
 fn compile_stream_phases_with_manifest_and_domains(
@@ -3624,16 +3656,37 @@ fn compile_stream_phases_with_manifest_and_domains(
     domains: &PrivacyDomains,
     trusted_standard_library_domain: Option<SegmentId>,
     options: CompileOptions,
+    include_interfaces: bool,
     mut incremental: Option<&mut crate::compiler_session::IncrementalCompilerSession>,
-) -> Result<CompiledPhases, Vec<Diagnostic>> {
-    let program = crate::modules::parse_bundle(bundle).map_err(|diagnostics| {
+) -> Result<
+    (
+        CompiledPhases,
+        Option<crate::interface::InterfaceBundleSnapshot>,
+    ),
+    Vec<Diagnostic>,
+> {
+    let parsed = if let Some(session) = incremental.as_mut() {
+        session.frontend_cache.begin_revision();
+        session.frontend_cache.parse_bundle(bundle)
+    } else {
+        crate::modules::parse_bundle(bundle)
+    };
+    let program = parsed.map_err(|diagnostics| {
         diagnostics
             .into_iter()
             .map(|error| error.with_code(PARSE_CODE))
             .collect::<Vec<_>>()
     })?;
+    let interface_program = include_interfaces.then(|| program.clone());
     let has_modules = !program.modules.is_empty();
-    let resolved = crate::modules::resolve_program(bundle, program)?;
+    let resolved = if include_interfaces {
+        crate::modules::resolve_program_for_interfaces(bundle, program)?
+    } else {
+        crate::modules::resolve_program(bundle, program)?
+    };
+    let interfaces = interface_program.map(|program| {
+        crate::interface::interface_bundle_from_resolved(bundle, program, &resolved.resolution)
+    });
     let domains = if has_modules {
         domains
             .clone()
@@ -3678,15 +3731,18 @@ fn compile_stream_phases_with_manifest_and_domains(
         provisional_fingerprint,
         diagnostics,
     ) = compiled?;
-    Ok(CompiledPhases {
-        artifact,
-        core,
-        mir,
-        optimization_report,
-        diagnostics,
-        provisional_text,
-        provisional_fingerprint,
-    })
+    Ok((
+        CompiledPhases {
+            artifact,
+            core,
+            mir,
+            optimization_report,
+            diagnostics,
+            provisional_text,
+            provisional_fingerprint,
+        },
+        interfaces,
+    ))
 }
 
 fn bind_runtime_manifest(

@@ -1,4 +1,4 @@
-//! Persistent compiler session state for incremental editor checks.
+//! Persistent compilation driver state shared by editors, servers, and tools.
 //!
 //! Module/import/name context is rebuilt on body-changing requests. Provisional
 //! per-body inference evidence is retained while the compiler's context
@@ -26,10 +26,12 @@ pub struct IncrementalCompilationStats {
     pub reused_phase_artifacts: usize,
     pub lowered_mir_bodies: usize,
     pub reused_mir_bodies: usize,
+    pub frontend: crate::frontend_cache::FrontendCacheStats,
 }
 
 #[derive(Default)]
-pub struct IncrementalCompilerSession {
+pub struct CompilationDriver {
+    pub(crate) frontend_cache: crate::frontend_cache::IncrementalFrontendCache,
     pub(crate) type_cache: IncrementalTypeCache,
     pub(crate) mir_cache: IncrementalMirCache,
     phase_cache: Option<CachedPhases>,
@@ -41,11 +43,21 @@ struct CachedPhases {
     bundle: SourceBundle,
     options: CompileOptions,
     phases: CompiledPhases,
+    interfaces: Option<crate::interface::InterfaceBundleSnapshot>,
     reusable_bodies: usize,
     reusable_mir_bodies: usize,
 }
 
-impl IncrementalCompilerSession {
+/// Compatibility name for callers that only need phase compilation.
+pub type IncrementalCompilerSession = CompilationDriver;
+
+#[derive(Clone, Debug)]
+pub struct CompilationSnapshot {
+    pub phases: CompiledPhases,
+    pub interfaces: crate::interface::InterfaceBundleSnapshot,
+}
+
+impl CompilationDriver {
     pub fn new() -> Self {
         Self::default()
     }
@@ -55,9 +67,41 @@ impl IncrementalCompilerSession {
         bundle: &SourceBundle,
         options: CompileOptions,
     ) -> Result<CompiledPhases, Vec<Diagnostic>> {
+        self.compile_bundle_inner(bundle, options, false)
+            .map(|(phases, _)| phases)
+    }
+
+    /// Check and extract both interface partitions from one parse and module
+    /// resolution transaction. Successful results are cached atomically, so
+    /// diagnostics and navigation can never describe different revisions.
+    pub fn compile_bundle_with_interfaces(
+        &mut self,
+        bundle: &SourceBundle,
+        options: CompileOptions,
+    ) -> Result<CompilationSnapshot, Vec<Diagnostic>> {
+        self.compile_bundle_inner(bundle, options, true)
+            .map(|(phases, interfaces)| CompilationSnapshot {
+                phases,
+                interfaces: interfaces.expect("interface compilation produced no snapshot"),
+            })
+    }
+
+    fn compile_bundle_inner(
+        &mut self,
+        bundle: &SourceBundle,
+        options: CompileOptions,
+        include_interfaces: bool,
+    ) -> Result<
+        (
+            CompiledPhases,
+            Option<crate::interface::InterfaceBundleSnapshot>,
+        ),
+        Vec<Diagnostic>,
+    > {
         if let Some(cached) = &self.phase_cache
             && cached.options == options
             && cached.bundle == *bundle
+            && (!include_interfaces || cached.interfaces.is_some())
         {
             self.stats = IncrementalCompilationStats {
                 elaborated_bodies: 0,
@@ -65,20 +109,30 @@ impl IncrementalCompilerSession {
                 reused_phase_artifacts: 1,
                 lowered_mir_bodies: 0,
                 reused_mir_bodies: cached.reusable_mir_bodies,
+                frontend: crate::frontend_cache::FrontendCacheStats::default(),
             };
-            return Ok(cached.phases.clone());
+            return Ok((cached.phases.clone(), cached.interfaces.clone()));
         }
         let checkpoint = self.type_cache.clone();
         let mir_checkpoint = self.mir_cache.clone();
         self.mir_cache.begin_revision();
         self.stats = IncrementalCompilationStats::default();
-        let result = crate::compiler::compile_bundle_to_phases_incremental(bundle, options, self);
+        let result = if include_interfaces {
+            crate::compiler::compile_bundle_to_phases_incremental_with_interfaces(
+                bundle, options, self,
+            )
+            .map(|(phases, interfaces)| (phases, Some(interfaces)))
+        } else {
+            crate::compiler::compile_bundle_to_phases_incremental(bundle, options, self)
+                .map(|phases| (phases, None))
+        };
         match &result {
-            Ok(phases) => {
+            Ok((phases, interfaces)) => {
                 self.phase_cache = Some(CachedPhases {
                     bundle: bundle.clone(),
                     options,
                     phases: phases.clone(),
+                    interfaces: interfaces.clone(),
                     reusable_bodies: self.stats.elaborated_bodies + self.stats.reused_bodies,
                     reusable_mir_bodies: self.stats.lowered_mir_bodies
                         + self.stats.reused_mir_bodies,
@@ -104,6 +158,7 @@ impl IncrementalCompilerSession {
             reused_phase_artifacts: 0,
             lowered_mir_bodies: self.mir_cache.lowered_bodies,
             reused_mir_bodies: self.mir_cache.reused_bodies,
+            frontend: self.frontend_cache.stats(),
         };
     }
 }

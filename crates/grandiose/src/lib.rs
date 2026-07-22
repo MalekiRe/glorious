@@ -13,6 +13,7 @@ mod compiler_traits;
 mod compiler_typeck;
 pub mod diagnostic;
 pub mod eval;
+pub mod frontend_cache;
 pub mod interface;
 pub mod lexer;
 pub mod lossless;

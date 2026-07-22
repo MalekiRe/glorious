@@ -1912,6 +1912,21 @@ pub fn fixity_regions(
 
 pub fn parse_bundle(bundle: &SourceBundle) -> Result<Program, Vec<Diagnostic>> {
     let tokens = crate::lexer::lex(bundle.source()).map_err(|error| vec![error])?;
+    parse_bundle_tokens(bundle, tokens)
+}
+
+pub(crate) fn parse_bundle_incremental(
+    bundle: &SourceBundle,
+    cache: &mut crate::frontend_cache::IncrementalFrontendCache,
+) -> Result<Program, Vec<Diagnostic>> {
+    let tokens = cache.lex_bundle(bundle).map_err(|error| vec![error])?;
+    parse_bundle_tokens(bundle, tokens)
+}
+
+fn parse_bundle_tokens(
+    bundle: &SourceBundle,
+    tokens: Vec<crate::lexer::Token>,
+) -> Result<Program, Vec<Diagnostic>> {
     let (probe, diagnostics) = crate::parser::parse_recovering(tokens.clone());
     if !diagnostics.is_empty() {
         return Err(diagnostics);

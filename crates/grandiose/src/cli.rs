@@ -7,7 +7,7 @@ use std::{
 
 use grandiose::{
     CompileOptions, OptimizationLevel, compile_bundle_to_phases_with_options,
-    compiler_session::IncrementalCompilerSession,
+    compiler_session::CompilationDriver,
     diagnostic::{Diagnostic, Severity},
     interface::{InterfaceSelection, scan_interfaces},
     lexer,
@@ -506,7 +506,7 @@ fn compile(command: CompileCommand, stdout: &mut dyn Write, stderr: &mut dyn Wri
 fn compile_loaded(
     command: CompileCommand,
     mut segments: Vec<Segment>,
-    incremental: Option<&mut IncrementalCompilerSession>,
+    incremental: Option<&mut CompilationDriver>,
     stdout: &mut dyn Write,
     stderr: &mut dyn Write,
 ) -> u8 {
@@ -650,7 +650,7 @@ struct SessionSnapshot {
 struct SessionState {
     generation: u64,
     last_good: Option<SessionSnapshot>,
-    compiler: IncrementalCompilerSession,
+    compiler: CompilationDriver,
 }
 
 enum BoundedLine {
