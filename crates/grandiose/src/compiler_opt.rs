@@ -7597,7 +7597,9 @@ fn scalarize_callables(program: &mut Program, types: &[Type], budget: u64) -> (P
         return (PassOutcome::Unchanged, scan_work.saturating_add(clone_work));
     }
     for (candidate, declaration) in accepted {
-        let block = &mut program.functions[candidate.caller].blocks[candidate.block];
+        let caller = &mut program.functions[candidate.caller];
+        caller.invalid_analyses |= pass_contract(PassId::ScalarizeCallables).invalidates;
+        let block = &mut caller.blocks[candidate.block];
         block.statements.truncate(candidate.statement_start);
         let mut direct_args = candidate.captures;
         direct_args.extend(candidate.args);
@@ -7607,6 +7609,9 @@ fn scalarize_callables(program: &mut Program, types: &[Type], budget: u64) -> (P
             args: direct_args,
             normal: candidate.normal,
         };
+    }
+    for clone in &mut clones {
+        clone.invalid_analyses |= pass_contract(PassId::ScalarizeCallables).invalidates;
     }
     program.functions.extend(clones);
     for function in &mut program.functions {
@@ -9776,6 +9781,7 @@ fn inline_by_cost_with_policy(
                 scratch.functions[caller_index] = old_caller;
                 continue;
             }
+            caller.invalid_analyses |= pass_contract(PassId::InlineByCost).invalidates;
             scratch_policy
                 .depths
                 .entry(candidate.caller)
@@ -10038,7 +10044,7 @@ fn inline_by_cost_with_policy(
             }
             caller.blocks.extend(cloned);
             caller.features = infer_feature_bits(caller);
-            caller.invalid_analyses |= analysis::ALL;
+            caller.invalid_analyses |= pass_contract(PassId::InlineByCost).invalidates;
 
             let original = originals[&candidate.caller];
             let cap = growth_factor * original + growth_slack;
@@ -10110,7 +10116,7 @@ fn run_transactional_pass(
             // Passes may publish a narrower, mutation-specific mask. Fall
             // back to the conservative contract for older transformations.
             if function.invalid_analyses == invalidated_before {
-                function.invalid_analyses |= pass_invalidation(pass);
+                function.invalid_analyses |= pass_contract(pass).invalidates;
             }
         }
         total_work = total_work.saturating_add(work);
@@ -10135,15 +10141,52 @@ fn run_transactional_pass(
     }
 }
 
-fn pass_invalidation(pass: PassId) -> u8 {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum InvalidationScope {
+    ChangedBodies,
+    WholeProgram,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PassContract {
+    invalidates: u8,
+    scope: InvalidationScope,
+}
+
+fn pass_contract(pass: PassId) -> PassContract {
+    let changed = |invalidates| PassContract {
+        invalidates,
+        scope: InvalidationScope::ChangedBodies,
+    };
     match pass {
-        // These preserve the block graph but rewrite register definitions and
-        // ownership events, so CFG analyses remain valid.
-        PassId::ScalarizeLocals | PassId::EraseLoanProofsAndScalarizedReferences => {
-            analysis::USES | analysis::FLOW | analysis::EFFECTS | analysis::VALUES | analysis::COST
-        }
-        // Every other implemented local pass may add/remove an edge or block.
-        _ => analysis::ALL,
+        PassId::NormalizeCfg
+        | PassId::SparseSimplify
+        | PassId::SimplifyCleanup
+        | PassId::GlobalSimplify
+        | PassId::SpecializeCleanup
+        | PassId::FormTailCallsAndHoist => changed(analysis::ALL),
+        // These preserve the block graph while rewriting definitions and
+        // ownership events, so existing CFG topology remains valid.
+        PassId::ScalarizeLocals | PassId::EraseLoanProofsAndScalarizedReferences => changed(
+            analysis::USES | analysis::FLOW | analysis::EFFECTS | analysis::VALUES | analysis::COST,
+        ),
+        // Callable scalarization and inlining mark each rewritten/new body as
+        // they commit it. Handler specialization currently rewrites through a
+        // whole-program scratch transaction, so it retains the conservative
+        // program-wide checkpoint contract.
+        PassId::ScalarizeCallables | PassId::InlineByCost => changed(analysis::ALL),
+        PassId::SpecializeControl => PassContract {
+            invalidates: analysis::ALL,
+            scope: InvalidationScope::WholeProgram,
+        },
+        PassId::ValidateRawMir
+        | PassId::ImportAndValidatePlaceFlow
+        | PassId::ElaborateCleanup
+        | PassId::ValidateCleanupMir
+        | PassId::LowerRegistersAndEdges
+        | PassId::LayoutAndPeephole
+        | PassId::ValidateBytecodeInput
+        | PassId::ValidateFinalArtifact => changed(0),
     }
 }
 
@@ -10181,8 +10224,22 @@ fn run_transactional_whole_program_pass(
         _ => (PassOutcome::SkippedUnavailable, 0),
     };
     if outcome == PassOutcome::Changed {
-        for function in &mut program.functions {
-            function.invalid_analyses |= analysis::ALL;
+        let contract = pass_contract(pass);
+        match contract.scope {
+            InvalidationScope::WholeProgram => {
+                for function in &mut program.functions {
+                    function.invalid_analyses |= contract.invalidates;
+                }
+            }
+            InvalidationScope::ChangedBodies => {
+                debug_assert!(
+                    program
+                        .functions
+                        .iter()
+                        .any(|function| function.invalid_analyses & contract.invalidates != 0),
+                    "{pass:?} changed MIR without publishing its body invalidation"
+                );
+            }
         }
     }
     *global_remaining = global_remaining.saturating_sub(work_units.min(*global_remaining));
@@ -10200,7 +10257,7 @@ fn run_mandatory_normalize(program: &mut Program) -> PassReport {
         let (body_outcome, work) = normalize_cfg(function, u64::MAX);
         work_units += work;
         if body_outcome == PassOutcome::Changed {
-            function.invalid_analyses |= analysis::ALL;
+            function.invalid_analyses |= pass_contract(PassId::NormalizeCfg).invalidates;
             outcome = PassOutcome::Changed;
         }
     }
@@ -10218,7 +10275,8 @@ fn run_mandatory_loan_erasure(program: &mut Program) -> PassReport {
         let (body_outcome, work) = erase_loan_proofs(function, u64::MAX);
         work_units = work_units.saturating_add(work);
         if body_outcome == PassOutcome::Changed {
-            function.invalid_analyses |= analysis::ALL;
+            function.invalid_analyses |=
+                pass_contract(PassId::EraseLoanProofsAndScalarizedReferences).invalidates;
             outcome = PassOutcome::Changed;
         }
     }
@@ -15970,6 +16028,50 @@ mod tests {
             })
         );
         validate_program(&candidate, &types, MirPhase::Raw).unwrap();
+    }
+
+    #[test]
+    fn whole_program_inlining_only_invalidates_rewritten_bodies() {
+        let (mut candidate, types) = inline_leaf_fixture();
+        let mut remaining = u64::MAX;
+        let mut policy = InlinePolicyState::default();
+        let report = run_transactional_whole_program_pass(
+            &mut candidate,
+            PassId::InlineByCost,
+            WholeProgramPassTables {
+                types: &types,
+                protocols: &[],
+                handler_defs: &[],
+            },
+            OptimizationLevel::O2,
+            &mut remaining,
+            &mut policy,
+        );
+
+        assert_eq!(report.outcome, PassOutcome::Changed);
+        assert_eq!(candidate.functions[0].invalid_analyses, analysis::ALL);
+        assert_eq!(candidate.functions[1].invalid_analyses, 0);
+    }
+
+    #[test]
+    fn pass_contract_preserves_cfg_for_body_only_rewrites() {
+        let body_only =
+            analysis::USES | analysis::FLOW | analysis::EFFECTS | analysis::VALUES | analysis::COST;
+        for pass in [
+            PassId::ScalarizeLocals,
+            PassId::EraseLoanProofsAndScalarizedReferences,
+        ] {
+            assert_eq!(pass_contract(pass).invalidates, body_only);
+            assert_eq!(pass_contract(pass).scope, InvalidationScope::ChangedBodies);
+        }
+        assert_eq!(
+            pass_contract(PassId::InlineByCost).scope,
+            InvalidationScope::ChangedBodies
+        );
+        assert_eq!(
+            pass_contract(PassId::SpecializeControl).scope,
+            InvalidationScope::WholeProgram
+        );
     }
 
     #[test]
