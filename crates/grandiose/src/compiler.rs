@@ -354,6 +354,38 @@ fn source_region_contract(program: &Program, function: &crate::ast::Function) ->
     }
 }
 
+fn validate_source_region_contract(
+    function: &crate::ast::Function,
+    contract: &RegionContract,
+) -> Option<Diagnostic> {
+    contract.result_region?;
+    let supplied = contract
+        .param_regions
+        .iter()
+        .flatten()
+        .copied()
+        .collect::<Vec<_>>();
+    if supplied.is_empty()
+        || supplied
+            .iter()
+            .any(|region| contract.permits_region(*region))
+    {
+        return None;
+    }
+    Some(
+        type_error(
+            function
+                .return_type
+                .as_ref()
+                .map_or(function.span, |result| result.span),
+            "returned reference does not outlive the callable's declared result lifetime",
+        )
+        .with_help(
+            "return a parameter with the declared lifetime or add a valid longer-to-shorter outlives constraint",
+        ),
+    )
+}
+
 fn specialized_region_contract(
     source: &RegionContract,
     arguments: &[GeneratedArgument],
@@ -4355,16 +4387,18 @@ fn compile_program_with_phases(
     // Ground nominal normalization rewrites `Slice<'a, T>` to its runtime
     // nominal path and therefore erases the source lifetime sidecar. Capture
     // callable region contracts while those source applications are intact.
-    let source_region_contracts = program
-        .functions
-        .iter()
-        .map(|function| {
-            (
-                function.name.clone(),
-                source_region_contract(program, function),
-            )
-        })
-        .collect::<BTreeMap<_, _>>();
+    let mut source_region_contracts = BTreeMap::new();
+    let mut region_contract_errors = Vec::new();
+    for function in &program.functions {
+        let contract = source_region_contract(program, function);
+        if let Some(error) = validate_source_region_contract(function, &contract) {
+            region_contract_errors.push(error);
+        }
+        source_region_contracts.insert(function.name.clone(), contract);
+    }
+    if !region_contract_errors.is_empty() {
+        return Err(region_contract_errors);
+    }
     let mut trait_db = TraitDb::build_with_manifest(program, manifest)?;
     trait_db.share_compilation_table_budget_from(&initial_trait_db);
     let mut specialization_solver_budgets = BTreeMap::new();
@@ -27793,14 +27827,22 @@ impl<'a> CoreLowerer<'a> {
                 {
                     self.check(span, expected, local.ty)?;
                     self.record_local_use(local.local, span)?;
-                    return Ok(self.typed(
+                    for origin in Self::local_reference_fields(&local).values() {
+                        self.mark_region_live(origin.region);
+                    }
+                    let mut expression = self.typed(
                         span,
                         local.ty,
                         core::ExprKind::Local {
                             local: local.local,
                             copy: true,
                         },
-                    ));
+                    );
+                    Self::set_expression_reference_fields(
+                        &mut expression,
+                        Self::local_reference_fields(&local),
+                    );
+                    return Ok(expression);
                 }
                 if self.empty_referents.contains(&local.local) {
                     return Err(self.borrow_error(

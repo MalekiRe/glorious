@@ -130,6 +130,11 @@ fn stored_regions_enforce_escape_covariance_and_unique_invariance() {
             "outlive",
         ),
         (
+            "stored-unrelated-supplier.glorious",
+            "struct View<'a,T>{base:&'a T} bad<'long,'short>(wrong:View<'long,i64>, unrelated:View<'short,i64>)->View<'short,i64>{move wrong} main()->(){()}",
+            "outlive",
+        ),
+        (
             "stored-unique-region-invariant.glorious",
             "struct ViewMut<'a,T>{base:&'a mut T} bad<'long,'short>(value:ViewMut<'long,i64>)->ViewMut<'short,i64> where 'long:'short {move value} main()->(){()}",
             "outlive",
@@ -145,8 +150,10 @@ fn stored_regions_enforce_escape_covariance_and_unique_invariance() {
             "expected ViewMut",
         ),
     ] {
-        let errors = compile_source_to_bytecode(name, source)
-            .expect_err("an invalid stored-reference region conversion compiled");
+        let errors = match compile_source_to_bytecode(name, source) {
+            Ok(_) => panic!("{name}: an invalid stored-reference region conversion compiled"),
+            Err(errors) => errors,
+        };
         assert!(
             errors.iter().any(|error| error.message.contains(expected)),
             "{name}: {errors:#?}"
