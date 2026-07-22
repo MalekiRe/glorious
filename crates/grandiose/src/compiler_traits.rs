@@ -240,77 +240,15 @@ impl TrustedRuntimeManifest {
                     declaration.display_name
                 )));
             }
-            if !matches!(
-                declaration.primitive,
-                Primitive::CharFromU32Checked
-                    | Primitive::CharToU32
-                    | Primitive::TextByteLen
-                    | Primitive::TextConcat
-                    | Primitive::TextEq
-                    | Primitive::TextFromUtf8Checked
-                    | Primitive::TextAsBytes
-                    | Primitive::BytesLen
-                    | Primitive::BytesConcat
-                    | Primitive::BytesGet
-                    | Primitive::BytesSlice
-                    | Primitive::BytesFromArrayMove
-                    | Primitive::BytesToArray
-                    | Primitive::ArrayNew
-                    | Primitive::ArrayLen
-                    | Primitive::ArrayGetCopy
-                    | Primitive::ArrayGetMove
-                    | Primitive::ArrayGetBorrowShared
-                    | Primitive::ArrayGetBorrowUnique
-                    | Primitive::ArraySetMove
-                    | Primitive::ArrayEmpty
-                    | Primitive::ArrayPushMove
-                    | Primitive::ArrayPopMove
-                    | Primitive::ArrayCapacity
-                    | Primitive::ArrayReserve
-                    | Primitive::ArrayFinishDrained
-                    | Primitive::FloatAdd
-                    | Primitive::FloatSub
-                    | Primitive::FloatMul
-                    | Primitive::FloatDiv
-                    | Primitive::FloatRem
-                    | Primitive::FloatNeg
-                    | Primitive::FloatEq
-                    | Primitive::FloatNe
-                    | Primitive::FloatLt
-                    | Primitive::FloatLe
-                    | Primitive::FloatGt
-                    | Primitive::FloatGe
-                    | Primitive::FloatConvert
-                    | Primitive::IntToFloat
-                    | Primitive::FloatToIntChecked
-                    | Primitive::FloatToBits
-                    | Primitive::FloatFromBits
-            ) {
+            let family = crate::builtins::runtime_primitive_family(declaration.primitive);
+            if family.is_none() {
                 errors.push(Diagnostic::plain(format!(
                     "trusted primitive leaf `{}` is outside the generation-1 Text/Bytes/Array frontend slice",
                     declaration.display_name
                 )));
             }
-            let repeatable_typed_float = matches!(
-                declaration.primitive,
-                Primitive::FloatAdd
-                    | Primitive::FloatSub
-                    | Primitive::FloatMul
-                    | Primitive::FloatDiv
-                    | Primitive::FloatRem
-                    | Primitive::FloatNeg
-                    | Primitive::FloatEq
-                    | Primitive::FloatNe
-                    | Primitive::FloatLt
-                    | Primitive::FloatLe
-                    | Primitive::FloatGt
-                    | Primitive::FloatGe
-                    | Primitive::FloatConvert
-                    | Primitive::IntToFloat
-                    | Primitive::FloatToIntChecked
-                    | Primitive::FloatToBits
-                    | Primitive::FloatFromBits
-            );
+            let repeatable_typed_float =
+                family == Some(crate::builtins::RuntimePrimitiveFamily::TypedFloat);
             if !repeatable_typed_float && !primitives.insert(declaration.primitive as u32) {
                 errors.push(Diagnostic::plain(format!(
                     "trusted runtime manifest contains duplicate primitive identity {:?}",
@@ -321,24 +259,8 @@ impl TrustedRuntimeManifest {
             }
         }
         let requires_array = primitive_leaves.iter().any(|declaration| {
-            matches!(
-                declaration.primitive,
-                Primitive::BytesFromArrayMove
-                    | Primitive::BytesToArray
-                    | Primitive::ArrayNew
-                    | Primitive::ArrayLen
-                    | Primitive::ArrayGetCopy
-                    | Primitive::ArrayGetMove
-                    | Primitive::ArrayGetBorrowShared
-                    | Primitive::ArrayGetBorrowUnique
-                    | Primitive::ArraySetMove
-                    | Primitive::ArrayEmpty
-                    | Primitive::ArrayPushMove
-                    | Primitive::ArrayPopMove
-                    | Primitive::ArrayCapacity
-                    | Primitive::ArrayReserve
-                    | Primitive::ArrayFinishDrained
-            )
+            crate::builtins::runtime_primitive_family(declaration.primitive)
+                == Some(crate::builtins::RuntimePrimitiveFamily::ArrayDependent)
         });
         if requires_array && !roles.contains(&MachineTypeRole::Array) {
             errors.push(Diagnostic::plain(
@@ -392,115 +314,14 @@ impl TrustedRuntimeManifest {
             parameters: vec![GenericParameterKind::Type],
             role: MachineTypeRole::Array,
         }];
-        let mut leaves = [
-            (
-                0x0030,
-                "__g1_char_from_u32_checked",
-                Primitive::CharFromU32Checked,
-            ),
-            (0x0031, "__g1_char_to_u32", Primitive::CharToU32),
-            (0x0040, "__g1_text_byte_len", Primitive::TextByteLen),
-            (0x0041, "__g1_text_concat", Primitive::TextConcat),
-            (0x0042, "__g1_text_eq", Primitive::TextEq),
-            (
-                0x0043,
-                "__g1_text_from_utf8_checked",
-                Primitive::TextFromUtf8Checked,
-            ),
-            (0x0044, "__g1_text_as_bytes", Primitive::TextAsBytes),
-            (0x0050, "__g1_bytes_len", Primitive::BytesLen),
-            (0x0051, "__g1_bytes_concat", Primitive::BytesConcat),
-            (0x0052, "__g1_bytes_get", Primitive::BytesGet),
-            (0x0053, "__g1_bytes_slice", Primitive::BytesSlice),
-            (
-                0x0054,
-                "__g1_bytes_from_array_move",
-                Primitive::BytesFromArrayMove,
-            ),
-            (0x0055, "__g1_bytes_to_array", Primitive::BytesToArray),
-            (0x0060, "__g1_array_new", Primitive::ArrayNew),
-            (0x0061, "__g1_array_len", Primitive::ArrayLen),
-            (0x0062, "__g1_array_get_copy", Primitive::ArrayGetCopy),
-            (0x0063, "__g1_array_get_move", Primitive::ArrayGetMove),
-            (
-                0x0064,
-                "__g1_array_get_borrow_shared",
-                Primitive::ArrayGetBorrowShared,
-            ),
-            (
-                0x0065,
-                "__g1_array_get_borrow_unique",
-                Primitive::ArrayGetBorrowUnique,
-            ),
-            (0x0066, "__g1_array_set_move", Primitive::ArraySetMove),
-            (0x0067, "__g1_array_empty", Primitive::ArrayEmpty),
-            (0x0068, "__g1_array_push_move", Primitive::ArrayPushMove),
-            (0x0069, "__g1_array_pop_move", Primitive::ArrayPopMove),
-            (0x006a, "__g1_array_capacity", Primitive::ArrayCapacity),
-            (0x006b, "__g1_array_reserve", Primitive::ArrayReserve),
-            (
-                0x006c,
-                "__g1_array_finish_drained",
-                Primitive::ArrayFinishDrained,
-            ),
-        ]
-        .into_iter()
-        .map(|(id, display_name, primitive)| ManifestPrimitiveLeaf {
-            id,
-            display_name: display_name.into(),
-            primitive,
-        })
-        .collect::<Vec<_>>();
-        let mut next_float_leaf_id = 0x0200_u64;
-        let mut push_float_leaf = |display_name: String, primitive: Primitive| {
-            leaves.push(ManifestPrimitiveLeaf {
-                id: next_float_leaf_id,
+        let leaves = crate::builtins::distributed_runtime_primitive_leaves()
+            .into_iter()
+            .map(|(id, display_name, primitive)| ManifestPrimitiveLeaf {
+                id,
                 display_name,
                 primitive,
-            });
-            next_float_leaf_id += 1;
-        };
-        for width in ["f32", "f64"] {
-            for (operation, primitive) in [
-                ("add", Primitive::FloatAdd),
-                ("sub", Primitive::FloatSub),
-                ("mul", Primitive::FloatMul),
-                ("div", Primitive::FloatDiv),
-                ("rem", Primitive::FloatRem),
-                ("neg", Primitive::FloatNeg),
-                ("eq", Primitive::FloatEq),
-                ("ne", Primitive::FloatNe),
-                ("lt", Primitive::FloatLt),
-                ("le", Primitive::FloatLe),
-                ("gt", Primitive::FloatGt),
-                ("ge", Primitive::FloatGe),
-            ] {
-                push_float_leaf(format!("__g1_{width}_{operation}"), primitive);
-            }
-        }
-        push_float_leaf("__g1_f32_to_f64".into(), Primitive::FloatConvert);
-        push_float_leaf("__g1_f64_to_f32".into(), Primitive::FloatConvert);
-        for target in ["f32", "f64"] {
-            for &source in crate::builtins::INTEGER_SCALAR_NAMES {
-                push_float_leaf(format!("__g1_{source}_to_{target}"), Primitive::IntToFloat);
-            }
-        }
-        for source in ["f32", "f64"] {
-            for &target in crate::builtins::INTEGER_SCALAR_NAMES {
-                push_float_leaf(
-                    format!("__g1_{source}_to_{target}_checked"),
-                    Primitive::FloatToIntChecked,
-                );
-            }
-        }
-        for (name, primitive) in [
-            ("__g1_f32_to_bits", Primitive::FloatToBits),
-            ("__g1_f32_from_bits", Primitive::FloatFromBits),
-            ("__g1_f64_to_bits", Primitive::FloatToBits),
-            ("__g1_f64_from_bits", Primitive::FloatFromBits),
-        ] {
-            push_float_leaf(name.into(), primitive);
-        }
+            })
+            .collect::<Vec<_>>();
         let host_imports = [
             (
                 0x0100,
@@ -6034,107 +5855,7 @@ mod tests {
                 role: MachineTypeRole::Array,
             }]
         );
-        let mut expected = [
-            (
-                0x0030,
-                "__g1_char_from_u32_checked",
-                Primitive::CharFromU32Checked,
-            ),
-            (0x0031, "__g1_char_to_u32", Primitive::CharToU32),
-            (0x0040, "__g1_text_byte_len", Primitive::TextByteLen),
-            (0x0041, "__g1_text_concat", Primitive::TextConcat),
-            (0x0042, "__g1_text_eq", Primitive::TextEq),
-            (
-                0x0043,
-                "__g1_text_from_utf8_checked",
-                Primitive::TextFromUtf8Checked,
-            ),
-            (0x0044, "__g1_text_as_bytes", Primitive::TextAsBytes),
-            (0x0050, "__g1_bytes_len", Primitive::BytesLen),
-            (0x0051, "__g1_bytes_concat", Primitive::BytesConcat),
-            (0x0052, "__g1_bytes_get", Primitive::BytesGet),
-            (0x0053, "__g1_bytes_slice", Primitive::BytesSlice),
-            (
-                0x0054,
-                "__g1_bytes_from_array_move",
-                Primitive::BytesFromArrayMove,
-            ),
-            (0x0055, "__g1_bytes_to_array", Primitive::BytesToArray),
-            (0x0060, "__g1_array_new", Primitive::ArrayNew),
-            (0x0061, "__g1_array_len", Primitive::ArrayLen),
-            (0x0062, "__g1_array_get_copy", Primitive::ArrayGetCopy),
-            (0x0063, "__g1_array_get_move", Primitive::ArrayGetMove),
-            (
-                0x0064,
-                "__g1_array_get_borrow_shared",
-                Primitive::ArrayGetBorrowShared,
-            ),
-            (
-                0x0065,
-                "__g1_array_get_borrow_unique",
-                Primitive::ArrayGetBorrowUnique,
-            ),
-            (0x0066, "__g1_array_set_move", Primitive::ArraySetMove),
-            (0x0067, "__g1_array_empty", Primitive::ArrayEmpty),
-            (0x0068, "__g1_array_push_move", Primitive::ArrayPushMove),
-            (0x0069, "__g1_array_pop_move", Primitive::ArrayPopMove),
-            (0x006a, "__g1_array_capacity", Primitive::ArrayCapacity),
-            (0x006b, "__g1_array_reserve", Primitive::ArrayReserve),
-            (
-                0x006c,
-                "__g1_array_finish_drained",
-                Primitive::ArrayFinishDrained,
-            ),
-        ]
-        .into_iter()
-        .map(|(id, name, primitive)| (id, name.to_owned(), primitive))
-        .collect::<Vec<_>>();
-        let mut next_float_leaf_id = 0x0200_u64;
-        let mut push_float = |name: String, primitive: Primitive| {
-            expected.push((next_float_leaf_id, name, primitive));
-            next_float_leaf_id += 1;
-        };
-        for width in ["f32", "f64"] {
-            for (operation, primitive) in [
-                ("add", Primitive::FloatAdd),
-                ("sub", Primitive::FloatSub),
-                ("mul", Primitive::FloatMul),
-                ("div", Primitive::FloatDiv),
-                ("rem", Primitive::FloatRem),
-                ("neg", Primitive::FloatNeg),
-                ("eq", Primitive::FloatEq),
-                ("ne", Primitive::FloatNe),
-                ("lt", Primitive::FloatLt),
-                ("le", Primitive::FloatLe),
-                ("gt", Primitive::FloatGt),
-                ("ge", Primitive::FloatGe),
-            ] {
-                push_float(format!("__g1_{width}_{operation}"), primitive);
-            }
-        }
-        push_float("__g1_f32_to_f64".into(), Primitive::FloatConvert);
-        push_float("__g1_f64_to_f32".into(), Primitive::FloatConvert);
-        for target in ["f32", "f64"] {
-            for &source in crate::builtins::INTEGER_SCALAR_NAMES {
-                push_float(format!("__g1_{source}_to_{target}"), Primitive::IntToFloat);
-            }
-        }
-        for source in ["f32", "f64"] {
-            for &target in crate::builtins::INTEGER_SCALAR_NAMES {
-                push_float(
-                    format!("__g1_{source}_to_{target}_checked"),
-                    Primitive::FloatToIntChecked,
-                );
-            }
-        }
-        for (name, primitive) in [
-            ("__g1_f32_to_bits", Primitive::FloatToBits),
-            ("__g1_f32_from_bits", Primitive::FloatFromBits),
-            ("__g1_f64_to_bits", Primitive::FloatToBits),
-            ("__g1_f64_from_bits", Primitive::FloatFromBits),
-        ] {
-            push_float(name.into(), primitive);
-        }
+        let expected = crate::builtins::distributed_runtime_primitive_leaves();
         assert_eq!(runtime.primitive_leaves.len(), expected.len());
         for (actual, (id, name, primitive)) in runtime.primitive_leaves.iter().zip(expected) {
             assert_eq!(actual.id, id);

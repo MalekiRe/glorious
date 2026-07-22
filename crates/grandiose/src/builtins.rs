@@ -5,6 +5,198 @@
 
 use grandiose_vm::Primitive;
 
+/// The semantic family of a primitive admitted by the generation-1 runtime
+/// manifest.  This is the single classification used by manifest validation
+/// and the recovery interpreter.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RuntimePrimitiveFamily {
+    Scalar,
+    ArrayDependent,
+    TypedFloat,
+}
+
+const SCALAR: RuntimePrimitiveFamily = RuntimePrimitiveFamily::Scalar;
+const ARRAY: RuntimePrimitiveFamily = RuntimePrimitiveFamily::ArrayDependent;
+
+pub(crate) const FIXED_RUNTIME_PRIMITIVE_LEAVES: &[(
+    u64,
+    &str,
+    Primitive,
+    RuntimePrimitiveFamily,
+)] = &[
+    (
+        0x0030,
+        "__g1_char_from_u32_checked",
+        Primitive::CharFromU32Checked,
+        SCALAR,
+    ),
+    (0x0031, "__g1_char_to_u32", Primitive::CharToU32, SCALAR),
+    (0x0040, "__g1_text_byte_len", Primitive::TextByteLen, SCALAR),
+    (0x0041, "__g1_text_concat", Primitive::TextConcat, SCALAR),
+    (0x0042, "__g1_text_eq", Primitive::TextEq, SCALAR),
+    (
+        0x0043,
+        "__g1_text_from_utf8_checked",
+        Primitive::TextFromUtf8Checked,
+        SCALAR,
+    ),
+    (0x0044, "__g1_text_as_bytes", Primitive::TextAsBytes, SCALAR),
+    (0x0050, "__g1_bytes_len", Primitive::BytesLen, SCALAR),
+    (0x0051, "__g1_bytes_concat", Primitive::BytesConcat, SCALAR),
+    (0x0052, "__g1_bytes_get", Primitive::BytesGet, SCALAR),
+    (0x0053, "__g1_bytes_slice", Primitive::BytesSlice, SCALAR),
+    (
+        0x0054,
+        "__g1_bytes_from_array_move",
+        Primitive::BytesFromArrayMove,
+        ARRAY,
+    ),
+    (
+        0x0055,
+        "__g1_bytes_to_array",
+        Primitive::BytesToArray,
+        ARRAY,
+    ),
+    (0x0060, "__g1_array_new", Primitive::ArrayNew, ARRAY),
+    (0x0061, "__g1_array_len", Primitive::ArrayLen, ARRAY),
+    (
+        0x0062,
+        "__g1_array_get_copy",
+        Primitive::ArrayGetCopy,
+        ARRAY,
+    ),
+    (
+        0x0063,
+        "__g1_array_get_move",
+        Primitive::ArrayGetMove,
+        ARRAY,
+    ),
+    (
+        0x0064,
+        "__g1_array_get_borrow_shared",
+        Primitive::ArrayGetBorrowShared,
+        ARRAY,
+    ),
+    (
+        0x0065,
+        "__g1_array_get_borrow_unique",
+        Primitive::ArrayGetBorrowUnique,
+        ARRAY,
+    ),
+    (
+        0x0066,
+        "__g1_array_set_move",
+        Primitive::ArraySetMove,
+        ARRAY,
+    ),
+    (0x0067, "__g1_array_empty", Primitive::ArrayEmpty, ARRAY),
+    (
+        0x0068,
+        "__g1_array_push_move",
+        Primitive::ArrayPushMove,
+        ARRAY,
+    ),
+    (
+        0x0069,
+        "__g1_array_pop_move",
+        Primitive::ArrayPopMove,
+        ARRAY,
+    ),
+    (
+        0x006a,
+        "__g1_array_capacity",
+        Primitive::ArrayCapacity,
+        ARRAY,
+    ),
+    (0x006b, "__g1_array_reserve", Primitive::ArrayReserve, ARRAY),
+    (
+        0x006c,
+        "__g1_array_finish_drained",
+        Primitive::ArrayFinishDrained,
+        ARRAY,
+    ),
+];
+
+pub(crate) const FLOAT_OPERATIONS: &[(&str, Primitive)] = &[
+    ("add", Primitive::FloatAdd),
+    ("sub", Primitive::FloatSub),
+    ("mul", Primitive::FloatMul),
+    ("div", Primitive::FloatDiv),
+    ("rem", Primitive::FloatRem),
+    ("neg", Primitive::FloatNeg),
+    ("eq", Primitive::FloatEq),
+    ("ne", Primitive::FloatNe),
+    ("lt", Primitive::FloatLt),
+    ("le", Primitive::FloatLe),
+    ("gt", Primitive::FloatGt),
+    ("ge", Primitive::FloatGe),
+];
+
+pub(crate) fn runtime_primitive_family(primitive: Primitive) -> Option<RuntimePrimitiveFamily> {
+    if let Some((_, _, _, family)) = FIXED_RUNTIME_PRIMITIVE_LEAVES
+        .iter()
+        .find(|(_, _, candidate, _)| *candidate == primitive)
+    {
+        return Some(*family);
+    }
+    (FLOAT_OPERATIONS
+        .iter()
+        .any(|(_, candidate)| *candidate == primitive)
+        || matches!(
+            primitive,
+            Primitive::FloatConvert
+                | Primitive::IntToFloat
+                | Primitive::FloatToIntChecked
+                | Primitive::FloatToBits
+                | Primitive::FloatFromBits
+        ))
+    .then_some(RuntimePrimitiveFamily::TypedFloat)
+}
+
+/// Materialize the canonical distributed table. IDs are intentionally assigned
+/// here so adding a float leaf cannot update the manifest and interpreter maps
+/// independently.
+pub(crate) fn distributed_runtime_primitive_leaves() -> Vec<(u64, String, Primitive)> {
+    let mut leaves = FIXED_RUNTIME_PRIMITIVE_LEAVES
+        .iter()
+        .map(|(id, name, primitive, _)| (*id, (*name).into(), *primitive))
+        .collect::<Vec<_>>();
+    let mut next_id = 0x0200_u64;
+    let mut push = |name: String, primitive| {
+        leaves.push((next_id, name, primitive));
+        next_id += 1;
+    };
+    for width in ["f32", "f64"] {
+        for &(operation, primitive) in FLOAT_OPERATIONS {
+            push(format!("__g1_{width}_{operation}"), primitive);
+        }
+    }
+    push("__g1_f32_to_f64".into(), Primitive::FloatConvert);
+    push("__g1_f64_to_f32".into(), Primitive::FloatConvert);
+    for target in ["f32", "f64"] {
+        for &source in INTEGER_SCALAR_NAMES {
+            push(format!("__g1_{source}_to_{target}"), Primitive::IntToFloat);
+        }
+    }
+    for source in ["f32", "f64"] {
+        for &target in INTEGER_SCALAR_NAMES {
+            push(
+                format!("__g1_{source}_to_{target}_checked"),
+                Primitive::FloatToIntChecked,
+            );
+        }
+    }
+    for (name, primitive) in [
+        ("__g1_f32_to_bits", Primitive::FloatToBits),
+        ("__g1_f32_from_bits", Primitive::FloatFromBits),
+        ("__g1_f64_to_bits", Primitive::FloatToBits),
+        ("__g1_f64_from_bits", Primitive::FloatFromBits),
+    ] {
+        push(name.into(), primitive);
+    }
+    leaves
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum IntegerLeafShape {
     Unary,
@@ -78,6 +270,69 @@ pub(crate) fn integer_conversion_leaf_name(operation: &str, target: &str) -> Str
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distributed_runtime_leaf_table_is_frozen_and_classified() {
+        let leaves = distributed_runtime_primitive_leaves();
+        assert_eq!(FIXED_RUNTIME_PRIMITIVE_LEAVES.len(), 26);
+        assert_eq!(leaves.len(), 104);
+        assert_eq!(
+            leaves.first(),
+            Some(&(
+                0x0030,
+                "__g1_char_from_u32_checked".into(),
+                Primitive::CharFromU32Checked,
+            ))
+        );
+        assert_eq!(
+            leaves.get(26),
+            Some(&(0x0200, "__g1_f32_add".into(), Primitive::FloatAdd))
+        );
+        for (index, id, name, primitive) in [
+            (
+                25,
+                0x006c,
+                "__g1_array_finish_drained",
+                Primitive::ArrayFinishDrained,
+            ),
+            (37, 0x020b, "__g1_f32_ge", Primitive::FloatGe),
+            (38, 0x020c, "__g1_f64_add", Primitive::FloatAdd),
+            (49, 0x0217, "__g1_f64_ge", Primitive::FloatGe),
+            (50, 0x0218, "__g1_f32_to_f64", Primitive::FloatConvert),
+            (51, 0x0219, "__g1_f64_to_f32", Primitive::FloatConvert),
+            (52, 0x021a, "__g1_u8_to_f32", Primitive::IntToFloat),
+            (75, 0x0231, "__g1_isize_to_f64", Primitive::IntToFloat),
+            (
+                76,
+                0x0232,
+                "__g1_f32_to_u8_checked",
+                Primitive::FloatToIntChecked,
+            ),
+            (
+                99,
+                0x0249,
+                "__g1_f64_to_isize_checked",
+                Primitive::FloatToIntChecked,
+            ),
+            (100, 0x024a, "__g1_f32_to_bits", Primitive::FloatToBits),
+            (103, 0x024d, "__g1_f64_from_bits", Primitive::FloatFromBits),
+        ] {
+            assert_eq!(leaves.get(index), Some(&(id, name.into(), primitive)));
+        }
+        assert!(
+            leaves
+                .iter()
+                .all(|(_, _, primitive)| runtime_primitive_family(*primitive).is_some())
+        );
+        assert_eq!(
+            runtime_primitive_family(Primitive::ArrayLen),
+            Some(RuntimePrimitiveFamily::ArrayDependent)
+        );
+        assert_eq!(
+            runtime_primitive_family(Primitive::FloatNeg),
+            Some(RuntimePrimitiveFamily::TypedFloat)
+        );
+    }
 
     #[test]
     fn distributed_integer_leaf_mapping_is_frozen() {

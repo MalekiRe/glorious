@@ -1120,25 +1120,12 @@ impl RuntimeLeafAuthority {
                         primitive,
                         target: function.return_type.as_ref().and_then(integer_kind)?,
                     },
-                    RuntimeLeaf::Primitive(
-                        primitive @ (Primitive::FloatAdd
-                        | Primitive::FloatSub
-                        | Primitive::FloatMul
-                        | Primitive::FloatDiv
-                        | Primitive::FloatRem
-                        | Primitive::FloatNeg
-                        | Primitive::FloatEq
-                        | Primitive::FloatNe
-                        | Primitive::FloatLt
-                        | Primitive::FloatLe
-                        | Primitive::FloatGt
-                        | Primitive::FloatGe
-                        | Primitive::FloatConvert
-                        | Primitive::IntToFloat
-                        | Primitive::FloatToIntChecked
-                        | Primitive::FloatToBits
-                        | Primitive::FloatFromBits),
-                    ) => RuntimeLeaf::FloatPrimitive(float_runtime_leaf(function, primitive)?),
+                    RuntimeLeaf::Primitive(primitive)
+                        if crate::builtins::runtime_primitive_family(primitive)
+                            == Some(crate::builtins::RuntimePrimitiveFamily::TypedFloat) =>
+                    {
+                        RuntimeLeaf::FloatPrimitive(float_runtime_leaf(function, primitive)?)
+                    }
                     leaf => leaf,
                 };
                 Some((index, leaf))
