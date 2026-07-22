@@ -138,7 +138,8 @@ fn verified_phase_cache_is_exact_and_compile_option_sensitive() {
     session.compile_bundle(&source, different_options).unwrap();
     assert_eq!(session.stats().reused_phase_artifacts, 0);
     session.compile_bundle(&source, options()).unwrap();
-    assert_eq!(session.stats().reused_phase_artifacts, 0);
+    assert_eq!(session.stats().reused_phase_artifacts, 1);
+    assert_eq!(session.stats().reused_historical_phase_artifacts, 1);
 
     let same_text_in_a_different_bundle = SourceBundle::raw_for_conformance(
         Segment::new(
@@ -158,6 +159,37 @@ fn verified_phase_cache_is_exact_and_compile_option_sensitive() {
             .is_err()
     );
     assert_eq!(session.stats().reused_phase_artifacts, 0);
+}
+
+#[test]
+fn historical_phase_cache_makes_editor_undo_an_exact_verified_hit() {
+    let original = bundle("1", "i64");
+    let edited = bundle("2", "i64");
+    let mut driver = CompilationDriver::new();
+
+    let first = driver
+        .compile_bundle_with_interfaces(&original, options())
+        .unwrap();
+    driver
+        .compile_bundle_with_interfaces(&edited, options())
+        .unwrap();
+    let body_edit = driver.stats();
+    assert_eq!(body_edit.frontend.lexed_segments, 1, "{body_edit:?}");
+    assert_eq!(body_edit.frontend.reused_segments, 1, "{body_edit:?}");
+
+    let restored = driver
+        .compile_bundle_with_interfaces(&original, options())
+        .unwrap();
+    let undo = driver.stats();
+    assert_eq!(undo.reused_phase_artifacts, 1, "{undo:?}");
+    assert_eq!(undo.reused_historical_phase_artifacts, 1, "{undo:?}");
+    assert_eq!(undo.elaborated_bodies, 0, "{undo:?}");
+    assert_eq!(undo.lowered_mir_bodies, 0, "{undo:?}");
+    assert_eq!(restored.interfaces.user, first.interfaces.user);
+    assert_eq!(
+        restored.phases.core_fingerprint(),
+        first.phases.core_fingerprint()
+    );
 }
 
 #[test]

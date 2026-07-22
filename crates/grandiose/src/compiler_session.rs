@@ -3,11 +3,12 @@
 //! Module/import/name context is rebuilt on body-changing requests. Provisional
 //! per-body inference evidence is retained while the compiler's context
 //! fingerprint (all source outside callable bodies) remains identical. The
-//! last successful, fully verified phase output is additionally retained for
-//! an exact-input retry, avoiding all downstream work for duplicate editor
-//! checks without reusing artifacts across a semantic input change.
+//! A bounded set of successful, fully verified phase outputs is additionally
+//! retained for exact-input retries, avoiding all downstream work for duplicate
+//! checks and editor undo/redo without reusing artifacts across a semantic
+//! input change.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 
 use grandiose_vm::{Type, TypeId};
 
@@ -24,6 +25,10 @@ pub struct IncrementalCompilationStats {
     /// Exact-input checks satisfied by cloning the last successful verified
     /// Core, MIR, and bytecode phase output.
     pub reused_phase_artifacts: usize,
+    /// Exact-input checks restored from an older successful revision rather
+    /// than the immediately preceding revision. This is the common editor
+    /// undo/redo and branch-switch case.
+    pub reused_historical_phase_artifacts: usize,
     pub lowered_mir_bodies: usize,
     pub reused_mir_bodies: usize,
     pub frontend: crate::frontend_cache::FrontendCacheStats,
@@ -34,7 +39,7 @@ pub struct CompilationDriver {
     pub(crate) frontend_cache: crate::frontend_cache::IncrementalFrontendCache,
     pub(crate) type_cache: IncrementalTypeCache,
     pub(crate) mir_cache: IncrementalMirCache,
-    phase_cache: Option<CachedPhases>,
+    phase_cache: VecDeque<CachedPhases>,
     stats: IncrementalCompilationStats,
 }
 
@@ -47,6 +52,10 @@ struct CachedPhases {
     reusable_bodies: usize,
     reusable_mir_bodies: usize,
 }
+
+/// Retaining a few complete revisions makes undo/redo effectively free while
+/// keeping the potentially large verified bytecode artifacts strictly bounded.
+const PHASE_CACHE_CAPACITY: usize = 4;
 
 /// Compatibility name for callers that only need phase compilation.
 pub type IncrementalCompilerSession = CompilationDriver;
@@ -98,20 +107,28 @@ impl CompilationDriver {
         ),
         Vec<Diagnostic>,
     > {
-        if let Some(cached) = &self.phase_cache
-            && cached.options == options
-            && cached.bundle == *bundle
-            && (!include_interfaces || cached.interfaces.is_some())
-        {
+        if let Some(index) = self.phase_cache.iter().position(|cached| {
+            cached.options == options
+                && cached.bundle == *bundle
+                && (!include_interfaces || cached.interfaces.is_some())
+        }) {
+            let historical = index != 0;
+            let cached = self
+                .phase_cache
+                .remove(index)
+                .expect("phase cache index disappeared");
             self.stats = IncrementalCompilationStats {
                 elaborated_bodies: 0,
                 reused_bodies: cached.reusable_bodies,
                 reused_phase_artifacts: 1,
+                reused_historical_phase_artifacts: usize::from(historical),
                 lowered_mir_bodies: 0,
                 reused_mir_bodies: cached.reusable_mir_bodies,
                 frontend: crate::frontend_cache::FrontendCacheStats::default(),
             };
-            return Ok((cached.phases.clone(), cached.interfaces.clone()));
+            let result = (cached.phases.clone(), cached.interfaces.clone());
+            self.phase_cache.push_front(cached);
+            return Ok(result);
         }
         let checkpoint = self.type_cache.clone();
         let mir_checkpoint = self.mir_cache.clone();
@@ -128,7 +145,12 @@ impl CompilationDriver {
         };
         match &result {
             Ok((phases, interfaces)) => {
-                self.phase_cache = Some(CachedPhases {
+                // A plain phase compilation may be followed by an interface
+                // request for the same input. Replace that incomplete entry
+                // rather than consuming another revision slot.
+                self.phase_cache
+                    .retain(|cached| cached.options != options || cached.bundle != *bundle);
+                self.phase_cache.push_front(CachedPhases {
                     bundle: bundle.clone(),
                     options,
                     phases: phases.clone(),
@@ -137,6 +159,7 @@ impl CompilationDriver {
                     reusable_mir_bodies: self.stats.lowered_mir_bodies
                         + self.stats.reused_mir_bodies,
                 });
+                self.phase_cache.truncate(PHASE_CACHE_CAPACITY);
             }
             Err(_) => {
                 self.type_cache = checkpoint;
@@ -156,6 +179,7 @@ impl CompilationDriver {
             elaborated_bodies: self.type_cache.stats.elaborated_bodies,
             reused_bodies: self.type_cache.stats.reused_bodies,
             reused_phase_artifacts: 0,
+            reused_historical_phase_artifacts: 0,
             lowered_mir_bodies: self.mir_cache.lowered_bodies,
             reused_mir_bodies: self.mir_cache.reused_bodies,
             frontend: self.frontend_cache.stats(),
