@@ -396,839 +396,510 @@ fn syntax_path_span(path: &[crate::ast::TypePathSegment]) -> Option<Span> {
     Some(path.first()?.span.join(path.last()?.span))
 }
 
-fn rewrite_type(
-    ty: &mut crate::ast::TypeSyntax,
+/// The state shared by every structural AST rewrite after module scopes have
+/// been built. Keeping it together makes name lookup a single operation and
+/// prevents each recursive walk from threading the same four arguments.
+struct AstRewriter<'a> {
     current: ModuleId,
-    resolution: &mut ModuleResolution,
-    scopes: &Scopes,
-    errors: &mut Vec<Diagnostic>,
-) {
-    use crate::ast::TypeSyntaxKind;
-    match &mut ty.kind {
-        TypeSyntaxKind::Path(path) => {
-            let names = path_names(path);
-            let path_span = syntax_path_span(path).unwrap_or(ty.span);
-            if let Some(definition) = resolve_definition(
-                resolution,
-                scopes,
-                current,
-                Namespace::Type,
-                &names,
-                path_span,
-                errors,
-            ) {
-                let spelling = resolution.backend_spelling(&definition);
-                resolution
-                    .resolved_paths
-                    .insert((path_span.start, path_span.end), definition);
-                *path = vec![crate::ast::TypePathSegment {
-                    name: spelling,
-                    span: ty.span,
-                }];
-            }
-        }
-        TypeSyntaxKind::SharedReference(referent) | TypeSyntaxKind::UniqueReference(referent) => {
-            rewrite_type(referent, current, resolution, scopes, errors)
-        }
-        TypeSyntaxKind::Tuple(elements) => {
-            for element in elements {
-                rewrite_type(element, current, resolution, scopes, errors);
-            }
-        }
-        TypeSyntaxKind::Application {
-            constructor,
-            arguments,
-            ..
-        } => {
-            rewrite_type(constructor, current, resolution, scopes, errors);
-            for argument in arguments {
-                rewrite_type(argument, current, resolution, scopes, errors);
-            }
-        }
-        TypeSyntaxKind::Projection {
-            subject,
-            trait_ref,
-            arguments,
-            ..
-        } => {
-            rewrite_type(subject, current, resolution, scopes, errors);
-            rewrite_trait_ref(trait_ref, current, resolution, scopes, errors);
-            for argument in arguments {
-                if let crate::ast::AssociatedArgumentSyntax::Type(argument) = argument {
-                    rewrite_type(argument, current, resolution, scopes, errors);
-                }
-            }
-        }
-        TypeSyntaxKind::Never => {}
-    }
+    resolution: &'a mut ModuleResolution,
+    scopes: &'a Scopes,
+    effect_sites: &'a BTreeMap<(usize, usize), String>,
+    errors: &'a mut Vec<Diagnostic>,
 }
 
-fn rewrite_trait_ref(
-    relation: &mut crate::ast::TraitRefSyntax,
-    current: ModuleId,
-    resolution: &mut ModuleResolution,
-    scopes: &Scopes,
-    errors: &mut Vec<Diagnostic>,
-) {
-    let names = path_names(&relation.path);
-    let path_span = syntax_path_span(&relation.path).unwrap_or(relation.span);
-    if let Some(definition) = resolve_definition(
-        resolution,
-        scopes,
-        current,
-        Namespace::Trait,
-        &names,
-        path_span,
-        errors,
-    ) {
-        let spelling = resolution.backend_spelling(&definition);
-        resolution
-            .resolved_paths
-            .insert((path_span.start, path_span.end), definition);
-        relation.path = vec![crate::ast::TypePathSegment {
-            name: spelling,
-            span: relation.span,
-        }];
+impl AstRewriter<'_> {
+    fn definition(&mut self, namespace: Namespace, path: &[String], span: Span) -> Option<DefId> {
+        resolve_definition(
+            self.resolution,
+            self.scopes,
+            self.current,
+            namespace,
+            path,
+            span,
+            self.errors,
+        )
     }
-    for argument in &mut relation.arguments {
-        if let crate::ast::GoalArgument::Type(argument) = argument {
-            rewrite_type(argument, current, resolution, scopes, errors);
-        }
-    }
-    for binding in &mut relation.bindings {
-        match &mut binding.value {
-            crate::ast::AssociatedBindingValue::Type(value) => {
-                rewrite_type(value, current, resolution, scopes, errors)
-            }
-            crate::ast::AssociatedBindingValue::EffectRow(row) => {
-                rewrite_effect_row(row, current, resolution, scopes, errors)
-            }
-        }
-    }
-}
 
-fn rewrite_effect_row(
-    row: &mut crate::ast::EffectRowSyntax,
-    current: ModuleId,
-    resolution: &mut ModuleResolution,
-    scopes: &Scopes,
-    errors: &mut Vec<Diagnostic>,
-) {
-    for effect in &mut row.effects {
-        let names = match &effect.kind {
-            crate::ast::TypeSyntaxKind::Path(path) => Some(path_names(path)),
-            _ => None,
-        };
-        let path_span = match &effect.kind {
-            crate::ast::TypeSyntaxKind::Path(path) => syntax_path_span(path),
-            _ => None,
-        }
-        .unwrap_or(effect.span);
-        if let Some(names) = names
-            && let Some(definition) = resolve_definition(
-                resolution,
-                scopes,
-                current,
-                Namespace::Effect,
-                &names,
-                path_span,
-                errors,
-            )
-        {
-            let spelling = resolution.backend_spelling(&definition);
-            resolution
-                .resolved_paths
-                .insert((path_span.start, path_span.end), definition);
-            effect.kind = crate::ast::TypeSyntaxKind::Path(vec![crate::ast::TypePathSegment {
-                name: spelling,
-                span: effect.span,
-            }]);
-        }
-    }
-}
-
-fn rewrite_value_path(
-    path: &[String],
-    span: Span,
-    current: ModuleId,
-    resolution: &mut ModuleResolution,
-    scopes: &Scopes,
-    errors: &mut Vec<Diagnostic>,
-) -> Option<Vec<String>> {
-    if let Some(definition) = resolve_definition(
-        resolution,
-        scopes,
-        current,
-        Namespace::Value,
-        path,
-        span,
-        errors,
-    ) {
-        let spelling = resolution.backend_spelling(&definition);
-        resolution
+    fn resolved_spelling(
+        &mut self,
+        namespace: Namespace,
+        path: &[String],
+        span: Span,
+    ) -> Option<String> {
+        let definition = self.definition(namespace, path, span)?;
+        let spelling = self.resolution.backend_spelling(&definition);
+        self.resolution
             .resolved_paths
             .insert((span.start, span.end), definition);
-        return Some(vec![spelling]);
+        Some(spelling)
     }
-    let (member, owner) = path.split_last()?;
-    for namespace in [Namespace::Type, Namespace::Trait] {
-        if let Some(definition) =
-            resolve_definition(resolution, scopes, current, namespace, owner, span, errors)
-        {
-            let spelling = resolution.backend_spelling(&definition);
-            resolution
-                .resolved_paths
-                .insert((span.start, span.end), definition);
-            return Some(vec![spelling, member.clone()]);
-        }
-    }
-    None
-}
 
-fn pattern_bindings(pattern: &crate::ast::Pattern, bound: &mut BTreeSet<String>) {
-    use crate::ast::PatternKind;
-    match &pattern.kind {
-        PatternKind::Binding(name) => {
-            bound.insert(name.clone());
-        }
-        PatternKind::Variant { fields, .. } => {
-            for field in fields {
-                pattern_bindings(field, bound);
+    fn rewrite_type(&mut self, ty: &mut crate::ast::TypeSyntax) {
+        use crate::ast::TypeSyntaxKind;
+        match &mut ty.kind {
+            TypeSyntaxKind::Path(path) => {
+                let names = path_names(path);
+                let path_span = syntax_path_span(path).unwrap_or(ty.span);
+                if let Some(spelling) = self.resolved_spelling(Namespace::Type, &names, path_span) {
+                    *path = vec![crate::ast::TypePathSegment {
+                        name: spelling,
+                        span: ty.span,
+                    }];
+                }
             }
-        }
-        PatternKind::Tuple { elements, .. } => {
-            for element in elements {
-                pattern_bindings(element, bound);
+            TypeSyntaxKind::SharedReference(referent)
+            | TypeSyntaxKind::UniqueReference(referent) => self.rewrite_type(referent),
+            TypeSyntaxKind::Tuple(elements) => {
+                for element in elements {
+                    self.rewrite_type(element);
+                }
             }
-        }
-        PatternKind::Struct { fields, .. } => {
-            for field in fields {
-                pattern_bindings(&field.pattern, bound);
+            TypeSyntaxKind::Application {
+                constructor,
+                arguments,
+                ..
+            } => {
+                self.rewrite_type(constructor);
+                for argument in arguments {
+                    self.rewrite_type(argument);
+                }
             }
+            TypeSyntaxKind::Projection {
+                subject,
+                trait_ref,
+                arguments,
+                ..
+            } => {
+                self.rewrite_type(subject);
+                self.rewrite_trait_ref(trait_ref);
+                for argument in arguments {
+                    if let crate::ast::AssociatedArgumentSyntax::Type(argument) = argument {
+                        self.rewrite_type(argument);
+                    }
+                }
+            }
+            TypeSyntaxKind::Never => {}
         }
-        PatternKind::Wildcard
-        | PatternKind::Unit
-        | PatternKind::Int(_)
-        | PatternKind::Float(_)
-        | PatternKind::String(_)
-        | PatternKind::Char(_)
-        | PatternKind::Byte(_) => {}
     }
-}
 
-fn rewrite_pattern(
-    pattern: &mut crate::ast::Pattern,
-    current: ModuleId,
-    resolution: &mut ModuleResolution,
-    scopes: &Scopes,
-    errors: &mut Vec<Diagnostic>,
-) {
-    use crate::ast::PatternKind;
-    match &mut pattern.kind {
-        PatternKind::Variant { path, fields, .. } => {
-            if let Some(rewritten) =
-                rewrite_value_path(path, path.span, current, resolution, scopes, errors)
+    fn rewrite_trait_ref(&mut self, relation: &mut crate::ast::TraitRefSyntax) {
+        let names = path_names(&relation.path);
+        let path_span = syntax_path_span(&relation.path).unwrap_or(relation.span);
+        if let Some(spelling) = self.resolved_spelling(Namespace::Trait, &names, path_span) {
+            relation.path = vec![crate::ast::TypePathSegment {
+                name: spelling,
+                span: relation.span,
+            }];
+        }
+        for argument in &mut relation.arguments {
+            if let crate::ast::GoalArgument::Type(argument) = argument {
+                self.rewrite_type(argument);
+            }
+        }
+        for binding in &mut relation.bindings {
+            match &mut binding.value {
+                crate::ast::AssociatedBindingValue::Type(value) => self.rewrite_type(value),
+                crate::ast::AssociatedBindingValue::EffectRow(row) => self.rewrite_effect_row(row),
+            }
+        }
+    }
+
+    fn rewrite_effect_row(&mut self, row: &mut crate::ast::EffectRowSyntax) {
+        for effect in &mut row.effects {
+            let names = match &effect.kind {
+                crate::ast::TypeSyntaxKind::Path(path) => Some(path_names(path)),
+                _ => None,
+            };
+            let path_span = match &effect.kind {
+                crate::ast::TypeSyntaxKind::Path(path) => syntax_path_span(path),
+                _ => None,
+            }
+            .unwrap_or(effect.span);
+            if let Some(names) = names
+                && let Some(spelling) = self.resolved_spelling(Namespace::Effect, &names, path_span)
             {
-                path.segments = rewritten;
-            }
-            for field in fields {
-                rewrite_pattern(field, current, resolution, scopes, errors);
-            }
-        }
-        PatternKind::Tuple { elements, .. } => {
-            for element in elements {
-                rewrite_pattern(element, current, resolution, scopes, errors);
+                effect.kind = crate::ast::TypeSyntaxKind::Path(vec![crate::ast::TypePathSegment {
+                    name: spelling,
+                    span: effect.span,
+                }]);
             }
         }
-        PatternKind::Struct {
-            name,
-            name_span,
-            fields,
-            ..
-        } => {
-            if let Some(definition) = resolve_definition(
-                resolution,
-                scopes,
-                current,
-                Namespace::Type,
-                std::slice::from_ref(name),
-                *name_span,
-                errors,
-            ) {
-                *name = resolution.backend_spelling(&definition);
-                resolution
-                    .resolved_paths
-                    .insert((name_span.start, name_span.end), definition);
-            }
-            for field in fields {
-                rewrite_pattern(&mut field.pattern, current, resolution, scopes, errors);
-            }
-        }
-        PatternKind::Binding(_)
-        | PatternKind::Wildcard
-        | PatternKind::Unit
-        | PatternKind::Int(_)
-        | PatternKind::Float(_)
-        | PatternKind::String(_)
-        | PatternKind::Char(_)
-        | PatternKind::Byte(_) => {}
     }
-}
 
-fn rewrite_statements(
-    statements: &mut Vec<crate::ast::Stmt>,
-    current: ModuleId,
-    bound: &mut BTreeSet<String>,
-    resolution: &mut ModuleResolution,
-    scopes: &Scopes,
-    effect_sites: &BTreeMap<(usize, usize), String>,
-    errors: &mut Vec<Diagnostic>,
-) {
-    for statement in statements {
-        match statement {
-            crate::ast::Stmt::Let { name, value, .. } => {
-                rewrite_expression(
-                    value,
-                    current,
-                    bound,
-                    resolution,
-                    scopes,
-                    effect_sites,
-                    errors,
-                );
+    fn rewrite_value_path(&mut self, path: &[String], span: Span) -> Option<Vec<String>> {
+        if let Some(spelling) = self.resolved_spelling(Namespace::Value, path, span) {
+            return Some(vec![spelling]);
+        }
+        let (member, owner) = path.split_last()?;
+        for namespace in [Namespace::Type, Namespace::Trait] {
+            if let Some(spelling) = self.resolved_spelling(namespace, owner, span) {
+                return Some(vec![spelling, member.clone()]);
+            }
+        }
+        None
+    }
+
+    fn pattern_bindings(pattern: &crate::ast::Pattern, bound: &mut BTreeSet<String>) {
+        use crate::ast::PatternKind;
+        match &pattern.kind {
+            PatternKind::Binding(name) => {
                 bound.insert(name.clone());
             }
-            crate::ast::Stmt::Deconstruct {
-                ty, fields, value, ..
+            PatternKind::Variant { fields, .. } => {
+                for field in fields {
+                    Self::pattern_bindings(field, bound);
+                }
+            }
+            PatternKind::Tuple { elements, .. } => {
+                for element in elements {
+                    Self::pattern_bindings(element, bound);
+                }
+            }
+            PatternKind::Struct { fields, .. } => {
+                for field in fields {
+                    Self::pattern_bindings(&field.pattern, bound);
+                }
+            }
+            PatternKind::Wildcard
+            | PatternKind::Unit
+            | PatternKind::Int(_)
+            | PatternKind::Float(_)
+            | PatternKind::String(_)
+            | PatternKind::Char(_)
+            | PatternKind::Byte(_) => {}
+        }
+    }
+
+    fn rewrite_pattern(&mut self, pattern: &mut crate::ast::Pattern) {
+        use crate::ast::PatternKind;
+        match &mut pattern.kind {
+            PatternKind::Variant { path, fields, .. } => {
+                if let Some(rewritten) = self.rewrite_value_path(path, path.span) {
+                    path.segments = rewritten;
+                }
+                for field in fields {
+                    self.rewrite_pattern(field);
+                }
+            }
+            PatternKind::Tuple { elements, .. } => {
+                for element in elements {
+                    self.rewrite_pattern(element);
+                }
+            }
+            PatternKind::Struct {
+                name,
+                name_span,
+                fields,
+                ..
             } => {
-                rewrite_expression(
-                    value,
-                    current,
-                    bound,
-                    resolution,
-                    scopes,
-                    effect_sites,
-                    errors,
-                );
-                if let Some(name) = ty
-                    && let Some(definition) = resolve_definition(
-                        resolution,
-                        scopes,
-                        current,
-                        Namespace::Type,
-                        std::slice::from_ref(name),
-                        value.span,
-                        errors,
-                    )
+                if let Some(spelling) =
+                    self.resolved_spelling(Namespace::Type, std::slice::from_ref(name), *name_span)
                 {
-                    *name = resolution.backend_spelling(&definition);
+                    *name = spelling;
                 }
-                bound.extend(fields.iter().filter_map(|field| field.binding.clone()));
+                for field in fields {
+                    self.rewrite_pattern(&mut field.pattern);
+                }
             }
-            crate::ast::Stmt::Assign {
-                destination, value, ..
+            PatternKind::Binding(_)
+            | PatternKind::Wildcard
+            | PatternKind::Unit
+            | PatternKind::Int(_)
+            | PatternKind::Float(_)
+            | PatternKind::String(_)
+            | PatternKind::Char(_)
+            | PatternKind::Byte(_) => {}
+        }
+    }
+
+    fn rewrite_statements(
+        &mut self,
+        statements: &mut Vec<crate::ast::Stmt>,
+        bound: &mut BTreeSet<String>,
+    ) {
+        for statement in statements {
+            match statement {
+                crate::ast::Stmt::Let { name, value, .. } => {
+                    self.rewrite_expression(value, bound);
+                    bound.insert(name.clone());
+                }
+                crate::ast::Stmt::Deconstruct {
+                    ty, fields, value, ..
+                } => {
+                    self.rewrite_expression(value, bound);
+                    if let Some(name) = ty
+                        && let Some(definition) =
+                            self.definition(Namespace::Type, std::slice::from_ref(name), value.span)
+                    {
+                        *name = self.resolution.backend_spelling(&definition);
+                    }
+                    bound.extend(fields.iter().filter_map(|field| field.binding.clone()));
+                }
+                crate::ast::Stmt::Assign {
+                    destination, value, ..
+                } => {
+                    self.rewrite_expression(value, bound);
+                    if let crate::ast::AssignmentPlaceKind::Dereference { reference, .. } =
+                        &mut destination.kind
+                    {
+                        self.rewrite_expression(Rc::make_mut(reference), bound);
+                    }
+                }
+                crate::ast::Stmt::Expr(expression) => self.rewrite_expression(expression, bound),
+            }
+        }
+    }
+
+    fn rewrite_refinement_if(
+        &mut self,
+        callee: &mut crate::ast::Expr,
+        arguments: &mut Vec<crate::ast::Expr>,
+        bound: &BTreeSet<String>,
+    ) -> bool {
+        use crate::ast::ExprKind;
+
+        let ExprKind::Variable(else_path) = &callee.kind else {
+            return false;
+        };
+        if else_path.len() != 1 || else_path[0].as_ref() != "else" {
+            return false;
+        }
+        let [if_expression, negative] = arguments.as_mut_slice() else {
+            return false;
+        };
+        let ExprKind::Call(if_callee, if_arguments) = &mut if_expression.kind else {
+            return false;
+        };
+        let ExprKind::Variable(if_path) = &if_callee.kind else {
+            return false;
+        };
+        if if_path.len() != 1 || if_path[0].as_ref() != "if" {
+            return false;
+        }
+        let [condition, positive] = Rc::make_mut(if_arguments).as_mut_slice() else {
+            return false;
+        };
+        let ExprKind::Is { subject, pattern } = &mut condition.kind else {
+            return false;
+        };
+
+        self.rewrite_expression(callee, bound);
+        self.rewrite_expression(Rc::make_mut(if_callee), bound);
+        self.rewrite_expression(Rc::make_mut(subject), bound);
+        self.rewrite_pattern(Rc::make_mut(pattern));
+
+        let mut positive_bound = bound.clone();
+        Self::pattern_bindings(pattern, &mut positive_bound);
+        self.rewrite_expression(positive, &positive_bound);
+        self.rewrite_expression(negative, bound);
+        true
+    }
+
+    fn rewrite_expression(&mut self, expression: &mut crate::ast::Expr, bound: &BTreeSet<String>) {
+        use crate::ast::ExprKind;
+        match &mut expression.kind {
+            ExprKind::Variable(path) => {
+                let names = path.iter().map(ToString::to_string).collect::<Vec<_>>();
+                if !(names.len() == 1 && bound.contains(&names[0])) {
+                    if let Some(rewritten) = self.rewrite_value_path(&names, expression.span) {
+                        *path = Rc::from(
+                            rewritten
+                                .into_iter()
+                                .map(Rc::<str>::from)
+                                .collect::<Vec<_>>(),
+                        );
+                    } else if package_root(self.resolution, self.current) != ModuleId(0) {
+                        self.errors.push(error(
+                            expression.span,
+                            format!(
+                                "unresolved value path `{}` in dependency package",
+                                names.join("::")
+                            ),
+                        ));
+                    }
+                }
+            }
+            ExprKind::Move(value)
+            | ExprKind::Unary { operand: value, .. }
+            | ExprKind::Labeled { body: value, .. }
+            | ExprKind::LabelDestination { body: value, .. }
+            | ExprKind::Cancel { resumption: value }
+            | ExprKind::Field(value, _) => self.rewrite_expression(Rc::make_mut(value), bound),
+            ExprKind::Closure { params, body } => {
+                let mut nested = bound.clone();
+                nested.extend(params.iter().map(ToString::to_string));
+                self.rewrite_expression(Rc::make_mut(body), &nested);
+            }
+            ExprKind::TypedClosure {
+                params,
+                return_type,
+                outward_effects,
+                body,
+                ..
             } => {
-                rewrite_expression(
-                    value,
-                    current,
-                    bound,
-                    resolution,
-                    scopes,
-                    effect_sites,
-                    errors,
-                );
-                if let crate::ast::AssignmentPlaceKind::Dereference { reference, .. } =
-                    &mut destination.kind
-                {
-                    rewrite_expression(
-                        Rc::make_mut(reference),
-                        current,
-                        bound,
-                        resolution,
-                        scopes,
-                        effect_sites,
-                        errors,
-                    );
+                for parameter in Rc::make_mut(params) {
+                    self.rewrite_type(&mut parameter.ty);
                 }
-            }
-            crate::ast::Stmt::Expr(expression) => rewrite_expression(
-                expression,
-                current,
-                bound,
-                resolution,
-                scopes,
-                effect_sites,
-                errors,
-            ),
-        }
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn rewrite_refinement_if(
-    callee: &mut crate::ast::Expr,
-    arguments: &mut Vec<crate::ast::Expr>,
-    current: ModuleId,
-    bound: &BTreeSet<String>,
-    resolution: &mut ModuleResolution,
-    scopes: &Scopes,
-    effect_sites: &BTreeMap<(usize, usize), String>,
-    errors: &mut Vec<Diagnostic>,
-) -> bool {
-    use crate::ast::ExprKind;
-
-    let ExprKind::Variable(else_path) = &callee.kind else {
-        return false;
-    };
-    if else_path.len() != 1 || else_path[0].as_ref() != "else" {
-        return false;
-    }
-    let [if_expression, negative] = arguments.as_mut_slice() else {
-        return false;
-    };
-    let ExprKind::Call(if_callee, if_arguments) = &mut if_expression.kind else {
-        return false;
-    };
-    let ExprKind::Variable(if_path) = &if_callee.kind else {
-        return false;
-    };
-    if if_path.len() != 1 || if_path[0].as_ref() != "if" {
-        return false;
-    }
-    let [condition, positive] = Rc::make_mut(if_arguments).as_mut_slice() else {
-        return false;
-    };
-    let ExprKind::Is { subject, pattern } = &mut condition.kind else {
-        return false;
-    };
-
-    rewrite_expression(
-        callee,
-        current,
-        bound,
-        resolution,
-        scopes,
-        effect_sites,
-        errors,
-    );
-    rewrite_expression(
-        Rc::make_mut(if_callee),
-        current,
-        bound,
-        resolution,
-        scopes,
-        effect_sites,
-        errors,
-    );
-    rewrite_expression(
-        Rc::make_mut(subject),
-        current,
-        bound,
-        resolution,
-        scopes,
-        effect_sites,
-        errors,
-    );
-    rewrite_pattern(Rc::make_mut(pattern), current, resolution, scopes, errors);
-
-    let mut positive_bound = bound.clone();
-    pattern_bindings(pattern, &mut positive_bound);
-    rewrite_expression(
-        positive,
-        current,
-        &positive_bound,
-        resolution,
-        scopes,
-        effect_sites,
-        errors,
-    );
-    rewrite_expression(
-        negative,
-        current,
-        bound,
-        resolution,
-        scopes,
-        effect_sites,
-        errors,
-    );
-    true
-}
-
-#[allow(clippy::too_many_arguments)]
-fn rewrite_expression(
-    expression: &mut crate::ast::Expr,
-    current: ModuleId,
-    bound: &BTreeSet<String>,
-    resolution: &mut ModuleResolution,
-    scopes: &Scopes,
-    effect_sites: &BTreeMap<(usize, usize), String>,
-    errors: &mut Vec<Diagnostic>,
-) {
-    use crate::ast::ExprKind;
-    match &mut expression.kind {
-        ExprKind::Variable(path) => {
-            let names = path.iter().map(ToString::to_string).collect::<Vec<_>>();
-            if !(names.len() == 1 && bound.contains(&names[0])) {
-                if let Some(rewritten) =
-                    rewrite_value_path(&names, expression.span, current, resolution, scopes, errors)
-                {
-                    *path = Rc::from(
-                        rewritten
-                            .into_iter()
-                            .map(Rc::<str>::from)
-                            .collect::<Vec<_>>(),
-                    );
-                } else if package_root(resolution, current) != ModuleId(0) {
-                    errors.push(error(
-                        expression.span,
-                        format!(
-                            "unresolved value path `{}` in dependency package",
-                            names.join("::")
-                        ),
-                    ));
+                if let Some(result) = return_type {
+                    self.rewrite_type(Rc::make_mut(result));
                 }
-            }
-        }
-        ExprKind::Move(value)
-        | ExprKind::Unary { operand: value, .. }
-        | ExprKind::Labeled { body: value, .. }
-        | ExprKind::LabelDestination { body: value, .. }
-        | ExprKind::Cancel { resumption: value }
-        | ExprKind::Field(value, _) => rewrite_expression(
-            Rc::make_mut(value),
-            current,
-            bound,
-            resolution,
-            scopes,
-            effect_sites,
-            errors,
-        ),
-        ExprKind::Closure { params, body } => {
-            let mut nested = bound.clone();
-            nested.extend(params.iter().map(ToString::to_string));
-            rewrite_expression(
-                Rc::make_mut(body),
-                current,
-                &nested,
-                resolution,
-                scopes,
-                effect_sites,
-                errors,
-            );
-        }
-        ExprKind::TypedClosure {
-            params,
-            return_type,
-            outward_effects,
-            body,
-            ..
-        } => {
-            for parameter in Rc::make_mut(params) {
-                rewrite_type(&mut parameter.ty, current, resolution, scopes, errors);
-            }
-            if let Some(result) = return_type {
-                rewrite_type(Rc::make_mut(result), current, resolution, scopes, errors);
-            }
-            if let Some(row) = outward_effects {
-                rewrite_effect_row(Rc::make_mut(row), current, resolution, scopes, errors);
-            }
-            let mut nested = bound.clone();
-            nested.extend(params.iter().map(|parameter| parameter.name.clone()));
-            rewrite_expression(
-                Rc::make_mut(body),
-                current,
-                &nested,
-                resolution,
-                scopes,
-                effect_sites,
-                errors,
-            );
-        }
-        ExprKind::Leave { value, .. }
-        | ExprKind::Resume { value, .. }
-        | ExprKind::TailResume { value, .. } => {
-            if let Some(value) = value {
-                rewrite_expression(
-                    Rc::make_mut(value),
-                    current,
-                    bound,
-                    resolution,
-                    scopes,
-                    effect_sites,
-                    errors,
-                );
-            }
-            match &mut expression.kind {
-                ExprKind::Resume { resumption, .. } | ExprKind::TailResume { resumption, .. } => {
-                    rewrite_expression(
-                        Rc::make_mut(resumption),
-                        current,
-                        bound,
-                        resolution,
-                        scopes,
-                        effect_sites,
-                        errors,
-                    )
-                }
-                _ => {}
-            }
-        }
-        ExprKind::ContextBlock(statements) | ExprKind::Block(statements) => {
-            let mut nested = bound.clone();
-            rewrite_statements(
-                Rc::make_mut(statements),
-                current,
-                &mut nested,
-                resolution,
-                scopes,
-                effect_sites,
-                errors,
-            );
-        }
-        ExprKind::List(values) | ExprKind::Tuple(values) => {
-            for value in Rc::make_mut(values) {
-                rewrite_expression(
-                    value,
-                    current,
-                    bound,
-                    resolution,
-                    scopes,
-                    effect_sites,
-                    errors,
-                );
-            }
-        }
-        ExprKind::Struct { name, fields } => {
-            let source_name = name.to_string();
-            if let Some(definition) = resolve_definition(
-                resolution,
-                scopes,
-                current,
-                Namespace::Type,
-                std::slice::from_ref(&source_name),
-                expression.span,
-                errors,
-            ) {
-                *name = Rc::from(resolution.backend_spelling(&definition));
-            }
-            for (_, value) in Rc::make_mut(fields) {
-                rewrite_expression(
-                    value,
-                    current,
-                    bound,
-                    resolution,
-                    scopes,
-                    effect_sites,
-                    errors,
-                );
-            }
-        }
-        ExprKind::Call(callee, arguments) => {
-            if rewrite_refinement_if(
-                Rc::make_mut(callee),
-                Rc::make_mut(arguments),
-                current,
-                bound,
-                resolution,
-                scopes,
-                effect_sites,
-                errors,
-            ) {
-                return;
-            }
-            rewrite_expression(
-                Rc::make_mut(callee),
-                current,
-                bound,
-                resolution,
-                scopes,
-                effect_sites,
-                errors,
-            );
-            for argument in Rc::make_mut(arguments) {
-                rewrite_expression(
-                    argument,
-                    current,
-                    bound,
-                    resolution,
-                    scopes,
-                    effect_sites,
-                    errors,
-                );
-            }
-        }
-        ExprKind::Perform { effect, args, .. } => {
-            if let Some(spelling) = effect_sites.get(&(expression.span.start, expression.span.end))
-            {
-                *effect = Rc::from(spelling.as_str());
-            } else {
-                let name = effect.to_string();
-                if let Some(definition) = resolve_definition(
-                    resolution,
-                    scopes,
-                    current,
-                    Namespace::Effect,
-                    std::slice::from_ref(&name),
-                    expression.span,
-                    errors,
-                ) {
-                    *effect = Rc::from(resolution.backend_spelling(&definition));
-                }
-            }
-            for argument in Rc::make_mut(args) {
-                rewrite_expression(
-                    argument,
-                    current,
-                    bound,
-                    resolution,
-                    scopes,
-                    effect_sites,
-                    errors,
-                );
-            }
-        }
-        ExprKind::Handle {
-            computation,
-            clauses,
-        } => {
-            rewrite_expression(
-                Rc::make_mut(computation),
-                current,
-                bound,
-                resolution,
-                scopes,
-                effect_sites,
-                errors,
-            );
-            for clause in Rc::make_mut(clauses) {
-                let effect = clause.effect.clone();
-                if let Some(definition) = resolve_definition(
-                    resolution,
-                    scopes,
-                    current,
-                    Namespace::Effect,
-                    std::slice::from_ref(&effect),
-                    clause.span,
-                    errors,
-                ) {
-                    clause.effect = resolution.backend_spelling(&definition);
+                if let Some(row) = outward_effects {
+                    self.rewrite_effect_row(Rc::make_mut(row));
                 }
                 let mut nested = bound.clone();
-                for pattern in &mut clause.patterns {
-                    rewrite_pattern(pattern, current, resolution, scopes, errors);
-                    pattern_bindings(pattern, &mut nested);
-                }
-                if let Some(resumption) = &clause.resumption {
-                    nested.insert(resumption.clone());
-                }
-                rewrite_expression(
-                    &mut clause.body,
-                    current,
-                    &nested,
-                    resolution,
-                    scopes,
-                    effect_sites,
-                    errors,
-                );
+                nested.extend(params.iter().map(|parameter| parameter.name.clone()));
+                self.rewrite_expression(Rc::make_mut(body), &nested);
             }
+            ExprKind::Leave { value, .. }
+            | ExprKind::Resume { value, .. }
+            | ExprKind::TailResume { value, .. } => {
+                if let Some(value) = value {
+                    self.rewrite_expression(Rc::make_mut(value), bound);
+                }
+                match &mut expression.kind {
+                    ExprKind::Resume { resumption, .. }
+                    | ExprKind::TailResume { resumption, .. } => {
+                        self.rewrite_expression(Rc::make_mut(resumption), bound)
+                    }
+                    _ => {}
+                }
+            }
+            ExprKind::ContextBlock(statements) | ExprKind::Block(statements) => {
+                let mut nested = bound.clone();
+                self.rewrite_statements(Rc::make_mut(statements), &mut nested);
+            }
+            ExprKind::List(values) | ExprKind::Tuple(values) => {
+                for value in Rc::make_mut(values) {
+                    self.rewrite_expression(value, bound);
+                }
+            }
+            ExprKind::Struct { name, fields } => {
+                let source_name = name.to_string();
+                if let Some(definition) = resolve_definition(
+                    self.resolution,
+                    self.scopes,
+                    self.current,
+                    Namespace::Type,
+                    std::slice::from_ref(&source_name),
+                    expression.span,
+                    self.errors,
+                ) {
+                    *name = Rc::from(self.resolution.backend_spelling(&definition));
+                }
+                for (_, value) in Rc::make_mut(fields) {
+                    self.rewrite_expression(value, bound);
+                }
+            }
+            ExprKind::Call(callee, arguments) => {
+                if self.rewrite_refinement_if(Rc::make_mut(callee), Rc::make_mut(arguments), bound)
+                {
+                    return;
+                }
+                self.rewrite_expression(Rc::make_mut(callee), bound);
+                for argument in Rc::make_mut(arguments) {
+                    self.rewrite_expression(argument, bound);
+                }
+            }
+            ExprKind::Perform { effect, args, .. } => {
+                if let Some(spelling) = self
+                    .effect_sites
+                    .get(&(expression.span.start, expression.span.end))
+                {
+                    *effect = Rc::from(spelling.as_str());
+                } else {
+                    let name = effect.to_string();
+                    if let Some(definition) = resolve_definition(
+                        self.resolution,
+                        self.scopes,
+                        self.current,
+                        Namespace::Effect,
+                        std::slice::from_ref(&name),
+                        expression.span,
+                        self.errors,
+                    ) {
+                        *effect = Rc::from(self.resolution.backend_spelling(&definition));
+                    }
+                }
+                for argument in Rc::make_mut(args) {
+                    self.rewrite_expression(argument, bound);
+                }
+            }
+            ExprKind::Handle {
+                computation,
+                clauses,
+            } => {
+                self.rewrite_expression(Rc::make_mut(computation), bound);
+                for clause in Rc::make_mut(clauses) {
+                    let effect = clause.effect.clone();
+                    if let Some(definition) = resolve_definition(
+                        self.resolution,
+                        self.scopes,
+                        self.current,
+                        Namespace::Effect,
+                        std::slice::from_ref(&effect),
+                        clause.span,
+                        self.errors,
+                    ) {
+                        clause.effect = self.resolution.backend_spelling(&definition);
+                    }
+                    let mut nested = bound.clone();
+                    for pattern in &mut clause.patterns {
+                        self.rewrite_pattern(pattern);
+                        Self::pattern_bindings(pattern, &mut nested);
+                    }
+                    if let Some(resumption) = &clause.resumption {
+                        nested.insert(resumption.clone());
+                    }
+                    self.rewrite_expression(&mut clause.body, &nested);
+                }
+            }
+            ExprKind::Binary { lhs, rhs, .. } => {
+                self.rewrite_expression(Rc::make_mut(lhs), bound);
+                self.rewrite_expression(Rc::make_mut(rhs), bound);
+            }
+            ExprKind::Is { subject, pattern } => {
+                self.rewrite_expression(Rc::make_mut(subject), bound);
+                self.rewrite_pattern(Rc::make_mut(pattern));
+            }
+            ExprKind::Unit
+            | ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::String(_)
+            | ExprKind::Char(_)
+            | ExprKind::Byte(_)
+            | ExprKind::ByteString(_)
+            | ExprKind::LabelReference(_) => {}
         }
-        ExprKind::Binary { lhs, rhs, .. } => {
-            rewrite_expression(
-                Rc::make_mut(lhs),
-                current,
-                bound,
-                resolution,
-                scopes,
-                effect_sites,
-                errors,
-            );
-            rewrite_expression(
-                Rc::make_mut(rhs),
-                current,
-                bound,
-                resolution,
-                scopes,
-                effect_sites,
-                errors,
-            );
-        }
-        ExprKind::Is { subject, pattern } => {
-            rewrite_expression(
-                Rc::make_mut(subject),
-                current,
-                bound,
-                resolution,
-                scopes,
-                effect_sites,
-                errors,
-            );
-            rewrite_pattern(Rc::make_mut(pattern), current, resolution, scopes, errors);
-        }
-        ExprKind::Unit
-        | ExprKind::Int(_)
-        | ExprKind::Float(_)
-        | ExprKind::String(_)
-        | ExprKind::Char(_)
-        | ExprKind::Byte(_)
-        | ExprKind::ByteString(_)
-        | ExprKind::LabelReference(_) => {}
     }
-}
 
-fn rewrite_where_clause(
-    clause: Option<&mut crate::ast::WhereClause>,
-    current: ModuleId,
-    resolution: &mut ModuleResolution,
-    scopes: &Scopes,
-    errors: &mut Vec<Diagnostic>,
-) {
-    let Some(clause) = clause else { return };
-    for goal in &mut clause.goals {
-        rewrite_type(&mut goal.subject, current, resolution, scopes, errors);
-        rewrite_trait_ref(&mut goal.relation, current, resolution, scopes, errors);
+    fn rewrite_where_clause(&mut self, clause: Option<&mut crate::ast::WhereClause>) {
+        let Some(clause) = clause else { return };
+        for goal in &mut clause.goals {
+            self.rewrite_type(&mut goal.subject);
+            self.rewrite_trait_ref(&mut goal.relation);
+        }
     }
-}
 
-fn rewrite_method(
-    method: &mut crate::ast::TraitMethod,
-    current: ModuleId,
-    resolution: &mut ModuleResolution,
-    scopes: &Scopes,
-    effect_sites: &BTreeMap<(usize, usize), String>,
-    errors: &mut Vec<Diagnostic>,
-) {
-    for parameter in &mut method.params {
-        rewrite_type(&mut parameter.ty, current, resolution, scopes, errors);
-    }
-    if let Some(result) = &mut method.return_type {
-        rewrite_type(result, current, resolution, scopes, errors);
-    }
-    if let Some(row) = &mut method.outward_effects {
-        rewrite_effect_row(row, current, resolution, scopes, errors);
-    }
-    rewrite_where_clause(
-        method.where_clause.as_mut(),
-        current,
-        resolution,
-        scopes,
-        errors,
-    );
-    if let Some(body) = &mut method.body {
-        let bound = method
-            .params
-            .iter()
-            .map(|parameter| parameter.name.clone())
-            .chain(std::iter::once("self".to_string()))
-            .collect();
-        rewrite_expression(
-            body,
-            current,
-            &bound,
-            resolution,
-            scopes,
-            effect_sites,
-            errors,
-        );
+    fn rewrite_method(&mut self, method: &mut crate::ast::TraitMethod) {
+        for parameter in &mut method.params {
+            self.rewrite_type(&mut parameter.ty);
+        }
+        if let Some(result) = &mut method.return_type {
+            self.rewrite_type(result);
+        }
+        if let Some(row) = &mut method.outward_effects {
+            self.rewrite_effect_row(row);
+        }
+        self.rewrite_where_clause(method.where_clause.as_mut());
+        if let Some(body) = &mut method.body {
+            let bound = method
+                .params
+                .iter()
+                .map(|parameter| parameter.name.clone())
+                .chain(std::iter::once("self".to_string()))
+                .collect();
+            self.rewrite_expression(body, &bound);
+        }
     }
 }
 
@@ -1299,40 +970,40 @@ fn rewrite_program_ast(
         }
     }
 
+    let mut rewrite = AstRewriter {
+        current: ModuleId(0),
+        resolution,
+        scopes,
+        effect_sites: &effect_sites,
+        errors: &mut errors,
+    };
+
     for declaration in &mut program.type_aliases {
-        let current = resolution
+        rewrite.current = rewrite
+            .resolution
             .owner(bundle, declaration.span)
             .unwrap_or(ModuleId(0));
-        rewrite_type(
-            &mut declaration.target,
-            current,
-            resolution,
-            scopes,
-            &mut errors,
-        );
+        rewrite.rewrite_type(&mut declaration.target);
     }
     for declaration in &mut program.effect_row_aliases {
-        let current = resolution
+        rewrite.current = rewrite
+            .resolution
             .owner(bundle, declaration.span)
             .unwrap_or(ModuleId(0));
-        rewrite_effect_row(
-            &mut declaration.row,
-            current,
-            resolution,
-            scopes,
-            &mut errors,
-        );
+        rewrite.rewrite_effect_row(&mut declaration.row);
     }
     for declaration in &mut program.structs {
-        let current = resolution
+        rewrite.current = rewrite
+            .resolution
             .owner(bundle, declaration.span)
             .unwrap_or(ModuleId(0));
         for field in &mut declaration.fields {
-            rewrite_type(&mut field.ty, current, resolution, scopes, &mut errors);
+            rewrite.rewrite_type(&mut field.ty);
         }
     }
     for declaration in &mut program.enums {
-        let current = resolution
+        rewrite.current = rewrite
+            .resolution
             .owner(bundle, declaration.span)
             .unwrap_or(ModuleId(0));
         for field in declaration
@@ -1340,181 +1011,100 @@ fn rewrite_program_ast(
             .iter_mut()
             .flat_map(|variant| &mut variant.fields)
         {
-            rewrite_type(field, current, resolution, scopes, &mut errors);
+            rewrite.rewrite_type(field);
         }
     }
     for declaration in &mut program.effects {
-        let current = resolution
+        rewrite.current = rewrite
+            .resolution
             .owner(bundle, declaration.span)
             .unwrap_or(ModuleId(0));
         for operation in &mut declaration.operations {
             for parameter in &mut operation.params {
-                rewrite_type(&mut parameter.ty, current, resolution, scopes, &mut errors);
+                rewrite.rewrite_type(&mut parameter.ty);
             }
             if let Some(result) = &mut operation.return_type {
-                rewrite_type(result, current, resolution, scopes, &mut errors);
+                rewrite.rewrite_type(result);
             }
         }
     }
     for declaration in &mut program.traits {
-        let current = resolution
+        rewrite.current = rewrite
+            .resolution
             .owner(bundle, declaration.span)
             .unwrap_or(ModuleId(0));
         for relation in &mut declaration.supertraits {
-            rewrite_trait_ref(relation, current, resolution, scopes, &mut errors);
+            rewrite.rewrite_trait_ref(relation);
         }
         for method in &mut declaration.methods {
-            rewrite_method(
-                method,
-                current,
-                resolution,
-                scopes,
-                &effect_sites,
-                &mut errors,
-            );
+            rewrite.rewrite_method(method);
         }
     }
     for declaration in &mut program.impls {
-        let current = resolution
+        rewrite.current = rewrite
+            .resolution
             .owner(bundle, declaration.span)
             .unwrap_or(ModuleId(0));
-        rewrite_type(
-            &mut declaration.self_ty,
-            current,
-            resolution,
-            scopes,
-            &mut errors,
-        );
-        rewrite_trait_ref(
-            &mut declaration.trait_ref,
-            current,
-            resolution,
-            scopes,
-            &mut errors,
-        );
-        rewrite_where_clause(
-            declaration.where_clause.as_mut(),
-            current,
-            resolution,
-            scopes,
-            &mut errors,
-        );
+        rewrite.rewrite_type(&mut declaration.self_ty);
+        rewrite.rewrite_trait_ref(&mut declaration.trait_ref);
+        rewrite.rewrite_where_clause(declaration.where_clause.as_mut());
         for associated in &mut declaration.associated_types {
             match &mut associated.value {
-                crate::ast::AssociatedBindingValue::Type(value) => {
-                    rewrite_type(value, current, resolution, scopes, &mut errors)
-                }
+                crate::ast::AssociatedBindingValue::Type(value) => rewrite.rewrite_type(value),
                 crate::ast::AssociatedBindingValue::EffectRow(row) => {
-                    rewrite_effect_row(row, current, resolution, scopes, &mut errors)
+                    rewrite.rewrite_effect_row(row)
                 }
             }
         }
         for method in &mut declaration.methods {
-            rewrite_method(
-                method,
-                current,
-                resolution,
-                scopes,
-                &effect_sites,
-                &mut errors,
-            );
+            rewrite.rewrite_method(method);
         }
     }
     for declaration in &mut program.uses {
-        let current = resolution
+        rewrite.current = rewrite
+            .resolution
             .owner(bundle, declaration.span)
             .unwrap_or(ModuleId(0));
-        rewrite_type(
-            &mut declaration.target,
-            current,
-            resolution,
-            scopes,
-            &mut errors,
-        );
-        rewrite_where_clause(
-            declaration.where_clause.as_mut(),
-            current,
-            resolution,
-            scopes,
-            &mut errors,
-        );
+        rewrite.rewrite_type(&mut declaration.target);
+        rewrite.rewrite_where_clause(declaration.where_clause.as_mut());
     }
     for declaration in &mut program.drops {
-        let current = resolution
+        rewrite.current = rewrite
+            .resolution
             .owner(bundle, declaration.span)
             .unwrap_or(ModuleId(0));
-        rewrite_type(
-            &mut declaration.target_type,
-            current,
-            resolution,
-            scopes,
-            &mut errors,
-        );
-        rewrite_where_clause(
-            declaration.where_clause.as_mut(),
-            current,
-            resolution,
-            scopes,
-            &mut errors,
-        );
-        rewrite_expression(
-            &mut declaration.body,
-            current,
-            &BTreeSet::from(["self".to_string()]),
-            resolution,
-            scopes,
-            &effect_sites,
-            &mut errors,
-        );
+        rewrite.rewrite_type(&mut declaration.target_type);
+        rewrite.rewrite_where_clause(declaration.where_clause.as_mut());
+        rewrite.rewrite_expression(&mut declaration.body, &BTreeSet::from(["self".to_string()]));
     }
     for declaration in &mut program.globals {
-        let current = resolution
+        rewrite.current = rewrite
+            .resolution
             .owner(bundle, declaration.span)
             .unwrap_or(ModuleId(0));
-        rewrite_expression(
-            &mut declaration.value,
-            current,
-            &BTreeSet::new(),
-            resolution,
-            scopes,
-            &effect_sites,
-            &mut errors,
-        );
+        rewrite.rewrite_expression(&mut declaration.value, &BTreeSet::new());
     }
     for function in &mut program.functions {
-        let current = resolution
+        rewrite.current = rewrite
+            .resolution
             .owner(bundle, function.span)
             .unwrap_or(ModuleId(0));
         for parameter in &mut function.params {
-            rewrite_type(&mut parameter.ty, current, resolution, scopes, &mut errors);
+            rewrite.rewrite_type(&mut parameter.ty);
         }
         if let Some(result) = &mut function.return_type {
-            rewrite_type(result, current, resolution, scopes, &mut errors);
+            rewrite.rewrite_type(result);
         }
         if let Some(row) = &mut function.outward_effects {
-            rewrite_effect_row(row, current, resolution, scopes, &mut errors);
+            rewrite.rewrite_effect_row(row);
         }
-        rewrite_where_clause(
-            function.where_clause.as_mut(),
-            current,
-            resolution,
-            scopes,
-            &mut errors,
-        );
+        rewrite.rewrite_where_clause(function.where_clause.as_mut());
         let bound = function
             .params
             .iter()
             .map(|parameter| parameter.name.clone())
             .collect();
-        rewrite_expression(
-            &mut function.body,
-            current,
-            &bound,
-            resolution,
-            scopes,
-            &effect_sites,
-            &mut errors,
-        );
+        rewrite.rewrite_expression(&mut function.body, &bound);
     }
 
     // Declarations are renamed last so every lookup above uses source names.
