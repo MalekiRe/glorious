@@ -202,8 +202,8 @@ fn resumption_operations_are_structural_not_spelled_calls() {
 
 #[test]
 fn is_expressions_retain_subject_and_nested_pattern() {
-    let program =
-        parse_ok("main() -> { value is Shape::Circle(radius, (x, y), Point { x: px, .. }) }");
+    let source = "main() -> { value is Shape::Circle(radius, (x, y), Point { x: px, .. }) }";
+    let program = parse_ok(source);
     let ExprKind::Is { subject, pattern } = body_expr(&program, "main") else {
         panic!("expected an is expression");
     };
@@ -211,17 +211,25 @@ fn is_expressions_retain_subject_and_nested_pattern() {
     let PatternKind::Variant { path, fields, .. } = &pattern.kind else {
         panic!("expected a variant pattern");
     };
-    assert_eq!(path, &vec!["Shape".to_string(), "Circle".to_string()]);
+    assert_eq!(path.segments, ["Shape", "Circle"]);
+    assert_eq!(&source[path.span.range()], "Shape::Circle");
     assert!(matches!(fields[0].kind, PatternKind::Binding(_)));
     let PatternKind::Tuple { elements, rest } = &fields[1].kind else {
         panic!("expected a tuple pattern");
     };
     assert_eq!(elements.len(), 2);
     assert!(rest.is_none());
-    let PatternKind::Struct { name, fields, rest } = &fields[2].kind else {
+    let PatternKind::Struct {
+        name,
+        name_span,
+        fields,
+        rest,
+    } = &fields[2].kind
+    else {
         panic!("expected a struct pattern");
     };
     assert_eq!(name, "Point");
+    assert_eq!(&source[name_span.range()], "Point");
     assert_eq!(fields[0].field, "x");
     assert!(rest.is_some());
 
