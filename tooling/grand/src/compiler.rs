@@ -6,10 +6,10 @@ use std::{
     sync::Mutex,
 };
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
-use crate::contract::{parse_stderr, Capabilities, Declaration, Diagnostic};
+use crate::contract::{Capabilities, Declaration, Diagnostic, parse_stderr};
 use crate::util::find_upwards;
 
 const SUPPORTED_CONTRACT: u32 = 1;
@@ -96,6 +96,7 @@ struct SessionResponse {
     protocol: u32,
     id: Option<u64>,
     status: u8,
+    stdout: String,
     stderr: String,
     generation: u64,
     transaction: String,
@@ -480,6 +481,21 @@ impl Compiler {
         if !self.caps.has_phase("resolve") {
             return Ok(None);
         }
+        let mut arguments = vec![
+            OsString::from("--diagnostics"),
+            OsString::from("json"),
+            OsString::from("--phase"),
+            OsString::from("resolve"),
+        ];
+        arguments.extend(inputs.iter().map(|path| path.as_os_str().to_owned()));
+        if let Some(response) = self.request_session(&arguments)? {
+            let (diagnostics, passthrough) = parse_stderr(&response.stderr);
+            return Ok(Some(CompileReport {
+                success: response.status == 0,
+                diagnostics,
+                passthrough,
+            }));
+        }
         {
             let mut command = Command::new(&self.path);
             if self.caps.diagnostics_json {
@@ -521,9 +537,7 @@ impl Compiler {
                     );
                 }
                 if !vm.accepts_seed_identity(identity) {
-                    bail!(
-                        "VM does not accept compiler released-seed identity `{identity}`"
-                    );
+                    bail!("VM does not accept compiler released-seed identity `{identity}`");
                 }
                 Ok(())
             }
@@ -537,6 +551,16 @@ impl Compiler {
     pub fn interfaces(&self, inputs: &[PathBuf]) -> Result<Vec<Declaration>> {
         match self.caps.can_emit("interfaces-json") {
             true => {
+                let mut arguments =
+                    vec![OsString::from("--emit"), OsString::from("interfaces-json")];
+                arguments.extend(inputs.iter().map(|path| path.as_os_str().to_owned()));
+                if let Some(response) = self.request_session(&arguments)? {
+                    if response.status != 0 {
+                        bail!("compiler interface scan failed: {}", response.stderr.trim());
+                    }
+                    return serde_json::from_str(&response.stdout)
+                        .context("parsing interfaces-json");
+                }
                 let mut command = Command::new(&self.path);
                 command.args(["--emit", "interfaces-json"]).args(inputs);
                 let stdout = crate::util::run_command(command, "compiler interface scan")?;
@@ -550,6 +574,20 @@ impl Compiler {
     pub fn std_interfaces(&self) -> Result<Vec<Declaration>> {
         match self.caps.can_emit("std-interfaces-json") {
             true => {
+                let arguments = [
+                    OsString::from("--emit"),
+                    OsString::from("std-interfaces-json"),
+                ];
+                if let Some(response) = self.request_session(&arguments)? {
+                    if response.status != 0 {
+                        bail!(
+                            "compiler standard interface scan failed: {}",
+                            response.stderr.trim()
+                        );
+                    }
+                    return serde_json::from_str(&response.stdout)
+                        .context("parsing std-interfaces-json");
+                }
                 let mut command = Command::new(&self.path);
                 command.args(["--emit", "std-interfaces-json"]);
                 let stdout = crate::util::run_command(command, "compiler std interface scan")?;
@@ -636,9 +674,7 @@ fn probe_vm(path: PathBuf) -> Result<VmToolchain> {
                 && capabilities
                     .accepted_seed_identities
                     .windows(2)
-                    .all(|pair| pair[0] < pair[1]) =>
-        {
-        }
+                    .all(|pair| pair[0] < pair[1]) => {}
         _ => bail!(
             "VM seed identity metadata is incomplete or noncanonical; version and a sorted unique nonempty acceptance set are required together"
         ),
@@ -682,7 +718,7 @@ fn which(name: &str) -> Result<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{executable_digest, find_checkout_release_tool, Compiler};
+    use super::{Compiler, executable_digest, find_checkout_release_tool};
 
     #[cfg(unix)]
     fn session_compiler(directory: &std::path::Path) -> (Compiler, std::path::PathBuf) {
