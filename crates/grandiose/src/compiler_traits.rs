@@ -13,6 +13,7 @@ use crate::ast::{
 };
 use crate::compiler_typeck::{
     DeclarationKey, GenericParamKey, NominalInstanceKey, NominalKey, ProvisionalType,
+    provisional_signature_type_any,
 };
 use crate::diagnostic::Diagnostic;
 
@@ -5316,26 +5317,12 @@ impl ConstructorMeasure {
 }
 
 fn provisional_measure(ty: &ProvisionalType) -> usize {
-    match ty {
-        ProvisionalType::Predefined(_) | ProvisionalType::Param(_) => 1,
-        ProvisionalType::Nominal(instance) => {
-            1 + instance
-                .arguments
-                .iter()
-                .map(provisional_measure)
-                .sum::<usize>()
-        }
-        ProvisionalType::Shared(referent) | ProvisionalType::Unique(referent) => {
-            1 + provisional_measure(referent)
-        }
-        ProvisionalType::Tuple(elements) => {
-            1 + elements.iter().map(provisional_measure).sum::<usize>()
-        }
-        ProvisionalType::Callable(shape) => {
-            1 + shape.params.iter().map(provisional_measure).sum::<usize>()
-                + provisional_measure(&shape.result)
-        }
-    }
+    let mut measure = 0;
+    provisional_signature_type_any(ty, &mut |_| {
+        measure += 1;
+        false
+    });
+    measure
 }
 
 fn pattern_measure(pattern: &Pattern) -> Option<ConstructorMeasure> {

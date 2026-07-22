@@ -497,6 +497,146 @@ impl ProvisionalType {
     }
 }
 
+/// Rebuilds the provisional type algebra while allowing a pass to replace any
+/// node. Pass-specific binder and cycle rules belong in `fold_type`; the
+/// exhaustive structural recursion stays here.
+pub(crate) trait ProvisionalTypeFolder {
+    type Error;
+
+    fn fold_type(&mut self, ty: &ProvisionalType) -> Result<ProvisionalType, Self::Error> {
+        fold_provisional_type_children(self, ty)
+    }
+
+    fn fold_callable_effect(
+        &mut self,
+        effect: &CallableEffect,
+    ) -> Result<CallableEffect, Self::Error> {
+        Ok(CallableEffect {
+            declaration: effect.declaration.clone(),
+            arguments: effect
+                .arguments
+                .iter()
+                .map(|argument| self.fold_type(argument))
+                .collect::<Result<_, _>>()?,
+        })
+    }
+}
+
+pub(crate) fn fold_provisional_type_children<F: ProvisionalTypeFolder + ?Sized>(
+    folder: &mut F,
+    ty: &ProvisionalType,
+) -> Result<ProvisionalType, F::Error> {
+    Ok(match ty {
+        ProvisionalType::Predefined(_) | ProvisionalType::Param(_) => ty.clone(),
+        ProvisionalType::Nominal(instance) => ProvisionalType::Nominal(NominalInstanceKey {
+            declaration: instance.declaration.clone(),
+            arguments: instance
+                .arguments
+                .iter()
+                .map(|argument| folder.fold_type(argument))
+                .collect::<Result<_, _>>()?,
+        }),
+        ProvisionalType::Tuple(elements) => ProvisionalType::Tuple(
+            elements
+                .iter()
+                .map(|element| folder.fold_type(element))
+                .collect::<Result<_, _>>()?,
+        ),
+        ProvisionalType::Shared(referent) => ProvisionalType::shared(folder.fold_type(referent)?),
+        ProvisionalType::Unique(referent) => ProvisionalType::unique(folder.fold_type(referent)?),
+        ProvisionalType::Callable(shape) => ProvisionalType::Callable(Box::new(CallableShape {
+            params: shape
+                .params
+                .iter()
+                .map(|param| folder.fold_type(param))
+                .collect::<Result<_, _>>()?,
+            result: folder.fold_type(&shape.result)?,
+            effects: shape
+                .effects
+                .iter()
+                .map(|effect| folder.fold_callable_effect(effect))
+                .collect::<Result<_, _>>()?,
+            effect_tail: shape.effect_tail.clone(),
+            infer_effects: shape.infer_effects,
+        })),
+    })
+}
+
+/// Pre-order query over every type-bearing edge, including callable effects.
+/// Returning true prunes that node, which makes both `any` and negated `all`
+/// queries cheap without another family of recursive matches.
+pub(crate) fn provisional_type_any(
+    ty: &ProvisionalType,
+    predicate: &mut impl FnMut(&ProvisionalType) -> bool,
+) -> bool {
+    provisional_type_any_with(ty, predicate, true)
+}
+
+/// Variant for signature-only policies whose callable effect row is already
+/// canonical and intentionally outside the analysis.
+pub(crate) fn provisional_signature_type_any(
+    ty: &ProvisionalType,
+    predicate: &mut impl FnMut(&ProvisionalType) -> bool,
+) -> bool {
+    provisional_type_any_with(ty, predicate, false)
+}
+
+/// Applies a predicate to the immediate signature children of `ty`. Recursive
+/// relations can call themselves from the predicate without causing the
+/// generic traversal to revisit the same subtree.
+pub(crate) fn provisional_signature_children_any(
+    ty: &ProvisionalType,
+    predicate: &mut impl FnMut(&ProvisionalType) -> bool,
+) -> bool {
+    match ty {
+        ProvisionalType::Nominal(instance) => instance.arguments.iter().any(predicate),
+        ProvisionalType::Tuple(elements) => elements.iter().any(predicate),
+        ProvisionalType::Shared(referent) | ProvisionalType::Unique(referent) => {
+            predicate(referent)
+        }
+        ProvisionalType::Callable(shape) => shape
+            .params
+            .iter()
+            .chain(std::iter::once(&shape.result))
+            .any(predicate),
+        ProvisionalType::Predefined(_) | ProvisionalType::Param(_) => false,
+    }
+}
+
+fn provisional_type_any_with(
+    ty: &ProvisionalType,
+    predicate: &mut impl FnMut(&ProvisionalType) -> bool,
+    visit_effects: bool,
+) -> bool {
+    predicate(ty)
+        || match ty {
+            ProvisionalType::Nominal(instance) => instance
+                .arguments
+                .iter()
+                .any(|argument| provisional_type_any_with(argument, predicate, visit_effects)),
+            ProvisionalType::Tuple(elements) => elements
+                .iter()
+                .any(|element| provisional_type_any_with(element, predicate, visit_effects)),
+            ProvisionalType::Shared(referent) | ProvisionalType::Unique(referent) => {
+                provisional_type_any_with(referent, predicate, visit_effects)
+            }
+            ProvisionalType::Callable(shape) => {
+                shape
+                    .params
+                    .iter()
+                    .any(|param| provisional_type_any_with(param, predicate, visit_effects))
+                    || provisional_type_any_with(&shape.result, predicate, visit_effects)
+                    || visit_effects
+                        && shape.effects.iter().any(|effect| {
+                            effect.arguments.iter().any(|argument| {
+                                provisional_type_any_with(argument, predicate, visit_effects)
+                            })
+                        })
+            }
+            ProvisionalType::Predefined(_) | ProvisionalType::Param(_) => false,
+        }
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) struct NominalKey(pub(crate) String);
 
@@ -2802,6 +2942,60 @@ impl<'a> Typer<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn provisional_folder_rebuilds_every_type_bearing_edge() {
+        struct Rename;
+        impl ProvisionalTypeFolder for Rename {
+            type Error = std::convert::Infallible;
+
+            fn fold_type(&mut self, ty: &ProvisionalType) -> Result<ProvisionalType, Self::Error> {
+                if matches!(ty, ProvisionalType::Predefined(name) if name == "Old") {
+                    Ok(predefined_named("New"))
+                } else {
+                    fold_provisional_type_children(self, ty)
+                }
+            }
+        }
+
+        let old = predefined_named("Old");
+        let ty = ProvisionalType::Callable(Box::new(CallableShape {
+            params: vec![ProvisionalType::Tuple(vec![old.clone()])],
+            result: ProvisionalType::shared(old.clone()),
+            effects: vec![CallableEffect {
+                declaration: ProtocolKey("Effect".into()),
+                arguments: vec![ProvisionalType::Nominal(NominalInstanceKey {
+                    declaration: NominalKey("Box".into()),
+                    arguments: vec![old],
+                })],
+            }],
+            effect_tail: None,
+            infer_effects: false,
+        }));
+        let folded = Rename.fold_type(&ty).unwrap();
+
+        assert!(!provisional_type_any(&folded, &mut |ty| {
+            matches!(ty, ProvisionalType::Predefined(name) if name == "Old")
+        }));
+    }
+
+    #[test]
+    fn signature_queries_deliberately_exclude_callable_effect_arguments() {
+        let ty = ProvisionalType::Callable(Box::new(CallableShape {
+            params: vec![],
+            result: predefined_named("Unit"),
+            effects: vec![CallableEffect {
+                declaration: ProtocolKey("Effect".into()),
+                arguments: vec![ProvisionalType::unique(predefined_named("i64"))],
+            }],
+            effect_tail: None,
+            infer_effects: false,
+        }));
+        let unique = &mut |ty: &ProvisionalType| matches!(ty, ProvisionalType::Unique(_));
+
+        assert!(provisional_type_any(&ty, unique));
+        assert!(!provisional_signature_type_any(&ty, unique));
+    }
 
     #[test]
     fn reserved_types_have_canonical_distinct_spellings() {

@@ -17,7 +17,9 @@ use crate::compiler_traits::{
     ParamEnv, SolveResult, SolverBudget, TraitDb, TraitFact, TraitKey,
 };
 use crate::compiler_typeck::{
-    CallableShape, DeclarationKey, GenericParamKey, NominalInstanceKey, NominalKey, ProvisionalType,
+    CallableShape, DeclarationKey, GenericParamKey, NominalInstanceKey, NominalKey,
+    ProvisionalType, ProvisionalTypeFolder, fold_provisional_type_children,
+    provisional_signature_children_any, provisional_signature_type_any, provisional_type_any,
 };
 
 const ASSOCIATED_PROJECTION_PREFIX: &str = "$associated_projection$";
@@ -47,15 +49,7 @@ pub(crate) enum SpecializationArgument {
 }
 
 pub(crate) fn contains_late_callable(ty: &ProvisionalType) -> bool {
-    match ty {
-        ProvisionalType::Callable(_) => true,
-        ProvisionalType::Nominal(instance) => instance.arguments.iter().any(contains_late_callable),
-        ProvisionalType::Tuple(elements) => elements.iter().any(contains_late_callable),
-        ProvisionalType::Shared(referent) | ProvisionalType::Unique(referent) => {
-            contains_late_callable(referent)
-        }
-        ProvisionalType::Predefined(_) | ProvisionalType::Param(_) => false,
-    }
+    provisional_type_any(ty, &mut |ty| matches!(ty, ProvisionalType::Callable(_)))
 }
 
 fn late_specialization(key: &SpecializationKey) -> bool {
@@ -622,25 +616,12 @@ fn specialization_type_embeds(ancestor: &ProvisionalType, descendant: &Provision
         }
         _ => false,
     };
-    coupled
-        || match descendant {
-            ProvisionalType::Nominal(instance) => instance
-                .arguments
-                .iter()
-                .any(|child| specialization_type_embeds(ancestor, child)),
-            ProvisionalType::Tuple(elements) => elements
-                .iter()
-                .any(|child| specialization_type_embeds(ancestor, child)),
-            ProvisionalType::Shared(referent) | ProvisionalType::Unique(referent) => {
-                specialization_type_embeds(ancestor, referent)
-            }
-            ProvisionalType::Callable(shape) => shape
-                .params
-                .iter()
-                .chain(std::iter::once(&shape.result))
-                .any(|child| specialization_type_embeds(ancestor, child)),
-            ProvisionalType::Predefined(_) | ProvisionalType::Param(_) => false,
-        }
+    if coupled {
+        return true;
+    }
+    provisional_signature_children_any(descendant, &mut |child| {
+        specialization_type_embeds(ancestor, child)
+    })
 }
 
 fn specialization_argument_embeds(
@@ -977,108 +958,83 @@ pub(crate) fn normalize_projection_placeholders(
         Some(TypeSyntax { kind, span })
     }
 
-    let rebuilt = match ty {
-        ProvisionalType::Nominal(instance) => ProvisionalType::Nominal(NominalInstanceKey {
-            declaration: instance.declaration.clone(),
-            arguments: instance
-                .arguments
-                .iter()
-                .map(|argument| normalize_projection_placeholders(argument, trait_db, budget))
-                .collect::<Option<Vec<_>>>()?,
-        }),
-        ProvisionalType::Tuple(elements) => ProvisionalType::Tuple(
-            elements
-                .iter()
-                .map(|element| normalize_projection_placeholders(element, trait_db, budget))
-                .collect::<Option<Vec<_>>>()?,
-        ),
-        ProvisionalType::Shared(referent) => ProvisionalType::shared(
-            normalize_projection_placeholders(referent, trait_db, budget)?,
-        ),
-        ProvisionalType::Unique(referent) => ProvisionalType::unique(
-            normalize_projection_placeholders(referent, trait_db, budget)?,
-        ),
-        ProvisionalType::Callable(shape) => ProvisionalType::Callable(Box::new(CallableShape {
-            params: shape
-                .params
-                .iter()
-                .map(|param| normalize_projection_placeholders(param, trait_db, budget))
-                .collect::<Option<Vec<_>>>()?,
-            result: normalize_projection_placeholders(&shape.result, trait_db, budget)?,
-            effects: shape.effects.clone(),
-            effect_tail: shape.effect_tail.clone(),
-            infer_effects: shape.infer_effects,
-        })),
-        ProvisionalType::Predefined(_) | ProvisionalType::Param(_) => ty.clone(),
-    };
-    let ProvisionalType::Nominal(instance) = &rebuilt else {
-        return Some(rebuilt);
-    };
-    let Some(encoded) = instance
-        .declaration
-        .0
-        .strip_prefix(ASSOCIATED_PROJECTION_PREFIX)
-    else {
-        return Some(rebuilt);
-    };
-    let (trait_name, item_name) = encoded.split_once('$')?;
-    let (subject, arguments) = instance.arguments.split_first()?;
-    let span = crate::span::Span::default();
-    let projection = TypeSyntax {
-        kind: TypeSyntaxKind::Projection {
-            subject: Box::new(syntax(subject)?),
-            trait_ref: crate::ast::TraitRefSyntax {
-                path: vec![crate::ast::TypePathSegment {
-                    name: trait_name.to_owned(),
-                    span,
-                }],
-                arguments: vec![],
-                bindings: vec![],
+    struct ProjectionFolder<'a> {
+        trait_db: &'a TraitDb,
+        budget: &'a mut SolverBudget,
+    }
+
+    impl ProvisionalTypeFolder for ProjectionFolder<'_> {
+        type Error = ();
+
+        fn fold_type(&mut self, ty: &ProvisionalType) -> Result<ProvisionalType, Self::Error> {
+            let rebuilt = fold_provisional_type_children(self, ty)?;
+            let ProvisionalType::Nominal(instance) = &rebuilt else {
+                return Ok(rebuilt);
+            };
+            let Some(encoded) = instance
+                .declaration
+                .0
+                .strip_prefix(ASSOCIATED_PROJECTION_PREFIX)
+            else {
+                return Ok(rebuilt);
+            };
+            let (trait_name, item_name) = encoded.split_once('$').ok_or(())?;
+            let (subject, arguments) = instance.arguments.split_first().ok_or(())?;
+            let span = crate::span::Span::default();
+            let projection = TypeSyntax {
+                kind: TypeSyntaxKind::Projection {
+                    subject: Box::new(syntax(subject).ok_or(())?),
+                    trait_ref: crate::ast::TraitRefSyntax {
+                        path: vec![crate::ast::TypePathSegment {
+                            name: trait_name.to_owned(),
+                            span,
+                        }],
+                        arguments: vec![],
+                        bindings: vec![],
+                        span,
+                    },
+                    item: crate::ast::TypePathSegment {
+                        name: item_name.to_owned(),
+                        span,
+                    },
+                    arguments: arguments
+                        .iter()
+                        .map(|argument| {
+                            syntax(argument)
+                                .map(AssociatedArgumentSyntax::Type)
+                                .ok_or(())
+                        })
+                        .collect::<Result<_, _>>()?,
+                    const_arguments: vec![],
+                },
                 span,
-            },
-            item: crate::ast::TypePathSegment {
-                name: item_name.to_owned(),
-                span,
-            },
-            arguments: arguments
-                .iter()
-                .map(|argument| syntax(argument).map(AssociatedArgumentSyntax::Type))
-                .collect::<Option<Vec<_>>>()?,
-            const_arguments: vec![],
-        },
-        span,
-    };
-    trait_db
-        .normalize_type_detailed_with_budget(&projection, budget)
-        .ok()
+            };
+            self.trait_db
+                .normalize_type_detailed_with_budget(&projection, self.budget)
+                .map_err(|_| ())
+        }
+
+        fn fold_callable_effect(
+            &mut self,
+            effect: &crate::compiler_typeck::CallableEffect,
+        ) -> Result<crate::compiler_typeck::CallableEffect, Self::Error> {
+            // Projection normalization historically applies to the callable
+            // signature, not to its already-canonical effect row.
+            Ok(effect.clone())
+        }
+    }
+
+    ProjectionFolder { trait_db, budget }.fold_type(ty).ok()
 }
 
 fn contains_projection_placeholder(ty: &ProvisionalType) -> bool {
-    match ty {
-        ProvisionalType::Nominal(instance) => {
-            instance
-                .declaration
-                .0
-                .starts_with(ASSOCIATED_PROJECTION_PREFIX)
-                || instance
-                    .arguments
-                    .iter()
-                    .any(contains_projection_placeholder)
-        }
-        ProvisionalType::Tuple(elements) => elements.iter().any(contains_projection_placeholder),
-        ProvisionalType::Shared(referent) | ProvisionalType::Unique(referent) => {
-            contains_projection_placeholder(referent)
-        }
-        ProvisionalType::Callable(shape) => {
-            shape.params.iter().any(contains_projection_placeholder)
-                || contains_projection_placeholder(&shape.result)
-                || shape
-                    .effects
-                    .iter()
-                    .any(|effect| effect.arguments.iter().any(contains_projection_placeholder))
-        }
-        ProvisionalType::Predefined(_) | ProvisionalType::Param(_) => false,
-    }
+    provisional_type_any(ty, &mut |ty| {
+        matches!(
+            ty,
+            ProvisionalType::Nominal(instance)
+                if instance.declaration.0.starts_with(ASSOCIATED_PROJECTION_PREFIX)
+        )
+    })
 }
 
 fn expand_effect_member(
@@ -2182,12 +2138,13 @@ pub(crate) fn substitute(
     ty: &ProvisionalType,
     substitutions: &BTreeMap<GenericParamKey, SpecializationArgument>,
 ) -> Option<ProvisionalType> {
-    substitute_type(
-        ty,
+    SubstitutionFolder {
         substitutions,
-        &mut BTreeSet::new(),
-        MissingParameter::Reject,
-    )
+        visiting: BTreeSet::new(),
+        missing: MissingParameter::Reject,
+    }
+    .fold_type(ty)
+    .ok()
 }
 
 /// Controls the one intentional distinction between substituting an input
@@ -2199,90 +2156,51 @@ enum MissingParameter {
     Preserve,
 }
 
-fn substitute_type(
-    ty: &ProvisionalType,
-    substitutions: &BTreeMap<GenericParamKey, SpecializationArgument>,
-    visiting: &mut BTreeSet<GenericParamKey>,
+struct SubstitutionFolder<'a> {
+    substitutions: &'a BTreeMap<GenericParamKey, SpecializationArgument>,
+    visiting: BTreeSet<GenericParamKey>,
     missing: MissingParameter,
-) -> Option<ProvisionalType> {
-    match ty {
-        ProvisionalType::Param(key) => {
-            let Some(argument) = substitutions.get(key) else {
-                return (missing == MissingParameter::Preserve).then(|| ty.clone());
+}
+
+impl ProvisionalTypeFolder for SubstitutionFolder<'_> {
+    type Error = ();
+
+    fn fold_type(&mut self, ty: &ProvisionalType) -> Result<ProvisionalType, Self::Error> {
+        if let ProvisionalType::Param(key) = ty {
+            let Some(argument) = self.substitutions.get(key).cloned() else {
+                return (self.missing == MissingParameter::Preserve)
+                    .then(|| ty.clone())
+                    .ok_or(());
             };
-            if visiting.is_empty()
-                && matches!(argument, SpecializationArgument::Type(value) if value == ty)
+            if self.visiting.is_empty()
+                && matches!(&argument, SpecializationArgument::Type(value) if value == ty)
             {
                 // Recursive symbolic validation uses the declaration's
                 // canonical binder as both caller-rigid and callee-local.
-                return Some(ty.clone());
+                return Ok(ty.clone());
             }
-            if !visiting.insert(key.clone()) {
-                return None;
+            if !self.visiting.insert(key.clone()) {
+                return Err(());
             }
-            let resolved = match argument {
-                SpecializationArgument::Type(value) => {
-                    substitute_type(value, substitutions, visiting, MissingParameter::Preserve)
-                }
+            let outer_missing = self.missing;
+            self.missing = MissingParameter::Preserve;
+            let resolved = match &argument {
+                SpecializationArgument::Type(value) => self.fold_type(value),
                 SpecializationArgument::Closure(_, shape, _, _) => {
-                    Some(ProvisionalType::Callable(shape.clone()))
+                    Ok(ProvisionalType::Callable(shape.clone()))
                 }
-                SpecializationArgument::EffectRow(_) => None,
+                SpecializationArgument::EffectRow(_) => Err(()),
             };
-            visiting.remove(key);
-            resolved
+            self.missing = outer_missing;
+            self.visiting.remove(key);
+            return resolved;
         }
-        ProvisionalType::Shared(inner) => {
-            substitute_type(inner, substitutions, visiting, missing).map(ProvisionalType::shared)
+        let folded = fold_provisional_type_children(self, ty)?;
+        if matches!(folded, ProvisionalType::Nominal(_)) {
+            fold_const_expression_identity(folded).ok_or(())
+        } else {
+            Ok(folded)
         }
-        ProvisionalType::Unique(inner) => {
-            substitute_type(inner, substitutions, visiting, missing).map(ProvisionalType::unique)
-        }
-        ProvisionalType::Tuple(elements) => Some(ProvisionalType::Tuple(
-            elements
-                .iter()
-                .map(|element| substitute_type(element, substitutions, visiting, missing))
-                .collect::<Option<Vec<_>>>()?,
-        )),
-        ProvisionalType::Nominal(instance) => {
-            fold_const_expression_identity(ProvisionalType::Nominal(NominalInstanceKey {
-                declaration: instance.declaration.clone(),
-                arguments: instance
-                    .arguments
-                    .iter()
-                    .map(|argument| substitute_type(argument, substitutions, visiting, missing))
-                    .collect::<Option<Vec<_>>>()?,
-            }))
-        }
-        ProvisionalType::Callable(shape) => {
-            Some(ProvisionalType::Callable(Box::new(CallableShape {
-                params: shape
-                    .params
-                    .iter()
-                    .map(|param| substitute_type(param, substitutions, visiting, missing))
-                    .collect::<Option<Vec<_>>>()?,
-                result: substitute_type(&shape.result, substitutions, visiting, missing)?,
-                effects: shape
-                    .effects
-                    .iter()
-                    .map(|effect| {
-                        Some(crate::compiler_typeck::CallableEffect {
-                            declaration: effect.declaration.clone(),
-                            arguments: effect
-                                .arguments
-                                .iter()
-                                .map(|argument| {
-                                    substitute_type(argument, substitutions, visiting, missing)
-                                })
-                                .collect::<Option<Vec<_>>>()?,
-                        })
-                    })
-                    .collect::<Option<Vec<_>>>()?,
-                effect_tail: shape.effect_tail.clone(),
-                infer_effects: shape.infer_effects,
-            })))
-        }
-        ProvisionalType::Predefined(_) => Some(ty.clone()),
     }
 }
 
@@ -2321,53 +2239,17 @@ fn substitute_generic_arg(
 }
 
 fn ground(ty: &ProvisionalType) -> bool {
-    match ty {
-        ProvisionalType::Param(_) => false,
-        ProvisionalType::Shared(referent) | ProvisionalType::Unique(referent) => ground(referent),
-        ProvisionalType::Callable(shape) => {
-            shape.params.iter().all(ground)
-                && ground(&shape.result)
-                && shape
-                    .effects
-                    .iter()
-                    .flat_map(|effect| &effect.arguments)
-                    .all(ground)
-        }
-        ProvisionalType::Nominal(instance) => instance.arguments.iter().all(ground),
-        ProvisionalType::Tuple(elements) => elements.iter().all(ground),
-        ProvisionalType::Predefined(_) => true,
-    }
+    !provisional_type_any(ty, &mut |ty| matches!(ty, ProvisionalType::Param(_)))
 }
 
 fn supported_capture_shape(ty: &ProvisionalType) -> bool {
-    match ty {
-        ProvisionalType::Predefined(_) => true,
-        ProvisionalType::Nominal(instance) => {
-            instance.arguments.iter().all(supported_capture_shape)
-        }
-        ProvisionalType::Tuple(elements) => elements.iter().all(supported_capture_shape),
-        ProvisionalType::Shared(referent) | ProvisionalType::Unique(referent) => {
-            supported_capture_shape(referent)
-        }
-        ProvisionalType::Callable(_) | ProvisionalType::Param(_) => false,
-    }
+    !provisional_type_any(ty, &mut |ty| {
+        matches!(ty, ProvisionalType::Callable(_) | ProvisionalType::Param(_))
+    })
 }
 
 fn contains_unique_reference_shape(ty: &ProvisionalType) -> bool {
-    match ty {
-        ProvisionalType::Unique(_) => true,
-        ProvisionalType::Shared(referent) => contains_unique_reference_shape(referent),
-        ProvisionalType::Tuple(elements) => elements.iter().any(contains_unique_reference_shape),
-        ProvisionalType::Nominal(instance) => instance
-            .arguments
-            .iter()
-            .any(contains_unique_reference_shape),
-        ProvisionalType::Callable(shape) => {
-            shape.params.iter().any(contains_unique_reference_shape)
-                || contains_unique_reference_shape(&shape.result)
-        }
-        ProvisionalType::Predefined(_) | ProvisionalType::Param(_) => false,
-    }
+    provisional_signature_type_any(ty, &mut |ty| matches!(ty, ProvisionalType::Unique(_)))
 }
 
 fn bind(
@@ -2423,56 +2305,34 @@ fn inference_occurs(
     substitutions: &BTreeMap<GenericParamKey, SpecializationArgument>,
     visiting: &mut BTreeSet<GenericParamKey>,
 ) -> bool {
-    match ty {
-        ProvisionalType::Param(candidate) => {
-            if candidate == key {
-                return true;
-            }
-            if !visiting.insert(candidate.clone()) {
-                return false;
-            }
-            let occurs = substitutions
-                .get(candidate)
-                .is_some_and(|argument| match argument {
-                    SpecializationArgument::Type(ty) => {
-                        inference_occurs(key, ty, substitutions, visiting)
-                    }
-                    SpecializationArgument::Closure(_, shape, _, _) => {
-                        shape
-                            .params
-                            .iter()
-                            .any(|ty| inference_occurs(key, ty, substitutions, visiting))
-                            || inference_occurs(key, &shape.result, substitutions, visiting)
-                    }
-                    SpecializationArgument::EffectRow(_) => false,
-                });
-            visiting.remove(candidate);
-            occurs
+    provisional_type_any(ty, &mut |ty| {
+        let ProvisionalType::Param(candidate) = ty else {
+            return false;
+        };
+        if candidate == key {
+            return true;
         }
-        ProvisionalType::Shared(inner) | ProvisionalType::Unique(inner) => {
-            inference_occurs(key, inner, substitutions, visiting)
+        if !visiting.insert(candidate.clone()) {
+            return false;
         }
-        ProvisionalType::Tuple(elements) => elements
-            .iter()
-            .any(|ty| inference_occurs(key, ty, substitutions, visiting)),
-        ProvisionalType::Nominal(instance) => instance
-            .arguments
-            .iter()
-            .any(|ty| inference_occurs(key, ty, substitutions, visiting)),
-        ProvisionalType::Callable(shape) => {
-            shape
-                .params
-                .iter()
-                .any(|ty| inference_occurs(key, ty, substitutions, visiting))
-                || inference_occurs(key, &shape.result, substitutions, visiting)
-                || shape
-                    .effects
-                    .iter()
-                    .flat_map(|effect| &effect.arguments)
-                    .any(|ty| inference_occurs(key, ty, substitutions, visiting))
-        }
-        ProvisionalType::Predefined(_) => false,
-    }
+        let occurs = substitutions
+            .get(candidate)
+            .is_some_and(|argument| match argument {
+                SpecializationArgument::Type(ty) => {
+                    inference_occurs(key, ty, substitutions, visiting)
+                }
+                SpecializationArgument::Closure(_, shape, _, _) => {
+                    shape
+                        .params
+                        .iter()
+                        .any(|ty| inference_occurs(key, ty, substitutions, visiting))
+                        || inference_occurs(key, &shape.result, substitutions, visiting)
+                }
+                SpecializationArgument::EffectRow(_) => false,
+            });
+        visiting.remove(candidate);
+        occurs
+    })
 }
 
 fn unify_inference(
@@ -3353,30 +3213,13 @@ impl<'a> Walker<'a> {
     }
 
     fn symbolically_known_type(&self, ty: &ProvisionalType) -> bool {
-        match ty {
-            ProvisionalType::Predefined(_) | ProvisionalType::Param(_) => true,
-            ProvisionalType::Nominal(instance) => {
-                self.nominal_templates
-                    .contains_key(instance.declaration.0.as_str())
-                    && instance
-                        .arguments
-                        .iter()
-                        .all(|argument| self.symbolically_known_type(argument))
-            }
-            ProvisionalType::Tuple(elements) => elements
-                .iter()
-                .all(|element| self.symbolically_known_type(element)),
-            ProvisionalType::Shared(referent) | ProvisionalType::Unique(referent) => {
-                self.symbolically_known_type(referent)
-            }
-            ProvisionalType::Callable(shape) => {
-                shape
-                    .params
-                    .iter()
-                    .all(|param| self.symbolically_known_type(param))
-                    && self.symbolically_known_type(&shape.result)
-            }
-        }
+        !provisional_signature_type_any(ty, &mut |ty| {
+            matches!(
+                ty,
+                ProvisionalType::Nominal(instance)
+                    if !self.nominal_templates.contains_key(instance.declaration.0.as_str())
+            )
+        })
     }
 
     fn effect_instance(
