@@ -8208,6 +8208,92 @@ fn declared_carrier_contract(
     Ok(Some(routes))
 }
 
+/// Run a monotone forward analysis whose state is one fact per register.
+///
+/// Transfers remain analysis-specific, while this owns the verifier's canonical
+/// control-flow ordering, checked successor lookup, queueing, and unreachable
+/// state. `join` must update one fact in place and report whether it changed.
+struct ForwardRegisterAnalysis<'a> {
+    artifact: &'a Artifact,
+    function_id: u32,
+    function: &'a Function,
+    label_states: &'a [Vec<LabelEntry>],
+}
+
+impl ForwardRegisterAnalysis<'_> {
+    fn run<T>(
+        &self,
+        entry: Vec<T>,
+        unreachable: Vec<T>,
+        mut transfer: impl FnMut(&mut [T], &Instruction),
+        mut join: impl FnMut(&mut T, &T) -> bool,
+    ) -> Result<Vec<Vec<T>>, VerifyError>
+    where
+        T: Clone,
+    {
+        debug_assert_eq!(entry.len(), unreachable.len());
+        let mut entries = vec![None; self.function.code_len as usize];
+        entries[0] = Some(entry);
+        let mut work = VecDeque::from([0u32]);
+        while let Some(pc) = work.pop_front() {
+            let mut state = entries[pc as usize].clone().unwrap();
+            let instruction = &self.artifact.code[self.function.code_start as usize + pc as usize];
+            transfer(&mut state, instruction);
+            let successors = match instruction {
+                Instruction::Jump { target } => vec![*target],
+                Instruction::Switch {
+                    cases, otherwise, ..
+                } => cases
+                    .iter()
+                    .map(|case| case.1)
+                    .chain(std::iter::once(*otherwise))
+                    .collect(),
+                Instruction::Leave { slot, .. } => vec![
+                    self.label_states[pc as usize]
+                        .iter()
+                        .rfind(|entry| entry.slot == *slot)
+                        .ok_or(VerifyError::InvalidFunction(self.function_id))?
+                        .target,
+                ],
+                Instruction::Return { .. }
+                | Instruction::TailCall { .. }
+                | Instruction::TailCallSelf { .. }
+                | Instruction::TailCallKnownReceiver { .. }
+                | Instruction::TailCallIndirect { .. }
+                | Instruction::TailResume { .. }
+                | Instruction::Perform { dst: None, .. }
+                | Instruction::Unreachable
+                | Instruction::Abort { .. } => vec![],
+                _ => vec![pc + 1],
+            };
+            for successor in successors {
+                let slot = entries
+                    .get_mut(successor as usize)
+                    .ok_or(VerifyError::InvalidFunction(self.function_id))?;
+                match slot {
+                    None => {
+                        *slot = Some(state.clone());
+                        work.push_back(successor);
+                    }
+                    Some(existing) => {
+                        let mut changed = false;
+                        for (old, incoming) in existing.iter_mut().zip(&state) {
+                            changed |= join(old, incoming);
+                        }
+                        if changed {
+                            work.push_back(successor);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(entries
+            .into_iter()
+            .map(|entry| entry.unwrap_or_else(|| unreachable.clone()))
+            .collect())
+    }
+}
+
 /// Compute the finite set of callable producers at every instruction boundary.
 /// An empty set means that no body-derived target is known. Branch joins union
 /// their alternatives instead of discarding useful information merely because
@@ -8219,7 +8305,6 @@ fn callable_targets_at_pcs(
     f: &Function,
     label_states: &[Vec<LabelEntry>],
 ) -> Result<Vec<Vec<CallableTargets>>, VerifyError> {
-    let mut entries = vec![None; f.code_len as usize];
     let mut entry = vec![CallableTargets::new(); f.register_types.len()];
     for (register, ty) in f
         .register_types
@@ -8232,12 +8317,17 @@ fn callable_targets_at_pcs(
             entry[register] = callable_type_producers(a, ty).into_iter().collect();
         }
     }
-    entries[0] = Some(entry);
-    let mut work = VecDeque::from([0u32]);
-    while let Some(pc) = work.pop_front() {
-        let mut state = entries[pc as usize].clone().unwrap();
-        let instruction = &a.code[f.code_start as usize + pc as usize];
-        match instruction {
+    let unreachable = vec![CallableTargets::new(); f.register_types.len()];
+    ForwardRegisterAnalysis {
+        artifact: a,
+        function_id: fid,
+        function: f,
+        label_states,
+    }
+    .run(
+        entry,
+        unreachable,
+        |state, instruction| match instruction {
             Instruction::Move { dst, src } => {
                 state[*dst as usize] = std::mem::take(&mut state[*src as usize]);
             }
@@ -8276,61 +8366,13 @@ fn callable_targets_at_pcs(
                     state[destination as usize].clear();
                 }
             }
-        }
-        let successors = match instruction {
-            Instruction::Jump { target } => vec![*target],
-            Instruction::Switch {
-                cases, otherwise, ..
-            } => cases
-                .iter()
-                .map(|case| case.1)
-                .chain(std::iter::once(*otherwise))
-                .collect(),
-            Instruction::Leave { slot, .. } => vec![
-                label_states[pc as usize]
-                    .iter()
-                    .rfind(|entry| entry.slot == *slot)
-                    .ok_or(VerifyError::InvalidFunction(fid))?
-                    .target,
-            ],
-            Instruction::Return { .. }
-            | Instruction::TailCall { .. }
-            | Instruction::TailCallSelf { .. }
-            | Instruction::TailCallKnownReceiver { .. }
-            | Instruction::TailCallIndirect { .. }
-            | Instruction::TailResume { .. }
-            | Instruction::Perform { dst: None, .. }
-            | Instruction::Unreachable
-            | Instruction::Abort { .. } => vec![],
-            _ => vec![pc + 1],
-        };
-        for successor in successors {
-            let entry = entries
-                .get_mut(successor as usize)
-                .ok_or(VerifyError::InvalidFunction(fid))?;
-            match entry {
-                None => {
-                    *entry = Some(state.clone());
-                    work.push_back(successor);
-                }
-                Some(existing) => {
-                    let mut changed = false;
-                    for (old, incoming) in existing.iter_mut().zip(&state) {
-                        let old_len = old.len();
-                        old.extend(incoming.iter().copied());
-                        changed |= old.len() != old_len;
-                    }
-                    if changed {
-                        work.push_back(successor);
-                    }
-                }
-            }
-        }
-    }
-    Ok(entries
-        .into_iter()
-        .map(|entry| entry.unwrap_or_else(|| vec![CallableTargets::new(); f.register_types.len()]))
-        .collect())
+        },
+        |old, incoming| {
+            let old_len = old.len();
+            old.extend(incoming.iter().copied());
+            old.len() != old_len
+        },
+    )
 }
 
 fn canonical_callable_carrier_contract(
@@ -10550,19 +10592,22 @@ fn array_roots_at_pcs(
     f: &Function,
     label_states: &[Vec<LabelEntry>],
 ) -> Result<Vec<Vec<Option<ArrayRoot>>>, VerifyError> {
-    let mut entries = vec![None; f.code_len as usize];
     let mut entry = vec![None; f.register_types.len()];
     for (parameter, ty) in f.params.iter().enumerate() {
         if array_element_type(a, *ty).is_some() {
             entry[parameter + 1] = Some(ArrayRoot::Parameter(parameter));
         }
     }
-    entries[0] = Some(entry);
-    let mut work = VecDeque::from([0u32]);
-    while let Some(pc) = work.pop_front() {
-        let mut state = entries[pc as usize].clone().unwrap();
-        let instruction = &a.code[f.code_start as usize + pc as usize];
-        match instruction {
+    ForwardRegisterAnalysis {
+        artifact: a,
+        function_id: fid,
+        function: f,
+        label_states,
+    }
+    .run(
+        entry,
+        vec![None; f.register_types.len()],
+        |state, instruction| match instruction {
             Instruction::Move { dst, src } => {
                 state[*dst as usize] = state[*src as usize].take();
             }
@@ -10587,63 +10632,9 @@ fn array_roots_at_pcs(
                     state[dst as usize] = None;
                 }
             }
-        }
-        let successors = match instruction {
-            Instruction::Jump { target } => vec![*target],
-            Instruction::Switch {
-                cases, otherwise, ..
-            } => cases
-                .iter()
-                .map(|case| case.1)
-                .chain(std::iter::once(*otherwise))
-                .collect(),
-            Instruction::Leave { slot, .. } => vec![
-                label_states[pc as usize]
-                    .iter()
-                    .rfind(|entry| entry.slot == *slot)
-                    .ok_or(VerifyError::InvalidFunction(fid))?
-                    .target,
-            ],
-            Instruction::Return { .. }
-            | Instruction::TailCall { .. }
-            | Instruction::TailCallSelf { .. }
-            | Instruction::TailCallKnownReceiver { .. }
-            | Instruction::TailCallIndirect { .. }
-            | Instruction::TailResume { .. }
-            | Instruction::Perform { dst: None, .. }
-            | Instruction::Unreachable
-            | Instruction::Abort { .. } => vec![],
-            _ => vec![pc + 1],
-        };
-        for successor in successors {
-            let slot = entries
-                .get_mut(successor as usize)
-                .ok_or(VerifyError::InvalidFunction(fid))?;
-            match slot {
-                None => {
-                    *slot = Some(state.clone());
-                    work.push_back(successor);
-                }
-                Some(existing) => {
-                    let mut changed = false;
-                    for (old, incoming) in existing.iter_mut().zip(&state) {
-                        let joined = if old == incoming { *old } else { None };
-                        if *old != joined {
-                            *old = joined;
-                            changed = true;
-                        }
-                    }
-                    if changed {
-                        work.push_back(successor);
-                    }
-                }
-            }
-        }
-    }
-    Ok(entries
-        .into_iter()
-        .map(|entry| entry.unwrap_or_else(|| vec![None; f.register_types.len()]))
-        .collect())
+        },
+        join_optional_equality,
+    )
 }
 
 fn constant_u64_registers_at_pcs(
@@ -10652,13 +10643,17 @@ fn constant_u64_registers_at_pcs(
     f: &Function,
     label_states: &[Vec<LabelEntry>],
 ) -> Result<Vec<Vec<Option<u64>>>, VerifyError> {
-    let mut entries = vec![None; f.code_len as usize];
-    entries[0] = Some(vec![None; f.register_types.len()]);
-    let mut work = VecDeque::from([0u32]);
-    while let Some(pc) = work.pop_front() {
-        let mut state = entries[pc as usize].clone().unwrap();
-        let instruction = &a.code[f.code_start as usize + pc as usize];
-        match instruction {
+    let empty = vec![None; f.register_types.len()];
+    ForwardRegisterAnalysis {
+        artifact: a,
+        function_id: fid,
+        function: f,
+        label_states,
+    }
+    .run(
+        empty.clone(),
+        empty,
+        |state, instruction| match instruction {
             Instruction::Const { dst, constant } => {
                 state[*dst as usize] = match a.constants.get(*constant as usize) {
                     Some(Constant::U8(value)) => Some(u64::from(*value)),
@@ -10677,63 +10672,19 @@ fn constant_u64_registers_at_pcs(
                     state[dst as usize] = None;
                 }
             }
-        }
-        let successors = match instruction {
-            Instruction::Jump { target } => vec![*target],
-            Instruction::Switch {
-                cases, otherwise, ..
-            } => cases
-                .iter()
-                .map(|case| case.1)
-                .chain(std::iter::once(*otherwise))
-                .collect(),
-            Instruction::Leave { slot, .. } => vec![
-                label_states[pc as usize]
-                    .iter()
-                    .rfind(|entry| entry.slot == *slot)
-                    .ok_or(VerifyError::InvalidFunction(fid))?
-                    .target,
-            ],
-            Instruction::Return { .. }
-            | Instruction::TailCall { .. }
-            | Instruction::TailCallSelf { .. }
-            | Instruction::TailCallKnownReceiver { .. }
-            | Instruction::TailCallIndirect { .. }
-            | Instruction::TailResume { .. }
-            | Instruction::Perform { dst: None, .. }
-            | Instruction::Unreachable
-            | Instruction::Abort { .. } => vec![],
-            _ => vec![pc + 1],
-        };
-        for successor in successors {
-            let entry = entries
-                .get_mut(successor as usize)
-                .ok_or(VerifyError::InvalidFunction(fid))?;
-            match entry {
-                None => {
-                    *entry = Some(state.clone());
-                    work.push_back(successor);
-                }
-                Some(existing) => {
-                    let mut changed = false;
-                    for (old, incoming) in existing.iter_mut().zip(&state) {
-                        let joined = if old == incoming { *old } else { None };
-                        if *old != joined {
-                            *old = joined;
-                            changed = true;
-                        }
-                    }
-                    if changed {
-                        work.push_back(successor);
-                    }
-                }
-            }
-        }
+        },
+        join_optional_equality,
+    )
+}
+
+fn join_optional_equality<T: Copy + Eq>(old: &mut Option<T>, incoming: &Option<T>) -> bool {
+    let joined = if old == incoming { *old } else { None };
+    if *old == joined {
+        false
+    } else {
+        *old = joined;
+        true
     }
-    Ok(entries
-        .into_iter()
-        .map(|entry| entry.unwrap_or_else(|| vec![None; f.register_types.len()]))
-        .collect())
 }
 
 fn remap_carrier_loans(
