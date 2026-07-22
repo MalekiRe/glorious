@@ -344,6 +344,17 @@ char_utf8_len(value: char) -> usize {
 // Layer 2: result-based control. These are ordinary source declarations: the
 // fixities determine grouping, and the Fn constraints are the only source of
 // right-hand laziness.
+infixl 20 ==;
+infixl 20 !=;
+infixl 20 <;
+infixl 20 <=;
+infixl 20 >;
+infixl 20 >=;
+infixl 30 +;
+infixl 30 -;
+infixl 40 *;
+infixl 40 /;
+infixl 40 %;
 infixr 1 else;
 infixl 2 or;
 infixl 3 and;

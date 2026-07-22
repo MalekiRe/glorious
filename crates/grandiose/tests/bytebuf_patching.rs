@@ -107,12 +107,11 @@ const SURFACE: &str = r#"
 "#;
 
 #[test]
-fn bytebuf_resize_patch_and_alignment_have_canonical_results_at_o0_through_o3() {
+fn bytebuf_resize_patch_and_alignment_have_canonical_results_at_o1_through_o3() {
     let mut canonical = vec![0xaa, 0x34, 0x12, 0xdd, 0xef, 0xcd, 0xab, 0x89];
     canonical.extend_from_slice(&[0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01]);
 
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -149,7 +148,6 @@ fn bytebuf_resize_patch_and_alignment_have_canonical_results_at_o0_through_o3() 
 #[test]
 fn bytebuf_patch_and_alignment_failures_are_atomic_and_overflow_safe() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

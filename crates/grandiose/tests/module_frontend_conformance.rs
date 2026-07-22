@@ -41,7 +41,7 @@ fn external_and_inline_modules_are_structural_and_flatten_their_items() {
     assert!(program.modules[2].span.end <= body.end);
 
     // Inline bodies remain in the ordinary declaration vectors so the module
-    // resolver can assign structured identities before the legacy backend.
+    // resolver can assign structured identities before the normalized backend.
     assert_eq!(
         program
             .functions

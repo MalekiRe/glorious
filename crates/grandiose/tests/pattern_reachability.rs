@@ -4,7 +4,7 @@ use grandiose::{
 };
 
 fn warnings(source: &str) -> Vec<grandiose::diagnostic::Diagnostic> {
-    compile_source_to_phases("pattern-reachability.gr", source)
+    compile_source_to_phases("pattern-reachability.glorious", source)
         .unwrap_or_else(|diagnostics| panic!("program did not compile: {diagnostics:#?}"))
         .diagnostics
         .into_iter()
@@ -130,13 +130,12 @@ fn warning_identity_and_span_are_stable_at_every_optimization_level() {
     "#;
     let expected_start = source.rfind("Pick::pick(7) => 0").unwrap();
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let phases = compile_source_to_phases_with_options(
-            "stable-pattern-warning.gr",
+            "stable-pattern-warning.glorious",
             source,
             CompileOptions { optimization_level },
         )

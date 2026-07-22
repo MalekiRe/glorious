@@ -8,15 +8,14 @@ use std::{
 use grandiose::{
     CompileOptions, OptimizationLevel, compile_bundle_to_phases_with_options,
     diagnostic::{Diagnostic, Severity},
-    eval::SystemHost,
     interface::{InterfaceSelection, scan_interfaces},
-    lexer, run_source,
+    lexer,
     source_bundle::{Segment, SourceBundle},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-const USAGE: &str = "usage:\n  grc [OPTIONS] <primary.glorious> [additional.glorious ...]\n  grc --serve\n  grandiose run <program.glorious> [-- <arguments>...]\n\ncompiler options:\n  -O0 | -O1 | -O2 | -O3  optimization level (default: -O0)\n  --check                  compile and verify without writing output\n  --phase PHASE            stop after lex, scan, resolve, or check\n  --emit KIND              emit bytecode, MIR/Core/provisional, or interfaces JSON\n  --dependency NAME=PATH   add a named dependency package root (repeatable)\n  --diagnostics json       emit one machine-readable diagnostic per line\n  --capabilities           print the versioned machine-readable contract\n  --serve                  serve versioned JSON-line compile requests\n  -o <path>                output path (default: primary input + kind suffix)\n  -h, --help               show this help\n";
+const USAGE: &str = "usage:\n  grc [OPTIONS] <primary.glorious> [additional.glorious ...]\n  grc --serve\n\ncompiler options:\n  -O1 | -O2 | -O3         optimization level (default: -O2)\n  -O0                     raw lowering mode for bytecode verification\n  --check                  compile and verify without writing output\n  --phase PHASE            stop after lex, scan, resolve, or check\n  --emit KIND              emit bytecode, MIR/Core/provisional, or interfaces JSON\n  --dependency NAME=PATH   add a named dependency package root (repeatable)\n  --diagnostics json       emit one machine-readable diagnostic per line\n  --capabilities           print the versioned machine-readable contract\n  --serve                  serve versioned JSON-line compile requests\n  -o <path>                output path (default: primary input + kind suffix)\n  -h, --help               show this help\n";
 
 const SESSION_PROTOCOL: u32 = 1;
 const SESSION_MAX_LINE_BYTES: usize = 1024 * 1024;
@@ -95,10 +94,6 @@ struct CompileCommand {
 
 enum Command {
     Compile(CompileCommand),
-    Run {
-        file: PathBuf,
-        arguments: Vec<String>,
-    },
     Help,
     Version,
     Capabilities,
@@ -134,32 +129,10 @@ fn parse(args: Vec<OsString>) -> Result<Command, String> {
         }
         return Ok(Command::Capabilities);
     }
-    if args.peek().is_some_and(|argument| argument == "run") {
-        args.next();
-        let file = args
-            .next()
-            .ok_or_else(|| "`run` requires one source file".to_string())?;
-        let mut arguments = Vec::new();
-        if args.peek().is_some_and(|argument| argument == "--") {
-            args.next();
-        }
-        for argument in args {
-            arguments.push(
-                argument
-                    .into_string()
-                    .map_err(|_| "program arguments must be valid UTF-8".to_string())?,
-            );
-        }
-        return Ok(Command::Run {
-            file: PathBuf::from(file),
-            arguments,
-        });
-    }
-
     let mut command = CompileCommand {
         inputs: Vec::new(),
         dependencies: Vec::new(),
-        optimization_level: OptimizationLevel::O0,
+        optimization_level: OptimizationLevel::default(),
         stop_phase: None,
         output: None,
         emit: None,
@@ -277,23 +250,17 @@ fn parse(args: Vec<OsString>) -> Result<Command, String> {
         return Err("at least one `.glorious` input is required".to_string());
     }
     for input in &command.inputs {
-        if !matches!(
-            input.extension().and_then(|extension| extension.to_str()),
-            Some("glorious" | "gr")
-        ) {
+        if input.extension().and_then(|extension| extension.to_str()) != Some("glorious") {
             return Err(format!(
-                "input `{}` must use the canonical `.glorious` extension (legacy `.gr` is also accepted)",
+                "input `{}` must use the `.glorious` extension",
                 input.display()
             ));
         }
     }
     for (_, input) in &command.dependencies {
-        if !matches!(
-            input.extension().and_then(|extension| extension.to_str()),
-            Some("glorious" | "gr")
-        ) {
+        if input.extension().and_then(|extension| extension.to_str()) != Some("glorious") {
             return Err(format!(
-                "dependency root `{}` must use the canonical `.glorious` extension (legacy `.gr` is also accepted)",
+                "dependency root `{}` must use the `.glorious` extension",
                 input.display()
             ));
         }
@@ -379,6 +346,7 @@ fn write_json_diagnostic(
     let mut object = Map::new();
     object.insert("severity".into(), json!(severity));
     object.insert("title".into(), json!(&diagnostic.title));
+    object.insert("message".into(), json!(&diagnostic.message));
     object.insert("labels".into(), Value::Array(labels));
     if let Some(code) = &diagnostic.code {
         object.insert("code".into(), json!(code));
@@ -456,18 +424,11 @@ fn load_segments(command: &CompileCommand) -> Result<Vec<Segment>, String> {
             continue;
         };
         for child in declared_external_module_paths(&path, segment.source()) {
-            let child = if child.is_file() {
-                child
-            } else {
-                let legacy = child.with_extension("gr");
-                if legacy.is_file() {
-                    legacy
-                } else {
-                    // Leave absence to the module graph, which has the source
-                    // declaration span needed for a structured diagnostic.
-                    continue;
-                }
-            };
+            if !child.is_file() {
+                // Leave absence to the module graph, which has the source
+                // declaration span needed for a structured diagnostic.
+                continue;
+            }
             if !known.contains_key(&child) {
                 if known.len() >= SESSION_MAX_INPUTS {
                     return Err(format!(
@@ -827,16 +788,9 @@ fn load_session_segments(
         };
         let children = declared_external_module_paths(&path, &sources[index].1);
         for child in children {
-            let child = if child.is_file() {
-                child
-            } else {
-                let legacy = child.with_extension("gr");
-                if legacy.is_file() {
-                    legacy
-                } else {
-                    continue;
-                }
-            };
+            if !child.is_file() {
+                continue;
+            }
             if !known.contains_key(&child) {
                 if sources.len() >= SESSION_MAX_INPUTS {
                     return Err(format!(
@@ -1114,36 +1068,6 @@ fn serve(input: &mut dyn BufRead, output: &mut dyn Write) -> u8 {
     }
 }
 
-fn run(file: PathBuf, arguments: Vec<String>, stderr: &mut dyn Write) -> u8 {
-    let source = match std::fs::read_to_string(&file) {
-        Ok(source) => source,
-        Err(error) => {
-            let _ = writeln!(
-                stderr,
-                "grandiose: error: could not read {}: {error}",
-                file.display()
-            );
-            return 1;
-        }
-    };
-    let mut host = SystemHost::default();
-    match run_source(&file.display().to_string(), &source, arguments, &mut host) {
-        Ok(_) => 0,
-        Err(diagnostics) => {
-            for diagnostic in diagnostics {
-                if diagnostic
-                    .with_source(file.display().to_string())
-                    .write(&source, &mut *stderr)
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            1
-        }
-    }
-}
-
 pub(crate) fn execute(args: impl IntoIterator<Item = OsString>) -> u8 {
     let mut stderr = io::stderr().lock();
     match parse(args.into_iter().collect()) {
@@ -1151,7 +1075,6 @@ pub(crate) fn execute(args: impl IntoIterator<Item = OsString>) -> u8 {
             let mut stdout = io::stdout().lock();
             compile(command, &mut stdout, &mut stderr)
         }
-        Ok(Command::Run { file, arguments }) => run(file, arguments, &mut stderr),
         Ok(Command::Help) => {
             print!("{USAGE}");
             0
@@ -1192,6 +1115,21 @@ mod tests {
     use super::*;
 
     #[test]
+    fn json_diagnostics_preserve_spanless_messages() {
+        let bundle = SourceBundle::distributed(Segment::new("input.glorious", ""), []);
+        let diagnostic = Diagnostic::plain("optimizer validation failed").with_code("G1OPT999");
+        let mut output = Vec::new();
+
+        write_json_diagnostic(&bundle, &diagnostic, &mut output).unwrap();
+
+        let value: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(value["title"], "error");
+        assert_eq!(value["message"], "optimizer validation failed");
+        assert_eq!(value["code"], "G1OPT999");
+        assert_eq!(value["labels"], json!([]));
+    }
+
+    #[test]
     fn parses_inputs_in_argument_order_and_the_selected_level() {
         let Command::Compile(command) = parse(
             ["-O3", "first.glorious", "second.glorious", "-o", "out.grbc"]
@@ -1212,6 +1150,36 @@ mod tests {
         assert_eq!(command.optimization_level, OptimizationLevel::O3);
         assert_eq!(command.output, Some(PathBuf::from("out.grbc")));
         assert_eq!(command.emit, None);
+    }
+
+    #[test]
+    fn defaults_to_the_self_host_optimization_level() {
+        let Command::Compile(command) = parse(vec![OsString::from("input.glorious")]).unwrap()
+        else {
+            panic!("expected a compile command")
+        };
+        assert_eq!(command.optimization_level, OptimizationLevel::O2);
+    }
+
+    #[test]
+    fn rejects_non_glorious_source_suffixes() {
+        let Err(input) = parse(vec![OsString::from("input.gr")]) else {
+            panic!("the removed source suffix was accepted")
+        };
+        assert!(input.contains("must use the `.glorious` extension"));
+
+        let Err(dependency) = parse(
+            [
+                OsString::from("--dependency"),
+                OsString::from("dep=deps/lib.gr"),
+                OsString::from("input.glorious"),
+            ]
+            .into_iter()
+            .collect(),
+        ) else {
+            panic!("a dependency using the removed source suffix was accepted")
+        };
+        assert!(dependency.contains("must use the `.glorious` extension"));
     }
 
     #[test]

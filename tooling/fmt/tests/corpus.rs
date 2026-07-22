@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use grandiose::lossless::{lex_lossless, LosslessKind};
+use grandiose::lossless::{LosslessKind, lex_lossless};
 
 fn significant(source: &str) -> Vec<String> {
     let mut tokens = lex_lossless(source)
@@ -53,7 +53,7 @@ fn repository_root() -> PathBuf {
 #[test]
 fn formats_repository_language_corpus_without_token_drift() {
     let root = repository_root();
-    let files = [root.join("crates/grandiose/src/distributed_std.gr")];
+    let files = [root.join("crates/grandiose/src/distributed_std.glorious")];
 
     for file in files {
         let source = std::fs::read_to_string(&file).unwrap();
@@ -87,6 +87,34 @@ fn formats_repository_language_corpus_without_token_drift() {
                 &formatted[start..right_end]
             );
         }
+    }
+}
+
+#[test]
+fn tutorial_library_is_canonical_idempotent_and_token_preserving() {
+    let file = repository_root().join("tutorial/brainfuck/library/src/lib.glorious");
+    let source = std::fs::read_to_string(&file).unwrap();
+    let formatted = grandfmt::format(&source)
+        .unwrap_or_else(|error| panic!("{} did not format: {error}", file.display()));
+    assert_eq!(
+        significant(&source),
+        significant(&formatted),
+        "token drift in {}",
+        file.display()
+    );
+    assert_eq!(formatted, source, "{} is not canonical", file.display());
+    assert_eq!(grandfmt::format(&formatted).unwrap(), formatted);
+    assert!(
+        formatted.lines().all(|line| line.chars().count() <= 100),
+        "{} exceeds the formatter width",
+        file.display()
+    );
+    for forbidden in ["& mut", "& *", "Vec <", "Result <", "\n\npub\n"] {
+        assert!(
+            !formatted.contains(forbidden),
+            "{} contains noncanonical {forbidden:?}",
+            file.display()
+        );
     }
 }
 

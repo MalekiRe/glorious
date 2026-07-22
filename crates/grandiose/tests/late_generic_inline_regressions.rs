@@ -48,7 +48,10 @@ fn late_generic_inline_evaluates_each_argument_once() {
         main() -> { () }
     "#;
 
-    assert_eq!(run("late-inline-once.gr", source, "answer"), Value::I64(42));
+    assert_eq!(
+        run("late-inline-once.glorious", source, "answer"),
+        Value::I64(42)
+    );
 }
 
 #[test]
@@ -67,7 +70,7 @@ fn late_generic_inline_preserves_control_expression_order() {
     "#;
 
     assert_eq!(
-        run("late-inline-control-order.gr", source, "answer"),
+        run("late-inline-control-order.glorious", source, "answer"),
         Value::I64(42)
     );
 }
@@ -88,7 +91,7 @@ fn mandatory_resumption_is_consumed_once_by_a_nontransparent_generic_callee() {
     "#;
 
     assert_eq!(
-        run("late-inline-mandatory-one.gr", source, "answer"),
+        run("late-inline-mandatory-one.glorious", source, "answer"),
         Value::I64(42)
     );
 }
@@ -100,7 +103,7 @@ fn retained_monomorphic_std_wrapper_keeps_its_generic_specialization() {
         main() -> { () }
     "#;
     assert_eq!(
-        run("retained-std-generic-child.gr", source, "answer"),
+        run("retained-std-generic-child.glorious", source, "answer"),
         Value::U64(128)
     );
 }
@@ -123,7 +126,7 @@ fn exact_two_resumption_uses_are_consumed_transitively_by_a_generic_callee() {
     "#;
 
     assert_eq!(
-        run("late-inline-exact-two.gr", source, "answer"),
+        run("late-inline-exact-two.glorious", source, "answer"),
         Value::I64(42)
     );
 }
@@ -132,7 +135,7 @@ fn exact_two_resumption_uses_are_consumed_transitively_by_a_generic_callee() {
 fn transitive_generic_summaries_reject_wrong_exact_quantities() {
     let cases = [
         (
-            "late-inline-one-used-zero.gr",
+            "late-inline-one-used-zero.glorious",
             r#"
                 effect Ask { [1,1] ask() -> i64 }
                 consume_zero<T>(continuation: T) -> i64 { 42 }
@@ -145,7 +148,7 @@ fn transitive_generic_summaries_reject_wrong_exact_quantities() {
             "#,
         ),
         (
-            "late-inline-one-used-twice.gr",
+            "late-inline-one-used-twice.glorious",
             r#"
                 effect Ask { [1,1] ask() -> i64 }
                 consume_twice<T>(continuation: T) -> i64 {
@@ -162,7 +165,7 @@ fn transitive_generic_summaries_reject_wrong_exact_quantities() {
             "#,
         ),
         (
-            "late-inline-two-used-once.gr",
+            "late-inline-two-used-once.glorious",
             r#"
                 effect Pick { [2,2] choose() -> i64 }
                 consume_once<T>(continuation: T) -> i64 {
@@ -177,7 +180,7 @@ fn transitive_generic_summaries_reject_wrong_exact_quantities() {
             "#,
         ),
         (
-            "late-inline-two-used-three.gr",
+            "late-inline-two-used-three.glorious",
             r#"
                 effect Pick { [2,2] choose() -> i64 }
                 consume_three<T>(continuation: T) -> i64 {
@@ -220,7 +223,7 @@ fn transitive_summary_follows_two_generic_forwarding_layers() {
         main() -> { () }
     "#;
 
-    assert_stable_quantity_error("late-inline-two-layer-forward.gr", source);
+    assert_stable_quantity_error("late-inline-two-layer-forward.glorious", source);
 }
 
 #[test]
@@ -241,7 +244,7 @@ fn branch_correlated_summary_requires_exact_consumption_on_every_handler_path() 
         main() -> { () }
     "#;
 
-    assert_stable_quantity_error("late-inline-branch-correlation.gr", source);
+    assert_stable_quantity_error("late-inline-branch-correlation.glorious", source);
 }
 
 #[test]
@@ -264,7 +267,7 @@ fn same_late_generic_template_keeps_handler_resumption_identities_distinct() {
         main() -> { () }
     "#;
 
-    let artifact = compile_source_to_bytecode("late-inline-distinct-k.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("late-inline-distinct-k.glorious", source).unwrap();
     let resumptions = artifact
         .handler_defs
         .iter()
@@ -302,7 +305,7 @@ fn recursive_late_generic_inline_reports_a_source_diagnostic() {
         main() -> { () }
     "#;
 
-    let errors = compile_source_to_bytecode("late-inline-recursion.gr", source).unwrap_err();
+    let errors = compile_source_to_bytecode("late-inline-recursion.glorious", source).unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error.span.is_some()
@@ -325,7 +328,7 @@ fn recursive_late_generic_inline_reports_a_source_diagnostic() {
 fn late_generic_inline_does_not_bypass_private_deconstruction_authority() {
     let bundle = SourceBundle::new(
         Segment::new(
-            "owner.gr",
+            "owner.glorious",
             r#"
                 effect Stop { [0,1] stop() -> i64 }
                 struct Secret<T> { private value: T }
@@ -336,7 +339,7 @@ fn late_generic_inline_does_not_bypass_private_deconstruction_authority() {
             "#,
         ),
         Segment::new(
-            "caller.gr",
+            "caller.glorious",
             r#"
                 answer() -> i64 {
                     handle perform Stop::stop() {

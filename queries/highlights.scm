@@ -4,15 +4,19 @@
 (boolean_literal) @boolean
 (lifetime) @variable.special
 (label) @label
-[(type_identifier)
- (struct_expression type: (identifier))] @type
+(type_identifier) @type
+(struct_expression type: (identifier) @type)
+(struct_pattern (identifier) @type . "{")
 
 (struct_declaration name: (type_identifier) @type)
 (trait_declaration name: (type_identifier) @type)
 (enum_declaration name: (type_identifier) @type @enum)
 
-(effect_identifier) @type @tag
-(effect_operation_identifier) @function @variant
+; Effects and their operations are distinct semantic namespaces.  Giving either
+; one an overlapping type/function capture makes clients such as Zed choose the
+; ordinary declaration colour and obscures handlers at a glance.
+(effect_identifier) @tag
+(effect_operation_identifier) @variant
 
 (enum_variant name: (variant_identifier) @constructor)
 (variant_pattern
@@ -22,6 +26,7 @@
 (field_declaration name: (identifier) @property)
 (field_initializer name: (identifier) @property)
 (field_expression field: (identifier) @property)
+(struct_pattern "{" (identifier) @property)
 
 (parameter name: (identifier) @variable.parameter)
 (generic_parameter (identifier) @variable.parameter)

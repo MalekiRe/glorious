@@ -19,13 +19,12 @@ fn higher_ranked_type_and_lifetime_prerequisites_compile_with_rigid_evidence() {
         main() -> () { () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let artifact = compile_source_to_bytecode_with_options(
-            "hrtb-positive.gr",
+            "hrtb-positive.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -48,7 +47,7 @@ fn one_concrete_impl_does_not_prove_a_higher_ranked_type_goal() {
         bad() -> Witness { require(Witness { marker: 42 }) }
         main() -> () { () }
     "#;
-    let errors = compile_source_to_bytecode("hrtb-negative.gr", source)
+    let errors = compile_source_to_bytecode("hrtb-negative.glorious", source)
         .expect_err("one concrete implementation must not prove `for<T>`");
     assert!(
         errors.iter().any(|error| {
@@ -73,7 +72,7 @@ fn higher_ranked_const_prerequisites_use_fresh_rigid_values() {
         main() -> () { () }
     "#;
     verify(
-        compile_source_to_bytecode("hrtb-const-positive.gr", positive)
+        compile_source_to_bytecode("hrtb-const-positive.glorious", positive)
             .expect("blanket const evidence must prove the universal prerequisite"),
     )
     .unwrap();
@@ -88,7 +87,7 @@ fn higher_ranked_const_prerequisites_use_fresh_rigid_values() {
         bad() -> Witness { require(Witness { marker: 42 }) }
         main() -> () { () }
     "#;
-    let errors = compile_source_to_bytecode("hrtb-const-negative.gr", negative)
+    let errors = compile_source_to_bytecode("hrtb-const-negative.glorious", negative)
         .expect_err("one const implementation must not prove a universal const goal");
     assert!(
         errors.iter().any(|error| {
@@ -118,13 +117,13 @@ fn higher_ranked_effect_row_gat_prerequisites_are_universal() {
         main() -> () { () }
     "#;
     verify(
-        compile_source_to_bytecode("hrtb-effect-row-positive.gr", source)
+        compile_source_to_bytecode("hrtb-effect-row-positive.glorious", source)
             .expect("the associated effect-row GAT must hold for every row tail"),
     )
     .unwrap();
 
     let negative = source.replace("{Ask | r};", "{Ask};");
-    let errors = compile_source_to_bytecode("hrtb-effect-row-negative.gr", &negative)
+    let errors = compile_source_to_bytecode("hrtb-effect-row-negative.glorious", &negative)
         .expect_err("a closed associated row must not prove every open row tail");
     assert!(
         errors.iter().any(|error| {
@@ -139,10 +138,11 @@ fn higher_ranked_effect_row_gat_prerequisites_are_universal() {
 #[test]
 fn higher_ranked_outlives_constraints_are_scoped_and_universal() {
     let positive = "check() -> () where for<'a> 'static: 'a { () } main() -> () { () }";
-    verify(compile_source_to_bytecode("hrtb-outlives-positive.gr", positive).unwrap()).unwrap();
+    verify(compile_source_to_bytecode("hrtb-outlives-positive.glorious", positive).unwrap())
+        .unwrap();
 
     let impossible = "check() -> () where for<'a, 'b> 'a: 'b { () } main() -> () { () }";
-    let errors = compile_source_to_bytecode("hrtb-outlives-impossible.gr", impossible)
+    let errors = compile_source_to_bytecode("hrtb-outlives-impossible.glorious", impossible)
         .expect_err("unrelated universal lifetimes do not have an outlives relation");
     assert!(
         errors.iter().any(|error| {
@@ -152,7 +152,7 @@ fn higher_ranked_outlives_constraints_are_scoped_and_universal() {
     );
 
     let shadow = "bad<'a, 'b>(value: &'a i64) -> &'b i64 where for<'a> 'static: 'a { value } main() -> () { () }";
-    let errors = compile_source_to_bytecode("hrtb-outlives-shadow.gr", shadow).expect_err(
+    let errors = compile_source_to_bytecode("hrtb-outlives-shadow.glorious", shadow).expect_err(
         "a scoped HRT binder must not add facts for the outer lifetime of the same name",
     );
     assert!(

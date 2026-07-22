@@ -123,9 +123,8 @@ fn function_id(artifact: &grandiose_vm::Artifact, name: &str) -> u32 {
 }
 
 #[test]
-fn exact_decimal_parsing_executes_at_o0_through_o3() {
+fn exact_decimal_parsing_executes_at_o1_through_o3() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

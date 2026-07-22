@@ -73,15 +73,14 @@ fn function_id(artifact: &grandiose_vm::Artifact, name: &str) -> u32 {
 }
 
 #[test]
-fn borrowing_projections_preserve_variants_and_mutate_at_o0_through_o3() {
+fn borrowing_projections_preserve_variants_and_mutate_at_o1_through_o3() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let phases = compile_source_to_phases_with_options(
-            "result-option-borrowing.gr",
+            "result-option-borrowing.glorious",
             SOURCE,
             CompileOptions { optimization_level },
         )
@@ -135,7 +134,7 @@ fn recovery_interpreter_agrees_on_projection_behavior() {
     "#;
     assert_eq!(
         run_source(
-            "result-option-borrowing-recovery.gr",
+            "result-option-borrowing-recovery.glorious",
             source,
             vec![],
             &mut NoHost
@@ -152,7 +151,7 @@ fn projected_references_reject_conflicting_owner_access_and_escape() {
         "ok()->Result<i64,i64>{Result::Ok(42)}warm<'a>(value:&'a Result<i64,i64>)->Result<&'a i64,&'a i64>{Result::as_ref(value)}bad()->Result<&'static i64,&'static i64>{let owner=ok();warm(&owner)}main()->(){let value=ok();warm(&value);bad();()}",
     ] {
         let errors = compile_source_to_phases_with_options(
-            "projection-hostile.gr",
+            "projection-hostile.glorious",
             source,
             CompileOptions::default(),
         )

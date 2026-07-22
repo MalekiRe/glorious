@@ -75,7 +75,7 @@ const TERMINAL_PROGRAM: &str = r#"
 
 fn optimized_phases(source: &str) -> grandiose::CompiledPhases {
     compile_source_to_phases_with_options(
-        "terminal-optimized.gr",
+        "terminal-optimized.glorious",
         source,
         CompileOptions {
             optimization_level: OptimizationLevel::O2,
@@ -96,7 +96,7 @@ fn control_outcome(phases: &grandiose::CompiledPhases) -> OptimizationPassOutcom
 
 #[test]
 fn o2_fuses_only_cleanup_empty_single_clause_terminal_handler() {
-    let baseline = compile_source_to_phases("terminal-o0.gr", TERMINAL_PROGRAM).unwrap();
+    let baseline = compile_source_to_phases("terminal-o0.glorious", TERMINAL_PROGRAM).unwrap();
     let optimized = optimized_phases(TERMINAL_PROGRAM);
     let repeated = optimized_phases(TERMINAL_PROGRAM);
     assert_eq!(
@@ -155,7 +155,7 @@ fn o2_fuses_computed_terminal_payloads_from_copy_scalar_captures() {
         }
         main() -> { () }
     "#;
-    let baseline = compile_source_to_phases("computed-terminal-o0.gr", source).unwrap();
+    let baseline = compile_source_to_phases("computed-terminal-o0.glorious", source).unwrap();
     let optimized = optimized_phases(source);
     assert_eq!(
         control_outcome(&optimized),
@@ -198,7 +198,7 @@ fn o2_fuses_a_fresh_owned_aggregate_terminal_payload() {
         }
         main() -> { () }
     "#;
-    let baseline = compile_source_to_phases("owned-terminal-o0.gr", source).unwrap();
+    let baseline = compile_source_to_phases("owned-terminal-o0.glorious", source).unwrap();
     let optimized = optimized_phases(source);
     assert_eq!(
         control_outcome(&optimized),
@@ -246,7 +246,7 @@ fn o2_fuses_a_shared_reference_terminal_payload_without_losing_its_origin() {
         }
         main() -> { () }
     "#;
-    let baseline = compile_source_to_phases("reference-terminal-o0.gr", source).unwrap();
+    let baseline = compile_source_to_phases("reference-terminal-o0.glorious", source).unwrap();
     let optimized = optimized_phases(source);
     assert_eq!(
         control_outcome(&optimized),
@@ -294,7 +294,8 @@ fn o2_fuses_a_unique_reference_terminal_payload_only_by_transferring_the_loan() 
         }
         main() -> { () }
     "#;
-    let baseline = compile_source_to_phases("unique-reference-terminal-o0.gr", source).unwrap();
+    let baseline =
+        compile_source_to_phases("unique-reference-terminal-o0.glorious", source).unwrap();
     let optimized = optimized_phases(source);
     assert_eq!(
         control_outcome(&optimized),
@@ -378,7 +379,8 @@ fn o2_terminal_fusion_preserves_ordered_cleanup_and_resumption_barriers() {
         }
         main() -> { () }
     "#;
-    let cleanup_baseline = compile_source_to_phases("terminal-cleanup-o0.gr", cleanup).unwrap();
+    let cleanup_baseline =
+        compile_source_to_phases("terminal-cleanup-o0.glorious", cleanup).unwrap();
     let cleanup_phases = optimized_phases(cleanup);
     let cleanup_function = cleanup_phases
         .artifact
@@ -455,7 +457,7 @@ fn o2_terminal_fusion_preserves_ordered_cleanup_and_resumption_barriers() {
         main() -> { () }
     "#;
     let resumptive_baseline =
-        compile_source_to_phases("resumptive-static-handler-o0.gr", resumptive).unwrap();
+        compile_source_to_phases("resumptive-static-handler-o0.glorious", resumptive).unwrap();
     let resumptive_phases = optimized_phases(resumptive);
     let resumptive_function = resumptive_phases
         .artifact
@@ -502,7 +504,7 @@ fn o2_terminal_fusion_preserves_ordered_cleanup_and_resumption_barriers() {
         main() -> { () }
     "#;
     let clause_capture_baseline =
-        compile_source_to_phases("terminal-capture-o0.gr", clause_capture).unwrap();
+        compile_source_to_phases("terminal-capture-o0.glorious", clause_capture).unwrap();
     let clause_capture_optimized = optimized_phases(clause_capture);
     assert_eq!(
         control_outcome(&clause_capture_optimized),
@@ -601,10 +603,10 @@ fn o2_o3_statically_compose_one_shot_resume_cancel_and_partial_handler_hits() {
         }
         main() -> { () }
     "#;
-    let baseline = compile_source_to_phases("resumptive-static-o0.gr", source).unwrap();
+    let baseline = compile_source_to_phases("resumptive-static-o0.glorious", source).unwrap();
     let compile = |level| {
         compile_source_to_phases_with_options(
-            "resumptive-static-optimized.gr",
+            "resumptive-static-optimized.glorious",
             source,
             CompileOptions {
                 optimization_level: level,
@@ -688,7 +690,7 @@ fn o2_o3_specialize_an_exact_forwarded_terminal_operation() {
         }
         main() -> { () }
     "#;
-    let baseline = compile_source_to_phases("forwarded-handler-o0.gr", source).unwrap();
+    let baseline = compile_source_to_phases("forwarded-handler-o0.glorious", source).unwrap();
     let baseline_id = baseline
         .artifact
         .functions
@@ -702,7 +704,7 @@ fn o2_o3_specialize_an_exact_forwarded_terminal_operation() {
 
     for level in [OptimizationLevel::O2, OptimizationLevel::O3] {
         let optimized = compile_source_to_phases_with_options(
-            "forwarded-handler-optimized.gr",
+            "forwarded-handler-optimized.glorious",
             source,
             CompileOptions {
                 optimization_level: level,
@@ -820,7 +822,7 @@ fn static_handler_specialization_keeps_deep_capture_and_loan_barriers() {
     ];
 
     for (name, source, expected) in fixtures {
-        let baseline = compile_source_to_phases(&format!("{name}-o0.gr"), source).unwrap();
+        let baseline = compile_source_to_phases(&format!("{name}-o0.glorious"), source).unwrap();
         let baseline_id = baseline
             .artifact
             .functions
@@ -833,7 +835,7 @@ fn static_handler_specialization_keeps_deep_capture_and_loan_barriers() {
         assert_eq!(baseline_value, expected, "{name} O0");
         for level in [OptimizationLevel::O2, OptimizationLevel::O3] {
             let optimized = compile_source_to_phases_with_options(
-                &format!("{name}-{level:?}.gr"),
+                &format!("{name}-{level:?}.glorious"),
                 source,
                 CompileOptions {
                     optimization_level: level,
@@ -867,7 +869,7 @@ fn static_handler_specialization_keeps_deep_capture_and_loan_barriers() {
 
 #[test]
 fn terminal_handler_emits_exact_dynamic_descriptors_and_executes() {
-    let artifact = compile_source_to_bytecode("terminal.gr", TERMINAL_PROGRAM).unwrap();
+    let artifact = compile_source_to_bytecode("terminal.glorious", TERMINAL_PROGRAM).unwrap();
     assert_eq!(artifact.required_features, 1 | (1 << 1) | (1 << 3));
     let stop = protocol_id(&artifact, "Stop");
     assert_eq!(artifact.protocols[stop as usize].operations.len(), 1);
@@ -952,8 +954,8 @@ fn terminal_handler_emits_exact_dynamic_descriptors_and_executes() {
 
 #[test]
 fn effect_core_and_mir_are_explicit_and_phase_fingerprints_are_deterministic() {
-    let first = compile_source_to_phases("terminal.gr", TERMINAL_PROGRAM).unwrap();
-    let second = compile_source_to_phases("terminal.gr", TERMINAL_PROGRAM).unwrap();
+    let first = compile_source_to_phases("terminal.glorious", TERMINAL_PROGRAM).unwrap();
+    let second = compile_source_to_phases("terminal.glorious", TERMINAL_PROGRAM).unwrap();
     assert_eq!(first.core_fingerprint(), second.core_fingerprint());
     assert_eq!(first.mir_fingerprint(), second.mir_fingerprint());
     assert_eq!(first.artifact.encode(), second.artifact.encode());
@@ -985,7 +987,7 @@ fn total_multi_operation_handler_preserves_declaration_and_clause_order() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("two-operations.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("two-operations.glorious", source).unwrap();
     let stop = protocol_id(&artifact, "Stop");
     assert_eq!(
         artifact.protocols[stop as usize]
@@ -1030,7 +1032,7 @@ fn terminal_perform_cleanup_tracks_abandoned_text_and_has_no_normal_return() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("cleanup.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("cleanup.glorious", source).unwrap();
     let stop = protocol_id(&artifact, "Stop");
     let handler_def = only_handler_def_for_protocol(&artifact, stop);
     let body_id = artifact
@@ -1099,13 +1101,12 @@ fn terminal_abandonment_classifies_partial_residuals_from_exact_flow_at_all_leve
         main() -> { () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let phases = compile_source_to_phases_with_options(
-            "terminal-residual-cleanup.gr",
+            "terminal-residual-cleanup.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -1176,10 +1177,10 @@ fn interpreter_and_vm_agree_on_a_closed_terminal_handler() {
         }
     "#;
     assert_eq!(
-        run_source("differential.gr", source, vec![], &mut NoHost).unwrap(),
+        run_source("differential.glorious", source, vec![], &mut NoHost).unwrap(),
         InterpreterValue::Unit
     );
-    let artifact = compile_source_to_bytecode("differential.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("differential.glorious", source).unwrap();
     let entry = artifact.entry_function.unwrap();
     assert_eq!(
         Vm::new(verify(artifact).unwrap())
@@ -1192,7 +1193,7 @@ fn interpreter_and_vm_agree_on_a_closed_terminal_handler() {
 #[test]
 fn genuinely_invalid_terminal_effect_shapes_reject_before_bytecode_verification() {
     let unused_resumptive = compile_source_to_bytecode(
-        "unused-resumptive.gr",
+        "unused-resumptive.glorious",
         "effect Ask { [1,1] ask() -> i64 } main() -> { () }",
     )
     .unwrap();
@@ -1213,7 +1214,7 @@ fn genuinely_invalid_terminal_effect_shapes_reject_before_bytecode_verification(
         ),
     ];
     for (source, needle) in cases {
-        let diagnostics = compile_source_to_bytecode("rejected.gr", source).unwrap_err();
+        let diagnostics = compile_source_to_bytecode("rejected.glorious", source).unwrap_err();
         assert!(
             diagnostics.iter().any(|diagnostic| {
                 !diagnostic.title.is_empty()
@@ -1256,7 +1257,7 @@ fn terminal_control_in_a_binary_operand_is_left_to_right_and_uses_the_nearest_ha
         main() -> { () }
     "#;
     assert_eq!(
-        run_selected("terminal-binary-operand.gr", source),
+        run_selected("terminal-binary-operand.glorious", source),
         Value::I64(11)
     );
 }
@@ -1276,7 +1277,7 @@ fn terminal_control_in_a_call_argument_is_left_to_right_and_uses_the_nearest_han
         main() -> { () }
     "#;
     assert_eq!(
-        run_selected("terminal-call-argument.gr", source),
+        run_selected("terminal-call-argument.glorious", source),
         Value::I64(21)
     );
 }
@@ -1295,7 +1296,7 @@ fn terminal_control_in_a_tuple_field_is_left_to_right_and_uses_the_nearest_handl
         main() -> { () }
     "#;
     assert_eq!(
-        run_selected("terminal-tuple-field.gr", source),
+        run_selected("terminal-tuple-field.glorious", source),
         Value::I64(31)
     );
 }
@@ -1318,7 +1319,7 @@ fn terminal_control_in_a_struct_field_is_left_to_right_and_uses_the_nearest_hand
         main() -> { () }
     "#;
     assert_eq!(
-        run_selected("terminal-struct-field.gr", source),
+        run_selected("terminal-struct-field.glorious", source),
         Value::I64(41)
     );
 }
@@ -1341,7 +1342,7 @@ fn terminal_control_in_an_effect_payload_uses_the_nearest_handler() {
         main() -> { () }
     "#;
     assert_eq!(
-        run_selected("terminal-effect-payload.gr", effect_payload),
+        run_selected("terminal-effect-payload.glorious", effect_payload),
         Value::I64(51)
     );
 }
@@ -1367,7 +1368,7 @@ fn a_locally_handled_terminal_resume_argument_does_not_abandon_the_mandatory_res
         main() -> { () }
     "#;
     assert_eq!(
-        run_selected("terminal-resume-argument.gr", resume_argument),
+        run_selected("terminal-resume-argument.glorious", resume_argument),
         Value::I64(61)
     );
 }
@@ -1384,7 +1385,7 @@ fn generic_terminal_instances_and_nested_terminal_handlers_are_required_behavior
         main() -> { () }
     "#;
     assert_eq!(
-        run_selected("generic-terminal-instance.gr", generic),
+        run_selected("generic-terminal-instance.glorious", generic),
         Value::I64(71)
     );
 
@@ -1400,7 +1401,7 @@ fn generic_terminal_instances_and_nested_terminal_handlers_are_required_behavior
         main() -> { () }
     "#;
     assert_eq!(
-        run_selected("nested-terminal-handler.gr", nested),
+        run_selected("nested-terminal-handler.glorious", nested),
         Value::I64(72)
     );
 }
@@ -1409,7 +1410,7 @@ fn generic_terminal_instances_and_nested_terminal_handlers_are_required_behavior
 fn terminal_control_cannot_abandon_live_must_move_values_or_mandatory_resumptions() {
     let cases = [
         (
-            "terminal-abandons-must-move.gr",
+            "terminal-abandons-must-move.glorious",
             r#"
                 struct Ticket { value: i64 }
                 impl Use<[1,1]> for Ticket {}
@@ -1424,7 +1425,7 @@ fn terminal_control_cannot_abandon_live_must_move_values_or_mandatory_resumption
             "#,
         ),
         (
-            "terminal-abandons-resumption.gr",
+            "terminal-abandons-resumption.glorious",
             r#"
                 effect Ask { [1,1] ask() -> i64 }
                 effect Stop { stop() -> ! }

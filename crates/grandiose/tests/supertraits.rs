@@ -65,7 +65,7 @@ fn transitive_diamond_bounds_imply_every_parent_and_execute() {
         answer()->i64{via_diamond(Token{marker:1})}
         main()->{()}
     "#;
-    let artifact = compile_source_to_bytecode("supertrait-diamond.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("supertrait-diamond.glorious", source).unwrap();
     let verified = verify(artifact).unwrap();
     let answer = verified
         .artifact()
@@ -120,7 +120,7 @@ fn positive_impls_require_all_parents_even_when_unreachable() {
         impl<T> Child<T> for Conditional<T> where Conditional<T>:Parent<T>{}
         main()->{()}
     "#;
-    compile_source_to_bytecode("provided-supertrait.gr", accepted).unwrap();
+    compile_source_to_bytecode("provided-supertrait.glorious", accepted).unwrap();
 }
 
 #[test]
@@ -137,7 +137,7 @@ fn type_quantity_and_u32_arguments_substitute_through_supertraits() {
         main()->{()}
     "#;
     let artifact =
-        compile_source_to_bytecode("supertrait-const-substitution.gr", accepted).unwrap();
+        compile_source_to_bytecode("supertrait-const-substitution.glorious", accepted).unwrap();
     let verified = verify(artifact).unwrap();
     let answer = verified
         .artifact()
@@ -159,7 +159,7 @@ fn type_quantity_and_u32_arguments_substitute_through_supertraits() {
         main()->{()}
     "#;
     let errors =
-        compile_source_to_bytecode("supertrait-const-mismatch.gr", mismatched).unwrap_err();
+        compile_source_to_bytecode("supertrait-const-mismatch.glorious", mismatched).unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error.code.as_deref() == Some("G1TR001")
@@ -183,7 +183,7 @@ fn associated_equalities_are_required_and_lexically_implied() {
         answer()->i64{child(Good{marker:1})}
         main()->{()}
     "#;
-    compile_source_to_bytecode("supertrait-associated.gr", accepted).unwrap();
+    compile_source_to_bytecode("supertrait-associated.glorious", accepted).unwrap();
 
     let mismatched = r#"
         trait Value<T>{type Item;}
@@ -193,8 +193,8 @@ fn associated_equalities_are_required_and_lexically_implied() {
         impl Child<Text> for Bad{}
         main()->{()}
     "#;
-    let errors =
-        compile_source_to_bytecode("supertrait-associated-mismatch.gr", mismatched).unwrap_err();
+    let errors = compile_source_to_bytecode("supertrait-associated-mismatch.glorious", mismatched)
+        .unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error.code.as_deref() == Some("G1TR001")
@@ -216,7 +216,7 @@ fn implication_is_positive_forward_only_and_negative_impls_need_no_parent() {
         child<T>(value:T)->T where T:Child{parent(value)}
         main()->{()}
     "#;
-    compile_source_to_bytecode("supertrait-direction.gr", accepted).unwrap();
+    compile_source_to_bytecode("supertrait-direction.glorious", accepted).unwrap();
 
     for (name, source) in [
         (
@@ -254,8 +254,8 @@ fn global_supertrait_polarity_rejects_negative_parent_but_not_negative_child() {
         impl Child for No{}
         main()->{()}
     "#;
-    let errors =
-        compile_source_to_bytecode("negative-parent-of-positive-child.gr", rejected).unwrap_err();
+    let errors = compile_source_to_bytecode("negative-parent-of-positive-child.glorious", rejected)
+        .unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error.code.as_deref() == Some("G1TR001")
@@ -273,7 +273,7 @@ fn global_supertrait_polarity_rejects_negative_parent_but_not_negative_child() {
         impl !Child for Yes{}
         main()->{()}
     "#;
-    compile_source_to_bytecode("positive-parent-negative-child.gr", accepted).unwrap();
+    compile_source_to_bytecode("positive-parent-negative-child.glorious", accepted).unwrap();
 }
 
 #[test]
@@ -298,7 +298,7 @@ fn cycles_are_structured_and_order_independent() {
     }
 
     let signature = |source: &str| {
-        let mut errors = compile_source_to_bytecode("cycle-order.gr", source)
+        let mut errors = compile_source_to_bytecode("cycle-order.glorious", source)
             .unwrap_err()
             .into_iter()
             .map(|error| (error.code, error.title, error.message))
@@ -336,12 +336,12 @@ fn declaration_order_is_canonical_and_overlap_remains_incoherent() {
         trait Child:Parent{}
         trait Parent{}
     "#;
-    let first = compile_source_to_phases("supertrait-order-a.gr", first).unwrap();
-    let reordered = compile_source_to_phases("supertrait-order-b.gr", reordered).unwrap();
+    let first = compile_source_to_phases("supertrait-order-a.glorious", first).unwrap();
+    let reordered = compile_source_to_phases("supertrait-order-b.glorious", reordered).unwrap();
     assert_eq!(first.artifact.encode(), reordered.artifact.encode());
 
     let overlap = "trait Parent{} trait Child:Parent{} struct Token{} impl Parent for Token{} impl Child for Token{} impl Child for Token{} main()->{()}";
-    let errors = compile_source_to_bytecode("supertrait-overlap.gr", overlap).unwrap_err();
+    let errors = compile_source_to_bytecode("supertrait-overlap.glorious", overlap).unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error.span.is_some()
@@ -372,7 +372,7 @@ fn intrinsic_drop_containment_accepts_zero_use_and_rejects_must_move_principals(
             ()
         }
     "#;
-    let phases = compile_source_to_phases("drop-supertrait-containment.gr", source).unwrap();
+    let phases = compile_source_to_phases("drop-supertrait-containment.glorious", source).unwrap();
     assert_eq!(phases.artifact.drop_glue.len(), 3);
     let parameter = |name: &str| {
         phases

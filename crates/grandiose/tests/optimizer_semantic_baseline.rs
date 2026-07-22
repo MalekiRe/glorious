@@ -85,27 +85,32 @@ const CONTROL_SOURCE: &str = r#"
 "#;
 
 #[test]
-fn options_default_is_explicit_o0_and_o1_removes_only_cleanup_free_constant_drop() {
+fn options_default_is_explicit_o2_and_o1_removes_only_cleanup_free_constant_drop() {
     let source = r#"
         answer() -> i64 { let unused = 7; 42 }
         main() -> { () }
     "#;
-    let default = compile_source_to_phases("optimizer-options-default.gr", source).unwrap();
+    let default = compile_source_to_phases("optimizer-options-default.glorious", source).unwrap();
+    let explicit_o2 = compile_at(
+        "optimizer-options-default.glorious",
+        source,
+        OptimizationLevel::O2,
+    );
     let explicit_o0 = compile_at(
-        "optimizer-options-default.gr",
+        "optimizer-options-default.glorious",
         source,
         OptimizationLevel::O0,
     );
     let o1 = compile_at(
-        "optimizer-options-default.gr",
+        "optimizer-options-default.glorious",
         source,
         OptimizationLevel::O1,
     );
 
-    assert_eq!(default.mir_fingerprint(), explicit_o0.mir_fingerprint());
-    assert_eq!(default.artifact.encode(), explicit_o0.artifact.encode());
-    assert_eq!(default.optimization_report, explicit_o0.optimization_report);
-    assert_eq!(explicit_o0.optimization_report.level, OptimizationLevel::O0);
+    assert_eq!(default.mir_fingerprint(), explicit_o2.mir_fingerprint());
+    assert_eq!(default.artifact.encode(), explicit_o2.artifact.encode());
+    assert_eq!(default.optimization_report, explicit_o2.optimization_report);
+    assert_eq!(explicit_o2.optimization_report.level, OptimizationLevel::O2);
     assert_eq!(o1.optimization_report.level, OptimizationLevel::O1);
     let backend = explicit_o0
         .optimization_report
@@ -177,12 +182,12 @@ fn o0_o2_empty_drop_sccp_is_semantically_equal_for_noop_cleanup() {
         main() -> () { () }
     "#;
     let o0 = compile_at(
-        "optimizer-empty-drop-differential.gr",
+        "optimizer-empty-drop-differential.glorious",
         source,
         OptimizationLevel::O0,
     );
     let o2 = compile_at(
-        "optimizer-empty-drop-differential.gr",
+        "optimizer-empty-drop-differential.glorious",
         source,
         OptimizationLevel::O2,
     );
@@ -201,12 +206,12 @@ fn o0_o2_empty_drop_sccp_is_semantically_equal_for_noop_cleanup() {
 #[test]
 fn o0_and_o1_are_observationally_equal_across_handlers_and_resumptions() {
     let o0 = compile_at(
-        "optimizer-control-differential.gr",
+        "optimizer-control-differential.glorious",
         CONTROL_SOURCE,
         OptimizationLevel::O0,
     );
     let o1 = compile_at(
-        "optimizer-control-differential.gr",
+        "optimizer-control-differential.glorious",
         CONTROL_SOURCE,
         OptimizationLevel::O1,
     );
@@ -253,17 +258,17 @@ fn o2_statically_selects_the_exact_terminal_clause_in_source_order() {
         main() -> { () }
     "#;
     let o0 = compile_at(
-        "optimizer-static-terminal.gr",
+        "optimizer-static-terminal.glorious",
         source,
         OptimizationLevel::O0,
     );
     let o2 = compile_at(
-        "optimizer-static-terminal.gr",
+        "optimizer-static-terminal.glorious",
         source,
         OptimizationLevel::O2,
     );
     let repeated = compile_at(
-        "optimizer-static-terminal.gr",
+        "optimizer-static-terminal.glorious",
         source,
         OptimizationLevel::O2,
     );
@@ -300,12 +305,12 @@ fn o2_terminal_specialization_preserves_partial_fallback_to_the_outer_handler() 
         main() -> { () }
     "#;
     let o0 = compile_at(
-        "optimizer-partial-terminal.gr",
+        "optimizer-partial-terminal.glorious",
         source,
         OptimizationLevel::O0,
     );
     let o2 = compile_at(
-        "optimizer-partial-terminal.gr",
+        "optimizer-partial-terminal.glorious",
         source,
         OptimizationLevel::O2,
     );
@@ -335,12 +340,12 @@ fn o2_statically_composes_canonical_one_shot_resume_and_cancel() {
     "#;
     for function in ["resumed", "cancelled"] {
         let o0 = compile_at(
-            "optimizer-one-shot-barrier.gr",
+            "optimizer-one-shot-barrier.glorious",
             source,
             OptimizationLevel::O0,
         );
         let o2 = compile_at(
-            "optimizer-one-shot-barrier.gr",
+            "optimizer-one-shot-barrier.glorious",
             source,
             OptimizationLevel::O2,
         );
@@ -381,12 +386,12 @@ fn o2_control_specialization_keeps_custom_drop_before_terminal_clause() {
         main() -> { () }
     "#;
     let o0 = compile_at(
-        "optimizer-control-drop-barrier.gr",
+        "optimizer-control-drop-barrier.glorious",
         source,
         OptimizationLevel::O0,
     );
     let o2 = compile_at(
-        "optimizer-control-drop-barrier.gr",
+        "optimizer-control-drop-barrier.glorious",
         source,
         OptimizationLevel::O2,
     );
@@ -418,12 +423,12 @@ fn o0_and_o1_preserve_dead_traps_and_custom_drop_barriers() {
 
     for function in ["dead_trap", "guarded"] {
         let o0 = compile_at(
-            "optimizer-barrier-differential.gr",
+            "optimizer-barrier-differential.glorious",
             source,
             OptimizationLevel::O0,
         );
         let o1 = compile_at(
-            "optimizer-barrier-differential.gr",
+            "optimizer-barrier-differential.glorious",
             source,
             OptimizationLevel::O1,
         );
@@ -433,7 +438,11 @@ fn o0_and_o1_preserve_dead_traps_and_custom_drop_barriers() {
         assert!(o1_error.contains("division by zero"), "{o1_error}");
     }
 
-    let o1 = compile_at("optimizer-barrier-shape.gr", source, OptimizationLevel::O1);
+    let o1 = compile_at(
+        "optimizer-barrier-shape.glorious",
+        source,
+        OptimizationLevel::O1,
+    );
     let guarded = function_code(&o1, "guarded");
     assert!(
         guarded
@@ -475,8 +484,8 @@ fn o0_and_o1_preserve_must_move_deconstruction_and_rejection() {
         }
         main() -> { () }
     "#;
-    let o0 = compile_at("optimizer-must-move.gr", valid, OptimizationLevel::O0);
-    let o1 = compile_at("optimizer-must-move.gr", valid, OptimizationLevel::O1);
+    let o0 = compile_at("optimizer-must-move.glorious", valid, OptimizationLevel::O0);
+    let o1 = compile_at("optimizer-must-move.glorious", valid, OptimizationLevel::O1);
     assert_eq!(run(o0, "answer").unwrap(), Value::I64(42));
     assert_eq!(run(o1, "answer").unwrap(), Value::I64(42));
 
@@ -488,7 +497,7 @@ fn o0_and_o1_preserve_must_move_deconstruction_and_rejection() {
     "#;
     let compile = |level| {
         compile_source_to_phases_with_options(
-            "optimizer-must-move-reject.gr",
+            "optimizer-must-move-reject.glorious",
             invalid,
             CompileOptions {
                 optimization_level: level,
@@ -505,12 +514,12 @@ fn o0_and_o1_preserve_must_move_deconstruction_and_rejection() {
 #[test]
 fn o1_reports_fingerprints_and_artifacts_deterministically() {
     let first = compile_at(
-        "optimizer-o1-determinism.gr",
+        "optimizer-o1-determinism.glorious",
         CONTROL_SOURCE,
         OptimizationLevel::O1,
     );
     let second = compile_at(
-        "optimizer-o1-determinism.gr",
+        "optimizer-o1-determinism.glorious",
         CONTROL_SOURCE,
         OptimizationLevel::O1,
     );
@@ -524,7 +533,7 @@ fn o1_reports_fingerprints_and_artifacts_deterministically() {
 #[test]
 fn dead_trapping_primitive_remains_observable_at_its_source_position() {
     let phases = compile_source_to_phases(
-        "optimizer-dead-trap.gr",
+        "optimizer-dead-trap.glorious",
         r#"
             answer() -> i64 { 1 / 0; 42 }
             main() -> { () }
@@ -548,7 +557,7 @@ fn dead_trapping_primitive_remains_observable_at_its_source_position() {
 #[test]
 fn constant_folding_must_preserve_checked_overflow_as_a_trap() {
     let phases = compile_source_to_phases(
-        "optimizer-overflow.gr",
+        "optimizer-overflow.glorious",
         r#"
             answer() -> i64 { 9223372036854775807 + 1 }
             main() -> { () }
@@ -572,7 +581,7 @@ fn constant_folding_must_preserve_checked_overflow_as_a_trap() {
 #[test]
 fn custom_drop_is_a_tail_formation_barrier_and_still_runs() {
     let phases = compile_source_to_phases(
-        "optimizer-drop-barrier.gr",
+        "optimizer-drop-barrier.glorious",
         r#"
             struct Guard { marker: i64 }
             impl Use<[0,1]> for Guard {}
@@ -623,12 +632,12 @@ fn o2_tail_discovery_does_not_move_custom_drop_before_a_callee_trap() {
         main() -> { () }
     "#;
     let o0 = compile_at(
-        "optimizer-tail-drop-order-o0.gr",
+        "optimizer-tail-drop-order-o0.glorious",
         source,
         OptimizationLevel::O0,
     );
     let o2 = compile_at(
-        "optimizer-tail-drop-order-o2.gr",
+        "optimizer-tail-drop-order-o2.glorious",
         source,
         OptimizationLevel::O2,
     );
@@ -654,8 +663,10 @@ fn o2_tail_discovery_does_not_move_custom_drop_before_a_callee_trap() {
 
 #[test]
 fn constant_handler_branch_keeps_clause_choice_and_resumption_identity() {
-    let first = compile_source_to_phases("optimizer-handler-identity.gr", CONTROL_SOURCE).unwrap();
-    let second = compile_source_to_phases("optimizer-handler-identity.gr", CONTROL_SOURCE).unwrap();
+    let first =
+        compile_source_to_phases("optimizer-handler-identity.glorious", CONTROL_SOURCE).unwrap();
+    let second =
+        compile_source_to_phases("optimizer-handler-identity.glorious", CONTROL_SOURCE).unwrap();
 
     assert_eq!(first.core_fingerprint(), second.core_fingerprint());
     assert_eq!(first.mir_fingerprint(), second.mir_fingerprint());
@@ -688,7 +699,7 @@ fn constant_handler_branch_keeps_clause_choice_and_resumption_identity() {
 #[test]
 fn self_tail_recursion_has_a_bounded_frame_replacement_baseline() {
     let phases = compile_source_to_phases(
-        "optimizer-self-tail.gr",
+        "optimizer-self-tail.glorious",
         r#"
             forever() -> ! { forever() }
             main() -> { () }
@@ -716,12 +727,12 @@ fn o2_forms_in_frame_self_backedges_and_keeps_nonself_tail_calls() {
         main() -> { () }
     "#;
     let o0 = compile_at(
-        "optimizer-self-backedge-o0.gr",
+        "optimizer-self-backedge-o0.glorious",
         source,
         OptimizationLevel::O0,
     );
     let o2 = compile_at(
-        "optimizer-self-backedge-o2.gr",
+        "optimizer-self-backedge-o2.glorious",
         source,
         OptimizationLevel::O2,
     );
@@ -769,12 +780,12 @@ fn o2_records_exact_closure_targets_without_erasing_indirect_receiver_semantics(
     let source =
         "run()->i64 { let captured = 42; let answer = { => captured }; answer() } main()->{()}";
     let o0 = compile_at(
-        "optimizer-exact-closure-o0.gr",
+        "optimizer-exact-closure-o0.glorious",
         source,
         OptimizationLevel::O0,
     );
     let o2 = compile_at(
-        "optimizer-exact-closure-o2.gr",
+        "optimizer-exact-closure-o2.glorious",
         source,
         OptimizationLevel::O2,
     );
@@ -837,8 +848,16 @@ fn o0_and_o1_tuple_scalarization_are_observationally_equal() {
         }
         main() -> { () }
     "#;
-    let o0 = compile_at("optimizer-scalarize-o0.gr", source, OptimizationLevel::O0);
-    let o1 = compile_at("optimizer-scalarize-o1.gr", source, OptimizationLevel::O1);
+    let o0 = compile_at(
+        "optimizer-scalarize-o0.glorious",
+        source,
+        OptimizationLevel::O0,
+    );
+    let o1 = compile_at(
+        "optimizer-scalarize-o1.glorious",
+        source,
+        OptimizationLevel::O1,
+    );
 
     for function in ["answer", "struct_answer"] {
         assert!(function_code(&o0, function).iter().any(|instruction| {
@@ -867,12 +886,12 @@ fn o0_and_o1_tuple_scalarization_are_observationally_equal() {
     assert_eq!(run(o1, "answer").unwrap(), Value::I64(42));
 
     let o0 = compile_at(
-        "optimizer-scalarize-struct-o0.gr",
+        "optimizer-scalarize-struct-o0.glorious",
         source,
         OptimizationLevel::O0,
     );
     let o1 = compile_at(
-        "optimizer-scalarize-struct-o1.gr",
+        "optimizer-scalarize-struct-o1.glorious",
         source,
         OptimizationLevel::O1,
     );
@@ -918,12 +937,12 @@ fn o2_scalarizes_an_immediate_owned_closure_call_observationally() {
         main() -> { () }
     "#;
     let o0 = compile_at(
-        "optimizer-owned-callable-o0.gr",
+        "optimizer-owned-callable-o0.glorious",
         source,
         OptimizationLevel::O0,
     );
     let o2 = compile_at(
-        "optimizer-owned-callable-o2.gr",
+        "optimizer-owned-callable-o2.glorious",
         source,
         OptimizationLevel::O2,
     );
@@ -934,7 +953,7 @@ fn o2_scalarizes_an_immediate_owned_closure_call_observationally() {
     assert_eq!(run(o2.clone(), "effect_answer").unwrap(), Value::I64(42));
     let o0_trap = run(
         compile_at(
-            "optimizer-owned-callable-trap-o0.gr",
+            "optimizer-owned-callable-trap-o0.glorious",
             source,
             OptimizationLevel::O0,
         ),

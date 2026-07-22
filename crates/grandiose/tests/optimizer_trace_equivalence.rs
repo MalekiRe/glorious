@@ -101,7 +101,7 @@ impl Host for TraceHost {
 
 fn observations(level: OptimizationLevel) -> (Vec<String>, grandiose_vm::RuntimeError) {
     let phases = compile_source_to_phases_with_options(
-        "optimizer-trace-equivalence.gr",
+        "optimizer-trace-equivalence.glorious",
         SOURCE,
         CompileOptions {
             optimization_level: level,

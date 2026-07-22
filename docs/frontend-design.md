@@ -258,8 +258,8 @@ resolved to a deterministic fixed point; benign re-export cycles are accepted,
 while unresolved and ambiguous cycles are diagnosed.
 
 Items in a named module are private by default and `pub` exports them to the
-parent/module path. Legacy explicitly supplied source fragments without any
-module edge remain crate-root fragments for compatibility. Once a crate uses
+parent/module path. Explicitly supplied source fragments without a module edge
+remain crate-root fragments for module-free programs. Once a crate uses
 module syntax, supplied files that are orphaned, duplicated, or mapped to the
 wrong hybrid path are errors. Fixity declarations are module scoped and operator
 resolution observes explicit and glob imports just like other value bindings.
@@ -1216,6 +1216,11 @@ same delimiter is reinstated by resume. The nearest matching handler is a runtim
 property, but static normalized keys and hidden evidence guarantee correct
 routing.
 
+The handled body and every clause coexist while the delimiter is active, so
+they cannot independently capture the same unique reference. Code returns or
+ends unique state used by the body before branching on its result; clauses may
+then borrow that state in the ordinary sequential scope.
+
 ### 8.5 Resumptions and cancellation
 
 At a nonterminal `perform`, continuation capture computes all live owners, loans,
@@ -1527,9 +1532,9 @@ remainder. Repeating canonical goals are deduplicated while rendering.
 
 ### 12.2 Cross-stage oracles
 
-- Run unoptimized Typed Core/MIR behavior against the existing interpreter only
-  for compiler-accepted programs in the documented bootstrap compatibility
-  intersection. The AST interpreter is not an oracle for ownership disposition,
+- Run unoptimized Typed Core/MIR behavior against the AST evaluator only for
+  compiler-accepted programs in its documented bootstrap subset. The evaluator
+  is not an oracle for ownership disposition,
   cleanup, borrowing, or private-field authority.
 - Compare MIR execution before and after evidence erasure and cleanup lowering.
 - Compile with semantic caches on/off and randomized lookup-map seeds; artifacts
@@ -1631,7 +1636,7 @@ Add effect declarations/rows, normalized protocol keys, handler literals,
 pattern matrices, deep/partial coverage, terminal performance, continuation
 capture, resumption quantities, resume/cancel checking, and label-indexed effects.
 
-Gate: effect semantics and cleanup agree with the Core/MIR interpreter; one-shot,
+Gate: effect semantics and cleanup agree with bytecode executed by `grvm`; one-shot,
 multi-shot, terminal, partial, and cancellation suites pass.
 
 ### Slice 7: refinements and final Core boundary

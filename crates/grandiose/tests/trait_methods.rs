@@ -92,7 +92,7 @@ fn grounded_qualified_trait_method_dispatches_statically() {
         main() -> { () }
     "#;
     let artifact =
-        grandiose::compile_source_to_bytecode("trait-method-dispatch.gr", source).unwrap();
+        grandiose::compile_source_to_bytecode("trait-method-dispatch.glorious", source).unwrap();
     let selected = artifact
         .functions
         .iter()
@@ -131,13 +131,12 @@ fn generic_qualified_trait_methods_specialize_with_where_evidence_at_all_levels(
         main() -> { () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let artifact = compile_source_to_bytecode_with_options(
-            "generic-trait-method.gr",
+            "generic-trait-method.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -189,13 +188,12 @@ fn bounded_symbolic_field_receivers_and_receiverless_results_defer_to_specializa
         main() -> { equal_pair(); make_pair(); make_result(); () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let artifact = compile_source_to_bytecode_with_options(
-            "symbolic-bounded-trait-calls.gr",
+            "symbolic-bounded-trait-calls.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -259,7 +257,6 @@ fn trait_method_selection_canonicalizes_alias_impl_heads_and_results() {
         main() -> () { () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -351,7 +348,6 @@ fn dot_trait_calls_match_qualified_calls_and_infer_shared_receivers() {
         main() -> () { () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -459,7 +455,6 @@ fn dot_trait_calls_preserve_existing_borrows_and_owned_access() {
         main() -> () { () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -512,13 +507,12 @@ fn trait_calls_inside_generic_bodies_dispatch_from_ground_evidence() {
         main() -> { () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let artifact = compile_source_to_bytecode_with_options(
-            "generic-body-trait-dispatch.gr",
+            "generic-body-trait-dispatch.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -559,12 +553,12 @@ fn generic_body_trait_dispatch_requires_lexical_and_ground_evidence() {
     "#;
     for (name, source, needle) in [
         (
-            "generic-trait-missing-lexical.gr",
+            "generic-trait-missing-lexical.glorious",
             missing_lexical,
             "no ground",
         ),
         (
-            "generic-trait-missing-ground.gr",
+            "generic-trait-missing-ground.glorious",
             missing_ground,
             "no matching implementation",
         ),
@@ -613,12 +607,12 @@ fn generic_trait_method_calls_require_where_evidence_and_exact_receiver_access()
     "#;
     for (name, body, expected) in [
         (
-            "missing-method-evidence.gr",
+            "missing-method-evidence.glorious",
             "bad(item:Item)->Text{Pick::pick(&item, \"no evidence\")} main()->{()}",
             "no matching implementation",
         ),
         (
-            "wrong-method-receiver-mode.gr",
+            "wrong-method-receiver-mode.glorious",
             "bad(item:Item)->i64{Pick::pick(item, 42)} main()->{()}",
             "not a callable",
         ),
@@ -654,13 +648,12 @@ fn const_generic_trait_method_binders_infer_and_specialize() {
         main() -> { () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let artifact = compile_source_to_bytecode_with_options(
-            "const-generic-trait-method.gr",
+            "const-generic-trait-method.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -703,13 +696,12 @@ fn qualified_methods_select_after_ground_gat_receiver_normalization() {
         main() -> { () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let artifact = compile_source_to_bytecode_with_options(
-            "projected-trait-method-receiver.gr",
+            "projected-trait-method-receiver.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -730,7 +722,7 @@ fn qualified_methods_select_after_ground_gat_receiver_normalization() {
     let recovery_source = source.replace("main() -> { () }", "main() -> i64 { selected() }");
     assert_eq!(
         grandiose::run_source(
-            "projected-dot-trait-method-recovery.gr",
+            "projected-dot-trait-method-recovery.glorious",
             &recovery_source,
             vec![],
             &mut grandiose::eval::SystemHost::default(),
@@ -751,8 +743,9 @@ fn qualified_method_projection_selection_requires_exact_associated_evidence() {
         bad(value: <Carrier as Family>::Item<i64>) -> i64 { Read::read(&value) }
         main() -> { () }
     "#;
-    let errors = grandiose::compile_source_to_bytecode("unproven-projected-method.gr", source)
-        .expect_err("an unproven associated receiver projection must be rejected");
+    let errors =
+        grandiose::compile_source_to_bytecode("unproven-projected-method.glorious", source)
+            .expect_err("an unproven associated receiver projection must be rejected");
     assert!(
         errors.iter().any(|error| {
             error.code.is_some()
@@ -782,13 +775,12 @@ fn qualified_methods_specialize_through_open_generic_impl_heads() {
         main() -> { () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let artifact = compile_source_to_bytecode_with_options(
-            "open-generic-method-impl.gr",
+            "open-generic-method-impl.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -821,8 +813,9 @@ fn open_generic_method_impl_heads_preserve_their_where_evidence() {
         bad(item: Box<Text>) -> i64 { Select::select(&item, 42) }
         main() -> { () }
     "#;
-    let errors = grandiose::compile_source_to_bytecode("open-impl-missing-evidence.gr", source)
-        .expect_err("an open impl head must retain its own where evidence");
+    let errors =
+        grandiose::compile_source_to_bytecode("open-impl-missing-evidence.glorious", source)
+            .expect_err("an open impl head must retain its own where evidence");
     assert!(
         errors.iter().any(|error| {
             error.code.is_some()

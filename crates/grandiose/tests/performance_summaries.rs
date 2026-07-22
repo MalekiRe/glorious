@@ -23,7 +23,7 @@ fn transitive_and_mixed_row_must_perform_evidence_multiplies_ownership() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("transitive-performance.gr", source).unwrap();
+    let phases = compile_source_to_phases("transitive-performance.glorious", source).unwrap();
     let core = phases.core.canonical_text();
     assert!(core.contains("performance \"leaf\" normal=[2] abandon=false widened=false"));
     assert!(core.contains("performance \"relay\" normal=[2] abandon=false widened=false"));
@@ -36,7 +36,7 @@ fn unused_operation_in_a_mixed_protocol_does_not_erase_body_evidence() {
         leaf() -> i64 / {Choice} { perform Choice::choose() }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("mixed-row-performance.gr", source).unwrap();
+    let phases = compile_source_to_phases("mixed-row-performance.glorious", source).unwrap();
     assert!(
         phases
             .core
@@ -63,7 +63,7 @@ fn grounded_generic_emission_carries_canonical_performance_evidence() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("generic-performance.gr", source).unwrap();
+    let phases = compile_source_to_phases("generic-performance.glorious", source).unwrap();
     assert!(phases.core.canonical_text().lines().any(|line| {
         line.contains("performance \"$specialization$relay#")
             && line.contains("normal=[2] abandon=false widened=false")
@@ -78,8 +78,8 @@ fn sequential_two_shot_calls_preserve_exact_factor_four() {
         twice() -> i64 / {Choice} { let first = leaf(); let second = leaf(); first + second }
         main() -> { () }
     "#;
-    let first = compile_source_to_phases("factor-four.gr", source).unwrap();
-    let repeated = compile_source_to_phases("factor-four.gr", source).unwrap();
+    let first = compile_source_to_phases("factor-four.glorious", source).unwrap();
+    let repeated = compile_source_to_phases("factor-four.glorious", source).unwrap();
     assert!(
         first
             .core
@@ -118,7 +118,7 @@ fn arbitrary_exact_power_of_two_multiplier_accounts_live_ownership() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("factor-eight.gr", source).unwrap();
+    let phases = compile_source_to_phases("factor-eight.glorious", source).unwrap();
     assert!(
         phases
             .core
@@ -152,7 +152,7 @@ fn optional_and_terminal_sequence_order_never_manufactures_must_perform_evidence
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("abandonment-order.gr", source).unwrap();
+    let phases = compile_source_to_phases("abandonment-order.glorious", source).unwrap();
     let core = phases.core.canonical_text();
     for callable in ["optional_first", "optional_last"] {
         assert!(core.contains(&format!(
@@ -179,7 +179,7 @@ fn exhaustive_terminal_dispatch_preserves_a_direct_branch_summary() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("conditional-performance.gr", source).unwrap();
+    let phases = compile_source_to_phases("conditional-performance.glorious", source).unwrap();
     let core = phases.core.canonical_text();
     assert!(
         core.contains("performance \"conditional\" normal=[2] abandon=false widened=false"),
@@ -202,7 +202,8 @@ fn exhaustive_terminal_enum_payload_dispatch_joins_exact_branches() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("exhaustive-payload-performance.gr", source).unwrap();
+    let phases =
+        compile_source_to_phases("exhaustive-payload-performance.glorious", source).unwrap();
     assert!(
         phases
             .core
@@ -239,7 +240,7 @@ fn nonexhaustive_terminal_payload_dispatch_cannot_authorize_caller_ownership() {
         }
         main() -> { () }
     "#;
-    let diagnostics = compile_source_to_phases("partial-terminal-performance.gr", source)
+    let diagnostics = compile_source_to_phases("partial-terminal-performance.glorious", source)
         .expect_err("a forwarded terminal path cannot prove an exact caller multiplier");
     assert!(
         diagnostics.iter().any(|diagnostic| {
@@ -262,7 +263,7 @@ fn may_effect_only_and_recursive_evidence_never_claims_a_multiplier() {
         recurse() -> i64 / {Choice} { recurse() }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("conservative-performance.gr", source).unwrap();
+    let phases = compile_source_to_phases("conservative-performance.glorious", source).unwrap();
     let core = phases.core.canonical_text();
     assert!(core.contains("performance \"may\" normal=[1] abandon=false widened=false"));
     assert!(core.contains("performance \"recurse\" normal=[] abandon=false widened=false"));
@@ -280,7 +281,7 @@ fn nonreturning_effect_free_callee_cannot_lend_a_false_later_multiplier() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("pure-nonreturn-performance.gr", source).unwrap();
+    let phases = compile_source_to_phases("pure-nonreturn-performance.glorious", source).unwrap();
     let core = phases.core.canonical_text();
     assert!(core.contains("performance \"never\" normal=[] abandon=false widened=false"));
     assert!(core.contains("performance \"claimed\" normal=[] abandon=false widened=false"));
@@ -302,7 +303,7 @@ fn acyclic_call_chain_longer_than_the_old_iteration_cap_converges() {
         ));
     }
     source.push_str("main() -> { () }\n");
-    let phases = compile_source_to_phases("long-summary-chain.gr", &source).unwrap();
+    let phases = compile_source_to_phases("long-summary-chain.glorious", &source).unwrap();
     assert!(
         phases
             .core
@@ -325,8 +326,8 @@ fn transitive_summary_is_not_source_declaration_order_dependent() {
         leaf() -> i64 / {Choice} { perform Choice::choose() }
         main() -> { () }
     "#;
-    let first = compile_source_to_phases("ordered.gr", first).unwrap();
-    let reordered = compile_source_to_phases("reordered.gr", reordered).unwrap();
+    let first = compile_source_to_phases("ordered.glorious", first).unwrap();
+    let reordered = compile_source_to_phases("reordered.glorious", reordered).unwrap();
     let evidence = |text: &str| {
         text.lines()
             .filter(|line| line.starts_with("performance "))

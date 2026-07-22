@@ -173,7 +173,7 @@ const CHAR_SURFACE: &str = r#"
 "#;
 
 #[test]
-fn integer_source_bases_ranges_and_errors_execute_at_o0_through_o3() {
+fn integer_source_bases_ranges_and_errors_execute_at_o1_through_o3() {
     let expected = [
         ("binary", Value::U64(175)),
         ("octal", Value::U64(493)),
@@ -196,7 +196,6 @@ fn integer_source_bases_ranges_and_errors_execute_at_o0_through_o3() {
     ];
 
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -221,7 +220,7 @@ fn integer_source_bases_ranges_and_errors_execute_at_o0_through_o3() {
 }
 
 #[test]
-fn character_scalars_and_utf8_codec_execute_at_o0_through_o3() {
+fn character_scalars_and_utf8_codec_execute_at_o1_through_o3() {
     let expected = [
         ("ascii_scalar", Value::U64(65)),
         ("invalid_scalar", Value::U64(0)),
@@ -235,7 +234,6 @@ fn character_scalars_and_utf8_codec_execute_at_o0_through_o3() {
     ];
 
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

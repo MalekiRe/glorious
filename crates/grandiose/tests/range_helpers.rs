@@ -130,13 +130,12 @@ fn distributed_range_helpers_execute_with_o0_o3_boundary_parity() {
     ];
 
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let artifact = compile_source_to_bytecode_with_options(
-            "range-helpers.gr",
+            "range-helpers.glorious",
             SOURCE,
             CompileOptions { optimization_level },
         )

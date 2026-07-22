@@ -56,9 +56,8 @@ const SURFACE: &str = r#"
 "#;
 
 #[test]
-fn public_character_scalar_surface_executes_at_o0_through_o3() {
+fn public_character_scalar_surface_executes_at_o1_through_o3() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

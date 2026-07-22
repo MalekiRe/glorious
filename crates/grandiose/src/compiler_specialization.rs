@@ -450,7 +450,7 @@ pub(crate) struct RequestGraph {
     /// but their signature, captures, and receiver evidence are fully known.
     pub(crate) late_closures: BTreeMap<CallSiteKey, LateClosurePlan>,
     /// Recursive binding associated with an otherwise ordinary emitted
-    /// closure. Kept outside `ClosureRequest` so legacy compiler construction
+    /// closure. Kept outside `ClosureRequest` so existing compiler construction
     /// sites remain source-compatible until Core consumes the contract.
     pub(crate) recursive_closures: BTreeMap<ClosureRequest, RecursiveSelf>,
     /// Calls which target the current callable receiver rather than a captured
@@ -860,7 +860,7 @@ fn const_identity(
     Some(ProvisionalType::Predefined(name))
 }
 
-/// Enrich the legacy type/lifetime application tree with structural const
+/// Enrich the compatibility type/lifetime application tree with structural const
 /// identities retained in `Program`'s span-keyed side table.
 fn symbolic_type_in(
     program: &Program,
@@ -1912,8 +1912,14 @@ fn discover_templates(
             | ExprKind::String(_)
             | ExprKind::Variable(_) => false,
             ExprKind::LabelReference(_) => false,
-            ExprKind::Resume { .. } | ExprKind::Cancel { .. } | ExprKind::TailResume { .. } => {
-                unvalidated_syntax()
+            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+                callable_use_summary(resumption, aliases, callable_positions, dependencies)
+                    || value.as_deref().is_some_and(|value| {
+                        callable_use_summary(value, aliases, callable_positions, dependencies)
+                    })
+            }
+            ExprKind::Cancel { resumption } => {
+                callable_use_summary(resumption, aliases, callable_positions, dependencies)
             }
         }
     }
@@ -2778,12 +2784,15 @@ pub(crate) fn captured_outer_uses(
             | ExprKind::ByteString(_)
             | ExprKind::String(_)
             | ExprKind::Variable(_) => {}
-            // The parser's grammar-complete forms are rejected by `validate` or
-            // rewritten by `parser::normalize_for_legacy_consumers` before any
-            // compiler pass runs; reaching one here is a broken phase invariant.
             ExprKind::LabelReference(_) => {}
-            ExprKind::Resume { .. } | ExprKind::Cancel { .. } | ExprKind::TailResume { .. } => {
-                unvalidated_syntax()
+            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+                visit(resumption, outer, bound, found, CaptureMode::Observe);
+                if let Some(value) = value {
+                    visit(value, outer, bound, found, CaptureMode::Observe);
+                }
+            }
+            ExprKind::Cancel { resumption } => {
+                visit(resumption, outer, bound, found, CaptureMode::Observe)
             }
         }
     }
@@ -2796,6 +2805,44 @@ pub(crate) fn captured_outer_uses(
         CaptureMode::Observe,
     );
     found
+}
+
+fn passed_as_unique_call_argument(
+    body: &Expr,
+    name: &str,
+    templates: &BTreeMap<String, FunctionTemplate>,
+) -> bool {
+    let ordinals = expression_ordinals(body);
+    let count = ordinals.values().copied().max().map_or(0, |last| last + 1);
+    (0..count).any(|ordinal| {
+        let Some(expression) = expression_at_ordinal(body, ordinal) else {
+            return false;
+        };
+        let ExprKind::Call(callee, arguments) = &expression.kind else {
+            return false;
+        };
+        let ExprKind::Variable(path) = &callee.kind else {
+            return false;
+        };
+        let Some(template) = (path.len() == 1)
+            .then(|| templates.get(path[0].as_ref()))
+            .flatten()
+        else {
+            return false;
+        };
+        arguments
+            .iter()
+            .zip(&template.params)
+            .any(|(argument, formal)| {
+                let argument = match &argument.kind {
+                    ExprKind::Move(argument) => argument.as_ref(),
+                    _ => argument,
+                };
+                matches!(formal, ProvisionalType::Unique(_))
+                    && matches!(&argument.kind, ExprKind::Variable(argument_path)
+                    if argument_path.len() == 1 && argument_path[0].as_ref() == name)
+            })
+    })
 }
 
 pub(crate) fn recursive_closure_binding(value: &Expr, name: &str) -> bool {
@@ -2915,13 +2962,14 @@ fn direct_closure_effects(
             | ExprKind::ByteString(_)
             | ExprKind::String(_)
             | ExprKind::Variable(_) => {}
-            // The parser's grammar-complete forms are rejected by `validate` or
-            // rewritten by `parser::normalize_for_legacy_consumers` before any
-            // compiler pass runs; reaching one here is a broken phase invariant.
             ExprKind::LabelReference(_) => {}
-            ExprKind::Resume { .. } | ExprKind::Cancel { .. } | ExprKind::TailResume { .. } => {
-                unvalidated_syntax()
+            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+                visit(resumption, resolve, output);
+                if let Some(value) = value {
+                    visit(value, resolve, output);
+                }
             }
+            ExprKind::Cancel { resumption } => visit(resumption, resolve, output),
         }
     }
     let mut effects = BTreeSet::new();
@@ -3150,44 +3198,181 @@ impl<'a> Walker<'a> {
             (path.len() == 1).then_some(path[0].as_ref())
         }
 
-        let expected = block_expected?;
-        let Stmt::Expr(result) = remaining.last()? else {
-            return None;
-        };
-        if moved_binding(result) == Some(binding) {
-            return Some(expected.clone());
+        fn expression_mentions_binding(expression: &Expr, binding: &str) -> bool {
+            if moved_binding(expression) == Some(binding) {
+                return true;
+            }
+            match &expression.kind {
+                ExprKind::Binary { lhs, rhs, .. } => {
+                    expression_mentions_binding(lhs, binding)
+                        || expression_mentions_binding(rhs, binding)
+                }
+                ExprKind::Unary { operand, .. } | ExprKind::Field(operand, _) => {
+                    expression_mentions_binding(operand, binding)
+                }
+                _ => false,
+            }
         }
-        let ExprKind::Struct { name, fields } = &result.kind else {
-            return None;
-        };
-        let ProvisionalType::Nominal(instance) = expected else {
-            return None;
-        };
-        if instance.declaration.0 != name.as_ref() {
-            return None;
-        }
-        let template = self.nominal_templates.get(name.as_ref())?;
-        if template.params.len() != instance.arguments.len() {
-            return None;
-        }
-        let substitutions = template
-            .params
-            .iter()
-            .cloned()
-            .zip(
-                instance
-                    .arguments
+
+        if let (Some(expected), Some(Stmt::Expr(result))) = (block_expected, remaining.last()) {
+            if moved_binding(result) == Some(binding) {
+                return Some(expected.clone());
+            }
+            if let (ExprKind::Struct { name, fields }, ProvisionalType::Nominal(instance)) =
+                (&result.kind, expected)
+                && instance.declaration.0 == name.as_ref()
+                && let Some(template) = self.nominal_templates.get(name.as_ref())
+                && template.params.len() == instance.arguments.len()
+            {
+                let substitutions = template
+                    .params
                     .iter()
                     .cloned()
-                    .map(SpecializationArgument::Type),
-            )
-            .collect::<BTreeMap<_, _>>();
-        fields.iter().find_map(|(field, value)| {
-            (moved_binding(value) == Some(binding))
-                .then(|| template.fields.get(field))
-                .flatten()
-                .and_then(|formal| substitute(formal, &substitutions))
-        })
+                    .zip(
+                        instance
+                            .arguments
+                            .iter()
+                            .cloned()
+                            .map(SpecializationArgument::Type),
+                    )
+                    .collect::<BTreeMap<_, _>>();
+                if let Some(expected) = fields.iter().find_map(|(field, value)| {
+                    expression_mentions_binding(value, binding)
+                        .then(|| template.fields.get(field))
+                        .flatten()
+                        .and_then(|formal| substitute(formal, &substitutions))
+                }) {
+                    return Some(expected);
+                }
+            }
+        }
+
+        // A zero-payload generic factory such as `Vec::new()` is commonly
+        // constrained by a later borrow (`consume(&mut value)`). Discover that
+        // exact ground parameter context before walking the initializer so its
+        // specialization is retained rather than relying on declaration order.
+        let mut pending = remaining
+            .iter()
+            .flat_map(|statement| match statement {
+                Stmt::Let { value, .. }
+                | Stmt::Deconstruct { value, .. }
+                | Stmt::Expr(value)
+                | Stmt::Assign { value, .. } => vec![value],
+            })
+            .collect::<Vec<_>>();
+        while let Some(expression) = pending.pop() {
+            match &expression.kind {
+                ExprKind::Call(callee, arguments) => {
+                    if let ExprKind::Variable(path) = &callee.kind
+                        && path.len() == 1
+                        && let Some(template) = self.templates.get(path[0].as_ref())
+                    {
+                        let mutable = template.generic_params.iter().cloned().collect();
+                        let mut substitutions = BTreeMap::new();
+                        for (argument, formal) in arguments.iter().zip(&template.params) {
+                            if let Some((actual, defaulted)) = self.obvious_argument_type(argument)
+                                && !defaulted
+                            {
+                                let _ =
+                                    unify_inference(formal, &actual, &mutable, &mut substitutions);
+                            }
+                        }
+                        for (argument, formal) in arguments.iter().zip(&template.params) {
+                            let specialized = substitute(formal, &substitutions)
+                                .unwrap_or_else(|| formal.clone());
+                            let (candidate, expected) = match (&argument.kind, &specialized) {
+                                (
+                                    ExprKind::Unary {
+                                        op: UnaryOp::BorrowUnique,
+                                        operand,
+                                    },
+                                    ProvisionalType::Unique(referent),
+                                ) => (operand.as_ref(), referent.as_ref()),
+                                (
+                                    ExprKind::Unary {
+                                        op: UnaryOp::BorrowShared,
+                                        operand,
+                                    },
+                                    ProvisionalType::Shared(referent),
+                                ) => (operand.as_ref(), referent.as_ref()),
+                                _ => (argument, formal),
+                            };
+                            if moved_binding(candidate) == Some(binding) && ground(expected) {
+                                return Some(expected.clone());
+                            }
+                        }
+                    }
+                    pending.push(callee);
+                    pending.extend(arguments.iter());
+                }
+                ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                    pending.extend(statements.iter().map(|statement| match statement {
+                        Stmt::Let { value, .. }
+                        | Stmt::Deconstruct { value, .. }
+                        | Stmt::Expr(value)
+                        | Stmt::Assign { value, .. } => value,
+                    }));
+                }
+                ExprKind::Handle {
+                    computation,
+                    clauses,
+                } => {
+                    pending.push(computation);
+                    pending.extend(clauses.iter().map(|clause| &clause.body));
+                }
+                ExprKind::List(values) | ExprKind::Tuple(values) => pending.extend(values.iter()),
+                ExprKind::Struct { fields, .. } => {
+                    pending.extend(fields.iter().map(|(_, value)| value));
+                }
+                ExprKind::Field(subject, _)
+                | ExprKind::Move(subject)
+                | ExprKind::Unary {
+                    operand: subject, ..
+                } => pending.push(subject),
+                ExprKind::Binary { lhs, rhs, .. } => {
+                    if expression_mentions_binding(lhs, binding)
+                        && let Some((ty, defaulted)) = self.obvious_argument_type(rhs)
+                        && !defaulted
+                        && ground(&ty)
+                    {
+                        return Some(ty);
+                    }
+                    if expression_mentions_binding(rhs, binding)
+                        && let Some((ty, defaulted)) = self.obvious_argument_type(lhs)
+                        && !defaulted
+                        && ground(&ty)
+                    {
+                        return Some(ty);
+                    }
+                    pending.extend([lhs.as_ref(), rhs.as_ref()]);
+                }
+                ExprKind::Perform { args, .. } => pending.extend(args.iter()),
+                ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
+                    pending.push(body)
+                }
+                ExprKind::Leave { value, .. } => pending.extend(value.iter().map(AsRef::as_ref)),
+                ExprKind::Is { subject, .. } => pending.push(subject),
+                ExprKind::Resume { resumption, value }
+                | ExprKind::TailResume { resumption, value } => {
+                    pending.push(resumption);
+                    pending.extend(value.iter().map(AsRef::as_ref));
+                }
+                ExprKind::Cancel { resumption } => pending.push(resumption),
+                ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
+                    pending.push(body)
+                }
+                ExprKind::Unit
+                | ExprKind::Int(_)
+                | ExprKind::Float(_)
+                | ExprKind::Char(_)
+                | ExprKind::Byte(_)
+                | ExprKind::ByteString(_)
+                | ExprKind::String(_)
+                | ExprKind::Variable(_)
+                | ExprKind::LabelReference(_) => {}
+            }
+        }
+        None
     }
 
     fn may_use_bidirectional_result_fallback(&self, expression: &Expr) -> bool {
@@ -3385,6 +3570,12 @@ impl<'a> Walker<'a> {
             ExprKind::Byte(_) => Some((ProvisionalType::Predefined("u8".into()), false)),
             ExprKind::ByteString(_) => Some((ProvisionalType::Predefined("Bytes".into()), false)),
             ExprKind::Move(operand) => self.obvious_argument_type(operand),
+            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                let Stmt::Expr(tail) = statements.last()? else {
+                    return None;
+                };
+                self.obvious_argument_type(tail)
+            }
             // These unary forms preserve or structurally wrap an already
             // synthesizable operand type. In particular, an exact borrowed
             // local must constrain `T` before a sibling numeric literal is
@@ -3447,6 +3638,46 @@ impl<'a> Walker<'a> {
                     )
                     | None => None,
                 }
+            }
+            ExprKind::Field(subject, field) => {
+                let (subject, defaulted) = self.obvious_argument_type(subject)?;
+                let subject = match subject {
+                    ProvisionalType::Shared(referent) | ProvisionalType::Unique(referent) => {
+                        *referent
+                    }
+                    subject => subject,
+                };
+                if let ProvisionalType::Tuple(elements) = &subject
+                    && let Ok(index) = field.parse::<usize>()
+                {
+                    return elements.get(index).cloned().map(|ty| (ty, defaulted));
+                }
+                let ProvisionalType::Nominal(instance) = subject else {
+                    return None;
+                };
+                if let Some(template) = self.nominal_templates.get(&instance.declaration.0)
+                    && let Some(formal) = template.fields.get(field)
+                    && template.params.len() == instance.arguments.len()
+                {
+                    let substitutions = template
+                        .params
+                        .iter()
+                        .cloned()
+                        .zip(
+                            instance
+                                .arguments
+                                .iter()
+                                .cloned()
+                                .map(SpecializationArgument::Type),
+                        )
+                        .collect();
+                    return substitute(formal, &substitutions).map(|ty| (ty, defaulted));
+                }
+                self.struct_fields
+                    .get(&instance.declaration.0)
+                    .and_then(|fields| fields.get(field.as_str()))
+                    .cloned()
+                    .map(|ty| (ty, defaulted))
             }
             ExprKind::Call(callee, arguments) => {
                 let ExprKind::Variable(path) = &callee.kind else {
@@ -4324,7 +4555,7 @@ impl<'a> Walker<'a> {
                     ));
                 return None;
             }
-            ExprKind::Block(_) if expected.params.is_empty() => {
+            ExprKind::Block(_) | ExprKind::ContextBlock(_) if expected.params.is_empty() => {
                 (vec![], expression, ClosureBodyKind::ContextualBlock)
             }
             _ => {
@@ -4359,7 +4590,7 @@ impl<'a> Walker<'a> {
         let outer = self.bindings.clone();
         let mut captures = Vec::new();
         let mut late = false;
-        for (name, mode) in captured_outer_uses(body, &outer, &params) {
+        for (name, mut mode) in captured_outer_uses(body, &outer, &params) {
             if let Some(LocalBinding::RecursiveSelf(recursive_self, _)) = self.locals.get(&name)
                 && self.active_recursive_self.as_ref() == Some(recursive_self)
             {
@@ -4374,6 +4605,12 @@ impl<'a> Walker<'a> {
                 return None;
             };
             let ty = substitute(ty, substitutions).unwrap_or_else(|| ty.clone());
+            if mode == CaptureMode::Observe
+                && matches!(ty, ProvisionalType::Unique(_))
+                && passed_as_unique_call_argument(body, &name, self.templates)
+            {
+                mode = CaptureMode::Mutate;
+            }
             if contains_late_callable(&ty) {
                 // Handler-site resumptions receive their exact runtime
                 // identity only during Core lowering. Retain the complete
@@ -6327,27 +6564,38 @@ impl<'a> Walker<'a> {
                     && let Some(branch_context) = expected
                         .cloned()
                         .or_else(|| self.structural_else_nominal_context(positive, negative))
-                    && matches!(
-                        &branch_context,
-                        ProvisionalType::Nominal(instance)
-                            if matches!(instance.declaration.0.as_str(), "Result" | "Option")
-                    )
+                        .or_else(|| {
+                            match (
+                                self.obvious_argument_type(positive),
+                                self.obvious_argument_type(negative),
+                            ) {
+                                (Some((positive, _)), Some((negative, _)))
+                                    if positive == negative =>
+                                {
+                                    Some(positive)
+                                }
+                                (Some((known, _)), None) | (None, Some((known, _))) => Some(known),
+                                _ => None,
+                            }
+                        })
                 {
-                    self.expression(condition, None)?;
-                    let positive_ty =
-                        self.expression(positive, Some(&branch_context))
-                            .or_else(|| {
-                                (self.symbolic_validation
-                                    || self.may_use_bidirectional_result_fallback(positive))
-                                .then(|| branch_context.clone())
-                            });
-                    let negative_ty =
-                        self.expression(negative, Some(&branch_context))
-                            .or_else(|| {
-                                (self.symbolic_validation
-                                    || self.may_use_bidirectional_result_fallback(negative))
-                                .then(|| branch_context.clone())
-                            });
+                    // The branch condition's concrete Bool representation is
+                    // irrelevant to the result island. Still walk it to record
+                    // dependencies, but do not abandon branch planning merely
+                    // because a generic comparison cannot synthesize its type
+                    // without an expected context.
+                    self.expression(condition, None);
+                    // The exact enclosing Result/Option is authoritative for
+                    // a branch whose nested handler or late specialization
+                    // cannot independently synthesize a result. Any concrete
+                    // incompatible type is still compared below, and genuine
+                    // nested errors have already been recorded by the walk.
+                    let positive_ty = self
+                        .expression(positive, Some(&branch_context))
+                        .or_else(|| Some(branch_context.clone()));
+                    let negative_ty = self
+                        .expression(negative, Some(&branch_context))
+                        .or_else(|| Some(branch_context.clone()));
                     let branch_result = match (positive_ty, negative_ty) {
                         (Some(positive), Some(negative)) if positive == negative => Some(positive),
                         (Some(ProvisionalType::Predefined(name)), Some(negative))
@@ -6374,35 +6622,6 @@ impl<'a> Walker<'a> {
                         self.discovery.graph.structural_elses.insert(site);
                     }
                     branch_result
-                } else if let ExprKind::Variable(path) = &callee.kind
-                    && path.len() == 1
-                    && matches!(path[0].as_ref(), "resume" | "tail")
-                    && args.len() == 2
-                {
-                    let terminal = path[0].as_ref() == "tail";
-                    let shape = match &args[0].kind {
-                        ExprKind::Variable(path) if path.len() == 1 => {
-                            match self.locals.get(path[0].as_ref()) {
-                                Some(LocalBinding::Type(ProvisionalType::Callable(shape))) => {
-                                    Some(shape.as_ref().clone())
-                                }
-                                _ => None,
-                            }
-                        }
-                        _ => None,
-                    };
-                    self.expression(&args[0], None);
-                    self.expression(
-                        &args[1],
-                        shape.as_ref().and_then(|shape| shape.params.first()),
-                    );
-                    if terminal {
-                        Some(ProvisionalType::Predefined("Never".into()))
-                    } else {
-                        shape
-                            .map(|shape| shape.result)
-                            .or_else(|| expected.cloned())
-                    }
                 } else if let ExprKind::Variable(path) = &callee.kind
                     && path.len() == 1
                 {
@@ -6863,12 +7082,15 @@ impl<'a> Walker<'a> {
                     self.expression(operand, referent)
                         .map(ProvisionalType::unique)
                 }
-                UnaryOp::Dereference => match self.expression(operand, None)? {
-                    ProvisionalType::Shared(referent) | ProvisionalType::Unique(referent) => {
-                        Some(*referent)
+                UnaryOp::Dereference => {
+                    let referent_context = expected.cloned().map(ProvisionalType::shared);
+                    match self.expression(operand, referent_context.as_ref())? {
+                        ProvisionalType::Shared(referent) | ProvisionalType::Unique(referent) => {
+                            Some(*referent)
+                        }
+                        _ => expected.cloned(),
                     }
-                    _ => expected.cloned(),
-                },
+                }
                 UnaryOp::Negate => self.expression(operand, expected),
             },
             ExprKind::Binary {
@@ -6882,9 +7104,19 @@ impl<'a> Walker<'a> {
                     | BinaryOp::Gt
                     | BinaryOp::GtEq,
             } => {
-                let operand = self.expression(lhs, None);
+                let hint = [lhs.as_ref(), rhs.as_ref()]
+                    .into_iter()
+                    .filter_map(|operand| self.obvious_argument_type(operand))
+                    .find_map(|(ty, defaulted)| (!defaulted).then_some(ty));
+                let operand = self.expression(lhs, hint.as_ref()).or(hint);
                 self.expression(rhs, operand.as_ref());
-                expected.cloned()
+                Some(ProvisionalType::Nominal(NominalInstanceKey {
+                    declaration: NominalKey("Result".into()),
+                    arguments: vec![
+                        ProvisionalType::Predefined("Unit".into()),
+                        ProvisionalType::Predefined("Unit".into()),
+                    ],
+                }))
             }
             ExprKind::Binary { lhs, rhs, .. } => {
                 let ty = expected
@@ -7215,19 +7447,91 @@ impl<'a> Walker<'a> {
             }
             ExprKind::LabelReference(_) => None,
             ExprKind::Variable(_) => None,
-            // The parser's grammar-complete forms are rejected by `validate`
-            // or rewritten by `parser::normalize_for_legacy_consumers` before
-            // specialization; reaching one is a broken phase invariant.
-            ExprKind::Resume { .. } | ExprKind::Cancel { .. } | ExprKind::TailResume { .. } => {
-                unvalidated_syntax()
+            ExprKind::Resume { resumption, value } => {
+                let local = match &resumption.kind {
+                    ExprKind::Variable(path) => Some(path),
+                    ExprKind::Move(inner) => match &inner.kind {
+                        ExprKind::Variable(path) => Some(path),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let shape = match local {
+                    Some(path) if path.len() == 1 => {
+                        self.locals.get(path[0].as_ref()).and_then(|binding| {
+                            let LocalBinding::Type(ProvisionalType::Callable(shape)) = binding
+                            else {
+                                return None;
+                            };
+                            Some(shape.clone())
+                        })
+                    }
+                    _ => None,
+                };
+                self.expression(resumption, None);
+                if let Some(value) = value {
+                    self.expression(
+                        value,
+                        shape
+                            .as_deref()
+                            .and_then(|shape| shape.params.first())
+                            .or(expected),
+                    );
+                }
+                shape
+                    .map(|shape| shape.result.clone())
+                    .or_else(|| expected.cloned())
+            }
+            ExprKind::Cancel { resumption } => {
+                self.expression(resumption, None);
+                Some(ProvisionalType::Predefined("Never".into()))
+            }
+            ExprKind::TailResume { resumption, value } => {
+                let local = match &resumption.kind {
+                    ExprKind::Variable(path) => Some(path),
+                    ExprKind::Move(inner) => match &inner.kind {
+                        ExprKind::Variable(path) => Some(path),
+                        _ => None,
+                    },
+                    _ => None,
+                };
+                let input = match local {
+                    Some(path) if path.len() == 1 => {
+                        self.locals.get(path[0].as_ref()).and_then(|binding| {
+                            let LocalBinding::Type(ProvisionalType::Callable(shape)) = binding
+                            else {
+                                return None;
+                            };
+                            shape.params.first().cloned()
+                        })
+                    }
+                    _ => None,
+                };
+                self.expression(resumption, None);
+                if let Some(value) = value {
+                    self.expression(value, input.as_ref());
+                }
+                Some(ProvisionalType::Predefined("Never".into()))
             }
         }
     }
 }
 
-pub(crate) fn expression_ordinals(root: &Expr) -> BTreeMap<usize, u32> {
-    fn visit(expression: &Expr, next: &mut u32, ordinals: &mut BTreeMap<usize, u32>) {
+pub(crate) fn expression_ordinal_maps(
+    root: &Expr,
+) -> (BTreeMap<usize, u32>, BTreeMap<(usize, usize), u32>) {
+    fn visit(
+        expression: &Expr,
+        next: &mut u32,
+        ordinals: &mut BTreeMap<usize, u32>,
+        spans: &mut BTreeMap<(usize, usize), u32>,
+        ambiguous_spans: &mut BTreeSet<(usize, usize)>,
+    ) {
         ordinals.insert(std::ptr::from_ref(expression) as usize, *next);
+        let span = (expression.span.start, expression.span.end);
+        if spans.insert(span, *next).is_some() {
+            ambiguous_spans.insert(span);
+        }
         *next += 1;
         match &expression.kind {
             ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
@@ -7236,16 +7540,16 @@ pub(crate) fn expression_ordinals(root: &Expr) -> BTreeMap<usize, u32> {
                         Stmt::Let { value, .. }
                         | Stmt::Deconstruct { value, .. }
                         | Stmt::Expr(value) => {
-                            visit(value, next, ordinals);
+                            visit(value, next, ordinals, spans, ambiguous_spans);
                         }
                         Stmt::Assign {
                             destination, value, ..
                         } => {
-                            visit(value, next, ordinals);
+                            visit(value, next, ordinals, spans, ambiguous_spans);
                             if let AssignmentPlaceKind::Dereference { reference, .. } =
                                 &destination.kind
                             {
-                                visit(reference, next, ordinals);
+                                visit(reference, next, ordinals, spans, ambiguous_spans);
                             }
                         }
                     }
@@ -7253,12 +7557,12 @@ pub(crate) fn expression_ordinals(root: &Expr) -> BTreeMap<usize, u32> {
             }
             ExprKind::List(values) | ExprKind::Tuple(values) => {
                 for value in values.iter() {
-                    visit(value, next, ordinals);
+                    visit(value, next, ordinals, spans, ambiguous_spans);
                 }
             }
             ExprKind::Struct { fields, .. } => {
                 for (_, value) in fields.iter() {
-                    visit(value, next, ordinals);
+                    visit(value, next, ordinals, spans, ambiguous_spans);
                 }
             }
             ExprKind::Field(subject, _)
@@ -7266,44 +7570,44 @@ pub(crate) fn expression_ordinals(root: &Expr) -> BTreeMap<usize, u32> {
             | ExprKind::Unary {
                 operand: subject, ..
             } => {
-                visit(subject, next, ordinals);
+                visit(subject, next, ordinals, spans, ambiguous_spans);
             }
             ExprKind::Call(callee, arguments) => {
-                visit(callee, next, ordinals);
+                visit(callee, next, ordinals, spans, ambiguous_spans);
                 for argument in arguments.iter() {
-                    visit(argument, next, ordinals);
+                    visit(argument, next, ordinals, spans, ambiguous_spans);
                 }
             }
             ExprKind::Perform { args, .. } => {
                 for argument in args.iter() {
-                    visit(argument, next, ordinals);
+                    visit(argument, next, ordinals, spans, ambiguous_spans);
                 }
             }
             ExprKind::Handle {
                 computation,
                 clauses,
             } => {
-                visit(computation, next, ordinals);
+                visit(computation, next, ordinals, spans, ambiguous_spans);
                 for clause in clauses.iter() {
-                    visit(&clause.body, next, ordinals);
+                    visit(&clause.body, next, ordinals, spans, ambiguous_spans);
                 }
             }
             ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
-                visit(body, next, ordinals)
+                visit(body, next, ordinals, spans, ambiguous_spans)
             }
             ExprKind::Binary { lhs, rhs, .. } => {
-                visit(lhs, next, ordinals);
-                visit(rhs, next, ordinals);
+                visit(lhs, next, ordinals, spans, ambiguous_spans);
+                visit(rhs, next, ordinals, spans, ambiguous_spans);
             }
             ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
-                visit(body, next, ordinals)
+                visit(body, next, ordinals, spans, ambiguous_spans)
             }
             ExprKind::Leave { value, .. } => {
                 if let Some(value) = value {
-                    visit(value, next, ordinals);
+                    visit(value, next, ordinals, spans, ambiguous_spans);
                 }
             }
-            ExprKind::Is { subject, .. } => visit(subject, next, ordinals),
+            ExprKind::Is { subject, .. } => visit(subject, next, ordinals, spans, ambiguous_spans),
             ExprKind::Unit
             | ExprKind::Int(_)
             | ExprKind::Float(_)
@@ -7312,19 +7616,37 @@ pub(crate) fn expression_ordinals(root: &Expr) -> BTreeMap<usize, u32> {
             | ExprKind::ByteString(_)
             | ExprKind::String(_)
             | ExprKind::Variable(_) => {}
-            // The parser's grammar-complete forms are rejected by `validate` or
-            // rewritten by `parser::normalize_for_legacy_consumers` before any
-            // compiler pass runs; reaching one here is a broken phase invariant.
             ExprKind::LabelReference(_) => {}
-            ExprKind::Resume { .. } | ExprKind::Cancel { .. } | ExprKind::TailResume { .. } => {
-                unvalidated_syntax()
+            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+                visit(resumption, next, ordinals, spans, ambiguous_spans);
+                if let Some(value) = value {
+                    visit(value, next, ordinals, spans, ambiguous_spans);
+                }
+            }
+            ExprKind::Cancel { resumption } => {
+                visit(resumption, next, ordinals, spans, ambiguous_spans)
             }
         }
     }
 
     let mut ordinals = BTreeMap::new();
-    visit(root, &mut 0, &mut ordinals);
-    ordinals
+    let mut spans = BTreeMap::new();
+    let mut ambiguous_spans = BTreeSet::new();
+    visit(
+        root,
+        &mut 0,
+        &mut ordinals,
+        &mut spans,
+        &mut ambiguous_spans,
+    );
+    for span in ambiguous_spans {
+        spans.remove(&span);
+    }
+    (ordinals, spans)
+}
+
+pub(crate) fn expression_ordinals(root: &Expr) -> BTreeMap<usize, u32> {
+    expression_ordinal_maps(root).0
 }
 
 fn expression_at_ordinal(root: &Expr, target: u32) -> Option<&Expr> {
@@ -7398,13 +7720,12 @@ fn expression_at_ordinal(root: &Expr, target: u32) -> Option<&Expr> {
             | ExprKind::ByteString(_)
             | ExprKind::String(_)
             | ExprKind::Variable(_) => {}
-            // The parser's grammar-complete forms are rejected by `validate` or
-            // rewritten by `parser::normalize_for_legacy_consumers` before any
-            // compiler pass runs; reaching one here is a broken phase invariant.
             ExprKind::LabelReference(_) => {}
-            ExprKind::Resume { .. } | ExprKind::Cancel { .. } | ExprKind::TailResume { .. } => {
-                unvalidated_syntax()
+            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+                children.push(resumption);
+                children.extend(value.iter().map(AsRef::as_ref));
             }
+            ExprKind::Cancel { resumption } => children.push(resumption),
         }
         children
             .into_iter()
@@ -7631,7 +7952,7 @@ where
                 }
                 ValueFlow { tracked, escapes }
             }
-            ExprKind::Block(statements) => {
+            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
                 let mut block_locals = locals.clone();
                 let mut result = ValueFlow::default();
                 for (index, statement) in statements.iter().enumerate() {
@@ -7853,10 +8174,71 @@ where
             | ExprKind::String(_)
             | ExprKind::Variable(_) => ValueFlow::default(),
             ExprKind::LabelReference(_) => ValueFlow::default(),
-            ExprKind::Resume { .. }
-            | ExprKind::Cancel { .. }
-            | ExprKind::TailResume { .. }
-            | ExprKind::ContextBlock(_) => unvalidated_syntax(),
+            ExprKind::Resume { resumption, value } => {
+                let resumption = visit(
+                    resumption,
+                    effect,
+                    handled,
+                    locals,
+                    functions,
+                    summaries,
+                    handler_closes,
+                );
+                let mut result = value.as_deref().map_or_else(ValueFlow::default, |value| {
+                    visit(
+                        value,
+                        effect,
+                        handled,
+                        locals,
+                        functions,
+                        summaries,
+                        handler_closes,
+                    )
+                });
+                result.escapes |= resumption.escapes;
+                result
+            }
+            ExprKind::TailResume { resumption, value } => {
+                let mut escapes = visit(
+                    resumption,
+                    effect,
+                    handled,
+                    locals,
+                    functions,
+                    summaries,
+                    handler_closes,
+                )
+                .escapes;
+                if let Some(value) = value {
+                    escapes |= visit(
+                        value,
+                        effect,
+                        handled,
+                        locals,
+                        functions,
+                        summaries,
+                        handler_closes,
+                    )
+                    .escapes;
+                }
+                ValueFlow {
+                    tracked: false,
+                    escapes,
+                }
+            }
+            ExprKind::Cancel { resumption } => ValueFlow {
+                tracked: false,
+                escapes: visit(
+                    resumption,
+                    effect,
+                    handled,
+                    locals,
+                    functions,
+                    summaries,
+                    handler_closes,
+                )
+                .escapes,
+            },
         }
     }
 
@@ -8547,15 +8929,6 @@ pub(crate) fn discover_with_traits_and_budgets(
     discovery
 }
 
-/// The parser's grammar-complete forms (labels, `is`, typed anonymous
-/// callables, float/char/byte literals, structural resumptions, contextual
-/// blocks) are rejected by `validate` or rewritten by
-/// `parser::normalize_for_legacy_consumers` before compilation begins, so no
-/// compiler pass can receive them.
-fn unvalidated_syntax<T>() -> T {
-    unreachable!("grammar-complete syntax is rejected or rewritten before lowering")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -8732,7 +9105,8 @@ mod tests {
     #[test]
     fn sealed_typed_closure_retains_exact_unique_capture_evidence() {
         let discovery = parse_discovery(
-            "retain<T>(value:T)->T{value}
+            "infixl 30 +;
+             retain<T>(value:T)->T{value}
              answer()->i64{
                  let value=40;
                  let borrowed=&mut value;

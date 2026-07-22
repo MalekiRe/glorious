@@ -1,7 +1,6 @@
 use anyhow::Result;
 use clap::{Args, Parser, Subcommand};
 use grand::ops::{self, LintLevel};
-use grand::target::Target;
 
 /// Diagnostic level overrides, applied over the manifest's `[lints]` table.
 /// Precedence within the CLI: --allow, then --warn, then --deny.
@@ -60,20 +59,15 @@ enum Command {
     Init,
     /// Compile the current package and its dependencies
     Build {
-        /// auto (G1 VM when available), vm, interp (legacy LLVM), or native
-        #[arg(long, default_value = "auto")]
-        target: String,
-        /// Optimization level (forwarded as -O<n> once the compiler supports it)
-        #[arg(short = 'O', long = "opt")]
+        /// Optimization level (defaults to the compiler's self-hosting pipeline)
+        #[arg(short = 'O', long = "opt", default_value = "2")]
         opt: Option<u8>,
         #[command(flatten)]
         lints: LintArgs,
     },
     /// Build and execute the current package
     Run {
-        #[arg(long, default_value = "auto")]
-        target: String,
-        #[arg(short = 'O', long = "opt")]
+        #[arg(short = 'O', long = "opt", default_value = "2")]
         opt: Option<u8>,
         #[command(flatten)]
         lints: LintArgs,
@@ -91,8 +85,6 @@ enum Command {
     Test {
         /// Only run tests whose name contains this substring
         filter: Option<String>,
-        #[arg(long, default_value = "auto")]
-        target: String,
         /// Rewrite compile-fail golden .stderr files with current output
         #[arg(long)]
         bless: bool,
@@ -169,27 +161,18 @@ fn dispatch(cli: Cli) -> Result<i32> {
     match cli.command {
         Command::New { name, path } => ops::new(&name, path.as_deref()).map(|()| 0),
         Command::Init => ops::init().map(|()| 0),
-        Command::Build { target, opt, lints } => {
-            ops::build(Target::parse(&target)?, opt, &lints.levels()).map(|()| 0)
-        }
+        Command::Build { opt, lints } => ops::build(opt, &lints.levels()).map(|()| 0),
         Command::Run {
-            target,
             opt,
             lints,
             arguments,
-        } => ops::run(Target::parse(&target)?, arguments, opt, &lints.levels()),
+        } => ops::run(arguments, opt, &lints.levels()),
         Command::Check { lints } => ops::check(&lints.levels()).map(|()| 0),
         Command::Test {
             filter,
-            target,
             bless,
             lints,
-        } => ops::test(
-            Target::parse(&target)?,
-            filter.as_deref(),
-            bless,
-            &lints.levels(),
-        ),
+        } => ops::test(filter.as_deref(), bless, &lints.levels()),
         Command::Fix { lints } => ops::fix(&lints.levels()).map(|()| 0),
         Command::Doc { open } => ops::doc(open).map(|()| 0),
         Command::Fmt {
@@ -234,5 +217,22 @@ fn dispatch(cli: Cli) -> Result<i32> {
         Command::Lock => ops::lock().map(|()| 0),
         Command::Vendor => ops::vendor().map(|()| 0),
         Command::Clean { cache } => ops::clean(cache).map(|()| 0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_and_run_default_to_o2() {
+        for arguments in [["grand", "build"], ["grand", "run"]] {
+            let cli = Cli::try_parse_from(arguments).unwrap();
+            let opt = match cli.command {
+                Command::Build { opt, .. } | Command::Run { opt, .. } => opt,
+                _ => unreachable!(),
+            };
+            assert_eq!(opt, Some(2));
+        }
     }
 }

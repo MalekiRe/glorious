@@ -4,8 +4,7 @@ use grandiose::{
 };
 use grandiose_vm::{RuntimeError, Value, Vm, verify};
 
-const LEVELS: [OptimizationLevel; 4] = [
-    OptimizationLevel::O0,
+const LEVELS: [OptimizationLevel; 3] = [
     OptimizationLevel::O1,
     OptimizationLevel::O2,
     OptimizationLevel::O3,

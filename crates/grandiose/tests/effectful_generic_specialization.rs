@@ -2,7 +2,7 @@ use grandiose::{compile_source_to_bytecode, compile_source_to_phases};
 use grandiose_vm::{Value, Vm, verify};
 
 fn run(source: &str, name: &str) -> Value {
-    let artifact = compile_source_to_bytecode("effectful-generic.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("effectful-generic.glorious", source).unwrap();
     let function = artifact
         .functions
         .iter()
@@ -21,7 +21,7 @@ fn grounded_generic_terminal_effect_forwards_its_exact_row_and_executes() {
         test() -> i64 { handle { fail(1) } { Stop::stop() => 42 } }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("generic-terminal.gr", source).unwrap();
+    let phases = compile_source_to_phases("generic-terminal.glorious", source).unwrap();
     let specialized = phases
         .artifact
         .functions
@@ -52,7 +52,7 @@ fn grounded_generic_resumptive_effect_and_transitive_wrapper_execute() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("generic-resumptive.gr", source).unwrap();
+    let phases = compile_source_to_phases("generic-resumptive.glorious", source).unwrap();
     let ask = phases
         .artifact
         .protocols
@@ -85,7 +85,7 @@ fn effectful_specialization_grounds_generic_nominal_signatures() {
         test() -> i64 { select().value }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("generic-nominal-effect.gr", source).unwrap();
+    let phases = compile_source_to_phases("generic-nominal-effect.glorious", source).unwrap();
     let specialized = phases
         .artifact
         .functions
@@ -129,8 +129,8 @@ fn effectful_specialization_ids_and_rows_are_declaration_order_independent() {
     let second = format!(
         "{declarations} zeta() -> Text / {{Stop}} {{ relay(\"z\") }} alpha() -> i64 / {{Stop}} {{ relay(1) }} main() -> {{ () }}"
     );
-    let first = compile_source_to_bytecode("generic-order-a.gr", &first).unwrap();
-    let second = compile_source_to_bytecode("generic-order-b.gr", &second).unwrap();
+    let first = compile_source_to_bytecode("generic-order-a.glorious", &first).unwrap();
+    let second = compile_source_to_bytecode("generic-order-b.glorious", &second).unwrap();
     assert_eq!(first.encode(), second.encode());
 }
 
@@ -140,7 +140,8 @@ fn grounded_generic_effects_require_exact_outward_evidence() {
         "effect Stop { stop() -> ! } fail<T>(value: T) -> T { perform Stop::stop() } test() -> i64 { handle { fail(1) } { Stop::stop() => 2 } } main() -> { () }",
         "effect Stop { stop() -> ! } fail<T>(value: T) -> T / {Stop} { perform Stop::stop() } call() -> i64 { fail(1) } main() -> { () }",
     ] {
-        let errors = compile_source_to_bytecode("generic-row-missing.gr", source).unwrap_err();
+        let errors =
+            compile_source_to_bytecode("generic-row-missing.glorious", source).unwrap_err();
         assert!(
             errors.iter().any(|error| {
                 error.message.contains("outward effect")
@@ -213,7 +214,7 @@ fn drop_cannot_hide_effect_control_inside_a_closed_generic_specialization() {
         }
         main() -> { let resource = Resource { marker: 0 }; () }
     "#;
-    let errors = compile_source_to_bytecode("generic-closed-drop.gr", source).unwrap_err();
+    let errors = compile_source_to_bytecode("generic-closed-drop.glorious", source).unwrap_err();
     assert!(
         errors
             .iter()

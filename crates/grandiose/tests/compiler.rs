@@ -68,7 +68,7 @@ fn assert_direct_only_functions(artifact: &Artifact, mut relevant: impl FnMut(&s
 #[test]
 fn stored_first_class_closure_constructs_and_calls_indirectly() {
     let source = "run()->i64 { let answer = { => 42 }; answer() } main()->{()}";
-    let phases = compile_source_to_phases("stored-closure.gr", source).unwrap();
+    let phases = compile_source_to_phases("stored-closure.glorious", source).unwrap();
     assert!(
         phases
             .artifact
@@ -97,7 +97,7 @@ fn stored_first_class_closure_constructs_and_calls_indirectly() {
 fn stored_copy_capture_closure_can_be_invoked_repeatedly() {
     let source =
         "run()->i64 { let value = 21; let twice = { => value }; twice() + twice() } main()->{()}";
-    let phases = compile_source_to_phases("stored-copy-closure.gr", source).unwrap();
+    let phases = compile_source_to_phases("stored-copy-closure.glorious", source).unwrap();
     assert_eq!(
         phases
             .artifact
@@ -133,7 +133,7 @@ fn stored_owned_capture_closure_is_invoked_exactly_once() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("stored-owned-closure.gr", source).unwrap();
+    let phases = compile_source_to_phases("stored-owned-closure.glorious", source).unwrap();
     let indirect = phases.artifact.code.iter().find_map(|instruction| {
         let Instruction::CallIndirect { receiver_mode, .. } = instruction else {
             return None;
@@ -165,7 +165,7 @@ fn returned_closure_value_can_be_stored_and_invoked() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("returned-closure.gr", source).unwrap();
+    let phases = compile_source_to_phases("returned-closure.glorious", source).unwrap();
     let run = phases
         .artifact
         .functions
@@ -193,7 +193,7 @@ fn returned_closure_identity_uses_the_exact_result_binder() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("returned-closure-identity.gr", source).unwrap();
+    let phases = compile_source_to_phases("returned-closure-identity.glorious", source).unwrap();
     let run = phases
         .artifact
         .functions
@@ -219,7 +219,7 @@ fn closure_value_round_trips_through_a_monomorphic_tuple() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("tuple-stored-closure.gr", source).unwrap();
+    let phases = compile_source_to_phases("tuple-stored-closure.glorious", source).unwrap();
     let run = phases
         .artifact
         .functions
@@ -246,7 +246,7 @@ fn closure_value_round_trips_through_a_mixed_tuple() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("mixed-tuple-stored-closure.gr", source).unwrap();
+    let phases = compile_source_to_phases("mixed-tuple-stored-closure.glorious", source).unwrap();
     let run = phases
         .artifact
         .functions
@@ -275,7 +275,7 @@ fn tuple_extraction_preserves_distinct_same_shape_closure_identities() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("tuple-closure-identities.gr", source).unwrap();
+    let phases = compile_source_to_phases("tuple-closure-identities.glorious", source).unwrap();
     let run = phases
         .artifact
         .functions
@@ -302,7 +302,7 @@ fn stored_outward_effectful_closure_runs_under_a_handler() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("stored-effectful-closure.gr", source).unwrap();
+    let phases = compile_source_to_phases("stored-effectful-closure.glorious", source).unwrap();
     let run = phases
         .artifact
         .functions
@@ -331,8 +331,8 @@ fn explicit_reference_regions_validate_outlives_escape_and_canonical_order() {
             where 'b: 'c, 'a: 'b { value }
         main() -> { () }
     "#;
-    let first = compile_source_to_phases("regions.gr", positive).unwrap();
-    let second = compile_source_to_phases("regions-reordered.gr", reordered).unwrap();
+    let first = compile_source_to_phases("regions.glorious", positive).unwrap();
+    let second = compile_source_to_phases("regions-reordered.glorious", reordered).unwrap();
     assert_eq!(first.core_fingerprint(), second.core_fingerprint());
     assert_eq!(first.mir_fingerprint(), second.mir_fingerprint());
     assert_eq!(first.artifact.encode(), second.artifact.encode());
@@ -344,7 +344,7 @@ fn explicit_reference_regions_validate_outlives_escape_and_canonical_order() {
         bad<'a, 'b>(value: &'a i64) -> &'b i64 { value }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("missing-outlives.gr", missing).unwrap_err();
+    let errors = compile_source_to_bytecode("missing-outlives.glorious", missing).unwrap_err();
     assert!(
         errors.iter().any(|error| error
             .message
@@ -356,13 +356,14 @@ fn explicit_reference_regions_validate_outlives_escape_and_canonical_order() {
         bad<'a, 'b>(left: &'a i64, right: &'b i64) -> &'a i64 { right }
         main() -> { () }
     "#;
-    assert!(compile_source_to_bytecode("wrong-region.gr", wrong_parameter).is_err());
+    assert!(compile_source_to_bytecode("wrong-region.glorious", wrong_parameter).is_err());
 
     let local_escape = r#"
         bad<'a>() -> &'a i64 { let local = 1; &local }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("region-local-escape.gr", local_escape).unwrap_err();
+    let errors =
+        compile_source_to_bytecode("region-local-escape.glorious", local_escape).unwrap_err();
     assert!(
         errors.iter().any(|error| error
             .message
@@ -400,8 +401,8 @@ fn monomorphic_drop_hooks_emit_verify_roundtrip_and_execute_before_children() {
             ()
         }
     "#;
-    let first = compile_source_to_phases("drop.gr", source).unwrap();
-    let second = compile_source_to_phases("drop.gr", source).unwrap();
+    let first = compile_source_to_phases("drop.glorious", source).unwrap();
+    let second = compile_source_to_phases("drop.glorious", source).unwrap();
     let verified = verify(first.artifact.clone()).unwrap();
     assert_eq!(first.artifact.drop_glue.len(), 4);
     assert!(
@@ -451,7 +452,7 @@ fn custom_drop_preserves_structural_copy_for_owner_and_containers() {
             ()
         }
     "#;
-    let phases = compile_source_to_phases("copy-drop.gr", source).unwrap();
+    let phases = compile_source_to_phases("copy-drop.glorious", source).unwrap();
     let artifact = &phases.artifact;
     let copy_drop = artifact
         .types
@@ -522,7 +523,7 @@ fn custom_drop_preserves_structural_copy_for_owner_and_containers() {
         struct CopyDrop { marker: i64 }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("copy-drop-reordered.gr", reordered)
+        compile_source_to_bytecode("copy-drop-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -539,7 +540,7 @@ fn principal_use_affine_narrowing_propagates_and_roundtrips() {
         hold(value: Holder) -> Holder { value }
         main() -> { let value = Ticket { value: 1 }; () }
     "#;
-    let phases = compile_source_to_phases("principal-use.gr", source).unwrap();
+    let phases = compile_source_to_phases("principal-use.glorious", source).unwrap();
     let artifact = &phases.artifact;
     for name in ["Ticket", "Holder"] {
         let ty = artifact
@@ -572,7 +573,7 @@ fn principal_use_affine_narrowing_propagates_and_roundtrips() {
         struct Ticket { value: i64 }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("principal-use-reordered.gr", reordered)
+        compile_source_to_bytecode("principal-use-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -587,7 +588,7 @@ fn principal_use_ground_generic_narrowing_is_exact() {
         forward(value: Box<i64>) -> Box<i64> { value }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("ground-use.gr", source).unwrap();
+    let phases = compile_source_to_phases("ground-use.glorious", source).unwrap();
     let ty = phases
         .artifact
         .functions
@@ -614,7 +615,7 @@ fn principal_use_rejects_widening_duplicates_and_invalid_forms() {
         "struct Item { value: i64 } impl Use<[0,1]> for Item { method } main() -> { () }",
     ];
     for source in cases {
-        let errors = compile_source_to_bytecode("invalid-use.gr", source).unwrap_err();
+        let errors = compile_source_to_bytecode("invalid-use.glorious", source).unwrap_err();
         assert!(errors.iter().all(|error| error.span.is_some()));
         assert!(errors.iter().all(|error| error.code.is_some()));
     }
@@ -625,7 +626,7 @@ fn principal_use_rejects_widening_duplicates_and_invalid_forms() {
         bad(value: Ticket) -> i64 { let first = value; let second = value; 0 }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("repeated-affine-use.gr", repeated).unwrap_err();
+    let errors = compile_source_to_bytecode("repeated-affine-use.glorious", repeated).unwrap_err();
     assert!(errors[0].message.contains("already moved"));
 }
 
@@ -638,7 +639,7 @@ fn principal_use_and_drop_remain_orthogonal() {
         forward(value: Ticket) -> Ticket { value }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("use-drop.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("use-drop.glorious", source).unwrap();
     assert_eq!(artifact.drop_glue.len(), 1);
     let ty = artifact.drop_glue[0].ty;
     assert!(!artifact.types[ty as usize].claimed_duplicable());
@@ -646,7 +647,7 @@ fn principal_use_and_drop_remain_orthogonal() {
     verify(artifact).unwrap();
 
     let erased = compile_source_to_bytecode(
-        "erased-drop.gr",
+        "erased-drop.glorious",
         "struct Erased { value: i64 } impl Use<[0,0]> for Erased {} impl Drop for Erased { drop(&mut self) -> { () } } main() -> { () }",
     )
     .unwrap();
@@ -655,8 +656,8 @@ fn principal_use_and_drop_remain_orthogonal() {
     verify(erased).unwrap();
 
     for (name, interval) in [
-        ("linear-drop.gr", "[1,1]"),
-        ("relevant-drop.gr", "[1,infinity]"),
+        ("linear-drop.glorious", "[1,1]"),
+        ("relevant-drop.glorious", "[1,infinity]"),
     ] {
         let source = format!(
             "struct MustMove {{ value: i64 }} impl Use<{interval}> for MustMove {{}} impl Drop for MustMove {{ drop(&mut self) -> {{ () }} }} main() -> {{ () }}"
@@ -695,7 +696,7 @@ fn actual_use_accepts_arbitrary_bounded_intervals_and_lowers_flags() {
         }
         main() -> { let erased = Erased { value: 0 }; () }
     "#;
-    let phases = compile_source_to_phases("bounded-use.gr", source).unwrap();
+    let phases = compile_source_to_phases("bounded-use.glorious", source).unwrap();
     let claims = |name: &str| {
         let ty = phases
             .artifact
@@ -754,7 +755,7 @@ fn actual_use_accepts_arbitrary_bounded_intervals_and_lowers_flags() {
         struct Erased { value: i64 }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("bounded-use-reordered.gr", reordered)
+        compile_source_to_bytecode("bounded-use-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -780,7 +781,7 @@ fn actual_use_counts_copy_destinations_temporaries_and_projection_boundaries() {
         transfer_move(value: Linear) -> Linear { let owner = value; owner }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("actual-use-boundaries.gr", positive).unwrap();
+    let artifact = compile_source_to_bytecode("actual-use-boundaries.glorious", positive).unwrap();
     verify(artifact).unwrap();
 
     let cases = [
@@ -796,7 +797,7 @@ fn actual_use_counts_copy_destinations_temporaries_and_projection_boundaries() {
         "struct AtLeastTwo { value: i64 } impl Use<[2,infinity]> for AtLeastTwo {} bad() -> AtLeastTwo { AtLeastTwo { value: 1 } } main() -> { () }",
     ];
     for source in cases {
-        let errors = compile_source_to_bytecode("invalid-actual-use.gr", source).unwrap_err();
+        let errors = compile_source_to_bytecode("invalid-actual-use.glorious", source).unwrap_err();
         assert!(errors.iter().all(|error| error.span.is_some()));
         assert!(errors.iter().all(|error| error.code.is_some()));
         assert!(
@@ -808,8 +809,8 @@ fn actual_use_counts_copy_destinations_temporaries_and_projection_boundaries() {
     }
 
     let moved_then_discarded = "struct Linear { value: i64 } impl Use<[1,1]> for Linear {} bad(value: Linear) -> { let owner = value; owner; () } main() -> { () }";
-    let errors =
-        compile_source_to_bytecode("moved-then-discarded.gr", moved_then_discarded).unwrap_err();
+    let errors = compile_source_to_bytecode("moved-then-discarded.glorious", moved_then_discarded)
+        .unwrap_err();
     assert!(errors.iter().any(|error| {
         error
             .message
@@ -819,11 +820,13 @@ fn actual_use_counts_copy_destinations_temporaries_and_projection_boundaries() {
     }));
 
     let involved_effect = "effect Stop { stop() -> ! } struct Bounded { value: i64 } impl Use<[0,2]> for Bounded {} bad(value: Bounded) -> { handle perform Stop::stop() { Stop::stop() => () } } main() -> { () }";
-    verify(compile_source_to_bytecode("involved-bounded-effect.gr", involved_effect).unwrap())
-        .unwrap();
+    verify(
+        compile_source_to_bytecode("involved-bounded-effect.glorious", involved_effect).unwrap(),
+    )
+    .unwrap();
 
     let bounded_global = "struct Bounded { value: i64 } impl Use<[0,2]> for Bounded {} let cached = Bounded { value: 1 }; main() -> { () }";
-    let errors = compile_source_to_bytecode("bounded-global.gr", bounded_global).unwrap_err();
+    let errors = compile_source_to_bytecode("bounded-global.glorious", bounded_global).unwrap_err();
     assert!(
         errors
             .iter()
@@ -839,7 +842,7 @@ fn actual_use_counts_copy_destinations_temporaries_and_projection_boundaries() {
         main() -> { () }
     "#;
     let artifact =
-        compile_source_to_bytecode("unrelated-bounded-effect.gr", unrelated_effect).unwrap();
+        compile_source_to_bytecode("unrelated-bounded-effect.glorious", unrelated_effect).unwrap();
     verify(artifact).unwrap();
 }
 
@@ -854,7 +857,7 @@ fn explicit_move_forces_final_transfer_of_a_duplicable_relevant_owner() {
         through_let(value: Relevant) -> Relevant { let owner = move value; move owner }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("explicit-move.gr", source).unwrap();
+    let phases = compile_source_to_phases("explicit-move.glorious", source).unwrap();
     verify(phases.artifact).unwrap();
     assert!(phases.core.canonical_text().contains("move l0"));
     assert!(phases.mir.canonical_text().contains("Copy"));
@@ -866,7 +869,7 @@ fn explicit_move_forces_final_transfer_of_a_duplicable_relevant_owner() {
         bad(value: Relevant) -> (Relevant, Relevant) { (value, value) }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("copies-only.gr", copies_only).unwrap_err();
+    let errors = compile_source_to_bytecode("copies-only.glorious", copies_only).unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error.code.as_deref() == Some("G1BC002")
@@ -882,7 +885,7 @@ fn explicit_move_forces_final_transfer_of_a_duplicable_relevant_owner() {
         bad() -> Relevant { let original = make(); let copy = original; move copy }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("live-copy-local.gr", live_local).unwrap_err();
+    let errors = compile_source_to_bytecode("live-copy-local.glorious", live_local).unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error.code.as_deref() == Some("G1BC002")
@@ -903,7 +906,7 @@ fn bounded_use_drop_compatibility_and_cleanup_are_checked_by_interval() {
         unused() -> { let value = OptionalDrop { value: 1 }; () }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("bounded-drop.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("bounded-drop.glorious", source).unwrap();
     assert_eq!(artifact.drop_glue.len(), 1);
     let ty = artifact.drop_glue[0].ty;
     assert!(artifact.types[ty as usize].claimed_duplicable());
@@ -911,7 +914,7 @@ fn bounded_use_drop_compatibility_and_cleanup_are_checked_by_interval() {
     verify(artifact).unwrap();
 
     let errors = compile_source_to_bytecode(
-        "incompatible-bounded-drop.gr",
+        "incompatible-bounded-drop.glorious",
         "struct Twice { value: i64 } impl Use<[2,infinity]> for Twice {} impl Drop for Twice { drop(&mut self) -> { () } } main() -> { () }",
     )
     .unwrap_err();
@@ -942,7 +945,7 @@ fn conditional_exact_use_selects_marker_proofs_and_is_canonical() {
         ground_no(value: Ground<Text>) -> Ground<Text> { value }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("conditional-exact-use.gr", source).unwrap();
+    let phases = compile_source_to_phases("conditional-exact-use.glorious", source).unwrap();
     let yes = phases
         .artifact
         .functions
@@ -1005,7 +1008,7 @@ fn conditional_exact_use_selects_marker_proofs_and_is_canonical() {
         trait Marker {}
     "#;
     assert_eq!(
-        compile_source_to_bytecode("conditional-exact-use-reordered.gr", reordered)
+        compile_source_to_bytecode("conditional-exact-use-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -1020,7 +1023,8 @@ fn conditional_exact_use_selects_marker_proofs_and_is_canonical() {
         main() -> { () }
     "#;
     let artifact =
-        compile_source_to_bytecode("monomorphic-conditional-use.gr", monomorphic_only).unwrap();
+        compile_source_to_bytecode("monomorphic-conditional-use.glorious", monomorphic_only)
+            .unwrap();
     let ticket = artifact
         .functions
         .iter()
@@ -1040,7 +1044,7 @@ fn conditional_use_reports_ambiguous_cycles_and_solver_overflow() {
         impl Use<[0,1]> for Ticket where Loop<i64>: Marker {}
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("cyclic-conditional-use.gr", cyclic).unwrap_err();
+    let errors = compile_source_to_bytecode("cyclic-conditional-use.glorious", cyclic).unwrap_err();
     assert!(errors.iter().any(|error| {
         error.message
             == "recursive implementation where-goal for `Marker` does not strictly decrease the type-constructor measure"
@@ -1062,7 +1066,7 @@ fn conditional_use_reports_ambiguous_cycles_and_solver_overflow() {
             .name("solver-boundary-use".into())
             .stack_size(16 * 1024 * 1024)
             .spawn_scoped(scope, || {
-                compile_source_to_bytecode("overflow-conditional-use.gr", &overflow)
+                compile_source_to_bytecode("overflow-conditional-use.glorious", &overflow)
             })
             .unwrap()
             .join()
@@ -1093,7 +1097,7 @@ fn conditional_use_reports_ambiguous_cycles_and_solver_overflow() {
             .stack_size(16 * 1024 * 1024)
             .spawn_scoped(scope, || {
                 compile_source_to_bytecode(
-                    "overflow-conditional-use-reordered.gr",
+                    "overflow-conditional-use-reordered.glorious",
                     &overflow_reordered,
                 )
             })
@@ -1144,7 +1148,7 @@ fn non_decreasing_recursive_marker_impls_have_stable_structured_diagnostics() {
     "#;
 
     let signature = |source: &str| {
-        let mut errors = compile_source_to_bytecode("recursive-impl.gr", source)
+        let mut errors = compile_source_to_bytecode("recursive-impl.glorious", source)
             .unwrap_err()
             .into_iter()
             .map(|error| {
@@ -1219,8 +1223,8 @@ fn decreasing_marker_recursion_composes_with_gats_polarity_and_param_envs() {
         ticket(value:Ticket<Wrap<Wrap<i64>>>)->Ticket<Wrap<Wrap<i64>>> { value }
         main()->{ () }
     "#;
-    let phases = compile_source_to_phases("decreasing-recursion.gr", source).unwrap();
-    let repeated = compile_source_to_phases("decreasing-recursion.gr", source).unwrap();
+    let phases = compile_source_to_phases("decreasing-recursion.glorious", source).unwrap();
+    let repeated = compile_source_to_phases("decreasing-recursion.glorious", source).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
     assert_eq!(phases.artifact.encode(), repeated.artifact.encode());
@@ -1282,9 +1286,11 @@ fn projection_solver_limit_is_exact_structured_and_source_order_independent() {
 
     let at_limit = program(256, false);
     let reordered_at_limit = program(256, true);
-    let bytes = compile("projection-limit.gr", &at_limit).unwrap().encode();
+    let bytes = compile("projection-limit.glorious", &at_limit)
+        .unwrap()
+        .encode();
     assert_eq!(
-        compile("projection-limit-reordered.gr", &reordered_at_limit)
+        compile("projection-limit-reordered.glorious", &reordered_at_limit)
             .unwrap()
             .encode(),
         bytes
@@ -1293,7 +1299,7 @@ fn projection_solver_limit_is_exact_structured_and_source_order_independent() {
     let above_limit = program(257, false);
     let reordered_above_limit = program(257, true);
     let messages = |source: &str| {
-        let mut diagnostics = compile("projection-overflow.gr", source)
+        let mut diagnostics = compile("projection-overflow.glorious", source)
             .unwrap_err()
             .into_iter()
             .map(|error| {
@@ -1339,7 +1345,7 @@ fn gat_cycle_reports_the_shortest_deterministic_repeating_goal_trace() {
         trait Family { type Member<T>; }
     "#;
     let message = |source: &str| {
-        let errors = compile_source_to_bytecode("gat-cycle.gr", source).unwrap_err();
+        let errors = compile_source_to_bytecode("gat-cycle.glorious", source).unwrap_err();
         assert_eq!(errors.len(), 1, "{errors:#?}");
         let error = &errors[0];
         assert_eq!(error.code.as_deref(), Some("G1BC002"));
@@ -1378,7 +1384,7 @@ fn phantom_generic_use_specializes_only_reachable_marker_proven_grounds() {
         no(value: Outer<Text>) -> Outer<Text> { value }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("phantom-generic-use.gr", source).unwrap();
+    let phases = compile_source_to_phases("phantom-generic-use.glorious", source).unwrap();
     let param = |name: &str| {
         phases
             .artifact
@@ -1416,7 +1422,7 @@ fn phantom_generic_use_specializes_only_reachable_marker_proven_grounds() {
         trait Marker {}
     "#;
     assert_eq!(
-        compile_source_to_bytecode("phantom-generic-use-reordered.gr", reordered)
+        compile_source_to_bytecode("phantom-generic-use-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -1432,7 +1438,8 @@ fn symbolic_expected_type_fixes_phantom_nominal_construction_inside_enum() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("phantom-nominal-expected-type.gr", source).unwrap();
+    let phases =
+        compile_source_to_phases("phantom-nominal-expected-type.glorious", source).unwrap();
     verify(phases.artifact).unwrap();
 }
 
@@ -1446,7 +1453,8 @@ fn generic_use_rejects_dependent_layouts_and_overlaps_before_reachability() {
         "trait Left {} trait Right {} struct Phantom<T> { marker: i64 } impl Use<[0,1]> for Phantom<i64> where i64: Left {} impl Use<[0,2]> for Phantom<i64> where i64: Right {} main() -> { () }",
     ];
     for source in cases {
-        let errors = compile_source_to_bytecode("invalid-generic-use.gr", source).unwrap_err();
+        let errors =
+            compile_source_to_bytecode("invalid-generic-use.glorious", source).unwrap_err();
         assert!(errors.iter().all(|error| error.span.is_some()));
         assert!(errors.iter().all(|error| error.code.is_some()));
     }
@@ -1456,11 +1464,11 @@ fn generic_use_rejects_dependent_layouts_and_overlaps_before_reachability() {
         impl<T> Use<[0,2]> for Phantom<T> {}
         main() -> { () }
     "#;
-    let artifact = compile_raw_source("unreached-generic-use.gr", zero_roots).unwrap();
+    let artifact = compile_raw_source("unreached-generic-use.glorious", zero_roots).unwrap();
     assert_eq!(artifact.types.len(), Type::predefined().len());
 
     compile_source_to_bytecode(
-        "permuted-generic-use.gr",
+        "permuted-generic-use.glorious",
         "struct Phantom<T, U> { marker: i64 } impl<T, U> Use<[0,1]> for Phantom<U, T> {} main() -> { () }",
     )
     .expect("structural generic Use heads may permute their bound arguments");
@@ -1494,7 +1502,7 @@ fn binder_owned_generic_use_is_gated_by_intrinsic_principal_evidence() {
         exact_no(value: ExactNo) -> ExactNo { value }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("binder-use-evidence.gr", source).unwrap();
+    let phases = compile_source_to_phases("binder-use-evidence.glorious", source).unwrap();
     let parameter = |name: &str| {
         phases
             .artifact
@@ -1529,7 +1537,7 @@ fn intrinsic_generic_use_rejects_missing_weak_and_nested_binder_coverage() {
         "struct Pair<A, B> { first: A, second: B } impl<A, B> Use<[0,1]> for Pair<A, B> where A: Use<[0,1]> {} main() -> { () }",
     ];
     for source in cases {
-        let errors = compile_source_to_bytecode("invalid-binder-use.gr", source).unwrap_err();
+        let errors = compile_source_to_bytecode("invalid-binder-use.glorious", source).unwrap_err();
         assert!(errors.iter().all(|error| error.span.is_some()));
         assert!(errors.iter().all(|error| error.code.is_some()));
     }
@@ -1598,10 +1606,10 @@ fn nested_and_fixed_generic_use_fields_require_exact_intrinsic_evidence() {
         struct Erased { marker: i64 }
     "#;
 
-    let phases = compile_source_to_phases("nested-generic-use.gr", source).unwrap();
-    let repeated = compile_source_to_phases("nested-generic-use.gr", source).unwrap();
+    let phases = compile_source_to_phases("nested-generic-use.glorious", source).unwrap();
+    let repeated = compile_source_to_phases("nested-generic-use.glorious", source).unwrap();
     let reordered_phases =
-        compile_source_to_phases("nested-generic-use-reordered.gr", reordered).unwrap();
+        compile_source_to_phases("nested-generic-use-reordered.glorious", reordered).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
     let bytes = phases.artifact.encode();
@@ -1675,7 +1683,7 @@ fn nested_and_fixed_generic_use_reject_missing_mismatched_and_weak_evidence() {
     ];
     for source in cases {
         let errors =
-            compile_source_to_bytecode("invalid-nested-generic-use.gr", source).unwrap_err();
+            compile_source_to_bytecode("invalid-nested-generic-use.glorious", source).unwrap_err();
         assert!(errors.iter().all(|error| error.span.is_some()));
         assert!(errors.iter().all(|error| error.code.is_some()));
     }
@@ -1690,7 +1698,8 @@ fn conditional_intrinsic_use_does_not_create_reachability_and_reports_cycles() {
         forward(value: Box<i64>) -> Box<i64> { value }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("use-no-reachability.gr", no_reachability).unwrap();
+    let artifact =
+        compile_source_to_bytecode("use-no-reachability.glorious", no_reachability).unwrap();
     let ty = artifact
         .functions
         .iter()
@@ -1706,7 +1715,7 @@ fn conditional_intrinsic_use_does_not_create_reachability_and_reports_cycles() {
         impl Use<[0,1]> for B where A: Use<[0,1]> {}
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("cyclic-intrinsic-use.gr", cyclic).unwrap_err();
+    let errors = compile_source_to_bytecode("cyclic-intrinsic-use.glorious", cyclic).unwrap_err();
     assert!(
         errors
             .iter()
@@ -1727,7 +1736,8 @@ fn conditional_intrinsic_use_reports_principal_solver_overflow() {
         ));
     }
     source.push_str("impl Use<[0,1]> for N66 {} main() -> { () }");
-    let errors = compile_source_to_bytecode("overflow-intrinsic-use.gr", &source).unwrap_err();
+    let errors =
+        compile_source_to_bytecode("overflow-intrinsic-use.glorious", &source).unwrap_err();
     assert!(
         errors
             .iter()
@@ -1756,10 +1766,10 @@ fn substituted_intrinsic_use_goals_are_canonical_across_declaration_order() {
         struct Erased { marker: i64 }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("canonical-intrinsic-use.gr", source)
+        compile_source_to_bytecode("canonical-intrinsic-use.glorious", source)
             .unwrap()
             .encode(),
-        compile_source_to_bytecode("canonical-intrinsic-use-reordered.gr", reordered)
+        compile_source_to_bytecode("canonical-intrinsic-use-reordered.glorious", reordered)
             .unwrap()
             .encode()
     );
@@ -1774,7 +1784,7 @@ fn intrinsic_bound_generic_zero_use_is_compatible_with_drop_and_cleanup() {
         consume(value: Resource<i64>) -> { value; () }
         main() -> { consume(Resource { value: 1 }) }
     "#;
-    let artifact = compile_source_to_bytecode("intrinsic-use-drop.gr", accepted).unwrap();
+    let artifact = compile_source_to_bytecode("intrinsic-use-drop.glorious", accepted).unwrap();
     assert_eq!(artifact.drop_glue.len(), 1);
     let bytes = artifact.encode();
     let decoded = Artifact::decode(&bytes).unwrap();
@@ -1793,7 +1803,8 @@ fn intrinsic_bound_generic_zero_use_is_compatible_with_drop_and_cleanup() {
         unused(value: Resource<i64>) -> { () }
         main() -> { () }
     "#;
-    verify(compile_source_to_bytecode("unused-intrinsic-use-drop.gr", unused).unwrap()).unwrap();
+    verify(compile_source_to_bytecode("unused-intrinsic-use-drop.glorious", unused).unwrap())
+        .unwrap();
 }
 
 #[test]
@@ -1810,7 +1821,7 @@ fn conditional_generic_use_and_drop_select_the_same_ground_instance() {
         no(value: Resource<Text>) -> Resource<Text> { value }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("conditional-use-drop.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("conditional-use-drop.glorious", source).unwrap();
     assert_eq!(artifact.drop_glue.len(), 1);
     let yes = artifact
         .functions
@@ -1839,7 +1850,8 @@ fn conditional_generic_use_and_drop_select_the_same_ground_instance() {
         impl Use<[0,infinity]> for Owner where Owner: Marker {}
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("conditional-use-widening.gr", widening).unwrap_err();
+    let errors =
+        compile_source_to_bytecode("conditional-use-widening.glorious", widening).unwrap_err();
     assert!(
         errors
             .iter()
@@ -1857,7 +1869,8 @@ fn conditional_generic_use_and_drop_select_the_same_ground_instance() {
         main() -> { () }
     "#;
     let errors =
-        compile_source_to_bytecode("conditional-use-drop-cleanup.gr", must_move_drop).unwrap_err();
+        compile_source_to_bytecode("conditional-use-drop-cleanup.glorious", must_move_drop)
+            .unwrap_err();
     assert!(
         errors
             .iter()
@@ -1883,7 +1896,7 @@ fn exact_linear_use_checks_straight_line_scopes_calls_and_flags() {
         forward_tuple(value: (Ticket, i64)) -> (Ticket, i64) { value }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("exact-linear.gr", source).unwrap();
+    let phases = compile_source_to_phases("exact-linear.glorious", source).unwrap();
     for name in ["Ticket", "Holder", "Envelope"] {
         let ty = phases
             .artifact
@@ -1931,7 +1944,7 @@ fn exact_linear_use_checks_straight_line_scopes_calls_and_flags() {
         struct Ticket { value: i64 }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("exact-linear-reordered.gr", reordered)
+        compile_source_to_bytecode("exact-linear-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -1948,7 +1961,7 @@ fn exact_linear_use_rejects_underuse_double_use_discard_and_partial_move() {
         "struct Owner { value: &mut i64 } struct Pair { owner: Owner } impl Use<[1,1]> for Pair {} bad(value: Pair) -> Owner { value.owner } main() -> { () }",
     ];
     for source in cases {
-        let errors = compile_source_to_bytecode("invalid-exact-use.gr", source).unwrap_err();
+        let errors = compile_source_to_bytecode("invalid-exact-use.glorious", source).unwrap_err();
         assert!(errors.iter().all(|error| error.span.is_some()));
         assert!(errors.iter().all(|error| error.code.is_some()));
     }
@@ -1962,7 +1975,7 @@ fn ground_generic_drop_requires_zero_use_containment() {
         impl<T> Drop for Box<T> { drop(&mut self) -> { self.value; () } }
         main() -> { let value = Box { value: 1 }; () }
     "#;
-    let artifact = compile_source_to_bytecode("erased-ground-drop.gr", accepted).unwrap();
+    let artifact = compile_source_to_bytecode("erased-ground-drop.glorious", accepted).unwrap();
     assert_eq!(artifact.drop_glue.len(), 1);
     let ty = artifact.drop_glue[0].ty;
     assert!(!artifact.types[ty as usize].claimed_duplicable());
@@ -1975,7 +1988,7 @@ fn ground_generic_drop_requires_zero_use_containment() {
         impl Drop for MustAccount { drop(&mut self) -> { () } }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("must-move-drop.gr", must_move).unwrap_err();
+    let errors = compile_source_to_bytecode("must-move-drop.glorious", must_move).unwrap_err();
     assert!(
         errors
             .iter()
@@ -1993,7 +2006,7 @@ fn exact_linear_use_is_scoped_to_involved_effect_control() {
         main() -> { () }
     "#;
     let unrelated_artifact =
-        compile_source_to_bytecode("unrelated-exact-effect.gr", unrelated).unwrap();
+        compile_source_to_bytecode("unrelated-exact-effect.glorious", unrelated).unwrap();
     verify(unrelated_artifact.clone()).unwrap();
     let unrelated_reordered = r#"
         main() -> { () }
@@ -2003,9 +2016,12 @@ fn exact_linear_use_is_scoped_to_involved_effect_control() {
         effect Stop { stop() -> ! }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("unrelated-exact-effect-reordered.gr", unrelated_reordered)
-            .unwrap()
-            .encode(),
+        compile_source_to_bytecode(
+            "unrelated-exact-effect-reordered.glorious",
+            unrelated_reordered
+        )
+        .unwrap()
+        .encode(),
         unrelated_artifact.encode()
     );
 
@@ -2016,7 +2032,8 @@ fn exact_linear_use_is_scoped_to_involved_effect_control() {
         bad(value: Ticket) -> { handle perform Stop::stop() { Stop::stop() => () } }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("involved-exact-effect.gr", involved).unwrap_err();
+    let errors =
+        compile_source_to_bytecode("involved-exact-effect.glorious", involved).unwrap_err();
     assert!(
         errors
             .iter()
@@ -2046,7 +2063,7 @@ fn relevant_use_checks_repeated_whole_copies_calls_layouts_and_flags() {
         forward_box(value: Box<i64>) -> Box<i64> { move value }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("relevant.gr", source).unwrap();
+    let phases = compile_source_to_phases("relevant.glorious", source).unwrap();
     for name in ["Token", "Pair", "Holder", "Envelope"] {
         let ty = phases
             .artifact
@@ -2110,7 +2127,7 @@ fn relevant_use_checks_repeated_whole_copies_calls_layouts_and_flags() {
         struct Token { value: i64 }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("relevant-reordered.gr", reordered)
+        compile_source_to_bytecode("relevant-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -2128,7 +2145,8 @@ fn relevant_use_rejects_underuse_projection_discard_and_involved_effects() {
         "effect Stop { stop() -> ! } struct Token { value: i64 } impl Use<[1,infinity]> for Token {} abort() -> i64 / {Stop} { perform Stop::stop() } bad(value: Token) -> Token / {Stop} { abort(); value } main() -> { () }",
     ];
     for source in cases {
-        let errors = compile_source_to_bytecode("invalid-relevant-use.gr", source).unwrap_err();
+        let errors =
+            compile_source_to_bytecode("invalid-relevant-use.glorious", source).unwrap_err();
         assert!(errors.iter().all(|error| error.span.is_some()));
         assert!(errors.iter().all(|error| error.code.is_some()));
     }
@@ -2140,7 +2158,7 @@ fn relevant_use_rejects_underuse_projection_discard_and_involved_effects() {
         impl Use<[1,infinity]> for Invalid {}
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("relevant-widening.gr", widening).unwrap_err();
+    let errors = compile_source_to_bytecode("relevant-widening.glorious", widening).unwrap_err();
     assert!(
         errors
             .iter()
@@ -2154,7 +2172,8 @@ fn relevant_use_rejects_underuse_projection_discard_and_involved_effects() {
         run() -> { handle perform Stop::stop() { Stop::stop() => () } }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("unrelated-relevant-effect.gr", unrelated).unwrap();
+    let artifact =
+        compile_source_to_bytecode("unrelated-relevant-effect.glorious", unrelated).unwrap();
     verify(artifact).unwrap();
 }
 
@@ -2166,7 +2185,7 @@ fn relevant_use_is_duplicable_but_cannot_implement_drop() {
         forward(value: Resource) -> Resource { move value }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("relevant-transfer.gr", accepted).unwrap();
+    let artifact = compile_source_to_bytecode("relevant-transfer.glorious", accepted).unwrap();
     let ty = artifact
         .functions
         .iter()
@@ -2183,7 +2202,7 @@ fn relevant_use_is_duplicable_but_cannot_implement_drop() {
         impl Drop for Resource { drop(&mut self) -> { () } }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("relevant-drop.gr", drop_impl).unwrap_err();
+    let errors = compile_source_to_bytecode("relevant-drop.glorious", drop_impl).unwrap_err();
     assert!(
         errors
             .iter()
@@ -2210,7 +2229,7 @@ fn custom_drop_rejects_partial_noncopy_moves_but_keeps_copy_and_whole_moves_lega
             main() -> { () }
         "#,
     ] {
-        let error = compile_source_to_bytecode("partial-drop-move.gr", source).unwrap_err();
+        let error = compile_source_to_bytecode("partial-drop-move.glorious", source).unwrap_err();
         assert_eq!(error[0].code.as_deref(), Some("G1BC002"));
         assert!(
             error[0].message.contains("custom Drop hook"),
@@ -2220,7 +2239,7 @@ fn custom_drop_rejects_partial_noncopy_moves_but_keeps_copy_and_whole_moves_lega
     }
 
     let legal = compile_source_to_phases(
-        "legal-drop-access.gr",
+        "legal-drop-access.glorious",
         r#"
             struct Owner { value: &mut i64 }
             struct Residual { owner: Owner, marker: i64 }
@@ -2261,13 +2280,14 @@ fn grounded_generic_drop_rejects_only_instances_with_an_applicable_hook() {
             main() -> { () }
         "#,
     ] {
-        let error = compile_source_to_bytecode("generic-partial-drop-move.gr", source).unwrap_err();
+        let error =
+            compile_source_to_bytecode("generic-partial-drop-move.glorious", source).unwrap_err();
         assert_eq!(error[0].code.as_deref(), Some("G1BC002"));
         assert!(error[0].message.contains("custom Drop hook"));
     }
 
     let phases = compile_source_to_phases(
-        "conditional-drop-not-applicable.gr",
+        "conditional-drop-not-applicable.glorious",
         r#"
             trait Marker {}
             struct Owner { value: &mut i64 }
@@ -2294,7 +2314,7 @@ fn generic_drop_emits_one_hook_per_reachable_ground_instance() {
         wrapper(value: Wrapper) -> { () }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("generic-drop.gr", source).unwrap();
+    let phases = compile_source_to_phases("generic-drop.glorious", source).unwrap();
     let reordered = r#"
         main() -> { () }
         wrapper(value: Wrapper) -> { () }
@@ -2304,7 +2324,8 @@ fn generic_drop_emits_one_hook_per_reachable_ground_instance() {
         struct Wrapper { item: Box<i64> }
         struct Box<T> { value: T }
     "#;
-    let reordered = compile_source_to_bytecode("generic-drop-reordered.gr", reordered).unwrap();
+    let reordered =
+        compile_source_to_bytecode("generic-drop-reordered.glorious", reordered).unwrap();
     verify(phases.artifact.clone()).unwrap();
     let artifact = &phases.artifact;
     assert_eq!(artifact.drop_glue.len(), 2);
@@ -2376,7 +2397,7 @@ fn generic_drop_hook_runs_before_ground_instance_children() {
         }
         main() -> { let value = make(); () }
     "#;
-    let artifact = compile_source_to_bytecode("generic-drop-order.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("generic-drop-order.glorious", source).unwrap();
     assert_eq!(artifact.drop_glue.len(), 2);
     let error = Vm::new(verify(artifact.clone()).unwrap())
         .run(artifact.entry_function.unwrap(), vec![])
@@ -2398,7 +2419,7 @@ fn conditional_generic_drop_selects_only_proven_ground_instances() {
         make() -> Box<i64> { Box { value: 1 } }
         main() -> { let value = make(); () }
     "#;
-    let phases = compile_source_to_phases("conditional-drop.gr", source).unwrap();
+    let phases = compile_source_to_phases("conditional-drop.glorious", source).unwrap();
     let artifact = &phases.artifact;
     assert_eq!(artifact.drop_glue.len(), 1);
     let integer = artifact
@@ -2448,7 +2469,7 @@ fn conditional_generic_drop_selects_only_proven_ground_instances() {
         .unwrap_err();
     assert!(error.to_string().contains("division by zero"), "{error}");
 
-    let repeated = compile_source_to_phases("drop-rooted-specialization.gr", source).unwrap();
+    let repeated = compile_source_to_phases("drop-rooted-specialization.glorious", source).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
     assert_eq!(bytes, repeated.artifact.encode());
@@ -2467,7 +2488,7 @@ fn conditional_generic_drop_selects_only_proven_ground_instances() {
     "#;
     assert_eq!(
         bytes,
-        compile_source_to_bytecode("conditional-drop-reordered.gr", reordered)
+        compile_source_to_bytecode("conditional-drop-reordered.glorious", reordered)
             .unwrap()
             .encode()
     );
@@ -2486,7 +2507,8 @@ fn conditional_generic_drop_uses_recursive_marker_evidence() {
         missing(value: Box<Wrap<Text>>) -> { () }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("recursive-conditional-drop.gr", source).unwrap();
+    let artifact =
+        compile_source_to_bytecode("recursive-conditional-drop.glorious", source).unwrap();
     assert_eq!(artifact.drop_glue.len(), 1);
     assert_eq!(
         artifact.drop_glue[0].ty,
@@ -2510,7 +2532,8 @@ fn conditional_generic_drop_rejects_cyclic_goals_and_overlapping_heads() {
         reachable(value: Box<Loop<i64>>) -> { () }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("cyclic-conditional-drop.gr", cyclic).unwrap_err();
+    let errors =
+        compile_source_to_bytecode("cyclic-conditional-drop.glorious", cyclic).unwrap_err();
     assert!(errors.iter().any(|error| {
         error.message
             == "recursive implementation where-goal for `Marker` does not strictly decrease the type-constructor measure"
@@ -2527,7 +2550,7 @@ fn conditional_generic_drop_rejects_cyclic_goals_and_overlapping_heads() {
         main() -> { () }
     "#;
     let errors =
-        compile_source_to_bytecode("overlapping-conditional-drop.gr", overlap).unwrap_err();
+        compile_source_to_bytecode("overlapping-conditional-drop.glorious", overlap).unwrap_err();
     assert!(errors.iter().any(|error| {
         error.message.contains("overlapping")
             && error.message.contains("Drop")
@@ -2547,7 +2570,7 @@ fn conditional_generic_drop_rejects_cyclic_goals_and_overlapping_heads() {
             .name("solver-boundary-drop".into())
             .stack_size(16 * 1024 * 1024)
             .spawn_scoped(scope, || {
-                compile_source_to_bytecode("overflow-conditional-drop.gr", &overflow)
+                compile_source_to_bytecode("overflow-conditional-drop.glorious", &overflow)
             })
             .unwrap()
             .join()
@@ -2579,7 +2602,7 @@ fn invalid_drop_targets_and_bodies_have_structured_diagnostics() {
         "effect Stop { stop() -> ! } unsafe_call() -> { handle perform Stop::stop() { Stop::stop() => () } } struct Item { value: i64 } impl Drop for Item { drop(&mut self) -> { unsafe_call() } } main() -> { () }",
     ];
     for (index, source) in cases.into_iter().enumerate() {
-        let errors = match compile_source_to_bytecode("bad-drop.gr", source) {
+        let errors = match compile_source_to_bytecode("bad-drop.glorious", source) {
             Err(errors) => errors,
             Ok(_) => panic!("case {index} unexpectedly compiled: {source}"),
         };
@@ -2592,12 +2615,12 @@ fn invalid_drop_targets_and_bodies_have_structured_diagnostics() {
     }
 
     compile_source_to_bytecode(
-        "nested-drop-head.gr",
+        "nested-drop-head.glorious",
         "struct Box<T> { value: T } impl<T> Drop for Box<Box<T>> { drop(&mut self) -> { () } } main() -> { () }",
     )
     .expect("structural generic Drop heads may contain finite nested nominal patterns");
     compile_source_to_bytecode(
-        "referenced-drop-goal.gr",
+        "referenced-drop-goal.glorious",
         "trait Marker {} struct Box<T> { value: T } impl<T> Drop for Box<T> where &T: Marker { drop(&mut self) -> { () } } main() -> { () }",
     )
     .expect("generic Drop marker goals may use supported reference subjects");
@@ -2616,7 +2639,7 @@ fn tuples_construct_project_call_nest_and_specialize() {
         answer() -> i64 { pair().0 }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("tuples.gr", source).unwrap();
+    let phases = compile_source_to_phases("tuples.glorious", source).unwrap();
     let verified = verify(phases.artifact.clone()).unwrap();
     let bytes = phases.artifact.encode();
     assert_eq!(Artifact::decode(&bytes).unwrap().encode(), bytes);
@@ -2673,8 +2696,9 @@ fn tuples_construct_project_call_nest_and_specialize() {
 fn tuple_descriptors_are_structural_canonical_and_request_free() {
     let baseline = "main() -> { () }";
     let grouped = "grouped(value: (i64)) -> i64 { (value) } main() -> { () }";
-    let baseline_artifact = compile_source_to_bytecode("tuple-baseline.gr", baseline).unwrap();
-    let grouped_artifact = compile_source_to_bytecode("tuple-grouped.gr", grouped).unwrap();
+    let baseline_artifact =
+        compile_source_to_bytecode("tuple-baseline.glorious", baseline).unwrap();
+    let grouped_artifact = compile_source_to_bytecode("tuple-grouped.glorious", grouped).unwrap();
     assert_eq!(baseline_artifact.types, grouped_artifact.types);
     assert_eq!(
         baseline_artifact
@@ -2700,8 +2724,9 @@ fn tuple_descriptors_are_structural_canonical_and_request_free() {
         single(value: (i64,)) -> (i64,) { value }
         outer(value: (i64, (Text,))) -> (i64, (Text,)) { value }
     "#;
-    let first = compile_source_to_bytecode("tuple-order.gr", first).unwrap();
-    let reordered = compile_source_to_bytecode("tuple-order-reordered.gr", reordered).unwrap();
+    let first = compile_source_to_bytecode("tuple-order.glorious", first).unwrap();
+    let reordered =
+        compile_source_to_bytecode("tuple-order-reordered.glorious", reordered).unwrap();
     assert_eq!(first.encode(), reordered.encode());
     for (parent, ty) in first.types.iter().enumerate() {
         if let Type::Tuple { fields, .. } = ty.representation() {
@@ -2728,8 +2753,8 @@ fn tuple_field_move_retains_and_cleans_the_residual_aggregate() {
         }
         main() -> { () }
     "#;
-    let first = compile_source_to_phases("tuple-move.gr", source).unwrap();
-    let second = compile_source_to_phases("tuple-move.gr", source).unwrap();
+    let first = compile_source_to_phases("tuple-move.glorious", source).unwrap();
+    let second = compile_source_to_phases("tuple-move.glorious", source).unwrap();
     verify(first.artifact.clone()).unwrap();
     assert_eq!(first.core_fingerprint(), second.core_fingerprint());
     assert_eq!(first.mir_fingerprint(), second.mir_fingerprint());
@@ -2786,7 +2811,7 @@ fn tuple_field_move_rejects_overlap_whole_use_loans_and_nested_paths() {
         ),
     ];
     for (name, source) in cases {
-        let result = compile_source_to_bytecode(&format!("{name}.gr"), source);
+        let result = compile_source_to_bytecode(&format!("{name}.glorious"), source);
         assert!(result.is_err(), "{name} unexpectedly compiled");
         let errors = result.unwrap_err();
         assert!(
@@ -2828,7 +2853,7 @@ fn invalid_tuple_forms_and_ownership_have_structured_diagnostics() {
         ),
     ];
     for (name, source) in cases {
-        let errors = compile_source_to_bytecode(&format!("{name}.gr"), source).unwrap_err();
+        let errors = compile_source_to_bytecode(&format!("{name}.glorious"), source).unwrap_err();
         assert!(!errors.is_empty(), "{name} unexpectedly compiled");
         assert!(
             errors.iter().any(|error| error.span.is_some()),
@@ -2858,7 +2883,7 @@ fn nested_ground_nominals_construct_project_pass_and_specialize() {
         answer() -> i64 { make_outer().value.value }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("nested-ground.gr", source).unwrap();
+    let phases = compile_source_to_phases("nested-ground.glorious", source).unwrap();
     let verified = verify(phases.artifact.clone()).unwrap();
     let bytes = phases.artifact.encode();
     assert_eq!(Artifact::decode(&bytes).unwrap().encode(), bytes);
@@ -2937,10 +2962,10 @@ fn nested_ground_nominal_layouts_are_canonical_across_declaration_order() {
         struct Box<T> { value: T }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("nested-order.gr", first)
+        compile_source_to_bytecode("nested-order.glorious", first)
             .unwrap()
             .encode(),
-        compile_source_to_bytecode("nested-order-reversed.gr", reordered)
+        compile_source_to_bytecode("nested-order-reversed.glorious", reordered)
             .unwrap()
             .encode()
     );
@@ -2973,10 +2998,10 @@ fn bounded_generic_tuple_fields_ground_nested_structural_layouts() {
         struct Packet { value: i64 }
     "#;
 
-    let phases = compile_source_to_phases("bounded-tuple-field.gr", source).unwrap();
-    let repeated = compile_source_to_phases("bounded-tuple-field.gr", source).unwrap();
+    let phases = compile_source_to_phases("bounded-tuple-field.glorious", source).unwrap();
+    let repeated = compile_source_to_phases("bounded-tuple-field.glorious", source).unwrap();
     let reordered =
-        compile_source_to_phases("bounded-tuple-field-reordered.gr", reordered).unwrap();
+        compile_source_to_phases("bounded-tuple-field-reordered.glorious", reordered).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
     assert_eq!(phases.artifact.encode(), reordered.artifact.encode());
@@ -3042,7 +3067,7 @@ fn bounded_generic_reference_fields_forward_with_exact_descriptors_and_use_flags
         struct Unique<T> { value: &mut T }
         struct Shared<T> { value: &T }
     "#;
-    let phases = compile_source_to_phases("bounded-reference-field.gr", source).unwrap();
+    let phases = compile_source_to_phases("bounded-reference-field.glorious", source).unwrap();
     let descriptor = |name: &str| {
         phases
             .artifact
@@ -3093,7 +3118,7 @@ fn bounded_generic_reference_fields_forward_with_exact_descriptors_and_use_flags
     let bytes = phases.artifact.encode();
     assert_eq!(Artifact::decode(&bytes).unwrap().encode(), bytes);
     assert_eq!(
-        compile_source_to_bytecode("bounded-reference-field-reordered.gr", reordered)
+        compile_source_to_bytecode("bounded-reference-field-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -3121,8 +3146,8 @@ fn generic_applications_nested_in_tuples_close_construct_project_and_execute() {
         }
         main() -> { answer(); () }
     "#;
-    let phases = compile_source_to_phases("nested-application-tuple.gr", source).unwrap();
-    let repeated = compile_source_to_phases("nested-application-tuple.gr", source).unwrap();
+    let phases = compile_source_to_phases("nested-application-tuple.glorious", source).unwrap();
+    let repeated = compile_source_to_phases("nested-application-tuple.glorious", source).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
 
@@ -3190,7 +3215,7 @@ fn generic_applications_nested_in_tuples_close_construct_project_and_execute() {
         struct Box<T> { value: T }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("nested-application-tuple-reordered.gr", reordered)
+        compile_source_to_bytecode("nested-application-tuple-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -3213,8 +3238,9 @@ fn generic_applications_under_references_close_exact_and_recursive_descriptors()
         forward_node(value: Node<i64>) -> Node<i64> { value }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("nested-application-reference.gr", source).unwrap();
-    let repeated = compile_source_to_phases("nested-application-reference.gr", source).unwrap();
+    let phases = compile_source_to_phases("nested-application-reference.glorious", source).unwrap();
+    let repeated =
+        compile_source_to_phases("nested-application-reference.glorious", source).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
 
@@ -3281,7 +3307,7 @@ fn generic_applications_under_references_close_exact_and_recursive_descriptors()
         struct Box<T> { value: T }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("nested-application-reference-reordered.gr", reordered)
+        compile_source_to_bytecode("nested-application-reference-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -3295,7 +3321,7 @@ fn borrowed_generic_parameter_permutation_closes_a_finite_descriptor_orbit() {
         forward(value: Swap<i64, Text>) -> Swap<i64, Text> { value }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("borrowed-parameter-swap.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("borrowed-parameter-swap.glorious", source).unwrap();
     let swaps = artifact
         .types
         .iter()
@@ -3329,7 +3355,7 @@ fn borrowed_generic_parameter_permutation_closes_a_finite_descriptor_orbit() {
         struct Swap<A, B> { next: &Swap<B, A> }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("borrowed-parameter-swap-reordered.gr", reordered)
+        compile_source_to_bytecode("borrowed-parameter-swap-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -3351,8 +3377,9 @@ fn structural_generic_arguments_construct_forward_and_preserve_principal_use() {
         answer() -> i64 { make().value.0 }
         main() -> { answer(); () }
     "#;
-    let phases = compile_source_to_phases("structural-generic-arguments.gr", source).unwrap();
-    let repeated = compile_source_to_phases("structural-generic-arguments.gr", source).unwrap();
+    let phases = compile_source_to_phases("structural-generic-arguments.glorious", source).unwrap();
+    let repeated =
+        compile_source_to_phases("structural-generic-arguments.glorious", source).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
 
@@ -3474,7 +3501,7 @@ fn structural_generic_arguments_construct_forward_and_preserve_principal_use() {
         struct Box<T> { value: T }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("structural-generic-arguments-reordered.gr", reordered)
+        compile_source_to_bytecode("structural-generic-arguments-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -3491,7 +3518,8 @@ fn structural_generic_enum_arguments_construct_and_forward() {
         forward_never(value: Maybe<!>) -> Maybe<!> { value }
         main() -> { make(); () }
     "#;
-    let phases = compile_source_to_phases("structural-generic-enum-arguments.gr", source).unwrap();
+    let phases =
+        compile_source_to_phases("structural-generic-enum-arguments.glorious", source).unwrap();
     let bytes = phases.artifact.encode();
     assert_eq!(Artifact::decode(&bytes).unwrap().encode(), bytes);
     let verified = verify(phases.artifact.clone()).unwrap();
@@ -3526,9 +3554,12 @@ fn structural_generic_enum_arguments_construct_and_forward() {
         enum Maybe<T> { None, Some(T) }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("structural-generic-enum-arguments-reordered.gr", reordered)
-            .unwrap()
-            .encode(),
+        compile_source_to_bytecode(
+            "structural-generic-enum-arguments-reordered.glorious",
+            reordered
+        )
+        .unwrap()
+        .encode(),
         bytes
     );
 }
@@ -3541,7 +3572,8 @@ fn monomorphic_enum_payload_roots_a_structural_generic_nominal_instance() {
         forward(value: Envelope) -> Envelope { value }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("enum-payload-generic-root.gr", source).unwrap();
+    let artifact =
+        compile_source_to_bytecode("enum-payload-generic-root.glorious", source).unwrap();
     let boxed = artifact
         .types
         .iter()
@@ -3585,7 +3617,7 @@ fn monomorphic_enum_payload_roots_a_structural_generic_nominal_instance() {
         struct Box<T> { value: T }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("enum-payload-generic-root-reordered.gr", reordered)
+        compile_source_to_bytecode("enum-payload-generic-root-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -3609,7 +3641,7 @@ fn owned_recursive_and_expanding_borrowed_generic_families_are_rejected() {
         ),
     ];
     for (name, source) in cases {
-        let errors = compile_source_to_bytecode(&format!("{name}.gr"), source).unwrap_err();
+        let errors = compile_source_to_bytecode(&format!("{name}.glorious"), source).unwrap_err();
         assert!(
             errors
                 .iter()
@@ -3639,7 +3671,7 @@ fn bounded_generic_enum_payloads_ground_tuple_and_reference_wrappers() {
         enum SharedPayload<T> { Value(&T) }
         enum TuplePayload<T> { Value((T, (T,))) }
     "#;
-    let phases = compile_source_to_phases("bounded-enum-payload.gr", source).unwrap();
+    let phases = compile_source_to_phases("bounded-enum-payload.glorious", source).unwrap();
     let descriptor = |name: &str| {
         phases
             .artifact
@@ -3693,7 +3725,7 @@ fn bounded_generic_enum_payloads_ground_tuple_and_reference_wrappers() {
     assert!(!unique.claimed_duplicable() && unique.claimed_zero_use_allowed());
     let bytes = phases.artifact.encode();
     assert_eq!(
-        compile_source_to_bytecode("bounded-enum-payload-reordered.gr", reordered)
+        compile_source_to_bytecode("bounded-enum-payload-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -3733,7 +3765,7 @@ fn callable_values_in_generic_aggregates_remain_structured_until_grounded() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("callable-generic-argument.gr", source).unwrap();
+    let phases = compile_source_to_phases("callable-generic-argument.glorious", source).unwrap();
     let exact_boxes = phases
         .artifact
         .types
@@ -3776,7 +3808,7 @@ fn generic_box_of_relevant_copy_closure_preserves_repeated_use_capability() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("relevant-copy-closure-box.gr", source).unwrap();
+    let phases = compile_source_to_phases("relevant-copy-closure-box.glorious", source).unwrap();
     let descriptor = phases
         .artifact
         .types
@@ -3816,7 +3848,7 @@ fn shared_closure_can_copy_a_whole_relevant_capture_into_a_consumer() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("whole-relevant-copy-closure.gr", source).unwrap();
+    let phases = compile_source_to_phases("whole-relevant-copy-closure.glorious", source).unwrap();
     let run = phases
         .artifact
         .functions
@@ -3846,7 +3878,7 @@ fn generic_box_of_owned_closure_preserves_exactly_one_use() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("owned-closure-box.gr", source).unwrap();
+    let phases = compile_source_to_phases("owned-closure-box.glorious", source).unwrap();
     let descriptor = phases
         .artifact
         .types
@@ -3883,7 +3915,7 @@ fn generic_box_of_affine_owned_closure_may_be_abandoned() {
         }
         main() -> { run() }
     "#;
-    let phases = compile_source_to_phases("zero-use-closure-box.gr", source).unwrap();
+    let phases = compile_source_to_phases("zero-use-closure-box.glorious", source).unwrap();
     let descriptor = phases
         .artifact
         .types
@@ -3925,7 +3957,7 @@ fn infinite_or_out_of_boundary_nested_nominal_layouts_are_rejected() {
         ),
     ];
     for (name, source) in cases {
-        let errors = compile_source_to_bytecode(&format!("{name}.gr"), source).unwrap_err();
+        let errors = compile_source_to_bytecode(&format!("{name}.glorious"), source).unwrap_err();
         assert!(!errors.is_empty(), "{name} unexpectedly compiled");
         assert!(
             errors.iter().any(|error| error.span.is_some()),
@@ -3958,7 +3990,7 @@ fn grounded_generic_aliases_are_transparent_through_calls_and_nominal_instances(
         answer() -> i64 { scalar(relay(make_box().value)) }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("generic-alias.gr", source).unwrap();
+    let phases = compile_source_to_phases("generic-alias.glorious", source).unwrap();
     let verified = verify(phases.artifact.clone()).unwrap();
     let bytes = phases.artifact.encode();
     assert_eq!(Artifact::decode(&bytes).unwrap().encode(), bytes);
@@ -4018,10 +4050,10 @@ fn grounded_generic_alias_normalization_is_canonical_and_request_free() {
     let baseline = "main() -> { () }";
     let dead = "type Identity<T> = T; main() -> { () }";
     assert_eq!(
-        compile_source_to_bytecode("alias-baseline.gr", baseline)
+        compile_source_to_bytecode("alias-baseline.glorious", baseline)
             .unwrap()
             .encode(),
-        compile_source_to_bytecode("alias-dead.gr", dead)
+        compile_source_to_bytecode("alias-dead.glorious", dead)
             .unwrap()
             .encode()
     );
@@ -4038,10 +4070,10 @@ fn grounded_generic_alias_normalization_is_canonical_and_request_free() {
         struct Box<T> { value: T }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("alias-order.gr", first)
+        compile_source_to_bytecode("alias-order.glorious", first)
             .unwrap()
             .encode(),
-        compile_source_to_bytecode("alias-order-reversed.gr", reordered)
+        compile_source_to_bytecode("alias-order-reversed.glorious", reordered)
             .unwrap()
             .encode()
     );
@@ -4059,7 +4091,7 @@ fn generic_aliases_are_transparent_in_use_and_drop_heads() {
         make() -> AliasWrapped<i64> { AliasBox { value: 42 } }
         main() -> { let value = make(); () }
     "#;
-    let artifact = compile_raw_source("alias-use-drop-head.gr", source)
+    let artifact = compile_raw_source("alias-use-drop-head.glorious", source)
         .unwrap_or_else(|diagnostics| panic!("{diagnostics:#?}"));
     let boxed = artifact
         .types
@@ -4081,7 +4113,7 @@ fn generic_aliases_are_transparent_in_use_and_drop_heads() {
         impl<T> Drop for AliasWrapped<T> { drop(&mut self) -> { () } }
         main() -> { () }
     "#;
-    let diagnostics = compile_raw_source("alias-duplicate-drop-head.gr", duplicate)
+    let diagnostics = compile_raw_source("alias-duplicate-drop-head.glorious", duplicate)
         .expect_err("an alias installed a second Drop hook on one nominal head");
     assert!(
         diagnostics.iter().any(|diagnostic| {
@@ -4119,7 +4151,7 @@ fn unsupported_generic_alias_forms_are_rejected_with_source_spans() {
         ),
     ];
     for (name, source) in cases {
-        let errors = compile_source_to_bytecode(&format!("{name}.gr"), source).unwrap_err();
+        let errors = compile_source_to_bytecode(&format!("{name}.glorious"), source).unwrap_err();
         assert!(!errors.is_empty(), "{name} unexpectedly compiled");
         assert!(
             errors.iter().any(|error| error.span.is_some()),
@@ -4131,7 +4163,7 @@ fn unsupported_generic_alias_forms_are_rejected_with_source_spans() {
         );
     }
     compile_source_to_bytecode(
-        "alias-in-alias.gr",
+        "alias-in-alias.glorious",
         "type LocalIdentity<T> = T; type Concrete = LocalIdentity<i64>; read(value: Concrete) -> i64 { value } main() -> { () }",
     )
     .unwrap();
@@ -4148,7 +4180,7 @@ fn grounded_generic_struct_instances_construct_project_and_specialize() {
         specialized() -> i64 { generic_read(make()) }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("generic-struct.gr", source).unwrap();
+    let phases = compile_source_to_phases("generic-struct.glorious", source).unwrap();
     let verified = verify(phases.artifact.clone()).unwrap();
     let bytes = phases.artifact.encode();
     assert_eq!(Artifact::decode(&bytes).unwrap().encode(), bytes);
@@ -4185,7 +4217,7 @@ fn grounded_generic_enum_instances_construct_call_and_specialize() {
         specialized() -> Maybe<i64> { relay(make()) }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("generic-enum.gr", source).unwrap();
+    let phases = compile_source_to_phases("generic-enum.glorious", source).unwrap();
     let verified = verify(phases.artifact.clone()).unwrap();
     let bytes = phases.artifact.encode();
     assert_eq!(Artifact::decode(&bytes).unwrap().encode(), bytes);
@@ -4232,10 +4264,10 @@ fn grounded_generic_enum_instances_are_deterministic_and_preserve_monomorphic_id
         main() -> { () }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("enum-baseline.gr", baseline)
+        compile_source_to_bytecode("enum-baseline.glorious", baseline)
             .unwrap()
             .encode(),
-        compile_source_to_bytecode("enum-dead.gr", dead)
+        compile_source_to_bytecode("enum-dead.glorious", dead)
             .unwrap()
             .encode()
     );
@@ -4255,8 +4287,9 @@ fn grounded_generic_enum_instances_are_deterministic_and_preserve_monomorphic_id
         enum Maybe<T> { None, Some(T) }
         struct Packet { value: i64 }
     "#;
-    let first = compile_source_to_bytecode("enum-instances.gr", first).unwrap();
-    let reordered = compile_source_to_bytecode("enum-instances-reordered.gr", reordered).unwrap();
+    let first = compile_source_to_bytecode("enum-instances.glorious", first).unwrap();
+    let reordered =
+        compile_source_to_bytecode("enum-instances-reordered.glorious", reordered).unwrap();
     assert_eq!(first.encode(), reordered.encode());
     let packet = nominal_type_id(&first, "Packet");
     let maybe_instances = first
@@ -4318,8 +4351,10 @@ fn expected_context_infers_generic_nominal_construction_across_calls_and_nesting
             nested_box(); nested_none(); ()
         }
     "#;
-    let phases = compile_source_to_phases("expected-generic-construction.gr", source).unwrap();
-    let repeated = compile_source_to_phases("expected-generic-construction.gr", source).unwrap();
+    let phases =
+        compile_source_to_phases("expected-generic-construction.glorious", source).unwrap();
+    let repeated =
+        compile_source_to_phases("expected-generic-construction.glorious", source).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
 
@@ -4422,9 +4457,12 @@ fn expected_context_infers_generic_nominal_construction_across_calls_and_nesting
         struct Box<T> { value: T }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("expected-generic-construction-reordered.gr", reordered)
-            .unwrap()
-            .encode(),
+        compile_source_to_bytecode(
+            "expected-generic-construction-reordered.glorious",
+            reordered
+        )
+        .unwrap()
+        .encode(),
         bytes
     );
 }
@@ -4450,7 +4488,7 @@ fn later_call_arguments_infer_earlier_context_dependent_generic_constructors() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("argument-order-inference.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("argument-order-inference.glorious", source).unwrap();
     let verified = verify(artifact.clone()).unwrap();
     for name in ["first", "second"] {
         let function = artifact
@@ -4476,7 +4514,7 @@ fn later_call_arguments_infer_earlier_context_dependent_generic_constructors() {
         main() -> { () }
     "#;
     let diagnostics =
-        compile_source_to_bytecode("argument-order-ambiguous.gr", ambiguous).unwrap_err();
+        compile_source_to_bytecode("argument-order-ambiguous.glorious", ambiguous).unwrap_err();
     assert!(
         diagnostics.iter().any(|diagnostic| {
             diagnostic.code.is_some()
@@ -4506,7 +4544,7 @@ fn ordinary_generic_call_islands_propagate_symbolic_constraints_deterministicall
         second() -> i64 { relay_reordered("marker", 42) }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("symbolic-call-island.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("symbolic-call-island.glorious", source).unwrap();
     let verified = verify(artifact.clone()).unwrap();
     for name in ["first", "second"] {
         let function = artifact
@@ -4529,7 +4567,8 @@ fn ordinary_generic_call_islands_propagate_symbolic_constraints_deterministicall
         main() -> { bad(42, "marker"); () }
     "#;
     let diagnostics =
-        compile_source_to_bytecode("symbolic-call-island-conflict.gr", conflicting).unwrap_err();
+        compile_source_to_bytecode("symbolic-call-island-conflict.glorious", conflicting)
+            .unwrap_err();
     assert!(
         diagnostics.iter().any(|diagnostic| {
             diagnostic.code.is_some()
@@ -4570,7 +4609,7 @@ fn unsupported_generic_enum_shapes_are_rejected_with_source_spans() {
         ),
     ];
     for (name, source) in cases {
-        let errors = compile_source_to_bytecode(&format!("{name}.gr"), source).unwrap_err();
+        let errors = compile_source_to_bytecode(&format!("{name}.glorious"), source).unwrap_err();
         assert!(!errors.is_empty(), "{name} unexpectedly compiled");
         assert!(
             errors.iter().any(|error| error.span.is_some()),
@@ -4597,10 +4636,10 @@ fn grounded_generic_struct_instances_are_deterministic_and_do_not_renumber_monom
         main() -> { () }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("baseline.gr", baseline)
+        compile_source_to_bytecode("baseline.glorious", baseline)
             .unwrap()
             .encode(),
-        compile_source_to_bytecode("dead-template.gr", with_dead_template)
+        compile_source_to_bytecode("dead-template.glorious", with_dead_template)
             .unwrap()
             .encode()
     );
@@ -4621,8 +4660,8 @@ fn grounded_generic_struct_instances_are_deterministic_and_do_not_renumber_monom
         struct Box<T> { value: T }
         struct Packet { value: i64 }
     "#;
-    let first = compile_source_to_bytecode("instances.gr", first).unwrap();
-    let reordered = compile_source_to_bytecode("instances-reordered.gr", reordered).unwrap();
+    let first = compile_source_to_bytecode("instances.glorious", first).unwrap();
+    let reordered = compile_source_to_bytecode("instances-reordered.glorious", reordered).unwrap();
     assert_eq!(first.encode(), reordered.encode());
     let packet = nominal_type_id(&first, "Packet");
     let box_instances = first
@@ -4665,7 +4704,7 @@ fn unsupported_generic_struct_shapes_are_rejected_with_source_spans() {
         ),
     ];
     for (name, source) in cases {
-        let errors = compile_source_to_bytecode(&format!("{name}.gr"), source).unwrap_err();
+        let errors = compile_source_to_bytecode(&format!("{name}.glorious"), source).unwrap_err();
         assert!(!errors.is_empty(), "{name} unexpectedly compiled");
         assert!(
             errors.iter().any(|error| error.span.is_some()),
@@ -4685,7 +4724,7 @@ fn grounded_generic_identity_emits_one_direct_specialization() {
         answer() -> i64 { let first = id(1); id(42) }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("generic-id.gr", source).unwrap();
+    let phases = compile_source_to_phases("generic-id.glorious", source).unwrap();
     let verified = verify(phases.artifact.clone()).unwrap();
     let answer = phases
         .artifact
@@ -4728,8 +4767,8 @@ fn reference_bearing_generic_specializations_forward_and_end_lexical_loans() {
         }
         main() -> { lexical(); () }
     "#;
-    let phases = compile_source_to_phases("generic-reference-forward.gr", source).unwrap();
-    let repeated = compile_source_to_phases("generic-reference-forward.gr", source).unwrap();
+    let phases = compile_source_to_phases("generic-reference-forward.glorious", source).unwrap();
+    let repeated = compile_source_to_phases("generic-reference-forward.glorious", source).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
 
@@ -4798,7 +4837,7 @@ fn reference_bearing_generic_specializations_forward_and_end_lexical_loans() {
         forward_shared<T>(value: &T) -> &T { value }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("generic-reference-forward-reordered.gr", reordered)
+        compile_source_to_bytecode("generic-reference-forward-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -4812,7 +4851,7 @@ fn named_generic_specialization_preserves_explicit_reference_regions() {
         external(left: &i64, right: &i64) -> &i64 { first(left, right) }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("generic-explicit-regions.gr", source).unwrap();
+    let phases = compile_source_to_phases("generic-explicit-regions.glorious", source).unwrap();
     let selected = phases
         .artifact
         .functions
@@ -4837,7 +4876,8 @@ fn shared_projected_reborrows_allow_siblings_but_a_unique_parent_stays_suspended
         }
         main() -> { let pair = Pair { left: 40, right: 2 }; read(&pair) }
     "#;
-    let artifact = compile_source_to_bytecode("shared-projected-siblings.gr", positive).unwrap();
+    let artifact =
+        compile_source_to_bytecode("shared-projected-siblings.glorious", positive).unwrap();
     verify(artifact).unwrap();
 
     let conflict = r#"
@@ -4851,8 +4891,8 @@ fn shared_projected_reborrows_allow_siblings_but_a_unique_parent_stays_suspended
         }
         main() -> { () }
     "#;
-    let errors =
-        compile_source_to_bytecode("unique-parent-projected-conflict.gr", conflict).unwrap_err();
+    let errors = compile_source_to_bytecode("unique-parent-projected-conflict.glorious", conflict)
+        .unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error.message.contains("suspended") || error.message.contains("live loan")
@@ -4875,7 +4915,7 @@ fn shared_call_result_downgrades_a_transferred_unique_loan() {
         }
         main() -> { exercise() }
     "#;
-    let artifact = compile_source_to_bytecode("shared-call-downgrade.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("shared-call-downgrade.glorious", source).unwrap();
     verify(artifact).unwrap();
 }
 
@@ -4886,7 +4926,8 @@ fn generic_reference_result_tracks_the_exact_selected_argument() {
         bad(left: &i64, right: &i64) -> &i64 { choose(left, right) }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("generic-reference-selection.gr", source).unwrap();
+    let artifact =
+        compile_source_to_bytecode("generic-reference-selection.glorious", source).unwrap();
     verify(artifact).unwrap();
 }
 
@@ -4898,7 +4939,8 @@ fn recursive_generic_reference_relays_infer_one_stable_parameter_origin() {
         external(value: &i64) -> &i64 { relay_left(value) }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("recursive-reference-relay.gr", source).unwrap();
+    let artifact =
+        compile_source_to_bytecode("recursive-reference-relay.glorious", source).unwrap();
     let specializations = artifact
         .functions
         .iter()
@@ -4938,8 +4980,8 @@ fn captureless_reference_callbacks_forward_shared_and_unique_loans() {
         }
         main() -> { lexical(); () }
     "#;
-    let phases = compile_source_to_phases("reference-callback-forward.gr", source).unwrap();
-    let repeated = compile_source_to_phases("reference-callback-forward.gr", source).unwrap();
+    let phases = compile_source_to_phases("reference-callback-forward.glorious", source).unwrap();
+    let repeated = compile_source_to_phases("reference-callback-forward.glorious", source).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
 
@@ -5009,7 +5051,7 @@ fn captureless_reference_callbacks_forward_shared_and_unique_loans() {
             where F: Fn<(T), Output=R> { body(value) }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("reference-callback-forward-reordered.gr", reordered)
+        compile_source_to_bytecode("reference-callback-forward-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -5026,7 +5068,8 @@ fn captureless_reference_callback_direct_parameter_selection_is_structured() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("reference-callback-selection.gr", source).unwrap();
+    let artifact =
+        compile_source_to_bytecode("reference-callback-selection.glorious", source).unwrap();
     verify(artifact).unwrap();
 }
 
@@ -5041,7 +5084,7 @@ fn captureless_callback_tuple_reference_signatures_transport_aggregate_origins()
         main() -> { () }
     "#;
     let artifact =
-        compile_source_to_bytecode("tuple-reference-closure-signature.gr", source).unwrap();
+        compile_source_to_bytecode("tuple-reference-closure-signature.glorious", source).unwrap();
     verify(artifact).unwrap();
 }
 
@@ -5056,8 +5099,8 @@ fn captureless_reference_callback_requires_a_direct_compatible_origin() {
         }
         main() -> { () }
     "#;
-    let errors =
-        compile_source_to_bytecode("nominal-reference-closure-origin.gr", source).unwrap_err();
+    let errors = compile_source_to_bytecode("nominal-reference-closure-origin.glorious", source)
+        .unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error.code.is_some()
@@ -5075,7 +5118,7 @@ fn generic_callback_bodies_create_nonescaping_loans_and_read_copy_referents() {
         bad() -> i64 { borrow_inside(42) }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("generic-body-borrow.gr", borrows).unwrap();
+    let artifact = compile_source_to_bytecode("generic-body-borrow.glorious", borrows).unwrap();
     let bad = artifact
         .functions
         .iter()
@@ -5094,7 +5137,8 @@ fn generic_callback_bodies_create_nonescaping_loans_and_read_copy_referents() {
         main() -> { () }
     "#;
     let artifact =
-        compile_source_to_bytecode("reference-closure-body-dereference.gr", dereference).unwrap();
+        compile_source_to_bytecode("reference-closure-body-dereference.glorious", dereference)
+            .unwrap();
     let answer = artifact
         .functions
         .iter()
@@ -5127,7 +5171,7 @@ fn captureless_callbacks_are_erased_to_direct_wrapper_calls() {
             ()
         }
     "#;
-    let phases = compile_source_to_phases("callbacks.gr", source).unwrap();
+    let phases = compile_source_to_phases("callbacks.glorious", source).unwrap();
     let verified = verify(phases.artifact.clone()).unwrap();
     let bytes = phases.artifact.encode();
     assert_eq!(Artifact::decode(&bytes).unwrap().encode(), bytes);
@@ -5209,7 +5253,7 @@ fn captureless_callbacks_are_erased_to_direct_wrapper_calls() {
         }
     }
     assert_eq!(
-        grandiose::run_source("callbacks.gr", source, vec![], &mut NoHost).unwrap(),
+        grandiose::run_source("callbacks.glorious", source, vec![], &mut NoHost).unwrap(),
         grandiose::eval::Value::Unit
     );
     assert_eq!(
@@ -5236,8 +5280,8 @@ fn captureless_callbacks_are_erased_to_direct_wrapper_calls() {
         id<T>(value: T) -> T { value }
         call0<F, R>(body: F) -> R where F: Fn<(), Output=R> { body() }
     "#;
-    let same = compile_source_to_phases("callbacks.gr", source).unwrap();
-    let repeated = compile_source_to_phases("callbacks-reordered.gr", reordered).unwrap();
+    let same = compile_source_to_phases("callbacks.glorious", source).unwrap();
+    let repeated = compile_source_to_phases("callbacks-reordered.glorious", reordered).unwrap();
     assert_eq!(phases.core_fingerprint(), same.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), same.mir_fingerprint());
     assert_eq!(phases.artifact.encode(), repeated.artifact.encode());
@@ -5284,8 +5328,8 @@ fn copy_capture_callbacks_lift_lexical_scalars_once_and_execute() {
             binder_shadow(); local_shadow(); nested_generic(); ()
         }
     "#;
-    let phases = compile_source_to_phases("copy-capture-callbacks.gr", source).unwrap();
-    let repeated = compile_source_to_phases("copy-capture-callbacks.gr", source).unwrap();
+    let phases = compile_source_to_phases("copy-capture-callbacks.glorious", source).unwrap();
+    let repeated = compile_source_to_phases("copy-capture-callbacks.glorious", source).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
 
@@ -5389,7 +5433,7 @@ fn copy_capture_callbacks_lift_lexical_scalars_once_and_execute() {
         call0<F, R>(body: F) -> R where F: Fn<(), Output=R> { body() }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("copy-capture-callbacks-reordered.gr", reordered)
+        compile_source_to_bytecode("copy-capture-callbacks-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -5411,7 +5455,7 @@ fn copy_capture_callbacks_lift_structurally_copyable_aggregates() {
         }
         main() -> { tuple_capture(); struct_capture(); () }
     "#;
-    let phases = compile_source_to_phases("aggregate-copy-captures.gr", source).unwrap();
+    let phases = compile_source_to_phases("aggregate-copy-captures.glorious", source).unwrap();
     let closures = phases
         .artifact
         .functions
@@ -5461,8 +5505,8 @@ fn copy_capture_callbacks_reject_unsafe_capture_and_body_shapes() {
         &["reference", "noncopy"] as &[&str],
     )];
     for (name, source, categories) in cases {
-        let errors =
-            compile_source_to_bytecode(&format!("copy-capture-{name}.gr"), source).unwrap_err();
+        let errors = compile_source_to_bytecode(&format!("copy-capture-{name}.glorious"), source)
+            .unwrap_err();
         assert!(
             errors.iter().any(|error| {
                 error.code.is_some()
@@ -5488,7 +5532,7 @@ fn mutate_capture_uses_a_nonescaping_unique_environment_borrow() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("mutate-capture.gr", source).unwrap();
+    let phases = compile_source_to_phases("mutate-capture.glorious", source).unwrap();
     let verified = verify(phases.artifact.clone()).unwrap();
     let answer = phases
         .artifact
@@ -5513,7 +5557,7 @@ fn nonescaping_shared_reference_capture_is_forwarded_without_copying_the_referen
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("shared-reference-capture.gr", source).unwrap();
+    let phases = compile_source_to_phases("shared-reference-capture.glorious", source).unwrap();
     let verified = verify(phases.artifact.clone()).unwrap();
     let answer = phases
         .artifact
@@ -5539,7 +5583,7 @@ fn observe_capture_of_affine_owner_borrows_the_environment_instead_of_copying_it
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("affine-observe-capture.gr", source).unwrap();
+    let phases = compile_source_to_phases("affine-observe-capture.glorious", source).unwrap();
     let verified = verify(phases.artifact.clone()).unwrap();
     let answer = phases
         .artifact
@@ -5600,8 +5644,8 @@ fn callable_aliases_and_transitive_forwarding_remain_direct_and_execute() {
             nested_generic_forwarding(); ()
         }
     "#;
-    let phases = compile_source_to_phases("callable-alias-forward.gr", source).unwrap();
-    let repeated = compile_source_to_phases("callable-alias-forward.gr", source).unwrap();
+    let phases = compile_source_to_phases("callable-alias-forward.glorious", source).unwrap();
+    let repeated = compile_source_to_phases("callable-alias-forward.glorious", source).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
 
@@ -5731,7 +5775,7 @@ fn callable_aliases_and_transitive_forwarding_remain_direct_and_execute() {
         }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("callable-alias-forward-reordered.gr", reordered)
+        compile_source_to_bytecode("callable-alias-forward-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -5754,7 +5798,7 @@ fn forwarding_one_callable_to_distinct_binders_deduplicates_hidden_capture_abi()
         }
         main() -> { answer(); () }
     "#;
-    let phases = compile_source_to_phases("deduped-forwarded-capture.gr", source).unwrap();
+    let phases = compile_source_to_phases("deduped-forwarded-capture.glorious", source).unwrap();
     let inner = phases
         .artifact
         .functions
@@ -5811,7 +5855,8 @@ fn callable_forwarding_rejects_ambiguous_binders_and_closes_finite_cycles() {
         bad() -> i64 { choose({ => 1 }, { => 2 }) }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("ambiguous-callable-binder.gr", ambiguous).unwrap_err();
+    let errors =
+        compile_source_to_bytecode("ambiguous-callable-binder.glorious", ambiguous).unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error.code.is_some()
@@ -5832,7 +5877,7 @@ fn callable_forwarding_rejects_ambiguous_binders_and_closes_finite_cycles() {
         bad() -> i64 { forward_a({ => 42 }) }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("cyclic-callable-forward.gr", cycle).unwrap();
+    let artifact = compile_source_to_bytecode("cyclic-callable-forward.glorious", cycle).unwrap();
     for prefix in [
         "$specialization$forward_a#",
         "$specialization$forward_b#",
@@ -5850,7 +5895,7 @@ fn callable_forwarding_rejects_ambiguous_binders_and_closes_finite_cycles() {
     }
     let bytes = artifact.encode();
     assert_eq!(
-        compile_source_to_bytecode("cyclic-callable-forward.gr", cycle)
+        compile_source_to_bytecode("cyclic-callable-forward.glorious", cycle)
             .unwrap()
             .encode(),
         bytes
@@ -5871,7 +5916,7 @@ fn nested_specializations_and_owned_retained_callback_arguments_execute() {
         packet() -> Packet { apply(Packet { value: "owned" }, { value => value }) }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("nested-generics.gr", source).unwrap();
+    let phases = compile_source_to_phases("nested-generics.glorious", source).unwrap();
     let verified = verify(phases.artifact.clone()).unwrap();
     let run = |name: &str| {
         let id = phases
@@ -5917,7 +5962,7 @@ fn specialization_ids_do_not_collide_with_handler_synthetics() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("generic-handler-ids.gr", source).unwrap();
+    let phases = compile_source_to_phases("generic-handler-ids.glorious", source).unwrap();
     let verified = verify(phases.artifact.clone()).unwrap();
 
     for name in ["generic_answer", "handled_answer"] {
@@ -5974,7 +6019,7 @@ fn unsupported_generic_and_callable_shapes_never_produce_an_artifact() {
         "#,
     ];
     for (index, source) in cases.into_iter().enumerate() {
-        let errors = compile_source_to_phases(&format!("generic-reject-{index}.gr"), source)
+        let errors = compile_source_to_phases(&format!("generic-reject-{index}.glorious"), source)
             .expect_err("unsupported generic program unexpectedly emitted an artifact");
         assert!(!errors.is_empty());
         assert!(errors.iter().all(|error| error.span.is_some()));
@@ -5991,8 +6036,8 @@ fn compilation_is_byte_for_byte_deterministic_and_canonical() {
         add(left: i64, right: i64) -> i64 { left + right }
         main() -> { () }
     "#;
-    let first = compile_source_to_bytecode("stable.gr", source).unwrap();
-    let second = compile_source_to_bytecode("stable.gr", source).unwrap();
+    let first = compile_source_to_bytecode("stable.glorious", source).unwrap();
+    let second = compile_source_to_bytecode("stable.glorious", source).unwrap();
     let first_bytes = first.encode();
     assert_eq!(first_bytes, second.encode());
     assert_eq!(
@@ -6010,8 +6055,8 @@ fn shared_and_unique_reference_forwarding_emit_verified_ownership_modes() {
         unique_relay(value: &mut i64) -> &mut i64 { unique_id(value) }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("reference-forward.gr", source).unwrap();
-    let repeated = compile_source_to_phases("reference-forward.gr", source).unwrap();
+    let phases = compile_source_to_phases("reference-forward.glorious", source).unwrap();
+    let repeated = compile_source_to_phases("reference-forward.glorious", source).unwrap();
     verify(phases.artifact.clone()).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
@@ -6076,7 +6121,7 @@ fn reference_aliases_and_recursive_nominal_fields_are_structurally_interned() {
         forward(value: Outer) -> Outer { value }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("reference-layout.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("reference-layout.glorious", source).unwrap();
     verify(artifact.clone()).unwrap();
 
     let link = artifact
@@ -6136,8 +6181,8 @@ fn reference_descriptor_and_artifact_order_is_declaration_independent() {
         main() -> { () }
         forward(value: B) -> B { value }
     "#;
-    let left = compile_raw_source("left.gr", left).unwrap();
-    let right = compile_raw_source("right.gr", right).unwrap();
+    let left = compile_raw_source("left.glorious", left).unwrap();
+    let right = compile_raw_source("right.glorious", right).unwrap();
     assert_eq!(left.encode(), right.encode());
     assert_eq!(
         Artifact::decode(&left.encode()).unwrap().encode(),
@@ -6152,7 +6197,7 @@ fn whole_value_dereference_copies_a_duplicable_referent() {
         answer() -> i64 { let value = 42; read(&value) }
         main() -> { () }
     "#;
-    let artifact = compile_raw_source("deref-copy.gr", source).unwrap();
+    let artifact = compile_raw_source("deref-copy.glorious", source).unwrap();
     assert!(
         artifact
             .code
@@ -6175,7 +6220,7 @@ fn whole_value_dereference_copies_a_duplicable_referent() {
 #[test]
 fn whole_value_dereference_rejects_a_nonduplicable_referent() {
     let errors = compile_raw_source(
-        "deref-linear.gr",
+        "deref-linear.glorious",
         r#"
             struct Ticket { serial: i64 }
             impl Use<[1,1]> for Ticket {}
@@ -6227,7 +6272,7 @@ fn straight_line_local_borrows_calls_and_reborrows_emit_verified_mir() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("borrow-local.gr", source).unwrap();
+    let phases = compile_source_to_phases("borrow-local.glorious", source).unwrap();
     verify(phases.artifact.clone()).unwrap();
     let immediate = phases
         .artifact
@@ -6277,8 +6322,8 @@ fn point_set_nll_ends_named_loans_after_their_last_alias_use() {
         }
         main() -> { answer(); () }
     "#;
-    let phases = compile_source_to_phases("point-set-nll.gr", source).unwrap();
-    let repeated = compile_source_to_phases("point-set-nll.gr", source).unwrap();
+    let phases = compile_source_to_phases("point-set-nll.glorious", source).unwrap();
+    let repeated = compile_source_to_phases("point-set-nll.glorious", source).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
     assert_eq!(phases.artifact.encode(), repeated.artifact.encode());
@@ -6338,7 +6383,7 @@ fn point_set_nll_handles_reborrows_projected_places_and_drop_liveness() {
         }
         main() -> { projected(); drop_after_last_use(); () }
     "#;
-    let phases = compile_source_to_phases("point-set-nll-places.gr", source).unwrap();
+    let phases = compile_source_to_phases("point-set-nll-places.glorious", source).unwrap();
     let verified = verify(phases.artifact.clone()).unwrap();
     for name in ["projected", "drop_after_last_use"] {
         let function = phases
@@ -6373,7 +6418,7 @@ fn point_set_nll_keeps_future_aliases_live_and_still_rejects_escape() {
         }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("nll-future-alias.gr", future_use).unwrap_err();
+    let errors = compile_source_to_bytecode("nll-future-alias.glorious", future_use).unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error.code.is_some()
@@ -6391,7 +6436,7 @@ fn point_set_nll_keeps_future_aliases_live_and_still_rejects_escape() {
         }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("nll-local-escape.gr", escape).unwrap_err();
+    let errors = compile_source_to_bytecode("nll-local-escape.glorious", escape).unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error.code.is_some() && error.span.is_some() && error.message.contains("cannot escape")
@@ -6421,8 +6466,8 @@ fn point_set_nll_joins_handler_branches_before_a_later_unique_borrow() {
         }
         main() -> { answer(); () }
     "#;
-    let phases = compile_source_to_phases("point-set-handler-join.gr", source).unwrap();
-    let repeated = compile_source_to_phases("point-set-handler-join.gr", source).unwrap();
+    let phases = compile_source_to_phases("point-set-handler-join.glorious", source).unwrap();
+    let repeated = compile_source_to_phases("point-set-handler-join.glorious", source).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
     assert_eq!(phases.artifact.encode(), repeated.artifact.encode());
@@ -6460,7 +6505,8 @@ fn point_set_nll_handler_join_preserves_a_future_alias_conflict() {
         }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("point-set-handler-future.gr", source).unwrap_err();
+    let errors =
+        compile_source_to_bytecode("point-set-handler-future.glorious", source).unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error.code.is_some()
@@ -6509,8 +6555,8 @@ fn projected_tuple_borrows_are_field_disjoint_verified_and_deterministic() {
         }
         main() -> { answer(); () }
     "#;
-    let first = compile_source_to_phases("projected-borrow.gr", source).unwrap();
-    let second = compile_source_to_phases("projected-borrow.gr", source).unwrap();
+    let first = compile_source_to_phases("projected-borrow.glorious", source).unwrap();
+    let second = compile_source_to_phases("projected-borrow.glorious", source).unwrap();
     let verified = verify(first.artifact.clone()).unwrap();
     let answer = first
         .artifact
@@ -6519,7 +6565,7 @@ fn projected_tuple_borrows_are_field_disjoint_verified_and_deterministic() {
         .position(|function| function.name == "answer")
         .unwrap() as u32;
     assert_eq!(
-        grandiose::run_source("projected-borrow.gr", source, vec![], &mut NoHost).unwrap(),
+        grandiose::run_source("projected-borrow.glorious", source, vec![], &mut NoHost).unwrap(),
         grandiose::eval::Value::Unit
     );
     assert_eq!(
@@ -6559,7 +6605,8 @@ fn projected_tuple_borrow_conflicts_and_unsupported_places_are_diagnosed() {
         "bad() -> &i64 { let pair = (1, 2); &pair.0 } main() -> { () }",
     ];
     for source in cases {
-        let errors = compile_source_to_bytecode("bad-projected-borrow.gr", source).unwrap_err();
+        let errors =
+            compile_source_to_bytecode("bad-projected-borrow.glorious", source).unwrap_err();
         assert!(
             errors
                 .iter()
@@ -6614,8 +6661,8 @@ fn projected_struct_borrows_and_moves_reuse_numeric_field_places() {
         }
         main() -> { answer(); () }
     "#;
-    let first = compile_source_to_phases("projected-struct.gr", source).unwrap();
-    let second = compile_source_to_phases("projected-struct.gr", source).unwrap();
+    let first = compile_source_to_phases("projected-struct.glorious", source).unwrap();
+    let second = compile_source_to_phases("projected-struct.glorious", source).unwrap();
     let verified = verify(first.artifact.clone()).unwrap();
     let answer = first
         .artifact
@@ -6628,7 +6675,7 @@ fn projected_struct_borrows_and_moves_reuse_numeric_field_places() {
         Value::I64(42)
     );
     let interpreted =
-        grandiose::run_source("projected-struct.gr", source, vec![], &mut NoHost).unwrap();
+        grandiose::run_source("projected-struct.glorious", source, vec![], &mut NoHost).unwrap();
     let executed = Vm::new(verify(first.artifact.clone()).unwrap())
         .run(first.artifact.entry_function.unwrap(), vec![])
         .unwrap();
@@ -6688,7 +6735,8 @@ fn projected_struct_place_conflicts_generics_and_nested_paths_reject() {
         "struct Pair { left: i64, right: i64 } bad(value: Pair) -> (&i64,) { let field = &value.left; (field,) } main() -> { () }",
     ];
     for source in cases {
-        let errors = compile_source_to_bytecode("bad-projected-struct.gr", source).unwrap_err();
+        let errors =
+            compile_source_to_bytecode("bad-projected-struct.glorious", source).unwrap_err();
         assert!(
             errors
                 .iter()
@@ -6719,8 +6767,8 @@ fn nested_projected_places_lower_as_explicit_verified_steps() {
         }
         main() -> { answer(); () }
     "#;
-    let first = compile_source_to_phases("nested-place.gr", source).unwrap();
-    let second = compile_source_to_phases("nested-place.gr", source).unwrap();
+    let first = compile_source_to_phases("nested-place.glorious", source).unwrap();
+    let second = compile_source_to_phases("nested-place.glorious", source).unwrap();
     let verified = verify(first.artifact.clone()).unwrap();
     let answer = first
         .artifact
@@ -6778,7 +6826,7 @@ fn nested_disjoint_unique_borrows_share_one_atomic_prefix() {
         }
         main() -> { answer(); () }
     "#;
-    let phases = compile_source_to_phases("nested-split-borrow.gr", source).unwrap();
+    let phases = compile_source_to_phases("nested-split-borrow.glorious", source).unwrap();
     let verified = verify(phases.artifact.clone()).unwrap();
     let answer = phases
         .artifact
@@ -6815,7 +6863,7 @@ fn nested_projected_place_overlap_and_move_boundaries_are_structured() {
         "struct Box<T> { value: T } struct Outer { boxed: Box<i64> } bad(value: Outer) -> { let field = &value.boxed.value; () } main() -> { () }",
     ];
     for source in cases {
-        let Err(errors) = compile_source_to_bytecode("bad-nested-place.gr", source) else {
+        let Err(errors) = compile_source_to_bytecode("bad-nested-place.glorious", source) else {
             panic!("expected nested-place rejection for {source}");
         };
         assert!(
@@ -6863,7 +6911,7 @@ fn invalid_straight_line_loans_report_source_errors_before_artifact_verification
             "not a temporary expression",
         ),
     ] {
-        let errors = compile_source_to_bytecode("bad-loan.gr", source).unwrap_err();
+        let errors = compile_source_to_bytecode("bad-loan.glorious", source).unwrap_err();
         assert!(
             errors.iter().any(|error| {
                 error.code.as_deref() == Some("G1BC002") && error.message.contains(needle)
@@ -6893,7 +6941,7 @@ fn stored_reference_can_escape_an_owned_carrier() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_raw_source("owned-reference-carrier.gr", source).unwrap();
+    let artifact = compile_raw_source("owned-reference-carrier.glorious", source).unwrap();
     verify(artifact.clone()).unwrap();
 
     let unpack = artifact
@@ -6927,7 +6975,7 @@ fn stored_reference_in_a_local_owned_carrier_cannot_escape() {
         }
         main() -> { () }
     "#;
-    let errors = compile_raw_source("local-reference-carrier.gr", source)
+    let errors = compile_raw_source("local-reference-carrier.glorious", source)
         .expect_err("a locally rooted stored reference must not escape");
     assert!(
         errors.iter().any(|error| {
@@ -6940,11 +6988,12 @@ fn stored_reference_in_a_local_owned_carrier_cannot_escape() {
 #[test]
 fn constants_are_deduplicated_and_sorted_by_frozen_wire_key() {
     let source = r#"
+        infixl 30 +;
         zed() -> i64 { 2 }
         alpha() -> i64 { 1 + 2 + 1 }
         main() -> { () }
     "#;
-    let artifact = compile_raw_source("constants.gr", source).unwrap();
+    let artifact = compile_raw_source("constants.glorious", source).unwrap();
     assert_eq!(
         artifact.constants,
         vec![
@@ -6965,7 +7014,7 @@ fn emitted_direct_calls_locals_and_checked_arithmetic_execute_in_the_vm() {
         add(left: i64, right: i64) -> i64 { left + right }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("execute.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("execute.glorious", source).unwrap();
     let compute = artifact
         .functions
         .iter()
@@ -6980,7 +7029,7 @@ fn emitted_direct_calls_locals_and_checked_arithmetic_execute_in_the_vm() {
 
 #[test]
 fn unit_return_uses_the_none32_operand_form() {
-    let artifact = compile_source_to_bytecode("unit.gr", "main() -> { () }").unwrap();
+    let artifact = compile_source_to_bytecode("unit.glorious", "main() -> { () }").unwrap();
     let main = artifact.entry_function.unwrap();
     let function = &artifact.functions[main as usize];
     let code = &artifact.code
@@ -6998,7 +7047,7 @@ fn unit_return_uses_the_none32_operand_form() {
 #[test]
 fn direct_calls_resolve_forward_declarations() {
     let source = "main() -> { finish() } finish() -> { () }";
-    let artifact = compile_source_to_bytecode("forward.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("forward.glorious", source).unwrap();
     let vm = Vm::new(verify(artifact.clone()).unwrap());
     assert_eq!(
         vm.run(artifact.entry_function.unwrap(), vec![]).unwrap(),
@@ -7016,7 +7065,7 @@ fn shadowed_locals_and_parameters_are_all_destroyed_before_return() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("shadow.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("shadow.glorious", source).unwrap();
     let shadow = artifact
         .functions
         .iter()
@@ -7032,9 +7081,9 @@ fn shadowed_locals_and_parameters_are_all_destroyed_before_return() {
 #[test]
 fn unsupported_features_have_stable_structured_diagnostics() {
     let errors =
-        compile_source_to_bytecode("unsupported.gr", r#"main() -> { [1, 2] }"#).unwrap_err();
+        compile_source_to_bytecode("unsupported.glorious", r#"main() -> { [1, 2] }"#).unwrap_err();
     assert_eq!(errors.len(), 1);
-    assert_eq!(errors[0].source_name, "unsupported.gr");
+    assert_eq!(errors[0].source_name, "unsupported.glorious");
     assert_eq!(errors[0].code.as_deref(), Some("G1BC001"));
     assert!(errors[0].message.contains("list"));
 }
@@ -7042,8 +7091,8 @@ fn unsupported_features_have_stable_structured_diagnostics() {
 #[test]
 fn bundle_compilation_preserves_global_diagnostic_spans() {
     let bundle = SourceBundle::new(
-        Segment::new("std.gr", ""),
-        Segment::new("main.gr", r#"main() -> { "no" }"#),
+        Segment::new("std.glorious", ""),
+        Segment::new("main.glorious", r#"main() -> { "no" }"#),
         [],
     );
     let errors = compile_bundle_to_bytecode(&bundle).unwrap_err();
@@ -7063,7 +7112,7 @@ fn nested_nominal_structs_construct_project_and_cross_direct_calls() {
         struct Inner { value: i64 }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("structs.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("structs.glorious", source).unwrap();
     verify(artifact.clone()).unwrap();
 
     let inner = nominal_type_id(&artifact, "Inner");
@@ -7124,8 +7173,8 @@ fn struct_artifacts_are_canonical_across_declaration_order() {
         struct Zed { value: Alpha }
         main() -> { let value = Zed { value: Alpha { number: 1 } }; () }
     "#;
-    let first = compile_source_to_bytecode("first.gr", first).unwrap();
-    let second = compile_source_to_bytecode("second.gr", second).unwrap();
+    let first = compile_source_to_bytecode("first.glorious", first).unwrap();
+    let second = compile_source_to_bytecode("second.glorious", second).unwrap();
     assert_eq!(first.encode(), second.encode());
     assert_eq!(
         Artifact::decode(&first.encode()).unwrap().encode(),
@@ -7153,7 +7202,7 @@ fn bad_struct_fields_and_recursive_layouts_are_diagnosed() {
             "recursive struct layout",
         ),
     ] {
-        let errors = compile_source_to_bytecode("bad.gr", source).unwrap_err();
+        let errors = compile_source_to_bytecode("bad.glorious", source).unwrap_err();
         assert!(
             errors.iter().any(|error| error.message.contains(needle)),
             "{errors:#?}"
@@ -7165,7 +7214,7 @@ fn bad_struct_fields_and_recursive_layouts_are_diagnosed() {
 #[test]
 fn unresolved_complex_struct_field_types_are_explicitly_unsupported() {
     let source = "struct Box { value: List<i64> } main() -> { () }";
-    let errors = compile_source_to_bytecode("complex.gr", source).unwrap_err();
+    let errors = compile_source_to_bytecode("complex.glorious", source).unwrap_err();
     assert!(
         errors
             .iter()
@@ -7188,7 +7237,7 @@ fn nominal_enums_construct_payloadless_and_nested_payload_variants_in_the_vm() {
         enum Choice { None, Number(i64) }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("enums.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("enums.glorious", source).unwrap();
     let bytes = artifact.encode();
     assert_eq!(Artifact::decode(&bytes).unwrap().encode(), bytes);
     let choice = nominal_type_id(&artifact, "Choice");
@@ -7249,10 +7298,10 @@ fn enum_artifacts_are_canonical_across_nominal_declaration_order() {
         main() -> { let value = Boxed { value: Maybe::Full(3) }; () }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("first.gr", first)
+        compile_source_to_bytecode("first.glorious", first)
             .unwrap()
             .encode(),
-        compile_source_to_bytecode("second.gr", second)
+        compile_source_to_bytecode("second.glorious", second)
             .unwrap()
             .encode()
     );
@@ -7286,7 +7335,7 @@ fn invalid_enum_shapes_and_uses_have_structured_diagnostics() {
             "recursive owned nominal layout",
         ),
     ] {
-        let errors = compile_source_to_bytecode("bad-enum.gr", source).unwrap_err();
+        let errors = compile_source_to_bytecode("bad-enum.glorious", source).unwrap_err();
         assert!(
             errors.iter().any(|error| error.message.contains(needle)),
             "{errors:#?}"
@@ -7298,7 +7347,7 @@ fn invalid_enum_shapes_and_uses_have_structured_diagnostics() {
 #[test]
 fn unresolved_complex_enum_payloads_are_explicitly_unsupported() {
     let source = "enum E { A(List<i64>) } main() -> { () }";
-    let errors = compile_source_to_bytecode("complex-enum.gr", source).unwrap_err();
+    let errors = compile_source_to_bytecode("complex-enum.glorious", source).unwrap_err();
     assert!(
         errors
             .iter()
@@ -7319,7 +7368,7 @@ fn every_unsigned_width_emits_and_executes_boundary_constants() {
         signed_min() -> i8 { -128 }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("unsigned.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("unsigned.glorious", source).unwrap();
     let verified = verify(artifact.clone()).unwrap();
     for (name, expected) in [
         ("a", Value::U64(255)),
@@ -7348,7 +7397,7 @@ fn unsigned_checked_arithmetic_uses_the_frozen_integer_primitives() {
         calculate(value: u16) -> u16 { (value + 2) * 3 - 1 }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("unsigned-arithmetic.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("unsigned-arithmetic.glorious", source).unwrap();
     let calculate = artifact
         .functions
         .iter()
@@ -7371,7 +7420,7 @@ fn text_literals_cross_calls_and_nested_nominals_as_copy_values() {
         enum Message { Empty, Named(Label) }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("text.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("text.glorious", source).unwrap();
     let label = nominal_type_id(&artifact, "Label");
     let message = nominal_type_id(&artifact, "Message");
     assert!(matches!(
@@ -7411,7 +7460,7 @@ fn unsigned_and_text_constants_are_deduplicated_and_canonical() {
         repeat() -> Text { "zeta" }
         main() -> { () }
     "#;
-    let artifact = compile_raw_source("leaf-constants.gr", source).unwrap();
+    let artifact = compile_raw_source("leaf-constants.glorious", source).unwrap();
     assert_eq!(
         artifact.constants,
         vec![
@@ -7441,7 +7490,7 @@ fn invalid_unsigned_literals_and_unknown_leaves_surface_honest_diagnostics() {
             "explicit supported monomorphic type",
         ),
     ] {
-        let errors = compile_source_to_bytecode("invalid-leaf.gr", source).unwrap_err();
+        let errors = compile_source_to_bytecode("invalid-leaf.glorious", source).unwrap_err();
         assert!(
             errors.iter().any(|error| error.message.contains(needle)),
             "{errors:#?}"
@@ -7460,7 +7509,7 @@ fn ordinary_string_alias_resolves_to_text_through_calls_and_nominals() {
         enum Message { Empty, Named(Label) }
         main() -> { () }
     "#;
-    let artifact = compile_raw_source("aliases.gr", source).unwrap();
+    let artifact = compile_raw_source("aliases.glorious", source).unwrap();
     let nominal_names = artifact
         .types
         .iter()
@@ -7512,6 +7561,7 @@ fn ordinary_string_alias_resolves_to_text_through_calls_and_nominals() {
 #[test]
 fn aliases_resolve_forward_chains_and_nominal_targets_without_descriptors() {
     let source = r#"
+        infixl 30 +;
         type Count = Later;
         type Later = u16;
         type Wrapped = Boxed;
@@ -7520,7 +7570,7 @@ fn aliases_resolve_forward_chains_and_nominal_targets_without_descriptors() {
         struct Boxed { value: Count }
         main() -> { () }
     "#;
-    let artifact = compile_raw_source("alias-chain.gr", source).unwrap();
+    let artifact = compile_raw_source("alias-chain.glorious", source).unwrap();
     let nominal_names = artifact
         .types
         .iter()
@@ -7571,8 +7621,9 @@ fn qualified_constructor_aliases_are_identity_preserving_and_name_agnostic() {
         answer() -> Maybe<i64> { Maybe::Present(42) }
         main() -> { () }
     "#;
-    let artifact = compile_raw_source("option-constructor-alias.gr", option).unwrap();
-    let renamed_artifact = compile_raw_source("renamed-constructor-alias.gr", renamed).unwrap();
+    let artifact = compile_raw_source("option-constructor-alias.glorious", option).unwrap();
+    let renamed_artifact =
+        compile_raw_source("renamed-constructor-alias.glorious", renamed).unwrap();
     assert_eq!(artifact.encode(), renamed_artifact.encode());
     let answer = artifact
         .functions
@@ -7597,7 +7648,7 @@ fn qualified_callable_aliases_rewrite_to_generic_ordinary_function_identities() 
         answer() -> i64 { Box::again(42) }
         main() -> { () }
     "#;
-    let artifact = compile_raw_source("associated-callable-alias.gr", source).unwrap();
+    let artifact = compile_raw_source("associated-callable-alias.glorious", source).unwrap();
     let answer = artifact
         .functions
         .iter()
@@ -7622,17 +7673,17 @@ fn qualified_callable_aliases_rewrite_to_generic_ordinary_function_identities() 
 fn qualified_callable_aliases_reject_invalid_owners_targets_and_cycles() {
     let cases = [
         (
-            "invalid-associated-owner.gr",
+            "invalid-associated-owner.glorious",
             "missing_owner_target<T>(value:T)->T{value} let Missing::identity = missing_owner_target; main()->{()}",
             "`Missing` is not a declared type alias, nominal type, or predefined type",
         ),
         (
-            "invalid-associated-target.gr",
+            "invalid-associated-target.glorious",
             "struct Box<T>{value:T} let Box::identity = missing; main()->{()}",
             "associated callable alias target `missing` is not an ordinary function",
         ),
         (
-            "associated-callable-cycle.gr",
+            "associated-callable-cycle.glorious",
             "struct Box<T>{value:T} let Box::first = Box::second; let Box::second = Box::first; main()->{()}",
             "alias cycle contains `Box::",
         ),
@@ -7667,7 +7718,7 @@ fn qualified_constructor_alias_chains_rewrite_construction_and_handler_patterns(
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("constructor-alias-chain.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("constructor-alias-chain.glorious", source).unwrap();
     let selected = artifact
         .functions
         .iter()
@@ -7690,7 +7741,7 @@ fn qualified_constructor_alias_cycles_are_rejected_deterministically() {
         let Option::Second = Option::First;
         main() -> { () }
     "#;
-    let diagnostics = compile_raw_source("constructor-alias-cycle.gr", source).unwrap_err();
+    let diagnostics = compile_raw_source("constructor-alias-cycle.glorious", source).unwrap_err();
     assert!(
         diagnostics.iter().any(|diagnostic| diagnostic
             .message
@@ -7724,10 +7775,10 @@ fn constructor_alias_declaration_order_does_not_change_artifact_bytes() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_raw_source("first-constructor-order.gr", first)
+        compile_raw_source("first-constructor-order.glorious", first)
             .unwrap()
             .encode(),
-        compile_raw_source("second-constructor-order.gr", second)
+        compile_raw_source("second-constructor-order.glorious", second)
             .unwrap()
             .encode()
     );
@@ -7737,22 +7788,22 @@ fn constructor_alias_declaration_order_does_not_change_artifact_bytes() {
 fn qualified_constructor_aliases_reject_wrong_owner_target_arity_and_duplicates() {
     let cases = [
         (
-            "wrong-owner.gr",
+            "wrong-owner.glorious",
             "enum Result<T, E> { Ok(T), Err(E) } enum Other<T> { Item(T) } type Wrong<T> = Other<T>; let Wrong::Some = Result::Ok; main() -> { () }",
             "belongs to `Other`, but its target belongs to `Result`",
         ),
         (
-            "wrong-target.gr",
+            "wrong-target.glorious",
             "enum Result<T, E> { Ok(T), Err(E) } type Option<T> = Result<T, ()>; let Option::Some = Result::Missing; main() -> { () }",
             "has no constructor `Missing`",
         ),
         (
-            "wrong-arity.gr",
+            "wrong-arity.glorious",
             "enum Result<T, E> { Ok(T), Err(E) } type Option<T> = Result<T, ()>; let Option::Some = Result::Ok; answer() -> Option<i64> { Option::Some() } main() -> { () }",
             "expects 1 payload value(s), got 0",
         ),
         (
-            "duplicate-constructor-alias.gr",
+            "duplicate-constructor-alias.glorious",
             "enum Result<T, E> { Ok(T), Err(E) } type Option<T> = Result<T, ()>; let Option::Some = Result::Ok; let Option::Some = Result::Ok; main() -> { () }",
             "value declared more than once",
         ),
@@ -7783,10 +7834,10 @@ fn alias_declaration_order_does_not_change_canonical_artifact_bytes() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("first.gr", first)
+        compile_source_to_bytecode("first.glorious", first)
             .unwrap()
             .encode(),
-        compile_source_to_bytecode("second.gr", second)
+        compile_source_to_bytecode("second.glorious", second)
             .unwrap()
             .encode()
     );
@@ -7816,7 +7867,7 @@ fn invalid_aliases_and_bare_string_have_stable_diagnostics() {
             "G1BC002",
         ),
     ] {
-        let errors = compile_source_to_bytecode("bad-alias.gr", source).unwrap_err();
+        let errors = compile_source_to_bytecode("bad-alias.glorious", source).unwrap_err();
         assert!(
             errors
                 .iter()
@@ -7829,7 +7880,7 @@ fn invalid_aliases_and_bare_string_have_stable_diagnostics() {
 #[test]
 fn bytes_is_a_signature_and_alias_type_without_inventing_a_literal() {
     compile_source_to_bytecode(
-        "bytes-types.gr",
+        "bytes-types.glorious",
         "type Blob = Bytes; echo(value: Blob) -> Bytes { value } main() -> () { () }",
     )
     .unwrap();
@@ -7842,7 +7893,7 @@ fn preserved_invalid_generic_goals_reject_before_type_resolution() {
         "where-clause goal",
         "i64: Use<[0, 0]>",
     );
-    let errors = compile_source_to_bytecode("structured-reject.gr", source).unwrap_err();
+    let errors = compile_source_to_bytecode("structured-reject.glorious", source).unwrap_err();
     let error = errors
         .iter()
         .find(|error| error.message.contains(needle))
@@ -7864,8 +7915,8 @@ fn instantiated_effect_aliases_and_callable_rows_resolve_exactly() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("instantiated-effect-alias.gr", source).unwrap();
-    let repeated = compile_source_to_phases("instantiated-effect-alias.gr", source).unwrap();
+    let phases = compile_source_to_phases("instantiated-effect-alias.glorious", source).unwrap();
+    let repeated = compile_source_to_phases("instantiated-effect-alias.glorious", source).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
     assert_eq!(phases.artifact.encode(), repeated.artifact.encode());
@@ -7906,7 +7957,7 @@ fn immutable_globals_support_source_string_aliases_and_callable_uses() {
         read() -> String { greeting }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("global-string.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("global-string.glorious", source).unwrap();
     let read = artifact
         .functions
         .iter()
@@ -7933,7 +7984,7 @@ fn nominal_global_factories_return_fresh_independent_aggregates() {
         get() -> Point { origin }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("global-nominal.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("global-nominal.glorious", source).unwrap();
     let get = artifact
         .functions
         .iter()
@@ -7959,7 +8010,7 @@ fn globals_resolve_forward_and_chained_dependencies() {
         read() -> Choice { first }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("global-forward.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("global-forward.glorious", source).unwrap();
     let read = artifact
         .functions
         .iter()
@@ -7993,10 +8044,10 @@ fn global_declaration_order_does_not_change_canonical_bytes() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("first.gr", first)
+        compile_source_to_bytecode("first.glorious", first)
             .unwrap()
             .encode(),
-        compile_source_to_bytecode("second.gr", second)
+        compile_source_to_bytecode("second.glorious", second)
             .unwrap()
             .encode()
     );
@@ -8005,7 +8056,7 @@ fn global_declaration_order_does_not_change_canonical_bytes() {
 #[test]
 fn invalid_globals_report_duplicates_cycles_runtime_calls_and_polymorphism() {
     let duplicate = compile_source_to_bytecode(
-        "duplicate-global.gr",
+        "duplicate-global.glorious",
         "let value = 1; let value = 2; main() -> { () }",
     )
     .unwrap_err();
@@ -8029,7 +8080,7 @@ fn invalid_globals_report_duplicates_cycles_runtime_calls_and_polymorphism() {
             "closed monomorphic literal",
         ),
     ] {
-        let errors = compile_source_to_bytecode("bad-global.gr", source).unwrap_err();
+        let errors = compile_source_to_bytecode("bad-global.glorious", source).unwrap_err();
         assert!(
             errors.iter().any(|error| error.message.contains(needle)
                 && error.code.as_deref() == Some("G1BC001")
@@ -8047,8 +8098,8 @@ fn typed_core_and_mir_text_and_fingerprints_are_deterministic() {
         read(value: Pair) -> i64 { value.right }
         main() -> { () }
     "#;
-    let first = compile_source_to_phases("phases.gr", source).unwrap();
-    let second = compile_source_to_phases("phases.gr", source).unwrap();
+    let first = compile_source_to_phases("phases.glorious", source).unwrap();
+    let second = compile_source_to_phases("phases.glorious", source).unwrap();
     assert_eq!(first.core.canonical_text(), second.core.canonical_text());
     assert_eq!(first.mir.canonical_text(), second.mir.canonical_text());
     assert_eq!(first.core_fingerprint(), second.core_fingerprint());
@@ -8059,12 +8110,12 @@ fn typed_core_and_mir_text_and_fingerprints_are_deterministic() {
 #[test]
 fn provisional_typing_text_and_fingerprint_are_canonical_across_reordering() {
     let first = compile_source_to_phases(
-        "first.gr",
+        "first.glorious",
         "id(value: &i64) -> &i64 { value } main() -> { let n = 4; let r = &n; id(r); () }",
     )
     .unwrap();
     let reordered = compile_source_to_phases(
-        "second.gr",
+        "second.glorious",
         "main() -> { let n = 4; let r = &n; id(r); () } id(value: &i64) -> &i64 { value }",
     )
     .unwrap();
@@ -8081,7 +8132,7 @@ fn provisional_typing_text_and_fingerprint_are_canonical_across_reordering() {
 #[test]
 fn provisional_typing_preserves_alias_reference_nesting_and_shadow_keys() {
     let phases = compile_source_to_phases(
-        "provisional.gr",
+        "provisional.glorious",
         r#"
             type Shared = &i64;
             type Nested = &mut Shared;
@@ -8108,7 +8159,7 @@ fn core_carries_exact_types_and_resolved_nominal_member_ids() {
     use grandiose::compiler_core::ExprKind;
 
     let phases = compile_source_to_phases(
-        "core-evidence.gr",
+        "core-evidence.glorious",
         r#"
             enum Choice { Empty, Number(i64) }
             struct Boxed { choice: Choice }
@@ -8171,7 +8222,7 @@ fn core_carries_exact_types_and_resolved_nominal_member_ids() {
 #[test]
 fn mir_owns_reverse_cleanup_and_explicit_operand_modes() {
     let phases = compile_source_to_phases(
-        "mir-cleanup.gr",
+        "mir-cleanup.glorious",
         r#"
             shadow(value: i64) -> i64 {
                 let first = value + 1;
@@ -8246,8 +8297,8 @@ fn accepted_pure_program_has_matching_interpreter_and_vm_outcome() {
         main() -> { consume(twice(base) + 2) }
     "#;
     let interpreted =
-        grandiose::run_source("differential.gr", source, vec![], &mut NoHost).unwrap();
-    let artifact = compile_source_to_bytecode("differential.gr", source).unwrap();
+        grandiose::run_source("differential.glorious", source, vec![], &mut NoHost).unwrap();
+    let artifact = compile_source_to_bytecode("differential.glorious", source).unwrap();
     let executed = Vm::new(verify(artifact.clone()).unwrap())
         .run(artifact.entry_function.unwrap(), vec![])
         .unwrap();
@@ -8270,7 +8321,7 @@ fn marker_constraints_gate_generic_specialization_and_recursive_constructor_evid
             ()
         }
     "#;
-    let artifact = compile_source_to_bytecode("marker.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("marker.glorious", source).unwrap();
     let result = Vm::new(verify(artifact.clone()).unwrap())
         .run(artifact.entry_function.unwrap(), vec![])
         .unwrap();
@@ -8282,7 +8333,7 @@ fn marker_constraints_gate_generic_specialization_and_recursive_constructor_evid
         marker_identity<T>(value: T) -> T where T: Marker { value }
         main() -> { marker_identity("not marked"); () }
     "#;
-    let errors = compile_source_to_bytecode("marker-missing.gr", missing).unwrap_err();
+    let errors = compile_source_to_bytecode("marker-missing.glorious", missing).unwrap_err();
     assert!(errors.iter().any(|error| {
         error.span.is_some()
             && error.code.is_some()
@@ -8321,8 +8372,8 @@ fn parameterized_trait_relations_gate_specialization_use_and_drop() {
         make_bomb() -> Bomb<Text> { Bomb { value: "boom" } }
         main() -> { let bomb = make_bomb(); () }
     "#;
-    let phases = compile_source_to_phases("parameterized-relations.gr", source).unwrap();
-    let repeated = compile_source_to_phases("parameterized-relations.gr", source).unwrap();
+    let phases = compile_source_to_phases("parameterized-relations.glorious", source).unwrap();
+    let repeated = compile_source_to_phases("parameterized-relations.glorious", source).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
 
@@ -8430,7 +8481,7 @@ fn parameterized_trait_relations_gate_specialization_use_and_drop() {
         trait Rel<To> {}
     "#;
     assert_eq!(
-        compile_source_to_bytecode("parameterized-relations-reordered.gr", reordered)
+        compile_source_to_bytecode("parameterized-relations-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -8446,7 +8497,7 @@ fn parameterized_trait_relations_reject_missing_and_incoherent_evidence() {
         main() -> { () }
     "#;
     let errors =
-        compile_source_to_bytecode("missing-parameterized-relation.gr", missing).unwrap_err();
+        compile_source_to_bytecode("missing-parameterized-relation.glorious", missing).unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error.code.is_some()
@@ -8481,8 +8532,9 @@ fn parameterized_trait_relations_reject_missing_and_incoherent_evidence() {
         ),
     ];
     for (name, source, needle) in cases {
-        let errors = compile_source_to_bytecode(&format!("bad-parameterized-{name}.gr"), source)
-            .unwrap_err();
+        let errors =
+            compile_source_to_bytecode(&format!("bad-parameterized-{name}.glorious"), source)
+                .unwrap_err();
         assert!(
             errors.iter().any(|error| {
                 error.code.is_some() && error.span.is_some() && error.message.contains(needle)
@@ -8533,8 +8585,8 @@ fn explicit_negative_evidence_gates_specialization_use_and_drop() {
         make_bomb() -> Bomb<Text> { Bomb { value: "boom" } }
         main() -> { let bomb = make_bomb(); () }
     "#;
-    let phases = compile_source_to_phases("negative-evidence.gr", source).unwrap();
-    let repeated = compile_source_to_phases("negative-evidence.gr", source).unwrap();
+    let phases = compile_source_to_phases("negative-evidence.glorious", source).unwrap();
+    let repeated = compile_source_to_phases("negative-evidence.glorious", source).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
 
@@ -8666,7 +8718,7 @@ fn explicit_negative_evidence_gates_specialization_use_and_drop() {
         trait Rel<To> {}
     "#;
     assert_eq!(
-        compile_source_to_bytecode("negative-evidence-reordered.gr", reordered)
+        compile_source_to_bytecode("negative-evidence-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -8682,7 +8734,7 @@ fn negative_evidence_rejects_missing_refuted_and_incoherent_proofs() {
         main() -> { () }
     "#;
     let missing_errors =
-        compile_source_to_bytecode("missing-negative-evidence.gr", missing).unwrap_err();
+        compile_source_to_bytecode("missing-negative-evidence.glorious", missing).unwrap_err();
     assert!(
         missing_errors.iter().any(|error| {
             error.code.is_some()
@@ -8701,7 +8753,7 @@ fn negative_evidence_rejects_missing_refuted_and_incoherent_proofs() {
         main() -> { () }
     "#;
     let refuted_errors =
-        compile_source_to_bytecode("refuted-negative-evidence.gr", refuted).unwrap_err();
+        compile_source_to_bytecode("refuted-negative-evidence.glorious", refuted).unwrap_err();
     assert!(
         refuted_errors.iter().any(|error| {
             error.code.is_some()
@@ -8754,8 +8806,8 @@ fn negative_evidence_rejects_missing_refuted_and_incoherent_proofs() {
         ),
     ];
     for (name, source, needle) in cases {
-        let errors =
-            compile_source_to_bytecode(&format!("bad-negative-{name}.gr"), source).unwrap_err();
+        let errors = compile_source_to_bytecode(&format!("bad-negative-{name}.glorious"), source)
+            .unwrap_err();
         assert!(
             errors.iter().any(|error| {
                 error.code.is_some()
@@ -8805,8 +8857,8 @@ fn associated_types_normalize_ground_layouts_and_gate_equality_evidence() {
         make_bomb() -> Bomb<Good> { Bomb { value: Good { marker: 1 } } }
         main() -> { let bomb = make_bomb(); () }
     "#;
-    let phases = compile_source_to_phases("associated-types.gr", source).unwrap();
-    let repeated = compile_source_to_phases("associated-types.gr", source).unwrap();
+    let phases = compile_source_to_phases("associated-types.glorious", source).unwrap();
+    let repeated = compile_source_to_phases("associated-types.glorious", source).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
 
@@ -8929,7 +8981,7 @@ fn associated_types_normalize_ground_layouts_and_gate_equality_evidence() {
         trait Value { type Item; }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("associated-types-reordered.gr", reordered)
+        compile_source_to_bytecode("associated-types-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -8948,7 +9000,7 @@ fn associated_types_reject_invalid_definitions_equalities_and_projections() {
         main() -> { () }
     "#;
     let mismatch_errors =
-        compile_source_to_bytecode("associated-equality-mismatch.gr", equality_mismatch)
+        compile_source_to_bytecode("associated-equality-mismatch.glorious", equality_mismatch)
             .unwrap_err();
     assert!(
         mismatch_errors.iter().any(|error| {
@@ -9030,8 +9082,8 @@ fn associated_types_reject_invalid_definitions_equalities_and_projections() {
         ),
     ];
     for (name, source, needle) in cases {
-        let errors =
-            compile_source_to_bytecode(&format!("bad-associated-{name}.gr"), source).unwrap_err();
+        let errors = compile_source_to_bytecode(&format!("bad-associated-{name}.glorious"), source)
+            .unwrap_err();
         assert!(
             errors.iter().any(|error| {
                 error.span.is_some()
@@ -9099,8 +9151,8 @@ fn gat_projections_substitute_every_binder_and_gate_equality_evidence() {
         make_bomb() -> Bomb<Good> { Bomb { value: Good { marker: 1 } } }
         main() -> { let bomb = make_bomb(); () }
     "#;
-    let phases = compile_source_to_phases("gat-projections.gr", source).unwrap();
-    let repeated = compile_source_to_phases("gat-projections.gr", source).unwrap();
+    let phases = compile_source_to_phases("gat-projections.glorious", source).unwrap();
+    let repeated = compile_source_to_phases("gat-projections.glorious", source).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
 
@@ -9266,7 +9318,7 @@ fn gat_projections_substitute_every_binder_and_gate_equality_evidence() {
         trait Family<C> { type Member<T>; }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("gat-projections-reordered.gr", reordered)
+        compile_source_to_bytecode("gat-projections-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -9293,7 +9345,8 @@ fn lexical_associated_equalities_normalize_symbolic_generic_signatures() {
         keyed_answer() -> u16 { keyed(Good { marker: 0 }, 42) }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("symbolic-projection-signatures.gr", source).unwrap();
+    let artifact =
+        compile_source_to_bytecode("symbolic-projection-signatures.glorious", source).unwrap();
     let bytes = artifact.encode();
     let verified = verify(artifact.clone()).unwrap();
     for (name, expected) in [
@@ -9331,9 +9384,12 @@ fn lexical_associated_equalities_normalize_symbolic_generic_signatures() {
         trait Value { type Item; }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("symbolic-projection-signatures-reordered.gr", reordered)
-            .unwrap()
-            .encode(),
+        compile_source_to_bytecode(
+            "symbolic-projection-signatures-reordered.glorious",
+            reordered
+        )
+        .unwrap()
+        .encode(),
         bytes
     );
 
@@ -9356,7 +9412,7 @@ fn lexical_associated_equalities_normalize_symbolic_generic_signatures() {
         ),
     ] {
         let diagnostics =
-            compile_source_to_bytecode(&format!("symbolic-{name}.gr"), source).unwrap_err();
+            compile_source_to_bytecode(&format!("symbolic-{name}.glorious"), source).unwrap_err();
         assert!(
             diagnostics.iter().any(|diagnostic| {
                 diagnostic.code.is_some()
@@ -9460,7 +9516,8 @@ fn gat_rejects_invalid_item_arguments_definitions_and_normalization() {
         ),
     ];
     for (name, source, needle) in cases {
-        let errors = compile_source_to_bytecode(&format!("bad-gat-{name}.gr"), source).unwrap_err();
+        let errors =
+            compile_source_to_bytecode(&format!("bad-gat-{name}.glorious"), source).unwrap_err();
         assert!(
             errors.iter().any(|error| {
                 error.span.is_some()
@@ -9521,8 +9578,8 @@ fn ground_gat_projections_normalize_in_every_where_clause_term() {
         make_bomb()->Bomb<Text> { Bomb { value: "boom" } }
         main()->{ let bomb = make_bomb(); () }
     "#;
-    let phases = compile_source_to_phases("gat-where-terms.gr", source).unwrap();
-    let repeated = compile_source_to_phases("gat-where-terms.gr", source).unwrap();
+    let phases = compile_source_to_phases("gat-where-terms.glorious", source).unwrap();
+    let repeated = compile_source_to_phases("gat-where-terms.glorious", source).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
 
@@ -9623,7 +9680,7 @@ fn ground_gat_projections_normalize_in_every_where_clause_term() {
         trait Family { type Member<T>; }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("gat-where-terms-reordered.gr", reordered)
+        compile_source_to_bytecode("gat-where-terms-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -9651,8 +9708,8 @@ fn lexical_param_environments_key_generic_closure_specializations() {
         right_answer() -> Token<Right> { closure_site(42) }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("param-env-closure.gr", source).unwrap();
-    let repeated = compile_source_to_phases("param-env-closure.gr", source).unwrap();
+    let phases = compile_source_to_phases("param-env-closure.glorious", source).unwrap();
+    let repeated = compile_source_to_phases("param-env-closure.glorious", source).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
 
@@ -9732,7 +9789,7 @@ fn lexical_param_environments_key_generic_closure_specializations() {
         trait Rel<Mode> {}
     "#;
     assert_eq!(
-        compile_source_to_bytecode("param-env-closure-reordered.gr", reordered)
+        compile_source_to_bytecode("param-env-closure-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -9760,12 +9817,12 @@ fn uninstantiated_generics_validate_calls_under_lexical_param_environments() {
         negative_outer<T>(value:T)->T where T: !Mark { negative_inner(value) }
         main()->{()}
     "#;
-    let phases = compile_source_to_phases("symbolic-param-env.gr", source).unwrap();
-    let repeated = compile_source_to_phases("symbolic-param-env.gr", source).unwrap();
+    let phases = compile_source_to_phases("symbolic-param-env.glorious", source).unwrap();
+    let repeated = compile_source_to_phases("symbolic-param-env.glorious", source).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
     let baseline =
-        compile_source_to_bytecode("symbolic-param-env-baseline.gr", "main()->{()}").unwrap();
+        compile_source_to_bytecode("symbolic-param-env-baseline.glorious", "main()->{()}").unwrap();
     let specialization_names = |artifact: &Artifact| {
         artifact
             .functions
@@ -9810,7 +9867,7 @@ fn uninstantiated_generics_validate_calls_under_lexical_param_environments() {
         trait Mark {}
     "#;
     assert_eq!(
-        compile_source_to_bytecode("symbolic-param-env-reordered.gr", reordered)
+        compile_source_to_bytecode("symbolic-param-env-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -9848,7 +9905,7 @@ fn uninstantiated_generic_calls_reject_lexical_environment_mismatches() {
     ];
     for (name, source, needle) in cases {
         let errors =
-            compile_source_to_bytecode(&format!("bad-symbolic-param-env-{name}.gr"), source)
+            compile_source_to_bytecode(&format!("bad-symbolic-param-env-{name}.glorious"), source)
                 .unwrap_err();
         assert!(
             errors.iter().any(|error| {
@@ -9907,8 +9964,8 @@ fn lexical_param_environments_forward_bounds_through_generic_calls() {
         negative_answer() -> i64 { negative_outer(42) }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("lexical-param-env.gr", source).unwrap();
-    let repeated = compile_source_to_phases("lexical-param-env.gr", source).unwrap();
+    let phases = compile_source_to_phases("lexical-param-env.glorious", source).unwrap();
+    let repeated = compile_source_to_phases("lexical-param-env.glorious", source).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
 
@@ -10029,7 +10086,7 @@ fn lexical_param_environments_forward_bounds_through_generic_calls() {
         trait Mark {}
     "#;
     assert_eq!(
-        compile_source_to_bytecode("lexical-param-env-reordered.gr", reordered)
+        compile_source_to_bytecode("lexical-param-env-reordered.glorious", reordered)
             .unwrap()
             .encode(),
         bytes
@@ -10106,8 +10163,8 @@ fn lexical_param_environments_isolate_missing_refuted_and_equality_facts() {
         ),
     ];
     for (name, source, needle) in cases {
-        let errors =
-            compile_source_to_bytecode(&format!("bad-param-env-{name}.gr"), source).unwrap_err();
+        let errors = compile_source_to_bytecode(&format!("bad-param-env-{name}.glorious"), source)
+            .unwrap_err();
         assert!(
             errors.iter().any(|error| {
                 error.code.is_some()
@@ -10130,9 +10187,11 @@ fn lexical_param_environments_isolate_missing_refuted_and_equality_facts() {
         trait Other {}
         trait Mark {}
     "#;
-    let errors =
-        compile_source_to_bytecode("bad-param-env-isolated-reordered.gr", reordered_missing)
-            .unwrap_err();
+    let errors = compile_source_to_bytecode(
+        "bad-param-env-isolated-reordered.glorious",
+        reordered_missing,
+    )
+    .unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error.code.is_some()
@@ -10153,18 +10212,18 @@ fn unused_marker_metadata_is_request_free_and_order_independent() {
         "trait Left {} trait Right {} impl Left for i64 {} impl Right for Text {} main() -> { () }";
     let reordered =
         "impl Right for Text {} main() -> { () } trait Right {} impl Left for i64 {} trait Left {}";
-    let baseline = compile_source_to_bytecode("marker-baseline.gr", baseline)
+    let baseline = compile_source_to_bytecode("marker-baseline.glorious", baseline)
         .unwrap()
         .encode();
     assert_eq!(
         baseline,
-        compile_source_to_bytecode("marker-unused.gr", first)
+        compile_source_to_bytecode("marker-unused.glorious", first)
             .unwrap()
             .encode()
     );
     assert_eq!(
         baseline,
-        compile_source_to_bytecode("marker-reordered.gr", reordered)
+        compile_source_to_bytecode("marker-reordered.glorious", reordered)
             .unwrap()
             .encode()
     );
@@ -10185,7 +10244,7 @@ fn grounded_generic_drop_body_discovers_function_nominal_and_cleanup() {
         make() -> Root<i64> { Root { value: 42 } }
         main() -> { let root = make(); () }
     "#;
-    let phases = compile_source_to_phases("drop-rooted-specialization.gr", source).unwrap();
+    let phases = compile_source_to_phases("drop-rooted-specialization.glorious", source).unwrap();
     let artifact = &phases.artifact;
 
     assert_eq!(
@@ -10227,7 +10286,8 @@ fn grounded_generic_drop_body_discovers_function_nominal_and_cleanup() {
         struct Root<T> { value: T }
     "#;
     let reordered =
-        compile_source_to_phases("drop-rooted-specialization-reordered.gr", reordered).unwrap();
+        compile_source_to_phases("drop-rooted-specialization-reordered.glorious", reordered)
+            .unwrap();
     assert_eq!(bytes, reordered.artifact.encode());
 }
 
@@ -10251,7 +10311,7 @@ fn grounded_generic_drop_discovery_reaches_a_transitive_fixed_point() {
         make() -> Root<i64> { Root { value: 42 } }
         main() -> { let root = make(); () }
     "#;
-    let artifact = compile_source_to_bytecode("transitive-drop-roots.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("transitive-drop-roots.glorious", source).unwrap();
 
     for name in ["$specialization$first#", "$specialization$second#"] {
         assert_eq!(
@@ -10293,7 +10353,8 @@ fn drop_rooted_recursive_specialization_and_generic_field_borrow_are_deduplicate
         keep(value: Root<i64>) -> Root<i64> { value }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("finite-drop-rooted-recursion.gr", finite).unwrap();
+    let artifact =
+        compile_source_to_bytecode("finite-drop-rooted-recursion.glorious", finite).unwrap();
     assert_eq!(
         artifact
             .functions
@@ -10313,7 +10374,7 @@ fn drop_rooted_recursive_specialization_and_generic_field_borrow_are_deduplicate
         keep(value: Root<i64>) -> Root<i64> { value }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("drop-rooted-borrow.gr", borrowed).unwrap();
+    let artifact = compile_source_to_bytecode("drop-rooted-borrow.glorious", borrowed).unwrap();
     verify(Artifact::decode(&artifact.encode()).unwrap()).unwrap();
     assert!(
         artifact
@@ -10339,7 +10400,7 @@ fn drop_rooted_captureless_callback_and_nested_generic_are_closed_and_execute() 
         make() -> Root<i64> { Root { value: 7 } }
         main() -> { let root = make(); () }
     "#;
-    let phases = compile_source_to_phases("drop-rooted-callback.gr", source).unwrap();
+    let phases = compile_source_to_phases("drop-rooted-callback.glorious", source).unwrap();
     let artifact = &phases.artifact;
 
     for prefix in ["$specialization$call0#", "$specialization$id#", "$closure$"] {
@@ -10367,7 +10428,7 @@ fn drop_rooted_captureless_callback_and_nested_generic_are_closed_and_execute() 
         .unwrap_err();
     assert!(error.to_string().contains("division by zero"), "{error}");
 
-    let repeated = compile_source_to_phases("drop-rooted-callback.gr", source).unwrap();
+    let repeated = compile_source_to_phases("drop-rooted-callback.glorious", source).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
     assert_eq!(bytes, repeated.artifact.encode());
@@ -10385,9 +10446,10 @@ fn drop_rooted_captureless_callback_and_nested_generic_are_closed_and_execute() 
         id<T>(value: T) -> T { value }
         struct Root<T> { value: T }
     "#;
-    let reordered = compile_source_to_bytecode("drop-rooted-callback-reordered.gr", reordered)
-        .unwrap()
-        .encode();
+    let reordered =
+        compile_source_to_bytecode("drop-rooted-callback-reordered.glorious", reordered)
+            .unwrap()
+            .encode();
     assert_eq!(bytes, reordered);
 }
 
@@ -10402,6 +10464,6 @@ fn drop_rooted_observe_capture_is_a_nonescaping_hook_loan() {
         keep(value: Root<i64>) -> Root<i64> { value }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("drop-rooted-captureful.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("drop-rooted-captureful.glorious", source).unwrap();
     verify(Artifact::decode(&artifact.encode()).unwrap()).unwrap();
 }

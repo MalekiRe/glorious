@@ -102,8 +102,8 @@ fn sealed_manifest_traits_reject_both_polarities_and_reserved_redeclarations() {
         "struct Local{marker:i64} impl Sealed for Local{} main()->{()}",
         "struct Local{marker:i64} impl !Sealed for Local{} main()->{()}",
     ] {
-        let errors =
-            compile_source_to_bytecode_with_manifest("sealed.gr", source, &manifest).unwrap_err();
+        let errors = compile_source_to_bytecode_with_manifest("sealed.glorious", source, &manifest)
+            .unwrap_err();
         assert!(
             errors.iter().any(|error| {
                 error.code.as_deref() == Some("G1TR001")
@@ -115,7 +115,7 @@ fn sealed_manifest_traits_reject_both_polarities_and_reserved_redeclarations() {
         );
     }
     let errors = compile_source_to_bytecode_with_manifest(
-        "reserved.gr",
+        "reserved.glorious",
         "trait Sealed{} main()->{()}",
         &manifest,
     )
@@ -153,7 +153,7 @@ fn manifest_and_source_order_preserve_diagnostic_identity() {
     "#;
     let signature = |source: &str, manifest: &TrustedTraitManifest| {
         let mut errors =
-            compile_source_to_bytecode_with_manifest("manifest-errors.gr", source, manifest)
+            compile_source_to_bytecode_with_manifest("manifest-errors.glorious", source, manifest)
                 .unwrap_err()
                 .into_iter()
                 .map(|error| {
@@ -181,11 +181,12 @@ fn source_spelling_has_no_manifest_authority_and_contexts_do_not_leak_identity()
         answer(value:Local)->Local{pass(value)}
         main()->{()}
     "#;
-    compile_source_to_bytecode_with_manifest("local-spelling.gr", local_spelling, &trusted)
+    compile_source_to_bytecode_with_manifest("local-spelling.glorious", local_spelling, &trusted)
         .unwrap();
 
     let sealed = "struct Local{marker:i64} impl Fn<i64> for Local{} main()->{()}";
-    let errors = compile_source_to_bytecode_with_manifest("fn.gr", sealed, &trusted).unwrap_err();
+    let errors =
+        compile_source_to_bytecode_with_manifest("fn.glorious", sealed, &trusted).unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error.message == "source impls for sealed external trait `Fn` are unsupported"
@@ -203,10 +204,14 @@ fn source_spelling_has_no_manifest_authority_and_contexts_do_not_leak_identity()
     let source =
         "trait Contextual{} struct Local{marker:i64} impl Contextual for Local{} main()->{()}";
     assert!(
-        compile_source_to_bytecode_with_manifest("external-context.gr", source, &external_context)
-            .is_err()
+        compile_source_to_bytecode_with_manifest(
+            "external-context.glorious",
+            source,
+            &external_context
+        )
+        .is_err()
     );
-    compile_source_to_bytecode("local-context.gr", source).unwrap();
+    compile_source_to_bytecode("local-context.glorious", source).unwrap();
 }
 
 #[test]
@@ -269,11 +274,13 @@ fn external_open_trait_for_local_generic_nominals_gates_all_consumers_determinis
         struct Wrap<T>{value:T}
         trait Marker{}
     "#;
-    let phases = compile_source_to_phases_with_manifest("foreign.gr", source, &manifest).unwrap();
+    let phases =
+        compile_source_to_phases_with_manifest("foreign.glorious", source, &manifest).unwrap();
     let repeated =
-        compile_source_to_phases_with_manifest("foreign.gr", source, &manifest_reordered).unwrap();
+        compile_source_to_phases_with_manifest("foreign.glorious", source, &manifest_reordered)
+            .unwrap();
     let reordered_phases =
-        compile_source_to_phases_with_manifest("foreign-reordered.gr", reordered, &manifest)
+        compile_source_to_phases_with_manifest("foreign-reordered.glorious", reordered, &manifest)
             .unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
@@ -353,8 +360,8 @@ fn orphan_rules_cover_predefined_alias_and_negative_parity() {
         "type Alias=i64; impl Foreign for Alias{} main()->{()}",
         "type Alias=Text; impl !Foreign for Alias{} main()->{()}",
     ] {
-        let errors =
-            compile_source_to_bytecode_with_manifest("orphan.gr", source, &manifest).unwrap_err();
+        let errors = compile_source_to_bytecode_with_manifest("orphan.glorious", source, &manifest)
+            .unwrap_err();
         assert!(errors.iter().any(|error| {
             error.code.as_deref() == Some("G1TR001")
                 && error.span.is_some()
@@ -374,7 +381,8 @@ fn orphan_rules_cover_predefined_alias_and_negative_parity() {
         text(value:Text)->Text{negative(value)}
         main()->{()}
     "#;
-    compile_source_to_bytecode_with_manifest("local-predefined.gr", local, &manifest).unwrap();
+    compile_source_to_bytecode_with_manifest("local-predefined.glorious", local, &manifest)
+        .unwrap();
 }
 
 #[test]
@@ -396,7 +404,8 @@ fn chained_alias_to_local_nominal_preserves_external_impl_ownership_and_evidence
         main()->{()}
     "#;
     let phases =
-        compile_source_to_phases_with_manifest("local-alias-orphan.gr", source, &manifest).unwrap();
+        compile_source_to_phases_with_manifest("local-alias-orphan.glorious", source, &manifest)
+            .unwrap();
     assert_eq!(
         phases
             .artifact
@@ -419,7 +428,7 @@ fn external_schema_kinds_are_checked_and_effect_rows_are_source_definable() {
         TraitPolicy::ExternalOpen,
     )]);
     compile_source_to_bytecode_with_manifest(
-        "const-manifest.gr",
+        "const-manifest.glorious",
         "struct Local{marker:i64} impl ConstExternal<7> for Local{} main()->{()}",
         &const_manifest,
     )
@@ -439,7 +448,7 @@ fn external_schema_kinds_are_checked_and_effect_rows_are_source_definable() {
     // Const-kinded associated-type binders and arguments are complete in the
     // trait layer: an external const-GAT definition is ordinary source.
     compile_source_to_bytecode_with_manifest(
-        "const-gat-definition.gr",
+        "const-gat-definition.glorious",
         "struct Local{marker:i64} impl ConstGat for Local{type Item<const N:u32> = i64;} main()->{()}",
         &const_gat_manifest,
     )
@@ -447,7 +456,7 @@ fn external_schema_kinds_are_checked_and_effect_rows_are_source_definable() {
     // Const arguments now remain attached through associated projection
     // normalization and bytecode signature lowering.
     compile_source_to_bytecode_with_manifest(
-        "const-gat-projection.gr",
+        "const-gat-projection.glorious",
         "struct Local{marker:i64} impl ConstGat for Local{type Item<const N:u32> = i64;} read(value:<Local as ConstGat>::Item<7>)->{()} main()->{()}",
         &const_gat_manifest,
     )
@@ -462,13 +471,13 @@ fn external_schema_kinds_are_checked_and_effect_rows_are_source_definable() {
     );
     let lifetime_manifest = manifest_with([lifetime.clone()]);
     compile_source_to_bytecode_with_manifest(
-        "rigid-lifetime-manifest.gr",
+        "rigid-lifetime-manifest.glorious",
         "struct Local{marker:i64} impl<'a> LifetimeExternal<'a> for Local{} main()->{()}",
         &lifetime_manifest,
     )
     .unwrap();
     let wrong_kind = compile_source_to_bytecode_with_manifest(
-        "wrong-lifetime-kind.gr",
+        "wrong-lifetime-kind.glorious",
         "struct Local{marker:i64} impl LifetimeExternal<i64> for Local{} main()->{()}",
         &lifetime_manifest,
     )
@@ -487,7 +496,7 @@ fn external_schema_kinds_are_checked_and_effect_rows_are_source_definable() {
         TraitPolicy::ExternalOpen,
     )]);
     compile_source_to_bytecode_with_manifest(
-        "external-row-manifest.gr",
+        "external-row-manifest.glorious",
         "struct Local{marker:i64} impl RowExternal for Local{type Effects = {};} main()->{()}",
         &row_manifest,
     )

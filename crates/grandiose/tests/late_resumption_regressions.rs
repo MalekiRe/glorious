@@ -24,7 +24,7 @@ fn late_resumption_round_trips_through_nested_tuple_and_generic_wrappers() {
         main() -> { () }
     "#;
 
-    let artifact = compile_source_to_bytecode("nested-late-wrapper.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("nested-late-wrapper.glorious", source).unwrap();
     let answer = artifact
         .functions
         .iter()
@@ -67,9 +67,9 @@ fn late_resumption_closure_identity_survives_declaration_reordering() {
         main() -> { () }
     "#;
 
-    let first = compile_source_to_phases("late-closure-order.gr", before).unwrap();
-    let repeated = compile_source_to_phases("late-closure-order.gr", before).unwrap();
-    let reordered = compile_source_to_phases("late-closure-order.gr", after).unwrap();
+    let first = compile_source_to_phases("late-closure-order.glorious", before).unwrap();
+    let repeated = compile_source_to_phases("late-closure-order.glorious", before).unwrap();
+    let reordered = compile_source_to_phases("late-closure-order.glorious", after).unwrap();
     assert_eq!(first.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(first.mir_fingerprint(), repeated.mir_fingerprint());
     assert_eq!(first.artifact.encode(), reordered.artifact.encode());
@@ -101,7 +101,7 @@ fn different_handler_sites_get_distinct_late_box_identities() {
         main() -> { () }
     "#;
 
-    let artifact = compile_source_to_bytecode("distinct-late-boxes.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("distinct-late-boxes.glorious", source).unwrap();
     let mut boxes = artifact
         .types
         .iter()
@@ -150,7 +150,7 @@ fn late_resumption_instantiates_a_generic_wrapper_over_a_tuple() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("late-tuple-wrapper.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("late-tuple-wrapper.glorious", source).unwrap();
     let answer = artifact
         .functions
         .iter()
@@ -188,8 +188,8 @@ fn late_resumption_specializes_a_private_generic_sealing_function() {
         main() -> { () }
     "#;
     let artifact = compile_bundle_to_bytecode(&SourceBundle::new(
-        Segment::new("owner.gr", owner),
-        Segment::new("caller.gr", caller),
+        Segment::new("owner.glorious", owner),
+        Segment::new("caller.glorious", caller),
         [],
     ))
     .unwrap();
@@ -207,7 +207,7 @@ fn late_resumption_specializes_a_private_generic_sealing_function() {
 
     let rejected = compile_bundle_to_bytecode(&SourceBundle::new(
         Segment::new(
-            "owner.gr",
+            "owner.glorious",
             r#"
                 effect Ask { [1,1] ask() -> i64 }
                 struct Secret<T> { private value: T }
@@ -215,7 +215,7 @@ fn late_resumption_specializes_a_private_generic_sealing_function() {
             "#,
         ),
         Segment::new(
-            "caller.gr",
+            "caller.glorious",
             r#"
                 bad() -> i64 {
                     handle perform Ask::ask() {

@@ -170,7 +170,7 @@ fn nested_leave_executes_the_outer_typed_destination() {
         }
         main() -> { () }
     "#;
-    compile_source_to_bytecode("nested-leave.gr", source).unwrap();
+    compile_source_to_bytecode("nested-leave.glorious", source).unwrap();
 }
 
 #[test]
@@ -188,7 +188,7 @@ fn leave_cleans_intervening_linear_owners_without_bypassing_use() {
         }
         main() -> { () }
     "#;
-    compile_source_to_bytecode("leave-cleanup.gr", source).unwrap();
+    compile_source_to_bytecode("leave-cleanup.glorious", source).unwrap();
 }
 
 #[test]
@@ -204,7 +204,7 @@ fn reference_result_provenance_crosses_leave_but_cannot_escape_its_referent() {
         }
         main() -> { () }
     "#;
-    compile_source_to_bytecode("leave-reference-result.gr", source).unwrap();
+    compile_source_to_bytecode("leave-reference-result.glorious", source).unwrap();
 }
 
 #[test]
@@ -219,7 +219,7 @@ fn leave_does_not_bypass_private_deconstruction_authority() {
         }
         main() -> { () }
     "#;
-    compile_source_to_bytecode("leave-private-field.gr", source).unwrap();
+    compile_source_to_bytecode("leave-private-field.glorious", source).unwrap();
 }
 
 #[test]
@@ -247,13 +247,12 @@ fn nested_leave_cleans_partial_owners_and_loans_at_all_optimization_levels() {
         main() -> { () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let phases = compile_source_to_phases_with_options(
-            "nested-leave-cleanup.gr",
+            "nested-leave-cleanup.glorious",
             source,
             CompileOptions { optimization_level },
         )

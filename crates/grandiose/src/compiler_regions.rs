@@ -9,7 +9,7 @@ use grandiose_vm::{Type, TypeId};
 use crate::compiler_core::PointId;
 use crate::compiler_mir::{
     BasicBlock, DropGlueKind, Edge, Function, InitAtEntry, InstructionKind, LabelId, LocalFact,
-    Operand, Place, Projection, Register, Terminator, UseMode,
+    Operand, OwnershipCategory, Place, Projection, Register, Terminator, UseMode,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -4367,13 +4367,18 @@ fn join_states(
         }
     }
     if joined.order != incoming.order {
+        let order_is_observable = |register: &&Register| {
+            !matches!(joined.regs[**register as usize], RegState::MaybeLive)
+                && !matches!(
+                    context.locals[**register as usize].ownership,
+                    OwnershipCategory::CopyValue | OwnershipCategory::ZstErased
+                )
+        };
         let strict_conflict = joined
             .order
             .iter()
-            .filter(|register| !matches!(joined.regs[**register as usize], RegState::MaybeLive))
-            .ne(incoming.order.iter().filter(|register| {
-                !matches!(joined.regs[**register as usize], RegState::MaybeLive)
-            }));
+            .filter(order_is_observable)
+            .ne(incoming.order.iter().filter(order_is_observable));
         if context.strict && strict_conflict {
             return Err(flow_error(
                 block,

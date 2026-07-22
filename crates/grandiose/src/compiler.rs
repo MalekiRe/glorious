@@ -511,6 +511,8 @@ struct EffectLowering {
     protocols: Vec<Protocol>,
     handler_defs: Vec<HandlerDef>,
     extra_types: Vec<Type>,
+    base_types: Vec<Type>,
+    reused_types: BTreeMap<TypeId, Type>,
     synthetics: Vec<SyntheticFunction>,
     first_extra_type: TypeId,
     first_synthetic_function: u32,
@@ -522,6 +524,11 @@ struct EffectLowering {
 
 impl EffectLowering {
     fn allocate_type(&mut self, ty: Type) -> TypeId {
+        if let Some(index) = self.base_types.iter().position(|existing| existing == &ty) {
+            let id = index as TypeId;
+            self.reused_types.entry(id).or_insert(ty);
+            return id;
+        }
         if let Some(index) = self.extra_types.iter().position(|existing| existing == &ty) {
             return self.first_extra_type + index as TypeId;
         }
@@ -580,8 +587,7 @@ impl EffectLowering {
     }
 
     fn resumption(&self, ty: TypeId) -> Option<(TypeId, TypeId, u32, bool)> {
-        let index = ty.checked_sub(self.first_extra_type)? as usize;
-        match self.extra_types.get(index)?.representation() {
+        match self.extra_type(ty)?.representation() {
             Type::Resumption {
                 input_type,
                 output_type,
@@ -594,6 +600,9 @@ impl EffectLowering {
     }
 
     fn extra_type(&self, ty: TypeId) -> Option<&Type> {
+        if let Some(descriptor) = self.reused_types.get(&ty) {
+            return Some(descriptor);
+        }
         let index = ty.checked_sub(self.first_extra_type)? as usize;
         self.extra_types.get(index)
     }
@@ -1029,10 +1038,16 @@ impl PerformanceSummaries {
                     }),
                 ExprKind::Is { subject, .. } => expression(subject, effects, nominals, summaries),
                 ExprKind::LabelReference(_) => PerformanceFactors::identity(),
-                ExprKind::Resume { .. }
-                | ExprKind::Cancel { .. }
-                | ExprKind::TailResume { .. }
-                | ExprKind::ContextBlock(_) => unvalidated_syntax(),
+                ExprKind::Resume { resumption, value }
+                | ExprKind::TailResume { resumption, value } => {
+                    let summary = expression(resumption, effects, nominals, summaries);
+                    value.as_deref().map_or(summary.clone(), |value| {
+                        summary.sequence(&expression(value, effects, nominals, summaries))
+                    })
+                }
+                ExprKind::Cancel { resumption } => {
+                    expression(resumption, effects, nominals, summaries)
+                }
                 ExprKind::Move(value)
                 | ExprKind::Field(value, _)
                 | ExprKind::Unary { operand: value, .. } => {
@@ -1048,26 +1063,23 @@ impl PerformanceSummaries {
                             summary.sequence(&expression(value, effects, nominals, summaries))
                         })
                 }
-                ExprKind::Block(statements) => {
-                    statements
-                        .iter()
-                        .fold(PerformanceFactors::identity(), |summary, statement| {
-                            let (value, reference) = match statement {
-                                Stmt::Let { value, .. }
-                                | Stmt::Deconstruct { value, .. }
-                                | Stmt::Expr(value) => (value, None),
-                                Stmt::Assign {
-                                    destination, value, ..
-                                } => (value, assignment_place_reference(destination)),
-                            };
-                            let summary =
-                                summary.sequence(&expression(value, effects, nominals, summaries));
-                            reference.map_or(summary.clone(), |reference| {
-                                summary
-                                    .sequence(&expression(reference, effects, nominals, summaries))
-                            })
+                ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => statements
+                    .iter()
+                    .fold(PerformanceFactors::identity(), |summary, statement| {
+                        let (value, reference) = match statement {
+                            Stmt::Let { value, .. }
+                            | Stmt::Deconstruct { value, .. }
+                            | Stmt::Expr(value) => (value, None),
+                            Stmt::Assign {
+                                destination, value, ..
+                            } => (value, assignment_place_reference(destination)),
+                        };
+                        let summary =
+                            summary.sequence(&expression(value, effects, nominals, summaries));
+                        reference.map_or(summary.clone(), |reference| {
+                            summary.sequence(&expression(reference, effects, nominals, summaries))
                         })
-                }
+                    }),
                 ExprKind::Binary { lhs, rhs, .. } => expression(lhs, effects, nominals, summaries)
                     .sequence(&expression(rhs, effects, nominals, summaries)),
                 ExprKind::Handle {
@@ -1342,6 +1354,7 @@ struct CoreLowerer<'a> {
     body_instance: Option<specialization::BodyInstanceKey>,
     environment_capture_modes: BTreeMap<String, specialization::CaptureMode>,
     expression_ordinals: BTreeMap<usize, u32>,
+    expression_span_ordinals: BTreeMap<(usize, usize), u32>,
     effects: &'a mut EffectLowering,
     allow_terminal_perform: Option<BTreeSet<(u32, u32)>>,
     outward_protocols: BTreeSet<u32>,
@@ -1842,6 +1855,18 @@ fn generic_ast_reference_return_plans(
                 callback_wrappers,
                 single_reference_parameters,
             ),
+            ExprKind::Unary {
+                op: UnaryOp::BorrowShared | UnaryOp::BorrowUnique | UnaryOp::Dereference,
+                operand,
+            } => expression_plan(
+                program,
+                operand,
+                environment,
+                known,
+                nominal_fields,
+                callback_wrappers,
+                single_reference_parameters,
+            ),
             ExprKind::Tuple(fields) => {
                 let mut result = Vec::new();
                 for (field, value) in fields.iter().enumerate() {
@@ -1907,17 +1932,13 @@ fn generic_ast_reference_return_plans(
                     return None;
                 };
                 let name = path.last()?.as_ref();
-                // The compatibility parser still lowers `resume(k, value)`
-                // to an ordinary call at this boundary.  A resume's result
-                // origin is exactly its value's origin; the resumption itself
-                // cannot contribute a reference to the result.
-                if name == "resume" && path.len() == 1 {
-                    let [_, value] = arguments.as_slice() else {
-                        return None;
-                    };
+                if matches!(
+                    name,
+                    "__g1_array_get_borrow_shared" | "__g1_array_get_borrow_unique"
+                ) {
                     return expression_plan(
                         program,
-                        value,
+                        arguments.first()?,
                         environment,
                         known,
                         nominal_fields,
@@ -2144,7 +2165,10 @@ fn generic_ast_reference_return_plans(
             | ExprKind::TailResume { .. }
             | ExprKind::Is { .. }
             | ExprKind::Perform { .. }
-            | ExprKind::Unary { .. }
+            | ExprKind::Unary {
+                op: UnaryOp::Negate,
+                ..
+            }
             | ExprKind::Binary { .. } => None,
         }
     }
@@ -3300,8 +3324,8 @@ struct GlobalResolutionContext<'a> {
     functions: &'a BTreeMap<&'a str, (Vec<TypeId>, TypeId)>,
 }
 
-/// Controls deterministic compiler transformations. The default is `O0`,
-/// which performs only the mandatory correctness pipeline.
+/// Controls deterministic compiler transformations. The default is `O2`,
+/// the self-hosting pipeline used for normal compilation.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CompileOptions {
     pub optimization_level: mir::OptimizationLevel,
@@ -3607,7 +3631,6 @@ fn compile_stream_phases_with_manifest_and_domains(
             .map(|error| error.with_code(PARSE_CODE))
             .collect::<Vec<_>>()
     })?;
-    let program = crate::parser::normalize_for_legacy_consumers(program);
     let has_modules = !program.modules.is_empty();
     let resolved = crate::modules::resolve_program(bundle, program)?;
     let domains = if has_modules {
@@ -4484,7 +4507,7 @@ fn compile_program_with_phases(
         let mut pending = vec![expression];
         while let Some(expression) = pending.pop() {
             match &expression.kind {
-                ExprKind::Block(statements) => {
+                ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
                     for statement in statements.iter() {
                         match statement {
                             Stmt::Let { value, .. }
@@ -4548,14 +4571,13 @@ fn compile_program_with_phases(
                 | ExprKind::Byte(_)
                 | ExprKind::ByteString(_)
                 | ExprKind::String(_) => {}
-                // The parser's grammar-complete forms are rejected by `validate` or
-                // rewritten by `parser::normalize_for_legacy_consumers` before any
-                // compiler pass runs; reaching one here is a broken phase invariant.
                 ExprKind::LabelReference(_) => {}
-                ExprKind::Resume { .. }
-                | ExprKind::Cancel { .. }
-                | ExprKind::TailResume { .. }
-                | ExprKind::ContextBlock(_) => unvalidated_syntax(),
+                ExprKind::Resume { resumption, value }
+                | ExprKind::TailResume { resumption, value } => {
+                    pending.push(resumption);
+                    pending.extend(value.iter().map(AsRef::as_ref));
+                }
+                ExprKind::Cancel { resumption } => pending.push(resumption),
             }
         }
     }
@@ -4604,7 +4626,7 @@ fn compile_program_with_phases(
         let Some(rest) = deferred.strip_prefix("$trait_deferred$") else {
             continue;
         };
-        let Some((trait_name, method)) = rest.split_once('$') else {
+        let Some((trait_name, method)) = rest.rsplit_once('$') else {
             continue;
         };
         let prefix = format!("$trait${trait_name}$");
@@ -6344,6 +6366,8 @@ fn compile_program_with_phases(
         protocols: artifact.protocols.clone(),
         handler_defs: Vec::new(),
         extra_types: Vec::new(),
+        base_types: artifact.types.clone(),
+        reused_types: BTreeMap::new(),
         synthetics: Vec::new(),
         first_extra_type: artifact.types.len() as TypeId,
         first_synthetic_function: named_function_count,
@@ -6832,6 +6856,17 @@ fn compile_program_with_phases(
                 })
                 .collect()
         });
+        let discovery_owner = match &body_instance {
+            specialization::BodyInstanceKey::Root(owner) => owner,
+            specialization::BodyInstanceKey::Specialization(key) => &key.template,
+            specialization::BodyInstanceKey::Closure(request) => &request.site.owner,
+            specialization::BodyInstanceKey::Drop(_) => {
+                unreachable!("drop glue is emitted by the later dedicated lowering loop")
+            }
+        };
+        let discovery_root =
+            specialization::body_root(&function_item_normalized_program, discovery_owner)
+                .expect("every emitted specialization body has a discovery root");
         let (mut lowerer, core_params, core_receiver_captures) = CoreLowerer::new(
             core_tables,
             &mut effect_lowering,
@@ -6848,7 +6883,10 @@ fn compile_program_with_phases(
                 noncancelling_operations: BTreeSet::new(),
             },
             body_instance.clone(),
-            specialization::expression_ordinals(root),
+            (
+                specialization::expression_ordinals(root),
+                specialization::expression_ordinal_maps(discovery_root).1,
+            ),
         );
         lowerer.active_reference_return_plan = reference_return_plans.get(&signature.id).cloned();
         if let Emission::Closure { request, .. } = &emission
@@ -10724,7 +10762,7 @@ pub(crate) fn normalize_constructor_aliases(program: &Program) -> Result<Program
                     rewrite_expression(value, aliases);
                 }
             }
-            ExprKind::Block(statements) => {
+            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
                 for statement in std::rc::Rc::make_mut(statements) {
                     match statement {
                         Stmt::Let { value, .. }
@@ -10793,14 +10831,16 @@ pub(crate) fn normalize_constructor_aliases(program: &Program) -> Result<Program
             | ExprKind::ByteString(_)
             | ExprKind::String(_)
             | ExprKind::Variable(_) => {}
-            // The parser's grammar-complete forms are rejected by `validate` or
-            // rewritten by `parser::normalize_for_legacy_consumers` before any
-            // compiler pass runs; reaching one here is a broken phase invariant.
             ExprKind::LabelReference(_) => {}
-            ExprKind::Resume { .. }
-            | ExprKind::Cancel { .. }
-            | ExprKind::TailResume { .. }
-            | ExprKind::ContextBlock(_) => unvalidated_syntax(),
+            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+                rewrite_expression(Rc::make_mut(resumption), aliases);
+                if let Some(value) = value {
+                    rewrite_expression(Rc::make_mut(value), aliases);
+                }
+            }
+            ExprKind::Cancel { resumption } => {
+                rewrite_expression(Rc::make_mut(resumption), aliases)
+            }
         }
     }
 
@@ -12307,7 +12347,7 @@ fn normalize_value_restricted_globals(program: &Program) -> Program {
                     rewrite(value, values, bound);
                 }
             }
-            ExprKind::Block(statements) => {
+            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
                 let mut nested = bound.clone();
                 for statement in Rc::make_mut(statements) {
                     match statement {
@@ -12380,14 +12420,14 @@ fn normalize_value_restricted_globals(program: &Program) -> Program {
             | ExprKind::ByteString(_)
             | ExprKind::String(_)
             | ExprKind::Variable(_) => {}
-            // The parser's grammar-complete forms are rejected by `validate` or
-            // rewritten by `parser::normalize_for_legacy_consumers` before any
-            // compiler pass runs; reaching one here is a broken phase invariant.
             ExprKind::LabelReference(_) => {}
-            ExprKind::Resume { .. }
-            | ExprKind::Cancel { .. }
-            | ExprKind::TailResume { .. }
-            | ExprKind::ContextBlock(_) => unvalidated_syntax(),
+            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+                rewrite(Rc::make_mut(resumption), values, bound);
+                if let Some(value) = value {
+                    rewrite(Rc::make_mut(value), values, bound);
+                }
+            }
+            ExprKind::Cancel { resumption } => rewrite(Rc::make_mut(resumption), values, bound),
         }
     }
 
@@ -12545,7 +12585,7 @@ fn normalize_capture_free_function_items(program: &Program) -> Program {
                     rewrite(value, functions, bound, false);
                 }
             }
-            ExprKind::Block(statements) => {
+            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
                 let mut nested = bound.clone();
                 for statement in Rc::make_mut(statements) {
                     match statement {
@@ -12641,14 +12681,16 @@ fn normalize_capture_free_function_items(program: &Program) -> Program {
             | ExprKind::ByteString(_)
             | ExprKind::String(_)
             | ExprKind::Variable(_) => {}
-            // The parser's grammar-complete forms are rejected by `validate` or
-            // rewritten by `parser::normalize_for_legacy_consumers` before any
-            // compiler pass runs; reaching one here is a broken phase invariant.
             ExprKind::LabelReference(_) => {}
-            ExprKind::Resume { .. }
-            | ExprKind::Cancel { .. }
-            | ExprKind::TailResume { .. }
-            | ExprKind::ContextBlock(_) => unvalidated_syntax(),
+            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+                rewrite(Rc::make_mut(resumption), functions, bound, false);
+                if let Some(value) = value {
+                    rewrite(Rc::make_mut(value), functions, bound, false);
+                }
+            }
+            ExprKind::Cancel { resumption } => {
+                rewrite(Rc::make_mut(resumption), functions, bound, false)
+            }
         }
     }
 
@@ -16531,20 +16573,22 @@ fn resolve_effects(
                     collect_sites(&clause.body, found);
                 }
             }
-            ExprKind::Block(statements) => statements.iter().for_each(|statement| {
-                let (value, reference) = match statement {
-                    Stmt::Let { value, .. }
-                    | Stmt::Deconstruct { value, .. }
-                    | Stmt::Expr(value) => (value, None),
-                    Stmt::Assign {
-                        destination, value, ..
-                    } => (value, assignment_place_reference(destination)),
-                };
-                collect_sites(value, found);
-                if let Some(reference) = reference {
-                    collect_sites(reference, found);
-                }
-            }),
+            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                statements.iter().for_each(|statement| {
+                    let (value, reference) = match statement {
+                        Stmt::Let { value, .. }
+                        | Stmt::Deconstruct { value, .. }
+                        | Stmt::Expr(value) => (value, None),
+                        Stmt::Assign {
+                            destination, value, ..
+                        } => (value, assignment_place_reference(destination)),
+                    };
+                    collect_sites(value, found);
+                    if let Some(reference) = reference {
+                        collect_sites(reference, found);
+                    }
+                })
+            }
             ExprKind::Closure { body, .. }
             | ExprKind::TypedClosure { body, .. }
             | ExprKind::Move(body)
@@ -16581,14 +16625,14 @@ fn resolve_effects(
             | ExprKind::ByteString(_)
             | ExprKind::String(_)
             | ExprKind::Variable(_) => {}
-            // The parser's grammar-complete forms are rejected by `validate` or
-            // rewritten by `parser::normalize_for_legacy_consumers` before any
-            // compiler pass runs; reaching one here is a broken phase invariant.
             ExprKind::LabelReference(_) => {}
-            ExprKind::Resume { .. }
-            | ExprKind::Cancel { .. }
-            | ExprKind::TailResume { .. }
-            | ExprKind::ContextBlock(_) => unvalidated_syntax(),
+            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+                collect_sites(resumption, found);
+                if let Some(value) = value {
+                    collect_sites(value, found);
+                }
+            }
+            ExprKind::Cancel { resumption } => collect_sites(resumption, found),
         }
     }
 
@@ -18509,6 +18553,11 @@ fn generated_shapes(
                 if lifted_closures.insert(closure) {
                     for (ordinal, capture) in captures.iter().enumerate() {
                         let transport = match capture.mode {
+                            specialization::CaptureMode::Mutate
+                                if matches!(capture.ty, typeck::ProvisionalType::Unique(_)) =>
+                            {
+                                capture.ty.clone()
+                            }
                             specialization::CaptureMode::Mutate => {
                                 typeck::ProvisionalType::unique(capture.ty.clone())
                             }
@@ -18722,6 +18771,11 @@ fn generated_shapes(
                 let resolved = provisional_to_resolved(&capture.ty, nominal_ids, array_name)?;
                 let observe = borrowed_capture_transport(program, capture);
                 Some(match capture.mode {
+                    specialization::CaptureMode::Mutate
+                        if matches!(resolved, ResolvedType::Unique(_)) =>
+                    {
+                        resolved
+                    }
                     specialization::CaptureMode::Mutate => ResolvedType::Unique(Box::new(resolved)),
                     specialization::CaptureMode::Observe
                         if matches!(resolved, ResolvedType::Unique(_)) =>
@@ -19102,17 +19156,20 @@ fn contains_effect_control(expression: &Expr) -> bool {
             .iter()
             .any(|(_, value)| contains_effect_control(value)),
         ExprKind::Field(subject, _) => contains_effect_control(subject),
-        ExprKind::Block(statements) => statements.iter().any(|statement| match statement {
-            Stmt::Let { value, .. } | Stmt::Deconstruct { value, .. } | Stmt::Expr(value) => {
-                contains_effect_control(value)
-            }
-            Stmt::Assign {
-                destination, value, ..
-            } => {
-                contains_effect_control(value)
-                    || assignment_place_reference(destination).is_some_and(contains_effect_control)
-            }
-        }),
+        ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+            statements.iter().any(|statement| match statement {
+                Stmt::Let { value, .. } | Stmt::Deconstruct { value, .. } | Stmt::Expr(value) => {
+                    contains_effect_control(value)
+                }
+                Stmt::Assign {
+                    destination, value, ..
+                } => {
+                    contains_effect_control(value)
+                        || assignment_place_reference(destination)
+                            .is_some_and(contains_effect_control)
+                }
+            })
+        }
         ExprKind::Call(callee, args) => {
             contains_effect_control(callee) || args.iter().any(contains_effect_control)
         }
@@ -19133,14 +19190,8 @@ fn contains_effect_control(expression: &Expr) -> bool {
         | ExprKind::ByteString(_)
         | ExprKind::String(_)
         | ExprKind::Variable(_) => false,
-        // The parser's grammar-complete forms are rejected by `validate` or
-        // rewritten by `parser::normalize_for_legacy_consumers` before any
-        // compiler pass runs; reaching one here is a broken phase invariant.
         ExprKind::LabelReference(_) => false,
-        ExprKind::Resume { .. }
-        | ExprKind::Cancel { .. }
-        | ExprKind::TailResume { .. }
-        | ExprKind::ContextBlock(_) => unvalidated_syntax(),
+        ExprKind::Resume { .. } | ExprKind::Cancel { .. } | ExprKind::TailResume { .. } => true,
     }
 }
 
@@ -19152,17 +19203,19 @@ fn contains_closure(expression: &Expr) -> bool {
         }
         ExprKind::List(values) | ExprKind::Tuple(values) => values.iter().any(contains_closure),
         ExprKind::Struct { fields, .. } => fields.iter().any(|(_, value)| contains_closure(value)),
-        ExprKind::Block(statements) => statements.iter().any(|statement| match statement {
-            Stmt::Let { value, .. } | Stmt::Deconstruct { value, .. } | Stmt::Expr(value) => {
-                contains_closure(value)
-            }
-            Stmt::Assign {
-                destination, value, ..
-            } => {
-                contains_closure(value)
-                    || assignment_place_reference(destination).is_some_and(contains_closure)
-            }
-        }),
+        ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+            statements.iter().any(|statement| match statement {
+                Stmt::Let { value, .. } | Stmt::Deconstruct { value, .. } | Stmt::Expr(value) => {
+                    contains_closure(value)
+                }
+                Stmt::Assign {
+                    destination, value, ..
+                } => {
+                    contains_closure(value)
+                        || assignment_place_reference(destination).is_some_and(contains_closure)
+                }
+            })
+        }
         ExprKind::Call(callee, arguments) => {
             contains_closure(callee) || arguments.iter().any(contains_closure)
         }
@@ -19188,14 +19241,11 @@ fn contains_closure(expression: &Expr) -> bool {
         | ExprKind::ByteString(_)
         | ExprKind::String(_)
         | ExprKind::Variable(_) => false,
-        // The parser's grammar-complete forms are rejected by `validate` or
-        // rewritten by `parser::normalize_for_legacy_consumers` before any
-        // compiler pass runs; reaching one here is a broken phase invariant.
         ExprKind::LabelReference(_) => false,
-        ExprKind::Resume { .. }
-        | ExprKind::Cancel { .. }
-        | ExprKind::TailResume { .. }
-        | ExprKind::ContextBlock(_) => unvalidated_syntax(),
+        ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+            contains_closure(resumption) || value.as_deref().is_some_and(contains_closure)
+        }
+        ExprKind::Cancel { resumption } => contains_closure(resumption),
     }
 }
 
@@ -19219,7 +19269,7 @@ fn expression_uses_name(expression: &Expr, searched: &str) -> bool {
         ExprKind::Struct { fields, .. } => fields
             .iter()
             .any(|(_, value)| expression_uses_name(value, searched)),
-        ExprKind::Block(statements) => {
+        ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
             for statement in statements.iter() {
                 let (value, reference) = match statement {
                     Stmt::Let { value, .. }
@@ -19293,14 +19343,14 @@ fn expression_uses_name(expression: &Expr, searched: &str) -> bool {
         | ExprKind::Byte(_)
         | ExprKind::ByteString(_)
         | ExprKind::String(_) => false,
-        // The parser's grammar-complete forms are rejected by `validate` or
-        // rewritten by `parser::normalize_for_legacy_consumers` before any
-        // compiler pass runs; reaching one here is a broken phase invariant.
         ExprKind::LabelReference(_) => false,
-        ExprKind::Resume { .. }
-        | ExprKind::Cancel { .. }
-        | ExprKind::TailResume { .. }
-        | ExprKind::ContextBlock(_) => unvalidated_syntax(),
+        ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+            expression_uses_name(resumption, searched)
+                || value
+                    .as_deref()
+                    .is_some_and(|value| expression_uses_name(value, searched))
+        }
+        ExprKind::Cancel { resumption } => expression_uses_name(resumption, searched),
     }
 }
 
@@ -19400,7 +19450,7 @@ fn scan_handled_computation(
                 diverges: info.terminal,
             })
         }
-        ExprKind::Block(statements) => {
+        ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
             let mut performed = BTreeSet::new();
             let mut outward_protocols = BTreeSet::new();
             let mut counts = BTreeMap::<_, usize>::new();
@@ -19646,10 +19696,22 @@ fn scan_handled_computation(
             counts: BTreeMap::new(),
             diverges: false,
         }),
-        ExprKind::Resume { .. }
-        | ExprKind::Cancel { .. }
-        | ExprKind::TailResume { .. }
-        | ExprKind::ContextBlock(_) => unvalidated_syntax(),
+        ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+            sequence(
+                std::iter::once(resumption.as_ref()).chain(value.iter().map(AsRef::as_ref)),
+                operations,
+                operation_sites,
+                signatures,
+                planned_signatures,
+            )
+        }
+        ExprKind::Cancel { resumption } => sequence(
+            [resumption.as_ref()],
+            operations,
+            operation_sites,
+            signatures,
+            planned_signatures,
+        ),
     }
 }
 
@@ -19685,7 +19747,7 @@ fn expression_captures(
             }
             ExprKind::Field(subject, _) => visit(subject, outer, bound),
             ExprKind::Move(subject) => visit(subject, outer, bound),
-            ExprKind::Block(statements) => {
+            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
                 let saved = bound.clone();
                 for statement in statements.iter() {
                     match statement {
@@ -19760,10 +19822,13 @@ fn expression_captures(
             | ExprKind::String(_)
             | ExprKind::Variable(_) => false,
             ExprKind::LabelReference(_) => false,
-            ExprKind::Resume { .. }
-            | ExprKind::Cancel { .. }
-            | ExprKind::TailResume { .. }
-            | ExprKind::ContextBlock(_) => unvalidated_syntax(),
+            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+                visit(resumption, outer, bound)
+                    || value
+                        .as_deref()
+                        .is_some_and(|value| visit(value, outer, bound))
+            }
+            ExprKind::Cancel { resumption } => visit(resumption, outer, bound),
         }
     }
     visit(expression, outer, &mut initially_bound.clone())
@@ -20449,18 +20514,20 @@ fn expression_mentions_name(expression: &Expr, name: &str) -> bool {
             .any(|(_, value)| expression_mentions_name(value, name)),
         ExprKind::Field(subject, _) => expression_mentions_name(subject, name),
         ExprKind::Move(subject) => expression_mentions_name(subject, name),
-        ExprKind::Block(statements) => statements.iter().any(|statement| match statement {
-            Stmt::Let { value, .. } | Stmt::Deconstruct { value, .. } | Stmt::Expr(value) => {
-                expression_mentions_name(value, name)
-            }
-            Stmt::Assign {
-                destination, value, ..
-            } => {
-                expression_mentions_name(value, name)
-                    || assignment_place_reference(destination)
-                        .is_some_and(|reference| expression_mentions_name(reference, name))
-            }
-        }),
+        ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+            statements.iter().any(|statement| match statement {
+                Stmt::Let { value, .. } | Stmt::Deconstruct { value, .. } | Stmt::Expr(value) => {
+                    expression_mentions_name(value, name)
+                }
+                Stmt::Assign {
+                    destination, value, ..
+                } => {
+                    expression_mentions_name(value, name)
+                        || assignment_place_reference(destination)
+                            .is_some_and(|reference| expression_mentions_name(reference, name))
+                }
+            })
+        }
         ExprKind::Call(callee, args) => {
             expression_mentions_name(callee, name)
                 || args
@@ -20497,14 +20564,14 @@ fn expression_mentions_name(expression: &Expr, name: &str) -> bool {
         | ExprKind::Byte(_)
         | ExprKind::ByteString(_)
         | ExprKind::String(_) => false,
-        // The parser's grammar-complete forms are rejected by `validate` or
-        // rewritten by `parser::normalize_for_legacy_consumers` before any
-        // compiler pass runs; reaching one here is a broken phase invariant.
         ExprKind::LabelReference(_) => false,
-        ExprKind::Resume { .. }
-        | ExprKind::Cancel { .. }
-        | ExprKind::TailResume { .. }
-        | ExprKind::ContextBlock(_) => unvalidated_syntax(),
+        ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+            expression_mentions_name(resumption, name)
+                || value
+                    .as_deref()
+                    .is_some_and(|value| expression_mentions_name(value, name))
+        }
+        ExprKind::Cancel { resumption } => expression_mentions_name(resumption, name),
     }
 }
 
@@ -20525,7 +20592,7 @@ fn prove_resumption_consumption(
                 .any(|alias| expression_mentions_name(value, alias))
         };
         match &expression.kind {
-            ExprKind::Block(statements) => {
+            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
                 for statement in statements.iter() {
                     match statement {
                         Stmt::Let { name, value, .. } => {
@@ -20606,14 +20673,14 @@ fn prove_resumption_consumption(
             | ExprKind::ByteString(_)
             | ExprKind::String(_)
             | ExprKind::Variable(_) => {}
-            // The parser's grammar-complete forms are rejected by `validate` or
-            // rewritten by `parser::normalize_for_legacy_consumers` before any
-            // compiler pass runs; reaching one here is a broken phase invariant.
             ExprKind::LabelReference(_) => {}
-            ExprKind::Resume { .. }
-            | ExprKind::Cancel { .. }
-            | ExprKind::TailResume { .. }
-            | ExprKind::ContextBlock(_) => unvalidated_syntax(),
+            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+                collect_aliases(resumption, aliases);
+                if let Some(value) = value {
+                    collect_aliases(value, aliases);
+                }
+            }
+            ExprKind::Cancel { resumption } => collect_aliases(resumption, aliases),
         }
     }
     fn mentions_origin(expression: &Expr, aliases: &BTreeSet<String>) -> bool {
@@ -20630,11 +20697,9 @@ fn prove_resumption_consumption(
         visiting: &mut BTreeSet<String>,
     ) -> Result<usize, Diagnostic> {
         match &expression.kind {
-            ExprKind::Call(callee, args) if matches!(&callee.kind, ExprKind::Variable(path) if path.len() == 1 && matches!(path[0].as_ref(), "resume" | "tail")) =>
-            {
-                let terminal =
-                    matches!(&callee.kind, ExprKind::Variable(path) if path[0].as_ref() == "tail");
-                if args.len() != 2 {
+            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+                let terminal = matches!(expression.kind, ExprKind::TailResume { .. });
+                let Some(value) = value else {
                     return Err(type_error(
                         expression.span,
                         if terminal {
@@ -20643,11 +20708,11 @@ fn prove_resumption_consumption(
                             "`resume` requires one transported resumption and one independent result value"
                         },
                     ));
+                };
+                if !mentions_origin(resumption, aliases) {
+                    return count(value, binder, aliases, allow_cancel, functions, visiting);
                 }
-                if !mentions_origin(&args[0], aliases) {
-                    return Ok(0);
-                }
-                if expression_mentions_name(&args[1], binder) {
+                if expression_mentions_name(value, binder) {
                     return Err(type_error(
                         expression.span,
                         if terminal {
@@ -20659,24 +20724,15 @@ fn prove_resumption_consumption(
                 }
                 Ok(1)
             }
-            ExprKind::Call(callee, args) if matches!(&callee.kind, ExprKind::Variable(path) if path.len() == 1 && path[0].as_ref() == "cancel") =>
-            {
+            ExprKind::Cancel { resumption } => {
+                if !mentions_origin(resumption, aliases) {
+                    return Ok(0);
+                }
                 if !allow_cancel {
                     return Err(type_error(
                         expression.span,
                         "a resumption with a positive lower bound cannot be cancelled before its required uses",
                     ));
-                }
-                if args.len() != 1 {
-                    return Err(type_error(
-                        expression.span,
-                        format!(
-                            "`cancel` must receive `{binder}` directly and no other arguments, or receive one transported owner"
-                        ),
-                    ));
-                }
-                if !mentions_origin(&args[0], aliases) {
-                    return Ok(0);
                 }
                 Ok(1)
             }
@@ -20694,28 +20750,31 @@ fn prove_resumption_consumption(
             ExprKind::Field(subject, _) | ExprKind::Move(subject) => {
                 count(subject, binder, aliases, allow_cancel, functions, visiting)
             }
-            ExprKind::Block(statements) => statements.iter().try_fold(0, |uses, statement| {
-                let (value, reference) = match statement {
-                    Stmt::Let { value, .. }
-                    | Stmt::Deconstruct { value, .. }
-                    | Stmt::Expr(value) => (value, None),
-                    Stmt::Assign {
-                        destination, value, ..
-                    } => (value, assignment_place_reference(destination)),
-                };
-                let uses = uses + count(value, binder, aliases, allow_cancel, functions, visiting)?;
-                Ok(uses
-                    + reference.map_or(Ok(0), |reference| {
-                        count(
-                            reference,
-                            binder,
-                            aliases,
-                            allow_cancel,
-                            functions,
-                            visiting,
-                        )
-                    })?)
-            }),
+            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                statements.iter().try_fold(0, |uses, statement| {
+                    let (value, reference) = match statement {
+                        Stmt::Let { value, .. }
+                        | Stmt::Deconstruct { value, .. }
+                        | Stmt::Expr(value) => (value, None),
+                        Stmt::Assign {
+                            destination, value, ..
+                        } => (value, assignment_place_reference(destination)),
+                    };
+                    let uses =
+                        uses + count(value, binder, aliases, allow_cancel, functions, visiting)?;
+                    Ok(uses
+                        + reference.map_or(Ok(0), |reference| {
+                            count(
+                                reference,
+                                binder,
+                                aliases,
+                                allow_cancel,
+                                functions,
+                                visiting,
+                            )
+                        })?)
+                })
+            }
             ExprKind::Call(callee, args) => {
                 let mut uses = count(callee, binder, aliases, allow_cancel, functions, visiting)?;
                 for argument in args.iter() {
@@ -20854,19 +20913,20 @@ fn prove_resumption_consumption(
             | ExprKind::String(_)
             | ExprKind::Variable(_) => Ok(0),
             ExprKind::LabelReference(_) => Ok(0),
-            ExprKind::Resume { .. }
-            | ExprKind::Cancel { .. }
-            | ExprKind::TailResume { .. }
-            | ExprKind::ContextBlock(_) => unvalidated_syntax(),
         }
     }
 
     fn named_calls(expression: &Expr, name: &str) -> usize {
-        let here = usize::from(matches!(&expression.kind,
-            ExprKind::Call(callee, _) if matches!(&callee.kind,
-                ExprKind::Variable(path) if path.len() == 1 && path[0].as_ref() == name)));
+        let here = usize::from(match name {
+            "resume" => matches!(expression.kind, ExprKind::Resume { .. }),
+            "cancel" => matches!(expression.kind, ExprKind::Cancel { .. }),
+            "tail" => matches!(expression.kind, ExprKind::TailResume { .. }),
+            _ => matches!(&expression.kind,
+                    ExprKind::Call(callee, _) if matches!(&callee.kind,
+                        ExprKind::Variable(path) if path.len() == 1 && path[0].as_ref() == name)),
+        });
         here + match &expression.kind {
-            ExprKind::Block(statements) => statements
+            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => statements
                 .iter()
                 .map(|statement| match statement {
                     Stmt::Let { value, .. }
@@ -20929,14 +20989,12 @@ fn prove_resumption_consumption(
             | ExprKind::ByteString(_)
             | ExprKind::String(_)
             | ExprKind::Variable(_) => 0,
-            // The parser's grammar-complete forms are rejected by `validate` or
-            // rewritten by `parser::normalize_for_legacy_consumers` before any
-            // compiler pass runs; reaching one here is a broken phase invariant.
             ExprKind::LabelReference(_) => 0,
-            ExprKind::Resume { .. }
-            | ExprKind::Cancel { .. }
-            | ExprKind::TailResume { .. }
-            | ExprKind::ContextBlock(_) => unvalidated_syntax(),
+            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+                named_calls(resumption, name)
+                    + value.as_deref().map_or(0, |value| named_calls(value, name))
+            }
+            ExprKind::Cancel { resumption } => named_calls(resumption, name),
         }
     }
     fn closure_use_adjustment(
@@ -20949,7 +21007,9 @@ fn prove_resumption_consumption(
     ) -> Result<isize, Diagnostic> {
         fn transported_names(root: &Expr, origin: &str) -> BTreeSet<String> {
             fn visit(expression: &Expr, names: &mut BTreeSet<String>) {
-                if let ExprKind::Block(statements) = &expression.kind {
+                if let ExprKind::Block(statements) | ExprKind::ContextBlock(statements) =
+                    &expression.kind
+                {
                     for statement in statements.iter() {
                         match statement {
                             Stmt::Let { name, value, .. } => {
@@ -20990,7 +21050,7 @@ fn prove_resumption_consumption(
             names
         }
         let mut adjustment = 0isize;
-        if let ExprKind::Block(statements) = &expression.kind {
+        if let ExprKind::Block(statements) | ExprKind::ContextBlock(statements) = &expression.kind {
             for statement in statements.iter() {
                 let value = match statement {
                     Stmt::Let { name, value, .. } => {
@@ -21047,7 +21107,8 @@ fn prove_resumption_consumption(
                 _ => false,
             }
         }
-        let ExprKind::Block(statements) = &expression.kind else {
+        let (ExprKind::Block(statements) | ExprKind::ContextBlock(statements)) = &expression.kind
+        else {
             return None;
         };
         for (index, statement) in statements.iter().enumerate() {
@@ -21083,30 +21144,37 @@ fn prove_resumption_consumption(
         aliases: &BTreeSet<String>,
         terminally_diverges: &impl Fn(&Expr) -> bool,
     ) -> Option<Span> {
-        if let ExprKind::Call(callee, args) = &expression.kind
-            && matches!(&callee.kind, ExprKind::Variable(path) if path.len() == 1 && matches!(path[0].as_ref(), "resume" | "tail"))
-            && args.len() == 2
-            && mentions_origin(&args[0], aliases)
-            && terminally_diverges(&args[1])
+        if let ExprKind::Resume {
+            resumption,
+            value: Some(value),
+        }
+        | ExprKind::TailResume {
+            resumption,
+            value: Some(value),
+        } = &expression.kind
+            && mentions_origin(resumption, aliases)
+            && terminally_diverges(value)
         {
-            return Some(args[1].span);
+            return Some(value.span);
         }
         match &expression.kind {
-            ExprKind::Block(statements) => statements.iter().find_map(|statement| {
-                let (value, reference) = match statement {
-                    Stmt::Let { value, .. }
-                    | Stmt::Deconstruct { value, .. }
-                    | Stmt::Expr(value) => (value, None),
-                    Stmt::Assign {
-                        destination, value, ..
-                    } => (value, assignment_place_reference(destination)),
-                };
-                abandoning_resume_argument(value, aliases, terminally_diverges).or_else(|| {
-                    reference.and_then(|reference| {
-                        abandoning_resume_argument(reference, aliases, terminally_diverges)
+            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                statements.iter().find_map(|statement| {
+                    let (value, reference) = match statement {
+                        Stmt::Let { value, .. }
+                        | Stmt::Deconstruct { value, .. }
+                        | Stmt::Expr(value) => (value, None),
+                        Stmt::Assign {
+                            destination, value, ..
+                        } => (value, assignment_place_reference(destination)),
+                    };
+                    abandoning_resume_argument(value, aliases, terminally_diverges).or_else(|| {
+                        reference.and_then(|reference| {
+                            abandoning_resume_argument(reference, aliases, terminally_diverges)
+                        })
                     })
                 })
-            }),
+            }
             ExprKind::Closure { body, .. }
             | ExprKind::TypedClosure { body, .. }
             | ExprKind::Move(body)
@@ -21163,14 +21231,17 @@ fn prove_resumption_consumption(
             | ExprKind::ByteString(_)
             | ExprKind::String(_)
             | ExprKind::Variable(_) => None,
-            // The parser's grammar-complete forms are rejected by `validate` or
-            // rewritten by `parser::normalize_for_legacy_consumers` before any
-            // compiler pass runs; reaching one here is a broken phase invariant.
             ExprKind::LabelReference(_) => None,
-            ExprKind::Resume { .. }
-            | ExprKind::Cancel { .. }
-            | ExprKind::TailResume { .. }
-            | ExprKind::ContextBlock(_) => unvalidated_syntax(),
+            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+                abandoning_resume_argument(resumption, aliases, terminally_diverges).or_else(|| {
+                    value.as_deref().and_then(|value| {
+                        abandoning_resume_argument(value, aliases, terminally_diverges)
+                    })
+                })
+            }
+            ExprKind::Cancel { resumption } => {
+                abandoning_resume_argument(resumption, aliases, terminally_diverges)
+            }
         }
     }
 
@@ -21572,8 +21643,9 @@ impl<'a> CoreLowerer<'a> {
         parameter_contract: CoreParameterContract<'_>,
         allowance: EffectAllowance,
         body_instance: specialization::BodyInstanceKey,
-        expression_ordinals: BTreeMap<usize, u32>,
+        expression_ordinals: (BTreeMap<usize, u32>, BTreeMap<(usize, usize), u32>),
     ) -> (Self, Vec<core::Param>, Vec<core::Param>) {
+        let (expression_ordinals, expression_span_ordinals) = expression_ordinals;
         let environment_capture_modes = match &body_instance {
             specialization::BodyInstanceKey::Closure(request) => request
                 .captures
@@ -21716,6 +21788,7 @@ impl<'a> CoreLowerer<'a> {
                 body_instance: Some(body_instance),
                 environment_capture_modes,
                 expression_ordinals,
+                expression_span_ordinals,
                 effects,
                 allow_terminal_perform: allowance.terminal_performs,
                 outward_protocols: allowance.outward_protocols,
@@ -21904,6 +21977,7 @@ impl<'a> CoreLowerer<'a> {
                 body_instance: None,
                 environment_capture_modes: BTreeMap::new(),
                 expression_ordinals: BTreeMap::new(),
+                expression_span_ordinals: BTreeMap::new(),
                 effects,
                 allow_terminal_perform: allowance.terminal_performs,
                 outward_protocols: allowance.outward_protocols,
@@ -22998,15 +23072,23 @@ impl<'a> CoreLowerer<'a> {
         })
     }
 
+    fn expression_ordinal(&self, expression: &Expr) -> Option<u32> {
+        self.expression_ordinals
+            .get(&(std::ptr::from_ref(expression) as usize))
+            .copied()
+            .or_else(|| {
+                self.expression_span_ordinals
+                    .get(&(expression.span.start, expression.span.end))
+                    .copied()
+            })
+    }
+
     fn planned_call(
         &self,
         expression: &Expr,
     ) -> Option<(Signature, Vec<GeneratedArgument>, Option<String>)> {
         let body = self.body_instance.clone()?;
-        let expression_ordinal = self
-            .expression_ordinals
-            .get(&(std::ptr::from_ref(expression) as usize))
-            .copied()?;
+        let expression_ordinal = self.expression_ordinal(expression)?;
         let site = specialization::CallSiteKey {
             body,
             expression_ordinal,
@@ -23030,10 +23112,7 @@ impl<'a> CoreLowerer<'a> {
 
     fn planned_late_generic_call(&self, expression: &Expr) -> Option<String> {
         let body = self.body_instance.clone()?;
-        let expression_ordinal = self
-            .expression_ordinals
-            .get(&(std::ptr::from_ref(expression) as usize))
-            .copied()?;
+        let expression_ordinal = self.expression_ordinal(expression)?;
         let target = self
             .specialization_graph
             .direct_calls
@@ -23122,10 +23201,7 @@ impl<'a> CoreLowerer<'a> {
 
     fn planned_closure_value(&self, expression: &Expr) -> Option<specialization::ClosureRequest> {
         let body = self.body_instance.clone()?;
-        let expression_ordinal = self
-            .expression_ordinals
-            .get(&(std::ptr::from_ref(expression) as usize))
-            .copied()?;
+        let expression_ordinal = self.expression_ordinal(expression)?;
         self.specialization_graph
             .closure_values
             .get(&specialization::CallSiteKey {
@@ -23137,10 +23213,7 @@ impl<'a> CoreLowerer<'a> {
 
     fn planned_late_closure(&self, expression: &Expr) -> Option<specialization::LateClosurePlan> {
         let body = self.body_instance.clone()?;
-        let expression_ordinal = self
-            .expression_ordinals
-            .get(&(std::ptr::from_ref(expression) as usize))
-            .copied()?;
+        let expression_ordinal = self.expression_ordinal(expression)?;
         self.specialization_graph
             .late_closures
             .get(&specialization::CallSiteKey {
@@ -23816,10 +23889,7 @@ impl<'a> CoreLowerer<'a> {
 
     fn planned_indirect_call(&self, expression: &Expr) -> Option<specialization::ClosureRequest> {
         let body = self.body_instance.clone()?;
-        let expression_ordinal = self
-            .expression_ordinals
-            .get(&(std::ptr::from_ref(expression) as usize))
-            .copied()?;
+        let expression_ordinal = self.expression_ordinal(expression)?;
         let site = specialization::CallSiteKey {
             body,
             expression_ordinal,
@@ -23840,11 +23910,7 @@ impl<'a> CoreLowerer<'a> {
         let Some(body) = self.body_instance.clone() else {
             return false;
         };
-        let Some(expression_ordinal) = self
-            .expression_ordinals
-            .get(&(std::ptr::from_ref(expression) as usize))
-            .copied()
-        else {
+        let Some(expression_ordinal) = self.expression_ordinal(expression) else {
             return false;
         };
         self.specialization_graph
@@ -23860,10 +23926,7 @@ impl<'a> CoreLowerer<'a> {
         expression: &Expr,
     ) -> Option<Vec<specialization::ClosureRequest>> {
         let body = self.body_instance.clone()?;
-        let expression_ordinal = self
-            .expression_ordinals
-            .get(&(std::ptr::from_ref(expression) as usize))
-            .copied()?;
+        let expression_ordinal = self.expression_ordinal(expression)?;
         self.specialization_graph
             .indirect_call_sets
             .get(&specialization::CallSiteKey {
@@ -23875,10 +23938,7 @@ impl<'a> CoreLowerer<'a> {
 
     fn planned_opaque_closure_set(&self, expression: &Expr) -> Option<String> {
         let body = self.body_instance.clone()?;
-        let expression_ordinal = self
-            .expression_ordinals
-            .get(&(std::ptr::from_ref(expression) as usize))
-            .copied()?;
+        let expression_ordinal = self.expression_ordinal(expression)?;
         self.specialization_graph
             .opaque_closure_sets
             .get(&specialization::CallSiteKey {
@@ -23893,10 +23953,7 @@ impl<'a> CoreLowerer<'a> {
         expression: &Expr,
     ) -> Option<specialization::RecursiveSelfCall> {
         let body = self.body_instance.clone()?;
-        let expression_ordinal = self
-            .expression_ordinals
-            .get(&(std::ptr::from_ref(expression) as usize))
-            .copied()?;
+        let expression_ordinal = self.expression_ordinal(expression)?;
         self.specialization_graph
             .recursive_self_calls
             .get(&specialization::CallSiteKey {
@@ -23908,10 +23965,7 @@ impl<'a> CoreLowerer<'a> {
 
     fn planned_indirect_receiver_mode(&self, expression: &Expr) -> Option<u32> {
         let body = self.body_instance.clone()?;
-        let expression_ordinal = self
-            .expression_ordinals
-            .get(&(std::ptr::from_ref(expression) as usize))
-            .copied()?;
+        let expression_ordinal = self.expression_ordinal(expression)?;
         self.specialization_graph
             .indirect_call_modes
             .get(&specialization::CallSiteKey {
@@ -24052,7 +24106,7 @@ impl<'a> CoreLowerer<'a> {
                     lhs,
                     rhs,
                 } => known(lowerer, lhs, scoped).or_else(|| known(lowerer, rhs, scoped)),
-                ExprKind::Block(statements) => {
+                ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
                     let mut scoped = scoped.clone();
                     for (index, statement) in statements.iter().enumerate() {
                         let last = index + 1 == statements.len();
@@ -24111,15 +24165,97 @@ impl<'a> CoreLowerer<'a> {
                 }
                 ExprKind::LabelReference(_) | ExprKind::Leave { .. } => None,
                 ExprKind::Is { .. } => None,
-                ExprKind::Resume { .. }
-                | ExprKind::Cancel { .. }
-                | ExprKind::TailResume { .. }
-                | ExprKind::ContextBlock(_) => unvalidated_syntax(),
+                ExprKind::Resume { value, .. } => value
+                    .as_deref()
+                    .and_then(|value| known(lowerer, value, scoped)),
+                ExprKind::Cancel { .. } | ExprKind::TailResume { .. } => None,
             }
         }
 
         let ty = known(self, expression, &BTreeMap::new())?;
         is_integer(ty).then_some(ty)
+    }
+
+    fn later_binding_expected_type(&self, binding: &str, remaining: &[Stmt]) -> Option<TypeId> {
+        let mut pending = remaining
+            .iter()
+            .map(|statement| match statement {
+                Stmt::Let { value, .. }
+                | Stmt::Deconstruct { value, .. }
+                | Stmt::Expr(value)
+                | Stmt::Assign { value, .. } => value,
+            })
+            .collect::<Vec<_>>();
+        while let Some(expression) = pending.pop() {
+            match &expression.kind {
+                ExprKind::Binary { lhs, rhs, .. } => {
+                    if expression_uses_name(lhs, binding)
+                        && let Some(ty) = self.integer_comparison_operand_type(rhs)
+                    {
+                        return Some(ty);
+                    }
+                    if expression_uses_name(rhs, binding)
+                        && let Some(ty) = self.integer_comparison_operand_type(lhs)
+                    {
+                        return Some(ty);
+                    }
+                    pending.extend([lhs.as_ref(), rhs.as_ref()]);
+                }
+                ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                    pending.extend(statements.iter().map(|statement| match statement {
+                        Stmt::Let { value, .. }
+                        | Stmt::Deconstruct { value, .. }
+                        | Stmt::Expr(value)
+                        | Stmt::Assign { value, .. } => value,
+                    }));
+                }
+                ExprKind::Call(callee, arguments) => {
+                    pending.push(callee);
+                    pending.extend(arguments.iter());
+                }
+                ExprKind::Struct { fields, .. } => {
+                    pending.extend(fields.iter().map(|(_, value)| value));
+                }
+                ExprKind::Handle {
+                    computation,
+                    clauses,
+                } => {
+                    pending.push(computation);
+                    pending.extend(clauses.iter().map(|clause| &clause.body));
+                }
+                ExprKind::List(values) | ExprKind::Tuple(values) => pending.extend(values.iter()),
+                ExprKind::Field(subject, _)
+                | ExprKind::Move(subject)
+                | ExprKind::Unary {
+                    operand: subject, ..
+                } => pending.push(subject),
+                ExprKind::Perform { args, .. } => pending.extend(args.iter()),
+                ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
+                    pending.push(body)
+                }
+                ExprKind::Leave { value, .. } => pending.extend(value.iter().map(AsRef::as_ref)),
+                ExprKind::Is { subject, .. } => pending.push(subject),
+                ExprKind::Resume { resumption, value }
+                | ExprKind::TailResume { resumption, value } => {
+                    pending.push(resumption);
+                    pending.extend(value.iter().map(AsRef::as_ref));
+                }
+                ExprKind::Cancel { resumption } => pending.push(resumption),
+                ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
+                    pending.push(body)
+                }
+                ExprKind::Unit
+                | ExprKind::Int(_)
+                | ExprKind::Float(_)
+                | ExprKind::Char(_)
+                | ExprKind::Byte(_)
+                | ExprKind::ByteString(_)
+                | ExprKind::String(_)
+                | ExprKind::Variable(_)
+                | ExprKind::LabelReference(_) => {}
+            }
+        }
+        None
     }
 
     fn planned_signatures_in(&self, root: &Expr) -> BTreeMap<usize, Signature> {
@@ -24144,7 +24280,7 @@ impl<'a> CoreLowerer<'a> {
                 found.insert(std::ptr::from_ref(expression) as usize, signature.clone());
             }
             match &expression.kind {
-                ExprKind::Block(statements) => {
+                ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
                     for statement in statements.iter() {
                         let (value, reference) = match statement {
                             Stmt::Let { value, .. }
@@ -24220,10 +24356,14 @@ impl<'a> CoreLowerer<'a> {
                 | ExprKind::String(_)
                 | ExprKind::Variable(_) => {}
                 ExprKind::LabelReference(_) => {}
-                ExprKind::Resume { .. }
-                | ExprKind::Cancel { .. }
-                | ExprKind::TailResume { .. }
-                | ExprKind::ContextBlock(_) => unvalidated_syntax(),
+                ExprKind::Resume { resumption, value }
+                | ExprKind::TailResume { resumption, value } => {
+                    visit(lowerer, resumption, found);
+                    if let Some(value) = value {
+                        visit(lowerer, value, found);
+                    }
+                }
+                ExprKind::Cancel { resumption } => visit(lowerer, resumption, found),
             }
         }
 
@@ -24252,7 +24392,7 @@ impl<'a> CoreLowerer<'a> {
                 }
             }
             match &expression.kind {
-                ExprKind::Block(statements) => {
+                ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
                     for statement in statements.iter() {
                         let (value, reference) = match statement {
                             Stmt::Let { value, .. }
@@ -24325,10 +24465,14 @@ impl<'a> CoreLowerer<'a> {
                 | ExprKind::String(_)
                 | ExprKind::Variable(_) => {}
                 ExprKind::LabelReference(_) => {}
-                ExprKind::Resume { .. }
-                | ExprKind::Cancel { .. }
-                | ExprKind::TailResume { .. }
-                | ExprKind::ContextBlock(_) => unvalidated_syntax(),
+                ExprKind::Resume { resumption, value }
+                | ExprKind::TailResume { resumption, value } => {
+                    visit(lowerer, resumption, found);
+                    if let Some(value) = value {
+                        visit(lowerer, value, found);
+                    }
+                }
+                ExprKind::Cancel { resumption } => visit(lowerer, resumption, found),
             }
         }
         let mut found = BTreeSet::new();
@@ -24338,10 +24482,7 @@ impl<'a> CoreLowerer<'a> {
 
     fn planned_construction(&self, expression: &Expr) -> Option<TypeId> {
         let body = self.body_instance.clone()?;
-        let expression_ordinal = self
-            .expression_ordinals
-            .get(&(std::ptr::from_ref(expression) as usize))
-            .copied()?;
+        let expression_ordinal = self.expression_ordinal(expression)?;
         let site = specialization::CallSiteKey {
             body: body.clone(),
             expression_ordinal,
@@ -25884,8 +26025,12 @@ impl<'a> CoreLowerer<'a> {
                 let mut projection_types = parent_origin.projection_types.clone();
                 let mut steps = Vec::with_capacity(names.len());
                 for name in names {
+                    let active_variant = steps
+                        .is_empty()
+                        .then(|| self.active_variant_proofs.get(&parent_origin.root).copied())
+                        .flatten();
                     let (field, next, variant) =
-                        self.projected_field(referent, name, operand.span, None)?;
+                        self.projected_field(referent, name, operand.span, active_variant)?;
                     referent = next;
                     path.push(field);
                     let reference = self.reference_id(referent, unique);
@@ -26222,6 +26367,35 @@ impl<'a> CoreLowerer<'a> {
                     None,
                 )
             }
+            _ if !unique => {
+                let parent = self.expression(operand, None)?;
+                self.validate_anonymous_use(&parent, 1, "borrowed temporary owner")?;
+                let referent = parent.ty;
+                let ty = self.reference_id(referent, false);
+                self.check(span, expected, ty)?;
+                let region = self.allocate_region(None);
+                let origin = core::ReferenceOrigin {
+                    region,
+                    root: u32::MAX,
+                    path: Vec::new(),
+                    projection_types: Vec::new(),
+                    external: false,
+                    unique: false,
+                    parent: None,
+                };
+                let mut expression = self.typed(
+                    span,
+                    ty,
+                    core::ExprKind::TemporaryProjectBorrow {
+                        source: Box::new(parent),
+                        path: Vec::new(),
+                        unique: false,
+                    },
+                );
+                expression.reference = Some(origin.clone());
+                expression.reference_fields = singleton_reference_fields(Some(origin));
+                return Ok(expression);
+            }
             _ => {
                 return Err(self.borrow_error(
                     operand.span,
@@ -26441,7 +26615,7 @@ impl<'a> CoreLowerer<'a> {
         let Some(rest) = deferred.strip_prefix("$trait_deferred$") else {
             return Ok(None);
         };
-        let Some((trait_name, method)) = rest.split_once('$') else {
+        let Some((trait_name, method)) = rest.rsplit_once('$') else {
             return Err(vec![type_error(
                 span,
                 "malformed deferred trait method identity",
@@ -27678,6 +27852,7 @@ impl<'a> CoreLowerer<'a> {
                     };
                     let mut parent_ty = local.ty;
                     let mut projections = Vec::with_capacity(fields.len());
+                    let mut active_variant = self.active_variant_proofs.get(&local.local).copied();
                     for (field, field_span) in fields {
                         if self.custom_drop_types.contains(&parent_ty) {
                             return Err(self.borrow_error(
@@ -27687,8 +27862,12 @@ impl<'a> CoreLowerer<'a> {
                                 ),
                             ));
                         }
-                        let (field_id, field_ty, _) =
-                            self.projected_field(parent_ty, field, field_span, None)?;
+                        let (field_id, field_ty, _) = self.projected_field(
+                            parent_ty,
+                            field,
+                            field_span,
+                            active_variant.take(),
+                        )?;
                         projections.push((field_id, field_ty, field_span));
                         parent_ty = field_ty;
                     }
@@ -27791,6 +27970,20 @@ impl<'a> CoreLowerer<'a> {
                         format!("`{name}` is not an owned local available to `move`"),
                     ));
                 };
+                if self.is_copy(local.ty)
+                    && self.use_interval(local.ty) == UseInterval::UNRESTRICTED
+                {
+                    self.check(span, expected, local.ty)?;
+                    self.record_local_use(local.local, span)?;
+                    return Ok(self.typed(
+                        span,
+                        local.ty,
+                        core::ExprKind::Local {
+                            local: local.local,
+                            copy: true,
+                        },
+                    ));
+                }
                 if self.empty_referents.contains(&local.local) {
                     return Err(self.borrow_error(
                         operand.span,
@@ -29006,7 +29199,170 @@ impl<'a> CoreLowerer<'a> {
                 Self::set_expression_reference_fields(&mut expression, projected_references);
                 Ok(expression)
             }
-            ExprKind::Block(statements) => self.block(statements, span, expected),
+            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                self.block(statements, span, expected)
+            }
+            ExprKind::Cancel { resumption } => {
+                if matches!(&resumption.kind, ExprKind::Variable(path)
+                    if path.len() == 1 && !self.locals.contains_key(path[0].as_ref()))
+                {
+                    return Err(vec![unsupported(
+                        span,
+                        "resumption control",
+                        "resumption outside handler clause: `cancel` requires an active handler resumption",
+                    )]);
+                }
+                let resumption = self.expression(resumption, None)?;
+                let Some((_, _, lower_uses, _)) = self.effects.resumption(resumption.ty) else {
+                    return Err(vec![type_error(
+                        resumption.span,
+                        "the `cancel` operand is not an optional one-shot resumption",
+                    )]);
+                };
+                if lower_uses != 0 {
+                    return Err(vec![unsupported(
+                        span,
+                        "resumption cancellation",
+                        "an exact finite `[n,n]` resumption cannot be cancelled before its required uses",
+                    )]);
+                }
+                self.check(span, expected, UNIT)?;
+                self.validate_anonymous_use(&resumption, 1, "cancel resumption temporary")?;
+                Ok(self.typed(
+                    span,
+                    UNIT,
+                    core::ExprKind::Cancel {
+                        resumption: Box::new(resumption),
+                    },
+                ))
+            }
+            ExprKind::Resume { resumption, value } => {
+                let Some(value) = value else {
+                    return Err(vec![type_error(
+                        span,
+                        "`resume` requires one transported resumption and one result value",
+                    )]);
+                };
+                if matches!(&resumption.kind, ExprKind::Variable(path)
+                    if path.len() == 1 && !self.locals.contains_key(path[0].as_ref()))
+                {
+                    return Err(vec![unsupported(
+                        span,
+                        "resumption control",
+                        "resumption outside handler clause: `resume` requires an active handler resumption",
+                    )]);
+                }
+                let receiver_mode = if matches!(resumption.kind, ExprKind::Move(_)) {
+                    2
+                } else {
+                    0
+                };
+                let resumption = self.expression(resumption, None)?;
+                let Some((input_type, output_type, _, reusable)) =
+                    self.effects.resumption(resumption.ty)
+                else {
+                    return Err(vec![type_error(
+                        resumption.span,
+                        "the `resume` operand is not a supported finite resumption",
+                    )]);
+                };
+                self.check(span, expected, output_type)?;
+                let value = self.expression(value, Some(input_type))?;
+                if Self::expression_reference_fields(&value)
+                    .values()
+                    .any(|origin| !origin.external)
+                {
+                    return Err(self.borrow_error(
+                        value.span,
+                        "a reference to a clause-local place cannot escape through resume",
+                    ));
+                }
+                self.validate_anonymous_use(&resumption, 1, "resume resumption temporary")?;
+                self.validate_anonymous_use(&value, 1, "resume value temporary")?;
+                Ok(self.typed(
+                    span,
+                    output_type,
+                    core::ExprKind::Resume {
+                        resumption: Box::new(resumption),
+                        receiver_mode: if !reusable { 2 } else { receiver_mode },
+                        value: Box::new(value),
+                    },
+                ))
+            }
+            ExprKind::TailResume { resumption, value } => {
+                let Some(value) = value else {
+                    return Err(vec![type_error(
+                        span,
+                        "`tail` requires one transported resumption and one operation-result value",
+                    )]);
+                };
+                if matches!(&resumption.kind, ExprKind::Variable(path)
+                    if path.len() == 1 && !self.locals.contains_key(path[0].as_ref()))
+                {
+                    return Err(vec![unsupported(
+                        span,
+                        "resumption control",
+                        "resumption outside handler clause: `tail` requires an active handler resumption",
+                    )]);
+                }
+                let resumption = self.expression(resumption, None)?;
+                let Some((input_type, output_type, _, reusable)) =
+                    self.effects.resumption(resumption.ty)
+                else {
+                    return Err(vec![type_error(
+                        resumption.span,
+                        "the `tail` operand is not a supported finite resumption",
+                    )]);
+                };
+                if reusable {
+                    return Err(vec![type_error(
+                        resumption.span,
+                        "`tail` requires an optional or exact one-shot resumption",
+                    )]);
+                }
+                let missing_effect =
+                    self.effects
+                        .extra_type(resumption.ty)
+                        .and_then(|descriptor| match descriptor.representation() {
+                            Type::Resumption {
+                                effect_signature, ..
+                            } => effect_signature
+                                .outward_protocols
+                                .iter()
+                                .find(|protocol| !self.outward_protocols.contains(protocol))
+                                .copied(),
+                            _ => None,
+                        });
+                if let Some(protocol) = missing_effect {
+                    return Err(vec![type_error(
+                        span,
+                        format!(
+                            "tail resumption may return through effect protocol {protocol}, which is absent from the current callable's outward row"
+                        ),
+                    )]);
+                }
+                self.check(span, expected, output_type)?;
+                let value = self.expression(value, Some(input_type))?;
+                if Self::expression_reference_fields(&value)
+                    .values()
+                    .any(|origin| !origin.external)
+                {
+                    return Err(self.borrow_error(
+                        value.span,
+                        "a reference to a clause-local place cannot escape through tail resume",
+                    ));
+                }
+                self.validate_anonymous_use(&resumption, 1, "tail-resume resumption temporary")?;
+                self.validate_anonymous_use(&value, 1, "tail-resume value temporary")?;
+                Ok(self.typed(
+                    span,
+                    output_type,
+                    core::ExprKind::TailResume {
+                        resumption: Box::new(resumption),
+                        value: Box::new(value),
+                    },
+                ))
+            }
             ExprKind::Tuple(values) => {
                 let expected_elements = expected.and_then(|ty| match self.resolved_type(ty) {
                     ResolvedType::Tuple(elements) if elements.len() == values.len() => {
@@ -29800,178 +30156,6 @@ impl<'a> CoreLowerer<'a> {
                     value.span = span;
                     return Ok(value);
                 }
-                if name == "cancel" {
-                    if arguments.len() != 1 {
-                        return Err(vec![type_error(
-                            span,
-                            format!("`cancel` expects 1 argument, got {}", arguments.len()),
-                        )]);
-                    }
-                    if matches!(&arguments[0].kind, ExprKind::Variable(path)
-                        if path.len() == 1 && !self.locals.contains_key(path[0].as_ref()))
-                    {
-                        return Err(vec![unsupported(
-                            span,
-                            "resumption control",
-                            "resumption outside handler clause: `cancel` requires an active handler resumption",
-                        )]);
-                    }
-                    let resumption = self.expression(&arguments[0], None)?;
-                    let Some((_, _, lower_uses, _)) = self.effects.resumption(resumption.ty) else {
-                        return Err(vec![type_error(
-                            arguments[0].span,
-                            "the `cancel` argument is not an optional one-shot resumption",
-                        )]);
-                    };
-                    if lower_uses != 0 {
-                        return Err(vec![unsupported(
-                            span,
-                            "resumption cancellation",
-                            "an exact finite `[n,n]` resumption cannot be cancelled before its required uses",
-                        )]);
-                    }
-                    self.check(span, expected, UNIT)?;
-                    self.validate_anonymous_use(&resumption, 1, "cancel resumption temporary")?;
-                    return Ok(self.typed(
-                        span,
-                        UNIT,
-                        core::ExprKind::Cancel {
-                            resumption: Box::new(resumption),
-                        },
-                    ));
-                }
-                if name == "resume" {
-                    if arguments.len() != 2 {
-                        return Err(vec![type_error(
-                            span,
-                            format!("`resume` expects 2 arguments, got {}", arguments.len()),
-                        )]);
-                    }
-                    if matches!(&arguments[0].kind, ExprKind::Variable(path)
-                        if path.len() == 1 && !self.locals.contains_key(path[0].as_ref()))
-                    {
-                        return Err(vec![unsupported(
-                            span,
-                            "resumption control",
-                            "resumption outside handler clause: `resume` requires an active handler resumption",
-                        )]);
-                    }
-                    let resumption = self.expression(&arguments[0], None)?;
-                    let Some((input_type, output_type, _, reusable)) =
-                        self.effects.resumption(resumption.ty)
-                    else {
-                        return Err(vec![type_error(
-                            arguments[0].span,
-                            "the first `resume` argument is not a supported finite resumption",
-                        )]);
-                    };
-                    self.check(span, expected, output_type)?;
-                    let value = self.expression(&arguments[1], Some(input_type))?;
-                    if Self::expression_reference_fields(&value)
-                        .values()
-                        .any(|origin| !origin.external)
-                    {
-                        return Err(self.borrow_error(
-                            arguments[1].span,
-                            "a reference to a clause-local place cannot escape through resume",
-                        ));
-                    }
-                    self.validate_anonymous_use(&resumption, 1, "resume resumption temporary")?;
-                    self.validate_anonymous_use(&value, 1, "resume value temporary")?;
-                    return Ok(self.typed(
-                        span,
-                        output_type,
-                        core::ExprKind::Resume {
-                            resumption: Box::new(resumption),
-                            receiver_mode: if !reusable
-                                || matches!(arguments[0].kind, ExprKind::Move(_))
-                            {
-                                2
-                            } else {
-                                0
-                            },
-                            value: Box::new(value),
-                        },
-                    ));
-                }
-                if name == "tail" {
-                    if arguments.len() != 2 {
-                        return Err(vec![type_error(
-                            span,
-                            format!("`tail` expects 2 arguments, got {}", arguments.len()),
-                        )]);
-                    }
-                    if matches!(&arguments[0].kind, ExprKind::Variable(path)
-                        if path.len() == 1 && !self.locals.contains_key(path[0].as_ref()))
-                    {
-                        return Err(vec![unsupported(
-                            span,
-                            "resumption control",
-                            "resumption outside handler clause: `tail` requires an active handler resumption",
-                        )]);
-                    }
-                    let resumption = self.expression(&arguments[0], None)?;
-                    let Some((input_type, output_type, _, reusable)) =
-                        self.effects.resumption(resumption.ty)
-                    else {
-                        return Err(vec![type_error(
-                            arguments[0].span,
-                            "the first `tail` argument is not a supported finite resumption",
-                        )]);
-                    };
-                    if reusable {
-                        return Err(vec![type_error(
-                            arguments[0].span,
-                            "`tail` requires an optional or exact one-shot resumption",
-                        )]);
-                    }
-                    let missing_effect =
-                        self.effects
-                            .extra_type(resumption.ty)
-                            .and_then(|descriptor| match descriptor.representation() {
-                                Type::Resumption {
-                                    effect_signature, ..
-                                } => effect_signature
-                                    .outward_protocols
-                                    .iter()
-                                    .find(|protocol| !self.outward_protocols.contains(protocol))
-                                    .copied(),
-                                _ => None,
-                            });
-                    if let Some(protocol) = missing_effect {
-                        return Err(vec![type_error(
-                            span,
-                            format!(
-                                "tail resumption may return through effect protocol {protocol}, which is absent from the current callable's outward row"
-                            ),
-                        )]);
-                    }
-                    self.check(span, expected, output_type)?;
-                    let value = self.expression(&arguments[1], Some(input_type))?;
-                    if Self::expression_reference_fields(&value)
-                        .values()
-                        .any(|origin| !origin.external)
-                    {
-                        return Err(self.borrow_error(
-                            arguments[1].span,
-                            "a reference to a clause-local place cannot escape through tail resume",
-                        ));
-                    }
-                    self.validate_anonymous_use(
-                        &resumption,
-                        1,
-                        "tail-resume resumption temporary",
-                    )?;
-                    self.validate_anonymous_use(&value, 1, "tail-resume value temporary")?;
-                    return Ok(self.typed(
-                        span,
-                        output_type,
-                        core::ExprKind::TailResume {
-                            resumption: Box::new(resumption),
-                            value: Box::new(value),
-                        },
-                    ));
-                }
                 if let Some(request) = self.planned_indirect_call(expression)
                     && let Some(runtime) = self.closure_runtimes.get(&request).cloned()
                 {
@@ -30529,14 +30713,46 @@ impl<'a> CoreLowerer<'a> {
                     )]);
                 }
                 self.check(span, expected, signature.result)?;
-                let mut args = Vec::with_capacity(arguments.len());
-                for (argument, ty) in arguments.iter().zip(&signature.params) {
-                    let argument = self.expression(argument, Some(*ty))?;
+                let deferred_unique_handles = arguments
+                    .iter()
+                    .zip(&signature.params)
+                    .enumerate()
+                    .filter_map(|(index, (argument, ty))| {
+                        let ExprKind::Variable(path) = &argument.kind else {
+                            return None;
+                        };
+                        (path.len() == 1
+                            && matches!(self.resolved_type(*ty), ResolvedType::Unique(_))
+                            && self
+                                .locals
+                                .get(path[0].as_ref())
+                                .is_some_and(|local| local.ty == *ty))
+                        .then_some(index)
+                    })
+                    .collect::<BTreeSet<_>>();
+                let mut args = vec![None; arguments.len()];
+                for index in (0..arguments.len())
+                    .filter(|index| !deferred_unique_handles.contains(index))
+                    .chain(deferred_unique_handles.iter().copied())
+                {
+                    let argument = &arguments[index];
+                    let ty = signature.params[index];
+                    let argument = if let ExprKind::Variable(path) = &argument.kind
+                        && path.len() == 1
+                        && self.environment_capture_modes.get(path[0].as_ref())
+                            == Some(&specialization::CaptureMode::Mutate)
+                        && matches!(self.resolved_type(ty), ResolvedType::Unique(_))
+                    {
+                        self.borrow(argument, true, argument.span, Some(ty))?
+                    } else {
+                        self.expression(argument, Some(ty))?
+                    };
                     let uses = self.expression_use_weight(&argument);
                     self.validate_anonymous_use(&argument, uses, "call argument temporary")?;
                     self.register_temporary_reference(&argument);
-                    args.push(argument);
+                    args[index] = Some(argument);
                 }
+                let args = args.into_iter().map(Option::unwrap).collect::<Vec<_>>();
                 if may_resume && let Some(factors) = &performance_factors {
                     self.enable_performance_factors(factors, span)?;
                 }
@@ -30886,7 +31102,38 @@ impl<'a> CoreLowerer<'a> {
                         ));
                     }
                 }
+                let observational_local = match &subject.kind {
+                    ExprKind::Variable(path) if path.len() == 1 => {
+                        self.locals.get(path[0].as_ref()).map(|local| {
+                            (
+                                local.local,
+                                self.actual_uses.get(&local.local).copied(),
+                                self.actual_use_lowers.get(&local.local).copied(),
+                            )
+                        })
+                    }
+                    _ => None,
+                };
                 let subject = self.expression(subject, None)?;
+                if let Some((local, upper, lower)) = observational_local {
+                    self.moved.remove(&local);
+                    match upper {
+                        Some(count) => {
+                            self.actual_uses.insert(local, count);
+                        }
+                        None => {
+                            self.actual_uses.remove(&local);
+                        }
+                    }
+                    match lower {
+                        Some(count) => {
+                            self.actual_use_lowers.insert(local, count);
+                        }
+                        None => {
+                            self.actual_use_lowers.remove(&local);
+                        }
+                    }
+                }
                 let decision = self.decision_pattern(pattern, subject.ty)?;
                 let raw = self.typed(
                     span,
@@ -32096,13 +32343,27 @@ impl<'a> CoreLowerer<'a> {
                 info,
                 clauses,
                 mut resumption_type,
-                receiver_mode,
+                mut receiver_mode,
                 mut receiver_type,
                 exhaustive,
                 captures,
                 recurrent_outward_protocols,
                 guaranteed_resume: _,
             } = group;
+            if shared_clause_plan.is_some()
+                && receiver_mode == 0
+                && info.resumption_upper.is_some_and(|upper| upper <= 1)
+            {
+                let outer = captures.iter().cloned().collect::<BTreeSet<_>>();
+                let requires_unique_view = clauses.iter().any(|clause| {
+                    specialization::captured_outer_uses(&clause.body, &outer, &[])
+                        .iter()
+                        .any(|(_, mode)| *mode == specialization::CaptureMode::Mutate)
+                });
+                if requires_unique_view {
+                    receiver_mode = 1;
+                }
+            }
             let capture_plan = if let Some(shared) = &shared_clause_plan {
                 shared.clone()
             } else {
@@ -32171,9 +32432,15 @@ impl<'a> CoreLowerer<'a> {
                                 .allocate_type(Type::RefShared { referent: *ty });
                         }
                     }
-                    receiver_type = self.effects.allocate_type(Type::RefShared {
-                        referent: capture_plan.ty,
-                    });
+                    receiver_type = if receiver_mode == 1 {
+                        self.effects.allocate_type(Type::RefUnique {
+                            referent: capture_plan.ty,
+                        })
+                    } else {
+                        self.effects.allocate_type(Type::RefShared {
+                            referent: capture_plan.ty,
+                        })
+                    };
                 }
             }
             let mut signature_params = info.params.clone();
@@ -32553,7 +32820,15 @@ impl<'a> CoreLowerer<'a> {
             AssignmentPlaceKind::Local { name, .. } => self
                 .locals
                 .get(name.as_ref())
-                .map(|local| Some(local.ty))
+                .map(|local| {
+                    if !Self::assignment_fields(place).is_empty()
+                        && let ResolvedType::Unique(referent) = self.resolved_type(local.ty)
+                    {
+                        Some(self.structural_id(&referent))
+                    } else {
+                        Some(local.ty)
+                    }
+                })
                 .ok_or_else(|| {
                     vec![type_error(
                         place.span,
@@ -32599,10 +32874,19 @@ impl<'a> CoreLowerer<'a> {
 
     fn assignment_active_variant(&self, place: &AssignmentPlace) -> Option<u32> {
         match &place.kind {
-            AssignmentPlaceKind::Local { name, .. } => self
-                .locals
-                .get(name.as_ref())
-                .and_then(|local| self.active_variant_proofs.get(&local.local).copied()),
+            AssignmentPlaceKind::Local { name, .. } => {
+                self.locals.get(name.as_ref()).and_then(|local| {
+                    if !Self::assignment_fields(place).is_empty()
+                        && matches!(self.resolved_type(local.ty), ResolvedType::Unique(_))
+                    {
+                        local.reference.as_ref().and_then(|origin| {
+                            self.active_variant_proofs.get(&origin.root).copied()
+                        })
+                    } else {
+                        self.active_variant_proofs.get(&local.local).copied()
+                    }
+                })
+            }
             AssignmentPlaceKind::Dereference { reference, .. } => {
                 let ExprKind::Variable(path) = &reference.kind else {
                     return None;
@@ -32646,15 +32930,45 @@ impl<'a> CoreLowerer<'a> {
                         format!("`{name}` is not an addressable local"),
                     )]);
                 };
-                (
-                    core::AssignmentRoot::Local {
-                        local: local.local,
-                        name: name.to_string(),
-                        ty: local.ty,
-                    },
-                    local.ty,
-                    Some((local.local, Vec::new())),
-                )
+                if !Self::assignment_fields(destination).is_empty()
+                    && let ResolvedType::Unique(referent) = self.resolved_type(local.ty)
+                {
+                    if self.moved.contains(&local.local) || self.suspended.contains(&local.local) {
+                        return Err(self.borrow_error(
+                            destination.span,
+                            format!("unique reference `{name}` is moved or suspended"),
+                        ));
+                    }
+                    let referent = self.structural_id(&referent);
+                    let Some(origin) = local.reference.clone().filter(|origin| origin.unique)
+                    else {
+                        return Err(self.borrow_error(
+                            destination.span,
+                            "the unique reference has no live mutable-loan origin",
+                        ));
+                    };
+                    self.mark_region_live(origin.region);
+                    (
+                        core::AssignmentRoot::DereferenceLocal {
+                            local: local.local,
+                            name: name.to_string(),
+                            reference: local.ty,
+                            referent,
+                        },
+                        referent,
+                        (!origin.external).then_some((origin.root, origin.path)),
+                    )
+                } else {
+                    (
+                        core::AssignmentRoot::Local {
+                            local: local.local,
+                            name: name.to_string(),
+                            ty: local.ty,
+                        },
+                        local.ty,
+                        Some((local.local, Vec::new())),
+                    )
+                }
             }
             AssignmentPlaceKind::Dereference { reference, .. } => {
                 if let ExprKind::Variable(path) = &reference.kind
@@ -32734,6 +33048,11 @@ impl<'a> CoreLowerer<'a> {
                 self.projected_field(ty, &field.name, field.span, active_variant.take())?;
             path.push(field_id);
             ty = next;
+            // MIR performs projected replacement through a temporary unique
+            // borrow. The source program need not otherwise mention
+            // `&mut <field type>`, so intern that implementation type while
+            // the global type arena is still mutable.
+            self.effects.allocate_type(Type::RefUnique { referent: ty });
             projections.push(core::AssignmentProjection {
                 field: field_id,
                 ty,
@@ -33040,7 +33359,8 @@ impl<'a> CoreLowerer<'a> {
                     if self.is_erased_callable_alias(value) {
                         continue;
                     }
-                    let value = self.expression(value, None)?;
+                    let expected = self.later_binding_expected_type(name, &statements[index + 1..]);
+                    let value = self.expression(value, expected)?;
                     let local = self.next_local;
                     self.next_local += 1;
                     let mut owns_loan = matches!(
@@ -35724,16 +36044,21 @@ impl MirLowerer {
                 MirFlow::Value(Some(dst))
             }
             core::ExprKind::PatternTest { subject, pattern } => {
+                let subject_local = match &subject.kind {
+                    core::ExprKind::Local { local, .. } => Some(*local),
+                    _ => None,
+                };
                 let subject_flow = self.expression(subject);
                 let MirFlow::Value(subject_value) = subject_flow else {
                     return MirFlow::Diverged;
                 };
                 let subject = self.materialize(subject_value, subject.span);
-                MirFlow::Value(Some(self.lower_pattern_test(
-                    subject,
-                    pattern,
-                    expression.span,
-                )))
+                let test = self.lower_pattern_test(subject, pattern, expression.span);
+                if let Some(local) = subject_local {
+                    self.locals.insert(local, subject);
+                    self.uninitialized_locals.remove(&local);
+                }
+                MirFlow::Value(Some(test))
             }
             core::ExprKind::PatternTestBorrowed { reference, pattern } => {
                 let reference = self.locals[reference];
@@ -35855,6 +36180,15 @@ impl MirLowerer {
                     self.mark(proven, expression.span);
                     self.destroy(tag, expression.span);
                 }
+                // A temporary refinement subject has no source-level name that
+                // can observe its residual shell. Retire that shell before
+                // lowering the branch body. Nested refinement joins remap live
+                // registers to block parameters, so retaining this raw register
+                // ID until after the body would later drop a moved predecessor.
+                if subject_local.is_none() {
+                    self.destroy(subject_register, subject.span);
+                    self.transfer_owner(subject_register);
+                }
                 let mut join_local_ids = Vec::new();
                 let mut join_detached_keys = Vec::new();
                 let mut join_registers = Vec::new();
@@ -35867,13 +36201,14 @@ impl MirLowerer {
                 if let MirFlow::Value(value) = self.expression(positive) {
                     positive_reaches_join = true;
                     let value = self.materialize(value, positive.span);
-                    let retire_subject =
-                        subject_local.is_none_or(|local| retire_at_join.contains(&local));
-                    if retire_subject {
-                        self.destroy(subject_register, subject.span);
-                        if let Some(local) = subject_local {
-                            self.uninitialized_locals.insert(local);
+                    if let Some(local) =
+                        subject_local.filter(|local| retire_at_join.contains(local))
+                    {
+                        if let Some(current_subject) = self.locals.remove(&local) {
+                            self.destroy(current_subject, subject.span);
+                            self.transfer_owner(current_subject);
                         }
+                        self.uninitialized_locals.insert(local);
                     }
                     join_local_ids = baseline_locals
                         .keys()
@@ -35948,15 +36283,20 @@ impl MirLowerer {
                 if let Some(variant) = negative_variant {
                     self.prove_enum_variant(subject_register, *variant, expression.span);
                 }
+                if subject_local.is_none() {
+                    self.destroy(subject_register, subject.span);
+                    self.transfer_owner(subject_register);
+                }
                 if let MirFlow::Value(value) = self.expression(negative) {
                     let value = self.materialize(value, negative.span);
-                    let retire_subject =
-                        subject_local.is_none_or(|local| retire_at_join.contains(&local));
-                    if retire_subject {
-                        self.destroy(subject_register, subject.span);
-                        if let Some(local) = subject_local {
-                            self.uninitialized_locals.insert(local);
+                    if let Some(local) =
+                        subject_local.filter(|local| retire_at_join.contains(local))
+                    {
+                        if let Some(current_subject) = self.locals.remove(&local) {
+                            self.destroy(current_subject, subject.span);
+                            self.transfer_owner(current_subject);
                         }
+                        self.uninitialized_locals.insert(local);
                     }
                     let negative_local_ids = baseline_locals
                         .keys()
@@ -36055,7 +36395,30 @@ impl MirLowerer {
                             } else {
                                 debug_assert_eq!(join_partial[index], incoming_partial);
                             }
+                            // Core ownership joining has already proved these
+                            // source locals equivalent. MIR may represent a
+                            // temporary borrow/copy carrier as owned on only
+                            // one predecessor; canonicalize the bookkeeping to
+                            // the first edge before constructing join operands.
+                            if join_owned[index] != self.owned.contains(source) {
+                                if join_owned[index] {
+                                    self.owned.push(*source);
+                                } else {
+                                    self.transfer_owner(*source);
+                                }
+                            }
                             debug_assert_eq!(join_owned[index], self.owned.contains(source));
+                            if join_borrowed[index] != self.borrowed.contains(source)
+                                && self
+                                    .reference_types
+                                    .contains(&self.register_types[*source as usize])
+                            {
+                                if join_borrowed[index] {
+                                    self.borrowed.insert(*source);
+                                } else {
+                                    self.borrowed.remove(source);
+                                }
+                            }
                             debug_assert_eq!(join_borrowed[index], self.borrowed.contains(source));
                         }
                     }
@@ -36369,6 +36732,20 @@ impl MirLowerer {
                 let source_span = source.span;
                 let value = self.expression(source).value();
                 let parent_reference = self.materialize(value, source_span);
+                if !self.borrowed.contains(&parent_reference) && path.is_empty() {
+                    let dst = self.allocate(expression.ty);
+                    self.push(
+                        expression.span,
+                        mir::InstructionKind::Borrow {
+                            dst,
+                            src: parent_reference,
+                            unique: *unique,
+                        },
+                    );
+                    self.borrowed.insert(dst);
+                    self.borrow_parents.insert(dst, parent_reference);
+                    return MirFlow::Value(Some(dst));
+                }
                 debug_assert!(
                     self.borrowed.contains(&parent_reference),
                     "a temporary projected-reborrow parent must be a live reference"
@@ -36496,18 +36873,37 @@ impl MirLowerer {
                 MirFlow::Value(Some(dst))
             }
             core::ExprKind::Call { declaration, args } => {
-                let mut lowered_args = Vec::with_capacity(args.len());
-                for argument in args {
+                let deferred_unique_handles = args
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(index, argument)| {
+                        (matches!(argument.kind, core::ExprKind::Local { copy: false, .. })
+                            && self
+                                .unique_reference_types
+                                .values()
+                                .any(|reference| *reference == argument.ty))
+                        .then_some(index)
+                    })
+                    .collect::<BTreeSet<_>>();
+                let mut lowered_args = vec![None; args.len()];
+                for index in (0..args.len())
+                    .filter(|index| !deferred_unique_handles.contains(index))
+                    .chain(deferred_unique_handles.iter().copied())
+                {
+                    let argument = &args[index];
                     let span = argument.span;
                     let MirFlow::Value(value) = self.expression(argument) else {
                         return MirFlow::Diverged;
                     };
-                    lowered_args.push(Self::operand(
+                    lowered_args[index] = Some(Self::operand(
                         self.materialize(value, span),
                         mir::UseMode::Move,
                     ));
                 }
-                let args = lowered_args;
+                let args = lowered_args
+                    .into_iter()
+                    .map(Option::unwrap)
+                    .collect::<Vec<_>>();
                 let parents = args
                     .iter()
                     .filter_map(|argument| self.borrow_parents.remove(&argument.register))
@@ -37463,6 +37859,7 @@ impl MirLowerer {
                     clause_values.push(Self::operand(dst, mir::UseMode::Move));
                 }
                 let handler = self.allocate(*handler_type);
+                let body_value = self.allocate(*body_type);
                 if shared {
                     let captures = shared_clause_captures
                         .iter()
@@ -37491,7 +37888,6 @@ impl MirLowerer {
                         },
                     );
                 }
-                let body_value = self.allocate(*body_type);
                 let captures = body_captures
                     .iter()
                     .map(|capture| {
@@ -37577,6 +37973,8 @@ impl MirLowerer {
                             }
                             self.push(*span, mir::InstructionKind::Deconstruct { src });
                             self.transfer_owner(src);
+                            self.locals.remove(source);
+                            self.uninitialized_locals.insert(*source);
                         }
                         core::Stmt::Assign {
                             value,
@@ -37861,7 +38259,12 @@ impl MirLowerer {
                     }
                     self.transfer_owner(register);
                 }
-                self.locals = saved;
+                // Lexical exit removes block-local identities, but outer
+                // locals may have been remapped to fresh SSA registers by a
+                // nested branch join or assignment. Keep those current
+                // mappings (and keep moved outer locals absent) instead of
+                // resurrecting the entry registers from `saved`.
+                self.locals.retain(|local, _| saved.contains_key(local));
                 value
             }
         }
@@ -41596,13 +41999,4 @@ fn unsupported(span: Span, title: &str, message: impl Into<String>) -> Diagnosti
 
 fn type_error(span: Span, message: impl Into<String>) -> Diagnostic {
     Diagnostic::error("bytecode subset type error", message, span).with_code(TYPE_CODE)
-}
-
-/// The parser's grammar-complete forms (labels, `is`, typed anonymous
-/// callables, float/char/byte literals, structural resumptions, contextual
-/// blocks) are rejected by `validate` or rewritten by
-/// `parser::normalize_for_legacy_consumers` before compilation begins, so no
-/// compiler pass can receive them.
-fn unvalidated_syntax<T>() -> T {
-    unreachable!("grammar-complete syntax is rejected or rewritten before lowering")
 }

@@ -16,8 +16,11 @@
   type: (identifier) @type
   variant: (variant_identifier) @constructor)
 (struct_expression type: (identifier) @type)
-(effect_identifier) @type @tag
-(effect_operation_identifier) @function @variant
+(struct_pattern (identifier) @type . "{")
+; Keep effects distinct from the nominal types used in their parameters, and
+; keep operations/handler clauses distinct from ordinary functions.
+(effect_identifier) @tag
+(effect_operation_identifier) @variant
 
 (function_declaration name: (identifier) @function)
 (function_signature name: (identifier) @function)
@@ -34,6 +37,7 @@
 (field_expression field: (identifier) @property)
 (field_declaration name: (identifier) @property)
 (field_initializer name: (identifier) @property)
+(struct_pattern "{" (identifier) @property)
 
 (parameter name: (identifier) @variable.parameter)
 (generic_parameter (identifier) @variable.parameter)

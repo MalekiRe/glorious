@@ -3,13 +3,12 @@ use grandiose_vm::{Value, Vm, verify};
 
 fn run_i64_at_all_levels(source: &str, function: &str) {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let phases = compile_source_to_phases_with_options(
-            "generic-reference-transport.gr",
+            "generic-reference-transport.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -30,12 +29,60 @@ fn run_i64_at_all_levels(source: &str, function: &str) {
     }
 }
 
+#[test]
+fn projected_shared_return_outlives_the_parent_reference_handle() {
+    let source = r#"
+        struct Wrapper { private value: i64 }
+        inner(wrapper: &Wrapper) -> &i64 { &wrapper.value }
+        value(wrapper: &Wrapper) -> &i64 { inner(wrapper) }
+        main() -> { () }
+    "#;
+    for optimization_level in [
+        OptimizationLevel::O1,
+        OptimizationLevel::O2,
+        OptimizationLevel::O3,
+    ] {
+        compile_source_to_phases_with_options(
+            "projected-reference-return.glorious",
+            source,
+            CompileOptions { optimization_level },
+        )
+        .unwrap_or_else(|errors| panic!("{optimization_level:?}: {errors:#?}"));
+    }
+}
+
+#[test]
+fn shared_borrow_of_a_temporary_owner_agrees_with_core_lowering() {
+    let source = r#"
+        effect TemporaryOwnerCase { inspect() -> !; }
+        consume(value: &Bytes) -> usize { Bytes::len(value) }
+        answer() -> usize {
+            handle perform TemporaryOwnerCase::inspect() {
+                TemporaryOwnerCase::inspect() => consume(&String::as_bytes(&"temporary"))
+            }
+        }
+        main() -> { () }
+    "#;
+    for optimization_level in [
+        OptimizationLevel::O1,
+        OptimizationLevel::O2,
+        OptimizationLevel::O3,
+    ] {
+        compile_source_to_phases_with_options(
+            "temporary-owner-borrow.glorious",
+            source,
+            CompileOptions { optimization_level },
+        )
+        .unwrap_or_else(|errors| panic!("{optimization_level:?}: {errors:#?}"));
+    }
+}
+
 fn run_i64_at_all_levels_and_recovery(source: &str, function: &str) {
     run_i64_at_all_levels(source, function);
     let recovery_source = source.replace("main() -> { () }", "main() -> i64 { answer() }");
     assert_eq!(
         grandiose::run_source(
-            "generic-reference-transport-recovery.gr",
+            "generic-reference-transport-recovery.glorious",
             &recovery_source,
             vec![],
             &mut grandiose::eval::SystemHost::default(),
@@ -120,10 +167,10 @@ fn generic_reference_result_cannot_escape_its_concrete_owner() {
         main() -> { () }
     "#;
     let errors = compile_source_to_phases_with_options(
-        "generic-reference-escape.gr",
+        "generic-reference-escape.glorious",
         source,
         CompileOptions {
-            optimization_level: OptimizationLevel::O0,
+            optimization_level: OptimizationLevel::O2,
         },
     )
     .expect_err("generic specialization must not erase a concrete borrow origin");
@@ -337,39 +384,38 @@ fn enum_reference_payload_access_requires_proof_and_preserves_escape_safety() {
     "#;
     for (name, source, needle) in [
         (
-            "enum-reference-without-proof.gr",
+            "enum-reference-without-proof.glorious",
             without_proof,
             "dominating",
         ),
-        ("enum-reference-escape.gr", escaping, "escape"),
+        ("enum-reference-escape.glorious", escaping, "escape"),
         (
-            "temporary-reference-projection-escape.gr",
+            "temporary-reference-projection-escape.glorious",
             temporary_projection_escape,
             "escape",
         ),
         (
-            "reference-deconstruction-escape.gr",
+            "reference-deconstruction-escape.glorious",
             deconstruction_escape,
             "escape",
         ),
         (
-            "reference-deconstruction-alias.gr",
+            "reference-deconstruction-alias.glorious",
             deconstruction_alias,
             "incompatible live loan",
         ),
         (
-            "temporary-projected-reborrow-escape.gr",
+            "temporary-projected-reborrow-escape.glorious",
             temporary_reborrow_escape,
             "escape",
         ),
         (
-            "temporary-unique-reborrow-alias.gr",
+            "temporary-unique-reborrow-alias.glorious",
             temporary_unique_reborrow_alias,
             "incompatible live loan",
         ),
     ] {
         for optimization_level in [
-            OptimizationLevel::O0,
             OptimizationLevel::O1,
             OptimizationLevel::O2,
             OptimizationLevel::O3,
@@ -602,13 +648,12 @@ fn higher_order_recursive_wrapper_with_an_altered_reference_state_fails_closed()
         main() -> { () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let errors = compile_source_to_phases_with_options(
-            "recursive-wrapper-altered-reference-state.gr",
+            "recursive-wrapper-altered-reference-state.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -725,13 +770,12 @@ fn higher_order_callback_divergent_cfg_origins_fail_closed() {
         main() -> { () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let errors = compile_source_to_phases_with_options(
-            "higher-order-divergent-cfg-origin.gr",
+            "higher-order-divergent-cfg-origin.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -788,20 +832,19 @@ fn higher_order_selected_lifetime_cannot_escape_or_alias_its_owner() {
         main() -> { () }
     "#;
     for (name, source, needle) in [
-        ("higher-order-lifetime-escape.gr", escaping, "escape"),
+        ("higher-order-lifetime-escape.glorious", escaping, "escape"),
         (
-            "higher-order-lifetime-alias.gr",
+            "higher-order-lifetime-alias.glorious",
             aliasing,
             "incompatible live loan",
         ),
         (
-            "higher-order-lifetime-opaque-route.gr",
+            "higher-order-lifetime-opaque-route.glorious",
             opaque_route,
             "exactly one compatible reference",
         ),
     ] {
         for optimization_level in [
-            OptimizationLevel::O0,
             OptimizationLevel::O1,
             OptimizationLevel::O2,
             OptimizationLevel::O3,

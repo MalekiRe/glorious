@@ -19,8 +19,7 @@ fn run(artifact: grandiose_vm::Artifact, name: &str) -> Value {
         .unwrap()
 }
 
-const LEVELS: [OptimizationLevel; 4] = [
-    OptimizationLevel::O0,
+const LEVELS: [OptimizationLevel; 3] = [
     OptimizationLevel::O1,
     OptimizationLevel::O2,
     OptimizationLevel::O3,
@@ -57,7 +56,7 @@ fn const_effect_instances_are_distinct_and_nested_handlers_match_exactly() {
         main() -> { () }
     "#;
     for level in LEVELS {
-        let artifact = artifact_at("const-effect-instances.gr", source, level);
+        let artifact = artifact_at("const-effect-instances.glorious", source, level);
         assert_eq!(
             artifact
                 .protocols
@@ -87,7 +86,7 @@ fn brand_effect_instances_are_distinct_and_match_exactly() {
         main() -> { () }
     "#;
     for level in LEVELS {
-        let artifact = artifact_at("brand-effect-instances.gr", source, level);
+        let artifact = artifact_at("brand-effect-instances.glorious", source, level);
         assert_eq!(
             artifact
                 .protocols
@@ -114,7 +113,7 @@ fn associated_projection_effect_arguments_normalize_before_identity_selection() 
         main() -> { () }
     "#;
     for level in LEVELS {
-        let artifact = artifact_at("projected-effect-instance.gr", source, level);
+        let artifact = artifact_at("projected-effect-instance.glorious", source, level);
         assert_eq!(run(artifact, "selected"), Value::I64(42), "{level:?}");
     }
 }
@@ -145,7 +144,7 @@ fn generic_aliases_normalize_in_effect_payloads_and_results() {
         main() -> { selected(); () }
     "#;
     for level in LEVELS {
-        let artifact = artifact_at("generic-alias-effect-signature.gr", source, level);
+        let artifact = artifact_at("generic-alias-effect-signature.glorious", source, level);
         assert_eq!(run(artifact, "selected"), Value::I64(42), "{level:?}");
     }
 }
@@ -162,7 +161,7 @@ fn unresolved_projection_effect_arguments_are_structured_and_never_guess() {
         }
         main() -> { () }
     "#;
-    let diagnostics = compile_source_to_bytecode("ungrounded-projected-effect.gr", source)
+    let diagnostics = compile_source_to_bytecode("ungrounded-projected-effect.glorious", source)
         .expect_err("an ungrounded associated projection selected a protocol");
     assert!(
         diagnostics
@@ -192,8 +191,8 @@ fn static_effect_protocol_identity_is_canonical_across_source_reordering() {
     "#;
     for level in LEVELS {
         assert_eq!(
-            artifact_at("static-effect-order-a.gr", first, level).encode(),
-            artifact_at("static-effect-order-b.gr", reordered, level).encode(),
+            artifact_at("static-effect-order-a.glorious", first, level).encode(),
+            artifact_at("static-effect-order-b.glorious", reordered, level).encode(),
             "{level:?}"
         );
     }
@@ -215,8 +214,8 @@ fn structural_effect_protocol_identity_is_canonical_across_source_reordering() {
     "#;
     for level in LEVELS {
         assert_eq!(
-            artifact_at("structural-effect-order-a.gr", first, level).encode(),
-            artifact_at("structural-effect-order-b.gr", reordered, level).encode(),
+            artifact_at("structural-effect-order-a.glorious", first, level).encode(),
+            artifact_at("structural-effect-order-b.glorious", reordered, level).encode(),
             "{level:?}"
         );
     }
@@ -230,7 +229,7 @@ fn distinct_fail_instantiations_have_distinct_runtime_protocol_identities() {
         text_scope() -> / {Fail<Text>} { () }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("distinct-fail-instances.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("distinct-fail-instances.glorious", source).unwrap();
     let fail = artifact
         .protocols
         .iter()
@@ -256,7 +255,7 @@ fn instantiated_text_perform_and_handler_execute_with_substituted_payload_type()
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("handled-fail-text.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("handled-fail-text.glorious", source).unwrap();
     assert_eq!(run(artifact, "selected"), Value::Text("typed".into()));
 }
 
@@ -274,7 +273,8 @@ fn one_generic_effect_source_site_uses_each_ground_specialization() {
         text() -> Text { unpack(Parcel::Wrapped("typed")) }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("generic-effect-source-site.gr", source).unwrap();
+    let artifact =
+        compile_source_to_bytecode("generic-effect-source-site.glorious", source).unwrap();
     let inspect = artifact
         .protocols
         .iter()
@@ -310,7 +310,7 @@ fn generic_callable_forwards_its_instantiated_effect_parameter_and_row() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("forwarded-generic-fail.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("forwarded-generic-fail.glorious", source).unwrap();
     assert_eq!(run(artifact, "selected"), Value::I64(42));
 }
 
@@ -329,7 +329,7 @@ fn nearest_matching_instantiated_handler_wins() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("nearest-generic-fail.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("nearest-generic-fail.glorious", source).unwrap();
     assert_eq!(run(artifact, "selected"), Value::I64(42));
 }
 
@@ -348,7 +348,7 @@ fn wrong_type_instance_is_not_intercepted_and_reaches_matching_outer_handler() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("nonmatching-generic-fail.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("nonmatching-generic-fail.glorious", source).unwrap();
     assert_eq!(run(artifact, "selected"), Value::I64(42));
 }
 
@@ -366,10 +366,10 @@ fn instantiated_protocol_artifact_is_stable_across_declaration_reordering() {
         integer() -> / {Fail<i64>} { () }
         effect Fail<E> { fail(error: E) -> ! }
     "#;
-    let first = compile_source_to_bytecode("generic-effect-order-a.gr", first)
+    let first = compile_source_to_bytecode("generic-effect-order-a.glorious", first)
         .unwrap()
         .encode();
-    let reordered = compile_source_to_bytecode("generic-effect-order-b.gr", reordered)
+    let reordered = compile_source_to_bytecode("generic-effect-order-b.glorious", reordered)
         .unwrap()
         .encode();
     assert_eq!(first, reordered);
@@ -379,17 +379,17 @@ fn instantiated_protocol_artifact_is_stable_across_declaration_reordering() {
 fn malformed_or_open_effect_instances_have_structured_diagnostics() {
     for (name, source, needle) in [
         (
-            "wrong-arity.gr",
+            "wrong-arity.glorious",
             "effect Fail<E> { fail(error:E) -> ! } bad() -> / {Fail<i64, Text>} { () } main() -> { () }",
             "argument",
         ),
         (
-            "wrong-kind.gr",
+            "wrong-kind.glorious",
             "effect Fail<E> { fail(error:E) -> ! } bad<e: EffectRow>() -> / {Fail<e>} { () } main() -> { () }",
             "type",
         ),
         (
-            "unresolved-effect-binder.gr",
+            "unresolved-effect-binder.glorious",
             "effect Fail<E> { fail(error:E) -> ! } bad() -> / {Fail<E>} { () } main() -> { () }",
             "E",
         ),
@@ -419,7 +419,8 @@ fn effect_row_aliases_may_contain_instantiated_protocols() {
         scope() -> / {Failures} { () }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("instantiated-effect-row-alias.gr", source).unwrap();
+    let artifact =
+        compile_source_to_bytecode("instantiated-effect-row-alias.glorious", source).unwrap();
     let fail = artifact
         .protocols
         .iter()
@@ -447,7 +448,7 @@ fn repeated_use_of_one_instance_dedupes_and_duplicate_display_names_are_rejected
         second() -> / {Fail<i64>} { () }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("deduped-effect-instance.gr", deduped).unwrap();
+    let artifact = compile_source_to_bytecode("deduped-effect-instance.glorious", deduped).unwrap();
     assert_eq!(
         artifact
             .protocols
@@ -469,8 +470,9 @@ fn repeated_use_of_one_instance_dedupes_and_duplicate_display_names_are_rejected
         effect Fail<E> { fail(error: E) -> ! }
         main() -> { () }
     "#;
-    let diagnostics = compile_source_to_bytecode("duplicate-effect-display-name.gr", duplicate)
-        .expect_err("duplicate effect display names were accepted");
+    let diagnostics =
+        compile_source_to_bytecode("duplicate-effect-display-name.glorious", duplicate)
+            .expect_err("duplicate effect display names were accepted");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic.code.as_deref() == Some("G0002")
             && diagnostic.message.contains("declared more than once")
@@ -498,7 +500,8 @@ fn generic_resumptions_have_distinct_identity_per_instance_and_handler_site() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("generic-resumption-identities.gr", source).unwrap();
+    let artifact =
+        compile_source_to_bytecode("generic-resumption-identities.glorious", source).unwrap();
     let ask_protocols = artifact
         .protocols
         .iter()
@@ -563,7 +566,8 @@ fn handling_one_instance_leaves_its_sibling_instance_outward() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("generic-effect-sibling-outward.gr", source).unwrap();
+    let artifact =
+        compile_source_to_bytecode("generic-effect-sibling-outward.glorious", source).unwrap();
     let integer = artifact
         .protocols
         .iter()

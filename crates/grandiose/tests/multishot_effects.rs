@@ -46,7 +46,7 @@ const TWO_SHOT: &str = r#"
 
 #[test]
 fn exact_two_shot_descriptor_copies_snapshots_cleans_up_and_replays() {
-    let artifact = compile_source_to_bytecode("two-shot.gr", TWO_SHOT).unwrap();
+    let artifact = compile_source_to_bytecode("two-shot.glorious", TWO_SHOT).unwrap();
     let required_for_this_program = 1 | (1 << 1) | (1 << 3) | (1 << 4);
     assert_eq!(
         artifact.required_features & required_for_this_program,
@@ -214,7 +214,7 @@ fn exact_two_shot_resumption_keeps_its_principal_through_generic_box_storage() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("boxed-two-shot.gr", source).unwrap();
+    let phases = compile_source_to_phases("boxed-two-shot.glorious", source).unwrap();
     let pick = phases
         .artifact
         .protocols
@@ -269,7 +269,7 @@ fn exact_two_shot_resumption_counts_closure_mediated_invocations() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("closure-two-shot.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("closure-two-shot.glorious", source).unwrap();
     let answer = artifact
         .functions
         .iter()
@@ -301,7 +301,7 @@ fn exact_two_shot_deeply_reinstalls_a_replayed_handler_tree() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("deep-two-shot.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("deep-two-shot.glorious", source).unwrap();
     let test = artifact
         .functions
         .iter()
@@ -341,7 +341,7 @@ fn direct_two_shot_multiplies_only_the_captured_owner_footprint() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("two-shot-owned-capture.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("two-shot-owned-capture.glorious", source).unwrap();
     let test = artifact
         .functions
         .iter()
@@ -405,7 +405,7 @@ fn direct_two_shot_rejects_under_and_overuse_of_a_captured_owner() {
         ),
     ];
     for (source, needle) in cases {
-        let diagnostics = compile_source_to_bytecode("bad-two-shot-owned-capture.gr", source)
+        let diagnostics = compile_source_to_bytecode("bad-two-shot-owned-capture.glorious", source)
             .expect_err("invalid multiplied ownership footprint was accepted");
         assert!(
             diagnostics
@@ -418,8 +418,8 @@ fn direct_two_shot_rejects_under_and_overuse_of_a_captured_owner() {
 
 #[test]
 fn two_shot_core_mir_and_artifact_are_deterministic() {
-    let first = compile_source_to_phases("two-shot.gr", TWO_SHOT).unwrap();
-    let second = compile_source_to_phases("two-shot.gr", TWO_SHOT).unwrap();
+    let first = compile_source_to_phases("two-shot.glorious", TWO_SHOT).unwrap();
+    let second = compile_source_to_phases("two-shot.glorious", TWO_SHOT).unwrap();
     assert_eq!(first.core_fingerprint(), second.core_fingerprint());
     assert_eq!(first.mir_fingerprint(), second.mir_fingerprint());
     assert_eq!(first.artifact.encode(), second.artifact.encode());
@@ -432,13 +432,16 @@ fn two_shot_core_mir_and_artifact_are_deterministic() {
 #[test]
 fn two_shot_bundle_and_interpreter_match_the_vm() {
     let bundle = SourceBundle::new(
-        Segment::new("effects.gr", "effect Choose { [2,2] choose() -> i64 }"),
         Segment::new(
-            "library.gr",
+            "effects.glorious",
+            "infixl 30 +; effect Choose { [2,2] choose() -> i64 }",
+        ),
+        Segment::new(
+            "library.glorious",
             "test() -> i64 { handle { let selected = perform Choose::choose(); selected + 1 } { Choose::choose() with k => { let ignored = resume(k, 19); resume(move k, 41) } } }",
         ),
         [Segment::new(
-            "entry.gr",
+            "entry.glorious",
             "main() -> { let result = test(); () }",
         )],
     );
@@ -468,10 +471,16 @@ fn two_shot_bundle_and_interpreter_match_the_vm() {
         main() -> { let result = test(); () }
     "#;
     assert_eq!(
-        run_source("two-shot-differential.gr", source, vec![], &mut NoHost).unwrap(),
+        run_source(
+            "two-shot-differential.glorious",
+            source,
+            vec![],
+            &mut NoHost
+        )
+        .unwrap(),
         InterpreterValue::Unit
     );
-    let artifact = compile_source_to_bytecode("two-shot-differential.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("two-shot-differential.glorious", source).unwrap();
     let entry = artifact.entry_function.unwrap();
     assert_eq!(
         Vm::new(verify(artifact).unwrap())
@@ -506,7 +515,7 @@ fn two_shot_snapshots_clone_only_initialized_residual_fields() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("two-shot-residual.gr", source).unwrap();
+    let phases = compile_source_to_phases("two-shot-residual.glorious", source).unwrap();
     assert!(
         phases
             .mir
@@ -572,7 +581,7 @@ fn invalid_and_unsupported_multishot_shapes_have_stable_source_diagnostics() {
         ),
     ];
     for (source, needle) in cases {
-        let diagnostics = compile_source_to_bytecode("rejected.gr", source).unwrap_err();
+        let diagnostics = compile_source_to_bytecode("rejected.glorious", source).unwrap_err();
         assert!(
             diagnostics.iter().any(|diagnostic| {
                 diagnostic.message.contains(needle)
@@ -637,7 +646,7 @@ fn direct_two_shot_snapshots_preserve_whole_and_projected_shared_aliases() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("two-shot-shared-aliases.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("two-shot-shared-aliases.glorious", source).unwrap();
     let functions = ["whole", "projected", "external"].map(|name| {
         artifact
             .functions
@@ -681,7 +690,8 @@ fn multishot_clause_capture_accepts_shared_references_and_reference_aggregates()
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("multishot-reference-capture.gr", source).unwrap();
+    let artifact =
+        compile_source_to_bytecode("multishot-reference-capture.glorious", source).unwrap();
     let selected = artifact
         .functions
         .iter()
@@ -716,7 +726,7 @@ fn two_shot_handlers_use_site_specific_result_types() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("site-specific-two-shot.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("site-specific-two-shot.glorious", source).unwrap();
     let choose = artifact
         .protocols
         .iter()

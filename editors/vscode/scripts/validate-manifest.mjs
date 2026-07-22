@@ -23,8 +23,8 @@ requireInvariant(
 const language = manifest.contributes?.languages?.find(({ id }) => id === "grandiose");
 requireInvariant(language, "Grandiose language contribution is missing");
 requireInvariant(
-  [".glorious", ".gr"].every((suffix) => language.extensions.includes(suffix)),
-  "canonical and compatibility source suffixes must both be packaged"
+  language.extensions.length === 1 && language.extensions[0] === ".glorious",
+  "only the .glorious source suffix may be packaged"
 );
 requireInvariant(
   manifest.contributes?.grammars?.some(
@@ -56,4 +56,8 @@ requireInvariant(
 requireInvariant(
   extension.includes('args: []'),
   "standalone grand-lsp launch must not receive hidden arguments"
+);
+requireInvariant(
+  !extension.includes('registerTextDocumentContentProvider('),
+  "standard-library definitions should open through ordinary file URIs"
 );

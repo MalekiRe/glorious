@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 use crate::util::valid_package_name;
@@ -21,16 +21,26 @@ pub struct WorkspaceDef {
 #[serde(deny_unknown_fields)]
 pub struct Manifest {
     pub project: Project,
+    /// Host capabilities granted when this package's bytecode is executed.
+    /// The default is deliberately empty: source code receives no ambient OS
+    /// authority merely by being compiled or run.
+    #[serde(default)]
+    pub runtime: Runtime,
     #[serde(default)]
     pub workspace: Option<WorkspaceDef>,
     #[serde(default)]
     pub dependencies: BTreeMap<String, DependencySpec>,
-    #[serde(default)]
-    pub backend: Option<Backend>,
     /// Diagnostic level overrides: `"warnings" = "deny"` or per-code
     /// `GRC1234 = "allow"`. Values: allow | warn | deny.
     #[serde(default)]
     pub lints: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Runtime {
+    #[serde(default)]
+    pub capabilities: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -44,19 +54,9 @@ pub struct Project {
     pub entry: Option<String>,
     /// Source globs are not supported yet; this is a list of directories (or
     /// files) relative to the package root that are scanned for canonical
-    /// `*.glorious` and legacy `*.gr` sources.
+    /// `*.glorious` sources.
     /// Defaults to `["src"]`.
     pub sources: Option<Vec<String>>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct Backend {
-    #[allow(dead_code)] // manifest contract; consulted when more backends exist
-    pub kind: Option<String>,
-    /// Checked against the installed clang major version at build time.
-    #[serde(rename = "minimum-version")]
-    pub minimum_version: Option<u64>,
 }
 
 /// Raw dependency table entry; validated into a [`Dependency`].
@@ -151,14 +151,15 @@ impl DependencySpec {
 
 /// A parsed grandiose.toml: a package, a bare workspace root, or both.
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawManifest {
     project: Option<Project>,
+    #[serde(default)]
+    runtime: Runtime,
     #[serde(default)]
     workspace: Option<WorkspaceDef>,
     #[serde(default)]
     dependencies: BTreeMap<String, DependencySpec>,
-    #[serde(default)]
-    backend: Option<Backend>,
     #[serde(default)]
     lints: BTreeMap<String, String>,
 }
@@ -178,12 +179,12 @@ pub fn load_any(path: &Path) -> Result<ManifestFile> {
         (Some(project), workspace) => {
             let manifest = Manifest {
                 project,
+                runtime: raw.runtime,
                 workspace,
                 dependencies: raw.dependencies,
-                backend: raw.backend,
                 lints: raw.lints,
             };
-            manifest.validate_name(path)?;
+            manifest.validate(path)?;
             Ok(ManifestFile::Package(manifest))
         }
         (None, Some(workspace)) => Ok(ManifestFile::WorkspaceRoot(workspace)),
@@ -205,7 +206,7 @@ impl Manifest {
         }
     }
 
-    fn validate_name(&self, path: &Path) -> Result<()> {
+    fn validate(&self, path: &Path) -> Result<()> {
         let manifest = self;
         if !valid_package_name(&manifest.project.name) {
             bail!(
@@ -213,6 +214,21 @@ impl Manifest {
                 path.display(),
                 manifest.project.name
             );
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for capability in &manifest.runtime.capabilities {
+            if !valid_capability_name(capability) {
+                bail!(
+                    "{}: runtime capability `{capability}` is invalid (expected lowercase dot-separated names such as `fs.read`)",
+                    path.display()
+                );
+            }
+            if !seen.insert(capability) {
+                bail!(
+                    "{}: runtime capability `{capability}` is listed more than once",
+                    path.display()
+                );
+            }
         }
         Ok(())
     }
@@ -227,6 +243,50 @@ impl Manifest {
                 Ok((name.clone(), spec.validate(name)?))
             })
             .collect()
+    }
+}
+
+fn valid_capability_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.split('.').all(|segment| {
+            let mut chars = segment.chars();
+            matches!(chars.next(), Some('a'..='z'))
+                && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ManifestFile, load_any};
+
+    #[test]
+    fn runtime_capabilities_default_to_none() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grandiose.toml");
+        std::fs::write(&path, "[project]\nname = \"app\"\nversion = \"0.1.0\"\n").unwrap();
+        let ManifestFile::Package(manifest) = load_any(&path).unwrap() else {
+            panic!("expected package")
+        };
+        assert!(manifest.runtime.capabilities.is_empty());
+    }
+
+    #[test]
+    fn runtime_capability_names_and_duplicates_are_rejected() {
+        for capabilities in [
+            "[\"fs/read\"]",
+            "[\"Fs.read\"]",
+            "[\"fs..read\"]",
+            "[\"fs.read\", \"fs.read\"]",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("grandiose.toml");
+            std::fs::write(
+                &path,
+                format!("[project]\nname = \"app\"\nversion = \"0.1.0\"\n\n[runtime]\ncapabilities = {capabilities}\n"),
+            )
+            .unwrap();
+            assert!(load_any(&path).is_err(), "accepted {capabilities}");
+        }
     }
 }
 
@@ -284,7 +344,7 @@ pub fn find_project_in_workspace(
     )
 }
 
-/// Legacy single-package lookup (used by the LSP and `add`).
+/// Single-package lookup used by the LSP and `add`.
 pub fn find_project(start: &Path) -> Result<(PathBuf, Manifest)> {
     let (root, manifest, _) = find_project_in_workspace(start, None)?;
     Ok((root, manifest))

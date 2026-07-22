@@ -6,7 +6,6 @@ use grandiose_vm::{Value, Vm, verify};
 
 fn run_selected_at_every_level(source_name: &str, source: &str, expected: Value) {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -46,7 +45,11 @@ fn shared_reference_payload_reaches_a_handler_pattern() {
         }
         main() -> { () }
     "#;
-    run_selected_at_every_level("shared-reference-effect-payload.gr", source, Value::I64(42));
+    run_selected_at_every_level(
+        "shared-reference-effect-payload.glorious",
+        source,
+        Value::I64(42),
+    );
 }
 
 #[test]
@@ -62,7 +65,11 @@ fn unique_reference_payload_is_accepted_for_mandatory_one_shot_resumption() {
         }
         main() -> { () }
     "#;
-    run_selected_at_every_level("unique-reference-effect-payload.gr", source, Value::I64(42));
+    run_selected_at_every_level(
+        "unique-reference-effect-payload.glorious",
+        source,
+        Value::I64(42),
+    );
 }
 
 #[test]
@@ -82,7 +89,11 @@ fn shared_reference_result_preserves_its_payload_origin_through_resume() {
         }
         main() -> { () }
     "#;
-    run_selected_at_every_level("shared-reference-effect-result.gr", source, Value::I64(42));
+    run_selected_at_every_level(
+        "shared-reference-effect-result.glorious",
+        source,
+        Value::I64(42),
+    );
 }
 
 #[test]
@@ -105,7 +116,11 @@ fn aggregate_reference_leaves_cross_the_effect_and_resume_together() {
         }
         main() -> { () }
     "#;
-    run_selected_at_every_level("aggregate-reference-effect.gr", source, Value::I64(42));
+    run_selected_at_every_level(
+        "aggregate-reference-effect.glorious",
+        source,
+        Value::I64(42),
+    );
 }
 
 #[test]
@@ -128,7 +143,11 @@ fn shared_reference_origin_survives_a_deep_resume_that_performs_again() {
         }
         main() -> { () }
     "#;
-    run_selected_at_every_level("deep-resume-reference-effect.gr", source, Value::I64(42));
+    run_selected_at_every_level(
+        "deep-resume-reference-effect.glorious",
+        source,
+        Value::I64(42),
+    );
 }
 
 #[test]
@@ -149,7 +168,7 @@ fn generic_effect_payload_and_result_preserve_reference_origin_relations() {
         main() -> { () }
     "#;
     run_selected_at_every_level(
-        "generic-reference-effect-relation.gr",
+        "generic-reference-effect-relation.glorious",
         source,
         Value::I64(42),
     );
@@ -176,7 +195,7 @@ fn closure_projection_routes_an_effect_result_origin_through_resume() {
         main() -> { () }
     "#;
     run_selected_at_every_level(
-        "closure-reference-effect-relation.gr",
+        "closure-reference-effect-relation.glorious",
         source,
         Value::I64(42),
     );
@@ -193,7 +212,11 @@ fn direct_tuple_projection_reference_return_keeps_external_origin() {
         }
         main() -> { () }
     "#;
-    run_selected_at_every_level("direct-tuple-reference-return.gr", source, Value::I64(42));
+    run_selected_at_every_level(
+        "direct-tuple-reference-return.glorious",
+        source,
+        Value::I64(42),
+    );
 }
 
 #[test]
@@ -212,7 +235,7 @@ fn unique_reference_payload_remains_rejected_for_multishot_resumption() {
         }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("unique-multishot-effect-reject.gr", source)
+    let errors = compile_source_to_bytecode("unique-multishot-effect-reject.glorious", source)
         .expect_err("a unique reference payload crossed a multishot operation");
     assert!(errors.iter().any(|error| {
         error
@@ -240,7 +263,7 @@ fn future_used_unique_reference_remains_in_the_exact_multishot_capture_set() {
         }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("future-unique-multishot-capture.gr", source)
+    let errors = compile_source_to_bytecode("future-unique-multishot-capture.glorious", source)
         .expect_err("a future-used unique loan must remain in the continuation capture set");
     assert!(
         errors.iter().any(|error| {
@@ -267,7 +290,7 @@ fn reference_result_cannot_escape_a_local_referent() {
         }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("reference-effect-local-escape.gr", source)
+    let errors = compile_source_to_bytecode("reference-effect-local-escape.glorious", source)
         .expect_err("an effect result escaped its local referent");
     assert!(
         errors.iter().any(|error| {
@@ -293,8 +316,9 @@ fn resume_cannot_send_a_clause_local_reference_into_the_suspended_computation() 
         }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("reference-effect-clause-local-escape.gr", source)
-        .expect_err("a clause-local reference escaped through resume");
+    let errors =
+        compile_source_to_bytecode("reference-effect-clause-local-escape.glorious", source)
+            .expect_err("a clause-local reference escaped through resume");
     assert!(
         errors.iter().any(|error| {
             error.message.contains("cannot escape")

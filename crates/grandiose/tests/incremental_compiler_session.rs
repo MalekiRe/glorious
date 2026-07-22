@@ -5,7 +5,7 @@ use grandiose::{CompileOptions, OptimizationLevel};
 fn bundle(helper_body: &str, helper_result: &str) -> SourceBundle {
     SourceBundle::distributed(
         Segment::new(
-            "main.gr",
+            "main.glorious",
             format!(
                 "helper() -> {helper_result} {{ {helper_body} }}\n\
                  untouched() -> i64 {{ 7 }}\n\
@@ -83,7 +83,7 @@ fn failed_revision_rolls_back_incremental_inference_transaction() {
     assert_eq!(session.stats().reused_bodies, total);
 
     let broken = SourceBundle::distributed(
-        Segment::new("main.gr", "helper( -> i64 { 9 }\nmain() -> () { () }"),
+        Segment::new("main.glorious", "helper( -> i64 { 9 }\nmain() -> () { () }"),
         [],
     );
     assert!(session.compile_bundle(&broken, options()).is_err());

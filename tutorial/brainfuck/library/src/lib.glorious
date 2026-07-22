@@ -1,0 +1,464 @@
+pub enum Instruction {
+    MoveRight,
+    MoveLeft,
+    Increment,
+    Decrement,
+    Output,
+    Input,
+    LoopStart(usize),
+    LoopEnd
+}
+
+infixl 20 represents;
+represents(byte: u8, command: u8) -> Bool { move byte == move command }
+
+pub struct Program { private instructions: Vec<Instruction>, private length: usize }
+
+pub enum ParseErrorKind { UnexpectedClose, UnclosedLoop }
+
+pub struct ParseError { private kind: ParseErrorKind, private offset: usize }
+
+struct Parser { private bytes: BytesIter, private offset: usize }
+
+struct NextByte { private found: Bool, private byte: u8 }
+
+struct Sequence {
+    private instructions: Vec<Instruction>,
+    private length: usize,
+    private closed: Bool
+}
+
+effect SequenceCase {
+    inspect(value: Result<Sequence, ParseError>) -> !;
+}
+
+effect ProgramCase {
+    inspect(value: Result<Program, ParseError>) -> !;
+}
+
+pub expect_program(value: Result<Program, ParseError>) -> Program {
+    handle perform ProgramCase::inspect(move value) {
+        ProgramCase::inspect(Result::Ok(program)) => program,
+        ProgramCase::inspect(Result::Err(_)) => abort()
+    }
+}
+
+sequence_ok(value: Sequence) -> Result<Sequence, ParseError> { Result::Ok(move value) }
+
+sequence_error(error: ParseError) -> Result<Sequence, ParseError> { Result::Err(move error) }
+
+sequence_error_after(error: ParseError, instructions: Vec<Instruction>) -> Result<Sequence, ParseError> {
+    sequence_error(move error)
+}
+
+new_instructions() -> Vec<Instruction> { Vec::new() }
+
+push_instruction(instructions: &mut Vec<Instruction>, instruction: Instruction) -> () {
+    Vec::push(instructions, move instruction)
+}
+
+append_instructions(instructions: &mut Vec<Instruction>, remainder: Vec<Instruction>) -> () {
+    Vec::append(instructions, move remainder)
+}
+
+next_byte(parser: &mut Parser) -> NextByte {
+    let next = BytesIter::next(&mut parser.bytes);
+    if(next is Option::Some(_)) {
+        NextByte { found: true, byte: move next.0 }
+    } else {
+        NextByte { found: false, byte: 0 }
+    }
+}
+
+parse_sequence(parser: &mut Parser, nested: Bool) -> Result<Sequence, ParseError> {
+    let next = next_byte(&mut *parser);
+    if(next.found) {
+        let byte = next.byte;
+        let offset = parser.offset;
+        parser.offset = move offset + 1;
+        if(byte represents 93) {
+            if(nested) {
+                sequence_ok(Sequence { instructions: Vec::new(), length: 0, closed: true })
+            } else {
+                sequence_error(
+                    ParseError { kind: ParseErrorKind::UnexpectedClose, offset: move offset }
+                )
+            }
+        } else {
+            if(byte == 91) {
+                let body_result = parse_sequence(&mut *parser, true);
+                handle perform SequenceCase::inspect(move body_result) {
+                    SequenceCase::inspect(Result::Err(error)) => {
+                        sequence_error(error)
+                    },
+                    SequenceCase::inspect(Result::Ok(sequence)) => {
+                    let Sequence { instructions: body, length: body_length, closed: _ } = move sequence;
+                    let rest_result = parse_sequence(&mut *parser, nested);
+                        handle perform SequenceCase::inspect(move rest_result) {
+                            SequenceCase::inspect(Result::Err(error)) => {
+                                sequence_error_after(error, move body)
+                            },
+                            SequenceCase::inspect(Result::Ok(rest)) => {
+                                let Sequence {
+                                    instructions: remainder,
+                                    length: remainder_length,
+                                    closed
+                                } = move rest;
+                                let instructions = new_instructions();
+                                let span = body_length + 1;
+                                push_instruction(&mut instructions, Instruction::LoopStart(move span));
+                                append_instructions(&mut instructions, move body);
+                                push_instruction(&mut instructions, Instruction::LoopEnd);
+                                append_instructions(&mut instructions, move remainder);
+                                sequence_ok(
+                                    Sequence {
+                                        instructions: move instructions,
+                                        length: move span + move remainder_length + 1,
+                                        closed: move closed
+                                    }
+                                )
+                            }
+                        }
+                    }
+                }
+            } else {
+                let rest_result = parse_sequence(&mut *parser, nested);
+                handle perform SequenceCase::inspect(move rest_result) {
+                    SequenceCase::inspect(Result::Err(error)) => {
+                        sequence_error(error)
+                    },
+                    SequenceCase::inspect(Result::Ok(rest)) => {
+                        let Sequence {
+                            instructions: remainder,
+                            length: remainder_length,
+                            closed
+                        } = move rest;
+                        let instructions = new_instructions();
+                        let added = if(byte == 62) {
+                            push_instruction(&mut instructions, Instruction::MoveRight);
+                            1
+                        } else {
+                            if(byte == 60) {
+                                push_instruction(&mut instructions, Instruction::MoveLeft);
+                                1
+                            } else {
+                                if(byte == 43) {
+                                    push_instruction(&mut instructions, Instruction::Increment);
+                                    1
+                                } else {
+                                    if(byte == 45) {
+                                        push_instruction(&mut instructions, Instruction::Decrement);
+                                        1
+                                    } else {
+                                        if(byte == 46) {
+                                            push_instruction(&mut instructions, Instruction::Output);
+                                            1
+                                        } else {
+                                            if(byte == 44) {
+                                                push_instruction(&mut instructions, Instruction::Input);
+                                                1
+                                            } else { 0 }
+                                        }
+                                    }
+                                }
+                            }
+                        };
+                        append_instructions(&mut instructions, move remainder);
+                        sequence_ok(
+                            Sequence {
+                                instructions: move instructions,
+                                length: move added + move remainder_length,
+                                closed: move closed
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    } else {
+        let offset = parser.offset;
+        if(nested) {
+            sequence_error(
+                ParseError { kind: ParseErrorKind::UnclosedLoop, offset: move offset }
+            )
+        } else { sequence_ok(Sequence { instructions: Vec::new(), length: 0, closed: false }) }
+    }
+}
+
+pub parse(bytes: BytesIter) -> Result<Program, ParseError> {
+    let parser = Parser { bytes: move bytes, offset: 0 };
+    let parsed = parse_sequence(&mut parser, false);
+    if(parsed is Result::Err(_)) {
+        Result::Err(move parsed.0)
+    } else {
+        let sequence = move parsed.0;
+        let Sequence { instructions, length, closed: _ } = move sequence;
+        Result::Ok(Program { instructions: move instructions, length: move length })
+    }
+}
+
+pub program_instructions(program: &Program) -> &Vec<Instruction> { &program.instructions }
+
+pub program_len(program: &Program) -> usize { program.length }
+
+pub parse_error_message(error: ParseError) -> String {
+    let ParseError { kind, offset: _ } = move error;
+    if(kind is ParseErrorKind::UnexpectedClose) {
+        "parse error: unexpected closing bracket"
+    } else { "parse error: unclosed loop" }
+}
+
+pub enum RuntimeError { PointerUnderflow, PointerOverflow }
+
+struct Tape { private cells: Vec<u8>, private length: usize, private cursor: usize }
+
+pub trait CellArithmetic {
+    increment(self: Self) -> Self;
+    decrement(self: Self) -> Self;
+}
+
+impl CellArithmetic for u8 {
+    increment(self: u8) -> u8 { wrapping_add(move self, 1) }
+
+    decrement(self: u8) -> u8 { wrapping_sub(move self, 1) }
+}
+
+increment_cell<T>(value: T) -> T where T: CellArithmetic { CellArithmetic::increment(move value) }
+
+decrement_cell<T>(value: T) -> T where T: CellArithmetic { CellArithmetic::decrement(move value) }
+
+effect BrainIo {
+    [1, 1] read() -> u8;
+    [1, 1] write(value: u8) -> ();
+}
+
+effect RuntimeCase {
+    inspect(value: Result<(), RuntimeError>) -> !;
+}
+
+effect OutputCase {
+    inspect(value: Result<Vec<u8>, RuntimeError>) -> !;
+}
+
+pub expect_output(value: Result<Vec<u8>, RuntimeError>) -> Vec<u8> {
+    handle perform OutputCase::inspect(move value) {
+        OutputCase::inspect(Result::Ok(output)) => output,
+        OutputCase::inspect(Result::Err(_)) => abort()
+    }
+}
+
+runtime_ok() -> Result<(), RuntimeError> { Result::Ok(()) }
+
+runtime_error(error: RuntimeError) -> Result<(), RuntimeError> { Result::Err(move error) }
+
+runtime_result_failed(value: &Result<(), RuntimeError>) -> Bool {
+    *value is Result::Err(_)
+}
+
+runtime_error_from_result(value: Result<(), RuntimeError>) -> Result<(), RuntimeError> {
+    handle perform RuntimeCase::inspect(move value) {
+        RuntimeCase::inspect(Result::Err(error)) => runtime_error(error),
+        RuntimeCase::inspect(Result::Ok(_)) => runtime_ok()
+    }
+}
+
+discard_runtime_result(value: Result<(), RuntimeError>) -> () { () }
+
+new_tape() -> Tape {
+    let cells = Vec::new();
+    fill_cells(&mut cells, 256);
+    Tape { cells: move cells, length: 256, cursor: 0 }
+}
+
+fill_cells(cells: &mut Vec<u8>, remaining: usize) -> {
+    if(remaining == 0) {
+        ()
+    } else {
+        Vec::push(&mut *cells, 0);
+        fill_cells(&mut *cells, move remaining - 1)
+    }
+}
+
+current(tape: &Tape) -> u8 { *Vec::index(&tape.cells, tape.cursor) }
+
+set_current(tape: &mut Tape, value: u8) -> {
+    let cursor = tape.cursor;
+    *Vec::index_mut(&mut tape.cells, move cursor) = move value;
+    ()
+}
+
+move_left(tape: &mut Tape) -> Result<(), RuntimeError> {
+    if(tape.cursor == 0) {
+        runtime_error(RuntimeError::PointerUnderflow)
+    } else {
+        let cursor = tape.cursor;
+        tape.cursor = move cursor - 1;
+        runtime_ok()
+    }
+}
+
+read_byte(input: &mut BytesIter) -> u8 {
+    let next = BytesIter::next(input);
+    if(next is Option::Some(_)) {
+        next.0
+    } else { 0 }
+}
+
+read_into_current(tape: &mut Tape) -> Result<(), RuntimeError> / { BrainIo } {
+    let value = perform BrainIo::read();
+    set_current(tape, move value);
+    runtime_ok()
+}
+
+execute_loop(
+    instructions: &Vec<Instruction>,
+    end: usize,
+    body_start: usize,
+    tape: &mut Tape
+) -> Result<(), RuntimeError> / { BrainIo } {
+    if(current(&*tape) == 0) {
+        move tape;
+        runtime_ok()
+    } else {
+        let step = execute_sequence(instructions, end, body_start, &mut *tape);
+        let failed = runtime_result_failed(&step);
+        if(failed) {
+            move tape;
+            runtime_error_from_result(move step)
+        } else {
+            discard_runtime_result(move step);
+            execute_loop(instructions, end, body_start, tape)
+        }
+    }
+}
+
+execute_sequence(
+    instructions: &Vec<Instruction>,
+    end: usize,
+    index: usize,
+    tape: &mut Tape
+) -> Result<(), RuntimeError> / { BrainIo } {
+    if(index == end) {
+        move tape;
+        runtime_ok()
+    } else {
+        let instruction = Vec::index(instructions, index);
+        let is_loop_end = *instruction is Instruction::LoopEnd;
+        let is_move_right = *instruction is Instruction::MoveRight;
+        let is_move_left = *instruction is Instruction::MoveLeft;
+        let is_increment = *instruction is Instruction::Increment;
+        let is_decrement = *instruction is Instruction::Decrement;
+        let is_output = *instruction is Instruction::Output;
+        let is_input = *instruction is Instruction::Input;
+        let loop_span = if(*instruction is Instruction::LoopStart(_)) {
+            instruction.0
+        } else { 0 };
+        let is_loop_start = *instruction is Instruction::LoopStart(_);
+        if(is_loop_end) {
+            move tape;
+            runtime_ok()
+        } else {
+            let step = if(is_move_right) {
+                let next = tape.cursor + 1;
+                if(next == tape.length) {
+                    runtime_error(RuntimeError::PointerOverflow)
+                } else {
+                    tape.cursor = move next;
+                    runtime_ok()
+                }
+            } else {
+                if(is_move_left) {
+                    move_left(&mut *tape)
+                } else {
+                    if(is_increment) {
+                        let value = increment_cell(current(&*tape));
+                        set_current(&mut *tape, move value);
+                        runtime_ok()
+                    } else {
+                        if(is_decrement) {
+                            let value = decrement_cell(current(&*tape));
+                            set_current(&mut *tape, move value);
+                            runtime_ok()
+                        } else {
+                            if(is_output) {
+                                perform BrainIo::write(current(&*tape));
+                                runtime_ok()
+                            } else {
+                                if(is_input) {
+                                    read_into_current(&mut *tape)
+                                } else {
+                                    execute_loop(
+                                        instructions,
+                                        end,
+                                        index + 1,
+                                        &mut *tape
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            };
+            let next = if(is_loop_start) {
+                index + move loop_span + 1
+            } else { index + 1 };
+            let failed = runtime_result_failed(&step);
+            if(failed) {
+                move tape;
+                runtime_error_from_result(move step)
+            } else {
+                discard_runtime_result(move step);
+                execute_sequence(
+                    instructions,
+                    end,
+                    move next,
+                    tape
+                )
+            }
+        }
+    }
+}
+
+pub run_with_io(program: &Program, input: BytesIter) -> Result<Vec<u8>, RuntimeError> {
+    let tape = new_tape();
+    let input = move input;
+    let output = empty_output();
+    handle perform RuntimeCase::inspect(
+        execute_sequence(
+            program_instructions(program),
+            program.length,
+            0,
+            &mut tape
+        )
+    ) {
+        RuntimeCase::inspect(Result::Err(error)) => Result::Err(error),
+        RuntimeCase::inspect(Result::Ok(_)) => Result::Ok(move output),
+        BrainIo::read() with continuation => resume(
+            move continuation,
+            read_byte(&mut input)
+        ),
+        BrainIo::write(byte) with continuation => {
+            Vec::push(&mut output, move byte);
+            resume(move continuation, ())
+        }
+    }
+}
+
+empty_output() -> Vec<u8> { Vec::new() }
+
+pub input_character_count(input: &String) -> usize {
+    let chars = String::chars(input);
+    count_chars(&mut chars, 0)
+}
+
+count_chars(chars: &mut Chars, count: usize) -> usize {
+    if(Chars::next(&mut *chars) is Option::Some(_)) {
+        count_chars(&mut *chars, move count + 1)
+    } else { count }
+}
+
+pub runtime_error_message(error: RuntimeError) -> String {
+    if(error is RuntimeError::PointerUnderflow) {
+        "runtime error: pointer moved left of cell zero"
+    } else { "runtime error: pointer moved beyond the fixed tape" }
+}

@@ -58,7 +58,8 @@ const ORDERED_MATRIX: &str = r#"
 
 #[test]
 fn repeated_operation_clauses_form_one_ordered_nested_decision_dag() {
-    let phases = compile_source_to_phases("ordered-handler-matrix.gr", ORDERED_MATRIX).unwrap();
+    let phases =
+        compile_source_to_phases("ordered-handler-matrix.glorious", ORDERED_MATRIX).unwrap();
 
     // Runtime handler lookup is by protocol/operation. Repeated source rows must
     // therefore be grouped behind one descriptor for `route`, not serialized as
@@ -129,7 +130,11 @@ fn repeated_operation_clauses_form_one_ordered_nested_decision_dag() {
 #[test]
 fn first_matching_row_wins_over_later_nested_fallbacks() {
     assert_eq!(
-        run_function("ordered-handler-matrix.gr", ORDERED_MATRIX, "selected"),
+        run_function(
+            "ordered-handler-matrix.glorious",
+            ORDERED_MATRIX,
+            "selected"
+        ),
         Value::I64(42)
     );
 }
@@ -148,7 +153,7 @@ fn failed_scalar_literal_tests_preserve_the_scrutinee_for_a_binding_fallback() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        run_function("scalar-pattern-fallback.gr", source, "selected"),
+        run_function("scalar-pattern-fallback.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -165,7 +170,11 @@ fn a_closed_enum_without_all_variants_is_not_a_total_handler() {
         }
         main() -> { () }
     "#;
-    has_message("non-exhaustive-handler.gr", source, &["non-exhaustive"]);
+    has_message(
+        "non-exhaustive-handler.glorious",
+        source,
+        &["non-exhaustive"],
+    );
 }
 
 #[test]
@@ -181,7 +190,7 @@ fn a_non_exhaustive_matrix_is_partial_and_retains_its_outward_protocol() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("partial-pattern-handler.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("partial-pattern-handler.glorious", source).unwrap();
     let partial = artifact
         .functions
         .iter()
@@ -231,7 +240,7 @@ fn exclusive_handler_rows_join_use_by_hull_and_discharge_must_move_payloads() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        run_function("handler-use-hull.gr", source, "selected"),
+        run_function("handler-use-hull.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -253,7 +262,7 @@ fn wildcard_payload_destruction_cannot_erase_a_must_move_child() {
         main() -> { () }
     "#;
     has_message(
-        "handler-must-move-discard.gr",
+        "handler-must-move-discard.glorious",
         source,
         &["discard", "[0,0]"],
     );
@@ -276,13 +285,13 @@ fn handler_clause_bodies_preserve_the_pattern_sites_privacy_authority() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        run_function("private-handler-owner.gr", same_authority, "selected"),
+        run_function("private-handler-owner.glorious", same_authority, "selected"),
         Value::I64(42)
     );
 
     let bundle = SourceBundle::new(
         Segment::new(
-            "owner.gr",
+            "owner.glorious",
             r#"
                 struct Secret { private marker: i64 }
                 enum Packet { Wrapped(Secret) }
@@ -291,7 +300,7 @@ fn handler_clause_bodies_preserve_the_pattern_sites_privacy_authority() {
             "#,
         ),
         Segment::new(
-            "outsider.gr",
+            "outsider.glorious",
             r#"
                 bad() -> i64 {
                     handle perform Stop::stop(make_packet()) {
@@ -303,7 +312,7 @@ fn handler_clause_bodies_preserve_the_pattern_sites_privacy_authority() {
                 }
             "#,
         ),
-        [Segment::new("entry.gr", "main() -> { () }")],
+        [Segment::new("entry.glorious", "main() -> { () }")],
     );
     let diagnostics = compile_bundle_to_bytecode(&bundle).unwrap_err();
     assert!(
@@ -331,7 +340,7 @@ fn exhaustive_pattern_dispatch_does_not_bypass_custom_drop() {
         main() -> { () }
     "#;
     has_message(
-        "handler-custom-drop.gr",
+        "handler-custom-drop.glorious",
         source,
         &["custom Drop", "pattern"],
     );
@@ -350,7 +359,7 @@ fn binders_are_unique_across_an_entire_nested_handler_row() {
         main() -> { () }
     "#;
     has_message(
-        "duplicate-nested-handler-binding.gr",
+        "duplicate-nested-handler-binding.glorious",
         source,
         &["binding `value`", "more than once"],
     );
@@ -385,7 +394,7 @@ fn terminal_pattern_miss_forwards_exact_linear_payload_to_an_outer_handler() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        run_function("terminal-pattern-forward.gr", source, "selected"),
+        run_function("terminal-pattern-forward.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -412,7 +421,7 @@ fn absent_operation_in_partial_handler_forwards_to_outer_delimiter() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        run_function("missing-operation-forward.gr", source, "selected"),
+        run_function("missing-operation-forward.glorious", source, "selected"),
         Value::I64(77)
     );
 }
@@ -437,7 +446,7 @@ fn resumptive_pattern_miss_forwards_then_resumes_the_original_continuation() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        run_function("resumptive-pattern-forward.gr", source, "selected"),
+        run_function("resumptive-pattern-forward.glorious", source, "selected"),
         Value::I64(42)
     );
 }

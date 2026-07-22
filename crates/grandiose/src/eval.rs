@@ -457,7 +457,7 @@ pub enum Value {
         magnitude: u128,
     },
     /// An integer whose source type cannot be represented faithfully by the
-    /// recovery evaluator's legacy, implicitly-i64 `Int` case. `raw` is the
+    /// recovery evaluator's compatibility, implicitly-i64 `Int` case. `raw` is the
     /// width-truncated two's-complement bit pattern.
     Integer {
         signed: bool,
@@ -1181,7 +1181,7 @@ pub(crate) fn run_entry_with_runtime(
     runtime_leaves: RuntimeLeafAuthority,
 ) -> Result<Value, Diagnostic> {
     let runtime_leaves = runtime_leaves.resolve(program);
-    // Keep the invocation arguments independently of the legacy optional
+    // Keep the invocation arguments independently of the compatibility optional
     // `main(args)` adapter. The manifest-bound `process.args/get` leaf must see
     // the original invocation even when `main` itself has no parameter.
     let invocation_args = args.clone();
@@ -2285,7 +2285,7 @@ fn bootstrap_token(kind: Value, start: usize, end: usize) -> Value {
 }
 
 /// Interpreter-only acceleration for the self-hosting bootstrap. This mirrors
-/// compiler/src/main.gr's lexer, but returns ordinary evaluator values so the
+/// compiler/src/main.glorious's lexer, but returns ordinary evaluator values so the
 /// parser and every later compiler phase still execute in Grandiose.
 fn bootstrap_lex(source: &Value, span: Span) -> Result<Value, Diagnostic> {
     let Value::Struct { name, fields } = source else {
@@ -2874,7 +2874,7 @@ impl Evaluator<'_> {
                         });
                         Control::Expr(unwrap_expr(subject), locals)
                     }
-                    ExprKind::Block(statements) => {
+                    ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
                         if statements.is_empty() {
                             Control::Value(Value::Unit)
                         } else if statements.len() == 1 && matches!(&statements[0], Stmt::Expr(_)) {
@@ -3087,17 +3087,65 @@ impl Evaluator<'_> {
                         });
                         Control::Expr(unwrap_expr(subject), locals)
                     }
+                    ExprKind::Resume { resumption, value } => {
+                        let mut arguments = vec![unwrap_expr(resumption)];
+                        arguments.extend(value.map(unwrap_expr));
+                        let callee = Rc::new(Expr {
+                            kind: ExprKind::Variable(Rc::from([Rc::from("resume")])),
+                            span: expr.span,
+                        });
+                        self.begin_call_arguments(
+                            CallDesignator::Path {
+                                callee,
+                                kind: CallKind::Resume,
+                            },
+                            Rc::new(arguments),
+                            locals,
+                            expr.span,
+                            &mut frames,
+                        )?
+                    }
+                    ExprKind::TailResume { resumption, value } => {
+                        let mut arguments = vec![unwrap_expr(resumption)];
+                        arguments.extend(value.map(unwrap_expr));
+                        let callee = Rc::new(Expr {
+                            kind: ExprKind::Variable(Rc::from([Rc::from("tail")])),
+                            span: expr.span,
+                        });
+                        self.begin_call_arguments(
+                            CallDesignator::Path {
+                                callee,
+                                kind: CallKind::TailResume,
+                            },
+                            Rc::new(arguments),
+                            locals,
+                            expr.span,
+                            &mut frames,
+                        )?
+                    }
+                    ExprKind::Cancel { resumption } => {
+                        let callee = Rc::new(Expr {
+                            kind: ExprKind::Variable(Rc::from([Rc::from("cancel")])),
+                            span: expr.span,
+                        });
+                        self.begin_call_arguments(
+                            CallDesignator::Path {
+                                callee,
+                                kind: CallKind::Cancel,
+                            },
+                            Rc::new(vec![unwrap_expr(resumption)]),
+                            locals,
+                            expr.span,
+                            &mut frames,
+                        )?
+                    }
                     // Structural forms the pipeline rewrites or `validate`
                     // rejects before evaluation; reaching one here means the
                     // caller skipped those phases.
                     ExprKind::Labeled { .. }
                     | ExprKind::LabelReference(_)
                     | ExprKind::LabelDestination { .. }
-                    | ExprKind::Leave { .. }
-                    | ExprKind::Resume { .. }
-                    | ExprKind::Cancel { .. }
-                    | ExprKind::TailResume { .. }
-                    | ExprKind::ContextBlock(_) => {
+                    | ExprKind::Leave { .. } => {
                         return Err(runtime(
                             expr.span,
                             "this syntax is parsed but not yet supported by the recovery evaluator",
@@ -3838,9 +3886,6 @@ impl Evaluator<'_> {
         }
         let kind = if path.len() == 1 {
             match path[0].as_ref() {
-                "resume" => Some(CallKind::Resume),
-                "tail" => Some(CallKind::TailResume),
-                "cancel" => Some(CallKind::Cancel),
                 "destroy" => Some(CallKind::Destroy),
                 name => name
                     .strip_prefix("$trait_deferred$")
@@ -6251,7 +6296,7 @@ fn coerce_declared_integer(
         })
     {
         let Value::Int(value) = value else {
-            unreachable!("i64 coercion must use the legacy integer representation")
+            unreachable!("i64 coercion must use the compatibility integer representation")
         };
         Ok(Value::Integer {
             signed: true,
@@ -6905,11 +6950,11 @@ mod array_runtime_tests {
 
         let bundle = crate::SourceBundle::raw_with_trusted_standard_for_conformance(
             crate::Segment::new(
-                "trusted.gr",
+                "trusted.glorious",
                 "__g1_f32_add(left: f32, right: f32) -> f32 { () }
                  probe() -> f32 { __g1_f32_add(16777216.0, 1.0) }",
             ),
-            crate::Segment::new("main.gr", "main() -> { () }"),
+            crate::Segment::new("main.glorious", "main() -> { () }"),
             [],
         );
         let value = crate::run_bundle_entry_with_manifest_for_conformance(
@@ -6924,9 +6969,9 @@ mod array_runtime_tests {
         // The same spelling in user code remains an ordinary function: its
         // body executes and does not acquire primitive authority by name.
         let untrusted = crate::SourceBundle::raw_with_trusted_standard_for_conformance(
-            crate::Segment::new("trusted.gr", "main() -> { () }"),
+            crate::Segment::new("trusted.glorious", "main() -> { () }"),
             crate::Segment::new(
-                "user.gr",
+                "user.glorious",
                 "__g1_f32_add(left: f32, right: f32) -> f32 { left }
                  probe() -> f32 { __g1_f32_add(2.0, 3.0) }",
             ),

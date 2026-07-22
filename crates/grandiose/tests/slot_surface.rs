@@ -59,7 +59,6 @@ fn run(level: OptimizationLevel, name: &str) -> Value {
 #[test]
 fn slot_reinitializes_moved_storage_at_every_optimization_level() {
     for level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

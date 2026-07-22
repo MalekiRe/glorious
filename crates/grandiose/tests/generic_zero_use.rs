@@ -38,9 +38,8 @@ fn function_id(artifact: &grandiose_vm::Artifact, name: &str) -> u32 {
 }
 
 #[test]
-fn zero_use_evidence_propagates_through_nested_generic_calls_at_o0_through_o3() {
+fn zero_use_evidence_propagates_through_nested_generic_calls_at_o1_through_o3() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

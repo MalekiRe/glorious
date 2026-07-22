@@ -21,15 +21,11 @@ use crate::{
     span::Span,
 };
 
-/// Parses a complete program, stopping at the first diagnostic, and returns
-/// the legacy-normalized AST. This is the single-error compatibility surface
-/// over [`parse_recovering`] for consumers that predate the structural
-/// resumption and contextual-block variants; new consumers should use
-/// [`parse_recovering`] and see the normative parse tree.
+/// Parses a complete program, stopping at the first diagnostic.
 pub fn parse(tokens: Vec<Token>) -> Result<Program, Diagnostic> {
     let (program, mut diagnostics) = parse_recovering(tokens);
     if diagnostics.is_empty() {
-        Ok(normalize_for_legacy_consumers(program))
+        Ok(program)
     } else {
         Err(diagnostics.remove(0))
     }
@@ -93,7 +89,7 @@ pub fn parse_recovering_with_fixity_regions(
 }
 
 /// One operator's authority: its fixity, precedence, and the declaration that
-/// introduced it. Built-in operators carry no declaration span.
+/// introduced it.
 #[derive(Clone, Copy, Debug)]
 struct FixityEntry {
     kind: FixityKind,
@@ -101,43 +97,10 @@ struct FixityEntry {
     declaration: Option<Span>,
 }
 
-/// There are no compiler-built-in operators: `+` and friends are ordinary
-/// library operators grouped by declared fixity. Until the distributed
-/// standard library carries its own `infixl`/`infixr` declarations for the
-/// symbolic vocabulary, the parser assumes these migration defaults; any
-/// source declaration silently overrides an entry that has no declaration
-/// span. Delete this table once the standard library declares its operators.
-fn default_fixities() -> HashMap<String, FixityEntry> {
-    let mut table = HashMap::new();
-    for (spelling, precedence) in [
-        ("==", 20u8),
-        ("!=", 20),
-        ("<", 20),
-        ("<=", 20),
-        (">", 20),
-        (">=", 20),
-        ("+", 30),
-        ("-", 30),
-        ("*", 40),
-        ("/", 40),
-        ("%", 40),
-    ] {
-        table.insert(
-            spelling.to_owned(),
-            FixityEntry {
-                kind: FixityKind::Infix(Associativity::Left),
-                precedence,
-                declaration: None,
-            },
-        );
-    }
-    table
-}
-
 /// The spellings the current lowering recognizes as its comparison and
 /// arithmetic contract. This is a representation choice for downstream
-/// consumers (like `resume` recognition by spelling), not operator policy:
-/// grouping authority always comes from the fixity table.
+/// consumers, not operator policy: grouping authority always comes from the
+/// fixity table.
 fn lowered_binary(spelling: &str) -> Option<BinaryOp> {
     Some(match spelling {
         "==" => BinaryOp::Eq,
@@ -2220,9 +2183,7 @@ impl Parser {
     }
 
     /// `resume(k, value)`, `cancel(k)`, and `tail(k, value)` are structural
-    /// operations on a resumption, not ordinary calls. An operation with a
-    /// non-normative argument count still parses — as the legacy call shape —
-    /// so the resumption-consumption phase reports it with full context.
+    /// operations on a resumption, not ordinary calls.
     fn resumption_operation(&mut self, keyword: Kw, start: Span) -> Result<Expr, Diagnostic> {
         self.expect(
             TokenKind::LParen,
@@ -2257,13 +2218,24 @@ impl Parser {
             (Kw::Cancel, 1) => ExprKind::Cancel {
                 resumption: Rc::new(args.pop().unwrap()),
             },
-            _ => ExprKind::Call(
-                Rc::new(Expr {
-                    kind: ExprKind::Variable(Rc::from([Rc::from(keyword.as_str())])),
-                    span: start,
-                }),
-                Rc::new(args),
-            ),
+            (Kw::Cancel, count) => {
+                return Err(Diagnostic::error(
+                    "invalid resumption operation",
+                    format!("`cancel` requires exactly 1 argument, found {count}"),
+                    span,
+                ));
+            }
+            (Kw::Resume | Kw::Tail, count) => {
+                return Err(Diagnostic::error(
+                    "invalid resumption operation",
+                    format!(
+                        "`{}` requires 1 or 2 arguments, found {count}",
+                        keyword.as_str()
+                    ),
+                    span,
+                ));
+            }
+            _ => unreachable!("resumption_operation is called only for resumption keywords"),
         };
         Ok(Expr { kind, span })
     }
@@ -2424,7 +2396,7 @@ impl Parser {
                     }
                 } else {
                     Expr {
-                        // This payload exists only for legacy AST consumers.
+                        // This payload exists only for normalized AST consumers.
                         // Semantic consumers select a width from the exact
                         // `numeric_literals` spelling recorded above.
                         kind: ExprKind::Int(literal.as_i64(token.span).unwrap_or(0)),
@@ -3756,246 +3728,6 @@ fn same_kind(lhs: &TokenKind, rhs: &TokenKind) -> bool {
     discriminant(lhs) == discriminant(rhs)
 }
 
-/// TRANSITIONAL LEGACY BRIDGE. The parser's structural `resume`/`cancel`
-/// operations and contextual blocks are semantically identical to the
-/// encodings today's evaluator and lowering recognize (a call to the spelling
-/// `resume`/`cancel`/`tail`, and a plain block in argument/operand position). Until
-/// those consumers match the structural variants directly, the pipeline entry
-/// points rewrite the structural forms into the legacy encodings after
-/// parsing. Parse-level consumers see the structural AST. Forms with no
-/// legacy equivalent (labels, `is`, typed closures, the new literal
-/// kinds) pass through untouched for `validate` to judge.
-pub fn normalize_for_legacy_consumers(program: Program) -> Program {
-    fn spelled_call(spelling: &str, span: Span, args: Vec<Expr>) -> ExprKind {
-        ExprKind::Call(
-            Rc::new(Expr {
-                kind: ExprKind::Variable(Rc::from([Rc::from(spelling)])),
-                span,
-            }),
-            Rc::new(args),
-        )
-    }
-
-    fn expr(expression: &Expr) -> Expr {
-        let kind = match &expression.kind {
-            ExprKind::Resume { resumption, value } => {
-                let mut args = vec![expr(resumption)];
-                args.extend(value.iter().map(|value| expr(value)));
-                spelled_call("resume", expression.span, args)
-            }
-            ExprKind::Cancel { resumption } => {
-                spelled_call("cancel", expression.span, vec![expr(resumption)])
-            }
-            ExprKind::ContextBlock(statements) => {
-                ExprKind::Block(Rc::new(statements.iter().map(stmt).collect()))
-            }
-            ExprKind::Unit
-            | ExprKind::Int(_)
-            | ExprKind::Float(_)
-            | ExprKind::String(_)
-            | ExprKind::Char(_)
-            | ExprKind::Byte(_)
-            | ExprKind::ByteString(_)
-            | ExprKind::Variable(_)
-            | ExprKind::LabelReference(_) => expression.kind.clone(),
-            ExprKind::Move(operand) => ExprKind::Move(Rc::new(expr(operand))),
-            ExprKind::Closure { params, body } => ExprKind::Closure {
-                params: params.clone(),
-                body: Rc::new(expr(body)),
-            },
-            ExprKind::TypedClosure {
-                params,
-                return_type,
-                effectful,
-                outward_effects,
-                body,
-            } => ExprKind::TypedClosure {
-                params: params.clone(),
-                return_type: return_type.clone(),
-                effectful: *effectful,
-                outward_effects: outward_effects.clone(),
-                body: Rc::new(expr(body)),
-            },
-            ExprKind::Labeled { label, body } => ExprKind::Labeled {
-                label: label.clone(),
-                body: Rc::new(expr(body)),
-            },
-            ExprKind::LabelDestination { label, ty, body } => ExprKind::LabelDestination {
-                label: label.clone(),
-                ty: ty.clone(),
-                body: Rc::new(expr(body)),
-            },
-            ExprKind::Leave { label, value } => ExprKind::Leave {
-                label: label.clone(),
-                value: value.as_ref().map(|value| Rc::new(expr(value))),
-            },
-            ExprKind::TailResume { resumption, value } => {
-                let mut args = vec![expr(resumption)];
-                args.extend(value.iter().map(|value| expr(value)));
-                spelled_call("tail", expression.span, args)
-            }
-            ExprKind::Is { subject, pattern } => ExprKind::Is {
-                subject: Rc::new(expr(subject)),
-                pattern: pattern.clone(),
-            },
-            ExprKind::List(elements) => {
-                ExprKind::List(Rc::new(elements.iter().map(expr).collect()))
-            }
-            ExprKind::Tuple(elements) => {
-                ExprKind::Tuple(Rc::new(elements.iter().map(expr).collect()))
-            }
-            ExprKind::Struct { name, fields } => ExprKind::Struct {
-                name: name.clone(),
-                fields: Rc::new(
-                    fields
-                        .iter()
-                        .map(|(field, value)| (field.clone(), expr(value)))
-                        .collect(),
-                ),
-            },
-            ExprKind::Field(subject, field) => {
-                ExprKind::Field(Rc::new(expr(subject)), field.clone())
-            }
-            ExprKind::Block(statements) => {
-                ExprKind::Block(Rc::new(statements.iter().map(stmt).collect()))
-            }
-            ExprKind::Call(callee, args) => ExprKind::Call(
-                Rc::new(expr(callee)),
-                Rc::new(args.iter().map(expr).collect()),
-            ),
-            ExprKind::Perform {
-                effect,
-                operation,
-                args,
-            } => ExprKind::Perform {
-                effect: effect.clone(),
-                operation: operation.clone(),
-                args: Rc::new(args.iter().map(expr).collect()),
-            },
-            ExprKind::Handle {
-                computation,
-                clauses,
-            } => ExprKind::Handle {
-                computation: Rc::new(expr(computation)),
-                clauses: Rc::new(
-                    clauses
-                        .iter()
-                        .map(|clause| HandlerClause {
-                            body: expr(&clause.body),
-                            ..clause.clone()
-                        })
-                        .collect(),
-                ),
-            },
-            ExprKind::Unary { op, operand } => ExprKind::Unary {
-                op: *op,
-                operand: Rc::new(expr(operand)),
-            },
-            ExprKind::Binary { op, lhs, rhs } => ExprKind::Binary {
-                op: *op,
-                lhs: Rc::new(expr(lhs)),
-                rhs: Rc::new(expr(rhs)),
-            },
-        };
-        Expr {
-            kind,
-            span: expression.span,
-        }
-    }
-
-    fn stmt(statement: &Stmt) -> Stmt {
-        match statement {
-            Stmt::Let { name, value, span } => Stmt::Let {
-                name: name.clone(),
-                value: expr(value),
-                span: *span,
-            },
-            Stmt::Deconstruct {
-                ty,
-                fields,
-                rest,
-                value,
-                span,
-            } => Stmt::Deconstruct {
-                ty: ty.clone(),
-                fields: fields.clone(),
-                rest: *rest,
-                value: expr(value),
-                span: *span,
-            },
-            Stmt::Assign {
-                destination,
-                value,
-                span,
-            } => Stmt::Assign {
-                destination: AssignmentPlace {
-                    kind: match &destination.kind {
-                        AssignmentPlaceKind::Local { name, fields } => AssignmentPlaceKind::Local {
-                            name: name.clone(),
-                            fields: fields.clone(),
-                        },
-                        AssignmentPlaceKind::Dereference { reference, fields } => {
-                            AssignmentPlaceKind::Dereference {
-                                reference: Rc::new(expr(reference)),
-                                fields: fields.clone(),
-                            }
-                        }
-                    },
-                    span: destination.span,
-                },
-                value: expr(value),
-                span: *span,
-            },
-            Stmt::Expr(expression) => Stmt::Expr(expr(expression)),
-        }
-    }
-
-    Program {
-        globals: program
-            .globals
-            .iter()
-            .map(|global| GlobalBinding {
-                owner: global.owner.clone(),
-                name: global.name.clone(),
-                value: expr(&global.value),
-                span: global.span,
-            })
-            .collect(),
-        drops: program
-            .drops
-            .iter()
-            .map(|drop| DropDecl {
-                body: expr(&drop.body),
-                ..drop.clone()
-            })
-            .collect(),
-        functions: program
-            .functions
-            .iter()
-            .map(|function| Function {
-                body: expr(&function.body),
-                ..function.clone()
-            })
-            .collect(),
-        impls: program
-            .impls
-            .iter()
-            .map(|implementation| ImplDecl {
-                methods: implementation
-                    .methods
-                    .iter()
-                    .map(|method| TraitMethod {
-                        body: method.body.as_ref().map(expr),
-                        ..method.clone()
-                    })
-                    .collect(),
-                ..implementation.clone()
-            })
-            .collect(),
-        ..program
-    }
-}
-
 fn collect_fixities(
     tokens: &[Token],
     diagnostics: &mut Vec<Diagnostic>,
@@ -4005,7 +3737,7 @@ fn collect_fixities(
             && matches!(window[1].kind, TokenKind::Ident(_))
             && matches!(window[2].kind, TokenKind::Semicolon | TokenKind::LBrace)
     });
-    let mut fixities = default_fixities();
+    let mut fixities = HashMap::new();
     let mut cursor = 0;
     while cursor < tokens.len() {
         let TokenKind::Ident(keyword) = &tokens[cursor].kind else {
@@ -4061,21 +3793,18 @@ fn collect_fixities(
             precedence,
             declaration: Some(*name_span),
         };
-        if let Some(existing) = fixities.insert(name.clone(), entry) {
-            // Overriding a sourceless migration default is the library taking
-            // ownership of its operator; only two source declarations clash.
-            if let Some(original) = existing.declaration
-                && !module_source
-            {
-                diagnostics.push(
-                    Diagnostic::error(
-                        "operator fixity declared more than once",
-                        format!("`{name}` has multiple fixity declarations"),
-                        *name_span,
-                    )
-                    .with_related(original, "the first declaration is here"),
-                );
-            }
+        if let Some(existing) = fixities.insert(name.clone(), entry)
+            && let Some(original) = existing.declaration
+            && !module_source
+        {
+            diagnostics.push(
+                Diagnostic::error(
+                    "operator fixity declared more than once",
+                    format!("`{name}` has multiple fixity declarations"),
+                    *name_span,
+                )
+                .with_related(original, "the first declaration is here"),
+            );
         }
         cursor = terminator + 1;
     }

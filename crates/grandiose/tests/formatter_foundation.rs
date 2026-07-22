@@ -118,7 +118,7 @@ const SURFACE: &str = r#"
 "#;
 
 #[test]
-fn formatter_emits_nested_indentation_and_integers_at_o0_through_o3() {
+fn formatter_emits_nested_indentation_and_integers_at_o1_through_o3() {
     let nested = concat!(
         "root\n",
         "    child=7, signed=-42☃\n",
@@ -129,7 +129,6 @@ fn formatter_emits_nested_indentation_and_integers_at_o0_through_o3() {
     );
 
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

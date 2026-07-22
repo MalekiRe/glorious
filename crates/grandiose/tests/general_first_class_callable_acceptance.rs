@@ -33,7 +33,6 @@ impl Host for NoHost {
 fn compile_and_run(source_name: &str, source: &str) -> (grandiose_vm::Artifact, Value) {
     let mut first = None;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -62,7 +61,6 @@ fn compile_and_run(source_name: &str, source: &str) -> (grandiose_vm::Artifact, 
 
 fn assert_rejected(source_name: &str, source: &str, message: &str) {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -103,13 +101,13 @@ fn ordinary_control_selects_a_finite_set_of_sealed_callable_targets() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("finite-callable-target-set.gr", source).1,
+        compile_and_run("finite-callable-target-set.glorious", source).1,
         Value::I64(42)
     );
     let recovery = source.replace("main() -> { () }", "main() -> i64 { answer() }");
     assert_eq!(
         run_source(
-            "finite-callable-target-set-recovery.gr",
+            "finite-callable-target-set-recovery.glorious",
             &recovery,
             vec![],
             &mut NoHost,
@@ -143,7 +141,7 @@ fn nested_generic_nominals_transport_effect_shaped_callable_arguments() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("nested-generic-effect-callable.gr", source).1,
+        compile_and_run("nested-generic-effect-callable.glorious", source).1,
         Value::I64(42)
     );
 }
@@ -162,7 +160,7 @@ fn callable_shaped_nominal_growth_is_rejected_before_layout_emission() {
         main() -> { () }
     "#;
     assert_rejected(
-        "callable-generic-layout-growth.gr",
+        "callable-generic-layout-growth.glorious",
         source,
         "generic nominal family expands infinitely",
     );
@@ -186,13 +184,13 @@ fn finite_callable_targets_join_identical_symbolic_reference_routes() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("finite-callable-reference-route.gr", source).1,
+        compile_and_run("finite-callable-reference-route.glorious", source).1,
         Value::I64(42)
     );
     let recovery = source.replace("main() -> { () }", "main() -> i64 { answer() }");
     assert_eq!(
         run_source(
-            "finite-callable-reference-route-recovery.gr",
+            "finite-callable-reference-route-recovery.glorious",
             &recovery,
             vec![],
             &mut NoHost,
@@ -221,13 +219,13 @@ fn finite_callable_targets_join_one_canonical_effect_contract() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("finite-callable-effect-route.gr", source).1,
+        compile_and_run("finite-callable-effect-route.glorious", source).1,
         Value::I64(42)
     );
     let recovery = source.replace("main() -> { () }", "main() -> i64 { answer() }");
     assert_eq!(
         run_source(
-            "finite-callable-effect-route-recovery.gr",
+            "finite-callable-effect-route-recovery.glorious",
             &recovery,
             vec![],
             &mut NoHost,
@@ -255,13 +253,13 @@ fn finite_callable_targets_join_one_canonical_capture_abi() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("finite-callable-capture-abi.gr", source).1,
+        compile_and_run("finite-callable-capture-abi.glorious", source).1,
         Value::I64(42)
     );
     let recovery = source.replace("main() -> { () }", "main() -> i64 { answer() }");
     assert_eq!(
         run_source(
-            "finite-callable-capture-abi-recovery.gr",
+            "finite-callable-capture-abi-recovery.glorious",
             &recovery,
             vec![],
             &mut NoHost,
@@ -287,13 +285,13 @@ fn finite_callable_targets_infer_a_parameterized_sibling_from_the_canonical_shap
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("finite-callable-inferred-sibling.gr", source).1,
+        compile_and_run("finite-callable-inferred-sibling.glorious", source).1,
         Value::I64(42)
     );
     let recovery = source.replace("main() -> { () }", "main() -> i64 { answer() }");
     assert_eq!(
         run_source(
-            "finite-callable-inferred-sibling-recovery.gr",
+            "finite-callable-inferred-sibling-recovery.glorious",
             &recovery,
             vec![],
             &mut NoHost,
@@ -318,7 +316,7 @@ fn finite_callable_targets_do_not_guess_two_unconstrained_parameter_types() {
         main() -> { () }
     "#;
     assert_rejected(
-        "finite-callable-unconstrained-inference.gr",
+        "finite-callable-unconstrained-inference.glorious",
         source,
         "explicit parameters",
     );
@@ -343,13 +341,13 @@ fn nontransparent_generic_transport_retains_a_vm_sealed_producer_set() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("sealed-generic-callable-transport.gr", source).1,
+        compile_and_run("sealed-generic-callable-transport.glorious", source).1,
         Value::I64(42)
     );
     let recovery = source.replace("main() -> { () }", "main() -> i64 { answer() }");
     assert_eq!(
         run_source(
-            "sealed-generic-callable-transport-recovery.gr",
+            "sealed-generic-callable-transport-recovery.glorious",
             &recovery,
             vec![],
             &mut NoHost,
@@ -382,7 +380,7 @@ fn nontransparent_generic_transport_rejects_incompatible_sealed_producers() {
         main() -> { () }
     "#;
     assert_rejected(
-        "sealed-generic-callable-transport-incompatible.gr",
+        "sealed-generic-callable-transport-incompatible.glorious",
         source,
         "incompatible producer",
     );
@@ -433,17 +431,17 @@ fn finite_callable_target_sets_reject_incompatible_effect_reference_and_ownershi
     "#;
     for (name, source, needle) in [
         (
-            "finite-callable-effect-mismatch.gr",
+            "finite-callable-effect-mismatch.glorious",
             effect,
             "outward effect",
         ),
         (
-            "finite-callable-reference-mismatch.gr",
+            "finite-callable-reference-mismatch.glorious",
             reference,
             "identical symbolic lifetime routes",
         ),
         (
-            "finite-callable-ownership-mismatch.gr",
+            "finite-callable-ownership-mismatch.glorious",
             ownership,
             "finite callable producer set has incompatible",
         ),
@@ -470,7 +468,7 @@ fn explicit_parameter_closure_captures_resumption_and_is_invoked_later() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("late-explicit-resumption.gr", source).1,
+        compile_and_run("late-explicit-resumption.glorious", source).1,
         Value::I64(42)
     );
 }
@@ -496,7 +494,7 @@ fn late_resumption_callable_carries_a_shared_reference_through_generic_formation
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("late-reference-resumption-callable.gr", source).1,
+        compile_and_run("late-reference-resumption-callable.glorious", source).1,
         Value::I64(42)
     );
 }
@@ -519,7 +517,7 @@ fn escaping_noncopy_owned_closure_survives_a_generic_boundary() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("escaping-noncopy-callable.gr", source).1,
+        compile_and_run("escaping-noncopy-callable.glorious", source).1,
         Value::I64(42)
     );
 }
@@ -543,7 +541,7 @@ fn aggregate_wrapped_resumption_is_captured_by_an_explicit_callable() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("aggregate-resumption-callable.gr", source).1,
+        compile_and_run("aggregate-resumption-callable.glorious", source).1,
         Value::I64(42)
     );
 }
@@ -564,7 +562,7 @@ fn recursive_closure_can_capture_its_own_nominal_identity() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("recursive-closure.gr", source).1,
+        compile_and_run("recursive-closure.glorious", source).1,
         Value::I64(42)
     );
 }
@@ -586,7 +584,7 @@ fn recursive_closure_reuses_its_captured_environment_through_a_handler() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("recursive-captured-closure.gr", source).1,
+        compile_and_run("recursive-captured-closure.glorious", source).1,
         Value::I64(42)
     );
 }
@@ -601,7 +599,7 @@ fn indirect_calls_select_observe_and_move_receiver_modes() {
         }
         main() -> { () }
     "#;
-    let (artifact, value) = compile_and_run("receiver-mode-matrix.gr", source);
+    let (artifact, value) = compile_and_run("receiver-mode-matrix.glorious", source);
     assert_eq!(value, Value::I64(42));
     for expected in [0, 2] {
         assert!(
@@ -629,7 +627,7 @@ fn move_capture_selects_owned_receiver_mode() {
         }
         main() -> { () }
     "#;
-    let (artifact, value) = compile_and_run("owned-receiver-mode.gr", source);
+    let (artifact, value) = compile_and_run("owned-receiver-mode.glorious", source);
     assert_eq!(value, Value::I64(42));
     assert!(artifact.code.iter().any(|instruction| matches!(
         instruction,
@@ -650,7 +648,7 @@ fn indirect_mutating_capture_selects_unique_receiver_mode() {
         }
         main() -> { () }
     "#;
-    let (artifact, value) = compile_and_run("mutating-receiver-mode.gr", source);
+    let (artifact, value) = compile_and_run("mutating-receiver-mode.glorious", source);
     assert_eq!(value, Value::I64(41));
     assert!(artifact.code.iter().any(|instruction| matches!(
         instruction,
@@ -678,7 +676,7 @@ fn generic_specialization_transports_a_resumption_closure() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("generic-resumption-callable.gr", source).1,
+        compile_and_run("generic-resumption-callable.glorious", source).1,
         Value::I64(42)
     );
 }
@@ -695,7 +693,7 @@ fn contextual_reference_capture_is_valid_within_the_call_lifetime() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("contextual-reference-environment.gr", source).1,
+        compile_and_run("contextual-reference-environment.glorious", source).1,
         Value::I64(42)
     );
 }
@@ -714,7 +712,7 @@ fn shared_reference_environment_escapes_a_generic_boundary_within_its_lifetime()
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("lifetime-bounded-reference-environment.gr", source).1,
+        compile_and_run("lifetime-bounded-reference-environment.glorious", source).1,
         Value::I64(42)
     );
 }
@@ -732,7 +730,7 @@ fn inline_typed_callable_is_formed_directly_as_a_generic_result() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("inline-generic-callable-formation.gr", source).1,
+        compile_and_run("inline-generic-callable-formation.glorious", source).1,
         Value::I64(42)
     );
 }
@@ -750,7 +748,7 @@ fn qualified_associated_callable_alias_forms_a_first_class_value() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("qualified-associated-callable-value.gr", source).1,
+        compile_and_run("qualified-associated-callable-value.glorious", source).1,
         Value::I64(42)
     );
 }
@@ -773,7 +771,7 @@ fn qualified_associated_callable_value_preserves_its_outward_effect_row() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("qualified-effectful-callable-value.gr", source).1,
+        compile_and_run("qualified-effectful-callable-value.glorious", source).1,
         Value::I64(42)
     );
 }
@@ -790,7 +788,7 @@ fn generic_associated_function_item_specializes_from_callable_context() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("generic-associated-function-item.gr", source).1,
+        compile_and_run("generic-associated-function-item.glorious", source).1,
         Value::I64(42)
     );
 }
@@ -808,7 +806,7 @@ fn deferred_generic_function_item_specializes_at_its_first_later_call() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("deferred-generic-function-item.gr", source).1,
+        compile_and_run("deferred-generic-function-item.glorious", source).1,
         Value::I64(42)
     );
 }
@@ -834,7 +832,11 @@ fn deferred_generic_function_item_preserves_effects_and_where_evidence() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("deferred-effectful-constrained-function-item.gr", source).1,
+        compile_and_run(
+            "deferred-effectful-constrained-function-item.glorious",
+            source
+        )
+        .1,
         Value::I64(42)
     );
 }
@@ -852,7 +854,7 @@ fn deferred_generic_function_item_allows_multiple_consistent_uses() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("consistent-deferred-function-item.gr", source).1,
+        compile_and_run("consistent-deferred-function-item.glorious", source).1,
         Value::I64(42)
     );
 }
@@ -872,7 +874,7 @@ fn deferred_generic_function_item_rejects_conflicting_later_shapes() {
         main() -> { () }
     "#;
     assert_rejected(
-        "conflicting-deferred-function-item.gr",
+        "conflicting-deferred-function-item.glorious",
         source,
         "expected i64, found Text",
     );
@@ -891,7 +893,7 @@ fn deferred_generic_function_item_cannot_escape_without_a_shape() {
         main() -> { () }
     "#;
     assert_rejected(
-        "unresolved-deferred-function-item-escape.gr",
+        "unresolved-deferred-function-item-escape.glorious",
         source,
         "escapes before a concrete callable shape is proven",
     );
@@ -911,7 +913,7 @@ fn deferred_generic_function_item_cannot_be_stored_before_shape_resolution() {
         main() -> { () }
     "#;
     assert_rejected(
-        "unresolved-deferred-function-item-storage.gr",
+        "unresolved-deferred-function-item-storage.glorious",
         source,
         "escapes before a concrete callable shape is proven",
     );
@@ -932,7 +934,11 @@ fn reference_environment_cannot_outlive_its_referent_scope() {
         }
         main() -> { () }
     "#;
-    assert_rejected("outlived-reference-environment.gr", source, "cannot escape");
+    assert_rejected(
+        "outlived-reference-environment.glorious",
+        source,
+        "cannot escape",
+    );
 }
 
 #[test]
@@ -949,7 +955,7 @@ fn unique_reference_environment_escapes_with_sealed_owned_capture_evidence() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("unique-reference-environment.gr", source).1,
+        compile_and_run("unique-reference-environment.glorious", source).1,
         Value::I64(42)
     );
 }
@@ -972,7 +978,7 @@ fn unique_reference_environment_supports_repeated_then_owned_mutating_calls() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("unique-mutating-reference-environment.gr", source).1,
+        compile_and_run("unique-mutating-reference-environment.glorious", source).1,
         Value::I64(42)
     );
 }
@@ -992,7 +998,7 @@ fn shared_reference_environment_keeps_its_referent_borrowed_until_consumed() {
         main() -> { () }
     "#;
     assert_rejected(
-        "reference-environment-alias-conflict.gr",
+        "reference-environment-alias-conflict.glorious",
         source,
         "incompatible live loan",
     );
@@ -1014,5 +1020,5 @@ fn owned_noncopy_capture_cannot_be_observed_after_it_moved_into_a_closure() {
         }
         main() -> { () }
     "#;
-    assert_rejected("moved-capture-reuse.gr", source, "was already moved");
+    assert_rejected("moved-capture-reuse.glorious", source, "was already moved");
 }

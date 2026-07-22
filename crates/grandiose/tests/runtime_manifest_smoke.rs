@@ -47,8 +47,8 @@ fn arbitrary_bound_names_lower_through_specialized_primitive_leaf_bodies() {
         }
     "#;
     let bundle = SourceBundle::raw_with_trusted_standard_for_conformance(
-        Segment::new("std.gr", standard_library),
-        Segment::new("main.gr", primary),
+        Segment::new("std.glorious", standard_library),
+        Segment::new("main.glorious", primary),
         [],
     );
     let phases = compile_bundle_to_phases_with_manifest(&bundle, &manifest()).unwrap();

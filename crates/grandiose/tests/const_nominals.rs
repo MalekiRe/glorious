@@ -35,7 +35,7 @@ fn phantom_u32_const_nominals_specialize_and_execute() {
         answer() -> i64 { read(three()) }
         main() -> () { () }
     "#;
-    let artifact = compile_source_to_bytecode("const-nominal-u32.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("const-nominal-u32.glorious", source).unwrap();
     let verified = verify(artifact).unwrap();
     let answer = verified
         .artifact()
@@ -58,7 +58,7 @@ fn ground_const_arithmetic_normalizes_into_nominal_identity() {
         answer() -> i64 { read(make()) }
         main() -> () { () }
     "#;
-    let artifact = compile_source_to_bytecode("const-arithmetic.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("const-arithmetic.glorious", source).unwrap();
     let verified = verify(artifact).unwrap();
     let answer = verified
         .artifact()
@@ -82,7 +82,7 @@ fn ground_const_arithmetic_rejects_invalid_domains() {
         let source = format!(
             "struct Tag<const N:u32>{{marker:i64}} bad()->Tag<{expression}>{{Tag{{marker:0}}}} main()->(){{()}}"
         );
-        let errors = compile_source_to_bytecode(&format!("const-{name}.gr"), &source)
+        let errors = compile_source_to_bytecode(&format!("const-{name}.glorious"), &source)
             .expect_err("invalid const arithmetic compiled");
         assert!(
             errors.iter().any(|error| error.message.contains(expected)),
@@ -101,7 +101,7 @@ fn const_generic_aliases_preserve_nominal_identity() {
         answer() -> i64 { read(three()) }
         main() -> () { () }
     "#;
-    let artifact = compile_source_to_bytecode("const-alias-u32.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("const-alias-u32.glorious", source).unwrap();
     let verified = verify(artifact).unwrap();
     let answer = verified
         .artifact()
@@ -125,7 +125,7 @@ fn const_generic_aliases_reorder_mixed_arguments_structurally() {
         answer() -> i64 { read(make()) }
         main() -> () { () }
     "#;
-    let artifact = compile_source_to_bytecode("const-alias-reorder.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("const-alias-reorder.glorious", source).unwrap();
     let verified = verify(artifact).unwrap();
     let answer = verified
         .artifact()
@@ -149,7 +149,7 @@ fn const_generic_alias_defaults_fill_trailing_arguments() {
         answer() -> i64 { read(make()) }
         main() -> () { () }
     "#;
-    let artifact = compile_source_to_bytecode("const-alias-default.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("const-alias-default.glorious", source).unwrap();
     let verified = verify(artifact).unwrap();
     let answer = verified
         .artifact()
@@ -172,7 +172,7 @@ fn nominal_const_defaults_fill_trailing_arguments() {
         answer() -> i64 { read(make()) }
         main() -> () { () }
     "#;
-    let artifact = compile_source_to_bytecode("const-nominal-default.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("const-nominal-default.glorious", source).unwrap();
     let verified = verify(artifact).unwrap();
     let answer = verified
         .artifact()
@@ -195,7 +195,7 @@ fn nominal_const_defaults_can_reference_earlier_const_arguments() {
         answer() -> i64 { read(make()) }
         main() -> () { () }
     "#;
-    let artifact = compile_source_to_bytecode("const-dependent-default.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("const-dependent-default.glorious", source).unwrap();
     let verified = verify(artifact).unwrap();
     let answer = verified
         .artifact()
@@ -221,7 +221,8 @@ fn symbolic_const_expressions_fold_after_specialization() {
         answer() -> i64 { read_four(bump_tag(three())) }
         main() -> () { () }
     "#;
-    let artifact = compile_source_to_bytecode("const-symbolic-expression.gr", source).unwrap();
+    let artifact =
+        compile_source_to_bytecode("const-symbolic-expression.glorious", source).unwrap();
     let verified = verify(artifact).unwrap();
     let answer = verified
         .artifact()
@@ -242,7 +243,7 @@ fn ground_fixed_arrays_lower_to_fixed_tuple_layouts() {
         answer() -> i64 { sum((20, 22)) }
         main() -> () { () }
     "#;
-    let artifact = compile_source_to_bytecode("fixed-array-layout.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("fixed-array-layout.glorious", source).unwrap();
     let verified = verify(artifact).unwrap();
     let answer = verified
         .artifact()
@@ -263,7 +264,7 @@ fn fixed_array_lengths_are_bounded_and_ground() {
         ("unresolved", "N", "unresolved parameter or path"),
     ] {
         let source = format!("bad<const N:u32>(value:[i64;{length}])->(){{()}} main()->(){{()}}");
-        let errors = compile_source_to_bytecode(&format!("fixed-array-{name}.gr"), &source)
+        let errors = compile_source_to_bytecode(&format!("fixed-array-{name}.glorious"), &source)
             .expect_err("invalid fixed-array length compiled");
         assert!(
             errors.iter().any(|error| error.message.contains(expected)),
@@ -290,13 +291,12 @@ fn const_defaults_symbolic_arithmetic_and_fixed_layouts_execute_at_all_levels() 
         main() -> () { () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let artifact = compile_source_to_bytecode_with_options(
-            "const-combined-all-levels.gr",
+            "const-combined-all-levels.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -332,7 +332,7 @@ fn const_defaults_symbolic_arithmetic_and_fixed_layouts_have_recovery_parity() {
         }
         main() -> i64 { combine((0, 0), bump(make()), boxed()) }
     "#;
-    let result = run_source("const-recovery.gr", source, vec![], &mut NoHost).unwrap();
+    let result = run_source("const-recovery.glorious", source, vec![], &mut NoHost).unwrap();
     assert_eq!(result, RecoveryValue::Int(42));
 }
 
@@ -345,7 +345,7 @@ fn phantom_quantity_const_nominals_specialize_and_execute() {
         answer() -> i64 { read(open()) }
         main() -> () { () }
     "#;
-    let artifact = compile_source_to_bytecode("const-nominal-quantity.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("const-nominal-quantity.glorious", source).unwrap();
     let verified = verify(artifact).unwrap();
     let answer = verified
         .artifact()
@@ -368,7 +368,7 @@ fn distinct_const_nominal_identities_do_not_unify() {
         answer() -> i64 { read_four(three()) }
         main() -> () { () }
     "#;
-    let errors = compile_source_to_bytecode("const-nominal-mismatch.gr", source).unwrap_err();
+    let errors = compile_source_to_bytecode("const-nominal-mismatch.glorious", source).unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error.code.as_deref() == Some("G1BC002")
@@ -395,8 +395,8 @@ fn const_nominal_specialization_is_declaration_order_deterministic() {
         three() -> Tag<3> { Tag { marker: 3 } }
         struct Tag<const N: u32> { marker: i64 }
     "#;
-    let first = compile_source_to_bytecode("const-order-a.gr", first).unwrap();
-    let reordered = compile_source_to_bytecode("const-order-b.gr", reordered).unwrap();
+    let first = compile_source_to_bytecode("const-order-a.glorious", first).unwrap();
+    let reordered = compile_source_to_bytecode("const-order-b.glorious", reordered).unwrap();
     assert_eq!(first.encode(), reordered.encode());
 }
 
@@ -404,19 +404,19 @@ fn const_nominal_specialization_is_declaration_order_deterministic() {
 fn const_nominal_literal_kinds_and_domains_have_exact_diagnostics() {
     for (name, source, title, message) in [
         (
-            "const-u32-overflow.gr",
+            "const-u32-overflow.glorious",
             "struct Tag<const N:u32>{marker:i64} bad()->Tag<4294967296>{Tag{marker:0}} main()->(){()}",
             "const argument exceeds its domain",
             "u32 const arguments must fit in 32 bits",
         ),
         (
-            "const-u32-kind.gr",
+            "const-u32-kind.glorious",
             "struct Tag<const N:u32>{marker:i64} bad()->Tag<[1,2]>{Tag{marker:0}} main()->(){()}",
             "nominal argument kind mismatch",
             "const argument has kind Quantity, but binder `N` of `Tag` has kind Const(U32)",
         ),
         (
-            "const-quantity-kind.gr",
+            "const-quantity-kind.glorious",
             "struct Tag<const Q:Quantity>{marker:i64} bad()->Tag<7>{Tag{marker:0}} main()->(){()}",
             "nominal argument kind mismatch",
             "const argument has kind U32, but binder `Q` of `Tag` has kind Const(Quantity)",
@@ -447,7 +447,7 @@ fn local_gat_const_arguments_normalize_into_runtime_signatures() {
         answer() -> i64 { gat_value(42) }
         main() -> () { () }
     "#;
-    let artifact = compile_source_to_bytecode("const-gat-runtime.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("const-gat-runtime.glorious", source).unwrap();
     let verified = verify(artifact).unwrap();
     let answer = verified
         .artifact()
@@ -464,7 +464,7 @@ fn local_gat_const_arguments_normalize_into_runtime_signatures() {
 #[test]
 fn const_binders_cannot_be_used_as_runtime_field_types() {
     let source = "struct Bad<const N:u32>{value:N} main()->(){()}";
-    let errors = compile_source_to_bytecode("const-runtime-field.gr", source).unwrap_err();
+    let errors = compile_source_to_bytecode("const-runtime-field.glorious", source).unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error.code.as_deref() == Some("G0008")
@@ -486,7 +486,7 @@ fn lifetime_const_and_type_nominal_arguments_keep_source_positions() {
         answer() -> i64 { read(make()) }
         main() -> () { () }
     "#;
-    let artifact = compile_source_to_bytecode("mixed-const-nominal.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("mixed-const-nominal.glorious", source).unwrap();
     let verified = verify(artifact).unwrap();
     let answer = verified
         .artifact()
@@ -512,7 +512,7 @@ fn inferred_function_consts_substitute_into_marker_evidence() {
         answer() -> i64 { select(make(), Token { marker:11 }).marker }
         main() -> () { () }
     "#;
-    let artifact = compile_source_to_bytecode("const-function-evidence.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("const-function-evidence.glorious", source).unwrap();
     let verified = verify(artifact).unwrap();
     let answer = verified
         .artifact()

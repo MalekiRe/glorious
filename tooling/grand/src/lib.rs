@@ -11,6 +11,5 @@ pub mod lock;
 pub mod manifest;
 pub mod ops;
 pub mod resolve;
-pub mod scan;
 pub mod target;
 pub mod util;

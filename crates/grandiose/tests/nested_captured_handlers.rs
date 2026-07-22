@@ -97,7 +97,7 @@ fn terminal_handler_nested_inside_resumptive_handler_is_required_positive_behavi
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("terminal-inside-resumptive.gr", source),
+        compile_and_run("terminal-inside-resumptive.glorious", source),
         Value::I64(42)
     );
 }
@@ -122,7 +122,7 @@ fn resumptive_handler_nested_inside_terminal_handler_is_required_positive_behavi
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("resumptive-inside-terminal.gr", source),
+        compile_and_run("resumptive-inside-terminal.glorious", source),
         Value::I64(42)
     );
 }
@@ -145,7 +145,7 @@ fn terminal_perform_cannot_abandon_a_mandatory_resumption_argument() {
         }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("abandoned-mandatory-resumption.gr", source)
+    let errors = compile_source_to_bytecode("abandoned-mandatory-resumption.glorious", source)
         .expect_err("a terminal payload must not abandon a mandatory resumption");
     assert!(errors.iter().any(|error| {
         error.message.contains("resumption") || error.message.contains("abandon")
@@ -171,7 +171,7 @@ fn captured_handler_may_be_passed_returned_stored_and_invoked() {
         }
         main() -> { () }
     "#;
-    let artifact = deterministic_phases("captured-handler-roundtrip.gr", source);
+    let artifact = deterministic_phases("captured-handler-roundtrip.glorious", source);
     assert_eq!(handler_count_for(&artifact, "Ask"), 1);
     assert_distinct_runtime_identities_and_valid_cleanups(&artifact);
     assert_eq!(run_artifact(artifact, "selected"), Value::I64(42));
@@ -192,7 +192,7 @@ fn directly_invoked_captured_handler_keeps_distinct_runtime_identity_and_cleanup
         }
         main() -> { () }
     "#;
-    let artifact = deterministic_phases("direct-captured-handler.gr", source);
+    let artifact = deterministic_phases("direct-captured-handler.glorious", source);
     assert_eq!(handler_count_for(&artifact, "Ask"), 1);
     assert!(!artifact.cleanups.is_empty());
     assert_distinct_runtime_identities_and_valid_cleanups(&artifact);
@@ -218,7 +218,7 @@ fn resumed_nested_computation_reinstalls_the_nearest_handler_deeply() {
         }
         main() -> { () }
     "#;
-    let artifact = deterministic_phases("deep-handler-reinstatement.gr", source);
+    let artifact = deterministic_phases("deep-handler-reinstatement.glorious", source);
     assert_eq!(handler_count_for(&artifact, "Ask"), 2);
     assert_eq!(run_artifact(artifact, "selected"), Value::I64(42));
 }
@@ -243,7 +243,7 @@ fn nested_handler_removes_only_its_exact_protocol_from_the_outward_row() {
         }
         main() -> { () }
     "#;
-    let artifact = deterministic_phases("exact-handler-row-subtraction.gr", source);
+    let artifact = deterministic_phases("exact-handler-row-subtraction.glorious", source);
     let ask = artifact
         .protocols
         .iter()
@@ -295,7 +295,7 @@ fn inner_partial_handler_forwards_to_outer_resumption() {
         main() -> { () }
     "#;
     assert_eq!(
-        compile_and_run("partial-forward-to-outer-resumption.gr", source),
+        compile_and_run("partial-forward-to-outer-resumption.glorious", source),
         Value::I64(42)
     );
 }
@@ -321,8 +321,8 @@ fn private_must_move_payload_is_consumed_by_defining_authority() {
         }
     "#;
     let bundle = SourceBundle::new(
-        Segment::new("owner.gr", owner),
-        Segment::new("entry.gr", "main() -> { selected(); () }"),
+        Segment::new("owner.glorious", owner),
+        Segment::new("entry.glorious", "main() -> { selected(); () }"),
         [],
     );
     assert_eq!(

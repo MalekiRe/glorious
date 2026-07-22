@@ -66,7 +66,7 @@ fn float_literal_defaults_to_f64() {
         main() -> { () }
     "#;
     assert_eq!(
-        run_all("float-default.gr", source, "answer"),
+        run_all("float-default.glorious", source, "answer"),
         Value::F64(4.5)
     );
 }
@@ -77,7 +77,10 @@ fn float_literal_respects_an_expected_f32() {
         answer() -> f32 { 1.5 }
         main() -> { () }
     "#;
-    assert_eq!(run_all("float-f32.gr", source, "answer"), Value::F32(1.5));
+    assert_eq!(
+        run_all("float-f32.glorious", source, "answer"),
+        Value::F32(1.5)
+    );
 }
 
 #[test]
@@ -88,7 +91,7 @@ fn float_literal_flows_through_an_f32_parameter() {
         main() -> { () }
     "#;
     assert_eq!(
-        run_all("float-param.gr", source, "answer"),
+        run_all("float-param.glorious", source, "answer"),
         Value::F32(2.25)
     );
 }
@@ -101,11 +104,11 @@ fn negative_float_literals_fold_at_both_widths() {
         main() -> { () }
     "#;
     assert_eq!(
-        run_all("float-negate.gr", source, "wide"),
+        run_all("float-negate.glorious", source, "wide"),
         Value::F64(-2.25)
     );
     assert_eq!(
-        run_all("float-negate.gr", source, "narrow"),
+        run_all("float-negate.glorious", source, "narrow"),
         Value::F32(-0.5)
     );
 }
@@ -119,14 +122,17 @@ fn float_boundary_values_survive_lowering() {
         main() -> { () }
     "#;
     assert_eq!(
-        run_all("float-bounds.gr", source, "huge"),
+        run_all("float-bounds.glorious", source, "huge"),
         Value::F64(f64::MAX)
     );
     assert_eq!(
-        run_all("float-bounds.gr", source, "tiny"),
+        run_all("float-bounds.glorious", source, "tiny"),
         Value::F64(5e-324)
     );
-    assert_eq!(run_all("float-bounds.gr", source, "zero"), Value::F64(0.0));
+    assert_eq!(
+        run_all("float-bounds.glorious", source, "zero"),
+        Value::F64(0.0)
+    );
 }
 
 #[test]
@@ -139,19 +145,19 @@ fn char_literals_lower_to_their_scalar_values() {
         main() -> { () }
     "#;
     assert_eq!(
-        run_all("char-literals.gr", source, "ascii"),
+        run_all("char-literals.glorious", source, "ascii"),
         Value::U64(u64::from(u32::from('A')))
     );
     assert_eq!(
-        run_all("char-literals.gr", source, "escaped"),
+        run_all("char-literals.glorious", source, "escaped"),
         Value::U64(10)
     );
     assert_eq!(
-        run_all("char-literals.gr", source, "unicode"),
+        run_all("char-literals.glorious", source, "unicode"),
         Value::U64(0x1F600)
     );
     assert_eq!(
-        run_all("char-literals.gr", source, "ceiling"),
+        run_all("char-literals.glorious", source, "ceiling"),
         Value::U64(0x10FFFF)
     );
 }
@@ -166,16 +172,19 @@ fn byte_literals_have_u8_and_cover_the_full_range() {
         main() -> { () }
     "#;
     assert_eq!(
-        run_all("byte-literals.gr", source, "letter"),
+        run_all("byte-literals.glorious", source, "letter"),
         Value::U64(65)
     );
-    assert_eq!(run_all("byte-literals.gr", source, "floor"), Value::U64(0));
     assert_eq!(
-        run_all("byte-literals.gr", source, "ceiling"),
+        run_all("byte-literals.glorious", source, "floor"),
+        Value::U64(0)
+    );
+    assert_eq!(
+        run_all("byte-literals.glorious", source, "ceiling"),
         Value::U64(255)
     );
     assert_eq!(
-        run_all("byte-literals.gr", source, "escaped"),
+        run_all("byte-literals.glorious", source, "escaped"),
         Value::U64(10)
     );
 }
@@ -187,11 +196,11 @@ fn byte_string_literals_preserve_their_exact_contents() {
         empty() -> Bytes { b"" }
         main() -> { () }
     "#;
-    let Value::Bytes(bytes) = run_all("byte-strings.gr", source, "payload") else {
+    let Value::Bytes(bytes) = run_all("byte-strings.glorious", source, "payload") else {
         panic!("byte-string literal must produce a Bytes value");
     };
     assert_eq!(bytes.as_ref(), [b'a', b'b', 0x00, 0xff, b'\n']);
-    let Value::Bytes(empty) = run_all("byte-strings.gr", source, "empty") else {
+    let Value::Bytes(empty) = run_all("byte-strings.glorious", source, "empty") else {
         panic!("empty byte-string literal must produce a Bytes value");
     };
     assert!(empty.is_empty());
@@ -211,8 +220,14 @@ fn float_handler_patterns_select_the_matching_clause() {
         miss() -> i64 { probe(2.0) }
         main() -> { () }
     "#;
-    assert_eq!(run_all("float-pattern.gr", source, "hit"), Value::I64(1));
-    assert_eq!(run_all("float-pattern.gr", source, "miss"), Value::I64(0));
+    assert_eq!(
+        run_all("float-pattern.glorious", source, "hit"),
+        Value::I64(1)
+    );
+    assert_eq!(
+        run_all("float-pattern.glorious", source, "miss"),
+        Value::I64(0)
+    );
 }
 
 #[test]
@@ -229,8 +244,14 @@ fn char_handler_patterns_select_the_matching_clause() {
         miss() -> i64 { probe('x') }
         main() -> { () }
     "#;
-    assert_eq!(run_all("char-pattern.gr", source, "hit"), Value::I64(1));
-    assert_eq!(run_all("char-pattern.gr", source, "miss"), Value::I64(0));
+    assert_eq!(
+        run_all("char-pattern.glorious", source, "hit"),
+        Value::I64(1)
+    );
+    assert_eq!(
+        run_all("char-pattern.glorious", source, "miss"),
+        Value::I64(0)
+    );
 }
 
 #[test]
@@ -247,8 +268,14 @@ fn byte_handler_patterns_select_the_matching_clause() {
         miss() -> i64 { probe(b'\x00') }
         main() -> { () }
     "#;
-    assert_eq!(run_all("byte-pattern.gr", source, "hit"), Value::I64(1));
-    assert_eq!(run_all("byte-pattern.gr", source, "miss"), Value::I64(0));
+    assert_eq!(
+        run_all("byte-pattern.glorious", source, "hit"),
+        Value::I64(1)
+    );
+    assert_eq!(
+        run_all("byte-pattern.glorious", source, "miss"),
+        Value::I64(0)
+    );
 }
 
 #[test]
@@ -267,15 +294,24 @@ fn literal_patterns_fall_through_ordered_clauses() {
         third() -> i64 { probe(9.5) }
         main() -> { () }
     "#;
-    assert_eq!(run_all("float-clauses.gr", source, "first"), Value::I64(1));
-    assert_eq!(run_all("float-clauses.gr", source, "second"), Value::I64(2));
-    assert_eq!(run_all("float-clauses.gr", source, "third"), Value::I64(3));
+    assert_eq!(
+        run_all("float-clauses.glorious", source, "first"),
+        Value::I64(1)
+    );
+    assert_eq!(
+        run_all("float-clauses.glorious", source, "second"),
+        Value::I64(2)
+    );
+    assert_eq!(
+        run_all("float-clauses.glorious", source, "third"),
+        Value::I64(3)
+    );
 }
 
 #[test]
 fn float_literal_rejects_a_non_float_context() {
     let errors = compile_errors(
-        "float-in-int.gr",
+        "float-in-int.glorious",
         r#"
             answer() -> i64 { 1.5 }
             main() -> { () }
@@ -293,7 +329,7 @@ fn float_literal_rejects_a_non_float_context() {
 fn char_and_byte_literals_reject_mismatched_contexts() {
     assert!(
         !compile_errors(
-            "char-in-int.gr",
+            "char-in-int.glorious",
             r#"
             answer() -> i64 { 'a' }
             main() -> { () }
@@ -303,7 +339,7 @@ fn char_and_byte_literals_reject_mismatched_contexts() {
     );
     assert!(
         !compile_errors(
-            "byte-in-char.gr",
+            "byte-in-char.glorious",
             r#"
             answer() -> Char { b'a' }
             main() -> { () }
@@ -313,7 +349,7 @@ fn char_and_byte_literals_reject_mismatched_contexts() {
     );
     assert!(
         !compile_errors(
-            "bytestring-in-text.gr",
+            "bytestring-in-text.glorious",
             r#"
             answer() -> Text { b"raw" }
             main() -> { () }
@@ -323,7 +359,7 @@ fn char_and_byte_literals_reject_mismatched_contexts() {
     );
     assert!(
         !compile_errors(
-            "int-in-float.gr",
+            "int-in-float.glorious",
             r#"
             answer() -> f64 { 3 }
             main() -> { () }
@@ -336,7 +372,7 @@ fn char_and_byte_literals_reject_mismatched_contexts() {
 #[test]
 fn float_pattern_rejects_a_non_float_payload() {
     let errors = compile_errors(
-        "float-pattern-on-int.gr",
+        "float-pattern-on-int.glorious",
         r#"
             effect Inspect { inspect(value: i64) -> ! }
             probe() -> i64 {
@@ -392,23 +428,25 @@ mod recovery {
     #[test]
     fn literal_expressions_evaluate() {
         assert_eq!(
-            run("recovery-float.gr", "main() -> f64 { 4.5 }"),
+            run("recovery-float.glorious", "main() -> f64 { 4.5 }"),
             Value::Float(4.5)
         );
         assert_eq!(
-            run("recovery-char.gr", "main() -> Char { '\\u{1F600}' }"),
+            run("recovery-char.glorious", "main() -> Char { '\\u{1F600}' }"),
             Value::Char('\u{1F600}')
         );
         assert_eq!(
-            run("recovery-byte.gr", "main() -> u8 { b'\\xff' }"),
+            run("recovery-byte.glorious", "main() -> u8 { b'\\xff' }"),
             Value::Integer {
                 signed: false,
                 bits: 8,
                 raw: 255,
             }
         );
-        let Value::Bytes(bytes) = run("recovery-bytes.gr", r#"main() -> Bytes { b"ab\x00" }"#)
-        else {
+        let Value::Bytes(bytes) = run(
+            "recovery-bytes.glorious",
+            r#"main() -> Bytes { b"ab\x00" }"#,
+        ) else {
             panic!("byte-string literal must produce Bytes in recovery");
         };
         assert_eq!(bytes.as_ref(), [b'a', b'b', 0x00]);
@@ -426,7 +464,10 @@ mod recovery {
             }
             main() -> i64 { probe(4.5) * 10 + probe(2.0) }
         "#;
-        assert_eq!(run("recovery-float-pattern.gr", source), Value::Int(10));
+        assert_eq!(
+            run("recovery-float-pattern.glorious", source),
+            Value::Int(10)
+        );
         let chars = r#"
             effect Inspect { inspect(value: Char) -> ! }
             probe(value: Char) -> i64 {
@@ -437,7 +478,7 @@ mod recovery {
             }
             main() -> i64 { probe('x') * 10 + probe('y') }
         "#;
-        assert_eq!(run("recovery-char-pattern.gr", chars), Value::Int(10));
+        assert_eq!(run("recovery-char-pattern.glorious", chars), Value::Int(10));
         let bytes = r#"
             effect Inspect { inspect(value: u8) -> ! }
             probe(value: u8) -> i64 {
@@ -448,6 +489,6 @@ mod recovery {
             }
             main() -> i64 { probe(b'\x00') * 10 + probe(b'\x01') }
         "#;
-        assert_eq!(run("recovery-byte-pattern.gr", bytes), Value::Int(10));
+        assert_eq!(run("recovery-byte-pattern.glorious", bytes), Value::Int(10));
     }
 }

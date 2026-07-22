@@ -5,7 +5,8 @@ use grandiose::{
 use grandiose_vm::{Value, Vm, verify};
 
 fn run_i64(source: &str, function: &str) -> i64 {
-    let artifact = compile_source_to_bytecode("generic-callable-evidence.gr", source).unwrap();
+    let artifact =
+        compile_source_to_bytecode("generic-callable-evidence.glorious", source).unwrap();
     let function = artifact
         .functions
         .iter()
@@ -22,13 +23,12 @@ fn run_i64(source: &str, function: &str) -> i64 {
 
 fn assert_answer_all_modes(source: &str) {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let artifact = compile_source_to_bytecode_with_options(
-            "generic-callable-evidence-all-modes.gr",
+            "generic-callable-evidence-all-modes.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -49,7 +49,7 @@ fn assert_answer_all_modes(source: &str) {
     let recovery_source = source.replace("main() -> { () }", "main() -> i64 { answer() }");
     assert_eq!(
         grandiose::run_source(
-            "generic-callable-evidence-recovery.gr",
+            "generic-callable-evidence-recovery.glorious",
             &recovery_source,
             vec![],
             &mut grandiose::eval::SystemHost::default(),
@@ -61,13 +61,12 @@ fn assert_answer_all_modes(source: &str) {
 
 fn assert_rejected_all_modes(source: &str, needle: &str) {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let errors = compile_source_to_bytecode_with_options(
-            "generic-callable-evidence-negative.gr",
+            "generic-callable-evidence-negative.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -161,13 +160,12 @@ fn finite_recursive_specialization_cycle_compiles_in_every_mode() {
         main() -> { first(()); () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let artifact = compile_source_to_bytecode_with_options(
-            "finite-recursive-specialization.gr",
+            "finite-recursive-specialization.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -274,8 +272,9 @@ fn callable_signature_projection_without_exact_equality_fails_closed() {
         }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("callable-projection-without-equality.gr", source)
-        .expect_err("an unproved callable projection compiled");
+    let errors =
+        compile_source_to_bytecode("callable-projection-without-equality.glorious", source)
+            .expect_err("an unproved callable projection compiled");
     assert!(
         errors.iter().any(|error| {
             error.message.contains("Fn<Tuple")
@@ -293,7 +292,7 @@ fn uninstantiated_generic_callable_bodies_are_symbolically_checked() {
             where F: Fn<(i64), Output=R> { body() }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("invalid-generic-callable-body.gr", source)
+    let errors = compile_source_to_bytecode("invalid-generic-callable-body.glorious", source)
         .expect_err("an uninstantiated generic body must still be checked");
     assert!(
         errors.iter().any(|error| {

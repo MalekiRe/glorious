@@ -1,5 +1,5 @@
 //! Tests for build caching, workspaces, `grand fmt`, and the test runner
-//! (filter + compile-fail goldens), all against the in-process fake compiler.
+//! (filter + compile-fail goldens), all against executable contract fixtures.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -9,6 +9,8 @@ use tempfile::TempDir;
 struct Sandbox {
     dir: TempDir,
     root: PathBuf,
+    compiler: PathBuf,
+    vm: PathBuf,
 }
 
 impl Sandbox {
@@ -16,18 +18,23 @@ impl Sandbox {
         let dir = TempDir::new().unwrap();
         let root = dir.path().join("work");
         std::fs::create_dir_all(&root).unwrap();
-        std::fs::write(dir.path().join("runtime.c"), "").unwrap();
-        Sandbox { dir, root }
+        let compiler = super_install_compiler(dir.path());
+        let vm = super_install_vm(dir.path());
+        Sandbox {
+            dir,
+            root,
+            compiler,
+            vm,
+        }
     }
 
-    fn grand(&self, cwd: &Path, caps: &str, args: &[&str]) -> Output {
+    fn grand(&self, cwd: &Path, _caps: &str, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_grand"))
             .args(args)
             .current_dir(cwd)
-            .env("GRAND_COMPILER", "fake")
-            .env("GRAND_FAKE_CAPS", caps)
+            .env("GRAND_COMPILER", &self.compiler)
+            .env("GRAND_VM", &self.vm)
             .env("GRAND_CACHE_DIR", self.dir.path().join("cache"))
-            .env("GRAND_RUNTIME", self.dir.path().join("runtime.c"))
             .output()
             .unwrap()
     }
@@ -46,6 +53,28 @@ impl Sandbox {
         assert!(self.grand(&self.root, "", &["new", "app"]).status.success());
         self.root.join("app")
     }
+}
+
+fn super_install_compiler(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("grc");
+    std::fs::write(&path, r#"#!/usr/bin/env bash
+if [ "$1" = --capabilities ]; then echo '{"grc":"test","contract":1,"contract-min":1,"contract-max":1,"artifact-major":1,"artifact-minor":0,"multi-file":true,"modules":true,"phases":["resolve","check"],"emit":["bytecode","interfaces-json","std-interfaces-json"],"diagnostics-json":true}'; exit 0; fi
+if [ "$1" = --emit ] && [[ "$2" = *interfaces-json ]]; then echo '[]'; exit 0; fi
+out=""; inputs=(); while [ $# -gt 0 ]; do case "$1" in --diagnostics|--phase|--emit|--dependency) shift;; -o) out="$2"; shift;; *) inputs+=("$1");; esac; shift; done
+for f in "${inputs[@]}"; do n="$(grep -n FAKE_ERROR "$f" | head -1 | cut -d: -f1)"; if [ -n "$n" ]; then printf '{"severity":"error","code":"GRC9999","title":"test error marker","labels":[{"file":"%s","line":%s}]}\n' "$f" "$n" >&2; exit 1; fi; done
+if [ -n "$out" ]; then printf 'GRBC' > "$out"; fi
+"#).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+fn super_install_vm(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("grvm");
+    std::fs::write(&path, "#!/usr/bin/env bash\nif [ \"$1\" = --capabilities ]; then echo '{\"grvm\":\"test\",\"contract\":1,\"contract-min\":1,\"contract-max\":1,\"artifact-major\":1,\"artifact-minor-min\":0,\"artifact-minor-max\":0}'; fi\nexit 0\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
 }
 
 fn write(path: &Path, content: &str) {
@@ -192,6 +221,53 @@ fn fmt_refuses_a_malformed_package_transactionally() {
 }
 
 #[test]
+fn fmt_treats_test_sources_as_independent_executable_roots() {
+    let sandbox = Sandbox::new();
+    let app = sandbox.app();
+    let alpha = app.join("tests/alpha.glorious");
+    let beta = app.join("tests/beta.glorious");
+    write(&alpha, "main( )->(){()}\n");
+    write(&beta, "main( )->(){()}\n");
+
+    sandbox.ok(&app, "", &["fmt"]);
+    assert_eq!(
+        std::fs::read_to_string(&alpha).unwrap(),
+        "main() -> { () }\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&beta).unwrap(),
+        "main() -> { () }\n"
+    );
+    sandbox.ok(&app, "", &["fmt", "--check"]);
+}
+
+#[test]
+fn fmt_keeps_package_modules_in_the_declared_crate_root_context() {
+    let sandbox = Sandbox::new();
+    let app = sandbox.app();
+    let main = app.join("src/main.glorious");
+    let helper = app.join("src/helper/helper.glorious");
+    write(
+        &main,
+        "mod helper;\nmain( )->i64{crate::helper::answer()}\n",
+    );
+    write(&helper, "pub answer( )->i64{42}\n");
+
+    sandbox.ok(&app, "", &["fmt"]);
+    assert!(
+        std::fs::read_to_string(&main)
+            .unwrap()
+            .contains("crate::helper::answer()")
+    );
+    assert!(
+        std::fs::read_to_string(&helper)
+            .unwrap()
+            .contains("answer()")
+    );
+    sandbox.ok(&app, "", &["fmt", "--check"]);
+}
+
+#[test]
 fn test_runner_filters_and_compile_fail_goldens() {
     let sandbox = Sandbox::new();
     let app = sandbox.app();
@@ -202,7 +278,7 @@ fn test_runner_filters_and_compile_fail_goldens() {
         "main() -> i64 {\n    FAKE_ERROR\n}\n",
     );
 
-    // Compile-fail path first (no LLVM toolchain needed): bless, then verify.
+    // Bless the compile-fail case, then verify it.
     let blessed = sandbox.ok(&app, "diagnostics", &["test", "bad", "--bless"]);
     assert!(
         blessed.contains("compile-fail/bad ... blessed"),
@@ -210,7 +286,7 @@ fn test_runner_filters_and_compile_fail_goldens() {
     );
     let golden = std::fs::read_to_string(app.join("tests/compile-fail/bad.stderr")).unwrap();
     assert!(
-        golden.contains("fake error marker"),
+        golden.contains("test error marker"),
         "golden missing diagnostic: {golden}"
     );
     assert!(
@@ -229,17 +305,6 @@ fn test_runner_filters_and_compile_fail_goldens() {
     assert!(!output.status.success());
     assert!(stderr(&output).contains("--bless"), "{}", stderr(&output));
 
-    // Runnable tests need the LLVM toolchain; skip quietly if absent.
-    if !["llvm-as", "lli", "clang"].iter().all(|tool| {
-        Command::new(tool)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    }) {
-        eprintln!("skipping runnable-test half: llvm toolchain missing");
-        return;
-    }
     // Restore the golden we deliberately broke above before running unfiltered.
     sandbox.ok(&app, "diagnostics", &["test", "bad", "--bless"]);
     let log = sandbox.ok(&app, "", &["test", "alpha"]);

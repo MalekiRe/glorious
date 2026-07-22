@@ -19,7 +19,7 @@ const LEVELS: [OptimizationLevel; 4] = [
 
 fn phases_at(source: &str, level: OptimizationLevel) -> grandiose::CompiledPhases {
     compile_source_to_phases_with_options(
-        "ownership-mir.gr",
+        "ownership-mir.glorious",
         source,
         CompileOptions {
             optimization_level: level,

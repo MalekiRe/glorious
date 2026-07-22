@@ -116,9 +116,8 @@ const SURFACE: &str = r#"
 "#;
 
 #[test]
-fn string_builder_formats_u64_and_i64_at_every_optimization_level() {
+fn string_builder_formats_u64_and_i64_at_optimized_levels() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

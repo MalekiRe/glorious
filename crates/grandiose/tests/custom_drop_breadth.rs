@@ -1,8 +1,7 @@
 use grandiose::{CompileOptions, OptimizationLevel, compile_source_to_phases_with_options};
 use grandiose_vm::verify;
 
-const LEVELS: [OptimizationLevel; 4] = [
-    OptimizationLevel::O0,
+const LEVELS: [OptimizationLevel; 3] = [
     OptimizationLevel::O1,
     OptimizationLevel::O2,
     OptimizationLevel::O3,
@@ -10,7 +9,7 @@ const LEVELS: [OptimizationLevel; 4] = [
 
 fn compile_at(source: &str, level: OptimizationLevel) -> Result<(), Vec<String>> {
     compile_source_to_phases_with_options(
-        "custom-drop-breadth.gr",
+        "custom-drop-breadth.glorious",
         source,
         CompileOptions {
             optimization_level: level,

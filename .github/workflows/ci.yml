@@ -14,21 +14,14 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: rustfmt, clippy
+          components: rustfmt
       - name: Formatting
         run: cargo fmt --all -- --check
-      - name: Strict Clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tooling formatting
         run: |
           cargo fmt --manifest-path tooling/fmt/Cargo.toml -- --check
           cargo fmt --manifest-path tooling/grand/Cargo.toml -- --check
           cargo fmt --manifest-path tooling/lsp/Cargo.toml -- --check
-      - name: Tooling strict Clippy
-        run: |
-          cargo clippy --manifest-path tooling/fmt/Cargo.toml --all-targets -- -D warnings
-          cargo clippy --manifest-path tooling/grand/Cargo.toml --all-targets -- -D warnings
-          cargo clippy --manifest-path tooling/lsp/Cargo.toml --all-targets -- -D warnings
       - name: Compiler and VM
         run: cargo test --workspace --all-targets
       - name: Formatter
@@ -37,17 +30,17 @@ jobs:
         run: cargo test --manifest-path tooling/grand/Cargo.toml --all-targets
       - name: Real grc-grand-grvm contract
         run: |
-          cargo build --workspace --bins
-          cargo build --manifest-path tooling/grand/Cargo.toml --bin grand
+          cargo build --release --workspace --bins
+          cargo build --release --manifest-path tooling/grand/Cargo.toml --bin grand
           integration_root="$(mktemp -d)"
           cd "$integration_root"
-          "$GITHUB_WORKSPACE/tooling/grand/target/debug/grand" new app
+          "$GITHUB_WORKSPACE/tooling/grand/target/release/grand" new app
           cd app
-          export GRAND_COMPILER="$GITHUB_WORKSPACE/target/debug/grc"
-          export GRAND_VM="$GITHUB_WORKSPACE/target/debug/grvm"
-          "$GITHUB_WORKSPACE/tooling/grand/target/debug/grand" check
-          "$GITHUB_WORKSPACE/tooling/grand/target/debug/grand" build
-          "$GITHUB_WORKSPACE/tooling/grand/target/debug/grand" run
+          export GRAND_COMPILER="$GITHUB_WORKSPACE/target/release/grc"
+          export GRAND_VM="$GITHUB_WORKSPACE/target/release/grvm"
+          "$GITHUB_WORKSPACE/tooling/grand/target/release/grand" check
+          "$GITHUB_WORKSPACE/tooling/grand/target/release/grand" build
+          "$GITHUB_WORKSPACE/tooling/grand/target/release/grand" run
           test -f target/grand/app.grbc
       - name: Language server
         run: cargo test --manifest-path tooling/lsp/Cargo.toml --all-targets

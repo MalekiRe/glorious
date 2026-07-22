@@ -10,7 +10,7 @@ fn function_id(artifact: &grandiose_vm::Artifact, name: &str) -> u32 {
 }
 
 fn run(source: &str, name: &str) -> Value {
-    let artifact = compile_source_to_bytecode("effect-aware-fn.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("effect-aware-fn.glorious", source).unwrap();
     let function = function_id(&artifact, name);
     Vm::new(verify(artifact).unwrap())
         .run(function, vec![])
@@ -18,7 +18,8 @@ fn run(source: &str, name: &str) -> Value {
 }
 
 fn assert_rejected(source: &str, required_words: &[&str]) {
-    let diagnostics = compile_source_to_bytecode("bad-effect-aware-fn.gr", source).unwrap_err();
+    let diagnostics =
+        compile_source_to_bytecode("bad-effect-aware-fn.glorious", source).unwrap_err();
     assert!(
         diagnostics
             .iter()
@@ -56,7 +57,7 @@ fn associated_fn_effect_rows_accept_empty_protocol_and_alias_forms() {
         alias_answer() -> i64 / {Ask} { aliased({ => perform Ask::ask() }) }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("associated-effect-rows.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("associated-effect-rows.glorious", source).unwrap();
     let verified = verify(artifact.clone()).unwrap();
     assert_eq!(
         Vm::new(verified)
@@ -96,7 +97,7 @@ fn open_fn_effect_rows_bind_canonical_residuals_without_dropping_the_prefix() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("open-fn-effect-rows.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("open-fn-effect-rows.glorious", source).unwrap();
     let mut invoke_rows = artifact
         .functions
         .iter()
@@ -117,7 +118,8 @@ fn open_fn_effect_rows_bind_canonical_residuals_without_dropping_the_prefix() {
         bad<e: EffectRow>() -> i64 / {| e} { 0 }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("unresolved-outward-row.gr", unresolved).unwrap_err();
+    let errors =
+        compile_source_to_bytecode("unresolved-outward-row.glorious", unresolved).unwrap_err();
     assert!(
         errors
             .iter()
@@ -138,13 +140,13 @@ fn repeated_open_row_variables_require_equal_residuals() {
     let positive = format!(
         "{shared} good() -> i64 / {{Ask}} {{ pair({{ => perform Ask::ask() }}, {{ => perform Ask::ask() }}) }} main()->{{()}}"
     );
-    compile_source_to_bytecode("equal-open-row-residuals.gr", &positive).unwrap();
+    compile_source_to_bytecode("equal-open-row-residuals.glorious", &positive).unwrap();
 
     let negative = format!(
         "{shared} bad() -> i64 / {{Ask,Trace}} {{ pair({{ => perform Ask::ask() }}, {{ => perform Trace::trace() }}) }} main()->{{()}}"
     );
-    let errors =
-        compile_source_to_bytecode("conflicting-open-row-residuals.gr", &negative).unwrap_err();
+    let errors = compile_source_to_bytecode("conflicting-open-row-residuals.glorious", &negative)
+        .unwrap_err();
     assert!(
         errors
             .iter()
@@ -168,9 +170,11 @@ fn open_row_known_members_are_canonical_across_source_order() {
         )
     };
     let left =
-        compile_source_to_bytecode("open-row-order-left.gr", &source("{Ask, Trace | e}")).unwrap();
+        compile_source_to_bytecode("open-row-order-left.glorious", &source("{Ask, Trace | e}"))
+            .unwrap();
     let right =
-        compile_source_to_bytecode("open-row-order-right.gr", &source("{Trace, Ask | e}")).unwrap();
+        compile_source_to_bytecode("open-row-order-right.glorious", &source("{Trace, Ask | e}"))
+            .unwrap();
     assert_eq!(left.encode(), right.encode());
 }
 
@@ -222,7 +226,7 @@ fn omitted_effects_infer_and_keep_pure_and_effectful_specializations_distinct() 
         effectful_answer() -> i64 / {Ask} { invoke({ => perform Ask::ask() }) }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("inferred-effects.gr", source).unwrap();
+    let phases = compile_source_to_phases("inferred-effects.glorious", source).unwrap();
     let invoke = phases
         .artifact
         .functions
@@ -308,7 +312,7 @@ fn generic_forwarders_propagate_rows_and_an_internal_handler_closes_them() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("forwarded-effects.gr", source).unwrap();
+    let phases = compile_source_to_phases("forwarded-effects.glorious", source).unwrap();
     for prefix in [
         "$specialization$forward_one#",
         "$specialization$forward_two#",
@@ -396,7 +400,7 @@ fn exhaustive_enum_handler_matrix_closes_forwarded_effect_but_partial_coverage_d
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("enum-handler-effects.gr", source).unwrap();
+    let phases = compile_source_to_phases("enum-handler-effects.glorious", source).unwrap();
     for prefix in ["$specialization$close#", "$specialization$forward_close#"] {
         let function = phases
             .artifact
@@ -444,7 +448,7 @@ fn contextual_blocks_are_eager_for_scalars_and_delayed_only_for_fn_evidence() {
         delayed_answer() -> i64 { delayed({ 40 + 2 }) }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("contextual-eager-delayed.gr", source).unwrap();
+    let phases = compile_source_to_phases("contextual-eager-delayed.glorious", source).unwrap();
     assert_eq!(
         phases
             .artifact
@@ -552,10 +556,10 @@ fn effect_aware_specialization_is_deterministic_across_declaration_order() {
         effect Ask { [1,1] ask() -> i64 }
     "#;
     assert_eq!(
-        compile_source_to_bytecode("ordered.gr", first)
+        compile_source_to_bytecode("ordered.glorious", first)
             .unwrap()
             .encode(),
-        compile_source_to_bytecode("reordered.gr", reordered)
+        compile_source_to_bytecode("reordered.glorious", reordered)
             .unwrap()
             .encode()
     );
@@ -631,7 +635,8 @@ fn distinct_handler_operations_share_one_exact_linear_incoming_environment() {
         make_right() -> i64 { right_answer(Ticket { marker: 42 }) }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("cross-operation-environment.gr", source).unwrap();
+    let artifact =
+        compile_source_to_bytecode("cross-operation-environment.glorious", source).unwrap();
     let bytes = artifact.encode();
     assert_eq!(Artifact::decode(&bytes).unwrap().encode(), bytes);
 
@@ -677,7 +682,7 @@ fn unused_effectful_callback_stays_pure_through_transitive_forwarding() {
         answer() -> i64 { forward({ => perform Ask::ask() }) }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("unused-effectful-forward.gr", source).unwrap();
+    let phases = compile_source_to_phases("unused-effectful-forward.glorious", source).unwrap();
     for prefix in ["$specialization$ignore#", "$specialization$forward#"] {
         let specialization = phases
             .artifact

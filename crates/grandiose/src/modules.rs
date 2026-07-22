@@ -1829,6 +1829,19 @@ pub fn fixity_regions(
                 })
                 .map(|(_, _, name)| name.clone()),
         );
+        names.extend(
+            scopes
+                .definitions
+                .iter()
+                .filter(|((owner, namespace, _), bindings)| {
+                    *owner == ModuleId(0)
+                        && *namespace == Namespace::Fixity
+                        && bindings.iter().any(|binding| {
+                            resolution.prelude_definitions.contains(&binding.definition)
+                        })
+                })
+                .map(|((_, _, name), _)| name.clone()),
+        );
         for name in names {
             let local = scopes
                 .definitions
@@ -1836,10 +1849,24 @@ pub fn fixity_regions(
             let root_binding = scopes
                 .definitions
                 .get(&(root, Namespace::Fixity, name.clone()));
+            let prelude_binding = scopes
+                .definitions
+                .get(&(ModuleId(0), Namespace::Fixity, name.clone()))
+                .filter(|bindings| {
+                    bindings
+                        .iter()
+                        .any(|binding| resolution.prelude_definitions.contains(&binding.definition))
+                });
             let bindings = local
                 .or(root_binding)
+                .or(prelude_binding)
                 .into_iter()
                 .flatten()
+                .filter(|binding| {
+                    local.is_some()
+                        || root_binding.is_some()
+                        || resolution.prelude_definitions.contains(&binding.definition)
+                })
                 .collect::<Vec<_>>();
             let definitions = bindings
                 .iter()
@@ -2094,8 +2121,7 @@ pub fn build_graph(
                     let directory = parent_info.physical_dir.join(&declaration.name);
                     let expected =
                         normalized(&directory.join(format!("{}.glorious", declaration.name)));
-                    let legacy = normalized(&directory.join(format!("{}.gr", declaration.name)));
-                    let Some(segment) = paths.get(&expected).or_else(|| paths.get(&legacy)) else {
+                    let Some(segment) = paths.get(&expected) else {
                         errors.push(error(
                             declaration.name_span,
                             format!(

@@ -898,8 +898,8 @@ impl Error for LoadError {
 /// Section slices and the caller's encoded byte buffer are borrowed only for
 /// the duration of this call. The returned image owns exactly the decoded
 /// tables needed at runtime and can outlive or immediately release that raw
-/// input. Use [`VerifiedArtifact::artifact`] only when the legacy mutable
-/// compatibility representation is actually required.
+/// input. Use [`VerifiedArtifact::artifact`] only when the mutable compatibility
+/// representation is actually required.
 pub fn load_verified(bytes: &[u8]) -> Result<VerifiedArtifact, LoadError> {
     let encoded: Arc<[u8]> = Arc::from(bytes);
     let decoded = Artifact::decode_internal(&encoded).map_err(LoadError::Decode)?;
@@ -1660,7 +1660,17 @@ fn verify_function(
         if require_cleanup_metadata {
             let plan = cleanup_registers(a, fid, pc);
             let exact = if f.label_slot_count == 0 {
-                plan == expected
+                let mut planned_members = plan.to_vec();
+                planned_members.sort_unstable();
+                let mut expected_members = expected.clone();
+                expected_members.sort_unstable();
+                planned_members == expected_members
+                    && plan
+                        .iter()
+                        .filter(|register| !is_copy(a, f.register_types[**register as usize]))
+                        .eq(expected
+                            .iter()
+                            .filter(|register| !is_copy(a, f.register_types[**register as usize])))
             } else {
                 // Label result slots may be listed before `LEAVE` initializes
                 // them so source and destination cleanup lists can have the
@@ -1758,10 +1768,18 @@ fn verify_function(
             if let Some(previous) = &order_states[target as usize]
                 && previous != &order
             {
-                return Err(VerifyError::StateMismatch {
-                    function: fid,
-                    instruction: target,
-                });
+                let observable =
+                    |register: &&u32| !is_copy(a, f.register_types[**register as usize]);
+                if previous
+                    .iter()
+                    .filter(observable)
+                    .ne(order.iter().filter(observable))
+                {
+                    return Err(VerifyError::StateMismatch {
+                        function: fid,
+                        instruction: target,
+                    });
+                }
             }
             if let Some(previous) = &mut shell_age_states[target as usize] {
                 let mut changed = false;
@@ -8409,10 +8427,13 @@ fn aggregate_reference_return_origins_with(
             })
     });
     if let Some(declared) = declared_carrier_contract(a, fid)? {
-        candidates.retain(|candidate| candidate == &declared);
-        if candidates.len() != 1 {
-            return Err(VerifyError::InvalidFunction(fid));
-        }
+        // A projected borrow can create a reference to a non-reference field
+        // inside a parameter referent. Such a route is intentionally absent
+        // from the coarse candidate set above, which enumerates reference
+        // leaves already stored in parameter values. Seed the declared route
+        // directly; the body fixed point below still has to reproduce it
+        // exactly, so metadata cannot manufacture an escape.
+        candidates = vec![declared];
     }
     let mut fixed_points = Vec::new();
     for candidate in candidates {
@@ -8598,11 +8619,49 @@ fn aggregate_reference_return_origins_inner(
             Instruction::BorrowShared { dst, .. } | Instruction::BorrowUnique { dst, .. } => {
                 state[*dst as usize] = vec![(vec![], CarrierOrigin::Local)];
             }
-            Instruction::ReborrowShared { dst, src }
-            | Instruction::ReborrowUnique { dst, src }
-            | Instruction::ProjectBorrowShared { dst, src, .. }
-            | Instruction::ProjectBorrowUnique { dst, src, .. } => {
+            Instruction::ReborrowShared { dst, src } | Instruction::ReborrowUnique { dst, src } => {
                 state[*dst as usize] = state[*src as usize].clone();
+            }
+            Instruction::ProjectBorrowShared { dst, src, field }
+            | Instruction::ProjectBorrowUnique { dst, src, field } => {
+                let through_reference = matches!(
+                    type_at(a, f.register_types[*src as usize]),
+                    Ok(Type::RefShared { .. } | Type::RefUnique { .. })
+                );
+                state[*dst as usize] = if through_reference {
+                    let result_paths = reference_leaves(a, f.register_types[*dst as usize]);
+                    state[*src as usize]
+                        .iter()
+                        .flat_map(|(_, origin)| {
+                            result_paths.iter().map(move |(result_path, _)| {
+                                let origin = match origin {
+                                    CarrierOrigin::Parameter { parameter, path } => {
+                                        let mut path = path.clone();
+                                        path.push(*field);
+                                        path.extend(result_path.iter().copied());
+                                        CarrierOrigin::Parameter {
+                                            parameter: *parameter,
+                                            path,
+                                        }
+                                    }
+                                    CarrierOrigin::Receiver { path } => {
+                                        let mut path = path.clone();
+                                        path.push(*field);
+                                        path.extend(result_path.iter().copied());
+                                        CarrierOrigin::Receiver { path }
+                                    }
+                                    CarrierOrigin::Local => CarrierOrigin::Local,
+                                };
+                                (result_path.clone(), origin)
+                            })
+                        })
+                        .collect()
+                } else {
+                    reference_leaves(a, f.register_types[*dst as usize])
+                        .into_iter()
+                        .map(|(path, _)| (path, CarrierOrigin::Local))
+                        .collect()
+                };
             }
             Instruction::Primitive { dst, op, args } => {
                 let root = args
@@ -8649,6 +8708,10 @@ fn aggregate_reference_return_origins_inner(
                     }
                 };
                 match op {
+                    Primitive::ArrayGetBorrowShared | Primitive::ArrayGetBorrowUnique => {
+                        let source = *args.first().ok_or(VerifyError::InvalidFunction(fid))?;
+                        state[*dst as usize] = state[source as usize].clone();
+                    }
                     Primitive::ArraySetMove | Primitive::ArrayPushMove => {
                         if let Some(ArrayRoot::Local(owner)) = root {
                             let item = *args
@@ -8715,22 +8778,8 @@ fn aggregate_reference_return_origins_inner(
                 && !reference_leaves(a, f.register_types[*dst as usize]).is_empty() =>
             {
                 let contract = carrier_return_contract_with(a, *function, visiting, provisional)?;
-                let mut origins = Vec::new();
-                for (result_path, origin) in contract {
-                    let CarrierOrigin::Parameter { parameter, path } = origin else {
-                        return Err(VerifyError::InvalidFunction(*function));
-                    };
-                    let argument = *args
-                        .get(parameter)
-                        .ok_or(VerifyError::InvalidFunction(*function))?;
-                    let source = state[argument as usize]
-                        .iter()
-                        .find(|(candidate, _)| candidate == &path)
-                        .map(|(_, origin)| origin.clone())
-                        .ok_or(VerifyError::InvalidFunction(*function))?;
-                    origins.push((result_path, source));
-                }
-                state[*dst as usize] = origins;
+                state[*dst as usize] =
+                    instantiate_carrier_contract(&contract, None, args, &state, *function)?;
             }
             Instruction::CallIndirect {
                 dst: Some(dst),
@@ -9392,6 +9441,33 @@ fn instantiate_carrier_contract(
                 .iter()
                 .find(|(candidate, _)| candidate == path)
                 .map(|(_, origin)| origin.clone())
+                .or_else(|| {
+                    let [(carrier_path, origin)] = state[register as usize].as_slice() else {
+                        return None;
+                    };
+                    if !carrier_path.is_empty() {
+                        return None;
+                    }
+                    Some(match origin {
+                        CarrierOrigin::Parameter {
+                            parameter,
+                            path: prefix,
+                        } => {
+                            let mut composed = prefix.clone();
+                            composed.extend(path.iter().copied());
+                            CarrierOrigin::Parameter {
+                                parameter: *parameter,
+                                path: composed,
+                            }
+                        }
+                        CarrierOrigin::Receiver { path: prefix } => {
+                            let mut composed = prefix.clone();
+                            composed.extend(path.iter().copied());
+                            CarrierOrigin::Receiver { path: composed }
+                        }
+                        CarrierOrigin::Local => CarrierOrigin::Local,
+                    })
+                })
                 .ok_or(VerifyError::InvalidFunction(callee))?;
             Ok((result_path.clone(), source))
         })
@@ -11867,6 +11943,23 @@ fn verify_loans(
                                     .iter()
                                     .find(|loan| loan.path == source_path)
                                     .cloned()
+                                    .or_else(|| {
+                                        // A validated callee contract may
+                                        // project a fresh reference to an
+                                        // ordinary field of the referent. No
+                                        // pre-existing carried loan exists for
+                                        // such a field: the argument's root
+                                        // reference is the authority. Stored
+                                        // reference fields still take the
+                                        // exact carried-loan path above.
+                                        let mut loan = reference.clone();
+                                        loan.loan.place.projections.extend(path.iter().copied());
+                                        loan.loan.unique = result_leaves
+                                            .iter()
+                                            .find(|(candidate, _)| candidate == &result_path)
+                                            .is_some_and(|(_, unique)| *unique);
+                                        Some(loan)
+                                    })
                             } else {
                                 let mut loan = reference.clone();
                                 loan.loan.place.projections.push(STORED_REFERENCE_DEREF);
@@ -27205,6 +27298,91 @@ mod tests {
             ..Artifact::default()
         };
         verify(artifact).expect("the nested stored-reference route must be body-proved");
+    }
+
+    #[test]
+    fn direct_wrapper_composes_a_callee_projected_reference_route() {
+        let mut types = Type::predefined();
+        let wrapper = types.len() as TypeId;
+        types.push(Type::Struct {
+            name: "Wrapper".into(),
+            fields: vec![Field {
+                name: "value".into(),
+                ty: I64,
+            }],
+            copy: false,
+        });
+        let wrapper_reference = types.len() as TypeId;
+        types.push(Type::RefShared { referent: wrapper });
+        let value_reference = types.len() as TypeId;
+        types.push(Type::RefShared { referent: I64 });
+        let route = |function| ReferenceReturnContract {
+            function,
+            routes: vec![ReferenceReturnRoute {
+                result_path: vec![],
+                origin: ReferenceReturnOrigin::Parameter {
+                    parameter: 0,
+                    path: vec![0],
+                },
+            }],
+        };
+        let artifact = Artifact {
+            required_features: 1 | (1 << 1),
+            types,
+            reference_return_contracts: vec![route(0), route(1)],
+            functions: vec![
+                Function {
+                    name: "inner".into(),
+                    flags: 0,
+                    params: vec![wrapper_reference],
+                    return_type: value_reference,
+                    outward_protocols: vec![],
+                    receiver_mode: None,
+                    register_types: vec![UNIT, wrapper_reference, value_reference],
+                    code_start: 0,
+                    code_len: 3,
+                    label_slot_count: 0,
+                },
+                Function {
+                    name: "wrapper".into(),
+                    flags: 0,
+                    params: vec![wrapper_reference],
+                    return_type: value_reference,
+                    outward_protocols: vec![],
+                    receiver_mode: None,
+                    register_types: vec![
+                        UNIT,
+                        wrapper_reference,
+                        wrapper_reference,
+                        value_reference,
+                    ],
+                    code_start: 3,
+                    code_len: 5,
+                    label_slot_count: 0,
+                },
+            ],
+            code: vec![
+                Instruction::ProjectBorrowShared {
+                    dst: 2,
+                    src: 1,
+                    field: 0,
+                },
+                Instruction::Drop { register: 1 },
+                Instruction::Return { src: Some(2) },
+                Instruction::Copy { dst: 2, src: 1 },
+                Instruction::Call {
+                    dst: Some(3),
+                    function: 0,
+                    args: vec![2],
+                },
+                Instruction::Jump { target: 3 },
+                Instruction::Drop { register: 1 },
+                Instruction::Return { src: Some(3) },
+            ],
+            ..Artifact::default()
+        };
+        verify(artifact)
+            .expect("the wrapper must compose the inner field route onto its root loan");
     }
 
     #[test]

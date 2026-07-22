@@ -16,8 +16,10 @@ use anyhow::Result;
 use grandiose::compiler_session::IncrementalCompilerSession;
 use grandiose::diagnostic::Severity;
 use grandiose::interface::{
-    InterfaceDeclaration, InterfaceSelection, InterfaceSnapshot, scan_interface_snapshot,
+    DeclarationKind, InterfaceDeclaration, InterfaceOccurrence, InterfaceSelection,
+    InterfaceSnapshot, scan_interface_snapshot,
 };
+use grandiose::lossless::{LosslessKind, lex_lossless};
 use grandiose::semantic::SemanticSnapshot as CompilerSemanticSnapshot;
 use grandiose::source_bundle::{Segment, SourceBundle};
 use grandiose::{CompileOptions, OptimizationLevel};
@@ -59,6 +61,12 @@ pub struct Analysis {
     pub locals: Vec<Local>,
     pub local_occurrences: Vec<SemanticOccurrence>,
     pub expression_types: Vec<SemanticExpression>,
+    /// Exactly resolved top-level names from the current source when the
+    /// compiler has never produced a successful snapshot for this root. This
+    /// is deliberately definition-only: references, rename, hover, and local
+    /// lookup continue to require compiler-owned semantic state.
+    initial_error_declarations: Vec<SemanticDeclaration>,
+    initial_error_occurrences: Vec<SemanticOccurrence>,
     /// Byte prefix unchanged from the successful snapshot that owns semantic
     /// spans. Requests outside it must not apply stale offsets to a broken edit.
     semantic_prefixes: BTreeMap<PathBuf, usize>,
@@ -183,6 +191,45 @@ impl Analysis {
             .min_by_key(|expression| expression.end_byte.saturating_sub(expression.start_byte))
     }
 
+    /// Resolve a top-level name from the current, module-resolved interface
+    /// when initial compilation failed after parsing/name resolution. The
+    /// caller must try compiler-owned locals and declarations first.
+    ///
+    /// Both the occurrence identity and its definition must be unique in the
+    /// originating root. This makes the fallback fail closed under ambiguity
+    /// and prevents equal names in sibling workspace roots from cross-linking.
+    pub fn initial_error_declaration_at(
+        &self,
+        file: &Path,
+        offset: usize,
+    ) -> Option<&SemanticDeclaration> {
+        let mut identities = self
+            .initial_error_occurrences
+            .iter()
+            .filter(|occurrence| {
+                occurrence.file == file
+                    && (occurrence.start_byte..occurrence.end_byte).contains(&offset)
+            })
+            .map(|occurrence| occurrence.identity.as_str());
+        let identity = identities.next()?;
+        if identities.any(|candidate| candidate != identity) {
+            return None;
+        }
+
+        let mut declarations = self
+            .initial_error_declarations
+            .iter()
+            .filter(|declaration| {
+                declaration.identity == identity
+                    && (identity.starts_with("std:") || self.same_root(file, &declaration.file))
+            });
+        let declaration = declarations.next()?;
+        if declarations.any(|candidate| candidate.file != declaration.file) {
+            return None;
+        }
+        Some(declaration)
+    }
+
     pub fn locals_at(&self, file: &Path, offset: usize) -> Vec<&Local> {
         let mut by_name = BTreeMap::new();
         for local in self.locals.iter().filter(|local| {
@@ -205,6 +252,10 @@ impl Analysis {
                     && self.span_is_current(file, local.definition_end_byte)
             })
             .collect()
+    }
+
+    pub fn semantic_span_is_current(&self, file: &Path, end: usize) -> bool {
+        self.span_is_current(file, end)
     }
 
     fn span_is_current(&self, file: &Path, end: usize) -> bool {
@@ -266,25 +317,30 @@ impl Workspace {
     fn project_groups(&self) -> Vec<(PathBuf, Vec<PathBuf>, BTreeMap<PathBuf, String>)> {
         let mut groups = Vec::new();
         let mut assigned = BTreeSet::new();
-        for root in &self.roots {
-            let (mut files, mut dependency_roots) = match self.resolve_project(root) {
-                Ok((files, dependency_roots)) if !files.is_empty() => (files, dependency_roots),
-                _ => (
-                    self.overlays
-                        .keys()
-                        .filter(|path| path.starts_with(root))
-                        .cloned()
-                        .collect(),
-                    BTreeMap::new(),
-                ),
+        // A workspace folder may contain several Grandiose projects (the
+        // repository tutorial is one such layout). Resolve the nearest
+        // manifest for every open source instead of assuming the workspace
+        // folder itself is a package root.
+        let mut project_roots = BTreeSet::new();
+        for candidate in self.roots.iter().chain(self.overlays.keys()) {
+            if let Ok((project_root, _)) = grand::manifest::find_project(candidate) {
+                project_roots.insert(project_root);
+            }
+        }
+        for root in project_roots {
+            let Ok((mut files, mut dependency_roots)) = self.resolve_project(&root) else {
+                continue;
             };
+            if files.is_empty() {
+                continue;
+            }
             files.sort();
             files.dedup();
             // A crate root is semantic, not lexicographic. Keep the manifest
             // entry first so SourceBundle's primary segment receives the root
             // module exception (`src/main.glorious` need not live in
             // `main/main.glorious`). Declared child modules remain sorted.
-            if let Ok((project_root, manifest)) = grand::manifest::find_project(root)
+            if let Ok((project_root, manifest)) = grand::manifest::find_project(&root)
                 && let Some(entry) = manifest.project.entry
                 && let entry = project_root.join(entry)
                 && let Some(index) = files.iter().position(|file| *file == entry)
@@ -292,9 +348,15 @@ impl Workspace {
                 let primary = files.remove(index);
                 files.insert(0, primary);
             }
-            files.retain(|file| assigned.insert(file.clone()));
+            for overlay in self
+                .overlays
+                .keys()
+                .filter(|overlay| files.contains(overlay))
+            {
+                assigned.insert(overlay.clone());
+            }
             dependency_roots.retain(|file, _| files.contains(file));
-            groups.push((root.clone(), files, dependency_roots));
+            groups.push((root, files, dependency_roots));
         }
         for file in self
             .overlays
@@ -359,6 +421,8 @@ impl Workspace {
         let mut locals = Vec::new();
         let mut local_occurrences = Vec::new();
         let mut expression_types = Vec::new();
+        let mut initial_error_declarations = Vec::new();
+        let mut initial_error_occurrences = Vec::new();
         let mut semantic_prefixes = BTreeMap::new();
         let mut file_roots = BTreeMap::new();
 
@@ -392,7 +456,7 @@ impl Workspace {
                 .compile_bundle(
                     &bundle,
                     CompileOptions {
-                        optimization_level: OptimizationLevel::O0,
+                        optimization_level: OptimizationLevel::O2,
                     },
                 );
             let compiler_diagnostics = match &checked {
@@ -427,23 +491,41 @@ impl Workspace {
             // Both compiler checking and interface extraction must succeed
             // before the new side tables become visible. This is the semantic
             // transaction boundary for one workspace root.
-            let user_interfaces = scan_interface_snapshot(&bundle, InterfaceSelection::User);
-            let standard_interfaces =
+            let mut user_interfaces = scan_interface_snapshot(&bundle, InterfaceSelection::User);
+            let mut standard_interfaces =
                 scan_interface_snapshot(&bundle, InterfaceSelection::StandardLibrary);
+            if let (Ok(user), Ok(standard)) = (&mut user_interfaces, &mut standard_interfaces) {
+                augment_effect_operations(&bundle, user, standard);
+            }
             if let Ok(phases) = &checked
-                && let (Ok(user), Ok(standard)) = (user_interfaces, standard_interfaces)
+                && let (Ok(user), Ok(standard)) = (&user_interfaces, &standard_interfaces)
             {
                 let compiler = grandiose::semantic::semantic_snapshot(&bundle, phases);
                 let previous = self.last_good.borrow().get(root).cloned();
                 let mut snapshot = semantic_snapshot(
-                    user,
-                    standard,
+                    user.clone(),
+                    standard.clone(),
                     compiler,
                     previous.as_ref(),
                     &self.next_body_arena,
                 );
                 snapshot.sources = group_sources.clone();
                 self.last_good.borrow_mut().insert(root.clone(), snapshot);
+            }
+            // Late compiler failures (for example unsupported bytecode
+            // specialization) need not disable declaration navigation on the
+            // very first editor load. Interface scanning uses the real parser
+            // and module resolver, so its occurrences already exclude locals
+            // and unresolved/ambiguous names. Never replace a last-good
+            // semantic transaction with this narrower current-source view.
+            if checked.is_err()
+                && !self.last_good.borrow().contains_key(root)
+                && let (Ok(user), Ok(standard)) = (user_interfaces, standard_interfaces)
+            {
+                let fallback = interface_snapshot(user, standard);
+                initial_error_declarations.extend(fallback.declarations);
+                initial_error_declarations.extend(fallback.std_declarations);
+                initial_error_occurrences.extend(fallback.occurrences);
             }
             if let Some(snapshot) = self.last_good.borrow().get(root) {
                 declarations.extend(snapshot.declarations.iter().cloned());
@@ -460,6 +542,11 @@ impl Workspace {
         }
         std_declarations.sort_by(|left, right| left.identity.cmp(&right.identity));
         std_declarations.dedup_by(|left, right| left.identity == right.identity);
+        initial_error_declarations.sort_by(|left, right| {
+            (&left.identity, &left.file).cmp(&(&right.identity, &right.file))
+        });
+        initial_error_declarations
+            .dedup_by(|left, right| left.identity == right.identity && left.file == right.file);
         Analysis {
             diagnostics,
             declarations,
@@ -468,9 +555,214 @@ impl Workspace {
             locals,
             local_occurrences,
             expression_types,
+            initial_error_declarations,
+            initial_error_occurrences,
             semantic_prefixes,
             file_roots,
         }
+    }
+}
+
+/// Add effect operations to the editor interface without weakening the
+/// compiler-owned effect identity. The compiler interface intentionally lists
+/// top-level effects only; an operation is namespaced by that exact identity,
+/// so equal operation spellings in different effects (or ordinary functions)
+/// can never collide.
+fn augment_effect_operations(
+    bundle: &SourceBundle,
+    user: &mut InterfaceSnapshot,
+    standard: &mut InterfaceSnapshot,
+) {
+    let Ok(program) = grandiose::modules::parse_bundle(bundle) else {
+        return;
+    };
+    let effects = user
+        .declarations
+        .iter()
+        .chain(&standard.declarations)
+        .filter(|declaration| declaration.kind == DeclarationKind::Effect)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    for effect in &program.effects {
+        let Some(mapped) = bundle.map_span(effect.span) else {
+            continue;
+        };
+        let Some(parent) = effects.iter().find(|declaration| {
+            declaration.file == mapped.segment.name()
+                && declaration.declaration_start_byte == mapped.span.start
+                && declaration.name == effect.name
+        }) else {
+            continue;
+        };
+        let target = if parent.identity.starts_with("std:") {
+            &mut *standard
+        } else {
+            &mut *user
+        };
+        for operation in &effect.operations {
+            let Some(operation_mapped) = bundle.map_span(operation.span) else {
+                continue;
+            };
+            let source = operation_mapped.segment.source();
+            let start = operation_mapped.span.start.min(source.len());
+            let end = operation_mapped.span.end.min(source.len());
+            let name_range = lex_lossless(source.get(start..end).unwrap_or_default())
+                .ok()
+                .and_then(|tokens| {
+                    tokens.into_iter().find(|token| {
+                        token.kind == LosslessKind::Identifier
+                            && token.text(&source[start..end]) == operation.name
+                    })
+                })
+                .map_or((start, start), |token| {
+                    (start + token.span.start, start + token.span.end)
+                });
+            let signature = source.get(start..end).unwrap_or_default().trim();
+            target.declarations.push(InterfaceDeclaration {
+                identity: format!("{}::operation:{}", parent.identity, operation.name),
+                name: operation.name.clone(),
+                kind: DeclarationKind::Callable,
+                module: parent.module.clone(),
+                visibility: parent.visibility.clone(),
+                file: operation_mapped.segment.name().to_string(),
+                line: source[..start]
+                    .bytes()
+                    .filter(|byte| *byte == b'\n')
+                    .count()
+                    + 1,
+                declaration_start_byte: start,
+                declaration_end_byte: end,
+                name_start_byte: name_range.0,
+                name_end_byte: name_range.1,
+                signature: (!signature.is_empty()).then(|| signature.to_string()),
+                docs: None,
+            });
+        }
+    }
+
+    let effect_identity = |file: &str, start: usize, end: usize| {
+        user.occurrences
+            .iter()
+            .chain(&standard.occurrences)
+            .find(|occurrence| {
+                occurrence.file == file
+                    && occurrence.start_byte == start
+                    && occurrence.end_byte == end
+            })
+            .map(|occurrence| occurrence.identity.clone())
+    };
+    let mut operation_occurrences = Vec::new();
+    for path in &program.effect_paths {
+        let effect_span = match &path.effect.kind {
+            grandiose::ast::TypeSyntaxKind::Path(segments) => segments
+                .first()
+                .zip(segments.last())
+                .map(|(first, last)| first.span.join(last.span)),
+            grandiose::ast::TypeSyntaxKind::Application { constructor, .. } => {
+                match &constructor.kind {
+                    grandiose::ast::TypeSyntaxKind::Path(segments) => segments
+                        .first()
+                        .zip(segments.last())
+                        .map(|(first, last)| first.span.join(last.span)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let (Some(effect_mapped), Some(site_mapped)) = (
+            effect_span.and_then(|span| bundle.map_span(span)),
+            bundle.map_span(path.site),
+        ) else {
+            continue;
+        };
+        if effect_mapped.segment.name() != site_mapped.segment.name() {
+            continue;
+        }
+        let Some(parent_identity) = effect_identity(
+            effect_mapped.segment.name(),
+            effect_mapped.span.start,
+            effect_mapped.span.end,
+        ) else {
+            continue;
+        };
+        let source = site_mapped.segment.source();
+        let tail_start = effect_mapped.span.end.min(source.len());
+        let tail_end = site_mapped.span.end.min(source.len());
+        let tail = source.get(tail_start..tail_end).unwrap_or_default();
+        let Some(operation) = lex_lossless(tail).ok().and_then(|tokens| {
+            let mut after_separator = false;
+            tokens.into_iter().find(|token| {
+                if token.kind == LosslessKind::Punctuation && token.text(tail) == "::" {
+                    after_separator = true;
+                    return false;
+                }
+                after_separator && token.kind == LosslessKind::Identifier
+            })
+        }) else {
+            continue;
+        };
+        let name = operation.text(tail);
+        let identity = format!("{parent_identity}::operation:{name}");
+        let occurrence = InterfaceOccurrence {
+            identity: identity.clone(),
+            file: site_mapped.segment.name().to_string(),
+            start_byte: tail_start + operation.span.start,
+            end_byte: tail_start + operation.span.end,
+        };
+        operation_occurrences.push((parent_identity.starts_with("std:"), occurrence));
+    }
+    for (is_standard, occurrence) in operation_occurrences {
+        if is_standard {
+            standard.occurrences.push(occurrence);
+        } else {
+            user.occurrences.push(occurrence);
+        }
+    }
+}
+
+fn interface_snapshot(user: InterfaceSnapshot, standard: InterfaceSnapshot) -> RootSnapshot {
+    let convert = |interface: InterfaceDeclaration| SemanticDeclaration {
+        file: PathBuf::from(&interface.file),
+        interface,
+    };
+    let declarations = user
+        .declarations
+        .into_iter()
+        .map(convert)
+        .collect::<Vec<_>>();
+    let std_declarations = standard
+        .declarations
+        .into_iter()
+        .map(convert)
+        .collect::<Vec<_>>();
+    let mut occurrences = declarations
+        .iter()
+        .map(|declaration| SemanticOccurrence {
+            identity: declaration.identity.clone(),
+            file: declaration.file.clone(),
+            start_byte: declaration.name_start_byte,
+            end_byte: declaration.name_end_byte,
+            definition: true,
+        })
+        .collect::<Vec<_>>();
+    occurrences.extend(
+        user.occurrences
+            .into_iter()
+            .chain(standard.occurrences)
+            .map(|occurrence| SemanticOccurrence {
+                identity: occurrence.identity,
+                file: occurrence.file.into(),
+                start_byte: occurrence.start_byte,
+                end_byte: occurrence.end_byte,
+                definition: false,
+            }),
+    );
+    RootSnapshot {
+        declarations,
+        std_declarations,
+        occurrences,
+        ..RootSnapshot::default()
     }
 }
 
@@ -489,42 +781,10 @@ fn semantic_snapshot(
     next_body_arena: &Cell<u64>,
 ) -> RootSnapshot {
     let body_arenas = retain_body_arenas(&compiler, previous, next_body_arena);
-    let convert = |interface: InterfaceDeclaration| SemanticDeclaration {
-        file: PathBuf::from(&interface.file),
-        interface,
-    };
-    let declarations = user
-        .declarations
-        .into_iter()
-        .map(convert)
-        .collect::<Vec<_>>();
-    let std_declarations = standard
-        .declarations
-        .into_iter()
-        .map(convert)
-        .collect::<Vec<_>>();
-    let mut occurrences = declarations
-        .iter()
-        .map(|declaration| SemanticOccurrence {
-            identity: declaration.interface.identity.clone(),
-            file: declaration.file.clone(),
-            start_byte: declaration.interface.name_start_byte,
-            end_byte: declaration.interface.name_end_byte,
-            definition: true,
-        })
-        .collect::<Vec<_>>();
-    occurrences.extend(
-        user.occurrences
-            .into_iter()
-            .chain(standard.occurrences)
-            .map(|occurrence| SemanticOccurrence {
-                identity: occurrence.identity,
-                file: occurrence.file.into(),
-                start_byte: occurrence.start_byte,
-                end_byte: occurrence.end_byte,
-                definition: false,
-            }),
-    );
+    let interface = interface_snapshot(user, standard);
+    let declarations = interface.declarations;
+    let std_declarations = interface.std_declarations;
+    let mut occurrences = interface.occurrences;
     occurrences.sort_by(|left, right| {
         (&left.file, left.start_byte, left.end_byte).cmp(&(
             &right.file,
@@ -625,7 +885,7 @@ mod tests {
         CompilerSemanticSnapshot {
             bodies: vec![grandiose::semantic::SemanticBodySnapshot {
                 identity: identity.into(),
-                file: "main.gr".into(),
+                file: "main.glorious".into(),
                 start_byte: start,
                 end_byte: start + 10,
                 source_fingerprint: fingerprint,
@@ -761,14 +1021,14 @@ mod tests {
             std::fs::write(
                 root.join("grandiose.toml"),
                 format!(
-                    "[project]\nname = \"{}\"\nversion = \"0.1.0\"\nentry = \"src/main.gr\"\n",
+                    "[project]\nname = \"{}\"\nversion = \"0.1.0\"\nentry = \"src/main.glorious\"\n",
                     root.file_name().unwrap().to_string_lossy()
                 ),
             )
             .unwrap();
         }
-        let first_main = first.join("src/main.gr");
-        let second_main = second.join("src/main.gr");
+        let first_main = first.join("src/main.glorious");
+        let second_main = second.join("src/main.glorious");
         std::fs::write(
             &first_main,
             "shared() -> () { () }\nmain() -> () { shared() }\n",
@@ -795,11 +1055,11 @@ mod tests {
         std::fs::create_dir_all(root.join("src/aaa")).unwrap();
         std::fs::write(
             root.join("grandiose.toml"),
-            "[project]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.gr\"\n",
+            "[project]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.glorious\"\n",
         )
         .unwrap();
-        let main = root.join("src/main.gr");
-        let module = root.join("src/aaa/aaa.gr");
+        let main = root.join("src/main.glorious");
+        let module = root.join("src/aaa/aaa.glorious");
         std::fs::write(&main, "mod aaa; main() -> () { () }").unwrap();
         std::fs::write(&module, "pub helper() -> () { () }").unwrap();
 

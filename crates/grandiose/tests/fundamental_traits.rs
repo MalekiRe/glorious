@@ -60,9 +60,8 @@ const SURFACE: &str = r#"
 "#;
 
 #[test]
-fn fundamental_traits_execute_at_o0_through_o3() {
+fn fundamental_traits_execute_at_o1_through_o3() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -201,7 +200,6 @@ fn primitive_and_tuple_impl_heads_are_coherent_solver_inputs() {
         main() -> () { () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

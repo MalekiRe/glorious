@@ -92,9 +92,8 @@ const SURFACE: &str = r#"
 "#;
 
 #[test]
-fn structural_fundamental_traits_execute_at_o0_through_o3() {
+fn structural_fundamental_traits_execute_at_o1_through_o3() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

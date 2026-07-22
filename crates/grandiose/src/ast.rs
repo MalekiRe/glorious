@@ -26,20 +26,20 @@ pub struct Program {
     /// references are absent; runtime type identity continues to erase regions.
     pub reference_lifetimes: Vec<ReferenceLifetimeSyntax>,
     /// Full source-level effect applications used by `perform` expressions and
-    /// handler clauses. The legacy `ExprKind::Perform::effect` and
+    /// handler clauses. The compatibility `ExprKind::Perform::effect` and
     /// `HandlerClause::effect` fields retain their simple declaration name so
     /// existing bootstrap consumers remain source compatible.
     pub effect_paths: Vec<EffectPathSyntax>,
     /// Structural const literals in ordinary type applications, keyed by the
     /// complete application span. Type/lifetime arguments remain in the
-    /// legacy `TypeSyntaxKind::Application` vectors.
+    /// compatibility `TypeSyntaxKind::Application` vectors.
     pub type_const_arguments: Vec<TypeConstApplicationSyntax>,
     /// Fixed-array source forms keyed by the complete type span. The
     /// compatibility type tree stores the element as a one-element tuple until
     /// layout lowering consumes this side table.
     pub fixed_array_types: Vec<FixedArrayTypeSyntax>,
     /// Exact numeric token payloads keyed by expression/pattern span. The
-    /// legacy scalar enum payloads remain compatibility shadows only.
+    /// scalar enum payloads remain compatibility shadows only.
     pub numeric_literals: Vec<NumericLiteralSyntax>,
     /// Exact source path spans for syntax nodes whose compatibility AST stores
     /// only path spellings (not per-segment spans), currently named patterns.
@@ -341,7 +341,7 @@ pub enum AssociatedArgumentSyntax {
 /// These live beside the type/lifetime argument list — with their original
 /// binder positions — rather than inside it, mirroring how
 /// [`TypeSyntaxKind::Application`] records lifetime arguments, so consumers of
-/// the legacy two-variant list are unaffected.
+/// the compatibility two-variant list are unaffected.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ConstAssociatedArgumentSyntax {
     /// The argument's index within the complete source argument list.
@@ -634,7 +634,7 @@ pub struct TypeSyntax {
 }
 
 impl TypeSyntax {
-    /// Returns the spelling only for the legacy frontend's supported type form:
+    /// Returns the spelling only for the compiler frontend's supported type form:
     /// one unqualified identifier with no generic arguments.
     pub fn simple_name(&self) -> Option<&str> {
         let TypeSyntaxKind::Path(segments) = &self.kind else {

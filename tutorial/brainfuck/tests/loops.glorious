@@ -1,0 +1,25 @@
+effect ParsedCase {
+    inspect(value: Result<brainfuck_core::Program, brainfuck_core::ParseError>) -> !;
+}
+
+effect TestOutputCase {
+    inspect(value: Result<Vec<u8>, brainfuck_core::RuntimeError>) -> !;
+}
+
+main() -> {
+    let source = "+++++[>++++++++<-]>++.";
+    let parsed = brainfuck_core::parse(Bytes::iter(&String::as_bytes(&source)));
+    handle perform ParsedCase::inspect(move parsed) {
+        ParsedCase::inspect(Result::Ok(program)) => {
+            let output = brainfuck_core::run_with_io(&program, Bytes::iter(&String::as_bytes(&"")));
+            handle perform TestOutputCase::inspect(move output) {
+                TestOutputCase::inspect(Result::Ok(bytes)) => {
+                    let expected = "*";
+                    assert(Bytes::eq(&Bytes::from_vec(move bytes), &String::as_bytes(&expected)))
+                },
+                TestOutputCase::inspect(Result::Err(_)) => assert(false)
+            }
+        },
+        ParsedCase::inspect(Result::Err(_)) => assert(false)
+    }
+}

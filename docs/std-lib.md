@@ -940,8 +940,8 @@ diagnosed. Each dependency is a separate parentless root, so `crate` remains
 package-local. Positional/unmarked additional segments never become dependencies.
 A missing declared module, duplicate physical module, or orphan segment
 in a module-bearing crate is a structured diagnostic. The path-aware CLI may
-recursively load the same declared closure before invoking that API. For legacy
-programs containing no module edge, explicitly supplied additional segments are
+recursively load the same declared closure before invoking that API. For
+module-free programs, explicitly supplied additional segments are
 crate-root fragments.
 
 The canonical distribution bundle is paired atomically with the distribution

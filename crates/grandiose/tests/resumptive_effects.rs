@@ -72,7 +72,7 @@ const ONE_SHOT: &str = r#"
 
 #[test]
 fn one_shot_resumption_emits_exact_descriptors_and_executes() {
-    let artifact = compile_source_to_bytecode("one-shot.gr", ONE_SHOT).unwrap();
+    let artifact = compile_source_to_bytecode("one-shot.glorious", ONE_SHOT).unwrap();
     assert_eq!(artifact.required_features, 1 | (1 << 1) | (1 << 3));
     let ask = protocol_id(&artifact, "Ask");
     let handler_def = only_handler_def_for_protocol(&artifact, ask);
@@ -186,7 +186,8 @@ fn resumption_identity_is_per_handler_group_and_keeps_deep_outward_effects() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("handler-specific-resumptions.gr", source).unwrap();
+    let artifact =
+        compile_source_to_bytecode("handler-specific-resumptions.glorious", source).unwrap();
     let ask = protocol_id(&artifact, "Ask");
     let handlers = handler_defs_for_protocol(&artifact, ask);
     assert_eq!(handlers.len(), 3);
@@ -259,7 +260,7 @@ fn one_shot_resumption_transports_through_identity_and_tuple_storage() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("transported-resumption.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("transported-resumption.glorious", source).unwrap();
     let answer = artifact
         .functions
         .iter()
@@ -289,7 +290,8 @@ fn one_shot_resumption_transports_through_generic_struct_storage() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("struct-transported-resumption.gr", source).unwrap();
+    let artifact =
+        compile_source_to_bytecode("struct-transported-resumption.glorious", source).unwrap();
     let answer = artifact
         .functions
         .iter()
@@ -318,7 +320,8 @@ fn one_shot_resumption_transports_through_owned_closure_capture() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("closure-transported-resumption.gr", source).unwrap();
+    let artifact =
+        compile_source_to_bytecode("closure-transported-resumption.glorious", source).unwrap();
     let reordered = r#"
         effect Ask { [1,1] ask() -> i64 }
         answer() -> i64 {
@@ -334,7 +337,7 @@ fn one_shot_resumption_transports_through_owned_closure_capture() {
     "#;
     assert_eq!(
         artifact.encode(),
-        compile_source_to_bytecode("closure-transported-resumption.gr", reordered)
+        compile_source_to_bytecode("closure-transported-resumption.glorious", reordered)
             .unwrap()
             .encode()
     );
@@ -367,7 +370,7 @@ fn nested_resume_cannot_launder_an_unused_outer_resumption() {
         main() -> { () }
     "#;
     let diagnostics =
-        compile_source_to_bytecode("nested-resumption-laundering.gr", source).unwrap_err();
+        compile_source_to_bytecode("nested-resumption-laundering.glorious", source).unwrap_err();
     assert!(
         diagnostics.iter().any(|diagnostic| {
             diagnostic.message.contains("`outer`")
@@ -393,7 +396,7 @@ fn deep_handler_reinstalls_for_two_sequential_performs() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("deep.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("deep.glorious", source).unwrap();
     let test = artifact
         .functions
         .iter()
@@ -409,8 +412,8 @@ fn deep_handler_reinstalls_for_two_sequential_performs() {
 
 #[test]
 fn resumptive_core_and_mir_are_explicit_and_deterministic() {
-    let first = compile_source_to_phases("one-shot.gr", ONE_SHOT).unwrap();
-    let second = compile_source_to_phases("one-shot.gr", ONE_SHOT).unwrap();
+    let first = compile_source_to_phases("one-shot.glorious", ONE_SHOT).unwrap();
+    let second = compile_source_to_phases("one-shot.glorious", ONE_SHOT).unwrap();
     assert_eq!(first.core_fingerprint(), second.core_fingerprint());
     assert_eq!(first.mir_fingerprint(), second.mir_fingerprint());
     assert_eq!(first.artifact.encode(), second.artifact.encode());
@@ -436,7 +439,7 @@ fn resumed_continuation_executes_its_suffix() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("suffix.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("suffix.glorious", source).unwrap();
     let test = artifact
         .functions
         .iter()
@@ -465,7 +468,7 @@ fn resumptive_perform_cleanup_tracks_owned_values_in_the_continuation() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("cleanup.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("cleanup.glorious", source).unwrap();
     let ask = protocol_id(&artifact, "Ask");
     let handler_def = only_handler_def_for_protocol(&artifact, ask);
     let body_id = artifact
@@ -510,12 +513,12 @@ fn resumptive_perform_cleanup_tracks_owned_values_in_the_continuation() {
 #[test]
 fn bundle_and_interpreter_agree_with_the_compiled_resumptive_handler() {
     let bundle = SourceBundle::new(
-        Segment::new("effects.gr", "effect Ask { [1,1] ask() -> i64 }"),
+        Segment::new("effects.glorious", "effect Ask { [1,1] ask() -> i64 }"),
         Segment::new(
-            "library.gr",
-            "test() -> i64 { handle { let value = perform Ask::ask(); value + 2 } { Ask::ask() with k => resume(k, 40) } }",
+            "library.glorious",
+            "infixl 30 +; test() -> i64 { handle { let value = perform Ask::ask(); value + 2 } { Ask::ask() with k => resume(k, 40) } }",
         ),
-        [Segment::new("entry.gr", "main() -> { () }")],
+        [Segment::new("entry.glorious", "main() -> { () }")],
     );
     let first = compile_bundle_to_bytecode(&bundle).unwrap();
     let second = compile_bundle_to_bytecode(&bundle).unwrap();
@@ -546,10 +549,10 @@ fn bundle_and_interpreter_agree_with_the_compiled_resumptive_handler() {
         }
     "#;
     assert_eq!(
-        run_source("differential.gr", main_source, vec![], &mut NoHost).unwrap(),
+        run_source("differential.glorious", main_source, vec![], &mut NoHost).unwrap(),
         InterpreterValue::Unit
     );
-    let artifact = compile_source_to_bytecode("differential.gr", main_source).unwrap();
+    let artifact = compile_source_to_bytecode("differential.glorious", main_source).unwrap();
     let entry = artifact.entry_function.unwrap();
     assert_eq!(
         Vm::new(verify(artifact).unwrap())
@@ -571,7 +574,7 @@ fn resumptive_handler_clauses_capture_duplicable_values_through_shared_receivers
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("captured-resumptive.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("captured-resumptive.glorious", source).unwrap();
     assert!(
         artifact
             .code
@@ -604,7 +607,8 @@ fn multiple_resumptive_clause_groups_copy_their_duplicable_environments_independ
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("multiple-captured-resumptive.gr", source).unwrap();
+    let artifact =
+        compile_source_to_bytecode("multiple-captured-resumptive.glorious", source).unwrap();
     assert!(
         !artifact
             .code
@@ -643,7 +647,7 @@ fn nonduplicable_resumptive_clause_captures_are_structured_source_errors() {
         main() -> { () }
     "#;
     let diagnostics =
-        compile_source_to_bytecode("linear-captured-resumptive.gr", source).unwrap_err();
+        compile_source_to_bytecode("linear-captured-resumptive.glorious", source).unwrap_err();
     assert!(
         diagnostics.iter().any(|diagnostic| {
             diagnostic.code.as_deref() == Some("G1HE001")
@@ -679,7 +683,7 @@ fn custom_drop_multishot_clause_captures_cannot_hide_behind_shared_receivers() {
         main() -> { () }
     "#;
     let diagnostics =
-        compile_source_to_bytecode("drop-captured-resumptive.gr", source).unwrap_err();
+        compile_source_to_bytecode("drop-captured-resumptive.glorious", source).unwrap_err();
     assert!(
         diagnostics.iter().any(|diagnostic| {
             diagnostic.code.as_deref() == Some("G1BC001")
@@ -713,7 +717,8 @@ fn mixed_terminal_and_resumptive_groups_share_an_exact_linear_environment() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("mixed-linear-handler-capture.gr", source).unwrap();
+    let artifact =
+        compile_source_to_bytecode("mixed-linear-handler-capture.glorious", source).unwrap();
     let selected = artifact
         .functions
         .iter()
@@ -748,7 +753,8 @@ fn mandatory_one_shot_transfers_exact_linear_payload_and_result() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("linear-resumptive-transfer.gr", source).unwrap();
+    let artifact =
+        compile_source_to_bytecode("linear-resumptive-transfer.glorious", source).unwrap();
     let selected = artifact
         .functions
         .iter()
@@ -779,7 +785,7 @@ fn mandatory_one_shot_preserves_unique_loan_and_reference_alias() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("one-shot-unique-loan.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("one-shot-unique-loan.glorious", source).unwrap();
     let selected = artifact
         .functions
         .iter()
@@ -814,7 +820,7 @@ fn mandatory_one_shot_carries_a_partially_moved_owner_residual() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("one-shot-residual.gr", source).unwrap();
+    let phases = compile_source_to_phases("one-shot-residual.glorious", source).unwrap();
     assert!(
         phases
             .mir
@@ -880,7 +886,7 @@ fn deferred_resumptive_forms_have_stable_source_diagnostics() {
         ),
     ];
     for (source, needle) in cases {
-        let diagnostics = compile_source_to_bytecode("rejected.gr", source).unwrap_err();
+        let diagnostics = compile_source_to_bytecode("rejected.glorious", source).unwrap_err();
         assert!(
             diagnostics.iter().any(|diagnostic| {
                 !diagnostic.title.is_empty()
@@ -909,7 +915,8 @@ fn one_operation_gets_distinct_resumptions_for_distinct_handler_results() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("handler-result-identities.gr", source).unwrap();
+    let artifact =
+        compile_source_to_bytecode("handler-result-identities.glorious", source).unwrap();
     let ask = protocol_id(&artifact, "Ask");
     let handlers = handler_defs_for_protocol(&artifact, ask);
     assert_eq!(handlers.len(), 2);

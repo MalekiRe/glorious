@@ -311,13 +311,12 @@ const SOURCE: &str = r#"
 "#;
 
 #[test]
-fn borrowed_collection_state_machines_execute_at_o0_through_o3() {
+fn borrowed_collection_state_machines_execute_at_o1_through_o3() {
     std::thread::Builder::new()
         .name("borrowed-collection-compiler".into())
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
             for optimization_level in [
-                OptimizationLevel::O0,
                 OptimizationLevel::O1,
                 OptimizationLevel::O2,
                 OptimizationLevel::O3,

@@ -71,7 +71,6 @@ fn run_source_entry_stream(
     if !parse_diagnostics.is_empty() {
         return Err(parse_diagnostics);
     }
-    let program = parser::normalize_for_legacy_consumers(program);
     validate::validate(&program)?;
     let program = compiler::normalize_trait_surface_for_recovery(&program)?;
     let program = compiler::normalize_constructor_aliases(&program)?;

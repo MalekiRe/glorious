@@ -1,0 +1,61 @@
+pub mod cli {
+    struct ArgumentsPolicy { private empty: String }
+
+    pub usage() -> String { "usage: brainfuck-tutorial <program.bf> [input]" }
+
+    pub input_or_empty(arguments: &Vec<String>) -> String {
+        let policy = ArgumentsPolicy { empty: String::empty() };
+        if(Vec::len(arguments) < 2) {
+            policy.empty
+        } else { *Vec::index(arguments, 1) }
+    }
+}
+
+effect ParseCase {
+    inspect(value: Result<brainfuck_core::Program, brainfuck_core::ParseError>) -> !;
+}
+
+effect RunCase {
+    inspect(value: Result<Vec<u8>, brainfuck_core::RuntimeError>) -> !;
+}
+
+effect Utf8Case {
+    inspect(value: Result<String, Utf8Error>) -> !;
+}
+
+application() -> / { ProcessArgs, FileRead, Diagnostic } {
+    let arguments = process_args();
+    if(Vec::len(&arguments) == 0) {
+        write_diagnostic(cli::usage())
+    } else {
+        let path = *Vec::index(&arguments, 0);
+        let input = cli::input_or_empty(&arguments);
+        let source = read_file(move path);
+        handle perform ParseCase::inspect(brainfuck_core::parse(Bytes::iter(&source))) {
+            ParseCase::inspect(Result::Err(error)) => write_diagnostic(
+                brainfuck_core::parse_error_message(move error)
+            ),
+            ParseCase::inspect(Result::Ok(program)) => {
+                handle perform RunCase::inspect(
+                    brainfuck_core::run_with_io(&program, Bytes::iter(&String::as_bytes(&input)))
+                ) {
+                    RunCase::inspect(Result::Err(error)) => write_diagnostic(
+                        brainfuck_core::runtime_error_message(move error)
+                    ),
+                    RunCase::inspect(Result::Ok(output)) => {
+                        handle perform Utf8Case::inspect(
+                            String::from_utf8(Bytes::from_vec(move output))
+                        ) {
+                            Utf8Case::inspect(Result::Ok(text)) => write_diagnostic(move text),
+                            Utf8Case::inspect(Result::Err(_)) => write_diagnostic(
+                                "program output is not valid UTF-8"
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+main() -> { run_compiler_host(application) }

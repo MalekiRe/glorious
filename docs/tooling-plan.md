@@ -24,8 +24,7 @@ signature/doc hover; it has no lexical local-resolution fallback. `grand` probes
 the real versioned `grc` contract,
 passes ordered canonical `.glorious` inputs, consumes JSON diagnostics and
 authoritative user/std interfaces, emits `.grbc`, and executes it through
-`grvm`; legacy `.gr` and fake/LLVM flows remain compatibility paths. The
-`grand` also probes the selected VM's contract/artifact range before compiling
+`grvm`. `grand` also probes the selected VM's contract/artifact range before compiling
 and fingerprints compiler + VM content identities atomically. The `lex`, declaration-`scan`, and
 interface/name/type `resolve`, and `check` stop boundaries are real. Released-seed
 identity negotiation and the bounded versioned `grc --serve` JSON-line transport
@@ -35,13 +34,10 @@ back a failed request. The milestone table records implementation dependency
 order rather than outstanding work.
 
 Ground rules (project decisions):
-- **All tooling is written in Rust**, as crates alongside the existing bootstrap
-  interpreter crate. Migration to Grandiose happens after the compiler is done; the
-  plan calls out the migration seams so nothing is designed into a corner.
-- **Native code is the eventual compilation target.** The build tool's default
-  pipeline assumes it, but the current execution path (LLVM IR → `lli` with the
-  dlopen'd C runtime / bytecode-style interpretation) stays as a supported target
-  until the native fixed point lands.
+- **All host tooling is written in Rust.** Migration of compiler components to
+  Grandiose happens only after the Rust implementation is complete.
+- **The G1 execution target is verified bytecode.** `grand` drives the versioned
+  compiler and VM contract directly; it has no alternate execution pipeline.
 
 ---
 
@@ -94,10 +90,10 @@ cheap now and expensive to retrofit.
   byte-for-byte. This is the formatter's round-trip foundation and costs nothing to
   maintain from day one.
 
-### 1.2 Diagnostics as data: `--emit diagnostics-json`
-- A flag that prints one JSON object per diagnostic: code, severity, title, primary +
-  secondary labels as `{file, start_byte, end_byte, line, col, message}` (segment
-  table already recovers file/line), note, help.
+### 1.2 Diagnostics as data: `--diagnostics json`
+- This flag prints one JSON object per diagnostic: code, severity, title, primary +
+  secondary labels as `{file, start_byte, end_byte, line, col, message}`, note,
+  and help. The compiler reports original source locations directly.
 - LSP phase 1 (§4.2) is *only* this flag plus a thin server. Golden diagnostic tests
   gain a stable machine-checkable format as a side benefit.
 
@@ -126,10 +122,10 @@ either); it is also the piece with the *least* pressure to ever migrate to Grand
 ```
 grand new <name> [--path <path>]   # scaffold a package (default: ./<name>)
 grand init                         # scaffold the current, existing directory
-grand build [-O..] [--emit ...]    # resolve deps -> ordered file list -> compiler
-grand run [-- args]                # build + execute under the supervisor limits
+grand build [-O..]                 # resolve deps -> compiler -> verified bytecode
+grand run [-O..] [-- args]         # build + execute through grvm
 grand check                        # frontend only, no emission (fast feedback)
-grand test                         # run *_test.glorious files / test callables (see 2.7)
+grand test [filter]                # run tests/**/*.glorious executables (see 2.8)
 grand fmt [--check]                # formatter (§3)
 grand lsp                          # start the language server (§4)
 grand add <dep>                    # edit [dependencies] + update lockfile
@@ -144,6 +140,10 @@ name = "my-app"          # must match package-name rules: [a-z][a-z0-9-]*
 version = "0.1.0"        # semver
 entry = "src/main.glorious"
 
+[runtime]
+# Default: []. Each name is forwarded as one exact `grvm run --allow` grant.
+capabilities = ["process.args", "fs.read", "diagnostic"]
+
 [dependencies]
 # local path dependency
 mylib = { path = "../mylib" }
@@ -152,19 +152,19 @@ json  = { git = "https://github.com/user/grandiose-json", tag = "v0.2.0" }
 utils = { git = "https://github.com/user/gr-utils", rev = "a1b2c3d" }
 # shorthand for github
 text  = { github = "user/gr-text", branch = "main" }
-
-[backend]
-kind = "vm"              # canonical G1 `.grbc` + `grvm` pipeline
 ```
 - A dependency is itself a directory with a `grandiose.toml`. **Library packages have
-  no `entry`;** instead `sources = ["src/**/*.glorious"]` (default: canonical
-  `.glorious` plus legacy `.gr` sources sorted
-  lexicographically for determinism). An executable package has `entry`; its entry
-  file is placed last in the bundle.
+  no `entry`;** `sources` may list source directories or individual files and
+  defaults to `["src"]`. Globs are not accepted. An executable package has an
+  explicit `entry` crate root.
 - `git` requires exactly one of `tag | rev | branch`. `branch` is resolved to a
   commit at lock time and never re-resolved until `grand update`.
+- Runtime capabilities use lowercase dot-separated names, reject duplicates,
+  and grant no authority when omitted. Package dependencies cannot grant host
+  authority to their consumers; execution uses only the selected root package's
+  `[runtime]` table.
 
-### 2.3 Resolution and the bundle order
+### 2.3 Resolution and compiler roots
 1. Read the manifest graph transitively (path deps read in place; git deps fetched to
    the cache, §2.6).
 2. Build the package DAG; reject cycles with a diagnostic naming the cycle.
@@ -172,27 +172,19 @@ kind = "vm"              # canonical G1 `.grbc` + `grvm` pipeline
    packages require `json` at incompatible pins, that's a hard error listing both
    requirers. Explicit dependency roots are assigned normalized package aliases;
    this policy avoids two different roots competing for the same alias.
-4. Topologically sort packages (dependencies first), then within each package apply
-   its deterministic source ordering.
-5. Final bundle: `std-lib` + dep packages in topo order + root package, entry file
-   last. Hand the ordered file list to the compiler; the segment table keeps
-   per-file diagnostics accurate. Same lockfile + same sources ⇒ byte-identical
-   bundle ⇒ byte-identical artifact (this composes with the stage-2/3
-   reproducibility story).
+4. Topologically sort packages deterministically.
+5. Pass the selected application's crate root first and each named dependency
+   crate root through `--dependency NAME=PATH`. The compiler discovers declared
+   module closures, supplies the embedded standard library, and owns canonical
+   `SourceBundle` ordering and source locations. The same lockfile, roots, sources,
+   compiler, and VM identities produce the same build fingerprint and artifact.
 
-### 2.4 Build targets: native by default, interpreted path preserved
-`grand build` owns the *whole* pipeline, not just the frontend invocation:
-- **`--target native` (the eventual default):** compiler emits `.ll` → `llc`/`clang`
-  compile + link against the C runtime (`compiler/runtime/`) → real executable in
-  `target/`. The build tool owns toolchain discovery (clang/llc ≥ the manifest's
-  `minimum-version`), object caching keyed by bundle hash, and linking.
-- **`--target interp` (the working path today):** compiler emits `.ll` → run via
-  `lli --dlopen`'d C runtime, under the supervisor limits (wall clock, 4 GiB
-  address-space ceiling). `grand run` uses whichever target the manifest/flag
-  selects, so switching a project to native later is a one-line change.
-- The target abstraction is a small trait in the build tool (`emit → materialize →
-  execute`), so a VM/bytecode backend slots in as a third implementation if it
-  returns; nothing outside that trait knows how programs run.
+### 2.4 Build and execution target
+`grand build` owns the whole pipeline: it resolves the package graph, invokes the
+versioned compiler contract, writes a verified `.grbc` artifact, and records the
+compiler/VM identity in its build fingerprint. `grand run` executes that artifact
+with the compatible `grvm` selected before compilation. There is one target and
+one artifact contract.
 
 ### 2.5 Lockfile — `grandiose.lock`
 ```toml
@@ -220,7 +212,7 @@ deps = ["text"]
 - Checkouts are read-only; `content-hash` is verified before every build so a
   tampered cache is detected.
 - **No build scripts, no code execution at resolution time — ever.** A package is
-  data (`.glorious`/legacy `.gr` files + manifest). This is a security stance worth keeping permanently;
+  data (`.glorious` files + manifest). This is a security stance worth keeping permanently;
   the concatenation model means there's nothing a build script would legitimately do.
 - `grand vendor` copies checkouts into `./vendor/` and a config key redirects
   resolution there for offline/hermetic builds.
@@ -232,7 +224,7 @@ package/module identities are build-tool diagnostics; the compiler remains the
 authority for imports, visibility, and ambiguity.
 
 ### 2.8 Tests
-- Convention: files matching `tests/**/*.glorious` (plus legacy `.gr`) each compile as their own executable
+- Convention: files matching `tests/**/*.glorious` each compile as their own executable
   (package sources + that file, its `main` as entry); exit code 0 = pass. This
   matches the existing e2e harness style and needs zero language features.
 - Later, when attributes/annotations exist, migrate to in-source `test` callables.
@@ -358,8 +350,8 @@ long tail:
 | # | Milestone | Depends on |
 |---|-----------|------------|
 | 1 | Comment syntax + trivia-preserving lexer (§1.1) | — |
-| 2 | `--emit diagnostics-json` (§1.2) | — |
-| 3 | `grand` skeleton: `new/init/build/run/check` over path-only deps + bundle ordering (§2.1–2.3) | — |
+| 2 | `--diagnostics json` (§1.2) | — |
+| 3 | `grand` skeleton: `new/init/build/run/check` over path-only deps + compiler roots (§2.1–2.3) | — |
 | 4 | LSP phase 1: diagnostics + TextMate grammar + VS Code extension (§4.2) | 2, 3 |
 | 5 | Git deps + lockfile + cache + vendor (§2.5–2.6) | 3 |
 | 6 | Interface scan emission + collision checking (§1.3, §2.7) | 3 |

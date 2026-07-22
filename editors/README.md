@@ -1,7 +1,7 @@
 # Grandiose editor setup
 
-The canonical source suffix is `.glorious`; `.gr` remains a legacy compatibility
-suffix. Build `tooling/lsp` and place `grand-lsp` on `PATH`, or use `grand lsp`
+The sole source suffix is `.glorious`. Build `tooling/lsp` and place `grand-lsp`
+on `PATH`, or use `grand lsp`
 as the stdio language-server command. Both commands speak ordinary LSP over
 stdin/stdout and require no editor-specific transport.
 
@@ -11,7 +11,7 @@ With `nvim-lspconfig`, register `.glorious` and start the server from the neares
 directory containing `grandiose.toml`:
 
 ```lua
-vim.filetype.add({ extension = { glorious = "grandiose", gr = "grandiose" } })
+vim.filetype.add({ extension = { glorious = "grandiose" } })
 vim.lsp.config.grandiose = {
   cmd = { "grand-lsp" },
   filetypes = { "grandiose" },
@@ -19,6 +19,13 @@ vim.lsp.config.grandiose = {
 }
 vim.lsp.enable("grandiose")
 ```
+
+The language server materializes its embedded standard library in grand's
+content-addressed cache and returns an ordinary `file://` location from
+go-to-definition. Neovim can therefore open definitions such as the library
+implementation of `if` without a client-specific URI handler. The cached file
+is read-only and isolated by its content digest, so different compiler versions
+cannot silently change an already-open document.
 
 ## Helix
 
@@ -31,14 +38,25 @@ command = "grand-lsp"
 [[language]]
 name = "grandiose"
 scope = "source.grandiose"
-file-types = ["glorious", "gr"]
+file-types = ["glorious"]
 roots = ["grandiose.toml", ".git"]
 language-servers = ["grandiose"]
 ```
 
-## Zed and other clients
+## Zed
 
-Configure a language named `Grandiose` for `*.glorious` and `*.gr`, with
+The checked-in Zed development extension uses the repository's native
+Tree-sitter grammar. Build `grand-lsp`, open Zed's command palette, choose
+**Zed: Install Dev Extension**, and select the `editors/zed` directory. If the
+server is not on `PATH`, set its absolute path as shown in
+`editors/zed/README.md`.
+
+Standard-library definitions use ordinary `file://` locations, so they open in
+Zed just like project-file definitions.
+
+## Other clients
+
+Configure a language named `Grandiose` for `*.glorious`, with
 `grandiose.toml` as its project marker and `grand-lsp` as its stdio server.
 Clients which accept an argument-bearing command may use `grand lsp` instead.
 

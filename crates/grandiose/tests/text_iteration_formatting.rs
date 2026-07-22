@@ -139,8 +139,8 @@ const SOURCE: &str = r#"
 
     rendered_diagnostic() -> String {
         let sources = SourceMap::new();
-        SourceMap::add(&mut sources, "first.gr", "éx\n");
-        SourceMap::add(&mut sources, "second.gr", "zq\n");
+        SourceMap::add(&mut sources, "first.glorious", "éx\n");
+        SourceMap::add(&mut sources, "second.glorious", "zq\n");
         let diagnostic = SourceDiagnostic::new(
             DiagnosticSeverity::Warning,
             "ordered annotations"
@@ -183,9 +183,9 @@ fn bool_value(artifact: &grandiose_vm::Artifact, function: u32, value: bool) -> 
 fn expected_diagnostic() -> &'static str {
     concat!(
         "warning: ordered annotations\n",
-        " --> first.gr:1:3\n",
+        " --> first.glorious:1:3\n",
         "  = label: secondary first\n",
-        " --> second.gr:1:2\n",
+        " --> second.glorious:1:2\n",
         "  = primary: primary second\n",
         " --> <unknown>:0:0\n",
         "  = label: outside sources\n",
@@ -194,9 +194,8 @@ fn expected_diagnostic() -> &'static str {
 }
 
 #[test]
-fn text_iterators_view_hashing_and_hex_format_work_at_o0_through_o3() {
+fn text_iterators_view_hashing_and_hex_format_work_at_o1_through_o3() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

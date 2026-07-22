@@ -3,7 +3,7 @@ use std::{io, ops::Range};
 use crate::{diagnostic::Diagnostic, span::Span};
 
 pub const DISTRIBUTED_STANDARD_LIBRARY_NAME: &str = "<grandiose:std>";
-pub const DISTRIBUTED_STANDARD_LIBRARY_SOURCE: &str = include_str!("distributed_std.gr");
+pub const DISTRIBUTED_STANDARD_LIBRARY_SOURCE: &str = include_str!("distributed_std.glorious");
 
 /// A bundle-local source identity. Numeric values have no artifact meaning and
 /// cannot grant authority; the trusted-standard role is private to bundle
@@ -128,7 +128,7 @@ impl SourceBundle {
         Self::assemble(segments, Some(0), false)
     }
 
-    /// Legacy raw fixture spelling. It no longer grants authority based on the
+    /// Raw fixture constructor. It never grants authority based on the
     /// first segment's position; new fixtures should use
     /// [`SourceBundle::raw_for_conformance`] explicitly.
     pub fn new(

@@ -32,9 +32,9 @@ use crate::span::Span;
 
 #[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialEq, PartialOrd)]
 pub enum OptimizationLevel {
-    #[default]
     O0,
     O1,
+    #[default]
     O2,
     O3,
 }
@@ -7782,7 +7782,7 @@ pub(crate) fn compact_live_registers_for_emission(
 
 /// Order compact MIR by typed control region while retaining stable BlockIds.
 /// Reachable order is the checked CFG's deterministic RPO; unreachable ties use
-/// the original identity. The legacy bytecode layout pass is consequently
+/// the original identity. The earlier bytecode layout pass is consequently
 /// idempotent for ordinary bodies while cleanup/label/handler/resumption seeds
 /// retain explicit, contiguous cold regions.
 fn layout_checked_blocks_for_emission(function: &mut Function) -> Result<bool, ValidationError> {
@@ -15605,7 +15605,7 @@ mod tests {
             forward(value: Scratch) -> i64 { leaf() }
             main() -> { () }
         "#;
-        let phases = crate::compile_source_to_phases("optimizer-input.gr", source).unwrap();
+        let phases = crate::compile_source_to_phases("optimizer-input.glorious", source).unwrap();
         let mut program = phases.mir;
         for function in &mut program.functions {
             function.phase = MirPhase::Raw;

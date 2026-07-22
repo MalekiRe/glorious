@@ -156,7 +156,29 @@ fn variant_pattern_test_executes() {
         }
         main() -> { () }
     "#;
-    compile_source_to_bytecode("variant-is.gr", source).unwrap();
+    compile_source_to_bytecode("variant-is.glorious", source).unwrap();
+}
+
+#[test]
+fn an_ordinary_assert_call_does_not_manufacture_a_variant_proof() {
+    let source = r#"
+        enum Choice { Yes(i64), No }
+        assert(condition: Bool) -> () { () }
+        bad(value: Choice) -> i64 {
+            assert(value is Choice::Yes(_));
+            value.0
+        }
+        main() -> { () }
+    "#;
+    let errors = compile_source_to_bytecode("untrusted-assert-refinement.glorious", source)
+        .expect_err("an ordinary callable named assert cannot prove an enum variant");
+    assert!(
+        errors.iter().any(|error| {
+            error.code.as_deref() == Some("G0001")
+                || error.message.contains("dominating active-variant proof")
+        }),
+        "{errors:#?}"
+    );
 }
 
 #[test]
@@ -168,7 +190,22 @@ fn positive_binder_visibility_is_branch_scoped() {
         }
         main() -> { () }
     "#;
-    compile_source_to_bytecode("positive-refinement-binding.gr", source).unwrap();
+    compile_source_to_bytecode("positive-refinement-binding.glorious", source).unwrap();
+}
+
+#[test]
+fn nested_refinement_retires_the_current_subject_register() {
+    let source = r#"
+        enum Choice { Yes(i64), No }
+        make() -> Choice { Choice::Yes(20) }
+        answer(other: Choice) -> i64 {
+            if(make() is Choice::Yes(left)) {
+                if(other is Choice::Yes(right)) { move left + move right } else { move left }
+            } else { 0 }
+        }
+        main() -> { () }
+    "#;
+    compile_source_to_bytecode("nested-refinement-register.glorious", source).unwrap();
 }
 
 #[test]
@@ -180,7 +217,7 @@ fn negative_environment_excludes_the_tested_variant() {
         }
         main() -> { () }
     "#;
-    compile_source_to_bytecode("negative-refinement.gr", source).unwrap();
+    compile_source_to_bytecode("negative-refinement.glorious", source).unwrap();
 }
 
 #[test]
@@ -192,5 +229,5 @@ fn refinement_does_not_bypass_private_projection_or_reference_lifetimes() {
         }
         main() -> { () }
     "#;
-    compile_source_to_bytecode("private-reference-refinement.gr", source).unwrap();
+    compile_source_to_bytecode("private-reference-refinement.glorious", source).unwrap();
 }

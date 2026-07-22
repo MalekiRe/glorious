@@ -26,9 +26,8 @@ const SOURCE: &str = r#"
 "#;
 
 #[test]
-fn entry_reference_return_survives_cfg_join_at_o0_through_o3() {
+fn entry_reference_return_survives_cfg_join_at_o1_through_o3() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

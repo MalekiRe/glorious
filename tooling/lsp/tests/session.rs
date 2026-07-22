@@ -18,6 +18,7 @@ impl Session {
     fn start(cwd: &Path) -> Session {
         let mut child = Command::new(env!("CARGO_BIN_EXE_grand-lsp"))
             .current_dir(cwd)
+            .env("GRAND_CACHE_DIR", cwd.join(".grand-cache"))
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -108,10 +109,12 @@ fn project(root: &Path, name: &str, source: &str) -> std::path::PathBuf {
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(
         root.join("grandiose.toml"),
-        format!("[project]\nname = \"{name}\"\nversion = \"0.1.0\"\nentry = \"src/main.gr\"\n"),
+        format!(
+            "[project]\nname = \"{name}\"\nversion = \"0.1.0\"\nentry = \"src/main.glorious\"\n"
+        ),
     )
     .unwrap();
-    let main = root.join("src/main.gr");
+    let main = root.join("src/main.glorious");
     std::fs::write(&main, source).unwrap();
     main
 }
@@ -151,15 +154,15 @@ fn full_session() {
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(
         root.join("grandiose.toml"),
-        "[project]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.gr\"\n",
+        "[project]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.glorious\"\n",
     )
     .unwrap();
     std::fs::write(
-        root.join("src/helpers.gr"),
+        root.join("src/helpers.glorious"),
         "// Consumes a value, allegedly.\nhelper(value: i64) -> () { () }\n",
     )
     .unwrap();
-    let main_path = root.join("src/main.gr");
+    let main_path = root.join("src/main.glorious");
     std::fs::write(&main_path, "main() -> () {\n    helper(0)\n}\n").unwrap();
 
     let mut session = Session::start(&root);
@@ -169,7 +172,7 @@ fn full_session() {
     assert_eq!(result["serverInfo"]["name"], "grand-lsp");
     session.notify("initialized", json!({}));
 
-    // Open a broken revision: expect an error diagnostic on main.gr.
+    // Open a broken revision: expect an error diagnostic on main.glorious.
     session.notify(
         "textDocument/didOpen",
         json!({"textDocument": {
@@ -177,7 +180,7 @@ fn full_session() {
             "text": "main( -> () {\n",
         }}),
     );
-    let diagnostics = session.diagnostics_for("main.gr");
+    let diagnostics = session.diagnostics_for("main.glorious");
     assert!(!diagnostics.is_empty(), "expected a parse error");
     assert_eq!(
         diagnostics[0]["severity"], 1,
@@ -191,13 +194,13 @@ fn full_session() {
         json!({"textDocument": {"uri": uri(&main_path), "version": 2},
                "contentChanges": [{"text": "main() -> () {\n    helper(0)\n}\n"}]}),
     );
-    let diagnostics = session.diagnostics_for("main.gr");
+    let diagnostics = session.diagnostics_for("main.glorious");
     assert!(
         diagnostics.is_empty(),
         "diagnostics did not clear: {diagnostics:?}"
     );
 
-    // Document symbols for main.gr.
+    // Document symbols for main.glorious.
     let (symbols, _) = session.request(
         "textDocument/documentSymbol",
         json!({"textDocument": {"uri": uri(&main_path)}}),
@@ -210,13 +213,16 @@ fn full_session() {
         .collect();
     assert_eq!(names, vec!["main"], "unexpected symbols: {names:?}");
 
-    // Go-to-definition on `helper` inside main.gr lands in helpers.gr.
+    // Go-to-definition on `helper` inside main.glorious lands in helpers.glorious.
     let (definition, _) = session.request(
         "textDocument/definition",
         json!({"textDocument": {"uri": uri(&main_path)}, "position": {"line": 1, "character": 6}}),
     );
     assert!(
-        definition["uri"].as_str().unwrap().ends_with("helpers.gr"),
+        definition["uri"]
+            .as_str()
+            .unwrap()
+            .ends_with("helpers.glorious"),
         "definition wrong: {definition}"
     );
     assert_eq!(definition["range"]["start"]["line"], 1); // below the doc comment
@@ -260,7 +266,7 @@ fn full_session() {
                "contentChanges": [{"text":
             "first( -> i64 {\n    1\n}\nsecond( -> i64 {\n    2\n}\nvalid() -> i64 { helper(1) }\n"}]}),
     );
-    let diagnostics = session.diagnostics_for("main.gr");
+    let diagnostics = session.diagnostics_for("main.glorious");
     assert!(
         diagnostics.len() >= 2,
         "resilient parser should report multiple errors: {diagnostics:?}"
@@ -279,7 +285,10 @@ fn full_session() {
         json!({"textDocument": {"uri": uri(&main_path)}, "position": {"line": 2, "character": 5}}),
     );
     assert!(
-        definition["uri"].as_str().unwrap().ends_with("main.gr"),
+        definition["uri"]
+            .as_str()
+            .unwrap()
+            .ends_with("main.glorious"),
         "{definition}"
     );
     assert_eq!(
@@ -295,7 +304,7 @@ fn full_session() {
         "local hover: {hover}"
     );
 
-    // References: `helper` appears in helpers.gr (definition) and main.gr (call).
+    // References: `helper` appears in helpers.glorious (definition) and main.glorious (call).
     let (references, _) = session.request(
         "textDocument/references",
         json!({"textDocument": {"uri": uri(&main_path)},
@@ -309,8 +318,10 @@ fn full_session() {
         .map(|l| l["uri"].as_str().unwrap())
         .collect();
     assert!(
-        reference_files.iter().any(|u| u.ends_with("helpers.gr"))
-            && reference_files.iter().any(|u| u.ends_with("main.gr")),
+        reference_files
+            .iter()
+            .any(|u| u.ends_with("helpers.glorious"))
+            && reference_files.iter().any(|u| u.ends_with("main.glorious")),
         "references incomplete: {reference_files:?}"
     );
 
@@ -367,6 +378,174 @@ fn full_session() {
 }
 
 #[test]
+fn standard_library_definition_opens_materialized_read_only_file() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join("app");
+    let source = concat!(
+        "condition() -> Result<(), ()> { Result::Ok(()) }\n",
+        "choose() -> Result<(), ()> {\n",
+        "    if(condition()) { () }\n",
+        "}\n",
+        "main() -> () { () }\n",
+    );
+    let main = project(&root, "app", source);
+
+    let mut session = Session::start(&root);
+    let (initialize, _) = session.request("initialize", json!({"rootUri": uri(&root)}));
+    let standard_library = &initialize["capabilities"]["experimental"]["standardLibrary"];
+    assert_eq!(standard_library["readOnly"], true);
+    session.notify("initialized", json!({}));
+    session.notify(
+        "textDocument/didOpen",
+        json!({"textDocument": {
+            "uri": uri(&main), "languageId": "grandiose", "version": 1, "text": source
+        }}),
+    );
+    let diagnostics = session.diagnostics_for("main.glorious");
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected diagnostics: {diagnostics:?}"
+    );
+
+    let (definition, _) = session.request(
+        "textDocument/definition",
+        json!({
+            "textDocument": {"uri": uri(&main)},
+            "position": {"line": 2, "character": 5}
+        }),
+    );
+    let std_uri = definition["uri"].as_str().unwrap();
+    assert!(std_uri.starts_with("file://"), "{definition}");
+    assert_eq!(standard_library["uri"], std_uri);
+    let std_path = std::path::PathBuf::from(std_uri.strip_prefix("file://").unwrap());
+    assert!(
+        std_path.starts_with(root.join(".grand-cache/lsp/stdlib")),
+        "{}",
+        std_path.display()
+    );
+    let contents = std::fs::read_to_string(&std_path).unwrap();
+    assert_eq!(
+        contents,
+        grandiose::source_bundle::DISTRIBUTED_STANDARD_LIBRARY_SOURCE
+    );
+    assert!(
+        std::fs::metadata(&std_path)
+            .unwrap()
+            .permissions()
+            .readonly()
+    );
+    let start = &definition["range"]["start"];
+    let end = &definition["range"]["end"];
+    assert_eq!(start["line"], end["line"]);
+    let line = contents
+        .lines()
+        .nth(start["line"].as_u64().unwrap() as usize)
+        .unwrap();
+    let start_character = start["character"].as_u64().unwrap() as usize;
+    let end_character = end["character"].as_u64().unwrap() as usize;
+    assert_eq!(&line[start_character..end_character], "if");
+}
+
+#[test]
+fn initial_late_compile_error_keeps_unique_top_level_definition_navigation() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join("app");
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(
+        root.join("grandiose.toml"),
+        "[project]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.glorious\"\n",
+    )
+    .unwrap();
+    let helper = root.join("src/helper.glorious");
+    std::fs::write(&helper, "helper() -> () { () }\n").unwrap();
+    let main = root.join("src/main.glorious");
+    // Name/module resolution succeeds, but the bad return type prevents the
+    // compiler from ever producing an initial semantic snapshot.
+    let source = concat!(
+        "broken() -> Text { 1 }\n",
+        "main() -> () {\n",
+        "    helper();\n",
+        "    assert(true)\n",
+        "}\n",
+    );
+    std::fs::write(&main, source).unwrap();
+
+    let mut session = Session::start(&root);
+    session.request("initialize", json!({"rootUri": uri(&root)}));
+    session.notify("initialized", json!({}));
+    session.notify(
+        "textDocument/didOpen",
+        json!({"textDocument": {
+            "uri": uri(&main), "languageId": "grandiose", "version": 1, "text": source
+        }}),
+    );
+    assert!(!session.diagnostics_for("main.glorious").is_empty());
+
+    let (project_definition, _) = session.request(
+        "textDocument/definition",
+        json!({
+            "textDocument": {"uri": uri(&main)},
+            "position": {"line": 2, "character": 7}
+        }),
+    );
+    assert_eq!(
+        project_definition["uri"],
+        uri(&helper),
+        "{project_definition}"
+    );
+
+    let (standard_definition, _) = session.request(
+        "textDocument/definition",
+        json!({
+            "textDocument": {"uri": uri(&main)},
+            "position": {"line": 3, "character": 7}
+        }),
+    );
+    assert!(
+        standard_definition["uri"]
+            .as_str()
+            .is_some_and(|uri| uri.contains("/lsp/stdlib/") && uri.starts_with("file://")),
+        "{standard_definition}"
+    );
+}
+
+#[test]
+fn initial_error_definition_fallback_does_not_capture_shadowing_local() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path().join("app");
+    let source = concat!(
+        "helper() -> () { () }\n",
+        "broken() -> Text { 1 }\n",
+        "main() -> i64 {\n",
+        "    let helper = 1;\n",
+        "    helper\n",
+        "}\n",
+    );
+    let main = project(&root, "app", source);
+    let mut session = Session::start(&root);
+    session.request("initialize", json!({"rootUri": uri(&root)}));
+    session.notify("initialized", json!({}));
+    session.notify(
+        "textDocument/didOpen",
+        json!({"textDocument": {
+            "uri": uri(&main), "languageId": "grandiose", "version": 1, "text": source
+        }}),
+    );
+    assert!(!session.diagnostics_for("main.glorious").is_empty());
+    let (definition, _) = session.request(
+        "textDocument/definition",
+        json!({
+            "textDocument": {"uri": uri(&main)},
+            "position": {"line": 4, "character": 7}
+        }),
+    );
+    assert!(
+        definition.is_null(),
+        "shadowed local must fail closed: {definition}"
+    );
+}
+
+#[test]
 fn cancellation_stale_versions_and_malformed_edits_do_not_replace_live_state() {
     let temporary = TempDir::new().unwrap();
     let root = temporary.path().join("app");
@@ -379,7 +558,7 @@ fn cancellation_stale_versions_and_malformed_edits_do_not_replace_live_state() {
         "textDocument/didOpen",
         json!({"textDocument": {"uri": uri(&main), "languageId": "grandiose", "version": 10, "text": live}}),
     );
-    let initial_diagnostics = session.diagnostics_for("main.gr");
+    let initial_diagnostics = session.diagnostics_for("main.glorious");
     assert!(
         initial_diagnostics.is_empty(),
         "unexpected diagnostics: {initial_diagnostics:?}"
@@ -418,7 +597,7 @@ fn cancellation_stale_versions_and_malformed_edits_do_not_replace_live_state() {
         "textDocument/didChange",
         json!({"textDocument": {"uri": uri(&main), "version": 12}, "contentChanges": [{"text": live}]}),
     );
-    let diagnostics = session.diagnostics_for("main.gr");
+    let diagnostics = session.diagnostics_for("main.glorious");
     assert!(
         diagnostics.is_empty(),
         "unexpected diagnostics: {diagnostics:?}"
@@ -457,7 +636,8 @@ fn cancellation_stale_versions_and_malformed_edits_do_not_replace_live_state() {
         "textDocument/didChange",
         json!({"textDocument": {"uri": uri(&main), "version": 15}, "contentChanges": [{"text": live}]}),
     );
-    assert!(session.diagnostics_for("main.gr").is_empty());
+    let diagnostics = session.diagnostics_for("main.glorious");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
 }
 
 #[test]
@@ -529,12 +709,12 @@ fn malformed_revision_keeps_last_good_semantic_identities_transactionally() {
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(
         root.join("grandiose.toml"),
-        "[project]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.gr\"\n",
+        "[project]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.glorious\"\n",
     )
     .unwrap();
-    let helper = root.join("src/helper.gr");
+    let helper = root.join("src/helper.glorious");
     std::fs::write(&helper, "helper() -> () { () }\n").unwrap();
-    let main = root.join("src/main.gr");
+    let main = root.join("src/main.glorious");
     let valid = "main() -> () {\n    helper()\n}\n";
     std::fs::write(&main, valid).unwrap();
 
@@ -547,7 +727,7 @@ fn malformed_revision_keeps_last_good_semantic_identities_transactionally() {
             "uri": uri(&main), "languageId": "grandiose", "version": 1, "text": valid
         }}),
     );
-    let diagnostics = session.diagnostics_for("main.gr");
+    let diagnostics = session.diagnostics_for("main.glorious");
     assert!(
         diagnostics.is_empty(),
         "unexpected diagnostics: {diagnostics:?}"
@@ -560,7 +740,12 @@ fn malformed_revision_keeps_last_good_semantic_identities_transactionally() {
         })
     };
     let (definition, _) = session.request("textDocument/definition", definition_request());
-    assert!(definition["uri"].as_str().unwrap().ends_with("helper.gr"));
+    assert!(
+        definition["uri"]
+            .as_str()
+            .unwrap()
+            .ends_with("helper.glorious")
+    );
 
     // Keep every previously checked occurrence at the same byte position but
     // make the new tail unparsable. Diagnostics come from this revision while
@@ -571,10 +756,15 @@ fn malformed_revision_keeps_last_good_semantic_identities_transactionally() {
         json!({"textDocument": {"uri": uri(&main), "version": 2},
                "contentChanges": [{"text": malformed}]}),
     );
-    assert!(!session.diagnostics_for("main.gr").is_empty());
+    assert!(!session.diagnostics_for("main.glorious").is_empty());
 
     let (definition, _) = session.request("textDocument/definition", definition_request());
-    assert!(definition["uri"].as_str().unwrap().ends_with("helper.gr"));
+    assert!(
+        definition["uri"]
+            .as_str()
+            .unwrap()
+            .ends_with("helper.glorious")
+    );
     let (symbols, _) = session.request(
         "textDocument/documentSymbol",
         json!({"textDocument": {"uri": uri(&main)}}),
@@ -616,7 +806,7 @@ fn compiler_local_tables_preserve_shadowing_utf16_and_last_good_rename() {
             "uri": uri(&main), "languageId": "grandiose", "version": 1, "text": source
         }}),
     );
-    assert!(session.diagnostics_for("main.gr").is_empty());
+    assert!(session.diagnostics_for("main.glorious").is_empty());
 
     let use_line = "        /* 😀 */ chosen";
     let use_character = use_line[..use_line.find("chosen").unwrap()]
@@ -694,7 +884,7 @@ fn compiler_local_tables_preserve_shadowing_utf16_and_last_good_rename() {
         json!({"textDocument": {"uri": uri(&main), "version": 2},
                "contentChanges": [{"text": malformed}]}),
     );
-    assert!(!session.diagnostics_for("main.gr").is_empty());
+    assert!(!session.diagnostics_for("main.glorious").is_empty());
     let (definition, _) = session.request("textDocument/definition", request());
     assert_eq!(definition["range"]["start"]["line"], 3, "{definition}");
 
@@ -704,7 +894,7 @@ fn compiler_local_tables_preserve_shadowing_utf16_and_last_good_rename() {
         json!({"textDocument": {"uri": uri(&main), "version": 3},
                "contentChanges": [{"text": shifted}]}),
     );
-    assert!(!session.diagnostics_for("main.gr").is_empty());
+    assert!(!session.diagnostics_for("main.glorious").is_empty());
     let (stale, _) = session.request(
         "textDocument/definition",
         json!({
@@ -799,16 +989,16 @@ fn signature_help_and_semantic_tokens_are_utf16_multifile_and_transactional() {
     std::fs::create_dir_all(root.join("src")).unwrap();
     std::fs::write(
         root.join("grandiose.toml"),
-        "[project]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.gr\"\n",
+        "[project]\nname = \"app\"\nversion = \"0.1.0\"\nentry = \"src/main.glorious\"\n",
     )
     .unwrap();
-    let helper = root.join("src/helper.gr");
+    let helper = root.join("src/helper.glorious");
     std::fs::write(
         &helper,
         "// 😀 helper docs\nhelper(left: i64, right: i64) -> i64 { left }\n",
     )
     .unwrap();
-    let main = root.join("src/main.gr");
+    let main = root.join("src/main.glorious");
     let valid = "main() -> () {\n    // 😀\n    helper(1, 2); ()\n}\n";
     std::fs::write(&main, valid).unwrap();
 
@@ -829,7 +1019,7 @@ fn signature_help_and_semantic_tokens_are_utf16_multifile_and_transactional() {
             "uri": uri(&main), "languageId": "grandiose", "version": 1, "text": valid
         }}),
     );
-    let diagnostics = session.diagnostics_for("main.gr");
+    let diagnostics = session.diagnostics_for("main.glorious");
     assert!(
         diagnostics.is_empty(),
         "unexpected diagnostics: {diagnostics:?}"
@@ -894,7 +1084,7 @@ fn signature_help_and_semantic_tokens_are_utf16_multifile_and_transactional() {
         json!({"textDocument": {"uri": uri(&main), "version": 2},
                "contentChanges": [{"text": malformed}]}),
     );
-    assert!(!session.diagnostics_for("main.gr").is_empty());
+    assert!(!session.diagnostics_for("main.glorious").is_empty());
     let (signature, _) = session.request("textDocument/signatureHelp", signature_request());
     assert_eq!(signature["activeParameter"], 1);
     assert_eq!(
@@ -909,4 +1099,185 @@ fn signature_help_and_semantic_tokens_are_utf16_multifile_and_transactional() {
         decoded_semantic_tokens(&tokens).contains(&(2, 4, 6, 6)),
         "last-good callable identity disappeared"
     );
+}
+
+#[test]
+fn qualified_effect_and_operation_definitions_are_exact() {
+    let temporary = TempDir::new().unwrap();
+    let root = temporary.path().join("app");
+    let source = concat!(
+        "effect ParseCase { inspect(value: i64) -> ! }\n",
+        "effect OtherCase { inspect(value: i64) -> ! }\n",
+        "inspect() -> i64 { 99 }\n",
+        "parse() -> i64 {\n",
+        "    handle perform ParseCase::inspect(7) {\n",
+        "        ParseCase::inspect(value) => value\n",
+        "    }\n",
+        "}\n",
+        "other() -> i64 {\n",
+        "    handle perform OtherCase::inspect(8) {\n",
+        "        OtherCase::inspect(value) => value\n",
+        "    }\n",
+        "}\n",
+        "main() -> () { () }\n",
+    );
+    let main = project(&root, "app", source);
+    let mut session = Session::start(&root);
+    session.request("initialize", json!({"rootUri": uri(&root)}));
+    session.notify("initialized", json!({}));
+    session.notify(
+        "textDocument/didOpen",
+        json!({"textDocument": {
+            "uri": uri(&main), "languageId": "grandiose", "version": 1, "text": source
+        }}),
+    );
+    assert!(session.diagnostics_for("main.glorious").is_empty());
+
+    let definition = |session: &mut Session, line, character| {
+        session
+            .request(
+                "textDocument/definition",
+                json!({
+                    "textDocument": {"uri": uri(&main)},
+                    "position": {"line": line, "character": character}
+                }),
+            )
+            .0
+    };
+    let parse_effect = definition(&mut session, 4, 20);
+    assert_eq!(parse_effect["range"]["start"]["line"], 0, "{parse_effect}");
+    assert_eq!(
+        parse_effect["range"]["start"]["character"], 7,
+        "{parse_effect}"
+    );
+
+    for (line, character) in [(4, 31), (5, 21)] {
+        let operation = definition(&mut session, line, character);
+        assert_eq!(operation["range"]["start"]["line"], 0, "{operation}");
+        assert_eq!(operation["range"]["start"]["character"], 19, "{operation}");
+    }
+    let other_operation = definition(&mut session, 9, 31);
+    assert_eq!(
+        other_operation["range"]["start"]["line"], 1,
+        "{other_operation}"
+    );
+    let ordinary_function = definition(&mut session, 2, 2);
+    assert_eq!(
+        ordinary_function["range"]["start"]["line"], 2,
+        "{ordinary_function}"
+    );
+}
+
+#[test]
+fn workspace_root_discovers_nested_project_and_its_dependency() {
+    let temporary = TempDir::new().unwrap();
+    let workspace = temporary.path().join("workspace");
+    let app = workspace.join("tutorial/app");
+    let dependency = app.join("library");
+    std::fs::create_dir_all(app.join("src")).unwrap();
+    std::fs::create_dir_all(dependency.join("src")).unwrap();
+    std::fs::write(
+        app.join("grandiose.toml"),
+        "[project]\nname = \"nested-app\"\nversion = \"0.1.0\"\nentry = \"src/main.glorious\"\n\n[dependencies]\ncore-lib = { path = \"library\" }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dependency.join("grandiose.toml"),
+        "[project]\nname = \"core-lib\"\nversion = \"0.1.0\"\n",
+    )
+    .unwrap();
+    let source = "use core_lib::answer;\nprobe() -> i64 { answer() }\nmain() -> () { let ignored = probe(); () }\n";
+    let main = app.join("src/main.glorious");
+    std::fs::write(&main, source).unwrap();
+    let library = dependency.join("src/lib.glorious");
+    std::fs::write(&library, "pub answer() -> i64 { 42 }\n").unwrap();
+
+    let mut session = Session::start(&workspace);
+    session.request("initialize", json!({"rootUri": uri(&workspace)}));
+    session.notify("initialized", json!({}));
+    session.notify(
+        "textDocument/didOpen",
+        json!({"textDocument": {
+            "uri": uri(&main), "languageId": "grandiose", "version": 1, "text": source
+        }}),
+    );
+    let diagnostics = session.diagnostics_for("main.glorious");
+    assert!(diagnostics.is_empty(), "{diagnostics:#?}");
+    let (definition, _) = session.request(
+        "textDocument/definition",
+        json!({
+            "textDocument": {"uri": uri(&main)},
+            "position": {"line": 1, "character": 18}
+        }),
+    );
+    assert_eq!(definition["uri"], uri(&library), "{definition}");
+}
+
+#[test]
+fn semantic_tokens_distinguish_effect_operations_enum_variants_and_functions() {
+    let temporary = TempDir::new().unwrap();
+    let root = temporary.path().join("app");
+    let source = concat!(
+        "effect Stop { stop(value: i64) -> ! }\n",
+        "ordinary() -> () { () }\n",
+        "result() -> Result<(), ()> { Result::Ok(()) }\n",
+        "test() -> i64 {\n",
+        "    ordinary();\n",
+        "    handle perform Stop::stop(42) {\n",
+        "        Stop::stop(value) => value\n",
+        "    }\n",
+        "}\n",
+        "main() -> () { () }\n",
+    );
+    let main = project(&root, "app", source);
+    let mut session = Session::start(&root);
+    let (initialize, _) = session.request("initialize", json!({"rootUri": uri(&root)}));
+    assert_eq!(
+        initialize["capabilities"]["semanticTokensProvider"]["legend"]["tokenTypes"][12],
+        "enumMember"
+    );
+    session.notify("initialized", json!({}));
+    session.notify(
+        "textDocument/didOpen",
+        json!({"textDocument": {
+            "uri": uri(&main), "languageId": "grandiose", "version": 1, "text": source
+        }}),
+    );
+    let diagnostics = session.diagnostics_for("main.glorious");
+    assert!(
+        diagnostics.is_empty(),
+        "unexpected diagnostics: {diagnostics:?}"
+    );
+
+    let (tokens, _) = session.request(
+        "textDocument/semanticTokens/full",
+        json!({"textDocument": {"uri": uri(&main)}}),
+    );
+    let tokens = decoded_semantic_tokens(&tokens);
+    assert!(
+        tokens.contains(&(4, 4, 8, 6)),
+        "ordinary function: {tokens:?}"
+    );
+    assert!(tokens.contains(&(5, 19, 4, 5)), "effect prefix: {tokens:?}");
+    assert!(
+        tokens.contains(&(5, 25, 4, 12)),
+        "effect operation: {tokens:?}"
+    );
+    assert!(
+        tokens.contains(&(6, 8, 4, 5)),
+        "handler effect prefix: {tokens:?}"
+    );
+    assert!(
+        tokens.contains(&(6, 14, 4, 12)),
+        "handler operation: {tokens:?}"
+    );
+
+    let result_line = "result() -> Result<(), ()> { Result::Ok(()) }";
+    let result_constructor = result_line.rfind("Result").unwrap() as u32;
+    let ok = result_line.find("::Ok").unwrap() as u32 + 2;
+    assert!(
+        tokens.contains(&(2, result_constructor, 6, 1)),
+        "enum prefix: {tokens:?}"
+    );
+    assert!(tokens.contains(&(2, ok, 2, 12)), "enum variant: {tokens:?}");
 }

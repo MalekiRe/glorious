@@ -15,7 +15,7 @@ fn open_effect_row_gat_binders_normalize_to_members_plus_the_original_tail() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("open-effect-row-gat.gr", source)
+    let artifact = compile_source_to_bytecode("open-effect-row-gat.glorious", source)
         .expect("an open associated row must retain its declared tail");
     verify(artifact).unwrap();
 }
@@ -39,13 +39,12 @@ fn open_associated_rows_close_through_callable_specialization_at_all_levels() {
         main()->{()}
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let artifact = compile_source_to_bytecode_with_options(
-            "specialized-open-effect-row-gat.gr",
+            "specialized-open-effect-row-gat.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -64,7 +63,7 @@ fn open_associated_row_specialization_rejects_ungrounded_and_conflicting_tails()
         }
         main()->{()}
     "#;
-    let errors = compile_source_to_bytecode("ungrounded-open-row-gat.gr", ungrounded)
+    let errors = compile_source_to_bytecode("ungrounded-open-row-gat.glorious", ungrounded)
         .expect_err("a symbolic owner without exact equality evidence must not reach MIR");
     assert!(
         errors.iter().any(|error| {
@@ -88,7 +87,7 @@ fn open_associated_row_specialization_rejects_ungrounded_and_conflicting_tails()
         }
         main()->{()}
     "#;
-    let errors = compile_source_to_bytecode("conflicting-open-row-gat.gr", conflicting)
+    let errors = compile_source_to_bytecode("conflicting-open-row-gat.glorious", conflicting)
         .expect_err("two distinct residual tails must not be merged");
     assert!(
         errors.iter().any(|error| {
@@ -116,7 +115,7 @@ fn open_effect_row_gat_arguments_are_kinded_and_tails_are_bound() {
             "unbound",
         ),
     ] {
-        let errors = compile_source_to_bytecode("invalid-open-effect-row-gat.gr", source)
+        let errors = compile_source_to_bytecode("invalid-open-effect-row-gat.glorious", source)
             .expect_err("invalid open associated rows must be rejected");
         assert!(
             errors.iter().any(|error| {
@@ -134,7 +133,7 @@ fn open_effect_row_gat_arguments_are_kinded_and_tails_are_bound() {
         bad<T>() -> / {<S as C>::E<T>} { () }
         main()->{()}
     "#;
-    let errors = compile_source_to_bytecode("wrong-open-row-argument.gr", wrong_projection)
+    let errors = compile_source_to_bytecode("wrong-open-row-argument.glorious", wrong_projection)
         .expect_err("a type binder must not masquerade as an effect-row binder");
     assert!(
         errors.iter().any(|error| error
@@ -161,13 +160,12 @@ fn grounded_effect_row_gat_projects_into_callable_rows_at_all_levels() {
         main() -> { () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let artifact = compile_source_to_bytecode_with_options(
-            "effect-row-gat.gr",
+            "effect-row-gat.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -196,7 +194,7 @@ fn effect_row_gats_require_exact_evidence_and_value_kinds() {
         bad() -> / {<Carrier as Capability>::Effects<i64>} { () }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("unresolved-effect-row-gat.gr", unresolved)
+    let errors = compile_source_to_bytecode("unresolved-effect-row-gat.glorious", unresolved)
         .expect_err("a row projection without implementation evidence must fail");
     assert!(
         errors.iter().any(|error| {
@@ -213,7 +211,7 @@ fn effect_row_gats_require_exact_evidence_and_value_kinds() {
         "trait Capability{type Effects<T>:EffectRow;} struct Carrier{marker:i64} impl Capability for Carrier{type Effects<U> = U;} main()->{()}",
         "trait Family{type Item<T>;} struct Carrier{marker:i64} impl Family for Carrier{type Item<U> = {};} main()->{()}",
     ] {
-        let errors = compile_source_to_bytecode("wrong-associated-kind.gr", source)
+        let errors = compile_source_to_bytecode("wrong-associated-kind.glorious", source)
             .expect_err("associated item values must match their declared kind");
         assert!(
             errors.iter().any(|error| {
@@ -249,13 +247,12 @@ fn symbolic_effect_row_gat_equalities_close_generic_callable_rows() {
         main() -> { () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let artifact = compile_source_to_bytecode_with_options(
-            "symbolic-effect-row-gat.gr",
+            "symbolic-effect-row-gat.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -287,7 +284,7 @@ fn symbolic_effect_row_projections_require_lexical_equality_evidence() {
         }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("symbolic-row-without-equality.gr", source)
+    let errors = compile_source_to_bytecode("symbolic-row-without-equality.glorious", source)
         .expect_err("a symbolic row projection requires an exact lexical equality");
     assert!(
         errors.iter().any(|error| {
@@ -314,8 +311,9 @@ fn symbolic_effect_row_projections_require_lexical_equality_evidence() {
         bad(capability: Carrier) -> ! { forward(&capability, 42) }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("conflicting-symbolic-row-equality.gr", conflicting)
-        .expect_err("ground impl evidence must agree with the lexical row equality");
+    let errors =
+        compile_source_to_bytecode("conflicting-symbolic-row-equality.glorious", conflicting)
+            .expect_err("ground impl evidence must agree with the lexical row equality");
     assert!(
         errors.iter().any(|error| {
             error.code.is_some()

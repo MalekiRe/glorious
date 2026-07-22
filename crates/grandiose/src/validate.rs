@@ -2054,10 +2054,7 @@ fn drop_body_has_outward_control(
             let forbidden_callee = matches!(
                 &callee.kind,
                 ExprKind::Variable(path)
-                    if path.len() == 1
-                        && (path[0].as_ref() == "resume"
-                            || path[0].as_ref() == "cancel"
-                            || effectful.contains(path[0].as_ref()))
+                    if path.len() == 1 && effectful.contains(path[0].as_ref())
             );
             forbidden_callee
                 || drop_body_has_outward_control(program, callee, effectful, handled)
@@ -2124,7 +2121,7 @@ fn drop_body_has_outward_control(
                 || drop_body_has_outward_control(program, rhs, effectful, handled)
         }
         // Structural resumption operations and direct label transfers are
-        // outward control, exactly like their legacy call spellings above.
+        // outward control.
         ExprKind::Resume { .. }
         | ExprKind::Cancel { .. }
         | ExprKind::TailResume { .. }
@@ -2461,9 +2458,8 @@ fn validate_expr(
             validate_expr(program, lhs, effects, generic_kinds, errors);
             validate_expr(program, rhs, effects, generic_kinds, errors);
         }
-        // Structural resumption invocations are the normative encoding of the
-        // legacy `resume`/`cancel` call spellings; the pipeline rewrites them
-        // before lowering, so they are valid here.
+        // Structural resumption invocations are checked directly throughout
+        // validation and lowering.
         ExprKind::Resume { resumption, value } => {
             validate_expr(program, resumption, effects, generic_kinds, errors);
             if let Some(value) = value {

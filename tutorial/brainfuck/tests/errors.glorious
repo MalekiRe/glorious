@@ -1,0 +1,24 @@
+effect ParsedCase {
+    inspect(value: Result<brainfuck_core::Program, brainfuck_core::ParseError>) -> !;
+}
+
+main() -> {
+    let open = "[+";
+    let close = "+]";
+    let underflow = "<";
+    let open_result = brainfuck_core::parse(Bytes::iter(&String::as_bytes(&open)));
+    let close_result = brainfuck_core::parse(Bytes::iter(&String::as_bytes(&close)));
+    assert(open_result is Result::Err(_));
+    assert(close_result is Result::Err(_));
+    let parsed = brainfuck_core::parse(Bytes::iter(&String::as_bytes(&underflow)));
+    handle perform ParsedCase::inspect(move parsed) {
+        ParsedCase::inspect(Result::Ok(program)) => {
+            let executed = brainfuck_core::run_with_io(
+                &program,
+                Bytes::iter(&String::as_bytes(&""))
+            );
+            assert(executed is Result::Err(_))
+        },
+        ParsedCase::inspect(Result::Err(_)) => assert(false)
+    }
+}

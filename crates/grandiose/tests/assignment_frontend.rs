@@ -35,7 +35,7 @@ fn external_i64_value(storage: &ArenaObject<ArrayValue>) -> Option<Value> {
 
 fn compile(source: &str, level: OptimizationLevel) -> Result<grandiose::CompiledPhases, String> {
     compile_source_to_phases_with_options(
-        "assignment.gr",
+        "assignment.glorious",
         source,
         grandiose::CompileOptions {
             optimization_level: level,
@@ -101,19 +101,25 @@ fn parser_keeps_assignment_statement_only_and_preserves_static_places() {
 }
 
 #[test]
-fn assignment_typechecks_at_o0_through_o3_for_local_field_and_unique_deref() {
+fn assignment_typechecks_at_o1_through_o3_for_local_field_and_unique_deref() {
     let source = r#"
         struct Pair { left: i64, right: i64 }
         struct Inner { number: i64 }
         struct Outer { inner: Inner }
+        struct Cursor { value: i64 }
         local(value: i64) -> i64 { value = 7; value }
         field(value: Pair) -> i64 { value.left = 8; value.left }
         nested(value: Outer) -> i64 { value.inner.number = 12; value.inner.number }
         indirect(value: &mut i64) -> i64 { *value = 9; *value }
+        read_cursor(value: &Cursor) -> i64 { value.value }
+        set_cursor(value: &mut Cursor, next: i64) -> { value.value = next; () }
+        advance_cursor(value: &mut Cursor) -> {
+            set_cursor(value, read_cursor(&*value) + 1);
+            ()
+        }
         main() -> { () }
     "#;
     for level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -227,7 +233,7 @@ fn assignment_obeys_live_alias_conflicts_and_nll_release() {
         }
         main() -> { () }
     "#;
-    let error = compile(conflict, OptimizationLevel::O0).unwrap_err();
+    let error = compile(conflict, OptimizationLevel::O2).unwrap_err();
     assert!(error.contains("live shared or unique loan"), "{error}");
 
     let released = r#"
@@ -239,7 +245,7 @@ fn assignment_obeys_live_alias_conflicts_and_nll_release() {
         }
         main() -> { () }
     "#;
-    compile(released, OptimizationLevel::O0).unwrap();
+    compile(released, OptimizationLevel::O2).unwrap();
 }
 
 #[test]
@@ -273,7 +279,7 @@ fn initialized_must_move_values_cannot_be_destroyed_by_assignment() {
         bad(ticket: Ticket) -> Ticket { ticket = Ticket {}; move ticket }
         main() -> { () }
     "#;
-    let error = compile(source, OptimizationLevel::O0).unwrap_err();
+    let error = compile(source, OptimizationLevel::O2).unwrap_err();
     assert!(
         error.contains("assignment would destroy an initialized subtree"),
         "{error}"
@@ -293,7 +299,7 @@ fn whole_local_reinitialization_after_move_does_not_destroy_the_old_owner() {
         }
         main() -> { () }
     "#;
-    compile(source, OptimizationLevel::O0).unwrap();
+    compile(source, OptimizationLevel::O2).unwrap();
 }
 
 #[test]
@@ -310,7 +316,6 @@ fn exact_moved_field_can_be_reinitialized_without_destroying_it_again() {
         main() -> { () }
     "#;
     for level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -323,7 +328,7 @@ fn exact_moved_field_can_be_reinitialized_without_destroying_it_again() {
 }
 
 #[test]
-fn nested_moved_leaf_rebuilds_every_parent_at_o0_through_o3() {
+fn nested_moved_leaf_rebuilds_every_parent_at_o1_through_o3() {
     let source = r#"
         struct Inner { left: i64, right: i64 }
         struct Outer { inner: Inner, marker: i64 }
@@ -335,7 +340,6 @@ fn nested_moved_leaf_rebuilds_every_parent_at_o0_through_o3() {
         main() -> { () }
     "#;
     for level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -368,7 +372,7 @@ fn nested_moved_leaf_rebuilds_every_parent_at_o0_through_o3() {
 }
 
 #[test]
-fn assigning_children_below_moved_parent_reconstructs_parent_at_o0_through_o3() {
+fn assigning_children_below_moved_parent_reconstructs_parent_at_o1_through_o3() {
     let source = r#"
         struct Inner { left: i64, right: i64 }
         struct Outer { inner: Inner, marker: i64 }
@@ -381,7 +385,6 @@ fn assigning_children_below_moved_parent_reconstructs_parent_at_o0_through_o3() 
         main() -> { () }
     "#;
     for level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -415,7 +418,7 @@ fn assigning_children_below_moved_parent_reconstructs_parent_at_o0_through_o3() 
 }
 
 #[test]
-fn assigning_all_leaves_after_whole_owner_move_reconstructs_root_at_o0_through_o3() {
+fn assigning_all_leaves_after_whole_owner_move_reconstructs_root_at_o1_through_o3() {
     let source = r#"
         struct Inner { left: i64, right: i64 }
         struct Outer { inner: Inner, marker: i64 }
@@ -429,7 +432,6 @@ fn assigning_all_leaves_after_whole_owner_move_reconstructs_root_at_o0_through_o
         main() -> { () }
     "#;
     for level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -474,7 +476,7 @@ fn nested_projection_moves_preserve_double_move_and_custom_drop_rejections() {
         }
         main() -> { () }
     "#;
-    let error = compile(double_move, OptimizationLevel::O0).unwrap_err();
+    let error = compile(double_move, OptimizationLevel::O2).unwrap_err();
     assert!(error.contains("already moved"), "{error}");
 
     let custom_drop = r#"
@@ -484,7 +486,7 @@ fn nested_projection_moves_preserve_double_move_and_custom_drop_rejections() {
         bad(value: Outer) -> i64 { move value.inner.value }
         main() -> { () }
     "#;
-    let error = compile(custom_drop, OptimizationLevel::O0).unwrap_err();
+    let error = compile(custom_drop, OptimizationLevel::O2).unwrap_err();
     assert!(error.contains("custom Drop hook"), "{error}");
 }
 
@@ -506,7 +508,6 @@ fn proven_enum_payload_assignment_replaces_and_reinitializes_at_all_levels() {
         main() -> { () }
     "#;
     for level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -535,7 +536,7 @@ fn enum_payload_assignment_requires_a_variant_proof_and_safe_replacement() {
         }
         main() -> { () }
     "#;
-    let error = compile(unproved, OptimizationLevel::O0).unwrap_err();
+    let error = compile(unproved, OptimizationLevel::O2).unwrap_err();
     assert!(error.contains("variant proof"), "{error}");
 
     let positive = r#"
@@ -552,7 +553,7 @@ fn enum_payload_assignment_requires_a_variant_proof_and_safe_replacement() {
         }
         main() -> { () }
     "#;
-    let error = compile(positive, OptimizationLevel::O0).unwrap_err();
+    let error = compile(positive, OptimizationLevel::O2).unwrap_err();
     assert!(
         error.contains("assignment would destroy an initialized subtree"),
         "{error}"
@@ -573,7 +574,7 @@ fn enum_payload_assignment_requires_a_variant_proof_and_safe_replacement() {
         }
         main() -> { () }
     "#;
-    let error = compile(custom_drop, OptimizationLevel::O0).unwrap_err();
+    let error = compile(custom_drop, OptimizationLevel::O2).unwrap_err();
     assert!(error.contains("custom Drop hook"), "{error}");
 }
 
@@ -592,7 +593,6 @@ fn nested_restoration_transfers_exact_use_obligations_to_old_and_replacement() {
         main() -> { () }
     "#;
     for level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -612,7 +612,6 @@ fn nested_restoration_transfers_exact_use_obligations_to_old_and_replacement() {
         main() -> { () }
     "#;
     for level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -638,7 +637,7 @@ fn assignment_rejects_shared_deref_unknown_places_and_type_mismatch() {
         ),
     ];
     for (source, expected) in cases {
-        let error = compile(source, OptimizationLevel::O0).unwrap_err();
+        let error = compile(source, OptimizationLevel::O2).unwrap_err();
         assert!(
             error.contains(expected),
             "expected {expected:?} in {error:?}"
@@ -647,7 +646,7 @@ fn assignment_rejects_shared_deref_unknown_places_and_type_mismatch() {
 }
 
 #[test]
-fn move_through_unique_reference_reinitializes_at_o0_through_o3() {
+fn move_through_unique_reference_reinitializes_at_o1_through_o3() {
     let source = r#"
         replace_i64(target: &mut i64, incoming: i64) -> i64 {
             replace(target, move incoming)
@@ -658,7 +657,6 @@ fn move_through_unique_reference_reinitializes_at_o0_through_o3() {
         main() -> { () }
     "#;
     for level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -707,7 +705,6 @@ fn move_through_unique_reference_preserves_exact_linear_values() {
         main() -> { () }
     "#;
     for level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -742,7 +739,7 @@ fn empty_unique_referents_reject_access_transfer_and_normal_exit() {
         ),
     ];
     for (source, expected) in cases {
-        let error = compile(source, OptimizationLevel::O0).unwrap_err();
+        let error = compile(source, OptimizationLevel::O2).unwrap_err();
         assert!(
             error.contains(expected),
             "expected {expected:?} in {error:?}"
@@ -762,7 +759,7 @@ fn pure_unrelated_call_is_allowed_while_unique_referent_is_empty() {
         }
         main() -> { () }
     "#;
-    compile(source, OptimizationLevel::O0).unwrap();
+    compile(source, OptimizationLevel::O2).unwrap();
 }
 
 #[test]
@@ -782,7 +779,6 @@ fn projected_assignment_in_handler_preserves_named_unique_root_at_join() {
         main() -> { () }
     "#;
     for level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

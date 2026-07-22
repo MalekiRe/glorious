@@ -84,16 +84,15 @@ fn bounds(ty: &str) -> (Value, Value) {
 }
 
 #[test]
-fn all_checked_integer_operators_execute_at_every_width_from_o0_through_o3() {
+fn all_checked_integer_operators_execute_at_every_width_from_o1_through_o3() {
     let source = arithmetic_source();
     for level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let phases = compile_source_to_phases_with_options(
-            "all-integer-arithmetic.gr",
+            "all-integer-arithmetic.glorious",
             &source,
             CompileOptions {
                 optimization_level: level,
@@ -131,7 +130,7 @@ fn long_left_associated_arithmetic_chains_do_not_use_the_host_call_stack() {
     }
     let source = format!("answer() -> i64 {{ {expression} }} main() -> () {{ () }}");
     let phases = compile_source_to_phases_with_options(
-        "long-arithmetic-chain.gr",
+        "long-arithmetic-chain.glorious",
         &source,
         CompileOptions::default(),
     )
@@ -146,16 +145,15 @@ fn long_left_associated_arithmetic_chains_do_not_use_the_host_call_stack() {
 }
 
 #[test]
-fn checked_boundaries_trap_for_signed_and_unsigned_types_at_every_level() {
+fn checked_boundaries_trap_for_signed_and_unsigned_types_at_optimized_levels() {
     let source = arithmetic_source();
     for level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let phases = compile_source_to_phases_with_options(
-            "integer-boundaries.gr",
+            "integer-boundaries.glorious",
             &source,
             CompileOptions {
                 optimization_level: level,
@@ -225,7 +223,7 @@ fn mixed_source_integer_types_are_rejected_for_every_arithmetic_operator() {
             "bad(left: u8, right: u16) -> u8 {{ left {operator} right }} main() -> {{ () }}"
         );
         let diagnostics = compile_source_to_phases_with_options(
-            "mixed-integer-arithmetic.gr",
+            "mixed-integer-arithmetic.glorious",
             &source,
             CompileOptions::default(),
         )
@@ -272,7 +270,7 @@ fn recovery_interpreter_preserves_typed_remainder_values_and_traps() {
         };
         assert_eq!(
             run_source(
-                &format!("recovery-{ty}-rem.gr"),
+                &format!("recovery-{ty}-rem.glorious"),
                 &source,
                 vec![],
                 &mut NoHost
@@ -288,7 +286,7 @@ fn recovery_interpreter_preserves_typed_remainder_values_and_traps() {
             "typed(value: {ty}) -> {ty} {{ value }} main() -> {ty} {{ typed(1) % typed(0) }}"
         );
         let diagnostics =
-            run_source("recovery-rem-zero.gr", &source, vec![], &mut NoHost).unwrap_err();
+            run_source("recovery-rem-zero.glorious", &source, vec![], &mut NoHost).unwrap_err();
         assert!(
             diagnostics
                 .iter()
@@ -307,8 +305,13 @@ fn recovery_interpreter_preserves_typed_remainder_values_and_traps() {
         let source = format!(
             "typed(value: {ty}) -> {ty} {{ value }} main() -> {ty} {{ ({minimum}) % typed(-1) }}"
         );
-        let diagnostics =
-            run_source("recovery-rem-overflow.gr", &source, vec![], &mut NoHost).unwrap_err();
+        let diagnostics = run_source(
+            "recovery-rem-overflow.glorious",
+            &source,
+            vec![],
+            &mut NoHost,
+        )
+        .unwrap_err();
         assert!(
             diagnostics
                 .iter()
@@ -333,13 +336,12 @@ fn remainder_evaluates_effectful_operands_once_in_left_to_right_order() {
         main() -> { () }
     "#;
     for level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let phases = compile_source_to_phases_with_options(
-            "remainder-order.gr",
+            "remainder-order.glorious",
             source,
             CompileOptions {
                 optimization_level: level,

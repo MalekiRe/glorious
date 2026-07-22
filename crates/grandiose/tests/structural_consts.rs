@@ -130,13 +130,13 @@ fn external_quantity_arguments_are_structural_and_forward_through_param_envs() {
         main()->{let bomb=make_bomb();()}
     "#;
     let phases = compile_source_to_phases_with_manifest(
-        "external-quantity.gr",
+        "external-quantity.glorious",
         source,
         &structural_manifest(),
     )
     .unwrap();
     let repeated = compile_source_to_phases_with_manifest(
-        "external-quantity.gr",
+        "external-quantity.glorious",
         source,
         &reordered_structural_manifest(),
     )
@@ -227,7 +227,8 @@ fn explicit_negative_quantity_evidence_is_not_confused_with_absence() {
         answer()->i64{reject(No{marker:7})}
         main()->{()}
     "#;
-    compile_source_to_bytecode_with_manifest("negative-quantity.gr", accepted, &manifest).unwrap();
+    compile_source_to_bytecode_with_manifest("negative-quantity.glorious", accepted, &manifest)
+        .unwrap();
 
     let absent = r#"
         struct Missing { marker:i64 }
@@ -235,8 +236,9 @@ fn explicit_negative_quantity_evidence_is_not_confused_with_absence() {
         bad(value:Missing)->i64{reject(value)}
         main()->{()}
     "#;
-    let errors = compile_source_to_bytecode_with_manifest("absent-negative.gr", absent, &manifest)
-        .unwrap_err();
+    let errors =
+        compile_source_to_bytecode_with_manifest("absent-negative.glorious", absent, &manifest)
+            .unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error.span.is_some()
@@ -260,7 +262,7 @@ fn source_const_binders_prove_ground_quantity_and_u32_goals() {
         answer()->i64{quantity(Any{marker:1})+index(Any{marker:2})}
         main()->{()}
     "#;
-    let artifact = grandiose::compile_source_to_bytecode("const-binders.gr", source).unwrap();
+    let artifact = grandiose::compile_source_to_bytecode("const-binders.glorious", source).unwrap();
     let verified = verify(artifact).unwrap();
     let answer = verified
         .artifact()
@@ -338,7 +340,7 @@ fn structural_const_overlap_uses_const_identity() {
         impl Rel<[0,2]> for S {}
         main()->{()}
     "#;
-    grandiose::compile_source_to_bytecode("disjoint-consts.gr", accepted).unwrap();
+    grandiose::compile_source_to_bytecode("disjoint-consts.glorious", accepted).unwrap();
 
     for (name, source) in [
         (
@@ -410,7 +412,8 @@ fn external_const_orphan_rules_preserve_alias_and_polarity_parity() {
     let manifest = structural_manifest();
     let accepted =
         "struct Local{marker:i64} type Alias=Local; impl Quota<[0,1]> for Alias{} main()->{()}";
-    compile_source_to_bytecode_with_manifest("local-alias-const.gr", accepted, &manifest).unwrap();
+    compile_source_to_bytecode_with_manifest("local-alias-const.glorious", accepted, &manifest)
+        .unwrap();
 
     for (name, source) in [
         (

@@ -17,7 +17,7 @@ fn lexical_generic_parameters_shadow_same_named_global_aliases() {
         answer() -> i64 { choose(42, "evidence", ()) }
         main() -> () { () }
     "#;
-    let artifact = compile_source_to_bytecode("generic-alias-shadowing.gr", source)
+    let artifact = compile_source_to_bytecode("generic-alias-shadowing.glorious", source)
         .expect("lexical generic binders must win over global aliases");
     verify(artifact).unwrap();
 }

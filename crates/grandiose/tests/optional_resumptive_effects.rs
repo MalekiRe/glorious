@@ -45,7 +45,7 @@ const CANCEL: &str = r#"
 
 #[test]
 fn optional_one_shot_cancel_emits_exact_descriptors_cleans_up_and_executes() {
-    let artifact = compile_source_to_bytecode("cancel.gr", CANCEL).unwrap();
+    let artifact = compile_source_to_bytecode("cancel.glorious", CANCEL).unwrap();
     assert_eq!(artifact.required_features, 1 | (1 << 1) | (1 << 3));
     let stop = artifact
         .protocols
@@ -174,7 +174,7 @@ fn optional_one_shot_may_resume_and_deeply_reinstalls_the_handler() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("optional-resume.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("optional-resume.glorious", source).unwrap();
     let test = artifact
         .functions
         .iter()
@@ -208,7 +208,7 @@ fn optional_cancellation_cleans_up_affine_custom_drop_capture() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("affine-cancel-capture.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("affine-cancel-capture.glorious", source).unwrap();
     assert_eq!(artifact.drop_glue.len(), 1);
     let selected = artifact
         .functions
@@ -267,7 +267,7 @@ fn optional_cancellation_releases_whole_and_projected_loans_before_their_owners(
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("optional-cancel-loans.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("optional-cancel-loans.glorious", source).unwrap();
     assert_eq!(artifact.drop_glue.len(), 1);
     let functions = ["shared", "unique_with_drop", "projected"].map(|name| {
         artifact
@@ -304,7 +304,8 @@ fn optional_outward_call_cancellation_releases_a_projected_loan() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("optional-call-projected-loan.gr", source).unwrap();
+    let artifact =
+        compile_source_to_bytecode("optional-call-projected-loan.glorious", source).unwrap();
     let selected = artifact
         .functions
         .iter()
@@ -339,7 +340,7 @@ fn optional_cancellation_carries_only_the_initialized_residual_fields() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("optional-residual-cancel.gr", source).unwrap();
+    let phases = compile_source_to_phases("optional-residual-cancel.glorious", source).unwrap();
     assert!(
         phases
             .mir
@@ -362,8 +363,8 @@ fn optional_cancellation_carries_only_the_initialized_residual_fields() {
 
 #[test]
 fn optional_cancel_core_mir_and_artifact_are_deterministic() {
-    let first = compile_source_to_phases("cancel.gr", CANCEL).unwrap();
-    let second = compile_source_to_phases("cancel.gr", CANCEL).unwrap();
+    let first = compile_source_to_phases("cancel.glorious", CANCEL).unwrap();
+    let second = compile_source_to_phases("cancel.glorious", CANCEL).unwrap();
     assert_eq!(first.core_fingerprint(), second.core_fingerprint());
     assert_eq!(first.mir_fingerprint(), second.mir_fingerprint());
     assert_eq!(first.artifact.encode(), second.artifact.encode());
@@ -374,13 +375,16 @@ fn optional_cancel_core_mir_and_artifact_are_deterministic() {
 #[test]
 fn optional_cancel_bundle_and_interpreter_match_the_vm() {
     let bundle = SourceBundle::new(
-        Segment::new("effects.gr", "effect Stop { [0,1] stop() -> i64 }"),
         Segment::new(
-            "library.gr",
+            "effects.glorious",
+            "infixl 30 +; effect Stop { [0,1] stop() -> i64 }",
+        ),
+        Segment::new(
+            "library.glorious",
             "test() -> i64 { handle { let ignored = perform Stop::stop(); ignored + 1000 } { Stop::stop() with k => { cancel(k); 42 } } }",
         ),
         [Segment::new(
-            "entry.gr",
+            "entry.glorious",
             "main() -> { let result = test(); () }",
         )],
     );
@@ -407,10 +411,10 @@ fn optional_cancel_bundle_and_interpreter_match_the_vm() {
         main() -> { let result = test(); () }
     "#;
     assert_eq!(
-        run_source("cancel-differential.gr", source, vec![], &mut NoHost).unwrap(),
+        run_source("cancel-differential.glorious", source, vec![], &mut NoHost).unwrap(),
         InterpreterValue::Unit
     );
-    let artifact = compile_source_to_bytecode("cancel-differential.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("cancel-differential.glorious", source).unwrap();
     let entry = artifact.entry_function.unwrap();
     assert_eq!(
         Vm::new(verify(artifact).unwrap())
@@ -447,7 +451,7 @@ fn optional_resumption_transports_through_identity_and_tuple_with_zero_use() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("optional-transport.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("optional-transport.glorious", source).unwrap();
     let resumption_types = artifact
         .handler_defs
         .iter()
@@ -493,7 +497,7 @@ fn optional_resumption_late_nominal_supports_projection_and_projected_borrow() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("late-nominal-place.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("late-nominal-place.glorious", source).unwrap();
     let answer = artifact
         .functions
         .iter()
@@ -515,20 +519,20 @@ fn late_resumption_nominal_inherits_private_field_authority() {
     "#;
     let allowed = SourceBundle::new(
         Segment::new(
-            "owner.gr",
+            "owner.glorious",
             format!(
                 "{defining} answer() -> i64 {{ handle perform Stop::stop() {{ Stop::stop() with k => {{ let stored = Secret {{ value: move k }}; let Secret {{ value }} = move stored; cancel(move value); 42 }} }} }}"
             ),
         ),
-        Segment::new("entry.gr", "main() -> { () }"),
+        Segment::new("entry.glorious", "main() -> { () }"),
         [],
     );
     compile_bundle_to_bytecode(&allowed).unwrap();
 
     let rejected = SourceBundle::new(
-        Segment::new("owner.gr", defining),
+        Segment::new("owner.glorious", defining),
         Segment::new(
-            "caller.gr",
+            "caller.glorious",
             "answer() -> i64 { handle perform Stop::stop() { Stop::stop() with k => { let stored = Secret { value: move k }; 42 } } } main() -> { () }",
         ),
         [],
@@ -556,7 +560,7 @@ fn invalid_optional_resumption_consumption_has_stable_diagnostics() {
         ),
         (
             "effect Stop { [0,1] stop() -> i64 } bad() -> i64 { handle perform Stop::stop() { Stop::stop() with k => { cancel(k, k); 42 } } } main() -> { () }",
-            "must receive `k` directly and no other arguments",
+            "`cancel` requires exactly 1 argument, found 2",
         ),
         (
             "effect Stop { [0,1] stop() -> i64 } good() -> i64 { handle perform Stop::stop() { Stop::stop() with k => { cancel(k); 42 } } } bad() -> { cancel(k) } main() -> { () }",
@@ -580,11 +584,14 @@ fn invalid_optional_resumption_consumption_has_stable_diagnostics() {
         ),
     ];
     for (source, needle) in cases {
-        let diagnostics = compile_source_to_bytecode("rejected.gr", source).unwrap_err();
+        let diagnostics = compile_source_to_bytecode("rejected.glorious", source).unwrap_err();
         assert!(
             diagnostics.iter().any(|diagnostic| {
                 diagnostic.message.contains(needle)
-                    && matches!(diagnostic.code.as_deref(), Some("G1BC001" | "G1BC002"))
+                    && matches!(
+                        diagnostic.code.as_deref(),
+                        Some("G1BC001" | "G1BC002" | "G1BC004")
+                    )
             }),
             "expected `{needle}` in {diagnostics:#?}"
         );
@@ -608,7 +615,7 @@ fn optional_cancel_handlers_use_site_specific_result_types() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("site-specific-cancel.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("site-specific-cancel.glorious", source).unwrap();
     let stop = artifact
         .protocols
         .iter()

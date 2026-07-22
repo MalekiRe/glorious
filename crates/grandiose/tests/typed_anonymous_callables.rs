@@ -1,6 +1,6 @@
 //! Explicit typed anonymous callables `(x: T) -> R / {Row} { body }`:
 //! signature resolution, capture discovery and enforcement, receiver modes,
-//! direct/contextual invocation, recovery/compiled parity, and O0-O3 parity.
+//! direct/contextual invocation, recovery/compiled parity, and O1-O3 parity.
 
 use grandiose::{
     CompileOptions, OptimizationLevel, compile_source_to_bytecode,
@@ -70,7 +70,7 @@ fn explicit_parameter_and_result_types_compile_and_run() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        compiled("typed-basic.gr", source, "selected"),
+        compiled("typed-basic.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -86,7 +86,7 @@ fn omitted_result_type_means_unit() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        compiled("typed-unit.gr", source, "selected"),
+        compiled("typed-unit.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -104,7 +104,7 @@ fn never_result_with_declared_effect_row_diverges_into_a_handler() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        compiled("typed-never.gr", source, "selected"),
+        compiled("typed-never.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -122,7 +122,7 @@ fn declared_effect_rows_admit_resumptive_operations() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        compiled("typed-resumptive.gr", source, "selected"),
+        compiled("typed-resumptive.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -153,13 +153,12 @@ fn indirect_effectful_calls_preserve_partial_residual_frames_at_all_levels() {
         main() -> { selected(); () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let artifact = compile_source_to_bytecode_with_options(
-            "typed-indirect-partial-residual.gr",
+            "typed-indirect-partial-residual.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -225,18 +224,17 @@ fn nested_indirect_residuals_support_optional_cancellation_and_unknown_multiplic
     "#;
     for (name, source, expected) in [
         (
-            "typed-indirect-nested-optional.gr",
+            "typed-indirect-nested-optional.glorious",
             optional,
             Value::I64(42),
         ),
         (
-            "typed-indirect-nested-multishot.gr",
+            "typed-indirect-nested-multishot.glorious",
             multishot,
             Value::I64(83),
         ),
     ] {
         for optimization_level in [
-            OptimizationLevel::O0,
             OptimizationLevel::O1,
             OptimizationLevel::O2,
             OptimizationLevel::O3,
@@ -282,13 +280,12 @@ fn nested_indirect_optional_capture_rejects_a_remaining_ticket() {
         main() -> { () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let errors = compile_source_to_bytecode_with_options(
-            "typed-indirect-nested-hostile.gr",
+            "typed-indirect-nested-hostile.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -324,13 +321,12 @@ fn indirect_optional_effect_rejects_a_positive_residual_on_every_level() {
         main() -> { () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let errors = compile_source_to_bytecode_with_options(
-            "typed-indirect-hostile-residual.gr",
+            "typed-indirect-hostile-residual.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -359,13 +355,12 @@ fn indirect_optional_effect_rejects_a_positive_residual_on_every_level() {
         main() -> { () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let errors = compile_source_to_bytecode_with_options(
-            "typed-indirect-hostile-result.gr",
+            "typed-indirect-hostile-result.glorious",
             restricted_result,
             CompileOptions { optimization_level },
         )
@@ -391,7 +386,7 @@ fn captures_are_discovered_and_shared_receiver_allows_repeat_calls() {
         }
         main() -> { selected(); () }
     "#;
-    let artifact = compile_source_to_bytecode("typed-captures.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("typed-captures.glorious", source).unwrap();
     // An observe-only capture keeps the least-consuming shared receiver.
     assert!(artifact.code.iter().any(|instruction| matches!(
         instruction,
@@ -419,7 +414,7 @@ fn typed_closures_satisfy_fn_constraints_contextually() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        compiled("typed-contextual.gr", source, "selected"),
+        compiled("typed-contextual.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -434,7 +429,7 @@ fn typed_closures_chain_through_indirect_callable_values() {
         }
         main() -> { selected(); () }
     "#;
-    let artifact = compile_source_to_bytecode("typed-chain.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("typed-chain.glorious", source).unwrap();
     assert!(
         artifact
             .code
@@ -467,13 +462,12 @@ fn monomorphic_typed_callable_forms_at_an_unplanned_generic_wrapper_site() {
         main() -> { () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let artifact = compile_source_to_bytecode_with_options(
-            "typed-runtime-fallback.gr",
+            "typed-runtime-fallback.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -515,13 +509,12 @@ fn runtime_callable_fallback_rejects_unproven_region_and_effect_contracts() {
             main() -> { () }
         "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let artifact = compile_source_to_bytecode_with_options(
-            "typed-runtime-reference-exact.gr",
+            "typed-runtime-reference-exact.glorious",
             exact_reference,
             CompileOptions { optimization_level },
         )
@@ -548,7 +541,7 @@ fn runtime_callable_fallback_rejects_unproven_region_and_effect_contracts() {
     let recovery = exact_reference.replace("main() -> { () }", "main() -> i64 { answer() }");
     assert_eq!(
         run_source(
-            "typed-runtime-reference-recovery.gr",
+            "typed-runtime-reference-recovery.glorious",
             &recovery,
             vec![],
             &mut NoHost,
@@ -558,7 +551,7 @@ fn runtime_callable_fallback_rejects_unproven_region_and_effect_contracts() {
     );
 
     has_message(
-        "typed-runtime-reference-opaque.gr",
+        "typed-runtime-reference-opaque.glorious",
         r#"
             apply<F, T, R>(value: T, body: F) -> R
                 where F: Fn<(T), Output=R> { body(value) }
@@ -573,7 +566,7 @@ fn runtime_callable_fallback_rejects_unproven_region_and_effect_contracts() {
     );
     for (name, source, needle) in [
         (
-            "typed-runtime-reference-escape.gr",
+            "typed-runtime-reference-escape.glorious",
             r#"
                 apply<F, T, R>(value: T, body: F) -> R
                     where F: Fn<(T), Output=R> { body(value) }
@@ -589,7 +582,7 @@ fn runtime_callable_fallback_rejects_unproven_region_and_effect_contracts() {
             "escape",
         ),
         (
-            "typed-runtime-reference-alias.gr",
+            "typed-runtime-reference-alias.glorious",
             r#"
                 apply<F, T, R>(value: T, body: F) -> R
                     where F: Fn<(T), Output=R> { body(value) }
@@ -609,7 +602,6 @@ fn runtime_callable_fallback_rejects_unproven_region_and_effect_contracts() {
         ),
     ] {
         for optimization_level in [
-            OptimizationLevel::O0,
             OptimizationLevel::O1,
             OptimizationLevel::O2,
             OptimizationLevel::O3,
@@ -627,7 +619,7 @@ fn runtime_callable_fallback_rejects_unproven_region_and_effect_contracts() {
         }
     }
     has_message(
-        "typed-runtime-effect-negative.gr",
+        "typed-runtime-effect-negative.glorious",
         r#"
             effect Escape { escape(value: i64) -> ! }
             apply<F, T, R>(value: T, body: F) -> R
@@ -655,7 +647,7 @@ fn contextual_typed_closures_may_borrow_captures_within_the_call() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        compiled("typed-ctx-borrow.gr", source, "selected"),
+        compiled("typed-ctx-borrow.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -673,7 +665,7 @@ fn effectful_typed_closures_keep_their_row_through_fn_constraints() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        compiled("typed-fn-effects.gr", source, "selected"),
+        compiled("typed-fn-effects.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -691,7 +683,7 @@ fn move_captures_transfer_exact_linear_obligations_into_one_call() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        compiled("typed-linear-capture.gr", source, "selected"),
+        compiled("typed-linear-capture.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -710,12 +702,12 @@ fn recovery_and_compiled_paths_agree() {
         }
     "#;
     let recovery = format!("{surface}\n        main() -> i64 {{ selected() }}");
-    let result = run_source("typed-recovery.gr", &recovery, vec![], &mut NoHost).unwrap();
+    let result = run_source("typed-recovery.glorious", &recovery, vec![], &mut NoHost).unwrap();
     assert_eq!(result, RecoveryValue::Int(42));
 
     let bytecode = format!("{surface}\n        main() -> {{ selected(); () }}");
     assert_eq!(
-        compiled("typed-compiled.gr", &bytecode, "selected"),
+        compiled("typed-compiled.glorious", &bytecode, "selected"),
         Value::I64(42)
     );
 }
@@ -735,13 +727,12 @@ fn behavior_is_identical_across_optimization_levels() {
         main() -> { selected(); () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let artifact = compile_source_to_bytecode_with_options(
-            "typed-levels.gr",
+            "typed-levels.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -769,7 +760,7 @@ fn call_site_arity_mismatches_are_rejected() {
         main() -> { selected(); () }
     "#;
     has_message(
-        "typed-bad-arity.gr",
+        "typed-bad-arity.glorious",
         source,
         &["closure expects 1 arguments, got 2"],
     );
@@ -785,7 +776,7 @@ fn call_site_argument_type_mismatches_are_rejected() {
         main() -> { selected(); () }
     "#;
     has_message(
-        "typed-bad-argument.gr",
+        "typed-bad-argument.glorious",
         source,
         &["expected i64, found Text"],
     );
@@ -801,7 +792,7 @@ fn body_result_mismatches_are_rejected() {
         main() -> { selected(); () }
     "#;
     has_message(
-        "typed-bad-result.gr",
+        "typed-bad-result.glorious",
         source,
         &["typed closure body result does not unify"],
     );
@@ -815,7 +806,7 @@ fn contextual_shape_mismatches_are_rejected() {
         main() -> { selected(); () }
     "#;
     has_message(
-        "typed-bad-context.gr",
+        "typed-bad-context.glorious",
         source,
         &["typed closure parameter 0 does not match its contextual callable shape"],
     );
@@ -832,7 +823,7 @@ fn undeclared_outward_effects_are_rejected() {
         main() -> { selected(); () }
     "#;
     has_message(
-        "typed-undeclared-effect.gr",
+        "typed-undeclared-effect.glorious",
         source,
         &[
             "typed closure body performs effect(s) absent from its declared effect row",
@@ -851,7 +842,7 @@ fn unknown_effects_in_a_declared_row_are_rejected() {
         main() -> { selected(); () }
     "#;
     has_message(
-        "typed-unknown-effect.gr",
+        "typed-unknown-effect.glorious",
         source,
         &["`Ghost` is not a declared effect or effect-row alias"],
     );
@@ -868,7 +859,7 @@ fn open_effect_row_tails_are_rejected() {
         main() -> { selected(); () }
     "#;
     has_message(
-        "typed-open-row.gr",
+        "typed-open-row.glorious",
         source,
         &["a typed anonymous callable must declare a closed effect row"],
     );
@@ -883,7 +874,7 @@ fn duplicate_parameters_are_rejected_with_spans() {
         }
         main() -> { selected(); () }
     "#;
-    let diagnostics = compile_source_to_bytecode("typed-dup-param.gr", source).unwrap_err();
+    let diagnostics = compile_source_to_bytecode("typed-dup-param.glorious", source).unwrap_err();
     let diagnostic = diagnostics
         .iter()
         .find(|diagnostic| {
@@ -909,7 +900,7 @@ fn borrowed_reference_capture_may_live_in_a_single_shot_environment_within_its_l
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        compiled("typed-lifetime-bounded-borrow.gr", source, "selected"),
+        compiled("typed-lifetime-bounded-borrow.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -928,7 +919,11 @@ fn move_captures_conflict_with_live_loans() {
         }
         main() -> { selected(); () }
     "#;
-    has_message("typed-loan-conflict.gr", source, &["container", "borrow"]);
+    has_message(
+        "typed-loan-conflict.glorious",
+        source,
+        &["container", "borrow"],
+    );
 }
 
 #[test]
@@ -945,7 +940,11 @@ fn exact_linear_captures_cannot_be_called_twice() {
         }
         main() -> { selected(); () }
     "#;
-    has_message("typed-linear-twice.gr", source, &["`f` was already moved"]);
+    has_message(
+        "typed-linear-twice.glorious",
+        source,
+        &["`f` was already moved"],
+    );
 }
 
 #[test]
@@ -960,7 +959,7 @@ fn exact_linear_captures_cannot_be_abandoned_unused() {
         }
         main() -> { selected(); () }
     "#;
-    has_message("typed-linear-unused.gr", source, &["[1,1]"]);
+    has_message("typed-linear-unused.glorious", source, &["[1,1]"]);
 }
 
 #[test]
@@ -973,6 +972,6 @@ fn recovery_evaluator_runs_typed_closures_with_captures() {
         }
         main() -> i64 { selected() }
     "#;
-    let result = run_source("typed-recovery-only.gr", source, vec![], &mut NoHost).unwrap();
+    let result = run_source("typed-recovery-only.glorious", source, vec![], &mut NoHost).unwrap();
     assert_eq!(result, RecoveryValue::Int(42));
 }

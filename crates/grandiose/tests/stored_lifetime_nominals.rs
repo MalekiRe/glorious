@@ -57,7 +57,6 @@ const SHARED: &str = r#"
 #[test]
 fn stored_shared_origin_survives_construction_forwarding_and_projection() {
     for level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

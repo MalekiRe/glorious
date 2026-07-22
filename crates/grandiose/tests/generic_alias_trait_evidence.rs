@@ -14,8 +14,8 @@ fn identity_generic_alias_impl_head_normalizes_associated_projection() {
         make() -> <Local<Text> as Value>::Item { "projected" }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("alias-trait-evidence.gr", source).unwrap();
-    let repeated = compile_source_to_phases("alias-trait-evidence.gr", source).unwrap();
+    let phases = compile_source_to_phases("alias-trait-evidence.glorious", source).unwrap();
+    let repeated = compile_source_to_phases("alias-trait-evidence.glorious", source).unwrap();
     assert_eq!(phases.core_fingerprint(), repeated.core_fingerprint());
     assert_eq!(phases.mir_fingerprint(), repeated.mir_fingerprint());
     let make = phases
@@ -42,7 +42,7 @@ fn alias_and_nominal_impl_heads_overlap_after_normalization() {
         impl<T> Marker for Local<T> {}
         main() -> { () }
     "#;
-    let diagnostics = compile_source_to_bytecode("alias-overlap.gr", source)
+    let diagnostics = compile_source_to_bytecode("alias-overlap.glorious", source)
         .expect_err("alias spelling bypassed coherence");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
@@ -59,7 +59,7 @@ fn non_identity_alias_impl_heads_remain_structured_errors() {
         "struct Pair<A,B>{left:A,right:B} type Duplicate<X,Y> = Pair<X,X>; trait Marker{} impl<A,B> Marker for Duplicate<A,B>{} main()->{()}",
     ];
     for source in cases {
-        let diagnostics = compile_source_to_bytecode("nonidentity-alias-head.gr", source)
+        let diagnostics = compile_source_to_bytecode("nonidentity-alias-head.glorious", source)
             .expect_err("non-identity alias impl head was accepted");
         assert!(diagnostics.iter().any(|diagnostic| {
             diagnostic.code.as_deref() == Some("G1TR001")
@@ -89,7 +89,7 @@ fn alias_trait_evidence_is_declaration_order_independent() {
         struct Local<T> { value: T }
         trait Value { type Item; }
     "#;
-    let first = compile_source_to_phases("alias-order-first.gr", first).unwrap();
-    let reordered = compile_source_to_phases("alias-order-second.gr", reordered).unwrap();
+    let first = compile_source_to_phases("alias-order-first.glorious", first).unwrap();
+    let reordered = compile_source_to_phases("alias-order-second.glorious", reordered).unwrap();
     assert_eq!(first.artifact.encode(), reordered.artifact.encode());
 }

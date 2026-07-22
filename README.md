@@ -113,8 +113,7 @@ cleanup, and control-flow invariants independently of the source compiler.
   definitions, references, and rename over standard input/output.
 - `editors/vscode` contains the VS Code extension and TextMate grammar.
 
-The canonical source suffix is `.glorious`. The older `.gr` suffix remains a
-compatibility alias.
+The source suffix is `.glorious`.
 
 ## Install from this checkout
 
@@ -142,12 +141,13 @@ export GRAND_VM="$PWD/target/release/grvm"
 export PATH="$PWD/tooling/grand/target/release:$PWD/tooling/lsp/target/release:$PATH"
 ```
 
-`grand` otherwise discovers `grc` and `grvm` on `PATH`. `GRAND_COMPILER` and
-`GRAND_VM` are useful when testing a particular checkout build.
+`grand` prefers this checkout's release-mode `grc` and `grvm`, then discovers
+installed tools on `PATH`. It intentionally does not select binaries from
+`target/debug`; compiler debug builds are dramatically slower on real source.
+`GRAND_COMPILER` and `GRAND_VM` remain useful when explicitly testing a
+particular toolchain build.
 
-System `git` is required for Git dependencies. LLVM tools (`clang`, `llvm-as`,
-and `lli`) are needed only for the legacy `interp`/`native` target paths, not
-for the canonical bytecode VM workflow.
+System `git` is required for Git dependencies.
 
 ## Create and run a project
 
@@ -189,6 +189,11 @@ An executable manifest names its entry point:
 name = "hello"
 version = "0.1.0"
 entry = "src/main.glorious"
+
+[runtime]
+# Exact host capabilities granted to `grand run` and executable tests.
+# Omit this table for a sandbox with no host access.
+capabilities = ["process.args", "diagnostic"]
 ```
 
 A library package omits `entry` and may set `sources = ["src"]`. A workspace
@@ -231,8 +236,8 @@ use `pub` to export them.
 grand new <name> [--path <dir>]  create a package
 grand init                       create a package in the current directory
 grand check                      type-check and verify without an artifact
-grand build [-O 0..3]            compile the package
-grand run [-O 0..3] -- <args>    compile and execute
+grand build [-O 0..3]            compile the package (default: O2)
+grand run [-O 0..3] -- <args>    compile at O2 by default and execute in grvm
 grand test [filter]              run source and compile-fail tests
 grand fmt [--check] [paths...]   format sources, or check formatting
 grand fmt --stdin                format standard input to standard output
@@ -246,15 +251,19 @@ grand lsp                        run grand-lsp over stdio
 pass. Files under `tests/compile-fail/` are compared with matching `.stderr`
 goldens; update them deliberately with `grand test --bless`.
 
-The target selector accepts `auto`, `vm`, `interp`, or `native`:
+`grand build` always emits verified G1 bytecode, and `grand run` always executes
+it through `grvm`. O0 is retained for raw lowering and bytecode-verification
+work; normal builds start at O2:
 
 ```sh
-grand build --target vm -O3
-grand run --target vm -- first-argument second-argument
+grand build -O3
+grand run -- first-argument second-argument
 ```
 
-The current Rust compiler emits G1 bytecode, so `auto` selects the verified VM.
-The `interp` and `native` choices exist for the retained legacy LLVM toolchain.
+Runtime authority is declared explicitly in `[runtime].capabilities`. It is
+empty by default, and every entry becomes one exact `grvm --allow` grant; there
+is no prefix or wildcard matching. The standard host capabilities are
+`process.args`, `fs.read`, `fs.write`, and `diagnostic`.
 
 Lint levels can be stored in the manifest's `[lints]` table or overridden with
 `-A/--allow`, `-W/--warn`, and `-D/--deny` using a diagnostic code or
@@ -323,6 +332,10 @@ grand lsp
 Both speak ordinary LSP over stdin/stdout. Configuration examples for Neovim,
 Helix, Zed, and other clients are in [editors/README.md](editors/README.md).
 
+The repository root is also a native `tree-sitter-grandiose` package. Run
+`npm ci` followed by `npm test` to regenerate-check and test its parser. Zed
+uses this grammar directly; it does not alias Grandiose to another language.
+
 For VS Code development or local installation:
 
 ```sh
@@ -338,6 +351,13 @@ The extension needs Node.js 22 or newer for packaging; CI currently uses Node
 24. Set `grandiose.serverPath` to an absolute `grand-lsp` path, or to `grand`
 to launch `grand lsp`. Syntax highlighting works without the language server.
 See [editors/vscode/README.md](editors/vscode/README.md) for details.
+
+For Zed, build `grand-lsp`, then choose **Zed: Install Dev Extension** and
+select `editors/zed`. The extension recognizes `.glorious`, loads the native
+Tree-sitter grammar pinned in its manifest, and starts `grand-lsp`. See
+[editors/zed/README.md](editors/zed/README.md) for the server-path override.
+Standard-library definitions use ordinary cached `file://` locations and open
+in Zed without a custom URI provider.
 
 To produce a locked VSIX, host-native language-server archive, and checksums:
 

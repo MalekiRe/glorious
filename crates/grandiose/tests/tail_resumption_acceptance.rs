@@ -36,7 +36,6 @@ fn function_id(artifact: &Artifact, name: &str) -> u32 {
 
 fn run_all_levels(source_name: &str, source: &str, expected: Value) {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -97,7 +96,7 @@ fn exact_one_shot_tail_resume_executes_at_every_optimization_level() {
         }
         main() -> { () }
     "#;
-    run_all_levels("tail-resume-one-shot.gr", source, Value::I64(42));
+    run_all_levels("tail-resume-one-shot.glorious", source, Value::I64(42));
 }
 
 #[test]
@@ -111,7 +110,7 @@ fn optional_one_shot_tail_resume_is_a_valid_terminal_consumption() {
         }
         main() -> { () }
     "#;
-    run_all_levels("tail-resume-optional.gr", source, Value::I64(42));
+    run_all_levels("tail-resume-optional.glorious", source, Value::I64(42));
 }
 
 #[test]
@@ -131,7 +130,7 @@ fn tail_resume_disposes_clause_locals_before_the_terminal_transfer() {
         }
         main() -> { () }
     "#;
-    run_all_levels("tail-resume-cleanup.gr", source, Value::I64(42));
+    run_all_levels("tail-resume-cleanup.glorious", source, Value::I64(42));
 }
 
 #[test]
@@ -145,7 +144,7 @@ fn tail_resume_rejects_a_reusable_resumption() {
         }
         main() -> { () }
     "#;
-    assert_rejected("tail-resume-multishot.gr", source, "one-shot");
+    assert_rejected("tail-resume-multishot.glorious", source, "one-shot");
 }
 
 #[test]
@@ -160,7 +159,7 @@ fn tail_resume_checks_the_continuation_input_type() {
         main() -> { () }
     "#;
     assert_rejected(
-        "tail-resume-input-type.gr",
+        "tail-resume-input-type.glorious",
         source,
         "expected i64, found Text",
     );
@@ -173,7 +172,7 @@ fn tail_resume_outside_a_handler_clause_is_rejected_at_source_level() {
         main() -> { () }
     "#;
     assert_rejected(
-        "tail-resume-outside-handler.gr",
+        "tail-resume-outside-handler.glorious",
         source,
         "active handler resumption",
     );
@@ -193,7 +192,7 @@ fn recovery_evaluator_treats_tail_as_a_terminal_one_shot_resume() {
         }
     "#;
     assert_eq!(
-        run_source("tail-resume-recovery.gr", source, vec![], &mut NoHost).unwrap(),
+        run_source("tail-resume-recovery.glorious", source, vec![], &mut NoHost).unwrap(),
         InterpreterValue::Unit
     );
 }

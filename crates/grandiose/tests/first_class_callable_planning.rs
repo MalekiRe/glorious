@@ -35,7 +35,7 @@ fn noncopy_capture_survives_generic_escape_and_is_consumed_once() {
         }
         main() -> { () }
     "#;
-    let (_, value) = run("noncopy-callable-escape.gr", source);
+    let (_, value) = run("noncopy-callable-escape.glorious", source);
     assert_eq!(value, Value::I64(42));
 }
 
@@ -56,7 +56,7 @@ fn indirect_receiver_selection_preserves_observe_and_move_calls() {
         }
         main() -> { () }
     "#;
-    let (artifact, value) = run("callable-receiver-modes.gr", source);
+    let (artifact, value) = run("callable-receiver-modes.glorious", source);
     assert_eq!(value, Value::I64(42));
     assert!(artifact.code.iter().any(|instruction| matches!(
         instruction,
@@ -90,7 +90,7 @@ fn explicit_parameter_resumption_capture_executes_through_late_lowering() {
         }
         main() -> { () }
     "#;
-    let (artifact, value) = run("late-parameter-closure.gr", source);
+    let (artifact, value) = run("late-parameter-closure.glorious", source);
     assert_eq!(value, Value::I64(42));
     assert!(artifact.code.iter().any(|instruction| matches!(
         instruction,
@@ -114,6 +114,6 @@ fn borrowed_capture_crosses_a_generic_boundary_within_its_lifetime() {
         }
         main() -> { () }
     "#;
-    let (_, value) = run("borrowed-callable-bounded-escape.gr", source);
+    let (_, value) = run("borrowed-callable-bounded-escape.glorious", source);
     assert_eq!(value, Value::I64(42));
 }

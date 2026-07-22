@@ -530,7 +530,7 @@ fn recovery_system_host_hardens_only_the_exact_g1_file_and_diagnostic_surface() 
             "Files",
             "write_string",
             vec![
-                Value::String("legacy.txt".into()),
+                Value::String("existing.txt".into()),
                 Value::String("longer than three bytes".into()),
             ],
             Span::default(),
@@ -539,7 +539,7 @@ fn recovery_system_host_hardens_only_the_exact_g1_file_and_diagnostic_surface() 
         Value::Unit
     );
     assert_eq!(
-        std::fs::read_to_string(directory.path().join("legacy.txt")).unwrap(),
+        std::fs::read_to_string(directory.path().join("existing.txt")).unwrap(),
         "longer than three bytes"
     );
 }
@@ -556,7 +556,7 @@ fn evaluates_calls_bindings_operators_and_effects() {
         }
     "#;
     let mut host = TestHost::default();
-    let result = run_source("test.gr", source, Vec::new(), &mut host).unwrap();
+    let result = run_source("test.glorious", source, Vec::new(), &mut host).unwrap();
     assert_eq!(result, Value::Int(42));
     assert_eq!(host.lines, ["42"]);
 }
@@ -571,7 +571,7 @@ fn associated_callable_aliases_execute_as_ordinary_generic_functions() {
         main() -> i64 { Box::again(42) }
     "#;
     let result = run_source(
-        "associated-callable-alias.gr",
+        "associated-callable-alias.glorious",
         source,
         Vec::new(),
         &mut TestHost::default(),
@@ -596,7 +596,7 @@ fn reference_root_struct_fields_read_and_borrow_the_projected_value() {
     "#;
     assert_eq!(
         run_source(
-            "reference-root-field.gr",
+            "reference-root-field.glorious",
             source,
             Vec::new(),
             &mut TestHost::default(),
@@ -621,7 +621,7 @@ fn straight_line_local_borrow_cases_match_the_compiled_vm_cases() {
     "#;
     assert_eq!(
         run_source(
-            "borrow-differential.gr",
+            "borrow-differential.glorious",
             source,
             vec![],
             &mut TestHost::default()
@@ -644,7 +644,7 @@ fn assignment_mutates_addressable_local_and_projected_storage() {
     "#;
     assert_eq!(
         run_source(
-            "recovery-local-assignment.gr",
+            "recovery-local-assignment.glorious",
             source,
             vec![],
             &mut TestHost::default(),
@@ -666,7 +666,7 @@ fn assignment_through_unique_reference_updates_original_local() {
     "#;
     assert_eq!(
         run_source(
-            "recovery-reference-assignment.gr",
+            "recovery-reference-assignment.glorious",
             source,
             vec![],
             &mut TestHost::default(),
@@ -688,7 +688,7 @@ fn moved_local_can_be_reinitialized_without_destroying_the_hole() {
     "#;
     assert_eq!(
         run_source(
-            "recovery-reinitialize.gr",
+            "recovery-reinitialize.glorious",
             source,
             vec![],
             &mut TestHost::default(),
@@ -713,7 +713,7 @@ fn unique_reference_survives_deref_move_until_store_reinitializes_its_hole() {
     "#;
     assert_eq!(
         run_source(
-            "recovery-deref-move-store.gr",
+            "recovery-deref-move-store.glorious",
             source,
             vec![],
             &mut TestHost::default(),
@@ -726,7 +726,7 @@ fn unique_reference_survives_deref_move_until_store_reinitializes_its_hole() {
 #[test]
 fn reports_source_spans_for_runtime_failures() {
     let source = "main() -> i64 { 10 / 0 }";
-    let error = run_source("bad.gr", source, Vec::new(), &mut TestHost::default())
+    let error = run_source("bad.glorious", source, Vec::new(), &mut TestHost::default())
         .unwrap_err()
         .remove(0);
     assert_eq!(error.title, "runtime error");
@@ -738,7 +738,7 @@ fn reports_source_spans_for_runtime_failures() {
 fn evaluates_checked_unary_negation() {
     let source = "main() -> i64 { -42 }";
     let result = run_source(
-        "unary-negation.gr",
+        "unary-negation.glorious",
         source,
         Vec::new(),
         &mut TestHost::default(),
@@ -767,7 +767,7 @@ fn evaluates_shared_and_unique_borrow_dereference() {
         }
     "#;
     let result = run_source(
-        "references.gr",
+        "references.glorious",
         source,
         Vec::new(),
         &mut TestHost::default(),
@@ -786,7 +786,7 @@ fn rejects_unique_reborrow_from_shared_reference() {
         main() -> i64 { invalid(&42) }
     "#;
     let error = run_source(
-        "invalid-reborrow.gr",
+        "invalid-reborrow.glorious",
         source,
         Vec::new(),
         &mut TestHost::default(),
@@ -817,7 +817,7 @@ fn custom_drop_runs_before_reverse_structural_destruction() {
         }
     "#;
     let errors = run_source(
-        "drop-order.gr",
+        "drop-order.glorious",
         outer_first,
         Vec::new(),
         &mut TestHost::default(),
@@ -842,7 +842,7 @@ fn custom_drop_runs_before_reverse_structural_destruction() {
         }
     "#;
     let errors = run_source(
-        "drop-field-order.gr",
+        "drop-field-order.glorious",
         reverse_fields,
         Vec::new(),
         &mut TestHost::default(),
@@ -862,7 +862,7 @@ fn rejects_effectful_drop_hooks() {
         main() -> i64 { 0 }
     "#;
     let errors = run_source(
-        "effectful-drop.gr",
+        "effectful-drop.glorious",
         source,
         Vec::new(),
         &mut TestHost::default(),
@@ -889,7 +889,7 @@ fn drop_hook_may_handle_its_effects_internally() {
         }
     "#;
     let result = run_source(
-        "handled-drop.gr",
+        "handled-drop.glorious",
         source,
         Vec::new(),
         &mut TestHost::default(),
@@ -902,7 +902,7 @@ fn drop_hook_may_handle_its_effects_internally() {
 fn passes_command_line_arguments_to_main() {
     let source = "main(args: List<String>) -> i64 { core::list_len(args) }";
     let result = run_source(
-        "args.gr",
+        "args.glorious",
         source,
         vec!["a".into(), "b".into()],
         &mut TestHost::default(),
@@ -914,8 +914,13 @@ fn passes_command_line_arguments_to_main() {
 #[test]
 fn rejects_undeclared_effects_before_execution() {
     let source = r#"main() -> / {Console} { perform Console::write_line("no") }"#;
-    let errors =
-        run_source("effects.gr", source, Vec::new(), &mut TestHost::default()).unwrap_err();
+    let errors = run_source(
+        "effects.glorious",
+        source,
+        Vec::new(),
+        &mut TestHost::default(),
+    )
+    .unwrap_err();
     assert_eq!(errors[0].code.as_deref(), Some("G0100"));
     assert!(
         errors[0]
@@ -929,8 +934,13 @@ fn rejects_undeclared_effects_before_execution() {
 #[test]
 fn duplicate_callables_have_a_related_source_span() {
     let source = "main() -> { () } main() -> { () }";
-    let errors =
-        run_source("duplicate.gr", source, Vec::new(), &mut TestHost::default()).unwrap_err();
+    let errors = run_source(
+        "duplicate.glorious",
+        source,
+        Vec::new(),
+        &mut TestHost::default(),
+    )
+    .unwrap_err();
     assert_eq!(errors[0].code.as_deref(), Some("G0001"));
     assert_eq!(errors[0].related.len(), 1);
 }
@@ -938,8 +948,13 @@ fn duplicate_callables_have_a_related_source_span() {
 #[test]
 fn duplicate_globals_in_the_value_namespace_are_rejected() {
     let source = "let answer = 41; let answer = 42; main() -> i64 { answer }";
-    let errors =
-        run_source("duplicate.gr", source, Vec::new(), &mut TestHost::default()).unwrap_err();
+    let errors = run_source(
+        "duplicate.glorious",
+        source,
+        Vec::new(),
+        &mut TestHost::default(),
+    )
+    .unwrap_err();
     assert_eq!(errors[0].code.as_deref(), Some("G0006"));
     assert_eq!(errors[0].related.len(), 1);
 }
@@ -947,8 +962,13 @@ fn duplicate_globals_in_the_value_namespace_are_rejected() {
 #[test]
 fn globals_and_callables_share_one_value_namespace() {
     let source = "let answer = 42; answer() -> i64 { 0 } main() -> i64 { answer }";
-    let errors =
-        run_source("duplicate.gr", source, Vec::new(), &mut TestHost::default()).unwrap_err();
+    let errors = run_source(
+        "duplicate.glorious",
+        source,
+        Vec::new(),
+        &mut TestHost::default(),
+    )
+    .unwrap_err();
     assert_eq!(errors[0].code.as_deref(), Some("G0006"));
     assert_eq!(errors[0].related.len(), 1);
 }
@@ -957,7 +977,7 @@ fn globals_and_callables_share_one_value_namespace() {
 fn nominal_declarations_share_one_type_namespace() {
     let source = "struct Answer {} enum Answer { Value } main() -> i64 { 42 }";
     let errors = run_source(
-        "duplicate-type.gr",
+        "duplicate-type.glorious",
         source,
         Vec::new(),
         &mut TestHost::default(),
@@ -971,7 +991,7 @@ fn nominal_declarations_share_one_type_namespace() {
 fn aliases_and_nominal_declarations_share_one_type_namespace() {
     let source = "type Answer = i64; struct Answer {} main() -> i64 { 42 }";
     let errors = run_source(
-        "duplicate-type.gr",
+        "duplicate-type.glorious",
         source,
         Vec::new(),
         &mut TestHost::default(),
@@ -1001,7 +1021,13 @@ fn nominal_values_closures_and_pattern_handlers_define_selection() {
             choose(Choice::True, { => pair.left + offset }, { => pair.right })
         }
     "#;
-    let result = run_source("selection.gr", source, Vec::new(), &mut TestHost::default()).unwrap();
+    let result = run_source(
+        "selection.glorious",
+        source,
+        Vec::new(),
+        &mut TestHost::default(),
+    )
+    .unwrap();
     assert_eq!(result, Value::Int(42));
 }
 
@@ -1021,7 +1047,7 @@ fn guarantees_tail_calls_through_closures_and_handlers() {
         main() -> i64 { countdown(100000) }
     "#;
     let result = run_source(
-        "tail-calls.gr",
+        "tail-calls.glorious",
         source,
         Vec::new(),
         &mut TestHost::default(),
@@ -1046,7 +1072,7 @@ fn terminal_handler_clauses_run_outside_the_selected_handler() {
         }
     "#;
     let result = run_source(
-        "terminal-handler-transfer.gr",
+        "terminal-handler-transfer.glorious",
         source,
         Vec::new(),
         &mut TestHost::default(),
@@ -1071,7 +1097,7 @@ fn resumptive_handlers_capture_and_deeply_reinstall_the_continuation() {
         }
     "#;
     let result = run_source(
-        "deep-resumption.gr",
+        "deep-resumption.glorious",
         source,
         Vec::new(),
         &mut TestHost::default(),
@@ -1098,7 +1124,7 @@ fn cancelling_a_resumption_discards_the_remaining_computation() {
         }
     "#;
     let result = run_source(
-        "cancel-resumption.gr",
+        "cancel-resumption.glorious",
         source,
         Vec::new(),
         &mut TestHost::default(),
@@ -1125,7 +1151,7 @@ fn consuming_a_one_shot_resumption_twice_is_a_runtime_error() {
         }
     "#;
     let error = run_source(
-        "one-shot-resumption.gr",
+        "one-shot-resumption.glorious",
         source,
         Vec::new(),
         &mut TestHost::default(),
@@ -1153,7 +1179,7 @@ fn multi_shot_resumptions_replay_the_delimited_continuation() {
         }
     "#;
     let result = run_source(
-        "multi-shot-resumption.gr",
+        "multi-shot-resumption.glorious",
         source,
         Vec::new(),
         &mut TestHost::default(),
@@ -1183,7 +1209,7 @@ fn multi_shot_replay_snapshots_addressable_assignment_cells() {
     "#;
     assert_eq!(
         run_source(
-            "multi-shot-assignment-snapshot.gr",
+            "multi-shot-assignment-snapshot.glorious",
             source,
             Vec::new(),
             &mut TestHost::default(),
@@ -1204,7 +1230,7 @@ fn cancellation_respects_the_resumption_lower_bound() {
         }
     "#;
     let error = run_source(
-        "required-resumption.gr",
+        "required-resumption.glorious",
         source,
         Vec::new(),
         &mut TestHost::default(),
@@ -1223,7 +1249,7 @@ fn validates_resumption_bindings_against_operation_terminality() {
         }
     "#;
     let error = run_source(
-        "missing-resumption.gr",
+        "missing-resumption.glorious",
         missing,
         Vec::new(),
         &mut TestHost::default(),
@@ -1239,7 +1265,7 @@ fn validates_resumption_bindings_against_operation_terminality() {
         }
     "#;
     let error = run_source(
-        "terminal-resumption.gr",
+        "terminal-resumption.glorious",
         terminal,
         Vec::new(),
         &mut TestHost::default(),
@@ -1257,7 +1283,7 @@ fn packaged_result_truth_and_source_declared_fn_operators_replace_booleans() {
         }
     "#;
     let result = run_source(
-        "result-operators.gr",
+        "result-operators.glorious",
         source,
         Vec::new(),
         &mut TestHost::default(),
@@ -1278,7 +1304,7 @@ fn callable_constraints_contextually_turn_trailing_blocks_into_closures() {
         }
     "#;
     let result = run_source(
-        "contextual-blocks.gr",
+        "contextual-blocks.glorious",
         source,
         Vec::new(),
         &mut TestHost::default(),

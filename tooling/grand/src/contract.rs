@@ -1,11 +1,8 @@
 //! The versioned compiler contract grand is written against.
 //!
-//! This module is the normative spec for what the real compiler will
-//! eventually implement (docs/compiler-changes-for-tooling.md items 1-5, 7):
+//! This module defines the contract between `grand` and `grc`:
 //!
 //! - `grc --capabilities` prints a [`Capabilities`] JSON object on stdout.
-//!   Legacy compilers fail this probe and get
-//!   [`Capabilities::legacy`]: single-file input, rendered-text diagnostics.
 //! - Compilation: `grc --diagnostics json [--phase resolve|check] [-o OUT] SOURCE...`
 //!   Diagnostics are emitted on stderr, one [`Diagnostic`] JSON object per
 //!   line; non-JSON stderr lines pass through to the user untouched.
@@ -18,11 +15,9 @@
 //!   stream to amortize.
 
 use std::fmt::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
-
-use crate::bundle::Segment;
 
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct Capabilities {
@@ -79,11 +74,6 @@ pub struct ServeCapabilities {
 }
 
 impl Capabilities {
-    /// Compatibility shape for an unversioned legacy compiler.
-    pub fn legacy() -> Capabilities {
-        Capabilities::default()
-    }
-
     pub fn has_phase(&self, phase: &str) -> bool {
         self.phases.iter().any(|p| p == phase)
     }
@@ -131,6 +121,10 @@ pub struct Diagnostic {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
     pub title: String,
+    /// Substantive diagnostic text. Older compilers only supplied this on a
+    /// primary label, so it remains optional for contract compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
     #[serde(default)]
     pub labels: Vec<Label>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -142,48 +136,6 @@ pub struct Diagnostic {
 }
 
 impl Diagnostic {
-    /// Rewrite labels that point into an assembled bundle back to the
-    /// original source files (legacy single-input compilers only see the
-    /// concatenation; see docs/compiler-changes-for-tooling.md item 1).
-    pub fn remap(&mut self, bundle_path: &Path, segments: &[Segment]) {
-        if let Some(fix) = &mut self.fix {
-            if fix.file == bundle_path {
-                if let Some(segment) = segments.iter().find(|s| {
-                    fix.start_byte >= s.start_byte && fix.start_byte < s.start_byte + s.byte_len
-                }) {
-                    fix.file = segment.file.clone();
-                    fix.start_byte -= segment.start_byte;
-                    fix.end_byte = fix.end_byte.saturating_sub(segment.start_byte);
-                }
-            }
-        }
-        for label in &mut self.labels {
-            if label.file != bundle_path {
-                continue;
-            }
-            let segment = match (label.start_byte, label.line) {
-                (Some(byte), _) => segments
-                    .iter()
-                    .find(|s| byte >= s.start_byte && byte < s.start_byte + s.byte_len),
-                (None, Some(line)) => segments
-                    .iter()
-                    .find(|s| line >= s.start_line && line < s.start_line + s.line_count),
-                _ => None,
-            };
-            let Some(segment) = segment else { continue };
-            label.file = segment.file.clone();
-            if let Some(line) = &mut label.line {
-                *line -= segment.start_line - 1;
-            }
-            if let Some(byte) = &mut label.start_byte {
-                *byte -= segment.start_byte;
-            }
-            if let Some(byte) = &mut label.end_byte {
-                *byte = byte.saturating_sub(segment.start_byte);
-            }
-        }
-    }
-
     pub fn render(&self) -> String {
         let mut out = String::new();
         let severity = match self.severity {
@@ -197,6 +149,11 @@ impl Diagnostic {
             }
             None => {
                 let _ = write!(out, "{severity}: {}", self.title);
+            }
+        }
+        if self.labels.is_empty() {
+            if let Some(message) = &self.message {
+                let _ = write!(out, "\n  = {message}");
             }
         }
         for label in &self.labels {
@@ -269,8 +226,8 @@ pub enum DeclarationKind {
 /// One top-level declaration from an interface scan.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Declaration {
-    /// Compiler-owned namespace/module identity. Legacy compilers omit it;
-    /// callers then fall back to the unqualified spelling.
+    /// Compiler-owned namespace/module identity. If absent, callers use the
+    /// unqualified spelling.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub identity: Option<String>,
     pub name: String,
@@ -289,7 +246,7 @@ pub struct Declaration {
 }
 
 /// Parse a compiler stderr stream: JSON lines become diagnostics, everything
-/// else passes through as opaque text (the legacy renderer's output).
+/// else passes through as opaque compiler text.
 pub fn parse_stderr(stderr: &str) -> (Vec<Diagnostic>, String) {
     let mut diagnostics = Vec::new();
     let mut passthrough = String::new();
@@ -305,4 +262,35 @@ pub fn parse_stderr(stderr: &str) -> (Vec<Diagnostic>, String) {
         passthrough.push('\n');
     }
     (diagnostics, passthrough)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spanless_json_diagnostic_preserves_and_renders_message() {
+        let (diagnostics, passthrough) = parse_stderr(
+            r#"{"severity":"error","code":"G1OPT999","title":"error","message":"optimizer validation failed","labels":[]}"#,
+        );
+
+        assert!(passthrough.is_empty());
+        assert_eq!(diagnostics.len(), 1);
+        assert_eq!(
+            diagnostics[0].render(),
+            "error[G1OPT999]: error\n  = optimizer validation failed"
+        );
+    }
+
+    #[test]
+    fn top_level_message_does_not_duplicate_labeled_diagnostic_text() {
+        let (diagnostics, passthrough) = parse_stderr(
+            r#"{"severity":"error","code":"GRC0001","title":"unknown name","message":"`missing` is not defined","labels":[{"file":"input.glorious","line":1,"message":"`missing` is not defined"}]}"#,
+        );
+
+        assert!(passthrough.is_empty());
+        let rendered = diagnostics[0].render();
+        assert_eq!(rendered.matches("`missing` is not defined").count(), 1);
+        assert!(rendered.contains("input.glorious:1"));
+    }
 }

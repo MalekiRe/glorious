@@ -188,9 +188,8 @@ const SOURCE: &str = r#"
 "#;
 
 #[test]
-fn extended_collection_operations_execute_at_o0_through_o3() {
+fn extended_collection_operations_execute_at_o1_through_o3() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

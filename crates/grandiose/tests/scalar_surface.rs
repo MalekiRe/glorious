@@ -94,15 +94,14 @@ fn value(ty: &str, raw: u128) -> Value {
 }
 
 #[test]
-fn frozen_integer_surface_executes_all_widths_at_o0_through_o3() {
+fn frozen_integer_surface_executes_all_widths_at_o1_through_o3() {
     for level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let phases = compile_source_to_phases_with_options(
-            "scalar-surface.gr",
+            "scalar-surface.glorious",
             &source(),
             CompileOptions {
                 optimization_level: level,
@@ -212,7 +211,7 @@ fn recovery_interpreter_uses_the_same_typed_wrapping_and_shift_rules() {
             "typed(value: {ty}) -> {ty} {{ wrapping_neg(wrapping_neg(move value)) }}\n\
              main() -> {ty} {{ typed(0) }}"
         );
-        let result = run_source("scalar-recovery.gr", &source, vec![], &mut NoHost).unwrap();
+        let result = run_source("scalar-recovery.glorious", &source, vec![], &mut NoHost).unwrap();
         assert_eq!(
             result,
             RecoveryValue::Integer {
@@ -225,7 +224,7 @@ fn recovery_interpreter_uses_the_same_typed_wrapping_and_shift_rules() {
     }
 
     let signed_shift = run_source(
-        "signed-shift-recovery.gr",
+        "signed-shift-recovery.glorious",
         "typed(value: i8, count: u32) -> i8 { shift_right(move value, move count) } main() -> i8 { typed(-128, 7) }",
         vec![],
         &mut NoHost,
@@ -244,7 +243,7 @@ fn recovery_interpreter_uses_the_same_typed_wrapping_and_shift_rules() {
 #[test]
 fn scalar_leaf_spellings_do_not_grant_user_code_primitive_authority() {
     let errors = compile_source_to_phases_with_options(
-        "forged-scalar-leaf.gr",
+        "forged-scalar-leaf.glorious",
         "forged(value: u8) -> u8 { __g1_int_bit_not(move value) } main() -> { () }",
         CompileOptions::default(),
     )
@@ -256,7 +255,7 @@ fn scalar_leaf_spellings_do_not_grant_user_code_primitive_authority() {
     }), "{errors:#?}");
 
     let errors = run_source(
-        "forged-scalar-leaf-recovery.gr",
+        "forged-scalar-leaf-recovery.glorious",
         "main() -> u8 { __g1_int_bit_not(0) }",
         vec![],
         &mut NoHost,

@@ -37,7 +37,7 @@ fn terminal_outward_callable_is_closed_by_a_lexical_handler() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("terminal-call.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("terminal-call.glorious", source).unwrap();
     let stop_with = artifact
         .functions
         .iter()
@@ -106,8 +106,8 @@ fn transparent_row_alias_closes_terminal_outward_call_and_emits_no_metadata() {
         test() -> i64 { handle { stop_with(42) } { Stop::stop(value) => value } }
         main() -> { () }
     "#;
-    let explicit = compile_source_to_phases("explicit-row.gr", explicit).unwrap();
-    let aliased = compile_source_to_phases("aliased-row.gr", aliased).unwrap();
+    let explicit = compile_source_to_phases("explicit-row.glorious", explicit).unwrap();
+    let aliased = compile_source_to_phases("aliased-row.glorious", aliased).unwrap();
     assert_eq!(
         explicit
             .core
@@ -159,9 +159,9 @@ fn normalized_empty_rows_are_pure_and_byte_equivalent() {
         id<T>(value: T) -> T / {AlsoEmpty} { value }
         main() -> / {Empty} { id(42); () }
     "#;
-    let omitted = compile_source_to_bytecode("empty-omitted.gr", omitted).unwrap();
-    let explicit = compile_source_to_bytecode("empty-explicit.gr", explicit).unwrap();
-    let aliased = compile_source_to_bytecode("empty-aliased.gr", aliased).unwrap();
+    let omitted = compile_source_to_bytecode("empty-omitted.glorious", omitted).unwrap();
+    let explicit = compile_source_to_bytecode("empty-explicit.glorious", explicit).unwrap();
+    let aliased = compile_source_to_bytecode("empty-aliased.glorious", aliased).unwrap();
     assert_eq!(omitted.encode(), explicit.encode());
     assert_eq!(omitted.encode(), aliased.encode());
     assert!(
@@ -190,7 +190,7 @@ fn drop_may_call_a_function_whose_alias_row_normalizes_empty() {
         impl Drop for Item { drop(&mut self) -> { safe() } }
         main() -> { let item = Item { value: 1 }; () }
     "#;
-    let artifact = compile_source_to_bytecode("empty-drop-row.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("empty-drop-row.glorious", source).unwrap();
     verify(artifact).unwrap();
 }
 
@@ -228,7 +228,8 @@ const ALIASED_TRANSITIVE: &str = r#"
 
 #[test]
 fn chained_row_aliases_preserve_transitive_resumption_metadata_and_codec() {
-    let artifact = compile_source_to_bytecode("aliased-transitive.gr", ALIASED_TRANSITIVE).unwrap();
+    let artifact =
+        compile_source_to_bytecode("aliased-transitive.glorious", ALIASED_TRANSITIVE).unwrap();
     let ask = artifact
         .protocols
         .iter()
@@ -277,10 +278,10 @@ fn row_alias_declaration_order_is_byte_independent() {
         "",
     );
     assert_eq!(
-        compile_source_to_bytecode("alias-order-a.gr", &canonical)
+        compile_source_to_bytecode("alias-order-a.glorious", &canonical)
             .unwrap()
             .encode(),
-        compile_source_to_bytecode("alias-order-b.gr", reordered)
+        compile_source_to_bytecode("alias-order-b.glorious", reordered)
             .unwrap()
             .encode()
     );
@@ -332,7 +333,7 @@ fn invalid_row_aliases_have_structured_member_or_declaration_diagnostics() {
             "G0100",
         ),
     ] {
-        let errors = compile_source_to_bytecode("invalid-row-alias.gr", source).unwrap_err();
+        let errors = compile_source_to_bytecode("invalid-row-alias.glorious", source).unwrap_err();
         let error = errors
             .iter()
             .find(|error| error.message.contains(needle) || error.title.contains(needle))
@@ -342,7 +343,7 @@ fn invalid_row_aliases_have_structured_member_or_declaration_diagnostics() {
     }
 
     let cycle = "cases Left = {Right}; cases Right = {Left}; main() -> { () }";
-    let errors = compile_source_to_bytecode("cyclic-row-alias.gr", cycle).unwrap_err();
+    let errors = compile_source_to_bytecode("cyclic-row-alias.glorious", cycle).unwrap_err();
     assert!(errors.iter().any(|error| {
         error.message.contains("cyclic")
             && error.span.is_some()
@@ -363,7 +364,7 @@ fn instantiated_effect_row_aliases_preserve_exact_protocol_identity() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("instantiated-row-alias.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("instantiated-row-alias.glorious", source).unwrap();
     let ask = artifact
         .protocols
         .iter()
@@ -408,7 +409,8 @@ fn open_and_polymorphic_row_alias_syntax_is_rejected_structurally() {
         "cases IO = {Ask | Tail}; main() -> { () }",
         "cases IO<T> = {Ask}; main() -> { () }",
     ] {
-        let errors = compile_source_to_bytecode("unsupported-row-alias.gr", source).unwrap_err();
+        let errors =
+            compile_source_to_bytecode("unsupported-row-alias.glorious", source).unwrap_err();
         assert!(
             errors
                 .iter()
@@ -419,7 +421,7 @@ fn open_and_polymorphic_row_alias_syntax_is_rejected_structurally() {
 
 #[test]
 fn resumptive_transitive_call_rows_have_exact_metadata_cleanup_and_result() {
-    let artifact = compile_source_to_bytecode("transitive.gr", TRANSITIVE).unwrap();
+    let artifact = compile_source_to_bytecode("transitive.glorious", TRANSITIVE).unwrap();
     let ask = artifact
         .protocols
         .iter()
@@ -506,7 +508,7 @@ fn mandatory_one_shot_outward_call_transfers_exact_linear_argument_and_result() 
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("linear-one-shot-call.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("linear-one-shot-call.glorious", source).unwrap();
     let selected = artifact
         .functions
         .iter()
@@ -534,7 +536,7 @@ fn mandatory_one_shot_outward_call_preserves_a_live_shared_loan() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("mandatory-call-loan.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("mandatory-call-loan.glorious", source).unwrap();
     let selected = artifact
         .functions
         .iter()
@@ -570,7 +572,7 @@ fn terminal_sibling_in_an_outward_row_blocks_positive_lower_capture_relaxation()
         main() -> { () }
     "#;
     let diagnostics =
-        compile_source_to_bytecode("mixed-row-linear-capture.gr", source).unwrap_err();
+        compile_source_to_bytecode("mixed-row-linear-capture.glorious", source).unwrap_err();
     assert!(
         diagnostics.iter().any(|diagnostic| {
             diagnostic.code.as_deref() == Some("G1BC001")
@@ -606,7 +608,7 @@ fn optional_outward_call_cancellation_cleans_up_affine_caller_capture() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("affine-optional-call.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("affine-optional-call.glorious", source).unwrap();
     let selected = artifact
         .functions
         .iter()
@@ -635,7 +637,7 @@ fn two_shot_outward_call_replays_independent_snapshots() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("two-shot-call.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("two-shot-call.glorious", source).unwrap();
     assert_eq!(
         artifact.required_features,
         1 | (1 << 1) | (1 << 3) | (1 << 4)
@@ -675,7 +677,8 @@ fn two_shot_outward_call_multiplies_a_live_exact_caller_owner() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("two-shot-call-owned-capture.gr", source).unwrap();
+    let artifact =
+        compile_source_to_bytecode("two-shot-call-owned-capture.glorious", source).unwrap();
     let test = artifact
         .functions
         .iter()
@@ -711,7 +714,7 @@ fn two_shot_row_without_an_actual_perform_does_not_multiply_ownership() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("two-shot-may-effect-call.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("two-shot-may-effect-call.glorious", source).unwrap();
     let test = artifact
         .functions
         .iter()
@@ -734,8 +737,8 @@ fn named_rows_are_canonical_and_phase_fingerprints_are_deterministic() {
         empty() -> / {} { () }
         main() -> { () }
     "#;
-    let first = compile_source_to_phases("rows.gr", source).unwrap();
-    let second = compile_source_to_phases("rows.gr", source).unwrap();
+    let first = compile_source_to_phases("rows.glorious", source).unwrap();
+    let second = compile_source_to_phases("rows.glorious", source).unwrap();
     assert_eq!(first.core_fingerprint(), second.core_fingerprint());
     assert_eq!(first.mir_fingerprint(), second.mir_fingerprint());
     assert_eq!(first.artifact.encode(), second.artifact.encode());
@@ -773,13 +776,13 @@ fn named_rows_are_canonical_and_phase_fingerprints_are_deterministic() {
 #[test]
 fn outward_call_bundle_and_interpreter_match_the_vm() {
     let bundle = SourceBundle::new(
-        Segment::new("effects.gr", "effect Ask { [1,1] ask() -> i64 }"),
+        Segment::new("effects.glorious", "effect Ask { [1,1] ask() -> i64 }"),
         Segment::new(
-            "library.gr",
+            "library.glorious",
             "leaf() -> i64 / {Ask} { perform Ask::ask() } test() -> i64 { handle { let value = leaf(); value + 2 } { Ask::ask() with k => resume(k, 40) } }",
         ),
         [Segment::new(
-            "entry.gr",
+            "entry.glorious",
             "main() -> { let result = test(); () }",
         )],
     );
@@ -807,10 +810,10 @@ fn outward_call_bundle_and_interpreter_match_the_vm() {
         main() -> { let result = test(); () }
     "#;
     assert_eq!(
-        run_source("row-differential.gr", source, vec![], &mut NoHost).unwrap(),
+        run_source("row-differential.glorious", source, vec![], &mut NoHost).unwrap(),
         InterpreterValue::Unit
     );
-    let artifact = compile_source_to_bytecode("row-differential.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("row-differential.glorious", source).unwrap();
     let entry = artifact.entry_function.unwrap();
     assert_eq!(
         Vm::new(verify(artifact).unwrap())
@@ -834,7 +837,8 @@ fn resumptive_effect_in_a_terminal_payload_resumes_before_the_terminal_handler_r
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("resumptive-terminal-payload.gr", source).unwrap();
+    let artifact =
+        compile_source_to_bytecode("resumptive-terminal-payload.glorious", source).unwrap();
     let selected = artifact
         .functions
         .iter()
@@ -889,7 +893,7 @@ fn invalid_named_effect_rows_and_calls_have_stable_diagnostics() {
         ),
     ];
     for (source, needle) in cases {
-        let diagnostics = compile_source_to_bytecode("rejected.gr", source).unwrap_err();
+        let diagnostics = compile_source_to_bytecode("rejected.glorious", source).unwrap_err();
         assert!(
             diagnostics.iter().any(|diagnostic| {
                 diagnostic.message.contains(needle)

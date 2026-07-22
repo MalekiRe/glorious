@@ -49,7 +49,7 @@ fn multiple_projected_moves_cross_mandatory_and_optional_captures() {
         main() -> {{ () }}
         "#
     );
-    let mir = run("multiple-mandatory-residual.gr", &mandatory, 42);
+    let mir = run("multiple-mandatory-residual.glorious", &mandatory, 42);
     assert!(mir.contains("initialized_fields: [false, false, true]"));
 
     let optional = format!(
@@ -72,7 +72,7 @@ fn multiple_projected_moves_cross_mandatory_and_optional_captures() {
         main() -> {{ () }}
         "#
     );
-    let mir = run("multiple-optional-residual.gr", &optional, 42);
+    let mir = run("multiple-optional-residual.glorious", &optional, 42);
     assert!(mir.contains("initialized_fields: [false, false, true]"));
 }
 
@@ -102,7 +102,7 @@ fn multiple_and_nested_residual_owners_cross_multishot_capture() {
         main() -> {{ () }}
         "#
     );
-    let mir = run("multiple-multishot-residual.gr", &multiple, 83);
+    let mir = run("multiple-multishot-residual.glorious", &multiple, 83);
     assert!(mir.contains("initialized_fields: [false, false, true]"));
 
     let nested = format!(
@@ -128,7 +128,7 @@ fn multiple_and_nested_residual_owners_cross_multishot_capture() {
         main() -> {{ () }}
         "#
     );
-    let mir = run("nested-multishot-residual.gr", &nested, 83);
+    let mir = run("nested-multishot-residual.glorious", &nested, 83);
     assert!(mir.matches("initialized_fields: [false, true]").count() >= 2);
 }
 
@@ -147,7 +147,7 @@ fn multiple_moves_remain_disjoint_and_custom_drop_safe() {
         main() -> {{ () }}
         "#
     );
-    let diagnostics = compile_source_to_bytecode("repeated-projected-move.gr", &repeated)
+    let diagnostics = compile_source_to_bytecode("repeated-projected-move.glorious", &repeated)
         .expect_err("moving the same child twice was accepted");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
@@ -162,8 +162,9 @@ fn multiple_moves_remain_disjoint_and_custom_drop_safe() {
         bad(value: Pair) -> Owner { value.left }
         main() -> { () }
     "#;
-    let diagnostics = compile_source_to_bytecode("custom-drop-projected-move.gr", custom_parent)
-        .expect_err("a custom-Drop parent was partially moved");
+    let diagnostics =
+        compile_source_to_bytecode("custom-drop-projected-move.glorious", custom_parent)
+            .expect_err("a custom-Drop parent was partially moved");
     assert!(diagnostics.iter().any(|diagnostic| {
         diagnostic
             .message

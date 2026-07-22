@@ -17,8 +17,8 @@ fn perform_records_live_owner_and_reference_capture_sets_deterministically() {
         }
         main() -> { () }
     "#;
-    let first = compile_source_to_phases("mir-capture.gr", source).unwrap();
-    let repeated = compile_source_to_phases("mir-capture.gr", source).unwrap();
+    let first = compile_source_to_phases("mir-capture.glorious", source).unwrap();
+    let repeated = compile_source_to_phases("mir-capture.glorious", source).unwrap();
     assert_eq!(first.mir.canonical_text(), repeated.mir.canonical_text());
     assert_eq!(first.mir_fingerprint(), repeated.mir_fingerprint());
 
@@ -65,7 +65,7 @@ fn transferred_perform_payload_is_not_a_continuation_owner() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("mir-payload-capture.gr", source).unwrap();
+    let phases = compile_source_to_phases("mir-payload-capture.glorious", source).unwrap();
     let (payloads, capture) = phases
         .mir
         .functions

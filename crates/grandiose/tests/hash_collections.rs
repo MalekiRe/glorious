@@ -262,9 +262,8 @@ const HASH_ITERATION_SURFACE: &str = r#"
 "#;
 
 #[test]
-fn generic_hash_map_and_set_execute_at_o0_through_o3() {
+fn generic_hash_map_and_set_execute_at_o1_through_o3() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -347,9 +346,8 @@ fn hash_collection_representation_is_private() {
 }
 
 #[test]
-fn removal_repairs_collision_clusters_at_o0_through_o3() {
+fn removal_repairs_collision_clusters_at_o1_through_o3() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -392,7 +390,6 @@ fn removal_has_recovery_parity() {
 #[test]
 fn deterministic_owning_iteration_transfers_every_entry() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

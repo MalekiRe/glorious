@@ -7,8 +7,7 @@ use grandiose::{
 };
 use grandiose_vm::{Value, Vm, verify};
 
-const LEVELS: [OptimizationLevel; 4] = [
-    OptimizationLevel::O0,
+const LEVELS: [OptimizationLevel; 3] = [
     OptimizationLevel::O1,
     OptimizationLevel::O2,
     OptimizationLevel::O3,
@@ -58,7 +57,7 @@ fn run(source: &str, name: &str, level: OptimizationLevel) -> Value {
 }
 
 #[test]
-fn full_width_integer_literals_survive_contextual_selection_at_o0_through_o3() {
+fn full_width_integer_literals_survive_contextual_selection_at_o1_through_o3() {
     let source = r#"
         u64_max() -> u64 { 18_446_744_073_709_551_615 }
         u128_max() -> u128 { 0xffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff }
@@ -113,7 +112,13 @@ fn recovery_contextually_selects_full_width_integer_literals() {
         ),
     ] {
         assert_eq!(
-            run_source(&format!("recovery-{name}.gr"), source, vec![], &mut NoHost,).unwrap(),
+            run_source(
+                &format!("recovery-{name}.glorious"),
+                source,
+                vec![],
+                &mut NoHost,
+            )
+            .unwrap(),
             expected,
             "{name}"
         );
@@ -144,7 +149,7 @@ fn ieee_literals_round_once_at_the_contextual_width() {
     }
 
     let RecoveryValue::Float(value) = run_source(
-        "recovery-direct-f64.gr",
+        "recovery-direct-f64.glorious",
         &format!("main() -> f64 {{ {F64_DIRECT_ROUND_UP} }}"),
         vec![],
         &mut NoHost,

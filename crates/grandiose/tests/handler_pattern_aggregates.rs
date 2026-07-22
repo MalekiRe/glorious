@@ -70,7 +70,7 @@ fn flat_tuple_patterns_select_clauses_by_scalar_literals() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        run_function("flat-tuple-pattern.gr", source, "selected"),
+        run_function("flat-tuple-pattern.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -89,7 +89,7 @@ fn deeply_nested_tuple_patterns_bind_every_leaf_once() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        run_function("deep-tuple-pattern.gr", source, "selected"),
+        run_function("deep-tuple-pattern.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -109,7 +109,7 @@ fn struct_pattern_fields_match_in_declaration_independent_order() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        run_function("struct-field-order.gr", source, "selected"),
+        run_function("struct-field-order.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -129,7 +129,7 @@ fn structs_nest_inside_variants_and_tuples() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        run_function("struct-in-variant-in-tuple.gr", source, "selected"),
+        run_function("struct-in-variant-in-tuple.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -146,7 +146,7 @@ fn tuple_remainder_discards_only_zero_use_middles() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        run_function("tuple-remainder.gr", source, "selected"),
+        run_function("tuple-remainder.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -163,7 +163,7 @@ fn short_tuple_patterns_implicitly_discard_the_suffix() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        run_function("tuple-implicit-suffix.gr", source, "selected"),
+        run_function("tuple-implicit-suffix.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -188,13 +188,12 @@ fn variant_middle_rest_and_short_suffix_omission_match_from_the_right_places() {
         main() -> { middle(); short(); () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let artifact = compile_source_to_bytecode_with_options(
-            "variant-remainder-and-omission.gr",
+            "variant-remainder-and-omission.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -229,7 +228,7 @@ fn struct_remainder_discards_only_zero_use_fields() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        run_function("struct-remainder.gr", source, "selected"),
+        run_function("struct-remainder.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -251,7 +250,7 @@ fn exact_linear_fields_transfer_their_obligation_to_the_binding() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        run_function("tuple-linear-transfer.gr", source, "selected"),
+        run_function("tuple-linear-transfer.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -275,7 +274,7 @@ fn exact_linear_struct_fields_transfer_through_named_patterns() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        run_function("struct-linear-transfer.gr", source, "selected"),
+        run_function("struct-linear-transfer.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -293,7 +292,11 @@ fn tuple_wildcard_cannot_erase_an_exact_linear_element() {
         }
         main() -> { () }
     "#;
-    has_message("tuple-linear-wildcard.gr", source, &["discard", "[0,0]"]);
+    has_message(
+        "tuple-linear-wildcard.glorious",
+        source,
+        &["discard", "[0,0]"],
+    );
 }
 
 #[test]
@@ -310,7 +313,7 @@ fn tuple_remainder_cannot_erase_an_exact_linear_element() {
         main() -> { () }
     "#;
     has_message(
-        "tuple-linear-remainder.gr",
+        "tuple-linear-remainder.glorious",
         source,
         &["discarded tuple element", "zero-use disposal"],
     );
@@ -330,7 +333,7 @@ fn implicit_tuple_suffix_cannot_erase_an_exact_linear_element() {
         main() -> { () }
     "#;
     has_message(
-        "tuple-linear-implicit-suffix.gr",
+        "tuple-linear-implicit-suffix.glorious",
         source,
         &["discarded tuple element", "zero-use disposal"],
     );
@@ -351,7 +354,7 @@ fn implicit_variant_suffix_cannot_erase_an_exact_linear_element() {
         main() -> { () }
     "#;
     has_message(
-        "variant-linear-implicit-suffix.gr",
+        "variant-linear-implicit-suffix.glorious",
         source,
         &["discarded variant payload field", "zero-use disposal"],
     );
@@ -373,7 +376,7 @@ fn struct_remainder_cannot_erase_an_exact_linear_field() {
         main() -> { () }
     "#;
     has_message(
-        "struct-linear-remainder.gr",
+        "struct-linear-remainder.glorious",
         source,
         &["discarded field `token`", "zero-use disposal"],
     );
@@ -391,7 +394,11 @@ fn struct_patterns_reject_unknown_fields() {
         }
         main() -> { () }
     "#;
-    has_message("struct-unknown-field.gr", source, &["no field named `z`"]);
+    has_message(
+        "struct-unknown-field.glorious",
+        source,
+        &["no field named `z`"],
+    );
 }
 
 #[test]
@@ -407,7 +414,7 @@ fn struct_patterns_without_remainder_implicitly_discard_missing_fields() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        run_function("struct-implicit-omission.gr", source, "selected"),
+        run_function("struct-implicit-omission.glorious", source, "selected"),
         Value::I64(1)
     );
 }
@@ -424,7 +431,8 @@ fn duplicate_struct_pattern_fields_are_rejected_at_parse_time() {
         }
         main() -> { () }
     "#;
-    let diagnostics = compile_source_to_bytecode("struct-duplicate-field.gr", source).unwrap_err();
+    let diagnostics =
+        compile_source_to_bytecode("struct-duplicate-field.glorious", source).unwrap_err();
     assert!(
         diagnostics.iter().any(|diagnostic| {
             diagnostic
@@ -447,7 +455,7 @@ fn tuple_pattern_arity_must_match_the_payload() {
         main() -> { () }
     "#;
     has_message(
-        "tuple-arity-mismatch.gr",
+        "tuple-arity-mismatch.glorious",
         source,
         &["expects at most 2 element(s), got 3"],
     );
@@ -466,7 +474,7 @@ fn variant_pattern_rejects_excess_entries() {
         main() -> { () }
     "#;
     has_message(
-        "variant-arity-mismatch.gr",
+        "variant-arity-mismatch.glorious",
         source,
         &["has 2 field(s)", "supplies 3 explicit"],
     );
@@ -485,14 +493,14 @@ fn implicit_omission_does_not_bypass_custom_drop() {
         }
         main() -> { () }
     "#;
-    has_message("implicit-custom-drop.gr", source, &["custom Drop"]);
+    has_message("implicit-custom-drop.glorious", source, &["custom Drop"]);
 }
 
 #[test]
 fn private_struct_fields_reject_handler_patterns_outside_their_segment() {
     let bundle = SourceBundle::new(
         Segment::new(
-            "owner.gr",
+            "owner.glorious",
             r#"
                 struct Secret { private marker: i64 }
                 effect Stop { stop(secret: Secret) -> ! }
@@ -500,7 +508,7 @@ fn private_struct_fields_reject_handler_patterns_outside_their_segment() {
             "#,
         ),
         Segment::new(
-            "outsider.gr",
+            "outsider.glorious",
             r#"
                 bad() -> i64 {
                     handle perform Stop::stop(make_secret()) {
@@ -509,7 +517,7 @@ fn private_struct_fields_reject_handler_patterns_outside_their_segment() {
                 }
             "#,
         ),
-        [Segment::new("entry.gr", "main() -> { () }")],
+        [Segment::new("entry.glorious", "main() -> { () }")],
     );
     let diagnostics = compile_bundle_to_bytecode(&bundle).unwrap_err();
     assert!(
@@ -535,7 +543,7 @@ fn private_struct_fields_match_inside_their_own_segment() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        run_function("private-same-segment.gr", source, "selected"),
+        run_function("private-same-segment.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -566,11 +574,11 @@ fn irrefutable_aggregate_rows_keep_the_handler_total() {
         main() -> { by_struct(); by_tuple(); () }
     "#;
     assert_eq!(
-        run_function("aggregate-total-handler.gr", source, "by_struct"),
+        run_function("aggregate-total-handler.glorious", source, "by_struct"),
         Value::I64(42)
     );
     assert_eq!(
-        run_function("aggregate-total-handler.gr", source, "by_tuple"),
+        run_function("aggregate-total-handler.glorious", source, "by_tuple"),
         Value::I64(42)
     );
 }
@@ -589,7 +597,7 @@ fn enum_columns_inside_tuples_participate_in_exhaustiveness() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        run_function("tuple-enum-exhaustive.gr", source, "selected"),
+        run_function("tuple-enum-exhaustive.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -606,7 +614,11 @@ fn missing_enum_variant_inside_a_tuple_keeps_the_handler_partial() {
         }
         main() -> { () }
     "#;
-    has_message("tuple-enum-partial.gr", source, &["partial effect handler"]);
+    has_message(
+        "tuple-enum-partial.glorious",
+        source,
+        &["partial effect handler"],
+    );
 }
 
 const PARITY_SURFACE: &str = r#"
@@ -627,7 +639,7 @@ const PARITY_SURFACE: &str = r#"
 fn aggregate_handler_patterns_have_recovery_parity() {
     let recovery = format!("{PARITY_SURFACE}\n    main() -> i64 {{ selected() }}");
     let result = run_source(
-        "aggregate-pattern-recovery.gr",
+        "aggregate-pattern-recovery.glorious",
         &recovery,
         vec![],
         &mut NoHost,
@@ -637,7 +649,7 @@ fn aggregate_handler_patterns_have_recovery_parity() {
 
     let compiled = format!("{PARITY_SURFACE}\n    main() -> {{ selected(); () }}");
     assert_eq!(
-        run_function("aggregate-pattern-compiled.gr", &compiled, "selected"),
+        run_function("aggregate-pattern-compiled.glorious", &compiled, "selected"),
         Value::I64(42)
     );
 }
@@ -657,7 +669,7 @@ fn resumptive_clauses_select_by_aggregate_patterns_and_resume() {
         main() -> { selected(); () }
     "#;
     assert_eq!(
-        run_function("resumptive-aggregate.gr", source, "selected"),
+        run_function("resumptive-aggregate.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -674,7 +686,13 @@ fn recovery_path_accepts_implicit_struct_omission() {
         }
     "#;
     assert_eq!(
-        run_source("recovery-implicit-field.gr", source, vec![], &mut NoHost).unwrap(),
+        run_source(
+            "recovery-implicit-field.glorious",
+            source,
+            vec![],
+            &mut NoHost
+        )
+        .unwrap(),
         RecoveryValue::Int(1)
     );
 }
@@ -692,7 +710,13 @@ fn recovery_path_matches_variant_middle_rest_and_implicit_tuple_suffix() {
         }
     "#;
     assert_eq!(
-        run_source("recovery-pattern-omission.gr", source, vec![], &mut NoHost).unwrap(),
+        run_source(
+            "recovery-pattern-omission.glorious",
+            source,
+            vec![],
+            &mut NoHost
+        )
+        .unwrap(),
         RecoveryValue::Int(42)
     );
 }
@@ -701,13 +725,12 @@ fn recovery_path_matches_variant_middle_rest_and_implicit_tuple_suffix() {
 fn aggregate_handler_patterns_agree_across_optimization_levels() {
     let compiled = format!("{PARITY_SURFACE}\n    main() -> {{ selected(); () }}");
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let artifact = compile_source_to_bytecode_with_options(
-            "aggregate-pattern-levels.gr",
+            "aggregate-pattern-levels.glorious",
             &compiled,
             CompileOptions { optimization_level },
         )

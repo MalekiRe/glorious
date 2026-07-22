@@ -217,7 +217,6 @@ fn resolved_occurrence_keys_are_exact_source_path_spans() {
         &[("/crate/src/api/api.glorious", "pub answer() -> i64 { 42 }")],
     );
     let program = grandiose::modules::parse_bundle(&bundle).unwrap();
-    let program = grandiose::parser::normalize_for_legacy_consumers(program);
     let resolved = grandiose::modules::resolve_program(&bundle, program).unwrap();
     let occurrences = resolved
         .resolution

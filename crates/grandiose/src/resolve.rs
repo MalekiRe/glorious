@@ -19,7 +19,6 @@ use crate::{
 
 pub fn resolve_bundle(bundle: &SourceBundle) -> Result<(), Vec<Diagnostic>> {
     let program = crate::modules::parse_bundle(bundle)?;
-    let program = crate::parser::normalize_for_legacy_consumers(program);
     let program = crate::modules::resolve_program(bundle, program)?.program;
     crate::validate::validate(&program)?;
     resolve_interfaces(&program)
@@ -255,9 +254,7 @@ impl Context<'_> {
         match &expression.kind {
             ExprKind::Variable(path) => match path.as_ref() {
                 [name]
-                    if !locals.contains(name.as_ref())
-                        && !self.values.contains(name.as_ref())
-                        && !matches!(name.as_ref(), "resume" | "cancel" | "tail") =>
+                    if !locals.contains(name.as_ref()) && !self.values.contains(name.as_ref()) =>
                 {
                     errors.push(unknown("value", name, expression.span));
                 }

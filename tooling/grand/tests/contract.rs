@@ -1,8 +1,8 @@
-//! Tests for the future-compiler contract paths: capability probing,
-//! multi-file input, check-only phase, structured diagnostics (including
-//! bundle-to-source remapping), interface scans, and collision preflight.
+//! Tests for the compiler contract: capability probing, module roots,
+//! check-only compilation, structured diagnostics, interface scans, and
+//! collision preflight.
 //! The "compiler" is either a bash mock implementing the subprocess protocol
-//! (tests the real wire format) or the in-process fake with GRAND_FAKE_CAPS.
+//! Tests use executable fixtures that implement the real wire format.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -23,12 +23,40 @@ impl Sandbox {
         Sandbox { dir, root }
     }
 
-    /// Install a bash mock of the future grc advertising `caps` (JSON).
+    /// Install a bash mock of grc advertising `caps` (JSON).
     /// Every invocation is appended to `args.log`; sources containing
     /// `MOCK_FAIL` produce a structured diagnostic at the marker line.
     fn install_mock_grc(&self, caps: &str) -> PathBuf {
         let dir = self.dir.path();
-        std::fs::write(dir.join("caps.json"), caps).unwrap();
+        let mut caps: serde_json::Value = serde_json::from_str(caps).unwrap();
+        let object = caps.as_object_mut().unwrap();
+        object
+            .entry("artifact-major")
+            .or_insert(serde_json::json!(1));
+        object
+            .entry("artifact-minor")
+            .or_insert(serde_json::json!(0));
+        object
+            .entry("multi-file")
+            .or_insert(serde_json::json!(true));
+        object.entry("modules").or_insert(serde_json::json!(true));
+        object
+            .entry("phases")
+            .or_insert(serde_json::json!(["check"]));
+        let emit = object
+            .entry("emit")
+            .or_insert_with(|| serde_json::json!([]))
+            .as_array_mut()
+            .unwrap();
+        for capability in ["bytecode", "interfaces-json", "std-interfaces-json"] {
+            if !emit.iter().any(|entry| entry == capability) {
+                emit.push(serde_json::json!(capability));
+            }
+        }
+        object
+            .entry("diagnostics-json")
+            .or_insert(serde_json::json!(true));
+        std::fs::write(dir.join("caps.json"), serde_json::to_vec(&caps).unwrap()).unwrap();
         let script = dir.join("mock-grc");
         std::fs::write(
             &script,
@@ -36,22 +64,52 @@ impl Sandbox {
 dir="$(cd "$(dirname "$0")" && pwd)"
 echo "$@" >> "$dir/args.log"
 if [ "$1" = --capabilities ]; then cat "$dir/caps.json"; exit 0; fi
-if [ "$1" = --emit ] && [ "$2" = std-interfaces-json ]; then echo '[]'; exit 0; fi
+if [ "$1" = --emit ] && [ "$2" = std-interfaces-json ]; then echo '[{"name":"if","kind":"callable","file":"«std»","line":0},{"name":"not","kind":"callable","file":"«std»","line":0}]'; exit 0; fi
+if [ "$1" = --emit ] && [ "$2" = interfaces-json ]; then
+  shift 2
+  python3 - "$@" <<'PY'
+import json,pathlib,re,sys
+out=[]
+paths=[]
+for root in sys.argv[1:]:
+  candidate=pathlib.Path(root)
+  paths.extend(candidate.parent.rglob('*.glorious'))
+for path in sorted(set(paths)):
+  try: lines=open(path).read().splitlines()
+  except OSError: continue
+  docs=[]
+  for n,line in enumerate(lines,1):
+    if line.lstrip().startswith('//'): docs.append(line.lstrip()[2:].lstrip('/').strip()); continue
+    m=re.match(r'\s*(?:pub\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*\(',line)
+    if m: out.append({'name':m.group(1),'kind':'callable','file':str(path),'line':n,'signature':line.strip(),'docs':'\n'.join(docs) or None})
+    docs=[]
+print(json.dumps(out))
+PY
+  exit 0
+fi
 out=""; inputs=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --diagnostics|--phase|--emit) shift;;
+    --diagnostics|--phase|--emit|--dependency) shift;;
     -o) out="$2"; shift;;
     *) inputs+=("$1");;
   esac
   shift
 done
-for f in "${inputs[@]}"; do
-  n="$(grep -n MOCK_FAIL "$f" | head -1 | cut -d: -f1)"
+expanded=()
+for root in "${inputs[@]}"; do while IFS= read -r f; do expanded+=("$f"); done < <(find "$(dirname "$root")" -name '*.glorious' -type f); done
+for f in "${expanded[@]}"; do
+  n="$(grep -n -E 'MOCK_FAIL|FAKE_ERROR' "$f" | head -1 | cut -d: -f1)"
   if [ -n "$n" ]; then
     printf '{"severity":"error","code":"GRC0001","title":"mock failure","labels":[{"file":"%s","line":%s,"message":"here"}]}\n' "$f" "$n" >&2
     exit 1
   fi
+  python3 - "$f" <<'PY' >&2
+import json,sys
+p=sys.argv[1]; s=open(p).read(); marker='FAKE_FIXME'; start=s.find(marker)
+if start >= 0:
+ print(json.dumps({'severity':'warning','code':'GRC8888','title':'fixable marker','labels':[{'file':p,'start_byte':start,'end_byte':start+len(marker)}],'fix':{'file':p,'start_byte':start,'end_byte':start+len(marker),'replacement':''}}))
+PY
 done
 if [ -n "$out" ]; then printf 'define i32 @main() {\nentry:\n  ret i32 0\n}\n' > "$out"; fi
 exit 0
@@ -84,19 +142,33 @@ exit 0
         script
     }
 
-    fn grand(&self, cwd: &Path, compiler: &str, caps: &str, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_grand"))
+    fn grand(&self, cwd: &Path, compiler: &str, _caps: &str, args: &[&str]) -> Output {
+        let fixture = compiler == "fixture";
+        let selected_compiler = if fixture {
+            self.install_mock_grc(
+                r#"{"grc":"test","contract":1,"artifact-major":1,"artifact-minor":0,"multi-file":true,"modules":true,"phases":["resolve","check"],"emit":["bytecode","interfaces-json","std-interfaces-json"],"diagnostics-json":true}"#,
+            )
+        } else {
+            PathBuf::from(compiler)
+        };
+        let mut command = Command::new(env!("CARGO_BIN_EXE_grand"));
+        command
             .args(args)
             .current_dir(cwd)
-            .env("GRAND_COMPILER", compiler)
-            .env("GRAND_FAKE_CAPS", caps)
-            .env("GRAND_CACHE_DIR", self.dir.path().join("cache"))
-            .output()
-            .unwrap()
+            .env("GRAND_COMPILER", selected_compiler)
+            .env("GRAND_CACHE_DIR", self.dir.path().join("cache"));
+        if fixture {
+            command.env("GRAND_VM", self.install_mock_vm());
+        }
+        command.output().unwrap()
     }
 
     fn app(&self) -> PathBuf {
-        let output = self.grand(&self.root, "fake", "", &["new", "app"]);
+        let output = Command::new(env!("CARGO_BIN_EXE_grand"))
+            .args(["new", "app"])
+            .current_dir(&self.root)
+            .output()
+            .unwrap();
         assert!(output.status.success());
         self.root.join("app")
     }
@@ -142,7 +214,7 @@ fn mock_grc_multi_file_and_check_phase() {
         log.contains("Using grc 9.9.9 (contract 1)"),
         "no version line: {log}"
     );
-    // Multi-file: both real source files passed, --phase check used, no bundle.
+    // The root and dependency crate root are passed through the canonical API.
     let args = sandbox.args_log();
     let compile_line = args.lines().last().unwrap();
     assert!(
@@ -150,12 +222,12 @@ fn mock_grc_multi_file_and_check_phase() {
         "no check phase: {compile_line}"
     );
     assert!(
-        compile_line.contains("lib.glorious") && compile_line.contains("main.glorious"),
-        "sources not passed individually: {compile_line}"
+        compile_line.contains("main.glorious") && compile_line.contains("--dependency util="),
+        "crate roots not passed: {compile_line}"
     );
     assert!(
         !app.join("target/grand/check.glorious").exists(),
-        "bundle written despite multi-file"
+        "unexpected synthetic source file"
     );
 }
 
@@ -198,7 +270,7 @@ fn module_aware_grc_receives_only_ordered_crate_roots_and_watches_children() {
     assert!(run().status.success());
     assert_eq!(
         sandbox.args_log().lines().count(),
-        3,
+        9,
         "fresh check recompiled"
     );
     write(
@@ -208,7 +280,7 @@ fn module_aware_grc_receives_only_ordered_crate_roots_and_watches_children() {
     assert!(run().status.success());
     assert_eq!(
         sandbox.args_log().lines().count(),
-        5,
+        14,
         "child module edit did not invalidate the fingerprint"
     );
 }
@@ -222,7 +294,11 @@ fn module_aware_dependency_root_ambiguity_is_diagnosed() {
     let app = sandbox.app();
     add_path_dep(&app, "util", "util_value() -> i64 { 3 }\n");
     write(
-        &app.parent().unwrap().join("util/src/lib.gr"),
+        &app.parent().unwrap().join("util/grandiose.toml"),
+        "[project]\nname = \"util\"\nversion = \"0.1.0\"\nsources = [\"src/lib.glorious\", \"src/other.glorious\"]\n",
+    );
+    write(
+        &app.parent().unwrap().join("util/src/other.glorious"),
         "other() -> i64 { 4 }\n",
     );
     let output = sandbox.grand(&app, grc.to_str().unwrap(), "", &["check"]);
@@ -257,13 +333,15 @@ fn bytecode_capability_switches_build_output_and_runtime_to_g1() {
         app.join("target/grand/app.grbc").is_file(),
         "missing .grbc output"
     );
-    assert!(
-        !app.join("target/grand/app.ll").exists(),
-        "legacy .ll output was requested"
-    );
     let compile_line = sandbox.args_log().lines().last().unwrap().to_string();
     assert!(compile_line.contains("--emit bytecode"), "{compile_line}");
     assert!(compile_line.contains("app.grbc"), "{compile_line}");
+
+    let manifest_path = app.join("grandiose.toml");
+    let mut manifest = std::fs::read_to_string(&manifest_path).unwrap();
+    manifest
+        .push_str("\n[runtime]\ncapabilities = [\"process.args\", \"fs.read\", \"diagnostic\"]\n");
+    std::fs::write(&manifest_path, manifest).unwrap();
 
     let run = Command::new(env!("CARGO_BIN_EXE_grand"))
         .args(["run", "--", "hello"])
@@ -280,12 +358,13 @@ fn bytecode_capability_switches_build_output_and_runtime_to_g1() {
     );
     let vm_args = std::fs::read_to_string(sandbox.dir.path().join("vm.log")).unwrap();
     assert!(
-        vm_args.contains("run") && vm_args.contains("app.grbc -- hello"),
+        vm_args.contains("run --allow process.args --allow fs.read --allow diagnostic")
+            && vm_args.contains("app.grbc -- hello"),
         "{vm_args}"
     );
     assert!(
         !vm_args.contains("--seed-identity"),
-        "legacy compiler/VM pairs must remain runnable without seed negotiation: {vm_args}"
+        "compiler/VM pairs without seed metadata must remain runnable: {vm_args}"
     );
 }
 
@@ -313,6 +392,10 @@ fn matching_released_seed_identity_is_forwarded_to_the_selected_vm() {
         vm_log.contains("run --seed-identity seed-a") && vm_log.contains("app.grbc -- hello"),
         "{vm_log}"
     );
+    assert!(
+        !vm_log.contains("--allow"),
+        "runtime capabilities must default to none: {vm_log}"
+    );
 }
 
 #[test]
@@ -320,11 +403,11 @@ fn missing_mismatched_and_malformed_seed_contracts_fail_before_compilation() {
     let cases = [
         (
             r#"{"grc":"seeded","contract":1,"artifact-major":1,"artifact-minor":0,"seed-identity-version":1,"seed-identity":"seed-a","emit":["bytecode"]}"#,
-            r#"{"grvm":"legacy","contract":1,"contract-min":1,"contract-max":1,"artifact-major":1,"artifact-minor-min":0,"artifact-minor-max":0}"#,
+            r#"{"grvm":"unseeded","contract":1,"contract-min":1,"contract-max":1,"artifact-major":1,"artifact-minor-min":0,"artifact-minor-max":0}"#,
             "must both advertise released-seed identity metadata",
         ),
         (
-            r#"{"grc":"legacy","contract":1,"artifact-major":1,"artifact-minor":0,"emit":["bytecode"]}"#,
+            r#"{"grc":"unseeded","contract":1,"artifact-major":1,"artifact-minor":0,"emit":["bytecode"]}"#,
             r#"{"grvm":"seeded","contract":1,"contract-min":1,"contract-max":1,"artifact-major":1,"artifact-minor-min":0,"artifact-minor-max":0,"seed-identity-version":1,"accepted-seed-identities":["seed-a"]}"#,
             "must both advertise released-seed identity metadata",
         ),
@@ -340,7 +423,7 @@ fn missing_mismatched_and_malformed_seed_contracts_fail_before_compilation() {
         ),
         (
             r#"{"grc":"partial","contract":1,"artifact-major":1,"artifact-minor":0,"seed-identity-version":1,"emit":["bytecode"]}"#,
-            r#"{"grvm":"legacy","contract":1,"contract-min":1,"contract-max":1,"artifact-major":1,"artifact-minor-min":0,"artifact-minor-max":0}"#,
+            r#"{"grvm":"unseeded","contract":1,"contract-min":1,"contract-max":1,"artifact-major":1,"artifact-minor-min":0,"artifact-minor-max":0}"#,
             "compiler seed identity metadata is incomplete",
         ),
         (
@@ -399,7 +482,11 @@ fn incompatible_seed_identity_rejects_an_existing_cached_artifact() {
     };
 
     assert!(build().status.success());
-    assert_eq!(sandbox.args_log().lines().count(), 2, "probe + compile");
+    assert_eq!(
+        sandbox.args_log().lines().count(),
+        4,
+        "probe + scans + compile"
+    );
     assert!(app.join("target/grand/app.grbc").is_file());
 
     std::fs::write(
@@ -416,7 +503,7 @@ fn incompatible_seed_identity_rejects_an_existing_cached_artifact() {
     );
     assert_eq!(
         sandbox.args_log().lines().count(),
-        3,
+        5,
         "cached output was recompiled or reused before compatibility rejection"
     );
 }
@@ -429,12 +516,12 @@ fn incompatible_contract_and_artifact_versions_fail_before_compilation() {
             "incompatible with grand contract 1",
         ),
         (
-            r#"{"grc":"missing-version","contract":1,"emit":["bytecode"]}"#,
-            "artifact version",
+            r#"{"grc":"missing-version","contract":1,"artifact-major":null,"artifact-minor":null,"emit":["bytecode"]}"#,
+            "does not emit supported Grandiose bytecode",
         ),
         (
             r#"{"grc":"future-artifact","contract":1,"artifact-major":2,"artifact-minor":0,"emit":["bytecode"]}"#,
-            "incompatible with supported 1.0",
+            "does not emit supported Grandiose bytecode",
         ),
         (
             r#"{"grc":"bad-session","contract":1,"serve":{"protocol":2,"transport":"json-lines","max-request-bytes":1,"max-arguments":1,"max-inputs":1,"max-source-bytes":1}}"#,
@@ -520,11 +607,15 @@ fn selected_vm_identity_is_part_of_the_atomic_bytecode_fingerprint() {
     };
 
     assert!(run_build().status.success());
-    assert_eq!(sandbox.args_log().lines().count(), 2, "probe + compile");
+    assert_eq!(
+        sandbox.args_log().lines().count(),
+        4,
+        "probe + scans + compile"
+    );
     assert!(run_build().status.success());
     assert_eq!(
         sandbox.args_log().lines().count(),
-        3,
+        7,
         "an unchanged VM must preserve the fresh compiler output"
     );
 
@@ -536,18 +627,16 @@ fn selected_vm_identity_is_part_of_the_atomic_bytecode_fingerprint() {
     assert!(run_build().status.success());
     assert_eq!(
         sandbox.args_log().lines().count(),
-        5,
+        11,
         "changing the selected compatible VM must force recompilation"
     );
 }
 
 #[test]
-fn mock_grc_diagnostics_remap_through_bundle() {
+fn mock_grc_renders_structured_diagnostics_at_source_locations() {
     let sandbox = Sandbox::new();
-    // No multi-file: grand must bundle, then remap diagnostics back out.
     let grc = sandbox.install_mock_grc(r#"{"grc":"9.9.9","contract":1,"diagnostics-json":true}"#);
     let app = sandbox.app();
-    add_path_dep(&app, "util", "util_value() -> i64 { 3 }\n");
     write(
         &app.join("src/main.glorious"),
         "main() -> i64 {\n    MOCK_FAIL\n}\n",
@@ -555,24 +644,18 @@ fn mock_grc_diagnostics_remap_through_bundle() {
     let output = sandbox.grand(&app, grc.to_str().unwrap(), "", &["check"]);
     let log = stderr(&output);
     assert!(!output.status.success());
-    // The mock reported bundle line 3 (util's line + main's line 2); grand
-    // must render the original file and line, not the bundle.
     assert!(
         log.contains("error[GRC0001]: mock failure"),
         "diagnostic not rendered: {log}"
     );
     assert!(
         log.contains("src/main.glorious:2"),
-        "diagnostic not remapped to the original file/line: {log}"
-    );
-    assert!(
-        !log.contains("check.glorious"),
-        "diagnostic still points into the bundle: {log}"
+        "diagnostic does not identify the original file/line: {log}"
     );
 }
 
 #[test]
-fn fake_structured_diagnostics_remap() {
+fn fixture_structured_diagnostics_remap() {
     let sandbox = Sandbox::new();
     let app = sandbox.app();
     write(&app.join("src/helpers.glorious"), "helper() -> i64 { 1 }\n");
@@ -580,36 +663,36 @@ fn fake_structured_diagnostics_remap() {
         &app.join("src/main.glorious"),
         "main() -> i64 {\n    FAKE_ERROR\n}\n",
     );
-    let output = sandbox.grand(&app, "fake", "diagnostics", &["check"]);
+    let output = sandbox.grand(&app, "fixture", "diagnostics", &["check"]);
     let log = stderr(&output);
     assert!(!output.status.success());
     assert!(
-        log.contains("error[GRC9999]: fake error marker"),
+        log.contains("error[GRC0001]: mock failure"),
         "unexpected: {log}"
     );
     assert!(log.contains("src/main.glorious:2"), "not remapped: {log}");
 }
 
 #[test]
-fn fake_multi_file_points_at_real_files_directly() {
+fn fixture_multi_file_points_at_real_files_directly() {
     let sandbox = Sandbox::new();
     let app = sandbox.app();
     write(
         &app.join("src/main.glorious"),
         "main() -> i64 {\n    FAKE_ERROR\n}\n",
     );
-    let output = sandbox.grand(&app, "fake", "multi-file,check,diagnostics", &["check"]);
+    let output = sandbox.grand(&app, "fixture", "multi-file,check,diagnostics", &["check"]);
     let log = stderr(&output);
     assert!(!output.status.success());
     assert!(log.contains("src/main.glorious:2"), "unexpected: {log}");
     assert!(
         !app.join("target/grand/check.glorious").exists(),
-        "bundle written despite multi-file"
+        "unexpected synthetic source file"
     );
 }
 
 #[test]
-fn fake_modules_capability_keeps_recursive_compatibility_inputs() {
+fn fixture_modules_capability_keeps_recursive_compatibility_inputs() {
     let sandbox = Sandbox::new();
     let app = sandbox.app();
     write(
@@ -618,7 +701,7 @@ fn fake_modules_capability_keeps_recursive_compatibility_inputs() {
     );
     let output = sandbox.grand(
         &app,
-        "fake",
+        "fixture",
         "multi-file,modules,check,diagnostics",
         &["check"],
     );
@@ -628,30 +711,17 @@ fn fake_modules_capability_keeps_recursive_compatibility_inputs() {
 }
 
 #[test]
-fn collision_preflight_warns_for_legacy_and_errors_authoritatively() {
+fn collision_preflight_is_authoritative() {
     let sandbox = Sandbox::new();
     let app = sandbox.app();
     add_path_dep(&app, "util", "shared() -> i64 { 3 }\n");
     write(&app.join("src/helpers.glorious"), "shared() -> i64 { 4 }\n");
 
-    // Legacy fallback (no interfaces capability): warning, build proceeds.
-    let output = sandbox.grand(&app, "fake", "", &["check"]);
-    let log = stderr(&output);
-    assert!(
-        output.status.success(),
-        "legacy fallback finding must not block: {log}"
-    );
-    assert!(
-        log.contains("warning[GRAND001]: `shared` is defined by both `util` and `app`"),
-        "missing legacy collision warning: {log}"
-    );
-
-    // Authoritative interface scan: hard error before compiling.
-    let output = sandbox.grand(&app, "fake", "interfaces", &["check"]);
+    let output = sandbox.grand(&app, "fixture", "", &["check"]);
     let log = stderr(&output);
     assert!(
         !output.status.success(),
-        "authoritative collision must fail: {log}"
+        "cross-package collision must block: {log}"
     );
     assert!(
         log.contains("error[GRAND001]: `shared` is defined by both"),
@@ -664,29 +734,27 @@ fn collision_preflight_warns_for_legacy_and_errors_authoritatively() {
 fn lint_levels_allow_and_deny() {
     let sandbox = Sandbox::new();
     let app = sandbox.app();
-    add_path_dep(&app, "util", "shared() -> i64 { 3 }\n");
-    write(&app.join("src/helpers.glorious"), "shared() -> i64 { 4 }\n");
+    write(&app.join("src/helpers.glorious"), "if() -> i64 { 4 }\n");
 
-    // Deny escalates the legacy collision warning to a build-stopping error.
-    let output = sandbox.grand(&app, "fake", "", &["check", "--deny", "GRAND001"]);
+    let output = sandbox.grand(&app, "fixture", "std", &["check", "--deny", "GRAND002"]);
     assert!(
         !output.status.success(),
         "deny must fail: {}",
         stderr(&output)
     );
     assert!(
-        stderr(&output).contains("error[GRAND001]"),
+        stderr(&output).contains("error[GRAND002]"),
         "unexpected: {}",
         stderr(&output)
     );
 
     // --deny warnings catches it too; --allow silences it entirely.
-    let output = sandbox.grand(&app, "fake", "", &["check", "--deny", "warnings"]);
+    let output = sandbox.grand(&app, "fixture", "std", &["check", "--deny", "warnings"]);
     assert!(!output.status.success());
-    let output = sandbox.grand(&app, "fake", "", &["check", "--allow", "GRAND001"]);
+    let output = sandbox.grand(&app, "fixture", "std", &["check", "--allow", "GRAND002"]);
     let log = stderr(&output);
     assert!(
-        output.status.success() && !log.contains("GRAND001"),
+        output.status.success() && !log.contains("GRAND002"),
         "allow failed: {log}"
     );
 
@@ -694,16 +762,16 @@ fn lint_levels_allow_and_deny() {
     let manifest = std::fs::read_to_string(app.join("grandiose.toml")).unwrap();
     write(
         &app.join("grandiose.toml"),
-        &format!("{manifest}\n[lints]\nGRAND001 = \"deny\"\n"),
+        &format!("{manifest}\n[lints]\nGRAND002 = \"deny\"\n"),
     );
-    let output = sandbox.grand(&app, "fake", "", &["check"]);
+    let output = sandbox.grand(&app, "fixture", "std", &["check"]);
     assert!(
         !output.status.success(),
         "manifest deny ignored: {}",
         stderr(&output)
     );
     // CLI overrides the manifest.
-    let output = sandbox.grand(&app, "fake", "", &["check", "--allow", "GRAND001"]);
+    let output = sandbox.grand(&app, "fixture", "std", &["check", "--allow", "GRAND002"]);
     assert!(
         output.status.success(),
         "CLI override failed: {}",
@@ -721,7 +789,7 @@ fn fix_applies_machine_fixes_and_reverifies() {
             .replace("FAKE_FIXME0", "FAKE_FIXME 0")
             .as_str(),
     );
-    let output = sandbox.grand(&app, "fake", "diagnostics", &["fix"]);
+    let output = sandbox.grand(&app, "fixture", "diagnostics", &["fix"]);
     let log = stderr(&output);
     assert!(output.status.success(), "fix failed: {log}");
     assert!(log.contains("Applied 1 fix(es)"), "unexpected: {log}");
@@ -730,7 +798,7 @@ fn fix_applies_machine_fixes_and_reverifies() {
     assert!(fixed.contains("main() -> i64"), "file mangled: {fixed}");
 
     // Nothing left to fix on the second run.
-    let output = sandbox.grand(&app, "fake", "diagnostics", &["fix"]);
+    let output = sandbox.grand(&app, "fixture", "diagnostics", &["fix"]);
     assert!(stderr(&output).contains("nothing to fix"));
 }
 
@@ -743,7 +811,7 @@ fn doc_renders_declarations_and_doc_comments() {
         "util",
         "// Adds one to a value.\nadd_one(value: i64) -> i64 { value }\n",
     );
-    let output = sandbox.grand(&app, "fake", "", &["doc"]);
+    let output = sandbox.grand(&app, "fixture", "", &["doc"]);
     assert!(output.status.success(), "doc failed: {}", stderr(&output));
     let html = std::fs::read_to_string(app.join("target/grand/doc/index.html")).unwrap();
     assert!(html.contains("<h1>util</h1>"), "package section missing");
@@ -767,7 +835,7 @@ fn std_shadowing_warns() {
         &app.join("src/helpers.glorious"),
         "not(value: i64) -> i64 { value }\n",
     );
-    let output = sandbox.grand(&app, "fake", "std", &["check"]);
+    let output = sandbox.grand(&app, "fixture", "std", &["check"]);
     let log = stderr(&output);
     assert!(
         output.status.success(),

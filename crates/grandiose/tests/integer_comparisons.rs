@@ -115,7 +115,6 @@ fn integer_comparisons_lower_to_each_frozen_primitive_and_source_bool() {
     let positive_expected = [false, true, false, false, true, true];
 
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -274,7 +273,6 @@ fn refinement_binders_shadow_function_items_only_in_the_positive_branch() {
     "#;
 
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

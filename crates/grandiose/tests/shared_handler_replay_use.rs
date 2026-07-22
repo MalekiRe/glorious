@@ -2,8 +2,7 @@ use grandiose::compiler_mir::OptimizationLevel;
 use grandiose::{CompileOptions, compile_source_to_phases, compile_source_to_phases_with_options};
 use grandiose_vm::{Artifact, Value, Vm, verify};
 
-const LEVELS: [OptimizationLevel; 4] = [
-    OptimizationLevel::O0,
+const LEVELS: [OptimizationLevel; 3] = [
     OptimizationLevel::O1,
     OptimizationLevel::O2,
     OptimizationLevel::O3,
@@ -41,7 +40,7 @@ fn mixed_replay_source(use_interval: &str) -> String {
 #[test]
 fn affine_capture_is_rejected_when_terminal_consumption_can_be_replayed_twice() {
     let errors = compile_source_to_phases(
-        "shared-handler-affine-replay.gr",
+        "shared-handler-affine-replay.glorious",
         &mixed_replay_source("[0,1]"),
     )
     .expect_err("an affine owner cannot be consumed in two continuation replays");
@@ -60,7 +59,7 @@ fn affine_capture_is_rejected_when_terminal_consumption_can_be_replayed_twice() 
 fn exact_two_use_capture_matches_two_terminal_replays() {
     for level in LEVELS {
         let phases = compile_source_to_phases_with_options(
-            "shared-handler-exact-replay.gr",
+            "shared-handler-exact-replay.glorious",
             &mixed_replay_source("[2,2]"),
             CompileOptions {
                 optimization_level: level,

@@ -1,4 +1,4 @@
-# Grandiose VM and Self-Hosting Compiler Architecture
+# Grandiose VM and Future Self-Hosting Compiler Architecture
 
 Status: normative architecture for bytecode generation 1. The binary contract is
 specified in [bytecode.md](bytecode.md). Language semantics are specified by
@@ -12,12 +12,19 @@ The compact implementation constraints are summarized in
 contracts are [frontend-design.md](frontend-design.md) and
 [mir-design.md](mir-design.md).
 
+The compiler in this repository is currently the complete Rust `grc` binary.
+The wholesale port of that compiler into Grandiose, the bytecode-hosted compiler
+distribution, and stage-1/2/3 convergence described below are future work tracked
+separately in [remaining-work.md](remaining-work.md#11-port-and-self-hosting-tracked-separately).
+Descriptions of a compiler written in Grandiose state the target architecture,
+not the current implementation.
+
 ## 1. Goals and boundaries
 
 The implementation has three deliverables:
 
 1. `grvm`, a safe Rust verifier and bytecode virtual machine;
-2. `grc`, a compiler written in Grandiose and distributed as verified bytecode;
+2. a future port of `grc` written in Grandiose and distributed as verified bytecode;
 3. a Grandiose bootstrap standard library that defines conventional control,
    collections, formatting, and compiler-building utilities in source rather
    than in the compiler or VM.
@@ -68,19 +75,19 @@ standard library + Grandiose source files
 
 The Rust runtime crate owns decoding, verification, execution, host capability
 adaptation, and process supervision. It contains no parser or language type
-checker. The Grandiose compiler owns all source semantics, cleanup insertion,
-and optimization. The bytecode verifier checks the lowered runtime invariants;
+checker. The compiler owns all source semantics, cleanup insertion, and
+optimization; today that compiler is implemented in Rust, with a wholesale
+Grandiose port planned after its behavior is frozen. The bytecode verifier checks the lowered runtime invariants;
 it does not repeat trait solving or source borrow inference.
 
-The existing AST interpreter may execute the first compiler generation and
-remains a recovery bootstrap tool. It is a differential oracle only for the
-documented compatibility intersection: the compared program must first be
-accepted by the current compiler and must avoid semantics the interpreter does
+The AST evaluator can execute a deliberately small source subset for bootstrap
+and differential tests. It is an oracle only for that documented subset: the
+compared program must first be accepted by the compiler and must avoid semantics the evaluator does
 not model, including ownership disposition, cleanup, and private-field
-authority. Interpreter acceptance is never evidence that a source program
-satisfies `Use`, must-move, borrowing, privacy, or cleanup rules. Existing
-compiler code is neither an architectural input nor part of the bootstrap
-chain.
+authority. Evaluator acceptance is never evidence that a source program
+satisfies `Use`, must-move, borrowing, privacy, or cleanup rules. The current
+Rust compiler is the behavioral source for the future wholesale port, but it is
+not itself part of the bytecode bootstrap chain.
 
 ## 3. Compiler architecture
 
@@ -248,7 +255,7 @@ once before active zero-use fields are destroyed in reverse declaration order.
 Panic is immediate abort and has no cleanup edge.
 
 Optimizer differential tests lower each selected MIR prefix to bytecode and run
-it in the VM. Together with the existing source interpreter this avoids embedding
+it in the VM. Together with the AST evaluator this avoids embedding
 a second complete effect/continuation runtime in the self-hosted compiler.
 
 ### 3.6 Optimization contract
@@ -435,25 +442,26 @@ Linux-only: it relies on Unix process groups, `SIGKILL`, and Linux address-space
 limits. The bytecode format and in-process VM remain portable; non-Linux worker
 supervision requires a future platform adapter and is not claimed here.
 
-## 5. Bootstrap and compatibility
+## 5. Future wholesale port, bootstrap, and artifact evolution
 
-The compiler and bootstrap-standard-library implementation initially stay inside
-a conservative subset accepted by the existing interpreter: nominal data,
+The future Grandiose compiler port and bootstrap-standard-library implementation
+will initially stay inside
+a conservative subset accepted by the AST evaluator: nominal data,
 functions, lexical locals, integer/text/bytes/list values, ordinary calls, and
 existing file/console effects. They avoid relying on features being introduced
 by that same compiler generation. Manifest-bound leaf operations may be provided
-by equivalent interpreter intrinsics during this recovery-only stage.
+by equivalent evaluator intrinsics during this bootstrap stage.
 
 Bootstrap is reproducible:
 
-1. the existing interpreter runs the canonical
+1. the AST evaluator runs the canonical
    `std-lib.glorious + compiler.glorious` bundle and emits `stage1.grbc`;
 2. `grvm` runs stage 1 on those exact bundled bytes to emit stage 2;
 3. `grvm` runs stage 2 on those exact bundled bytes to emit stage 3;
 4. stage 2 and stage 3 must be byte-identical;
 5. stage 2 becomes the checked-in seed and routine development uses it;
-6. interpreter bootstrap remains a recovery test and, for compiler-accepted
-   programs in the documented compatibility intersection, a differential test.
+6. evaluator bootstrap remains a recovery test and, for compiler-accepted
+   programs in its documented subset, a differential test.
 
 Bytecode changes are additive. A new VM lands first and must run every previously
 released valid artifact. The previous compiler then builds a bridge compiler that
@@ -517,10 +525,10 @@ grvm run [--time-limit 120s] [--memory-limit 4096MiB]
 grc [-O0|-O1|-O2|-O3] [--emit mir|bytecode] SOURCE [SOURCE...] -o OUTPUT
 ```
 
-`grc` is the compiler bytecode invoked through `grvm`; a native `grc` executable,
-if supplied, is only a launcher and contains no compiler logic. The launcher or
-compiler driver prepends its distribution's `std-lib.glorious`; the first
-explicit source is the crate root. Its declared external modules are discovered
-recursively under the hybrid layout in `std-lib.md`. Explicit additional inputs
-remain a hermetic embedding API and must correspond to declared modules whenever
-the crate uses module syntax.
+Today `grc` is the native Rust compiler executable and contains the complete
+compiler pipeline. In the future bytecode-hosted distribution, a native `grc`
+may become a thin launcher that invokes compiler bytecode through `grvm`. The
+current compiler embeds the distributed standard library; the first explicit
+source is the crate root. Its declared external modules are discovered recursively
+under the hybrid layout in `std-lib.md`. Explicit named dependency roots use
+`--dependency NAME=PATH`.

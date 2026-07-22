@@ -7,7 +7,7 @@ use grandiose::compile_source_to_phases;
 use grandiose_vm::{Instruction, Value, Vm, verify};
 
 fn compile_verify_run(source: &str, expected: i64) {
-    let phases = compile_source_to_phases("shared-handler-resumption-quantities.gr", source)
+    let phases = compile_source_to_phases("shared-handler-resumption-quantities.glorious", source)
         .expect("source lowers to bytecode phases");
     assert!(
         phases

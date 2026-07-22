@@ -870,7 +870,7 @@ fn json_diagnostics_use_local_files_and_byte_offsets() {
 }
 
 #[test]
-fn compatibility_run_path_remains_available() {
+fn source_evaluator_command_is_not_exposed() {
     let directory = tempdir().unwrap();
     let input = directory.path().join("runner.glorious");
     write(&input, "main() -> () { () }");
@@ -879,9 +879,8 @@ fn compatibility_run_path_remains_available() {
         .arg(&input)
         .output()
         .unwrap();
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
+    assert_eq!(result.status.code(), Some(2));
+    let stderr = String::from_utf8(result.stderr).unwrap();
+    assert!(stderr.contains("must use the `.glorious` extension"));
+    assert!(!stderr.contains("grandiose run <program"));
 }

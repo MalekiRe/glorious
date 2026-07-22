@@ -4663,13 +4663,23 @@ fn infer_register_types(
                     }
                     Instruction::EnumTag { dst, src } => {
                         set(&mut t, *dst, U32)?;
-                        if let Some(src_ty) = t[*src as usize]
-                            && !matches!(
-                                types.get(src_ty as usize).map(Type::representation),
-                                Some(Type::Enum { .. })
-                            )
-                        {
-                            return Err(DecodeError::InvalidTable("enum tag"));
+                        if let Some(src_ty) = t[*src as usize] {
+                            let source = types
+                                .get(src_ty as usize)
+                                .map(Type::representation)
+                                .ok_or(DecodeError::InvalidTable("enum tag"))?;
+                            let source = match source {
+                                Type::RefShared { referent } | Type::RefUnique { referent } => {
+                                    types
+                                        .get(*referent as usize)
+                                        .map(Type::representation)
+                                        .ok_or(DecodeError::InvalidTable("enum tag"))?
+                                }
+                                source => source,
+                            };
+                            if !matches!(source, Type::Enum { .. }) {
+                                return Err(DecodeError::InvalidTable("enum tag"));
+                            }
                         }
                     }
                     Instruction::Primitive { dst, op, args } => {
@@ -5480,6 +5490,14 @@ fn infer_primitive_types(
             }
         }
         ArrayPopMove => {
+            if let Some(reference_ty) = args.first().and_then(|register| known(*register, inferred))
+                && let Some(Type::RefUnique { referent }) =
+                    types.get(reference_ty as usize).map(Type::representation)
+                && let Some(Type::Array { element }) =
+                    types.get(*referent as usize).map(Type::representation)
+            {
+                set(inferred, dst, *element)?;
+            }
             if let Some(element) = known(dst, inferred)
                 && let Some(reference) = array_reference(element, true)
             {
@@ -6814,6 +6832,84 @@ mod tests {
 
         let bytes = canonical(artifact.clone()).encode();
         assert_eq!(Artifact::decode(&bytes).unwrap(), canonical(artifact));
+    }
+
+    #[test]
+    fn enum_tag_type_inference_accepts_a_reference_to_an_enum() {
+        let mut types = Type::predefined();
+        let choice = types.len() as TypeId;
+        types.push(Type::Enum {
+            name: "Choice".into(),
+            variants: vec![EnumVariant {
+                name: "Only".into(),
+                fields: vec![],
+            }],
+            copy: false,
+        });
+        let borrowed_choice = types.len() as TypeId;
+        types.push(Type::RefShared { referent: choice });
+        let artifact = Artifact {
+            required_features: CORE_G1 | REFERENCES_G1,
+            types,
+            functions: vec![Function {
+                flags: 0,
+                name: "borrowed_tag".into(),
+                params: vec![borrowed_choice],
+                return_type: U32,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, borrowed_choice, U32],
+                code_start: 0,
+                code_len: 2,
+                label_slot_count: 0,
+            }],
+            code: vec![
+                Instruction::EnumTag { dst: 2, src: 1 },
+                Instruction::Return { src: Some(2) },
+            ],
+            ..Artifact::default()
+        };
+
+        let expected = canonical(artifact);
+        let bytes = expected.encode();
+        assert_eq!(Artifact::decode(&bytes).unwrap(), expected);
+    }
+
+    #[test]
+    fn array_pop_type_inference_flows_from_the_unique_array_reference() {
+        let mut types = Type::predefined();
+        let array = types.len() as TypeId;
+        types.push(Type::Array { element: I64 });
+        let array_reference = types.len() as TypeId;
+        types.push(Type::RefUnique { referent: array });
+        let artifact = canonical(Artifact {
+            required_features: CORE_G1 | REFERENCES_G1,
+            types,
+            functions: vec![Function {
+                flags: 0,
+                name: "pop".into(),
+                params: vec![array_reference],
+                return_type: I64,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, array_reference, I64],
+                code_start: 0,
+                code_len: 2,
+                label_slot_count: 0,
+            }],
+            code: vec![
+                Instruction::Primitive {
+                    dst: 2,
+                    op: Primitive::ArrayPopMove,
+                    args: vec![1],
+                },
+                Instruction::Return { src: Some(2) },
+            ],
+            ..Artifact::default()
+        });
+
+        let bytes = artifact.encode();
+        assert_eq!(Artifact::decode(&bytes).unwrap(), artifact);
     }
 
     fn type_record_flags(bytes: &[u8], type_id: usize) -> u8 {

@@ -451,7 +451,6 @@ fn associated_host_leaf_aliases_remain_host_calls_at_every_optimization_level() 
         main() -> () { Diagnostic::write("alias") }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -754,7 +753,6 @@ fn distributed_checked_vec_access_and_pop_run_in_both_engines_at_every_level() {
     "#;
 
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -1073,7 +1071,6 @@ fn distributed_vec_rearrangement_removal_insertion_and_append_are_checked_at_eve
     "#;
 
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -1228,7 +1225,7 @@ fn recursive_vec_moving_algorithms_form_tail_edges_and_run_in_constant_frame_spa
         "large-vec-moving.glorious",
         source,
         CompileOptions {
-            optimization_level: OptimizationLevel::O0,
+            optimization_level: OptimizationLevel::O1,
         },
     )
     .unwrap();
@@ -1342,7 +1339,6 @@ fn distributed_text_bytes_and_vec_bridges_execute_at_every_optimization_level() 
         main() -> () { () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -1483,7 +1479,6 @@ fn distributed_safe_bytes_predicates_access_and_slices_run_at_every_optimization
     "#;
 
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -1568,7 +1563,7 @@ fn distributed_safe_bytes_predicates_access_and_slices_run_at_every_optimization
             );
         }
 
-        if optimization_level == OptimizationLevel::O0 {
+        if optimization_level == OptimizationLevel::O1 {
             let large_equal = vec![b'a'; 32 * 1024];
             let mut large_common_prefix = large_equal.clone();
             *large_common_prefix.last_mut().unwrap() = b'b';
@@ -1682,7 +1677,6 @@ fn distributed_utf8_validation_and_text_slicing_are_safe_and_tail_recursive() {
     "#;
 
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -1851,7 +1845,7 @@ fn distributed_utf8_validation_and_text_slicing_are_safe_and_tail_recursive() {
             "UTF-8 recursion must lower to tail calls at {optimization_level:?}"
         );
 
-        if optimization_level == OptimizationLevel::O0 {
+        if optimization_level == OptimizationLevel::O1 {
             let large = vec![b'a'; 32 * 1024];
             let expected = std::str::from_utf8(&large).unwrap().to_owned();
             assert_eq!(

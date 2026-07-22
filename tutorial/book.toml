@@ -1,0 +1,11 @@
+[book]
+title = "A Brainfuck Interpreter in Grandiose"
+authors = ["The Grandiose project"]
+description = "Build a checked, modular Brainfuck interpreter using Grandiose's ownership and effect systems."
+src = "src"
+language = "en"
+
+[build]
+build-dir = "book"
+
+[output.html]

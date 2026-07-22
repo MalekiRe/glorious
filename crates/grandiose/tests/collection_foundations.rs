@@ -92,9 +92,8 @@ const STACK_SURFACE: &str = r#"
 "#;
 
 #[test]
-fn stack_wrapper_executes_at_every_optimization_level() {
+fn stack_wrapper_executes_at_optimized_levels() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

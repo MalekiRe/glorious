@@ -149,9 +149,8 @@ const SURFACE: &str = r#"
 "#;
 
 #[test]
-fn vec_deque_wraps_grows_and_transfers_at_every_optimization_level() {
+fn vec_deque_wraps_grows_and_transfers_at_optimized_levels() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

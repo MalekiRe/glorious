@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use serde::Serialize;
 
 use crate::resolve::{Resolution, ResolvedPackage};
 use crate::util::is_source_path;
@@ -31,26 +30,8 @@ fn canonical_package_path(
     Ok(canonical)
 }
 
-/// One input file's placement inside the concatenated bundle. Written next to
-/// the bundle so diagnostics pointing into it can be traced back by hand (and,
-/// later, remapped automatically once the compiler reports structured spans).
-#[derive(Debug, Serialize)]
-pub struct Segment {
-    pub package: String,
-    pub file: PathBuf,
-    pub start_byte: usize,
-    pub byte_len: usize,
-    pub start_line: usize,
-    pub line_count: usize,
-}
-
-pub struct Bundle {
-    pub text: String,
-    pub segments: Vec<Segment>,
-}
-
 /// Source files of one package in deterministic order: every `.glorious`
-/// (plus legacy `.gr`) under the configured source directories (default
+/// under the configured source directories (default
 /// `src/`), sorted by relative path.
 /// The `entry` file, if any, is excluded here and appended separately.
 pub fn package_sources(package: &ResolvedPackage) -> Result<Vec<PathBuf>> {
@@ -93,11 +74,10 @@ pub fn package_sources(package: &ResolvedPackage) -> Result<Vec<PathBuf>> {
     Ok(files)
 }
 
-/// The resolution's compilation inputs in bundle order: dependencies in
+/// The resolution's compilation inputs in dependency order: dependencies in
 /// topological order, then the root package, then the entry file last (the
 /// root manifest's entry, or a substitute such as a test file). This ordered
-/// list is the compilation unit — the legacy path concatenates it, the
-/// multi-file path passes it to the compiler verbatim.
+/// list is the compilation unit passed to the compiler.
 pub fn input_files(
     resolution: &Resolution,
     entry: Option<&Path>,
@@ -219,11 +199,9 @@ fn dependency_crate_root(package: &ResolvedPackage) -> Result<PathBuf> {
             candidates.push(base);
             continue;
         }
-        for conventional in ["lib.glorious", "lib.gr"] {
-            let candidate = base.join(conventional);
-            if candidate.is_file() {
-                candidates.push(candidate.canonicalize()?);
-            }
+        let candidate = base.join("lib.glorious");
+        if candidate.is_file() {
+            candidates.push(candidate.canonicalize()?);
         }
     }
     candidates.sort();
@@ -231,7 +209,7 @@ fn dependency_crate_root(package: &ResolvedPackage) -> Result<PathBuf> {
     match candidates.as_slice() {
         [root] => Ok(root.clone()),
         [] => bail!(
-            "dependency `{}` has no unambiguous crate root; set `[project].entry`, select a source file, or provide exactly one `lib.glorious`/`lib.gr` under its source directories",
+            "dependency `{}` has no unambiguous crate root; set `[project].entry`, select a source file, or provide exactly one `lib.glorious` under its source directories",
             package.name
         ),
         roots => bail!(
@@ -262,41 +240,4 @@ pub fn module_input_files(
         }
     }
     Ok(files)
-}
-
-/// Concatenate ordered inputs into a single compilation unit for compilers
-/// without multi-file support.
-pub fn assemble(files: &[(String, PathBuf)]) -> Result<Bundle> {
-    let mut text = String::new();
-    let mut segments = Vec::new();
-    for (package, file) in files {
-        let mut content = std::fs::read_to_string(file)
-            .with_context(|| format!("reading source file {}", file.display()))?;
-        if !content.ends_with('\n') {
-            content.push('\n');
-        }
-        segments.push(Segment {
-            package: package.clone(),
-            file: file.clone(),
-            start_byte: text.len(),
-            byte_len: content.len(),
-            start_line: text.lines().count() + 1,
-            line_count: content.lines().count(),
-        });
-        text.push_str(&content);
-    }
-    Ok(Bundle { text, segments })
-}
-
-impl Bundle {
-    /// Write bundle + segment map into `dir`, returning the bundle path.
-    pub fn write(&self, dir: &Path, stem: &str) -> Result<PathBuf> {
-        std::fs::create_dir_all(dir)?;
-        let bundle_path = dir.join(format!("{stem}.glorious"));
-        std::fs::write(&bundle_path, &self.text)
-            .with_context(|| format!("writing {}", bundle_path.display()))?;
-        let map_path = dir.join(format!("{stem}.map.json"));
-        std::fs::write(&map_path, serde_json::to_string_pretty(&self.segments)?)?;
-        Ok(bundle_path)
-    }
 }

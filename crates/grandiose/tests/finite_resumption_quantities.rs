@@ -22,7 +22,7 @@ fn exact_four_shot_resumption_replays_four_independent_snapshots() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("four-shot.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("four-shot.glorious", source).unwrap();
     let choose = artifact
         .protocols
         .iter()
@@ -82,7 +82,7 @@ fn exact_four_shot_call_multiplies_a_live_exact_owner_by_four() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("four-shot-owner.gr", source).unwrap();
+    let phases = compile_source_to_phases("four-shot-owner.glorious", source).unwrap();
     assert!(
         phases
             .core
@@ -116,7 +116,8 @@ fn exact_four_shot_handler_rejects_under_and_over_resumption() {
         ),
     ];
     for (source, expected) in cases {
-        let diagnostics = compile_source_to_bytecode("invalid-four-shot.gr", source).unwrap_err();
+        let diagnostics =
+            compile_source_to_bytecode("invalid-four-shot.glorious", source).unwrap_err();
         assert!(
             diagnostics
                 .iter()

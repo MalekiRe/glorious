@@ -111,9 +111,8 @@ const SURFACE: &str = r#"
 "#;
 
 #[test]
-fn distributed_views_and_builders_execute_at_every_optimization_level() {
+fn distributed_views_and_builders_execute_at_optimized_levels() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

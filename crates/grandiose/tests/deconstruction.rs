@@ -6,7 +6,6 @@ use grandiose_vm::{Instruction, Type, Value, Vm, verify};
 
 fn run_i64_at_all_levels(source_name: &str, source: &str, function: &str, expected: i64) {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -51,13 +50,12 @@ fn exhaustive_deconstruction_releases_empty_and_nonempty_exact_linear_structs() 
     "#;
 
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let phases = compile_source_to_phases_with_options(
-            "deconstruct.gr",
+            "deconstruct.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -129,7 +127,7 @@ fn deconstructed_positive_lower_field_remains_a_checked_owner() {
         main() -> { () }
     "#;
 
-    let errors = compile_source_to_bytecode("deconstruct-discard.gr", source).unwrap_err();
+    let errors = compile_source_to_bytecode("deconstruct-discard.glorious", source).unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error.message.contains("actual Use count 0")
@@ -150,7 +148,7 @@ fn deconstruction_discharges_the_shells_complete_residual_quantity() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("deconstruct-residual-use.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("deconstruct-residual-use.glorious", source).unwrap();
     verify(artifact).unwrap();
 }
 
@@ -166,7 +164,7 @@ fn custom_drop_structs_cannot_be_deconstructed() {
         main() -> { () }
     "#;
 
-    let errors = compile_source_to_bytecode("deconstruct-drop.gr", source).unwrap_err();
+    let errors = compile_source_to_bytecode("deconstruct-drop.glorious", source).unwrap_err();
     assert!(errors.iter().any(|error| {
         error.message.contains("custom Drop") && error.message.contains("deconstruct")
     }));
@@ -186,7 +184,7 @@ fn deconstruction_transfers_reference_field_origins() {
         }
         main() -> { () }
     "#;
-    run_i64_at_all_levels("deconstruct-reference.gr", reference, "answer", 42);
+    run_i64_at_all_levels("deconstruct-reference.glorious", reference, "answer", 42);
 }
 
 #[test]
@@ -201,7 +199,7 @@ fn deconstruction_rejects_erased_fields_before_owner_creation() {
         }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("deconstruct-erased.gr", erased).unwrap_err();
+    let errors = compile_source_to_bytecode("deconstruct-erased.glorious", erased).unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error
@@ -228,7 +226,7 @@ fn deconstruction_bindings_may_shadow_outer_locals() {
         main() -> { answer(); () }
     "#;
 
-    let artifact = compile_source_to_bytecode("deconstruct-shadow.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("deconstruct-shadow.glorious", source).unwrap();
     let answer = artifact
         .functions
         .iter()
@@ -262,7 +260,7 @@ fn exhaustive_tuple_deconstruction_lowers_through_core_mir_and_vm() {
         main() -> { answer(); singleton(); () }
     "#;
 
-    let phases = compile_source_to_phases("tuple-deconstruct.gr", source).unwrap();
+    let phases = compile_source_to_phases("tuple-deconstruct.glorious", source).unwrap();
     assert!(phases.core.canonical_text().contains("deconstruct"));
     assert!(phases.mir.canonical_text().contains("ProjectMove"));
     assert!(
@@ -385,7 +383,7 @@ fn wildcard_rest_and_omitted_fields_are_zero_use_disposals() {
         }
     "#;
 
-    let phases = compile_source_to_phases("zero-use-patterns.gr", source).unwrap();
+    let phases = compile_source_to_phases("zero-use-patterns.glorious", source).unwrap();
     let text = phases.core.canonical_text();
     assert!(text.contains("destroy:t10"));
     assert!(
@@ -462,7 +460,7 @@ fn exact_zero_discard_is_erased_from_aggregate_layout_and_code() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("erased-discard.gr", source).unwrap();
+    let phases = compile_source_to_phases("erased-discard.glorious", source).unwrap();
     assert!(phases.core.canonical_text().contains("destroy-erased"));
 
     let envelope = phases
@@ -507,7 +505,7 @@ fn exact_zero_field_with_observable_drop_keeps_its_runtime_slot() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("observable-zero-drop.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("observable-zero-drop.glorious", source).unwrap();
     let envelope = artifact
         .types
         .iter()
@@ -552,7 +550,7 @@ fn discarded_runtime_fields_drop_in_reverse_declaration_order() {
         }
         main() -> { () }
     "#;
-    let artifact = compile_source_to_bytecode("reverse-discard.gr", source).unwrap();
+    let artifact = compile_source_to_bytecode("reverse-discard.glorious", source).unwrap();
     let function = artifact
         .functions
         .iter()
@@ -595,7 +593,8 @@ fn tuple_deconstruction_rejects_borrowed_and_partially_moved_sources() {
         }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("tuple-deconstruct-borrowed.gr", borrowed).unwrap_err();
+    let errors =
+        compile_source_to_bytecode("tuple-deconstruct-borrowed.glorious", borrowed).unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error.message.contains("cannot be deconstructed") && error.message.contains("borrowed")
@@ -613,8 +612,8 @@ fn tuple_deconstruction_rejects_borrowed_and_partially_moved_sources() {
         }
         main() -> { () }
     "#;
-    let errors =
-        compile_source_to_bytecode("tuple-deconstruct-partial.gr", partially_moved).unwrap_err();
+    let errors = compile_source_to_bytecode("tuple-deconstruct-partial.glorious", partially_moved)
+        .unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error.message.contains("already moved or partially moved")
@@ -638,7 +637,8 @@ fn tuple_deconstructed_positive_lower_elements_remain_checked_owners() {
         main() -> { () }
     "#;
 
-    let errors = compile_source_to_bytecode("tuple-deconstruct-discard.gr", source).unwrap_err();
+    let errors =
+        compile_source_to_bytecode("tuple-deconstruct-discard.glorious", source).unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error.message.contains("actual Use count 0")
@@ -661,7 +661,12 @@ fn tuple_deconstruction_transfers_reference_element_origins() {
         }
         main() -> { () }
     "#;
-    run_i64_at_all_levels("tuple-deconstruct-reference.gr", reference, "answer", 42);
+    run_i64_at_all_levels(
+        "tuple-deconstruct-reference.glorious",
+        reference,
+        "answer",
+        42,
+    );
 }
 
 #[test]
@@ -676,7 +681,8 @@ fn tuple_deconstruction_rejects_erased_elements() {
         }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("tuple-deconstruct-erased.gr", erased).unwrap_err();
+    let errors =
+        compile_source_to_bytecode("tuple-deconstruct-erased.glorious", erased).unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error

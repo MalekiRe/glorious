@@ -20,7 +20,7 @@ fn application(ty: &TypeSyntax) -> (&TypeSyntax, &[TypeSyntax]) {
 }
 
 #[test]
-fn perform_and_handler_paths_retain_effect_type_arguments_with_legacy_names() {
+fn perform_and_handler_paths_retain_effect_type_arguments_with_compatibility_names() {
     let source = r#"
         effect Fail<E> { fail(error: E) -> ! }
         selected() -> i64 {

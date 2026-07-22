@@ -28,13 +28,12 @@ fn nested_generic_nominal_fields_construct_and_forward_at_every_optimization_lev
     "#;
 
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let phases = compile_source_to_phases_with_options(
-            "nested-generic-fields.gr",
+            "nested-generic-fields.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -65,7 +64,7 @@ fn nested_generic_field_use_requires_exact_evidence() {
         bad(value: Ring<Ticket>) -> () { () }
         main() -> () { () }
     "#;
-    let errors = grandiose::compile_source_to_bytecode("nested-generic-use.gr", source)
+    let errors = grandiose::compile_source_to_bytecode("nested-generic-use.glorious", source)
         .expect_err("the nested Vec<NestedSlot<T>> field lacks exact Use<[1,1]> evidence");
     assert!(
         errors.iter().any(|error| {
@@ -97,7 +96,7 @@ fn nested_generic_applications_cannot_hide_owned_cycles_or_growth() {
             "expands infinitely",
         ),
     ] {
-        let errors = grandiose::compile_source_to_bytecode("nested-generic-cycle.gr", source)
+        let errors = grandiose::compile_source_to_bytecode("nested-generic-cycle.glorious", source)
             .expect_err("owned nested generic recursion must remain finite");
         assert!(
             errors.iter().any(|error| error.message.contains(expected)),
@@ -125,10 +124,10 @@ fn nested_generic_field_emission_is_declaration_order_independent() {
         struct NestedSlot<T> { value: T }
     "#;
     assert_eq!(
-        grandiose::compile_source_to_bytecode("nested-order-a.gr", first)
+        grandiose::compile_source_to_bytecode("nested-order-a.glorious", first)
             .unwrap()
             .encode(),
-        grandiose::compile_source_to_bytecode("nested-order-b.gr", reordered)
+        grandiose::compile_source_to_bytecode("nested-order-b.glorious", reordered)
             .unwrap()
             .encode()
     );

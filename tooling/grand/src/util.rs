@@ -3,13 +3,8 @@ use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
-/// Canonical source suffix plus the legacy compatibility suffix accepted
-/// during the G1 tooling migration.
 pub fn is_source_path(path: &Path) -> bool {
-    matches!(
-        path.extension().and_then(|extension| extension.to_str()),
-        Some("glorious" | "gr")
-    )
+    path.extension().and_then(|extension| extension.to_str()) == Some("glorious")
 }
 
 /// XDG-respecting cache root for grand (`~/.cache/grandiose` by default).
@@ -44,8 +39,8 @@ pub fn blake3_hex(bytes: &[u8]) -> String {
     blake3::hash(bytes).to_hex().to_string()
 }
 
-/// Deterministic content hash of a package directory: every `.glorious` or
-/// legacy `.gr` file plus `grandiose.toml`, in sorted relative-path order,
+/// Deterministic content hash of a package directory: every `.glorious`
+/// file plus `grandiose.toml`, in sorted relative-path order,
 /// `.git` excluded.
 pub fn hash_package_dir(dir: &Path) -> Result<String> {
     let mut files: Vec<PathBuf> = Vec::new();

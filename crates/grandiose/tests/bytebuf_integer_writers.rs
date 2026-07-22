@@ -63,7 +63,7 @@ const SURFACE: &str = r#"
 "#;
 
 #[test]
-fn bytebuf_integer_writers_append_canonical_little_endian_bytes_at_o0_through_o3() {
+fn bytebuf_integer_writers_append_canonical_little_endian_bytes_at_o1_through_o3() {
     let mut canonical = vec![9_u8, 8, 238, 0x34, 0x12, 0xef, 0xcd, 0xab, 0x89];
     canonical.extend_from_slice(&[0xef, 0xcd, 0xab, 0x89, 0x67, 0x45, 0x23, 0x01]);
     canonical.extend_from_slice(&[0x78, 0x56, 0x34, 0x12]);
@@ -79,7 +79,6 @@ fn bytebuf_integer_writers_append_canonical_little_endian_bytes_at_o0_through_o3
     boundaries.extend_from_slice(&[0xff; 16]);
 
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

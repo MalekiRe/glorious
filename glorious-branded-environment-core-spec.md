@@ -1715,7 +1715,7 @@ source
   -> seal environments and serialize abstract interface evidence
   -> Typed Core
   -> ownership/control MIR with explicit cleanup and continuation edges
-  -> interpreter or native backend
+  -> verified bytecode backend
 ```
 
 Compiled interfaces serialize abstract callable relations such as:
@@ -1832,7 +1832,7 @@ A conforming implementation demonstrates:
 - no compiler-known control names;
 - no `If`, `Loop`, `Return`, or arithmetic nodes in Typed Core;
 - standard control libraries compiling from ordinary source;
-- interpreter/backend differential tests;
+- evaluator/bytecode differential tests;
 - structured diagnostics that explain environment brands in source terms rather than internal IDs.
 
 ---

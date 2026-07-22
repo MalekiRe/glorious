@@ -106,9 +106,8 @@ fn integer_value(ty: &str, value: u128) -> Value {
     }
 }
 
-fn public_float_surface_executes_at_o0_through_o3_inner() {
+fn public_float_surface_executes_at_o1_through_o3_inner() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -181,11 +180,11 @@ fn public_float_surface_executes_at_o0_through_o3_inner() {
 }
 
 #[test]
-fn public_float_surface_executes_at_o0_through_o3() {
+fn public_float_surface_executes_at_o1_through_o3() {
     std::thread::Builder::new()
         .name("float-source-surface".into())
         .stack_size(32 * 1024 * 1024)
-        .spawn(public_float_surface_executes_at_o0_through_o3_inner)
+        .spawn(public_float_surface_executes_at_o1_through_o3_inner)
         .unwrap()
         .join()
         .unwrap();
@@ -294,7 +293,7 @@ fn float_traits_and_exact_formatting_execute() {
         "float-traits-format.glorious",
         TRAIT_FORMAT_SURFACE,
         CompileOptions {
-            optimization_level: OptimizationLevel::O0,
+            optimization_level: OptimizationLevel::O2,
         },
     )
     .unwrap_or_else(|errors| panic!("{errors:#?}"));

@@ -512,9 +512,9 @@ mod tests {
     fn unqualified_cross_file_occurrences_keep_their_definition_identity() {
         let source = "main() -> () { helper(0) }";
         let bundle = SourceBundle::distributed(
-            Segment::new("/work/src/main.gr", source),
+            Segment::new("/work/src/main.glorious", source),
             [Segment::new(
-                "/work/src/helper.gr",
+                "/work/src/helper.glorious",
                 "helper(value: i64) -> () { () }",
             )],
         );
@@ -524,7 +524,7 @@ mod tests {
             .iter()
             .find(|occurrence| occurrence.identity == "user:value:helper")
             .unwrap();
-        assert_eq!(occurrence.file, "/work/src/main.gr");
+        assert_eq!(occurrence.file, "/work/src/main.glorious");
         assert_eq!(
             &source[occurrence.start_byte..occurrence.end_byte],
             "helper"

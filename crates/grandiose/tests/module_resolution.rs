@@ -269,6 +269,49 @@ fn dependency_roots_are_explicit_packages_and_crate_is_package_local() {
 }
 
 #[test]
+fn dependency_control_callables_and_fixities_retain_specialization_identity() {
+    let bundle = package_bundle(
+        (
+            "/work/app/main.glorious",
+            r#"
+            use control::{when, otherwise};
+            condition() -> Result<(), ()> { Result::Ok(()) }
+            probe() -> i64 {
+                when(condition()) { 42 } otherwise { 0 }
+            }
+            main() -> { () }
+            "#,
+        ),
+        &[(
+            "control",
+            "/deps/control/src/lib.glorious",
+            r#"
+            pub infixr 1 otherwise;
+            effect BranchCase<A, E> { inspect(value: Result<A, E>) -> !; }
+
+            pub when<A, E, B, F>(condition: Result<A, E>, body: F) -> Result<B, E>
+                where F: Fn<(), Output=B>, A: Use<[0,0]> {
+                handle perform BranchCase<A, E>::inspect(condition) {
+                    BranchCase<A, E>::inspect(Result::Ok(_)) => Result::Ok(body()),
+                    BranchCase<A, E>::inspect(Result::Err(error)) => Result::Err(error)
+                }
+            }
+
+            pub otherwise<A, E, F>(value: Result<A, E>, fallback: F) -> A
+                where F: Fn<(), Output=A>, E: Use<[0,0]> {
+                handle perform BranchCase<A, E>::inspect(value) {
+                    BranchCase<A, E>::inspect(Result::Ok(result)) => result,
+                    BranchCase<A, E>::inspect(Result::Err(_)) => fallback()
+                }
+            }
+            "#,
+        )],
+        &[],
+    );
+    assert_eq!(run_root_i64(&bundle, "probe"), 42);
+}
+
+#[test]
 fn dependency_aliases_are_valid_unique_and_do_not_disable_orphan_checks() {
     let invalid = package_bundle(
         ("/work/app/main.glorious", "main()->{()}"),

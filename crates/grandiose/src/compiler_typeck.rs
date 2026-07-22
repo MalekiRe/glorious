@@ -1027,7 +1027,15 @@ impl TypedProgram {
                     core::ExprKind::Perform { .. } | core::ExprKind::Handle { .. }
                 )
             );
+            let anonymous_borrow_boundary = matches!(
+                (&typed.kind, &core.kind),
+                (
+                    TypedExprKind::Borrow { source, .. },
+                    core::ExprKind::TemporaryProjectBorrow { .. }
+                ) if source.ordinal == u32::MAX
+            );
             if !effect_boundary
+                && !anonymous_borrow_boundary
                 && typed
                     .ty
                     .as_ref()
@@ -1209,6 +1217,30 @@ impl TypedProgram {
                             .eq(core_path.iter().map(|step| step.field))
                         && unique == actual_unique
                 }
+                // The allocation-independent pass deliberately represents a
+                // borrow of an anonymous owner with the sentinel local and a
+                // placeholder referent. Core retains the evaluated owner in a
+                // `TemporaryProjectBorrow` instead. There is no local identity
+                // or child provisional expression to compare, but the sentinel
+                // and borrow mode still establish the same ownership choice.
+                (
+                    TypedExprKind::Borrow {
+                        source,
+                        path,
+                        reborrow,
+                        unique,
+                        ..
+                    },
+                    core::ExprKind::TemporaryProjectBorrow {
+                        unique: actual_unique,
+                        ..
+                    },
+                ) => {
+                    source.ordinal == u32::MAX
+                        && path.is_empty()
+                        && !reborrow
+                        && unique == actual_unique
+                }
                 (
                     TypedExprKind::Borrow {
                         source,
@@ -1268,7 +1300,15 @@ impl TypedProgram {
                                     }) && match &destination.root {
                                         core::AssignmentRoot::Local { .. } => children.len() == 1,
                                         core::AssignmentRoot::DereferenceLocal { .. } => {
-                                            children.len() == 2
+                                            // A projected assignment through
+                                            // a named `&mut` local may be
+                                            // written with field auto-deref
+                                            // (`owner.field = value`). The
+                                            // provisional tree then has no
+                                            // explicit dereference child even
+                                            // though Core canonicalizes both
+                                            // spellings to DereferenceLocal.
+                                            matches!(children.len(), 1 | 2)
                                         }
                                         core::AssignmentRoot::Dereference { reference, .. } => {
                                             children.len() == 2
@@ -2630,6 +2670,114 @@ impl<'a> Typer<'a> {
         )
     }
 
+    fn later_binding_type(&self, binding: &str, remaining: &[Stmt]) -> Option<ProvisionalType> {
+        fn binding_name(expression: &Expr) -> Option<&str> {
+            let expression = match &expression.kind {
+                ExprKind::Move(value) => value.as_ref(),
+                _ => expression,
+            };
+            let ExprKind::Variable(path) = &expression.kind else {
+                return None;
+            };
+            (path.len() == 1).then_some(path[0].as_ref())
+        }
+
+        let mut pending = remaining
+            .iter()
+            .map(|statement| match statement {
+                Stmt::Let { value, .. }
+                | Stmt::Deconstruct { value, .. }
+                | Stmt::Expr(value)
+                | Stmt::Assign { value, .. } => value,
+            })
+            .collect::<Vec<_>>();
+        while let Some(expression) = pending.pop() {
+            match &expression.kind {
+                ExprKind::Call(callee, arguments) => {
+                    if let ExprKind::Variable(path) = &callee.kind
+                        && path.len() == 1
+                        && let Some(shape) = self.tables.functions.get(path[0].as_ref())
+                    {
+                        for (argument, formal) in arguments.iter().zip(&shape.params) {
+                            let (candidate, expected) = match (&argument.kind, formal) {
+                                (
+                                    ExprKind::Unary {
+                                        op: UnaryOp::BorrowUnique,
+                                        operand,
+                                    },
+                                    ProvisionalType::Unique(referent),
+                                )
+                                | (
+                                    ExprKind::Unary {
+                                        op: UnaryOp::BorrowShared,
+                                        operand,
+                                    },
+                                    ProvisionalType::Shared(referent),
+                                ) => (operand.as_ref(), referent.as_ref()),
+                                _ => (argument, formal),
+                            };
+                            if binding_name(candidate) == Some(binding) {
+                                return Some(expected.clone());
+                            }
+                        }
+                    }
+                    pending.push(callee);
+                    pending.extend(arguments.iter());
+                }
+                ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                    pending.extend(statements.iter().map(|statement| match statement {
+                        Stmt::Let { value, .. }
+                        | Stmt::Deconstruct { value, .. }
+                        | Stmt::Expr(value)
+                        | Stmt::Assign { value, .. } => value,
+                    }));
+                }
+                ExprKind::Handle {
+                    computation,
+                    clauses,
+                } => {
+                    pending.push(computation);
+                    pending.extend(clauses.iter().map(|clause| &clause.body));
+                }
+                ExprKind::List(values) | ExprKind::Tuple(values) => pending.extend(values.iter()),
+                ExprKind::Struct { fields, .. } => {
+                    pending.extend(fields.iter().map(|(_, value)| value));
+                }
+                ExprKind::Field(subject, _)
+                | ExprKind::Move(subject)
+                | ExprKind::Unary {
+                    operand: subject, ..
+                } => pending.push(subject),
+                ExprKind::Binary { lhs, rhs, .. } => pending.extend([lhs.as_ref(), rhs.as_ref()]),
+                ExprKind::Perform { args, .. } => pending.extend(args.iter()),
+                ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
+                    pending.push(body)
+                }
+                ExprKind::Leave { value, .. } => pending.extend(value.iter().map(AsRef::as_ref)),
+                ExprKind::Is { subject, .. } => pending.push(subject),
+                ExprKind::Resume { resumption, value }
+                | ExprKind::TailResume { resumption, value } => {
+                    pending.push(resumption);
+                    pending.extend(value.iter().map(AsRef::as_ref));
+                }
+                ExprKind::Cancel { resumption } => pending.push(resumption),
+                ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
+                    pending.push(body)
+                }
+                ExprKind::Unit
+                | ExprKind::Int(_)
+                | ExprKind::Float(_)
+                | ExprKind::Char(_)
+                | ExprKind::Byte(_)
+                | ExprKind::ByteString(_)
+                | ExprKind::String(_)
+                | ExprKind::Variable(_)
+                | ExprKind::LabelReference(_) => {}
+            }
+        }
+        None
+    }
+
     fn block(
         &mut self,
         source: &Expr,
@@ -2647,8 +2795,11 @@ impl<'a> Typer<'a> {
                     if let Some(shape) = &recursive_shape {
                         self.bind(name.clone(), shape.clone());
                     }
-                    let value = self.expression(value, None);
+                    let inferred = self.later_binding_type(name, &statements[index + 1..]);
+                    let value = self.expression(value, inferred.as_ref());
                     if let Some(ty) = value.ty.clone() {
+                        self.bind(name.clone(), ty);
+                    } else if let Some(ty) = inferred {
                         self.bind(name.clone(), ty);
                     } else if recursive_shape.is_some() {
                         // Keep the prebound self identity as the final local;

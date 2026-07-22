@@ -107,13 +107,12 @@ fn distributed_result_and_option_combinators_execute_with_o0_o3_parity() {
         ("option_unwrap_none", 21),
     ];
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let artifact = compile_source_to_bytecode_with_options(
-            "result-option-combinators.gr",
+            "result-option-combinators.glorious",
             SOURCE,
             CompileOptions { optimization_level },
         )

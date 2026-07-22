@@ -18,8 +18,7 @@ The server path may be overridden in Zed settings:
 }
 ```
 
-The server advertises its standard library at the read-only virtual URI
-`grandiose-std:/distributed_std.glorious`. Zed currently has no extension API
-for registering the custom `grandiose/virtualDocument` content provider, so a
-definition into that URI cannot be opened in Zed. Project-file definitions and
-all standard LSP features are unaffected.
+The server materializes its embedded standard library in grand's
+content-addressed cache. Go-to-definition returns an ordinary `file://` URI, so
+Zed can open definitions such as the library implementation of `if` without a
+custom content provider. The cached source is marked read-only.

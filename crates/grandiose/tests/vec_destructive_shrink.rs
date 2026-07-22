@@ -56,9 +56,8 @@ const POSITIVE: &str = r#"
 "#;
 
 #[test]
-fn vec_truncate_and_clear_execute_at_every_optimization_level() {
+fn vec_truncate_and_clear_execute_at_optimized_levels() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

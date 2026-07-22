@@ -1,0 +1,11 @@
+[project]
+name = "brainfuck-tutorial"
+version = "0.1.0"
+entry = "src/main.glorious"
+sources = []
+
+[runtime]
+capabilities = ["process.args", "fs.read", "fs.write", "diagnostic"]
+
+[dependencies]
+brainfuck-core = { path = "library" }

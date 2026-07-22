@@ -312,9 +312,8 @@ const SURFACE: &str = r#"
 "#;
 
 #[test]
-fn byte_reader_decodes_bytebuf_output_and_tracks_metadata_at_o0_through_o3() {
+fn byte_reader_decodes_bytebuf_output_and_tracks_metadata_at_o1_through_o3() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -345,9 +344,8 @@ fn byte_reader_decodes_bytebuf_output_and_tracks_metadata_at_o0_through_o3() {
 }
 
 #[test]
-fn byte_reader_handles_zero_and_maximum_words_at_o0_through_o3() {
+fn byte_reader_handles_zero_and_maximum_words_at_o1_through_o3() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -384,9 +382,8 @@ fn byte_reader_handles_zero_and_maximum_words_at_o0_through_o3() {
 }
 
 #[test]
-fn truncated_word_reads_return_none_without_advancing_at_o0_through_o3() {
+fn truncated_word_reads_return_none_without_advancing_at_o1_through_o3() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

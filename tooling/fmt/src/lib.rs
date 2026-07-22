@@ -9,8 +9,8 @@
 
 use std::collections::BTreeSet;
 
-use grandiose::interface::{scan_interfaces, InterfaceSelection};
-use grandiose::lossless::{lex_lossless, LosslessKind};
+use grandiose::interface::{InterfaceSelection, scan_interfaces};
+use grandiose::lossless::{LosslessKind, lex_lossless};
 use grandiose::source_bundle::{Segment, SourceBundle};
 
 const WIDTH: usize = 100;
@@ -90,7 +90,6 @@ enum Doc {
     /// Nothing when flat, newline when broken.
     SoftBreak,
     HardLine,
-    IfBreak(&'static str),
     Concat(Vec<Doc>),
     Nest(usize, Box<Doc>),
     Group(Box<Doc>),
@@ -221,8 +220,23 @@ fn analyze(source: &str, context: Context<'_>) -> Result<BTreeSet<usize>, Error>
     Ok(declarations
         .into_iter()
         .filter(|declaration| declaration.file == context.source_name)
-        .map(|declaration| leading_comment_start(source, declaration.declaration_start_byte))
+        .map(|declaration| declaration_layout_start(source, declaration.declaration_start_byte))
         .collect())
+}
+
+fn declaration_layout_start(source: &str, declaration: usize) -> usize {
+    let before = &source[..declaration.min(source.len())];
+    let trimmed = before.trim_end_matches(char::is_whitespace);
+    let boundary = trimmed
+        .strip_suffix("pub")
+        .filter(|prefix| {
+            prefix
+                .chars()
+                .next_back()
+                .is_none_or(|character| !character.is_alphanumeric() && character != '_')
+        })
+        .map_or(declaration, |prefix| prefix.len());
+    leading_comment_start(source, boundary)
 }
 
 fn leading_comment_start(source: &str, declaration: usize) -> usize {
@@ -279,6 +293,54 @@ fn normalize(tokens: &mut Vec<Token>) {
         }
         index += 1;
     }
+    remove_redundant_trailing_commas(tokens);
+}
+
+/// The renderer used to add a trailing comma whenever a parenthesized group
+/// broke. Remove those grammar-neutral commas from multi-item groups while
+/// preserving the one-element tuple spelling `(value,)`.
+fn remove_redundant_trailing_commas(tokens: &mut Vec<Token>) {
+    let mut index = 0;
+    while index + 1 < tokens.len() {
+        if tokens[index].text != "," || !matches!(tokens[index + 1].text.as_str(), ")" | "]") {
+            index += 1;
+            continue;
+        }
+        let close = tokens[index + 1].text.as_str();
+        let open = if close == ")" { "(" } else { "[" };
+        let mut depth = 0usize;
+        let mut opening = None;
+        for candidate in (0..index).rev() {
+            match tokens[candidate].text.as_str() {
+                text if text == close => depth += 1,
+                text if text == open && depth > 0 => depth -= 1,
+                text if text == open => {
+                    opening = Some(candidate);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let Some(opening) = opening else {
+            index += 1;
+            continue;
+        };
+        let mut nested = 0usize;
+        let has_separator = tokens[opening + 1..index].iter().any(|token| {
+            match token.text.as_str() {
+                "(" | "[" | "{" => nested += 1,
+                ")" | "]" | "}" => nested = nested.saturating_sub(1),
+                "," if nested == 0 => return true,
+                _ => {}
+            }
+            false
+        });
+        if has_separator {
+            tokens.remove(index);
+        } else {
+            index += 1;
+        }
+    }
 }
 
 fn is_comment(token: &Token) -> bool {
@@ -307,7 +369,8 @@ impl<'tokens> DocumentBuilder<'tokens> {
             if let Some(previous) = &previous {
                 parts.push(self.separator(previous, &token, top_level));
             }
-            if let Some(expected) = matching_close(&token.text) {
+            let generic = token.text == "<" && self.is_generic_open(self.cursor);
+            if let Some(expected) = matching_close(&token.text).or(generic.then_some(">")) {
                 self.cursor += 1;
                 let inner_start = self.cursor;
                 let (inner, inner_had_comma) = self.sequence(Some(expected), false);
@@ -327,9 +390,13 @@ impl<'tokens> DocumentBuilder<'tokens> {
                 let open = token.text.clone();
                 let close_text = expected.to_string();
                 let force_block = open == "{"
-                    && self.tokens[inner_start..self.cursor.saturating_sub(1)]
+                    && (self.tokens[inner_start..self.cursor.saturating_sub(1)]
                         .iter()
-                        .any(|token| token.text == ";");
+                        .any(|token| token.text == ";")
+                        || self
+                            .tokens
+                            .get(self.cursor)
+                            .is_some_and(|token| token.text == "else"));
                 let boundary = if force_block {
                     Doc::HardLine
                 } else if open == "{" {
@@ -337,16 +404,8 @@ impl<'tokens> DocumentBuilder<'tokens> {
                 } else {
                     Doc::SoftBreak
                 };
-                let already_trailing = self
-                    .cursor
-                    .checked_sub(2)
-                    .and_then(|index| self.tokens.get(index))
-                    .is_some_and(|token| token.text == ",");
-                let trailing = if open == "(" && inner_had_comma && !already_trailing {
-                    Doc::IfBreak(",")
-                } else {
-                    Doc::Empty
-                };
+                let _ = inner_had_comma;
+                let trailing = Doc::Empty;
                 let delimited = if matches!(inner, Doc::Empty) {
                     Doc::concat([Doc::Text(open), Doc::Text(close_text)])
                 } else {
@@ -379,6 +438,12 @@ impl<'tokens> DocumentBuilder<'tokens> {
     }
 
     fn separator(&self, previous: &Token, current: &Token, top_level: bool) -> Doc {
+        if previous.text == "pub" {
+            return Doc::Space;
+        }
+        if previous.text == ";" {
+            return Doc::HardLine;
+        }
         if top_level
             && self.declarations.contains(&current.start)
             && previous.start != current.start
@@ -418,6 +483,15 @@ impl<'tokens> DocumentBuilder<'tokens> {
                 Doc::Space
             };
         }
+        if previous.text == "}"
+            && !matches!(current.text.as_str(), "else" | "with")
+            && self.starts_callable_declaration(self.cursor)
+        {
+            return Doc::concat([Doc::HardLine, Doc::HardLine]);
+        }
+        if current.text == "<" && self.is_generic_open(self.cursor) {
+            return Doc::Empty;
+        }
         match current.text.as_str() {
             "," | ";" | ")" | "]" | "}" | "." | "::" => return Doc::Empty,
             ":" => {
@@ -442,8 +516,9 @@ impl<'tokens> DocumentBuilder<'tokens> {
         }
         match previous.text.as_str() {
             "." | "::" | "(" | "[" => Doc::Empty,
-            "," | ";" => Doc::SoftLine,
+            "," => Doc::SoftLine,
             ":" => Doc::Space,
+            _ if self.is_prefix_operator(self.cursor.saturating_sub(1)) => Doc::Empty,
             _ if operator(previous) && operator(current) && !current.spaced => Doc::Empty,
             _ if operator(previous) || operator(current) => Doc::Space,
             _ if word_like(previous) && word_like(current) => Doc::Space,
@@ -451,6 +526,96 @@ impl<'tokens> DocumentBuilder<'tokens> {
             _ if current.spaced => Doc::Space,
             _ => Doc::Empty,
         }
+    }
+
+    fn starts_callable_declaration(&self, index: usize) -> bool {
+        let Some(current) = self.tokens.get(index) else {
+            return false;
+        };
+        if current.text == "pub" {
+            return self.starts_callable_declaration(index + 1);
+        }
+        if current.kind != Kind::Word {
+            return false;
+        }
+        self.tokens
+            .get(index + 1)
+            .is_some_and(|next| next.text == "(" || next.text == "<")
+    }
+
+    fn is_generic_open(&self, index: usize) -> bool {
+        let Some(previous) = index
+            .checked_sub(1)
+            .and_then(|index| self.tokens.get(index))
+        else {
+            return false;
+        };
+        if previous.kind != Kind::Word {
+            return false;
+        }
+        let mut depth = 0usize;
+        let mut close = None;
+        for candidate in index..self.tokens.len() {
+            match self.tokens[candidate].text.as_str() {
+                "<" => depth += 1,
+                ">" if depth > 1 => depth -= 1,
+                ">" => {
+                    close = Some(candidate);
+                    break;
+                }
+                ";" | "{" | "}" if depth == 1 => break,
+                _ => {}
+            }
+        }
+        let Some(close) = close else {
+            return false;
+        };
+        let before = index
+            .checked_sub(2)
+            .and_then(|index| self.tokens.get(index))
+            .map(|token| token.text.as_str());
+        let after = self.tokens.get(close + 1).map(|token| token.text.as_str());
+        previous.text.chars().next().is_some_and(char::is_uppercase)
+            || matches!(
+                before,
+                Some(
+                    ":" | "->"
+                        | ","
+                        | "("
+                        | "["
+                        | "<"
+                        | "="
+                        | "where"
+                        | "type"
+                        | "for"
+                        | "impl"
+                        | "as"
+                        | "::"
+                )
+            )
+            || matches!(after, Some("(" | "::"))
+    }
+
+    fn is_prefix_operator(&self, index: usize) -> bool {
+        let Some(token) = self.tokens.get(index) else {
+            return false;
+        };
+        if !matches!(token.text.as_str(), "&" | "*" | "!" | "-" | "+") {
+            return false;
+        }
+        let Some(previous) = index
+            .checked_sub(1)
+            .and_then(|index| self.tokens.get(index))
+        else {
+            return true;
+        };
+        matches!(
+            previous.text.as_str(),
+            "(" | "[" | "{" | "," | ";" | ":" | "=" | "->" | "=>" | "/" | "&" | "*"
+        ) || matches!(
+            previous.text.as_str(),
+            "let" | "return" | "move" | "is" | "perform" | "resume" | "tail"
+        )
     }
 }
 
@@ -477,7 +642,7 @@ fn operator(token: &Token) -> bool {
 
 fn flat_width(doc: &Doc) -> Option<usize> {
     match doc {
-        Doc::Empty | Doc::IfBreak(_) => Some(0),
+        Doc::Empty => Some(0),
         Doc::Text(text) => Some(text.chars().count()),
         Doc::Space | Doc::SoftLine => Some(1),
         Doc::SoftBreak => Some(0),
@@ -525,12 +690,6 @@ impl Renderer {
                 }
             }
             Doc::HardLine => self.newline(indent),
-            Doc::IfBreak(text) => {
-                if !flat {
-                    self.output.push_str(text);
-                    self.column += text.len();
-                }
-            }
             Doc::Concat(parts) => {
                 for part in parts {
                     self.doc(part, indent, flat);
@@ -758,6 +917,28 @@ mod tests {
         assert!(output.contains("Packet::Data(first, .., last)"), "{output}");
         assert!(output.contains("value is (first,)"), "{output}");
         assert!(output.contains("Point { x }"), "{output}");
+        assert_eq!(formatted(&output), output);
+    }
+
+    #[test]
+    fn keeps_visibility_generics_and_prefix_operators_canonical() {
+        let source = "pub struct Holder<T>{private value:T}\n\
+                      pub parse<T,E>(value:& mut Holder<T>,tape:& Holder<T>)->Result<T,E>{\n\
+                          let shared=&* tape;\n\
+                          let field=& tape.value;\n\
+                          Result::Ok(* shared)\n\
+                      }";
+        let output = formatted(source);
+        assert!(output.contains("pub struct Holder<T>"), "{output}");
+        assert!(output.contains("pub parse<T, E>"), "{output}");
+        assert!(output.contains("&mut Holder<T>"), "{output}");
+        assert!(output.contains("tape: &Holder<T>"), "{output}");
+        assert!(output.contains("Result<T, E>"), "{output}");
+        assert!(output.contains("&*tape"), "{output}");
+        assert!(output.contains("&tape.value"), "{output}");
+        assert!(output.contains("Result::Ok(*shared)"), "{output}");
+        assert!(!output.contains("pub\n"), "{output}");
+        assert!(!output.contains(",)"), "{output}");
         assert_eq!(formatted(&output), output);
     }
 }

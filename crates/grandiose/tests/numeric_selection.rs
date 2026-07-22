@@ -82,16 +82,15 @@ fn interpreter_value(ty: &str, value: i64) -> InterpreterValue {
 }
 
 #[test]
-fn public_numeric_selection_runs_at_o0_through_o3() {
+fn public_numeric_selection_runs_at_o1_through_o3() {
     let source = source();
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let phases = compile_source_to_phases_with_options(
-            "numeric-selection.gr",
+            "numeric-selection.glorious",
             &source,
             CompileOptions { optimization_level },
         )
@@ -172,7 +171,7 @@ fn recovery_interpreter_agrees_on_widths_and_clamp_boundaries() {
                 format!("typed(value: {ty}) -> {ty} {{ value }} main() -> {ty} {{ {expression} }}");
             assert_eq!(
                 run_source(
-                    &format!("recovery-{label}-{ty}.gr"),
+                    &format!("recovery-{label}-{ty}.glorious"),
                     &source,
                     vec![],
                     &mut NoHost,

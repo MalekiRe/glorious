@@ -4,8 +4,12 @@ Syntax highlighting (TextMate grammar) plus full LSP features via `grand-lsp`:
 diagnostics as you type, document symbols, go-to-definition (locals and
 cross-file), hover with signatures + doc comments, completion (locals,
 workspace, std prelude, keywords), find-references, rename, and formatting.
-Canonical `.glorious` sources and the legacy `.gr` compatibility suffix are
-both recognized.
+Only `.glorious` source files are recognized.
+
+Go-to-definition on standard-library names such as `if` opens the exact library
+source embedded in the running server. The server materializes that source as a
+read-only, content-addressed cache file; it does not create or modify a project
+file, and VS Code needs no custom URI provider.
 
 ## Setup
 

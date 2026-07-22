@@ -1084,7 +1084,7 @@ lowers a selected MIR prefix with optimization disabled, emits an in-memory G1
 artifact, and executes that artifact in `grvm` with deterministic mock host
 capabilities. The optimized prefix is lowered and executed the same way. The
 For programs first accepted by the compiler and confined to the documented
-bootstrap compatibility intersection, the existing source interpreter supplies
+bootstrap subset, the AST evaluator supplies
 an independent source-level behavioral oracle. It is not an ownership,
 borrowing, privacy, or cleanup-conformance oracle: those properties are checked
 by the frontend, MIR validation, artifact verification, and VM execution.
@@ -1104,8 +1104,8 @@ Every transformation pass has four test layers:
    rejection;
 3. differential VM execution of bytecode lowered immediately before and after the
    pass;
-4. end-to-end comparison of source-interpreter, `-O0`, and optimized bytecode for
-   compiler-accepted programs in the interpreter compatibility intersection;
+4. end-to-end comparison of the AST evaluator, `-O0`, and optimized bytecode for
+   compiler-accepted programs in the evaluator's documented subset;
    otherwise comparison of `-O0` and optimized bytecode.
 
 The differential harness supplies the same serialized parameters and mock host

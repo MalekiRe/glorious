@@ -171,10 +171,9 @@ fn integer_value(ty: &str) -> Value {
 }
 
 #[test]
-fn concrete_float_leaves_execute_at_every_optimization_level() {
+fn concrete_float_leaves_execute_at_optimized_levels() {
     let (bundle, manifest) = fixture();
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

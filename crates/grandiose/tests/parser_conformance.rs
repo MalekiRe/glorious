@@ -93,7 +93,7 @@ fn numeric_source_payloads_survive_parsing_without_eager_narrowing() {
 
 #[test]
 fn typed_anonymous_callables_are_distinct_from_groups_and_tuples() {
-    let program = parse_ok("main() -> { (x: i64, y: i64) -> i64 { x + y } }");
+    let program = parse_ok("infixl 30 +; main() -> { (x: i64, y: i64) -> i64 { x + y } }");
     let ExprKind::TypedClosure {
         params,
         return_type,
@@ -192,10 +192,12 @@ fn resumption_operations_are_structural_not_spelled_calls() {
         body_expr(&program, "main"),
         ExprKind::TailResume { value: Some(_), .. }
     ));
-    // A non-normative argument count still parses; the resumption-consumption
-    // phase owns that diagnostic with full context.
-    let program = parse_ok("main() -> { cancel(k, k) }");
-    assert!(matches!(body_expr(&program, "main"), ExprKind::Call(_, _)));
+    let diagnostics = parse_err("main() -> { cancel(k, k) }");
+    assert_eq!(diagnostics[0].title, "invalid resumption operation");
+    assert_eq!(
+        diagnostics[0].message,
+        "`cancel` requires exactly 1 argument, found 2"
+    );
 }
 
 #[test]
@@ -309,8 +311,8 @@ fn contextual_blocks_stay_undecided_in_trailing_and_operand_positions() {
 
 #[test]
 fn flat_operator_sequences_group_by_declared_fixity() {
-    // Left-associative default vocabulary.
-    let program = parse_ok("main() -> { 1 - 2 - 3 }");
+    // A library declaration gives the operator left associativity.
+    let program = parse_ok("infixl 30 -; main() -> { 1 - 2 - 3 }");
     let ExprKind::Binary { lhs, .. } = body_expr(&program, "main") else {
         panic!();
     };
@@ -369,8 +371,7 @@ fn fixity_redeclaration_of_a_declared_operator_is_diagnosed_with_both_sites() {
     assert_eq!(duplicate.title, "operator fixity declared more than once");
     assert_eq!(duplicate.related.len(), 1);
 
-    // Overriding a sourceless migration default is the library taking
-    // ownership of the operator, not an error.
+    // A single source declaration establishes the operator's fixity.
     parse_ok("infixl 30 +; main() -> { 1 + 2 }");
 }
 
@@ -417,7 +418,7 @@ fn new_literal_expressions_parse_structurally() {
         body_expr(&program, "main"),
         ExprKind::ByteString(_)
     ));
-    let program = parse_ok("main() -> { 0xFF + 0b1_01 }");
+    let program = parse_ok("infixl 30 +; main() -> { 0xFF + 0b1_01 }");
     assert!(matches!(
         body_expr(&program, "main"),
         ExprKind::Binary { .. }
@@ -425,37 +426,37 @@ fn new_literal_expressions_parse_structurally() {
 }
 
 #[test]
-fn legacy_normalization_rewrites_only_forms_with_legacy_equivalents() {
+fn parse_preserves_structural_resumptions_and_context_blocks() {
     let source = "main() -> { resume(k, 1); cancel(k); tail(k, 2); select() { 2 } }";
     let (program, diagnostics) = parser::parse_recovering(lexer::lex(source).unwrap());
     assert!(diagnostics.is_empty());
-    let normalized = parser::normalize_for_legacy_consumers(program);
-    let ExprKind::Block(statements) = &normalized.functions[0].body.kind else {
+    let ExprKind::Block(statements) = &program.functions[0].body.kind else {
         panic!();
     };
     let Stmt::Expr(first) = &statements[0] else {
         panic!();
     };
-    let ExprKind::Call(callee, args) = &first.kind else {
-        panic!("resume normalizes to the legacy call shape");
+    let ExprKind::Resume { value, .. } = &first.kind else {
+        panic!("resume must remain structural");
     };
-    assert!(matches!(&callee.kind, ExprKind::Variable(path) if path[0].as_ref() == "resume"));
-    assert_eq!(args.len(), 2);
+    assert!(value.is_some());
     let Stmt::Expr(third) = &statements[2] else {
         panic!();
     };
-    let ExprKind::Call(callee, args) = &third.kind else {
-        panic!("tail normalizes to the legacy call shape");
+    let ExprKind::TailResume { value, .. } = &third.kind else {
+        panic!("tail resume must remain structural");
     };
-    assert!(matches!(&callee.kind, ExprKind::Variable(path) if path[0].as_ref() == "tail"));
-    assert_eq!(args.len(), 2);
+    assert!(value.is_some());
     let Stmt::Expr(fourth) = &statements[3] else {
         panic!();
     };
     let ExprKind::Call(_, args) = &fourth.kind else {
         panic!();
     };
-    assert!(matches!(args.last().unwrap().kind, ExprKind::Block(_)));
+    assert!(matches!(
+        args.last().unwrap().kind,
+        ExprKind::ContextBlock(_)
+    ));
 }
 
 #[test]

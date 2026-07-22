@@ -1,9 +1,9 @@
 # Remaining implementation work
 
 This is the open implementation backlog for the Rust Grandiose compiler and G1
-VM. Completed work is intentionally omitted. The legacy LLVM compiler, eventual
-wholesale port into Grandiose, and self-hosting convergence are excluded from
-current compiler-completion percentages and are tracked separately below.
+VM. Completed work is intentionally omitted. The eventual wholesale port into
+Grandiose and self-hosting convergence are excluded from current
+compiler-completion percentages and are tracked separately below.
 
 Further VM hardening is out of the active product scope. Optimizer breadth is
 retained below but scheduled after the core language and tooling tranche.

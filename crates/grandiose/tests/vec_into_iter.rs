@@ -96,9 +96,8 @@ const SURFACE: &str = r#"
 "#;
 
 #[test]
-fn vec_into_iter_orders_exhausts_and_handles_linearity_at_every_level() {
+fn vec_into_iter_orders_exhausts_and_handles_linearity_at_optimized_levels() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

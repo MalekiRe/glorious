@@ -2,7 +2,7 @@ mod analysis;
 mod position;
 mod rpc;
 
-use std::io::{BufReader, Stdout};
+use std::io::{BufReader, Stdout, Write};
 use std::path::PathBuf;
 use std::sync::{
     Arc, Mutex,
@@ -11,7 +11,7 @@ use std::sync::{
 };
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Context, Result, bail};
 use grandiose::diagnostic::Severity;
 use grandiose::interface::DeclarationKind;
 use grandiose::lossless::{LosslessKind, lex_lossless};
@@ -23,9 +23,9 @@ use crate::rpc::{path_to_uri, read_message, uri_to_path, write_message};
 
 /// didChange publishes are debounced by this much; requests flush eagerly.
 const DEBOUNCE: Duration = Duration::from_millis(120);
-
 struct Server {
     workspace: Workspace,
+    standard_library_path: PathBuf,
     output: Stdout,
     published: std::collections::BTreeSet<PathBuf>,
     /// A didChange happened and diagnostics have not been re-published yet.
@@ -42,6 +42,71 @@ enum Target {
     Local(Local),
     Decl(SemanticDeclaration),
     Std(SemanticDeclaration),
+}
+
+/// Materialize the compiler-embedded standard library under grand's normal
+/// content-addressed cache. Definition results can then use an ordinary
+/// `file://` URI that every LSP client knows how to open. The immutable digest
+/// directory also prevents one server version from changing the document
+/// underneath another running editor.
+fn materialize_standard_library() -> Result<PathBuf> {
+    let source = grandiose::source_bundle::DISTRIBUTED_STANDARD_LIBRARY_SOURCE;
+    let digest = grand::util::blake3_hex(source.as_bytes());
+    let directory = grand::util::cache_root()?
+        .join("lsp")
+        .join("stdlib")
+        .join(digest);
+    let path = directory.join("distributed_std.glorious");
+
+    if path.exists() {
+        let existing = std::fs::read_to_string(&path)
+            .with_context(|| format!("read cached standard library `{}`", path.display()))?;
+        if existing == source {
+            mark_readonly(&path)?;
+            return Ok(path);
+        }
+        bail!(
+            "cached standard library `{}` does not match its content address",
+            path.display()
+        );
+    }
+
+    std::fs::create_dir_all(&directory)
+        .with_context(|| format!("create standard-library cache `{}`", directory.display()))?;
+    let temporary = directory.join(format!(
+        ".distributed_std.glorious.{}.tmp",
+        std::process::id()
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&temporary)
+        .with_context(|| format!("create `{}`", temporary.display()))?;
+    file.write_all(source.as_bytes())?;
+    file.sync_all()?;
+    drop(file);
+
+    if let Err(error) = std::fs::rename(&temporary, &path) {
+        // Another language-server process can win the same content-addressed
+        // write. Accept its identical complete file and discard ours.
+        let _ = std::fs::remove_file(&temporary);
+        if std::fs::read_to_string(&path).ok().as_deref() != Some(source) {
+            return Err(error)
+                .with_context(|| format!("install cached standard library `{}`", path.display()));
+        }
+    }
+    mark_readonly(&path)?;
+    Ok(path)
+}
+
+fn mark_readonly(path: &std::path::Path) -> Result<()> {
+    let mut permissions = std::fs::metadata(path)?.permissions();
+    if !permissions.readonly() {
+        permissions.set_readonly(true);
+        std::fs::set_permissions(path, permissions)?;
+    }
+    Ok(())
 }
 
 fn main() -> Result<()> {
@@ -86,6 +151,7 @@ fn main() -> Result<()> {
 
     let mut server = Server {
         workspace: Workspace::new(std::env::current_dir()?),
+        standard_library_path: materialize_standard_library()?,
         output: std::io::stdout(),
         published: Default::default(),
         dirty: false,
@@ -170,7 +236,7 @@ impl Server {
                                     "tokenTypes": [
                                         "type", "enum", "interface", "struct", "variable",
                                         "event", "function", "keyword", "comment", "string",
-                                        "number", "operator"
+                                        "number", "operator", "enumMember"
                                     ],
                                     "tokenModifiers": []
                                 },
@@ -180,6 +246,12 @@ impl Server {
                             "referencesProvider": true,
                             "renameProvider": true,
                             "workspace": {"workspaceFolders": {"supported": true, "changeNotifications": false}},
+                            "experimental": {
+                                "standardLibrary": {
+                                    "uri": path_to_uri(&self.standard_library_path),
+                                    "readOnly": true,
+                                }
+                            },
                         },
                         "serverInfo": {"name": "grand-lsp", "version": env!("CARGO_PKG_VERSION")},
                     }),
@@ -292,8 +364,20 @@ impl Server {
                             ),
                         })
                     }
-                    // Std names have no navigable file.
-                    Some(Target::Std(_)) | None => Value::Null,
+                    Some(Target::Std(declaration)) => {
+                        let text = grandiose::source_bundle::DISTRIBUTED_STANDARD_LIBRARY_SOURCE;
+                        let index = LineIndex::new(text);
+                        json!({
+                            "uri": path_to_uri(&self.standard_library_path),
+                            "range": byte_range(
+                                &index,
+                                text,
+                                declaration.name_start_byte,
+                                declaration.name_end_byte,
+                            ),
+                        })
+                    }
+                    None => Value::Null,
                 };
                 self.respond(&id, result)?;
             }
@@ -655,6 +739,17 @@ impl Server {
                 return Ok(Some(Target::Decl(declaration.clone())));
             }
         }
+        // On an initial late compiler failure there is no last-good semantic
+        // snapshot yet. The analysis layer may still have an exact, uniquely
+        // resolved top-level interface occurrence from the current source.
+        // This branch is intentionally after normal semantic/local lookup and
+        // is used only for definition navigation.
+        if let Some(declaration) = analysis.initial_error_declaration_at(&path, offset) {
+            if declaration.identity.starts_with("std:") {
+                return Ok(Some(Target::Std(declaration.clone())));
+            }
+            return Ok(Some(Target::Decl(declaration.clone())));
+        }
         Ok(None)
     }
 
@@ -890,7 +985,8 @@ fn signature_parameters(signature: &str) -> Vec<String> {
 
 fn semantic_tokens(analysis: &analysis::Analysis, path: &std::path::Path, text: &str) -> Value {
     let mut spans = std::collections::BTreeMap::<(usize, usize), u32>::new();
-    if let Ok(tokens) = lex_lossless(text) {
+    let lossless_tokens = lex_lossless(text).ok();
+    if let Some(tokens) = &lossless_tokens {
         for token in tokens {
             let token_type = match token.kind {
                 LosslessKind::LineComment | LosslessKind::BlockComment => Some(8),
@@ -939,6 +1035,74 @@ fn semantic_tokens(analysis: &analysis::Analysis, path: &std::path::Path, text: 
             DeclarationKind::Fixity => 11,
         };
         spans.insert((occurrence.start_byte, occurrence.end_byte), token_type);
+
+        // An enum/effect path names two different semantic roles. Keep the
+        // resolved prefix colored as the nominal declaration, but color the
+        // variant/operation after `::` as an enum member. In particular this
+        // prevents LSP semantic highlighting from flattening handler clauses
+        // such as `BrainIo::read(...)` into one effect-colored path.
+        if matches!(
+            declaration.kind,
+            DeclarationKind::Enum | DeclarationKind::Effect
+        ) && let Some(tokens) = &lossless_tokens
+            && let Some((member_start, member_end)) =
+                qualified_member_after(tokens, text, occurrence.end_byte)
+        {
+            spans.insert((member_start, member_end), 12);
+        }
+    }
+
+    // Constructors are resolved in the compiler's type/pattern namespaces and
+    // are not always emitted as top-level value occurrences. Recover their
+    // two-token role only from a unique nominal declaration visible to this
+    // compilation root, and only while the compiler snapshot still owns the
+    // complete path span. Ambiguous equal names deliberately receive no
+    // semantic override, leaving syntax highlighting intact.
+    if let Some(tokens) = &lossless_tokens {
+        let significant = tokens
+            .iter()
+            .filter(|token| !token.kind.is_trivia())
+            .collect::<Vec<_>>();
+        for window in significant.windows(3) {
+            let [prefix, separator, member] = window else {
+                continue;
+            };
+            if prefix.kind != LosslessKind::Identifier
+                || separator.kind != LosslessKind::Punctuation
+                || separator.text(text) != "::"
+                || member.kind != LosslessKind::Identifier
+                || !analysis.semantic_span_is_current(path, member.span.end)
+            {
+                continue;
+            }
+            let name = prefix.text(text);
+            let mut candidates = analysis
+                .declarations
+                .iter()
+                .chain(&analysis.std_declarations)
+                .filter(|declaration| {
+                    declaration.name == name
+                        && matches!(
+                            declaration.kind,
+                            DeclarationKind::Enum | DeclarationKind::Effect
+                        )
+                        && (declaration.identity.starts_with("std:")
+                            || analysis.same_root(path, &declaration.file))
+                });
+            let Some(declaration) = candidates.next() else {
+                continue;
+            };
+            if candidates.any(|candidate| candidate.identity != declaration.identity) {
+                continue;
+            }
+            let prefix_type = match declaration.kind {
+                DeclarationKind::Enum => 1,
+                DeclarationKind::Effect => 5,
+                _ => unreachable!(),
+            };
+            spans.insert((prefix.span.start, prefix.span.end), prefix_type);
+            spans.insert((member.span.start, member.span.end), 12);
+        }
     }
 
     let index = LineIndex::new(text);
@@ -971,6 +1135,22 @@ fn semantic_tokens(analysis: &analysis::Analysis, path: &std::path::Path, text: 
         previous_start = start_character;
     }
     json!({"data": data})
+}
+
+fn qualified_member_after(
+    tokens: &[grandiose::lossless::LosslessToken],
+    text: &str,
+    prefix_end: usize,
+) -> Option<(usize, usize)> {
+    let mut following = tokens
+        .iter()
+        .filter(|token| !token.kind.is_trivia() && token.span.start >= prefix_end);
+    let separator = following.next()?;
+    if separator.kind != LosslessKind::Punctuation || separator.text(text) != "::" {
+        return None;
+    }
+    let member = following.next()?;
+    (member.kind == LosslessKind::Identifier).then_some((member.span.start, member.span.end))
 }
 
 fn insert_single_line_spans(

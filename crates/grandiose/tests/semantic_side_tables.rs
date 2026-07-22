@@ -21,8 +21,8 @@ main() -> () { () }
 "#;
     let secondary = "helper(value: i64) -> i64 { value }\n";
     let bundle = SourceBundle::distributed(
-        Segment::new("主.gr", primary),
-        [Segment::new("helper.gr", secondary)],
+        Segment::new("主.glorious", primary),
+        [Segment::new("helper.glorious", secondary)],
     );
     let phases = compile_bundle_to_phases_with_options(
         &bundle,
@@ -37,7 +37,7 @@ main() -> () { () }
         .iter()
         .find(|body| body.identity == "body:selected")
         .expect("principal source body snapshot");
-    assert_eq!(selected_body.file, "主.gr");
+    assert_eq!(selected_body.file, "主.glorious");
     assert!(selected_body.source_fingerprint != 0);
     assert!(
         selected_body
@@ -61,7 +61,7 @@ main() -> () { () }
         2,
         "shadowed bindings need distinct semantic identities"
     );
-    assert_eq!(chosen.file, "主.gr");
+    assert_eq!(chosen.file, "主.glorious");
     assert_eq!(chosen.inferred_type, "i64");
     assert_eq!(
         &primary[chosen.definition_start_byte..chosen.definition_end_byte],
@@ -82,7 +82,7 @@ main() -> () { () }
     let parameter = snapshot
         .locals
         .iter()
-        .find(|local| local.file == "helper.gr" && local.name == "value")
+        .find(|local| local.file == "helper.glorious" && local.name == "value")
         .expect("secondary-file parameter");
     assert_eq!(parameter.inferred_type, "i64");
     assert_eq!(
@@ -107,7 +107,7 @@ selected() -> i64 {
 }
 main() -> () { () }
 "#;
-    let bundle = SourceBundle::distributed(Segment::new("handler.gr", source), []);
+    let bundle = SourceBundle::distributed(Segment::new("handler.glorious", source), []);
     let phases = compile_bundle_to_phases_with_options(
         &bundle,
         CompileOptions {

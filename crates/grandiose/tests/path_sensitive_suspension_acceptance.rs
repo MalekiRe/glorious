@@ -15,7 +15,6 @@ fn function_id(artifact: &Artifact, name: &str) -> u32 {
 
 fn run_all_levels(source_name: &str, source: &str, expected: Value) {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -59,7 +58,6 @@ fn assert_rejected(source_name: &str, source: &str, needles: &[&str]) {
 
 fn assert_rejected_all_levels(source_name: &str, source: &str, needles: &[&str]) {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -100,7 +98,7 @@ const PURE_DECLARED_ROW: &str = r#"
 #[test]
 fn desired_pure_interprocedural_summary_ignores_an_unperformed_declared_effect() {
     run_all_levels(
-        "pure-declared-row-accept.gr",
+        "pure-declared-row-accept.glorious",
         PURE_DECLARED_ROW,
         Value::I64(42),
     );
@@ -138,7 +136,7 @@ const CONDITIONAL_MULTIPLIER: &str = r#"
 #[test]
 fn desired_conditional_normal_multipliers_are_checked_as_a_finite_set() {
     run_all_levels(
-        "conditional-multiplier-accept.gr",
+        "conditional-multiplier-accept.glorious",
         CONDITIONAL_MULTIPLIER,
         Value::I64(82),
     );
@@ -165,7 +163,7 @@ const OPTIONAL_ALWAYS_RESUMED: &str = r#"
 #[test]
 fn desired_per_owner_cancellation_disposition_accepts_the_always_resumed_path() {
     run_all_levels(
-        "optional-always-resumed-accept.gr",
+        "optional-always-resumed-accept.glorious",
         OPTIONAL_ALWAYS_RESUMED,
         Value::I64(42),
     );
@@ -176,7 +174,7 @@ fn actual_optional_cancellation_still_rejects_a_positive_lower_owner() {
     let source =
         OPTIONAL_ALWAYS_RESUMED.replace("resume(continuation, 2)", "{ cancel(continuation); 42 }");
     assert_rejected(
-        "optional-real-cancel-reject.gr",
+        "optional-real-cancel-reject.glorious",
         &source,
         &[
             "cancellation/abandonment path",
@@ -204,7 +202,7 @@ fn affine_cancellation_disposition_executes_and_round_trips() {
         }
         main() -> { () }
     "#;
-    run_all_levels("affine-cancel-disposition.gr", source, Value::I64(42));
+    run_all_levels("affine-cancel-disposition.glorious", source, Value::I64(42));
 }
 
 const RESULT_OWNER: &str = r#"
@@ -233,7 +231,11 @@ const RESULT_OWNER: &str = r#"
 
 #[test]
 fn each_multishot_result_owner_carries_an_independent_obligation() {
-    run_all_levels("result-owner-obligations.gr", RESULT_OWNER, Value::I64(42));
+    run_all_levels(
+        "result-owner-obligations.glorious",
+        RESULT_OWNER,
+        Value::I64(42),
+    );
 }
 
 #[test]
@@ -243,7 +245,7 @@ fn abandoning_an_effectful_restricted_result_remains_a_use_error() {
         "ticket;\n            0",
     );
     assert_rejected(
-        "result-owner-abandon-reject.gr",
+        "result-owner-abandon-reject.glorious",
         &source,
         &["must-move value cannot be discarded"],
     );
@@ -269,7 +271,7 @@ fn mandatory_suspension_preserves_a_partially_moved_residual_owner() {
         }
         main() -> { () }
     "#;
-    run_all_levels("mandatory-residual-owner.gr", source, Value::I64(42));
+    run_all_levels("mandatory-residual-owner.glorious", source, Value::I64(42));
 }
 
 #[test]
@@ -303,7 +305,7 @@ fn exact_multishot_preserves_and_replays_a_restricted_residual_field() {
         main() -> { () }
     "#;
     run_all_levels(
-        "multishot-restricted-residual-owner.gr",
+        "multishot-restricted-residual-owner.glorious",
         source,
         Value::I64(84),
     );
@@ -334,7 +336,7 @@ fn cancellation_rejects_a_partially_moved_residual_with_positive_lower_use() {
         main() -> { () }
     "#;
     assert_rejected(
-        "optional-positive-residual-reject.gr",
+        "optional-positive-residual-reject.glorious",
         source,
         &[
             "owner on a cancellation/abandonment path",
@@ -379,7 +381,11 @@ fn conditional_residual_shell_survives_join_and_mandatory_suspension() {
         }
         main() -> { () }
     "#;
-    run_all_levels("conditional-residual-suspension.gr", source, Value::I64(42));
+    run_all_levels(
+        "conditional-residual-suspension.glorious",
+        source,
+        Value::I64(42),
+    );
 }
 
 #[test]
@@ -424,14 +430,14 @@ fn conditional_residual_join_rejects_mismatched_paths_and_field_use_quantities()
         1,
     );
     assert_rejected_all_levels(
-        "conditional-residual-mismatch.gr",
+        "conditional-residual-mismatch.glorious",
         &mismatched,
         &["branches leave different ownership or borrow states"],
     );
 
     let invalid_field_quantity = base.replacen("consume_ticket(move ticket);", "ticket;", 1);
     assert_rejected_all_levels(
-        "conditional-field-quantity.gr",
+        "conditional-field-quantity.glorious",
         &invalid_field_quantity,
         &["must-move value cannot be discarded after a whole-value move"],
     );
@@ -461,7 +467,11 @@ fn one_sided_affine_partial_move_retires_each_branch_before_the_join() {
         }
         main() -> { () }
     "#;
-    run_all_levels("one-sided-partial-retirement.gr", source, Value::I64(42));
+    run_all_levels(
+        "one-sided-partial-retirement.glorious",
+        source,
+        Value::I64(42),
+    );
 }
 
 #[test]
@@ -487,7 +497,7 @@ fn one_sided_positive_owner_cannot_be_retired_at_the_join() {
         main() -> { () }
     "#;
     assert_rejected_all_levels(
-        "one-sided-positive-partial-join.gr",
+        "one-sided-positive-partial-join.glorious",
         source,
         &["branches leave different ownership or borrow states"],
     );
@@ -525,12 +535,12 @@ fn conditional_zero_use_field_is_retired_before_join_and_suspension() {
         main() -> { () }
     "#;
     run_all_levels(
-        "conditional-field-through-suspension.gr",
+        "conditional-field-through-suspension.glorious",
         source,
         Value::I64(42),
     );
     let phases = compile_source_to_phases_with_options(
-        "conditional-field-through-suspension.gr",
+        "conditional-field-through-suspension.glorious",
         source,
         CompileOptions {
             optimization_level: OptimizationLevel::O2,
@@ -591,7 +601,7 @@ fn custom_drop_still_forbids_conditional_partial_moves() {
         main() -> { () }
     "#;
     assert_rejected_all_levels(
-        "conditional-custom-drop-partial-move.gr",
+        "conditional-custom-drop-partial-move.glorious",
         source,
         &["custom Drop hook"],
     );
@@ -632,9 +642,13 @@ fn distinct_affine_residuals_retire_before_effectful_tail_call() {
         }
         main() -> { () }
     "#;
-    run_all_levels("distinct-residual-tail-effect.gr", source, Value::I64(42));
+    run_all_levels(
+        "distinct-residual-tail-effect.glorious",
+        source,
+        Value::I64(42),
+    );
     let phases = compile_source_to_phases_with_options(
-        "distinct-residual-tail-effect.gr",
+        "distinct-residual-tail-effect.glorious",
         source,
         CompileOptions {
             optimization_level: OptimizationLevel::O2,
@@ -686,7 +700,7 @@ fn distinct_affine_residuals_retire_before_abandoning_effect() {
         main() -> { () }
     "#;
     run_all_levels(
-        "distinct-residual-abandon-effect.gr",
+        "distinct-residual-abandon-effect.glorious",
         source,
         Value::I64(42),
     );
@@ -716,7 +730,7 @@ fn distinct_positive_residuals_cannot_be_retired_at_join() {
         main() -> { () }
     "#;
     assert_rejected_all_levels(
-        "distinct-positive-residual-join.gr",
+        "distinct-positive-residual-join.glorious",
         source,
         &["branches leave different ownership or borrow states"],
     );
@@ -743,7 +757,7 @@ fn refined_enum_payload_reference_survives_mandatory_suspension_all_levels() {
         main() -> { () }
     "#;
     run_all_levels(
-        "refined-enum-reference-suspension.gr",
+        "refined-enum-reference-suspension.glorious",
         source,
         Value::I64(42),
     );
@@ -757,7 +771,7 @@ fn enum_payload_projection_requires_exact_dominating_variant_and_bounds() {
         main() -> { () }
     "#;
     assert_rejected_all_levels(
-        "enum-payload-without-proof.gr",
+        "enum-payload-without-proof.glorious",
         without_proof,
         &["dominating active-variant proof"],
     );
@@ -773,7 +787,7 @@ fn enum_payload_projection_requires_exact_dominating_variant_and_bounds() {
         main() -> { () }
     "#;
     assert_rejected_all_levels(
-        "enum-payload-out-of-bounds.gr",
+        "enum-payload-out-of-bounds.glorious",
         out_of_bounds,
         &["no payload field `1`"],
     );
@@ -788,7 +802,7 @@ fn enum_payload_projection_requires_exact_dominating_variant_and_bounds() {
         main() -> { () }
     "#;
     assert_rejected_all_levels(
-        "enum-proof-does-not-cross-join.gr",
+        "enum-proof-does-not-cross-join.glorious",
         proof_does_not_cross_join,
         &["dominating active-variant proof"],
     );

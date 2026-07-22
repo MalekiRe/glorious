@@ -3,13 +3,12 @@ use grandiose_vm::verify;
 
 fn assert_compiles_all_modes(source: &str) {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let artifact = compile_source_to_bytecode_with_options(
-            "generic-use-drop-grounding.gr",
+            "generic-use-drop-grounding.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -94,7 +93,7 @@ fn receiverless_associated_method_uses_generic_where_evidence() {
     let recovery = source.replace("main() -> () { () }", "main() -> i64 { answer() }");
     assert_eq!(
         grandiose::run_source(
-            "generic-default-recovery.gr",
+            "generic-default-recovery.glorious",
             &recovery,
             vec![],
             &mut grandiose::eval::SystemHost::default(),
@@ -138,7 +137,7 @@ fn borrowed_pattern_view_does_not_authorize_mutation_through_an_aliased_unique_r
         }
         main() -> () { () }
     "#;
-    let errors = grandiose::compile_source_to_bytecode("borrowed-pattern-alias.gr", source)
+    let errors = grandiose::compile_source_to_bytecode("borrowed-pattern-alias.glorious", source)
         .expect_err("mutation while a shared alias is live must be rejected");
     assert!(
         errors.iter().any(|error| {
@@ -233,7 +232,7 @@ fn overlapping_structural_ownership_heads_are_rejected() {
         impl<U> Use<[0,infinity]> for Ambiguous<i64, U> {}
         main() -> () { () }
     "#;
-    let errors = grandiose::compile_source_to_bytecode("overlapping-use-heads.gr", source)
+    let errors = grandiose::compile_source_to_bytecode("overlapping-use-heads.glorious", source)
         .expect_err("the two heads overlap at Ambiguous<i64, i64>");
     assert!(
         errors
@@ -255,7 +254,7 @@ fn overlapping_structural_drop_heads_are_rejected() {
         }
         main() -> () { () }
     "#;
-    let errors = grandiose::compile_source_to_bytecode("overlapping-drop-heads.gr", source)
+    let errors = grandiose::compile_source_to_bytecode("overlapping-drop-heads.glorious", source)
         .expect_err("the two heads overlap at Ambiguous<i64, i64>");
     assert!(
         errors.iter().any(|error| {
@@ -308,8 +307,9 @@ fn unresolved_ownership_projection_reports_the_missing_ground_evidence() {
         }
         main() -> () { () }
     "#;
-    let errors = grandiose::compile_source_to_bytecode("missing-ownership-projection.gr", source)
-        .expect_err("an unresolved ground ownership projection must be diagnosed");
+    let errors =
+        grandiose::compile_source_to_bytecode("missing-ownership-projection.glorious", source)
+            .expect_err("an unresolved ground ownership projection must be diagnosed");
     assert!(
         errors.iter().any(|error| {
             error.message.contains("conditional Use where subject")
@@ -353,7 +353,7 @@ fn projection_hidden_owned_cycles_and_growth_are_rejected() {
         expose(value: Loop<i64>) -> Loop<i64> { value }
         main() -> () { () }
     "#;
-    let errors = grandiose::compile_source_to_bytecode("projection-cycle.gr", cycle)
+    let errors = grandiose::compile_source_to_bytecode("projection-cycle.glorious", cycle)
         .expect_err("projection-normalized owned recursion must be rejected");
     assert!(
         errors
@@ -369,7 +369,7 @@ fn projection_hidden_owned_cycles_and_growth_are_rejected() {
         expose(value: Grow<i64>) -> Grow<i64> { value }
         main() -> () { () }
     "#;
-    let errors = grandiose::compile_source_to_bytecode("projection-growth.gr", growth)
+    let errors = grandiose::compile_source_to_bytecode("projection-growth.glorious", growth)
         .expect_err("projection-normalized constructor growth must be rejected");
     assert!(
         errors

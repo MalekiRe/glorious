@@ -35,7 +35,7 @@ fn function_id(artifact: &grandiose_vm::Artifact, name: &str) -> u32 {
 }
 
 #[test]
-fn step_budget_is_monotonic_and_failed_spends_are_atomic_at_o0_through_o3() {
+fn step_budget_is_monotonic_and_failed_spends_are_atomic_at_o1_through_o3() {
     let source = r#"
         spend() -> usize {
             let budget = StepBudget::new(5);
@@ -50,7 +50,6 @@ fn step_budget_is_monotonic_and_failed_spends_are_atomic_at_o0_through_o3() {
         main() -> () { () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -214,9 +213,8 @@ const TYPED_TOOLKIT_SURFACE: &str = r#"
 "#;
 
 #[test]
-fn typed_compiler_toolkit_executes_at_o0_through_o3() {
+fn typed_compiler_toolkit_executes_at_o1_through_o3() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -348,9 +346,8 @@ const STORAGE_TOOLKIT_SURFACE: &str = r#"
 "#;
 
 #[test]
-fn storage_and_source_toolkit_execute_at_o0_through_o3() {
+fn storage_and_source_toolkit_execute_at_o1_through_o3() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

@@ -42,7 +42,7 @@ fn terminal_specialization_inside_a_handler_has_the_ground_row_and_executes() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("generic-terminal-handler.gr", source).unwrap();
+    let phases = compile_source_to_phases("generic-terminal-handler.glorious", source).unwrap();
     let specialized = phases
         .artifact
         .functions
@@ -64,7 +64,7 @@ fn terminal_specialization_inside_a_handler_has_the_ground_row_and_executes() {
             .any(|instruction| matches!(instruction, Instruction::Perform { dst: None, .. }))
     );
     assert_eq!(
-        run("generic-terminal-handler.gr", source, "selected"),
+        run("generic-terminal-handler.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -84,7 +84,7 @@ fn resumptive_generic_relay_preserves_the_row_through_two_planned_calls() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("generic-resumptive-relay.gr", source).unwrap();
+    let phases = compile_source_to_phases("generic-resumptive-relay.glorious", source).unwrap();
     let ask = phases
         .artifact
         .protocols
@@ -101,7 +101,7 @@ fn resumptive_generic_relay_preserves_the_row_through_two_planned_calls() {
         assert_eq!(specialized.outward_protocols, [ask]);
     }
     assert_eq!(
-        run("generic-resumptive-relay.gr", source, "selected"),
+        run("generic-resumptive-relay.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -127,7 +127,8 @@ fn grounded_mandatory_outward_call_carries_exact_argument_and_result() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("generic-mandatory-linear-edge.gr", source).unwrap();
+    let phases =
+        compile_source_to_phases("generic-mandatory-linear-edge.glorious", source).unwrap();
     let relay = phases
         .artifact
         .functions
@@ -142,7 +143,7 @@ fn grounded_mandatory_outward_call_carries_exact_argument_and_result() {
         .expect("missing source protocol `Ask`") as u32;
     assert_eq!(relay.outward_protocols, [ask]);
     assert_eq!(
-        run("generic-mandatory-linear-edge.gr", source, "selected"),
+        run("generic-mandatory-linear-edge.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -174,7 +175,8 @@ fn grounded_two_shot_call_weights_caller_and_callee_owners_independently() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("generic-two-shot-call-capture.gr", source).unwrap();
+    let phases =
+        compile_source_to_phases("generic-two-shot-call-capture.glorious", source).unwrap();
     assert!(
         phases
             .artifact
@@ -183,7 +185,7 @@ fn grounded_two_shot_call_weights_caller_and_callee_owners_independently() {
             .any(|function| function.name.starts_with("$specialization$relay#"))
     );
     assert_eq!(
-        run("generic-two-shot-call-capture.gr", source, "selected"),
+        run("generic-two-shot-call-capture.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -214,7 +216,7 @@ fn grounded_two_shot_call_rejects_non_two_use_caller_owner() {
         main() -> { () }
     "#;
     assert_rejected(
-        "generic-two-shot-invalid-caller-capture.gr",
+        "generic-two-shot-invalid-caller-capture.glorious",
         source,
         &[
             "requires every live restricted owner",
@@ -243,7 +245,7 @@ fn mandatory_specialization_call_preserves_a_live_shared_loan() {
         main() -> { () }
     "#;
     assert_eq!(
-        run("mandatory-specialization-loan.gr", source, "selected"),
+        run("mandatory-specialization-loan.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -268,7 +270,7 @@ fn optional_specialization_call_cancels_a_crossing_loan_cleanly() {
         main() -> { () }
     "#;
     assert_eq!(
-        run("optional-specialization-loan.gr", source, "selected"),
+        run("optional-specialization-loan.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -296,7 +298,7 @@ fn optional_generic_outward_call_rejects_exact_caller_capture() {
         main() -> { () }
     "#;
     assert_rejected(
-        "generic-optional-exact-caller-capture.gr",
+        "generic-optional-exact-caller-capture.glorious",
         source,
         &[
             "restricted-use value at an effectful call",
@@ -330,7 +332,11 @@ fn optional_generic_outward_call_cancels_affine_caller_capture_cleanly() {
         main() -> { () }
     "#;
     assert_eq!(
-        run("generic-optional-affine-cancel.gr", source, "selected"),
+        run(
+            "generic-optional-affine-cancel.glorious",
+            source,
+            "selected"
+        ),
         Value::I64(42)
     );
 }
@@ -349,7 +355,7 @@ fn generic_body_may_handle_its_effect_internally_without_leaking_a_row() {
         text_value() -> i64 { closed("closed") }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("generic-internal-handler.gr", source).unwrap();
+    let phases = compile_source_to_phases("generic-internal-handler.glorious", source).unwrap();
     let specializations = phases
         .artifact
         .functions
@@ -363,11 +369,11 @@ fn generic_body_may_handle_its_effect_internally_without_leaking_a_row() {
             .all(|function| function.outward_protocols.is_empty())
     );
     assert_eq!(
-        run("generic-internal-handler.gr", source, "int_value"),
+        run("generic-internal-handler.glorious", source, "int_value"),
         Value::I64(9)
     );
     assert_eq!(
-        run("generic-internal-handler.gr", source, "text_value"),
+        run("generic-internal-handler.glorious", source, "text_value"),
         Value::I64(9)
     );
 }
@@ -383,7 +389,7 @@ fn the_handled_computation_may_be_a_nested_planned_generic_call() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("planned-generic-handler-body.gr", source).unwrap();
+    let phases = compile_source_to_phases("planned-generic-handler-body.glorious", source).unwrap();
     let stop = phases
         .artifact
         .protocols
@@ -410,7 +416,7 @@ fn the_handled_computation_may_be_a_nested_planned_generic_call() {
         .expect("the source Stop handler must have a body function");
     assert_eq!(handler_body.outward_protocols, [stop]);
     assert_eq!(
-        run("planned-generic-handler-body.gr", source, "selected"),
+        run("planned-generic-handler-body.glorious", source, "selected"),
         Value::I64(73)
     );
 }
@@ -437,9 +443,10 @@ fn nested_row_aliases_and_two_ground_instances_are_order_deterministic() {
             main() -> {{ () }}
         "#
     );
-    let first_artifact = compile_source_to_bytecode("generic-ground-order-a.gr", &first).unwrap();
+    let first_artifact =
+        compile_source_to_bytecode("generic-ground-order-a.glorious", &first).unwrap();
     let reordered_artifact =
-        compile_source_to_bytecode("generic-ground-order-b.gr", &reordered).unwrap();
+        compile_source_to_bytecode("generic-ground-order-b.glorious", &reordered).unwrap();
     assert_eq!(first_artifact.encode(), reordered_artifact.encode());
     assert_eq!(
         first_artifact
@@ -450,11 +457,11 @@ fn nested_row_aliases_and_two_ground_instances_are_order_deterministic() {
         2
     );
     assert_eq!(
-        run("generic-ground-order-a.gr", &first, "int_value"),
+        run("generic-ground-order-a.glorious", &first, "int_value"),
         Value::I64(42)
     );
     assert_eq!(
-        run("generic-ground-order-a.gr", &first, "text_value"),
+        run("generic-ground-order-a.glorious", &first, "text_value"),
         Value::Text("stopped".into())
     );
 }
@@ -468,7 +475,7 @@ fn caller_of_an_effectful_ground_specialization_requires_the_complete_row() {
         main() -> { () }
     "#;
     assert_rejected(
-        "generic-missing-caller-row.gr",
+        "generic-missing-caller-row.glorious",
         source,
         &["requires outward effect", "outward effect"],
     );
@@ -494,7 +501,11 @@ fn terminal_generic_call_transfers_an_exact_linear_payload_once() {
         main() -> { () }
     "#;
     assert_eq!(
-        run("generic-linear-terminal-payload.gr", source, "selected"),
+        run(
+            "generic-linear-terminal-payload.glorious",
+            source,
+            "selected"
+        ),
         Value::I64(91)
     );
 }
@@ -519,7 +530,7 @@ fn fixed_positive_lower_local_moves_through_mandatory_one_shot_capture() {
         main() -> { () }
     "#;
     assert_eq!(
-        run("generic-fixed-linear-capture.gr", source, "selected"),
+        run("generic-fixed-linear-capture.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -543,7 +554,11 @@ fn direct_exact_owner_is_consumed_after_mandatory_resumption() {
         main() -> { () }
     "#;
     assert_eq!(
-        run("direct-linear-continuation-capture.gr", source, "selected"),
+        run(
+            "direct-linear-continuation-capture.glorious",
+            source,
+            "selected"
+        ),
         Value::I64(42)
     );
 }
@@ -567,7 +582,11 @@ fn owner_moved_before_perform_is_not_falsely_captured() {
         main() -> { () }
     "#;
     assert_eq!(
-        run("moved-before-continuation-capture.gr", source, "selected"),
+        run(
+            "moved-before-continuation-capture.glorious",
+            source,
+            "selected"
+        ),
         Value::I64(42)
     );
 }
@@ -590,7 +609,7 @@ fn mandatory_resumption_does_not_relax_exact_owner_underuse_or_double_use() {
         main() -> { () }
     "#;
     assert_rejected(
-        "underused-linear-continuation-capture.gr",
+        "underused-linear-continuation-capture.glorious",
         underused,
         &[
             "actual Use count 0",
@@ -617,7 +636,7 @@ fn mandatory_resumption_does_not_relax_exact_owner_underuse_or_double_use() {
         main() -> { () }
     "#;
     assert_rejected(
-        "double-used-linear-continuation-capture.gr",
+        "double-used-linear-continuation-capture.glorious",
         doubled,
         &["already moved", "cannot be used again", "at most 1 use"],
     );
@@ -642,7 +661,7 @@ fn affine_custom_drop_owner_crosses_mandatory_resumption_with_one_drop_glue() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("drop-continuation-capture.gr", source).unwrap();
+    let phases = compile_source_to_phases("drop-continuation-capture.glorious", source).unwrap();
     let resource = phases
         .artifact
         .types
@@ -661,7 +680,7 @@ fn affine_custom_drop_owner_crosses_mandatory_resumption_with_one_drop_glue() {
         1
     );
     assert_eq!(
-        run("drop-continuation-capture.gr", source, "selected"),
+        run("drop-continuation-capture.glorious", source, "selected"),
         Value::I64(42)
     );
 }
@@ -678,7 +697,7 @@ fn drop_reachability_cannot_hide_an_effectful_generic_specialization() {
         main() -> { let resource = Resource { marker: 0 }; () }
     "#;
     assert_rejected(
-        "effectful-generic-drop-root.gr",
+        "effectful-generic-drop-root.glorious",
         source,
         &[
             "effectful call from Drop::drop",
@@ -705,7 +724,7 @@ fn drop_rejects_a_generic_specialization_with_internally_closed_control() {
         main() -> { let resource = Resource { marker: 0 }; () }
     "#;
     assert_rejected(
-        "closed-effect-generic-drop-root.gr",
+        "closed-effect-generic-drop-root.glorious",
         source,
         &["effectful call from Drop::drop", "pure, non-suspending"],
     );
@@ -723,7 +742,8 @@ fn typed_handler_payload_infers_a_generic_clause_call_and_executes() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("handler-payload-generic-inference.gr", source).unwrap();
+    let phases =
+        compile_source_to_phases("handler-payload-generic-inference.glorious", source).unwrap();
     assert_eq!(
         phases
             .artifact
@@ -734,7 +754,11 @@ fn typed_handler_payload_infers_a_generic_clause_call_and_executes() {
         1
     );
     assert_eq!(
-        run("handler-payload-generic-inference.gr", source, "selected"),
+        run(
+            "handler-payload-generic-inference.glorious",
+            source,
+            "selected"
+        ),
         Value::I64(42)
     );
 }
@@ -753,7 +777,8 @@ fn nested_enum_payload_binder_infers_a_generic_clause_call() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("nested-handler-generic-inference.gr", source).unwrap();
+    let phases =
+        compile_source_to_phases("nested-handler-generic-inference.glorious", source).unwrap();
     assert_eq!(
         phases
             .artifact
@@ -764,7 +789,11 @@ fn nested_enum_payload_binder_infers_a_generic_clause_call() {
         1
     );
     assert_eq!(
-        run("nested-handler-generic-inference.gr", source, "selected"),
+        run(
+            "nested-handler-generic-inference.glorious",
+            source,
+            "selected"
+        ),
         Value::I64(42)
     );
 }
@@ -782,7 +811,7 @@ fn generic_clause_call_can_consume_the_result_of_resume() {
         main() -> { () }
     "#;
     let phases =
-        compile_source_to_phases("resumption-result-generic-inference.gr", source).unwrap();
+        compile_source_to_phases("resumption-result-generic-inference.glorious", source).unwrap();
     assert_eq!(
         phases
             .artifact
@@ -793,7 +822,11 @@ fn generic_clause_call_can_consume_the_result_of_resume() {
         1
     );
     assert_eq!(
-        run("resumption-result-generic-inference.gr", source, "selected"),
+        run(
+            "resumption-result-generic-inference.glorious",
+            source,
+            "selected"
+        ),
         Value::I64(42)
     );
 }

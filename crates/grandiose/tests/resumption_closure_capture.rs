@@ -28,7 +28,7 @@ fn exact_two_shot_capture_is_borrowed_once_then_consumed_by_the_final_call() {
         }
         main() -> { () }
     "#;
-    let (artifact, value) = run_answer("closure-mode0-mode2.gr", source);
+    let (artifact, value) = run_answer("closure-mode0-mode2.glorious", source);
     assert_eq!(value, Value::I64(42));
     assert!(artifact.code.iter().any(|instruction| matches!(
         instruction,
@@ -60,7 +60,7 @@ fn optional_resumption_capture_may_be_abandoned_with_its_closure() {
         }
         main() -> { () }
     "#;
-    let (_, value) = run_answer("abandoned-optional-closure.gr", source);
+    let (_, value) = run_answer("abandoned-optional-closure.glorious", source);
     assert_eq!(value, Value::I64(42));
 }
 
@@ -82,7 +82,7 @@ fn captured_resumption_closure_survives_retain_and_aggregate_roundtrip() {
         }
         main() -> { () }
     "#;
-    let (_, value) = run_answer("retained-aggregate-closure.gr", source);
+    let (_, value) = run_answer("retained-aggregate-closure.glorious", source);
     assert_eq!(value, Value::I64(42));
 }
 
@@ -101,7 +101,7 @@ fn duplicated_callable_aliases_cannot_exceed_one_shared_capture_quantity() {
         }
         main() -> { () }
     "#;
-    let diagnostics = compile_source_to_bytecode("duplicated-closure-alias.gr", source)
+    let diagnostics = compile_source_to_bytecode("duplicated-closure-alias.glorious", source)
         .expect_err("duplicated aliases laundered excess resumes through a [2,2] capture");
     assert!(
         diagnostics.iter().any(|diagnostic| {

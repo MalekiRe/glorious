@@ -41,8 +41,8 @@ fn direct_tail_positions_form_in_core_mir_and_bytecode_deterministically() {
         forever() -> ! { forever() }
         main() -> { () }
     "#;
-    let first = compile_source_to_phases("direct-tail.gr", source).unwrap();
-    let second = compile_source_to_phases("direct-tail.gr", source).unwrap();
+    let first = compile_source_to_phases("direct-tail.glorious", source).unwrap();
+    let second = compile_source_to_phases("direct-tail.glorious", source).unwrap();
     assert_eq!(first.core_fingerprint(), second.core_fingerprint());
     assert_eq!(first.mir_fingerprint(), second.mir_fingerprint());
     assert_eq!(first.artifact.encode(), second.artifact.encode());
@@ -89,7 +89,7 @@ fn tail_calls_protect_must_move_arguments_and_clean_safe_affine_remainders() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("owned-tail.gr", source).unwrap();
+    let phases = compile_source_to_phases("owned-tail.glorious", source).unwrap();
     assert_direct_tail_call(&phases.artifact, "relay", "token_identity");
     assert_direct_tail_call(&phases.artifact, "cleanup_safe", "leaf");
     let cleanup = function_code(&phases.artifact, "cleanup_safe");
@@ -122,7 +122,7 @@ fn observable_drop_and_reference_cleanup_keep_ordinary_call_return_order() {
         borrowed(value: &i64) -> i64 { leaf() }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("tail-fallback.gr", source).unwrap();
+    let phases = compile_source_to_phases("tail-fallback.glorious", source).unwrap();
     for name in ["guarded", "borrowed"] {
         let code = function_code(&phases.artifact, name);
         assert!(
@@ -150,7 +150,7 @@ fn outward_effectful_direct_tail_call_preserves_the_handler_delimiter() {
         }
         main() -> { () }
     "#;
-    let phases = compile_source_to_phases("effect-tail.gr", source).unwrap();
+    let phases = compile_source_to_phases("effect-tail.glorious", source).unwrap();
     assert_direct_tail_call(&phases.artifact, "forward", "leaf");
     let forward = &phases.artifact.functions[function_id(&phases.artifact, "forward") as usize];
     let ask = phases
@@ -179,7 +179,7 @@ fn compiled_deep_forwarding_chain_executes_with_frame_replacement() {
     source.push_str(&format!(
         "step{DEPTH}() -> i64 {{ 42 }}\nmain() -> {{ () }}\n"
     ));
-    let phases = compile_source_to_phases("deep-tail-chain.gr", &source).unwrap();
+    let phases = compile_source_to_phases("deep-tail-chain.glorious", &source).unwrap();
     for index in 0..DEPTH {
         assert_direct_tail_call(
             &phases.artifact,
@@ -223,7 +223,7 @@ fn externally_rooted_unique_reference_recursion_tail_transfers_at_every_level() 
         OptimizationLevel::O3,
     ] {
         let phases = compile_source_to_phases_with_options(
-            "unique-reference-tail.gr",
+            "unique-reference-tail.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -294,7 +294,7 @@ fn reference_tail_proof_rejects_live_loans_returns_and_leftover_reference_owners
         }
         main() -> () { () }
     "#;
-    let phases = compile_source_to_phases("reference-tail-negative.gr", source).unwrap();
+    let phases = compile_source_to_phases("reference-tail-negative.glorious", source).unwrap();
 
     for name in [
         "projected_loan",
@@ -318,7 +318,7 @@ fn reference_tail_proof_rejects_live_loans_returns_and_leftover_reference_owners
     verify(phases.artifact).unwrap();
 
     let errors = compile_source_to_phases(
-        "ambiguous-reference-tail.gr",
+        "ambiguous-reference-tail.glorious",
         r#"
             struct Two<'a> { first: &'a i64, second: &'a i64 }
             pass<'a>(value: Two<'a>) -> Two<'a> { move value }

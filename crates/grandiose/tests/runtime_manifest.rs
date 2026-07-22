@@ -408,10 +408,10 @@ fn a_single_source_compile_has_no_implicit_primitive_leaf_authority() {
     );
     let source = "secret_birth<T>() -> Raw<T> { () }\nmain() -> () { () }";
     let errors =
-        compile_source_to_bytecode_with_manifest("forged.gr", source, &manifest).unwrap_err();
+        compile_source_to_bytecode_with_manifest("forged.glorious", source, &manifest).unwrap_err();
 
     assert!(errors.iter().any(|error| {
-        error.source_name == "forged.gr"
+        error.source_name == "forged.glorious"
             && error
                 .message
                 .contains("explicitly trusted standard-library bundle entry")
@@ -626,7 +626,7 @@ fn specialization_proves_intrinsic_unrestricted_use_for_predefined_scalars() {
         answer() -> i64 { scalar_identity(42) }
         main() -> () { answer(); () }
     "#;
-    let artifact = grandiose::compile_source_to_bytecode("use.gr", source).unwrap();
+    let artifact = grandiose::compile_source_to_bytecode("use.glorious", source).unwrap();
     let verified = verify(artifact).unwrap();
     let answer = verified
         .artifact()
@@ -837,7 +837,6 @@ fn source_array_slot_summaries_compose_through_nested_wrappers_at_all_levels() {
         "answer() -> i64 { exercise() } main() -> () { answer(); () }",
     );
     for level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -927,7 +926,6 @@ fn source_array_slot_summaries_fail_closed_for_invalid_and_opaque_calls() {
         ),
     ];
     for level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -1004,7 +1002,6 @@ fn reference_array_slots_cross_exact_read_wrappers_at_all_levels() {
         "#,
     );
     for level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -1052,7 +1049,6 @@ fn dynamic_reference_array_slot_origins_fail_closed_at_all_levels() {
         "main() -> () { bad() }",
     );
     for level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -1428,7 +1424,7 @@ fn projected_element_loan_suspends_unique_wrapper_reference_and_regions_reject_a
         main() -> () { () }
     "#;
     let errors =
-        grandiose::compile_source_to_bytecode("ambiguous-regions.gr", ambiguous).unwrap_err();
+        grandiose::compile_source_to_bytecode("ambiguous-regions.glorious", ambiguous).unwrap_err();
     assert!(
         errors.iter().any(|error| {
             error

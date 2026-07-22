@@ -14,7 +14,6 @@ fn function_id(artifact: &grandiose_vm::Artifact, name: &str) -> u32 {
 
 fn run_selected_at_every_level(source_name: &str, source: &str, expected: Value) {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -45,7 +44,11 @@ fn nested_resumptive_payload_composes_the_outer_evaluation_continuation() {
         }
         main() -> { () }
     "#;
-    run_selected_at_every_level("nested-perform-same-handler.gr", source, Value::I64(42));
+    run_selected_at_every_level(
+        "nested-perform-same-handler.glorious",
+        source,
+        Value::I64(42),
+    );
 }
 
 #[test]
@@ -78,7 +81,8 @@ fn earlier_linear_payload_is_captured_by_the_inner_perform_but_not_the_outer_one
         main() -> { () }
     "#;
 
-    let phases = compile_source_to_phases("nested-perform-linear-capture.gr", source).unwrap();
+    let phases =
+        compile_source_to_phases("nested-perform-linear-capture.glorious", source).unwrap();
     let performs = phases.mir.functions.iter().flat_map(|function| {
         function
             .blocks
@@ -112,7 +116,7 @@ fn earlier_linear_payload_is_captured_by_the_inner_perform_but_not_the_outer_one
             .is_err()
     }));
 
-    run_selected_at_every_level("nested-perform-linear-run.gr", source, Value::I64(42));
+    run_selected_at_every_level("nested-perform-linear-run.glorious", source, Value::I64(42));
 }
 
 #[test]
@@ -133,7 +137,11 @@ fn nested_payload_uses_the_nearest_inner_handler_then_forwards_the_outer_operati
         }
         main() -> { () }
     "#;
-    run_selected_at_every_level("nested-perform-handler-search.gr", source, Value::I64(31));
+    run_selected_at_every_level(
+        "nested-perform-handler-search.glorious",
+        source,
+        Value::I64(31),
+    );
 }
 
 #[test]
@@ -167,7 +175,11 @@ fn cancelling_inner_payload_suspension_cleans_an_earlier_zero_use_payload() {
         }
         main() -> { () }
     "#;
-    run_selected_at_every_level("nested-perform-cancel-cleanup.gr", source, Value::I64(7));
+    run_selected_at_every_level(
+        "nested-perform-cancel-cleanup.glorious",
+        source,
+        Value::I64(7),
+    );
 }
 
 #[test]
@@ -199,7 +211,8 @@ fn terminal_inner_payload_abandons_the_outer_perform_and_cleans_earlier_payloads
         main() -> { () }
     "#;
 
-    let phases = compile_source_to_phases("nested-terminal-payload-capture.gr", source).unwrap();
+    let phases =
+        compile_source_to_phases("nested-terminal-payload-capture.glorious", source).unwrap();
     let terminal_capture = phases
         .mir
         .functions
@@ -218,5 +231,9 @@ fn terminal_inner_payload_abandons_the_outer_perform_and_cleans_earlier_payloads
     assert!(!terminal_capture.captured_owners.is_empty());
     assert!(terminal_capture.cancellation_safe);
 
-    run_selected_at_every_level("nested-terminal-payload-run.gr", source, Value::I64(9));
+    run_selected_at_every_level(
+        "nested-terminal-payload-run.glorious",
+        source,
+        Value::I64(9),
+    );
 }

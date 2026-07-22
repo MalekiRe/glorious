@@ -2,18 +2,15 @@
 
 `tooling/grand` now drives the versioned G1 compiler contract: ordered
 `.glorious` inputs, JSON diagnostics, check-only compilation, `.grbc` output,
-and execution through `grvm`. Legacy `.gr`, fake-compiler, and LLVM paths are
-retained as compatibility seams. The numbered list records the completed compiler
+and execution through `grvm`. The numbered list records the completed compiler
 surfaces on which the tooling depends.
 
 **Status: items 1–9, per-body incremental inference, and compiler-owned local/type
 side tables are real and integration-tested.**
 `tooling/grand/src/contract.rs` is the normative spec (capabilities probe,
-CLI shapes, JSON schemas); grand already implements both sides of every
-capability with graceful legacy fallback, verified by
-`tooling/grand/tests/contract.rs` against a bash subprocess mock of the versioned compiler contract
-(real subprocess protocol) and the in-process fake
-(`GRAND_COMPILER=fake` + `GRAND_FAKE_CAPS=multi-file,check,diagnostics,interfaces,std`).
+CLI shapes, JSON schemas); grand implements the contract directly, verified by
+`tooling/grand/tests/contract.rs` against subprocess mocks of the versioned
+compiler and VM protocols.
 The real compiler answers `--capabilities` truthfully, and grand gates every
 optional path on that response. The current probe contract is:
 
@@ -56,7 +53,7 @@ limits are checked before compilation.
    every diagnostic back to its original file. Grand passes the application root
    and explicit dependency roots when the capability is present.
 
-2. **`--emit diagnostics-json`.**
+2. **`--diagnostics json`.**
    One JSON object per diagnostic: code, severity, title, labels as
    `{file, start_byte, end_byte, line, col, message}`, note, help. With (1) it
    makes grand's error output precise; it is also the substrate of LSP phase 1
@@ -78,8 +75,7 @@ limits are checked before compilation.
    **Implemented:** the real parser supplies ordered file/line/signature/doc
    metadata plus stable namespace-qualified identities and exact file-local
    declaration/name byte spans. The LSP consumes these directly, including module
-   paths and explicitly marked dependency package roots; grand retains its
-   compiler-owned in-process scan as a warning-only legacy-contract fallback.
+   paths and explicitly marked dependency package roots.
 
 5. **A real `grc` binary with `--version`.**
    **Implemented:** the native Rust bootstrap ships a real `grc` binary
@@ -94,9 +90,8 @@ limits are checked before compilation.
    set. Grand requires matching protocol/identity metadata before consulting
    build freshness, includes it in the atomic toolchain fingerprint, and passes
    the selected identity to `grvm run` for a second check before artifact load.
-   Both sides omitting metadata remains an explicit legacy compatibility mode;
-   asymmetric omission, malformed metadata, version mismatch, and an
-   unaccepted identity fail closed.
+   Missing or malformed metadata, version mismatch, and an unaccepted identity
+   fail closed.
 
 6. **Comment syntax, lexed as trivia.**
    Line + nested block comments per docs/frontend-design.md. Prerequisite for
@@ -105,18 +100,16 @@ limits are checked before compilation.
    extraction all consume the same source bytes.
 
 7. **Distributed std-lib manifest.**
-   The bootstrap embeds `distributed_std.gr` invisibly. Tooling needs to know
+   The bootstrap embeds `distributed_std.glorious` invisibly. Tooling needs to know
    which names are implicit (collision checks, LSP hover/completion, and the
-   eventual `std-lib.glorious` prepend contract). A `--emit std-interfaces` or
+   eventual `std-lib.glorious` prepend contract). A `--emit std-interfaces-json` or
    a shipped interface file both work. **Implemented:** `std-interfaces-json`
    reports only the trusted embedded-prelude segment and grand consumes it for
    collision preflight.
 
 8. **Object/executable emission.**
-   Long-term the compiler (or a driver library it exposes) should own
-   `-O` levels and native emission. **The canonical G1 path is implemented:**
-   grand selects bytecode from capabilities and runs `.grbc` through `grvm`.
-   The LLVM interpreter/native paths remain compatibility targets.
+   **The canonical G1 path is implemented:** grand forwards `-O` levels to the
+   compiler, requires bytecode emission, and runs `.grbc` through `grvm`.
 
 9. **Session mode (`grc --serve`).**
    **Implemented:** one long-lived process accepts repeated resolve,
@@ -137,6 +130,6 @@ limits are checked before compilation.
    references, rename, completion, and inferred-type inlay hints, while last-good
    snapshots fail closed across edited or shifted source.
 
-`GRAND_COMPILER=fake` remains useful for hermetic build-tool tests; contract
-tests also exercise bytecode selection and VM invocation, while the real
-`grc`/`grvm` pair is used by the repository integration gate.
+Contract tests exercise bytecode selection and VM invocation through hermetic
+subprocess protocol fixtures, while the real `grc`/`grvm` pair is used by the
+repository integration gate.

@@ -38,13 +38,12 @@ fn two_shared_origins_construct_call_project_deconstruct_and_drop() {
     "#;
 
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let phases = compile_source_to_phases_with_options(
-            "multi-origin-aggregate.gr",
+            "multi-origin-aggregate.glorious",
             source,
             CompileOptions { optimization_level },
         )
@@ -86,10 +85,10 @@ fn unproven_selected_leaf_is_rejected_as_ambiguous() {
         main() -> () { () }
     "#;
     let errors = compile_source_to_phases_with_options(
-        "ambiguous-multi-origin-selection.gr",
+        "ambiguous-multi-origin-selection.glorious",
         source,
         CompileOptions {
-            optimization_level: OptimizationLevel::O0,
+            optimization_level: OptimizationLevel::O2,
         },
     )
     .expect_err("an unproven reference leaf selection must not acquire a summary");
@@ -124,13 +123,12 @@ fn exact_first_class_callable_transports_two_reference_result_origins() {
     "#;
 
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let phases = compile_source_to_phases_with_options(
-            "indirect-multi-origin-aggregate.gr",
+            "indirect-multi-origin-aggregate.glorious",
             source,
             CompileOptions { optimization_level },
         )

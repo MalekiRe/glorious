@@ -1,7 +1,6 @@
-//! End-to-end tests over the grand binary. The compiler is faked
-//! (`GRAND_COMPILER=fake`) so these exercise everything grand owns —
-//! scaffolding, resolution, git fetching, lockfiles, bundling — without
-//! depending on the in-progress Grandiose compiler or the LLVM toolchain.
+//! End-to-end tests over the grand binary using executable contract fixtures.
+//! These exercise scaffolding, resolution, git fetching, and lockfiles without
+//! depending on the full compiler implementation.
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
@@ -12,6 +11,8 @@ struct Sandbox {
     _dir: TempDir,
     root: PathBuf,
     cache: PathBuf,
+    compiler: PathBuf,
+    vm: PathBuf,
 }
 
 impl Sandbox {
@@ -20,13 +21,14 @@ impl Sandbox {
         let root = dir.path().join("work");
         let cache = dir.path().join("cache");
         std::fs::create_dir_all(&root).unwrap();
-        // Empty stand-in for compiler/runtime/native_entry.c: the fake
-        // compiler's modules need no runtime symbols.
-        std::fs::write(dir.path().join("runtime.c"), "").unwrap();
+        let compiler = install_compiler(dir.path());
+        let vm = install_vm(dir.path());
         Sandbox {
             _dir: dir,
             root,
             cache,
+            compiler,
+            vm,
         }
     }
 
@@ -34,9 +36,9 @@ impl Sandbox {
         Command::new(env!("CARGO_BIN_EXE_grand"))
             .args(args)
             .current_dir(cwd)
-            .env("GRAND_COMPILER", "fake")
+            .env("GRAND_COMPILER", &self.compiler)
+            .env("GRAND_VM", &self.vm)
             .env("GRAND_CACHE_DIR", &self.cache)
-            .env("GRAND_RUNTIME", self._dir.path().join("runtime.c"))
             .output()
             .unwrap()
     }
@@ -59,6 +61,29 @@ impl Sandbox {
         );
         String::from_utf8_lossy(&output.stderr).into_owned()
     }
+}
+
+fn install_compiler(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("grc");
+    std::fs::write(&path, r#"#!/usr/bin/env bash
+if [ "$1" = --capabilities ]; then echo '{"grc":"test","contract":1,"contract-min":1,"contract-max":1,"artifact-major":1,"artifact-minor":0,"multi-file":true,"modules":true,"phases":["resolve","check"],"emit":["bytecode","interfaces-json","std-interfaces-json"],"diagnostics-json":true}'; exit 0; fi
+if [ "$1" = --emit ] && [[ "$2" = *interfaces-json ]]; then echo '[]'; exit 0; fi
+out=""; inputs=()
+while [ $# -gt 0 ]; do case "$1" in --diagnostics|--phase|--emit|--dependency) shift;; -o) out="$2"; shift;; *) inputs+=("$1");; esac; shift; done
+for f in "${inputs[@]}"; do n="$(grep -n FAKE_ERROR "$f" | head -1 | cut -d: -f1)"; if [ -n "$n" ]; then printf '{"severity":"error","code":"GRC9999","title":"test error marker","labels":[{"file":"%s","line":%s}]}\n' "$f" "$n" >&2; exit 1; fi; done
+if [ -n "$out" ]; then printf 'GRBC' > "$out"; fi
+"#).unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
+}
+
+fn install_vm(dir: &Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join("grvm");
+    std::fs::write(&path, "#!/usr/bin/env bash\nif [ \"$1\" = --capabilities ]; then echo '{\"grvm\":\"test\",\"contract\":1,\"contract-min\":1,\"contract-max\":1,\"artifact-major\":1,\"artifact-minor-min\":0,\"artifact-minor-max\":0}'; fi\nexit 0\n").unwrap();
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    path
 }
 
 fn write(path: &Path, content: &str) {
@@ -126,8 +151,7 @@ fn new_accepts_an_optional_destination_path_without_overwriting() {
 
     assert_eq!(
         std::fs::read_to_string(destination.join("grandiose.toml")).unwrap(),
-        "[project]\nname = \"my-app\"\nversion = \"0.1.0\"\nentry = \"src/main.glorious\"\n\n\
-         [backend]\nkind = \"vm\"\n"
+        "[project]\nname = \"my-app\"\nversion = \"0.1.0\"\nentry = \"src/main.glorious\"\n"
     );
     assert_eq!(
         std::fs::read_to_string(destination.join("src/main.glorious")).unwrap(),
@@ -174,7 +198,37 @@ fn new_rejects_invalid_names_before_creating_the_target() {
 }
 
 #[test]
-fn path_dependencies_bundle_in_topological_order() {
+fn obsolete_backend_manifest_table_is_rejected() {
+    let sandbox = Sandbox::new();
+    sandbox.ok_in(&sandbox.root, &["new", "app"]);
+    let app = sandbox.root.join("app");
+    let mut manifest = std::fs::read_to_string(app.join("grandiose.toml")).unwrap();
+    manifest.push_str("\n[backend]\nkind = \"vm\"\n");
+    write(&app.join("grandiose.toml"), &manifest);
+    let log = sandbox.fail_in(&app, &["check"]);
+    assert!(
+        log.contains("unknown field `backend`"),
+        "unexpected log: {log}"
+    );
+}
+
+#[test]
+fn invalid_runtime_capability_is_rejected_by_the_manifest() {
+    let sandbox = Sandbox::new();
+    sandbox.ok_in(&sandbox.root, &["new", "app"]);
+    let app = sandbox.root.join("app");
+    let mut manifest = std::fs::read_to_string(app.join("grandiose.toml")).unwrap();
+    manifest.push_str("\n[runtime]\ncapabilities = [\"fs/read\"]\n");
+    write(&app.join("grandiose.toml"), &manifest);
+    let log = sandbox.fail_in(&app, &["check"]);
+    assert!(
+        log.contains("runtime capability `fs/read` is invalid"),
+        "unexpected log: {log}"
+    );
+}
+
+#[test]
+fn path_dependencies_resolve_in_topological_order() {
     let sandbox = Sandbox::new();
     let deep = sandbox.root.join("deep");
     lib_package(&deep, "deep", "deep_value() -> i64 { 1 }\n");
@@ -192,19 +246,6 @@ fn path_dependencies_bundle_in_topological_order() {
     );
     sandbox.ok_in(&app, &["check"]);
 
-    let bundle = std::fs::read_to_string(app.join("target/grand/check.glorious")).unwrap();
-    let deep_at = bundle.find("deep_value").unwrap();
-    let mid_at = bundle.find("mid_value").unwrap();
-    let main_at = bundle.find("main()").unwrap();
-    assert!(
-        deep_at < mid_at && mid_at < main_at,
-        "bundle order wrong:\n{bundle}"
-    );
-    let map = std::fs::read_to_string(app.join("target/grand/check.map.json")).unwrap();
-    assert!(
-        map.contains("\"package\": \"deep\""),
-        "segment map missing packages: {map}"
-    );
     // Path dependencies do not appear pinned in the lockfile, but exist in it.
     let lock = std::fs::read_to_string(app.join("grandiose.lock")).unwrap();
     assert!(lock.contains("name = \"mid\"") && lock.contains("name = \"deep\""));
@@ -234,11 +275,6 @@ fn git_dependencies_pin_lock_and_stay_reproducible() {
     );
 
     sandbox.ok_in(&app, &["check"]);
-    let bundle = std::fs::read_to_string(app.join("target/grand/check.glorious")).unwrap();
-    assert!(
-        bundle.contains("util_value"),
-        "git dep missing from bundle:\n{bundle}"
-    );
 
     // Moving the tag upstream must not affect a locked project…
     write(
@@ -248,17 +284,18 @@ fn git_dependencies_pin_lock_and_stay_reproducible() {
     git(&repo, &["commit", "-qam", "update"]);
     git(&repo, &["tag", "-f", "v1"]);
     sandbox.ok_in(&app, &["check"]);
-    let bundle = std::fs::read_to_string(app.join("target/grand/check.glorious")).unwrap();
-    assert!(
-        !bundle.contains("extra"),
-        "locked build picked up unpinned changes"
+    assert_eq!(
+        std::fs::read_to_string(app.join("grandiose.lock")).unwrap(),
+        lock
     );
 
     // …until an explicit update re-resolves it.
     sandbox.ok_in(&app, &["update", "util"]);
     sandbox.ok_in(&app, &["check"]);
-    let bundle = std::fs::read_to_string(app.join("target/grand/check.glorious")).unwrap();
-    assert!(bundle.contains("extra"), "update did not move the pin");
+    assert_ne!(
+        std::fs::read_to_string(app.join("grandiose.lock")).unwrap(),
+        lock
+    );
 }
 
 #[test]
@@ -278,7 +315,8 @@ fn locked_mode_refuses_lockfile_changes() {
     let output = Command::new(env!("CARGO_BIN_EXE_grand"))
         .args(["check"])
         .current_dir(&app)
-        .env("GRAND_COMPILER", "fake")
+        .env("GRAND_COMPILER", &sandbox.compiler)
+        .env("GRAND_VM", &sandbox.vm)
         .env("GRAND_CACHE_DIR", &sandbox.cache)
         .env("GRAND_LOCKED", "1")
         .output()
@@ -546,16 +584,6 @@ fn resolution_order_and_git_cache_identity_are_deterministic() {
         let first = std::fs::read(app.join("grandiose.lock")).unwrap();
         sandbox.ok_in(&app, &["check"]);
         assert_eq!(std::fs::read(app.join("grandiose.lock")).unwrap(), first);
-        let bundle = std::fs::read_to_string(app.join("target/grand/check.glorious")).unwrap();
-        let expected = if dependency_name == "first" {
-            "{ 1 }"
-        } else {
-            "{ 2 }"
-        };
-        assert!(
-            bundle.contains(expected),
-            "cache contents crossed repositories: {bundle}"
-        );
     }
 
     let checkout_roots = std::fs::read_dir(sandbox.cache.join("checkouts"))
@@ -580,8 +608,6 @@ fn resolution_order_and_git_cache_identity_are_deterministic() {
     sandbox.ok_in(&ordered, &["check"]);
     let lock = std::fs::read_to_string(ordered.join("grandiose.lock")).unwrap();
     assert!(lock.find("name = \"alpha\"").unwrap() < lock.find("name = \"zulu\"").unwrap());
-    let bundle = std::fs::read_to_string(ordered.join("target/grand/check.glorious")).unwrap();
-    assert!(bundle.find("alpha_value").unwrap() < bundle.find("zulu_value").unwrap());
 }
 
 #[test]
@@ -593,29 +619,7 @@ fn tests_run_as_independent_executables() {
         &app.join("tests").join("smoke.glorious"),
         "main() -> i64 { 0 }\n",
     );
-    // The fake compiler ignores input and emits an exit-0 module, so this
-    // exercises discovery, per-test bundling, materialization, and execution.
-    if !has_llvm_toolchain() {
-        eprintln!("skipping: llvm-as/lli/clang not available");
-        return;
-    }
+    // The contract fixture emits bytecode accepted by the fixture VM.
     let log = sandbox.ok_in(&app, &["test"]);
     assert!(log.contains("test smoke ... ok"), "unexpected log: {log}");
-    // The test bundle must contain the test file, not the root entry.
-    let bundle = std::fs::read_to_string(app.join("target/grand/test-smoke.glorious")).unwrap();
-    assert_eq!(
-        bundle.matches("main()").count(),
-        1,
-        "root entry leaked into test bundle"
-    );
-}
-
-fn has_llvm_toolchain() -> bool {
-    ["llvm-as", "lli", "clang"].iter().all(|tool| {
-        Command::new(tool)
-            .arg("--version")
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-    })
 }

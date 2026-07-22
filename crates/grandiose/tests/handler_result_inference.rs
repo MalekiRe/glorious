@@ -1,8 +1,7 @@
 use grandiose::{CompileOptions, OptimizationLevel, compile_source_to_phases_with_options};
 use grandiose_vm::{Value, Vm, verify};
 
-const LEVELS: [OptimizationLevel; 4] = [
-    OptimizationLevel::O0,
+const LEVELS: [OptimizationLevel; 3] = [
     OptimizationLevel::O1,
     OptimizationLevel::O2,
     OptimizationLevel::O3,
@@ -44,7 +43,11 @@ fn terminal_clause_infers_a_let_bound_handler_result_without_context() {
         }
         main() -> { () }
     "#;
-    run_selected("handler-terminal-inference.gr", source, Value::I64(42));
+    run_selected(
+        "handler-terminal-inference.glorious",
+        source,
+        Value::I64(42),
+    );
 }
 
 #[test]
@@ -62,7 +65,11 @@ fn normal_completion_and_resumptive_clause_results_join_without_context() {
         }
         main() -> { () }
     "#;
-    run_selected("handler-normal-clause-join.gr", source, Value::I64(42));
+    run_selected(
+        "handler-normal-clause-join.glorious",
+        source,
+        Value::I64(42),
+    );
 }
 
 #[test]
@@ -82,7 +89,7 @@ fn inferred_handlers_nest_inside_captured_callable_computations() {
         main() -> { () }
     "#;
     run_selected(
-        "handler-nested-capture-inference.gr",
+        "handler-nested-capture-inference.glorious",
         source,
         Value::I64(42),
     );
@@ -102,7 +109,7 @@ fn incompatible_normal_and_clause_results_are_rejected_at_every_level() {
     "#;
     for optimization_level in LEVELS {
         let errors = compile_source_to_phases_with_options(
-            "handler-result-mismatch.gr",
+            "handler-result-mismatch.glorious",
             source,
             CompileOptions { optimization_level },
         )

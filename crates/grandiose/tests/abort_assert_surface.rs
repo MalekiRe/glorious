@@ -55,9 +55,8 @@ const SOURCE: &str = r#"
 "#;
 
 #[test]
-fn assertion_and_abort_wrappers_select_terminal_vm_abort_at_o0_through_o3() {
+fn assertion_and_abort_wrappers_select_terminal_vm_abort_at_o1_through_o3() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

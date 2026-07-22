@@ -110,9 +110,8 @@ fn slice_value(
 }
 
 #[test]
-fn shared_slice_checked_surface_executes_at_every_optimization_level() {
+fn shared_slice_checked_surface_executes_at_optimized_levels() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

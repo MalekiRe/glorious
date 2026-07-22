@@ -163,13 +163,12 @@ fn matrix_source(source_ty: &str) -> String {
 fn check_conversion_row(source_ty: &str) {
     let source = matrix_source(source_ty);
     for level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let phases = compile_source_to_phases_with_options(
-            "integer-conversion-matrix.gr",
+            "integer-conversion-matrix.glorious",
             &source,
             CompileOptions {
                 optimization_level: level,
@@ -228,51 +227,51 @@ macro_rules! conversion_row_test {
 }
 
 conversion_row_test!(
-    checked_and_wrapping_conversion_from_u8_at_o0_through_o3,
+    checked_and_wrapping_conversion_from_u8_at_o1_through_o3,
     "u8"
 );
 conversion_row_test!(
-    checked_and_wrapping_conversion_from_u16_at_o0_through_o3,
+    checked_and_wrapping_conversion_from_u16_at_o1_through_o3,
     "u16"
 );
 conversion_row_test!(
-    checked_and_wrapping_conversion_from_u32_at_o0_through_o3,
+    checked_and_wrapping_conversion_from_u32_at_o1_through_o3,
     "u32"
 );
 conversion_row_test!(
-    checked_and_wrapping_conversion_from_u64_at_o0_through_o3,
+    checked_and_wrapping_conversion_from_u64_at_o1_through_o3,
     "u64"
 );
 conversion_row_test!(
-    checked_and_wrapping_conversion_from_u128_at_o0_through_o3,
+    checked_and_wrapping_conversion_from_u128_at_o1_through_o3,
     "u128"
 );
 conversion_row_test!(
-    checked_and_wrapping_conversion_from_usize_at_o0_through_o3,
+    checked_and_wrapping_conversion_from_usize_at_o1_through_o3,
     "usize"
 );
 conversion_row_test!(
-    checked_and_wrapping_conversion_from_i8_at_o0_through_o3,
+    checked_and_wrapping_conversion_from_i8_at_o1_through_o3,
     "i8"
 );
 conversion_row_test!(
-    checked_and_wrapping_conversion_from_i16_at_o0_through_o3,
+    checked_and_wrapping_conversion_from_i16_at_o1_through_o3,
     "i16"
 );
 conversion_row_test!(
-    checked_and_wrapping_conversion_from_i32_at_o0_through_o3,
+    checked_and_wrapping_conversion_from_i32_at_o1_through_o3,
     "i32"
 );
 conversion_row_test!(
-    checked_and_wrapping_conversion_from_i64_at_o0_through_o3,
+    checked_and_wrapping_conversion_from_i64_at_o1_through_o3,
     "i64"
 );
 conversion_row_test!(
-    checked_and_wrapping_conversion_from_i128_at_o0_through_o3,
+    checked_and_wrapping_conversion_from_i128_at_o1_through_o3,
     "i128"
 );
 conversion_row_test!(
-    checked_and_wrapping_conversion_from_isize_at_o0_through_o3,
+    checked_and_wrapping_conversion_from_isize_at_o1_through_o3,
     "isize"
 );
 
@@ -314,7 +313,7 @@ fn recovery_checked_conversion_rejects_cross_sign_and_narrowing_boundaries() {
         let source = format!("main() -> {return_type} {{ {body} }}");
         assert_eq!(
             run_source(
-                "recovery-integer-conversion.gr",
+                "recovery-integer-conversion.glorious",
                 &source,
                 vec![],
                 &mut NoHost
@@ -328,7 +327,7 @@ fn recovery_checked_conversion_rejects_cross_sign_and_narrowing_boundaries() {
 #[test]
 fn conversion_leaf_names_do_not_grant_primitive_authority() {
     let errors = compile_source_to_phases_with_options(
-        "forged-conversion-leaf.gr",
+        "forged-conversion-leaf.glorious",
         "probe(value: i16) -> u8 { __g1_int_convert_checked_to_u8(move value) } main() -> { () }",
         CompileOptions::default(),
     )
@@ -340,7 +339,7 @@ fn conversion_leaf_names_do_not_grant_primitive_authority() {
     }), "{errors:#?}");
 
     let errors = run_source(
-        "forged-conversion-leaf-recovery.gr",
+        "forged-conversion-leaf-recovery.glorious",
         "main() -> u8 { __g1_int_convert_checked_to_u8(1) }",
         vec![],
         &mut NoHost,
@@ -356,13 +355,12 @@ fn conversion_leaf_names_do_not_grant_primitive_authority() {
 #[test]
 fn checked_usize_arithmetic_reports_boundaries_without_trapping() {
     for level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
     ] {
         let phases = compile_source_to_phases_with_options(
-            "checked-usize.gr",
+            "checked-usize.glorious",
             "probe_add(left: usize, right: usize) -> Option<usize> { checked_usize_add(move left, move right) }
              probe_sub(left: usize, right: usize) -> Option<usize> { checked_usize_sub(move left, move right) }
              probe_mul(left: usize, right: usize) -> Option<usize> { checked_usize_mul(move left, move right) }
@@ -401,7 +399,7 @@ fn checked_usize_arithmetic_reports_boundaries_without_trapping() {
 #[test]
 fn trusted_conversion_wrappers_are_emitted_only_when_user_roots_reach_them() {
     let empty = compile_source_to_phases_with_options(
-        "no-conversions.gr",
+        "no-conversions.glorious",
         "main() -> { () }",
         CompileOptions::default(),
     )
@@ -424,7 +422,7 @@ fn trusted_conversion_wrappers_are_emitted_only_when_user_roots_reach_them() {
     }));
 
     let reached = compile_source_to_phases_with_options(
-        "one-conversion.gr",
+        "one-conversion.glorious",
         "probe(value: i16) -> Option<u8> { checked_i16_to_u8(move value) } main() -> { () }",
         CompileOptions::default(),
     )

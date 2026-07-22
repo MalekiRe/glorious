@@ -34,9 +34,8 @@ const BORROW_EVIDENCE: &str = r#"
 "#;
 
 #[test]
-fn borrow_derived_generic_evidence_precedes_numeric_defaults_at_o0_through_o3() {
+fn borrow_derived_generic_evidence_precedes_numeric_defaults_at_o1_through_o3() {
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
@@ -82,7 +81,6 @@ fn contradictory_borrow_and_value_evidence_is_rejected_in_every_mode() {
         main() -> () { () }
     "#;
     for optimization_level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,

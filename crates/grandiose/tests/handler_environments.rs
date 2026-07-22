@@ -1,13 +1,12 @@
 //! Noncopy mixed terminal/resumptive handler environments: per-clause capture
 //! views over one stored environment, exact abandonment/resumption/
-//! cancellation cleanup, and O0-O3 parity.
+//! cancellation cleanup, and O1-O3 parity.
 
 use grandiose::compiler_mir::OptimizationLevel;
 use grandiose::{CompileOptions, compile_source_to_phases_with_options};
 use grandiose_vm::{Value, Vm, verify};
 
-const LEVELS: [OptimizationLevel; 4] = [
-    OptimizationLevel::O0,
+const LEVELS: [OptimizationLevel; 3] = [
     OptimizationLevel::O1,
     OptimizationLevel::O2,
     OptimizationLevel::O3,
@@ -15,7 +14,7 @@ const LEVELS: [OptimizationLevel; 4] = [
 
 fn phases_at(source: &str, level: OptimizationLevel) -> grandiose::CompiledPhases {
     compile_source_to_phases_with_options(
-        "handler-environments.gr",
+        "handler-environments.glorious",
         source,
         CompileOptions {
             optimization_level: level,
@@ -39,10 +38,10 @@ fn run_entry(phases: &grandiose::CompiledPhases, name: &str) -> Value {
 
 fn expect_errors(source: &str) -> Vec<grandiose::diagnostic::Diagnostic> {
     compile_source_to_phases_with_options(
-        "handler-environments.gr",
+        "handler-environments.glorious",
         source,
         CompileOptions {
-            optimization_level: OptimizationLevel::O0,
+            optimization_level: OptimizationLevel::O2,
         },
     )
     .expect_err("compilation must be rejected")

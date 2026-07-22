@@ -17,7 +17,6 @@ fn mixed_lifetime_type_nominals_erase_regions_from_runtime_identity() {
         main() -> () { () }
     "#;
     for level in [
-        OptimizationLevel::O0,
         OptimizationLevel::O1,
         OptimizationLevel::O2,
         OptimizationLevel::O3,
