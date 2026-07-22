@@ -1,10 +1,13 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::ControlFlow,
+};
 
 use crate::{
     ast::{
-        AssignmentPlaceKind, AssociatedBindingValue, EffectDecl, EffectOperationDecl, Expr,
-        ExprKind, GenericParamKind, GoalArgument, PatternKind, Program, Stmt, TraitRefSyntax,
-        TypeSyntax, TypeSyntaxKind, WhereClause,
+        AssociatedBindingValue, EffectDecl, EffectOperationDecl, Expr, ExprKind, ExprVisitor,
+        GenericParamKind, GoalArgument, PatternKind, Program, Stmt, TraitRefSyntax, TypeSyntax,
+        TypeSyntaxKind, WhereClause, visit_expr_preorder, walk_expr,
     },
     diagnostic::Diagnostic,
     span::Span,
@@ -1023,19 +1026,21 @@ fn validate_label_scopes(expression: &Expr, errors: &mut Vec<Diagnostic>) {
         }
     }
 
-    fn visit<'a>(
-        expression: &'a Expr,
-        labels: &mut HashMap<String, ActiveLabel<'a>>,
-        errors: &mut Vec<Diagnostic>,
-    ) {
-        let bind = |label: &'a crate::ast::LabelSyntax,
-                    direct_destination: bool,
-                    destination: Option<&'a TypeSyntax>,
-                    body: &'a Expr,
-                    labels: &mut HashMap<String, ActiveLabel<'a>>,
-                    errors: &mut Vec<Diagnostic>| {
-            if let Some(previous) = labels.get(label.name.as_ref()) {
-                errors.push(
+    struct LabelScopes<'ast, 'errors> {
+        labels: HashMap<String, ActiveLabel<'ast>>,
+        errors: &'errors mut Vec<Diagnostic>,
+    }
+
+    impl<'ast> LabelScopes<'ast, '_> {
+        fn bind(
+            &mut self,
+            label: &'ast crate::ast::LabelSyntax,
+            direct_destination: bool,
+            destination: Option<&'ast TypeSyntax>,
+            body: &'ast Expr,
+        ) -> ControlFlow<()> {
+            if let Some(previous) = self.labels.get(label.name.as_ref()) {
+                self.errors.push(
                     Diagnostic::error(
                         "duplicate active label",
                         format!("label `@{}` is already active in this lexical scope", label.name),
@@ -1045,10 +1050,9 @@ fn validate_label_scopes(expression: &Expr, errors: &mut Vec<Diagnostic>) {
                     .with_related(previous.binder, "the active label is introduced here")
                     .with_help("rename one label; label identities are generative and cannot shadow an active brand"),
                 );
-                visit(body, labels, errors);
-                return;
+                return self.visit_expr(body);
             }
-            labels.insert(
+            self.labels.insert(
                 label.name.to_string(),
                 ActiveLabel {
                     binder: label.span,
@@ -1056,18 +1060,24 @@ fn validate_label_scopes(expression: &Expr, errors: &mut Vec<Diagnostic>) {
                     destination,
                 },
             );
-            visit(body, labels, errors);
-            labels.remove(label.name.as_ref());
-        };
+            let result = self.visit_expr(body);
+            self.labels.remove(label.name.as_ref());
+            result
+        }
+    }
 
-        match &expression.kind {
-            ExprKind::Labeled { label, body } => bind(label, false, None, body, labels, errors),
-            ExprKind::LabelDestination { label, ty, body } => {
-                bind(label, true, ty.as_deref(), body, labels, errors)
-            }
-            ExprKind::LabelReference(label) => {
-                if !labels.contains_key(label.name.as_ref()) {
-                    errors.push(
+    impl<'ast> ExprVisitor<'ast> for LabelScopes<'ast, '_> {
+        type Break = ();
+
+        fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<()> {
+            match &expression.kind {
+                ExprKind::Labeled { label, body } => self.bind(label, false, None, body),
+                ExprKind::LabelDestination { label, ty, body } => {
+                    self.bind(label, true, ty.as_deref(), body)
+                }
+                ExprKind::LabelReference(label) => {
+                    if !self.labels.contains_key(label.name.as_ref()) {
+                        self.errors.push(
                         Diagnostic::error(
                             "unknown label",
                             format!("label `@{}` is not active here", label.name),
@@ -1076,132 +1086,68 @@ fn validate_label_scopes(expression: &Expr, errors: &mut Vec<Diagnostic>) {
                         .with_code("G0132")
                         .with_help("move this use inside the label body or introduce a label with that name"),
                     );
+                    }
+                    ControlFlow::Continue(())
                 }
-            }
-            ExprKind::Leave { label, value } => {
-                match labels.get(label.name.as_ref()) {
-                    None => errors.push(
-                        Diagnostic::error(
-                            "unknown leave destination",
-                            format!("`leave@{}` has no active lexical destination", label.name),
-                            label.span,
-                        )
-                        .with_code("G0132"),
-                    ),
-                    Some(active) if !active.direct_destination => errors.push(
-                        Diagnostic::error(
-                            "label is not a direct destination",
-                            format!(
-                                "`@{}` introduces a label brand but no `Destination` evidence",
-                                label.name
-                            ),
-                            label.span,
-                        )
-                        .with_code("G0133")
-                        .with_related(active.binder, "this generative label is introduced here")
-                        .with_help(
-                            "use `label @name: Type { ... }` for a direct typed destination",
-                        ),
-                    ),
-                    Some(active) if !destination_accepts(active.destination, value.as_deref()) => {
-                        errors.push(
+                ExprKind::Leave { label, value } => {
+                    match self.labels.get(label.name.as_ref()) {
+                        None => self.errors.push(
                             Diagnostic::error(
-                                "leave value does not match destination",
-                                format!("`leave@{}` supplies an incompatible value", label.name),
-                                value.as_deref().map_or(label.span, |value| value.span),
+                                "unknown leave destination",
+                                format!("`leave@{}` has no active lexical destination", label.name),
+                                label.span,
                             )
-                            .with_code("G0134")
-                            .with_related(
-                                active.binder,
-                                "the typed destination is introduced here",
+                            .with_code("G0132"),
+                        ),
+                        Some(active) if !active.direct_destination => self.errors.push(
+                            Diagnostic::error(
+                                "label is not a direct destination",
+                                format!(
+                                    "`@{}` introduces a label brand but no `Destination` evidence",
+                                    label.name
+                                ),
+                                label.span,
+                            )
+                            .with_code("G0133")
+                            .with_related(active.binder, "this generative label is introduced here")
+                            .with_help(
+                                "use `label @name: Type { ... }` for a direct typed destination",
                             ),
-                        );
-                    }
-                    Some(_) => {}
-                }
-                if let Some(value) = value {
-                    visit(value, labels, errors);
-                }
-            }
-            ExprKind::Move(value)
-            | ExprKind::Field(value, _)
-            | ExprKind::Unary { operand: value, .. } => visit(value, labels, errors),
-            ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
-                visit(body, labels, errors)
-            }
-            ExprKind::List(values) | ExprKind::Tuple(values) => {
-                for value in values.iter() {
-                    visit(value, labels, errors);
-                }
-            }
-            ExprKind::Struct { fields, .. } => {
-                for (_, value) in fields.iter() {
-                    visit(value, labels, errors);
-                }
-            }
-            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
-                for statement in statements.iter() {
-                    match statement {
-                        Stmt::Let { value, .. }
-                        | Stmt::Deconstruct { value, .. }
-                        | Stmt::Expr(value) => visit(value, labels, errors),
-                        Stmt::Assign {
-                            destination, value, ..
-                        } => {
-                            visit(value, labels, errors);
-                            if let AssignmentPlaceKind::Dereference { reference, .. } =
-                                &destination.kind
-                            {
-                                visit(reference, labels, errors);
-                            }
+                        ),
+                        Some(active)
+                            if !destination_accepts(active.destination, value.as_deref()) =>
+                        {
+                            self.errors.push(
+                                Diagnostic::error(
+                                    "leave value does not match destination",
+                                    format!(
+                                        "`leave@{}` supplies an incompatible value",
+                                        label.name
+                                    ),
+                                    value.as_deref().map_or(label.span, |value| value.span),
+                                )
+                                .with_code("G0134")
+                                .with_related(
+                                    active.binder,
+                                    "the typed destination is introduced here",
+                                ),
+                            );
                         }
+                        Some(_) => {}
                     }
+                    walk_expr(self, expression)
                 }
+                _ => walk_expr(self, expression),
             }
-            ExprKind::Call(callee, arguments) => {
-                visit(callee, labels, errors);
-                for argument in arguments.iter() {
-                    visit(argument, labels, errors);
-                }
-            }
-            ExprKind::Perform { args, .. } => {
-                for argument in args.iter() {
-                    visit(argument, labels, errors);
-                }
-            }
-            ExprKind::Handle {
-                computation,
-                clauses,
-            } => {
-                visit(computation, labels, errors);
-                for clause in clauses.iter() {
-                    visit(&clause.body, labels, errors);
-                }
-            }
-            ExprKind::Binary { lhs, rhs, .. } => {
-                visit(lhs, labels, errors);
-                visit(rhs, labels, errors);
-            }
-            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
-                visit(resumption, labels, errors);
-                if let Some(value) = value {
-                    visit(value, labels, errors);
-                }
-            }
-            ExprKind::Cancel { resumption } => visit(resumption, labels, errors),
-            ExprKind::Is { subject, .. } => visit(subject, labels, errors),
-            ExprKind::Unit
-            | ExprKind::Int(_)
-            | ExprKind::Float(_)
-            | ExprKind::String(_)
-            | ExprKind::Char(_)
-            | ExprKind::Byte(_)
-            | ExprKind::ByteString(_)
-            | ExprKind::Variable(_) => {}
         }
     }
 
-    visit(expression, &mut HashMap::new(), errors);
+    let result = LabelScopes {
+        labels: HashMap::new(),
+        errors,
+    }
+    .visit_expr(expression);
+    debug_assert!(result.is_continue());
 }
 
 fn validate_effect_row_binder_positions(program: &Program, errors: &mut Vec<Diagnostic>) {
@@ -2034,124 +1980,95 @@ fn drop_body_has_outward_control(
     effectful: &HashSet<&str>,
     handled: &HashSet<(String, String)>,
 ) -> bool {
-    match &expr.kind {
-        ExprKind::Move(operand) => {
-            drop_body_has_outward_control(program, operand, effectful, handled)
-        }
-        ExprKind::Perform {
-            effect,
-            operation,
-            args,
-        } => {
-            !handled.contains(&(
-                effect_instance_text(program, expr.span, effect),
-                operation.to_string(),
-            )) || args.iter().any(|argument| {
-                drop_body_has_outward_control(program, argument, effectful, handled)
-            })
-        }
-        ExprKind::Call(callee, arguments) => {
-            let forbidden_callee = matches!(
-                &callee.kind,
-                ExprKind::Variable(path)
-                    if path.len() == 1 && effectful.contains(path[0].as_ref())
-            );
-            forbidden_callee
-                || drop_body_has_outward_control(program, callee, effectful, handled)
-                || arguments.iter().any(|argument| {
-                    drop_body_has_outward_control(program, argument, effectful, handled)
-                })
-        }
-        ExprKind::List(values) | ExprKind::Tuple(values) => values
-            .iter()
-            .any(|value| drop_body_has_outward_control(program, value, effectful, handled)),
-        ExprKind::Closure { body, .. } => {
-            drop_body_has_outward_control(program, body, effectful, handled)
-        }
-        ExprKind::Struct { fields, .. } => fields
-            .iter()
-            .any(|(_, value)| drop_body_has_outward_control(program, value, effectful, handled)),
-        ExprKind::Field(subject, _) => {
-            drop_body_has_outward_control(program, subject, effectful, handled)
-        }
-        ExprKind::Block(statements) => statements.iter().any(|statement| match statement {
-            Stmt::Let { value, .. } | Stmt::Deconstruct { value, .. } | Stmt::Expr(value) => {
-                drop_body_has_outward_control(program, value, effectful, handled)
-            }
-            Stmt::Assign {
-                destination, value, ..
-            } => {
-                drop_body_has_outward_control(program, value, effectful, handled)
-                    || match &destination.kind {
-                        AssignmentPlaceKind::Local { .. } => false,
-                        AssignmentPlaceKind::Dereference { reference, .. } => {
-                            drop_body_has_outward_control(program, reference, effectful, handled)
-                        }
-                    }
-            }
-        }),
-        ExprKind::Handle {
-            computation,
-            clauses,
-        } => {
-            let mut computation_handled = handled.clone();
-            for clause in clauses.iter() {
-                if clause.patterns.iter().all(|pattern| {
-                    matches!(
-                        pattern.kind,
-                        PatternKind::Wildcard | PatternKind::Binding(_)
-                    )
-                }) {
-                    computation_handled.insert((
-                        effect_instance_text(program, clause.span, &clause.effect),
-                        clause.operation.clone(),
-                    ));
-                }
-            }
-            drop_body_has_outward_control(program, computation, effectful, &computation_handled)
-                || clauses.iter().any(|clause| {
-                    drop_body_has_outward_control(program, &clause.body, effectful, handled)
-                })
-        }
-        ExprKind::Unary { operand, .. } => {
-            drop_body_has_outward_control(program, operand, effectful, handled)
-        }
-        ExprKind::Binary { lhs, rhs, .. } => {
-            drop_body_has_outward_control(program, lhs, effectful, handled)
-                || drop_body_has_outward_control(program, rhs, effectful, handled)
-        }
-        // Structural resumption operations and direct label transfers are
-        // outward control.
-        ExprKind::Resume { .. }
-        | ExprKind::Cancel { .. }
-        | ExprKind::TailResume { .. }
-        | ExprKind::Leave { .. } => true,
-        ExprKind::ContextBlock(statements) => statements.iter().any(|statement| match statement {
-            Stmt::Let { value, .. } | Stmt::Deconstruct { value, .. } | Stmt::Expr(value) => {
-                drop_body_has_outward_control(program, value, effectful, handled)
-            }
-            Stmt::Assign { value, .. } => {
-                drop_body_has_outward_control(program, value, effectful, handled)
-            }
-        }),
-        ExprKind::TypedClosure { body, .. }
-        | ExprKind::Labeled { body, .. }
-        | ExprKind::LabelDestination { body, .. } => {
-            drop_body_has_outward_control(program, body, effectful, handled)
-        }
-        ExprKind::Is { subject, .. } => {
-            drop_body_has_outward_control(program, subject, effectful, handled)
-        }
-        ExprKind::Unit
-        | ExprKind::Int(_)
-        | ExprKind::Float(_)
-        | ExprKind::String(_)
-        | ExprKind::Char(_)
-        | ExprKind::Byte(_)
-        | ExprKind::ByteString(_)
-        | ExprKind::Variable(_)
-        | ExprKind::LabelReference(_) => false,
+    struct OutwardControl<'program, 'facts> {
+        program: &'program Program,
+        effectful: &'facts HashSet<&'facts str>,
+        handled: &'facts HashSet<(String, String)>,
     }
+
+    impl<'ast> ExprVisitor<'ast> for OutwardControl<'_, '_> {
+        type Break = ();
+
+        fn visit_expr(&mut self, expr: &'ast Expr) -> ControlFlow<()> {
+            match &expr.kind {
+                ExprKind::Perform {
+                    effect, operation, ..
+                } if !self.handled.contains(&(
+                    effect_instance_text(self.program, expr.span, effect),
+                    operation.to_string(),
+                )) =>
+                {
+                    ControlFlow::Break(())
+                }
+                ExprKind::Call(callee, _)
+                    if matches!(
+                    &callee.kind,
+                    ExprKind::Variable(path)
+                        if path.len() == 1 && self.effectful.contains(path[0].as_ref())
+                    ) =>
+                {
+                    ControlFlow::Break(())
+                }
+                // Structural resumption operations and direct label transfers
+                // are outward control without inspecting their operands.
+                ExprKind::Resume { .. }
+                | ExprKind::Cancel { .. }
+                | ExprKind::TailResume { .. }
+                | ExprKind::Leave { .. } => ControlFlow::Break(()),
+                ExprKind::Handle {
+                    computation,
+                    clauses,
+                } => {
+                    let mut computation_handled = self.handled.clone();
+                    for clause in clauses.iter().filter(|clause| {
+                        clause.patterns.iter().all(|pattern| {
+                            matches!(
+                                pattern.kind,
+                                PatternKind::Wildcard | PatternKind::Binding(_)
+                            )
+                        })
+                    }) {
+                        computation_handled.insert((
+                            effect_instance_text(self.program, clause.span, &clause.effect),
+                            clause.operation.clone(),
+                        ));
+                    }
+                    OutwardControl {
+                        program: self.program,
+                        effectful: self.effectful,
+                        handled: &computation_handled,
+                    }
+                    .visit_expr(computation)?;
+                    for clause in clauses.iter() {
+                        self.visit_expr(&clause.body)?;
+                    }
+                    ControlFlow::Continue(())
+                }
+                // Context assignments deliberately ignore their destination;
+                // only the value executes as part of the context expression.
+                ExprKind::ContextBlock(statements) => {
+                    for value in statements.iter().map(|statement| match statement {
+                        Stmt::Let { value, .. }
+                        | Stmt::Deconstruct { value, .. }
+                        | Stmt::Assign { value, .. }
+                        | Stmt::Expr(value) => value,
+                    }) {
+                        self.visit_expr(value)?;
+                    }
+                    ControlFlow::Continue(())
+                }
+                _ => walk_expr(self, expr),
+            }
+        }
+    }
+
+    OutwardControl {
+        program,
+        effectful,
+        handled,
+    }
+    .visit_expr(expr)
+    .is_break()
 }
 
 fn validate_effect_application<'a>(
@@ -2310,110 +2227,74 @@ fn validate_expr(
     generic_kinds: &HashMap<&str, GenericParamKind>,
     errors: &mut Vec<Diagnostic>,
 ) {
-    match &expr.kind {
-        ExprKind::Move(operand) => validate_expr(program, operand, effects, generic_kinds, errors),
-        ExprKind::List(values) | ExprKind::Tuple(values) => values
-            .iter()
-            .for_each(|value| validate_expr(program, value, effects, generic_kinds, errors)),
-        ExprKind::Closure { body, .. } => {
-            validate_expr(program, body, effects, generic_kinds, errors)
-        }
-        ExprKind::Struct { fields, .. } => fields
-            .iter()
-            .for_each(|(_, value)| validate_expr(program, value, effects, generic_kinds, errors)),
-        ExprKind::Field(subject, _) => {
-            validate_expr(program, subject, effects, generic_kinds, errors)
-        }
-        ExprKind::Block(statements) => statements.iter().for_each(|statement| match statement {
-            Stmt::Let { value, .. } | Stmt::Deconstruct { value, .. } | Stmt::Expr(value) => {
-                validate_expr(program, value, effects, generic_kinds, errors)
-            }
-            Stmt::Assign {
-                destination, value, ..
+    let result = visit_expr_preorder(expr, |expr| {
+        match &expr.kind {
+            ExprKind::Perform {
+                effect, operation, ..
             } => {
-                validate_expr(program, value, effects, generic_kinds, errors);
-                if let AssignmentPlaceKind::Dereference { reference, .. } = &destination.kind {
-                    validate_expr(program, reference, effects, generic_kinds, errors);
-                }
-            }
-        }),
-        ExprKind::Call(callee, args) => {
-            validate_expr(program, callee, effects, generic_kinds, errors);
-            args.iter()
-                .for_each(|arg| validate_expr(program, arg, effects, generic_kinds, errors));
-        }
-        ExprKind::Perform {
-            effect,
-            operation,
-            args,
-        } => {
-            let declaration_name = validate_effect_application(
-                program,
-                expr.span,
-                effect,
-                effects,
-                generic_kinds,
-                errors,
-            );
-            match declaration_name.and_then(|name| effects.get(name)) {
-                None => {}
-                Some((declaration, operations)) if !operations.contains_key(operation.as_ref()) => {
-                    errors.push(
-                        Diagnostic::error(
-                            "unknown effect operation",
-                            format!("effect `{effect}` has no operation named `{operation}`"),
-                            expr.span,
-                        )
-                        .with_code("G0101")
-                        .with_related(declaration.span, format!("`{effect}` is declared here"))
-                        .with_help("use an operation declared by the effect interface"),
-                    )
-                }
-                Some(_) => {}
-            }
-            args.iter()
-                .for_each(|arg| validate_expr(program, arg, effects, generic_kinds, errors));
-        }
-        ExprKind::Handle {
-            computation,
-            clauses,
-        } => {
-            validate_expr(program, computation, effects, generic_kinds, errors);
-            for clause in clauses.iter() {
                 let declaration_name = validate_effect_application(
                     program,
-                    clause.span,
-                    &clause.effect,
+                    expr.span,
+                    effect,
                     effects,
                     generic_kinds,
                     errors,
                 );
-                match declaration_name
-                    .and_then(|name| effects.get(name))
-                    .and_then(|(_, operations)| operations.get(clause.operation.as_str()))
-                {
-                    None if declaration_name.is_none() => {}
-                    None => {
-                        let declaration = effects[declaration_name.unwrap()].0;
+                match declaration_name.and_then(|name| effects.get(name)) {
+                    None => {}
+                    Some((declaration, operations))
+                        if !operations.contains_key(operation.as_ref()) =>
+                    {
                         errors.push(
                             Diagnostic::error(
                                 "unknown effect operation",
-                                format!(
-                                    "effect `{}` has no operation named `{}`",
-                                    clause.effect, clause.operation
-                                ),
-                                clause.span,
+                                format!("effect `{effect}` has no operation named `{operation}`"),
+                                expr.span,
                             )
                             .with_code("G0101")
-                            .with_related(
-                                declaration.span,
-                                format!("`{}` is declared here", clause.effect),
-                            )
+                            .with_related(declaration.span, format!("`{effect}` is declared here"))
                             .with_help("use an operation declared by the effect interface"),
-                        );
+                        )
                     }
-                    Some(operation) if operation.terminal && clause.resumption.is_some() => {
-                        errors.push(
+                    Some(_) => {}
+                }
+            }
+            ExprKind::Handle { clauses, .. } => {
+                for clause in clauses.iter() {
+                    let declaration_name = validate_effect_application(
+                        program,
+                        clause.span,
+                        &clause.effect,
+                        effects,
+                        generic_kinds,
+                        errors,
+                    );
+                    match declaration_name
+                        .and_then(|name| effects.get(name))
+                        .and_then(|(_, operations)| operations.get(clause.operation.as_str()))
+                    {
+                        None if declaration_name.is_none() => {}
+                        None => {
+                            let declaration = effects[declaration_name.unwrap()].0;
+                            errors.push(
+                                Diagnostic::error(
+                                    "unknown effect operation",
+                                    format!(
+                                        "effect `{}` has no operation named `{}`",
+                                        clause.effect, clause.operation
+                                    ),
+                                    clause.span,
+                                )
+                                .with_code("G0101")
+                                .with_related(
+                                    declaration.span,
+                                    format!("`{}` is declared here", clause.effect),
+                                )
+                                .with_help("use an operation declared by the effect interface"),
+                            );
+                        }
+                        Some(operation) if operation.terminal && clause.resumption.is_some() => {
+                            errors.push(
                             Diagnostic::error(
                                 "terminal operation has no resumption",
                                 format!(
@@ -2426,9 +2307,9 @@ fn validate_expr(
                             .with_related(operation.span, "the terminal operation is declared here")
                             .with_help("remove the `with` resumption binding"),
                         );
-                    }
-                    Some(operation) if !operation.terminal && clause.resumption.is_none() => {
-                        errors.push(
+                        }
+                        Some(operation) if !operation.terminal && clause.resumption.is_none() => {
+                            errors.push(
                             Diagnostic::error(
                                 "resumptive handler must name its continuation",
                                 format!(
@@ -2441,91 +2322,56 @@ fn validate_expr(
                             .with_related(operation.span, "the resumptive operation is declared here")
                             .with_help("write `with k => ...` and use `resume(k, value)` or `cancel(k)`"),
                         );
-                    }
-                    _ => {}
-                }
-                clause
-                    .patterns
-                    .iter()
-                    .for_each(|pattern| validate_pattern(program, pattern, errors));
-                validate_expr(program, &clause.body, effects, generic_kinds, errors);
-            }
-        }
-        ExprKind::Unary { operand, .. } => {
-            validate_expr(program, operand, effects, generic_kinds, errors)
-        }
-        ExprKind::Binary { lhs, rhs, .. } => {
-            validate_expr(program, lhs, effects, generic_kinds, errors);
-            validate_expr(program, rhs, effects, generic_kinds, errors);
-        }
-        // Structural resumption invocations are checked directly throughout
-        // validation and lowering.
-        ExprKind::Resume { resumption, value } => {
-            validate_expr(program, resumption, effects, generic_kinds, errors);
-            if let Some(value) = value {
-                validate_expr(program, value, effects, generic_kinds, errors);
-            }
-        }
-        ExprKind::Cancel { resumption } => {
-            validate_expr(program, resumption, effects, generic_kinds, errors)
-        }
-        ExprKind::ContextBlock(statements) => {
-            statements.iter().for_each(|statement| match statement {
-                Stmt::Let { value, .. } | Stmt::Deconstruct { value, .. } | Stmt::Expr(value) => {
-                    validate_expr(program, value, effects, generic_kinds, errors)
-                }
-                Stmt::Assign {
-                    destination, value, ..
-                } => {
-                    validate_expr(program, value, effects, generic_kinds, errors);
-                    if let AssignmentPlaceKind::Dereference { reference, .. } = &destination.kind {
-                        validate_expr(program, reference, effects, generic_kinds, errors);
-                    }
-                }
-            })
-        }
-        ExprKind::TypedClosure {
-            params,
-            outward_effects,
-            body,
-            ..
-        } => {
-            let mut seen = HashMap::<&str, Span>::new();
-            for param in params.iter() {
-                if let Some(original) = seen.insert(param.name.as_str(), param.span) {
-                    errors.push(
-                        Diagnostic::error(
-                            "duplicate typed closure parameter",
-                            format!("parameter `{}` appears more than once", param.name),
-                            param.span,
-                        )
-                        .with_code("G0130")
-                        .with_related(original, "the first declaration is here")
-                        .with_help("give every typed closure parameter a distinct name"),
-                    );
-                }
-            }
-            if let Some(row) = outward_effects {
-                if let Some(tail) = &row.tail {
-                    errors.push(
-                        Diagnostic::error(
-                            "open typed closure effect row",
-                            "a typed anonymous callable must declare a closed effect row",
-                            tail.span,
-                        )
-                        .with_code("G0130")
-                        .with_help("list every outward effect instead of `| tail`"),
-                    );
-                }
-                for member in &row.effects {
-                    let name = match &member.kind {
-                        TypeSyntaxKind::Application { constructor, .. } => {
-                            constructor.simple_name()
                         }
-                        _ => member.simple_name(),
-                    };
-                    let Some(name) = name else {
+                        _ => {}
+                    }
+                    clause
+                        .patterns
+                        .iter()
+                        .for_each(|pattern| validate_pattern(program, pattern, errors));
+                }
+            }
+            ExprKind::TypedClosure {
+                params,
+                outward_effects,
+                ..
+            } => {
+                let mut seen = HashMap::<&str, Span>::new();
+                for param in params.iter() {
+                    if let Some(original) = seen.insert(param.name.as_str(), param.span) {
                         errors.push(
+                            Diagnostic::error(
+                                "duplicate typed closure parameter",
+                                format!("parameter `{}` appears more than once", param.name),
+                                param.span,
+                            )
+                            .with_code("G0130")
+                            .with_related(original, "the first declaration is here")
+                            .with_help("give every typed closure parameter a distinct name"),
+                        );
+                    }
+                }
+                if let Some(row) = outward_effects {
+                    if let Some(tail) = &row.tail {
+                        errors.push(
+                            Diagnostic::error(
+                                "open typed closure effect row",
+                                "a typed anonymous callable must declare a closed effect row",
+                                tail.span,
+                            )
+                            .with_code("G0130")
+                            .with_help("list every outward effect instead of `| tail`"),
+                        );
+                    }
+                    for member in &row.effects {
+                        let name = match &member.kind {
+                            TypeSyntaxKind::Application { constructor, .. } => {
+                                constructor.simple_name()
+                            }
+                            _ => member.simple_name(),
+                        };
+                        let Some(name) = name else {
+                            errors.push(
                             Diagnostic::error(
                                 "invalid typed closure effect row",
                                 "each row member must name one declared effect or effect-row alias",
@@ -2533,56 +2379,37 @@ fn validate_expr(
                             )
                             .with_code("G0130"),
                         );
-                        continue;
-                    };
-                    if !effects.contains_key(name)
-                        && !program
-                            .effect_row_aliases
-                            .iter()
-                            .any(|alias| alias.name == name)
-                    {
-                        errors.push(
-                            Diagnostic::error(
-                                "unknown typed closure effect",
-                                format!("`{name}` is not a declared effect or effect-row alias"),
-                                member.span,
-                            )
-                            .with_code("G0130")
-                            .with_help("declare the effect before naming it in a closure row"),
-                        );
+                            continue;
+                        };
+                        if !effects.contains_key(name)
+                            && !program
+                                .effect_row_aliases
+                                .iter()
+                                .any(|alias| alias.name == name)
+                        {
+                            errors.push(
+                                Diagnostic::error(
+                                    "unknown typed closure effect",
+                                    format!(
+                                        "`{name}` is not a declared effect or effect-row alias"
+                                    ),
+                                    member.span,
+                                )
+                                .with_code("G0130")
+                                .with_help("declare the effect before naming it in a closure row"),
+                            );
+                        }
                     }
                 }
             }
-            validate_expr(program, body, effects, generic_kinds, errors);
-        }
-        ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
-            validate_expr(program, body, effects, generic_kinds, errors);
-        }
-        ExprKind::LabelReference(_) => {}
-        ExprKind::Leave { value, .. } => {
-            if let Some(value) = value {
-                validate_expr(program, value, effects, generic_kinds, errors);
+            ExprKind::Is { pattern, .. } => {
+                validate_refinement_pattern(program, pattern, errors);
             }
+            _ => {}
         }
-        ExprKind::TailResume { resumption, value } => {
-            validate_expr(program, resumption, effects, generic_kinds, errors);
-            if let Some(value) = value {
-                validate_expr(program, value, effects, generic_kinds, errors);
-            }
-        }
-        ExprKind::Is { subject, pattern } => {
-            validate_expr(program, subject, effects, generic_kinds, errors);
-            validate_refinement_pattern(program, pattern, errors);
-        }
-        ExprKind::Unit
-        | ExprKind::Int(_)
-        | ExprKind::Float(_)
-        | ExprKind::Char(_)
-        | ExprKind::Byte(_)
-        | ExprKind::ByteString(_)
-        | ExprKind::String(_)
-        | ExprKind::Variable(_) => {}
-    }
+        ControlFlow::<()>::Continue(())
+    });
+    debug_assert!(result.is_continue());
 }
 
 /// Handler clause patterns are structurally recursive; named-struct patterns
@@ -2737,5 +2564,46 @@ fn validate_pattern_with_context(
                 )
             });
         }
+    }
+}
+
+#[cfg(test)]
+mod traversal_validation_tests {
+    use std::rc::Rc;
+
+    use super::*;
+    use crate::ast::{AssignmentPlace, AssignmentPlaceKind, LabelSyntax};
+
+    #[test]
+    fn label_validation_reaches_assignment_reference_expressions() {
+        let missing = Expr {
+            kind: ExprKind::LabelReference(LabelSyntax {
+                name: Rc::from("missing"),
+                span: Span::new(4, 12),
+            }),
+            span: Span::new(4, 12),
+        };
+        let expression = Expr {
+            kind: ExprKind::Block(Rc::new(vec![Stmt::Assign {
+                destination: AssignmentPlace {
+                    kind: AssignmentPlaceKind::Dereference {
+                        reference: Rc::new(missing),
+                        fields: vec![],
+                    },
+                    span: Span::new(3, 12),
+                },
+                value: Expr {
+                    kind: ExprKind::Unit,
+                    span: Span::new(15, 17),
+                },
+                span: Span::new(3, 17),
+            }])),
+            span: Span::new(0, 18),
+        };
+
+        let mut errors = Vec::new();
+        validate_label_scopes(&expression, &mut errors);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].code.as_deref(), Some("G0132"));
     }
 }
