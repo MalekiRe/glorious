@@ -18,8 +18,8 @@ use super::{
     BasicBlock, BlockKind, BlockParam, BlockParamRole, CleanupAction, CleanupEdge, CleanupPlanFact,
     CleanupPlanId, DropGlueKind, Edge, FlowProvenance, Function, HandlerSiteFact, Instruction,
     InstructionKind, LabelId, LoanId, LocalFact, MovePathId, MovePaths, Operand, PerformSiteFact,
-    Program, Projection, RegionId, Register, ResumptionSiteFact, ScopeId, SourceInfoId, Terminator,
-    UseMode, analysis,
+    Program, Projection, RegionId, Register, RegisterUseKind, ResumptionSiteFact, ScopeId,
+    SourceInfoId, Terminator, UseMode, analysis,
 };
 use crate::compiler_mir::analyses::{
     AnalysisErrorKind, ControlFlowAnalysis, EdgeLiveness, PhysicalRegisterAllocation,
@@ -651,7 +651,7 @@ pub(crate) fn validate_program(
                 definition_blocks.insert(param.register, block.id);
             }
             for (index, statement) in block.statements.iter().enumerate() {
-                if let Some(dst) = instruction_destination(&statement.kind) {
+                if let Some(dst) = statement.kind.destination() {
                     // ABI parameters are source-storage `Place` locals in the
                     // compact MIR. Pattern fallback may exhaustively move an
                     // aggregate parameter and reconstruct that same place so
@@ -722,34 +722,9 @@ fn used_registers(block: &BasicBlock) -> Vec<Register> {
     }
     let mut used = Vec::new();
     for statement in &block.statements {
-        match &statement.kind {
-            InstructionKind::Const { .. } => {}
-            InstructionKind::Copy { src, .. } | InstructionKind::Move { src, .. } => {
-                used.push(src.register)
-            }
-            InstructionKind::Borrow { src, .. }
-            | InstructionKind::ProjectBorrow { src, .. }
-            | InstructionKind::Reborrow { src, .. }
-            | InstructionKind::DerefCopy { src, .. }
-            | InstructionKind::DerefMove { src, .. }
-            | InstructionKind::EndBorrow { reference: src }
-            | InstructionKind::Deconstruct { src }
-            | InstructionKind::EnumTag { src, .. } => used.push(*src),
-            InstructionKind::Construct { fields, .. } => operands(&mut used, fields),
-            InstructionKind::ProjectCopy { src, .. }
-            | InstructionKind::ProjectMove { src, .. }
-            | InstructionKind::Drop { owner: src } => used.push(src.register),
-            InstructionKind::DerefStore { dst, src } => {
-                used.push(*dst);
-                used.push(src.register);
-            }
-            InstructionKind::Primitive { args, .. } => operands(&mut used, args),
-            InstructionKind::MakeCallable { captures, .. } => operands(&mut used, captures),
-            InstructionKind::MakeHandler { clauses, .. } => operands(&mut used, clauses),
-            InstructionKind::MakeHandlerShared { captures, .. } => operands(&mut used, captures),
-            InstructionKind::MakeBindingPack { payloads, .. } => operands(&mut used, payloads),
-            InstructionKind::LabelPush { .. } | InstructionKind::LabelPop { .. } => {}
-        }
+        statement
+            .kind
+            .for_each_register_use(|register, _| used.push(register));
     }
     match &block.terminator {
         Terminator::Goto(target) => edge(&mut used, target),
@@ -914,79 +889,13 @@ fn lowered_self_tail_assignment_start(function: &Function, block: &BasicBlock) -
     Some(assignment_start)
 }
 
-fn instruction_destination(instruction: &InstructionKind) -> Option<Register> {
-    match instruction {
-        InstructionKind::Const { dst, .. }
-        | InstructionKind::Copy { dst, .. }
-        | InstructionKind::Move { dst, .. }
-        | InstructionKind::Borrow { dst, .. }
-        | InstructionKind::ProjectBorrow { dst, .. }
-        | InstructionKind::Reborrow { dst, .. }
-        | InstructionKind::DerefCopy { dst, .. }
-        | InstructionKind::DerefMove { dst, .. }
-        | InstructionKind::Construct { dst, .. }
-        | InstructionKind::ProjectCopy { dst, .. }
-        | InstructionKind::ProjectMove { dst, .. }
-        | InstructionKind::EnumTag { dst, .. }
-        | InstructionKind::Primitive { dst, .. }
-        | InstructionKind::MakeCallable { dst, .. }
-        | InstructionKind::MakeHandler { dst, .. }
-        | InstructionKind::MakeHandlerShared { dst, .. }
-        | InstructionKind::MakeBindingPack { dst, .. } => Some(*dst),
-        InstructionKind::EndBorrow { .. }
-        | InstructionKind::DerefStore { .. }
-        | InstructionKind::Deconstruct { .. }
-        | InstructionKind::LabelPush { .. }
-        | InstructionKind::LabelPop { .. }
-        | InstructionKind::Drop { .. } => None,
-    }
-}
-
 fn instruction_consumed_registers(instruction: &InstructionKind) -> BTreeSet<Register> {
     let mut consumed = BTreeSet::new();
-    let mut operand = |value: &Operand| {
-        if value.mode == UseMode::Move {
-            consumed.insert(value.register);
+    instruction.for_each_register_use(|register, kind| {
+        if kind == RegisterUseKind::Consume {
+            consumed.insert(register);
         }
-    };
-    match instruction {
-        InstructionKind::Move { src, .. } | InstructionKind::Drop { owner: src } => operand(src),
-        InstructionKind::EndBorrow { reference }
-        | InstructionKind::Deconstruct { src: reference } => {
-            consumed.insert(*reference);
-        }
-        InstructionKind::Construct { fields, .. }
-        | InstructionKind::Primitive { args: fields, .. }
-        | InstructionKind::MakeCallable {
-            captures: fields, ..
-        }
-        | InstructionKind::MakeHandler {
-            clauses: fields, ..
-        }
-        | InstructionKind::MakeHandlerShared {
-            captures: fields, ..
-        }
-        | InstructionKind::MakeBindingPack {
-            payloads: fields, ..
-        } => {
-            for value in fields {
-                operand(value);
-            }
-        }
-        InstructionKind::DerefStore { src, .. } => operand(src),
-        InstructionKind::Const { .. }
-        | InstructionKind::Copy { .. }
-        | InstructionKind::Borrow { .. }
-        | InstructionKind::ProjectBorrow { .. }
-        | InstructionKind::Reborrow { .. }
-        | InstructionKind::DerefCopy { .. }
-        | InstructionKind::DerefMove { .. }
-        | InstructionKind::ProjectCopy { .. }
-        | InstructionKind::ProjectMove { .. }
-        | InstructionKind::EnumTag { .. }
-        | InstructionKind::LabelPush { .. }
-        | InstructionKind::LabelPop { .. } => {}
-    }
+    });
     consumed
 }
 
@@ -2514,9 +2423,7 @@ fn simplify_identity_block_parameter(
             || function.blocks[target_index]
                 .statements
                 .iter()
-                .any(|statement| {
-                    instruction_destination(&statement.kind) == Some(identity.register)
-                })
+                .any(|statement| statement.kind.destination() == Some(identity.register))
         {
             continue;
         }
@@ -2908,57 +2815,9 @@ fn register_uses(function: &Function) -> Vec<u32> {
     }
     for block in &function.blocks {
         for statement in &block.statements {
-            match &statement.kind {
-                InstructionKind::Copy { src, .. } | InstructionKind::Move { src, .. } => {
-                    note_operand(&mut uses, src)
-                }
-                InstructionKind::Borrow { src, .. }
-                | InstructionKind::ProjectBorrow { src, .. }
-                | InstructionKind::Reborrow { src, .. }
-                | InstructionKind::DerefCopy { src, .. }
-                | InstructionKind::DerefMove { src, .. }
-                | InstructionKind::EndBorrow { reference: src }
-                | InstructionKind::Deconstruct { src }
-                | InstructionKind::EnumTag { src, .. } => {
-                    uses[*src as usize] = uses[*src as usize].saturating_add(1)
-                }
-                InstructionKind::Construct { fields, .. } => {
-                    for field in fields {
-                        note_operand(&mut uses, field);
-                    }
-                }
-                InstructionKind::ProjectCopy { src, .. }
-                | InstructionKind::ProjectMove { src, .. } => note_operand(&mut uses, src),
-                InstructionKind::Primitive { args, .. } => {
-                    for arg in args {
-                        note_operand(&mut uses, arg);
-                    }
-                }
-                InstructionKind::MakeCallable { captures, .. }
-                | InstructionKind::MakeHandlerShared { captures, .. } => {
-                    for capture in captures {
-                        note_operand(&mut uses, capture);
-                    }
-                }
-                InstructionKind::MakeHandler { clauses, .. } => {
-                    for clause in clauses {
-                        note_operand(&mut uses, clause);
-                    }
-                }
-                InstructionKind::MakeBindingPack { payloads, .. } => {
-                    for payload in payloads {
-                        note_operand(&mut uses, payload);
-                    }
-                }
-                InstructionKind::Drop { owner } => note_operand(&mut uses, owner),
-                InstructionKind::DerefStore { dst, src } => {
-                    uses[*dst as usize] = uses[*dst as usize].saturating_add(1);
-                    note_operand(&mut uses, src);
-                }
-                InstructionKind::Const { .. }
-                | InstructionKind::LabelPush { .. }
-                | InstructionKind::LabelPop { .. } => {}
-            }
+            statement.kind.for_each_register_use(|register, _| {
+                uses[register as usize] = uses[register as usize].saturating_add(1);
+            });
         }
         match &block.terminator {
             Terminator::Switch { discr, .. } => note_operand(&mut uses, discr),
@@ -3100,31 +2959,7 @@ fn scalarize_locals(function: &mut Function, types: &[Type], budget: u64) -> (Pa
                 definitions[parameter.register as usize].saturating_add(1);
         }
         for statement in &block.statements {
-            let dst = match &statement.kind {
-                InstructionKind::Const { dst, .. }
-                | InstructionKind::Copy { dst, .. }
-                | InstructionKind::Move { dst, .. }
-                | InstructionKind::Borrow { dst, .. }
-                | InstructionKind::ProjectBorrow { dst, .. }
-                | InstructionKind::Reborrow { dst, .. }
-                | InstructionKind::DerefCopy { dst, .. }
-                | InstructionKind::DerefMove { dst, .. }
-                | InstructionKind::Construct { dst, .. }
-                | InstructionKind::ProjectCopy { dst, .. }
-                | InstructionKind::ProjectMove { dst, .. }
-                | InstructionKind::EnumTag { dst, .. }
-                | InstructionKind::Primitive { dst, .. }
-                | InstructionKind::MakeCallable { dst, .. }
-                | InstructionKind::MakeHandler { dst, .. }
-                | InstructionKind::MakeHandlerShared { dst, .. }
-                | InstructionKind::MakeBindingPack { dst, .. } => Some(*dst),
-                InstructionKind::EndBorrow { .. }
-                | InstructionKind::DerefStore { .. }
-                | InstructionKind::Deconstruct { .. }
-                | InstructionKind::LabelPush { .. }
-                | InstructionKind::LabelPop { .. }
-                | InstructionKind::Drop { .. } => None,
-            };
+            let dst = statement.kind.destination();
             if let Some(dst) = dst {
                 definitions[dst as usize] = definitions[dst as usize].saturating_add(1);
             }
@@ -4181,7 +4016,7 @@ fn eliminate_dead_nontrapping_scalar_primitives(
             if work > budget {
                 return (PassOutcome::BudgetExhausted, work);
             }
-            if let Some(destination) = instruction_destination(&statement.kind) {
+            if let Some(destination) = statement.kind.destination() {
                 let count = &mut definitions[destination as usize];
                 *count = count.saturating_add(1);
                 locations[destination as usize] =
@@ -4341,7 +4176,7 @@ fn sparse_simplify(function: &mut Function, types: &[Type], budget: u64) -> (Pas
                 definitions[parameter.register as usize].saturating_add(1);
         }
         for statement in &block.statements {
-            if let Some(destination) = instruction_destination(&statement.kind) {
+            if let Some(destination) = statement.kind.destination() {
                 definitions[destination as usize] =
                     definitions[destination as usize].saturating_add(1);
             }
@@ -4410,7 +4245,7 @@ fn sparse_simplify(function: &mut Function, types: &[Type], budget: u64) -> (Pas
             return (PassOutcome::BudgetExhausted, work);
         }
         for statement in &block.statements {
-            let Some(destination) = instruction_destination(&statement.kind) else {
+            let Some(destination) = statement.kind.destination() else {
                 continue;
             };
             if definitions[destination as usize] != 1 {
@@ -4745,7 +4580,7 @@ fn local_forward_moves(function: &mut Function, budget: u64) -> (PassOutcome, u6
                     || after.iter().any(|later| {
                         instruction_register_use_count(&later.kind, source) != 0
                             || !local_forwarding_use_is_safe(&later.kind, dst)
-                            || instruction_destination(&later.kind) == Some(source)
+                            || later.kind.destination() == Some(source)
                     })
                     || terminator_register_use_count(&block.terminator, source) != 0
                     || !matches!(
@@ -6143,7 +5978,7 @@ fn hoist_loop_invariant_primitives(function: &mut Function, budget: u64) -> (Pas
             }
         }
         for statement in &block.statements {
-            if let Some(destination) = instruction_destination(&statement.kind)
+            if let Some(destination) = statement.kind.destination()
                 && definitions.insert(destination, Some(block.id)).is_some()
             {
                 multiply_defined.insert(destination);
@@ -6959,32 +6794,7 @@ fn remap_edge(edge: &mut Edge, registers: &[Option<Register>]) -> Option<()> {
 }
 
 fn remap_instruction(kind: &mut InstructionKind, registers: &[Option<Register>]) -> Option<()> {
-    let destination = match kind {
-        InstructionKind::Const { dst, .. }
-        | InstructionKind::Copy { dst, .. }
-        | InstructionKind::Move { dst, .. }
-        | InstructionKind::Borrow { dst, .. }
-        | InstructionKind::ProjectBorrow { dst, .. }
-        | InstructionKind::Reborrow { dst, .. }
-        | InstructionKind::DerefCopy { dst, .. }
-        | InstructionKind::DerefMove { dst, .. }
-        | InstructionKind::Construct { dst, .. }
-        | InstructionKind::ProjectCopy { dst, .. }
-        | InstructionKind::ProjectMove { dst, .. }
-        | InstructionKind::EnumTag { dst, .. }
-        | InstructionKind::Primitive { dst, .. }
-        | InstructionKind::MakeCallable { dst, .. }
-        | InstructionKind::MakeHandler { dst, .. }
-        | InstructionKind::MakeHandlerShared { dst, .. }
-        | InstructionKind::MakeBindingPack { dst, .. } => Some(dst),
-        InstructionKind::EndBorrow { .. }
-        | InstructionKind::DerefStore { .. }
-        | InstructionKind::Deconstruct { .. }
-        | InstructionKind::LabelPush { .. }
-        | InstructionKind::LabelPop { .. }
-        | InstructionKind::Drop { .. } => None,
-    };
-    if let Some(destination) = destination {
+    if let Some(destination) = kind.destination_mut() {
         *destination = remap_register(*destination, registers)?;
     }
     match kind {
@@ -8303,7 +8113,7 @@ fn append_transplanted_statements(
             _ => {}
         }
 
-        let old_destination = instruction_destination(&statement.kind);
+        let old_destination = statement.kind.destination();
         if let Some(old_destination) = old_destination {
             if registers.get(old_destination as usize)?.is_some()
                 || omitted.contains(&old_destination)
@@ -8474,7 +8284,7 @@ fn resolve_forwarded_terminal_body(
         registers[index + 1] = Some(argument.register);
     }
     for statement in &forwarded_block.statements {
-        let old_destination = instruction_destination(&statement.kind)?;
+        let old_destination = statement.kind.destination()?;
         let new_destination = flattened.register_types.len() as Register;
         flattened
             .register_types
@@ -8662,7 +8472,7 @@ fn specialize_terminal_handlers(
                 continue;
             }
             if capture_setup_statements.iter().any(|statement| {
-                let Some(dst) = instruction_destination(&statement.kind) else {
+                let Some(dst) = statement.kind.destination() else {
                     return true;
                 };
                 let dst_ty = caller.register_types[dst as usize];
@@ -9010,7 +8820,9 @@ fn specialize_terminal_handlers(
             registers[body_register as usize] = Some(caller_register);
         }
         for mut statement in candidate.body_statements {
-            let old_destination = instruction_destination(&statement.kind)
+            let old_destination = statement
+                .kind
+                .destination()
                 .expect("terminal-fusion statements always define registers");
             let new_destination = function.register_types.len() as Register;
             function
@@ -9752,7 +9564,10 @@ fn inline_leaf_legal(target: &Function, types: &[Type]) -> bool {
     if target.return_cleanup.contains(&0)
         || used_registers(block).contains(&0)
         || block.statements.iter().any(|statement| {
-            instruction_destination(&statement.kind).is_some_and(|register| register <= abi_end)
+            statement
+                .kind
+                .destination()
+                .is_some_and(|register| register <= abi_end)
         })
     {
         return false;
@@ -9865,7 +9680,10 @@ fn inline_multiblock_exit_survivors(
     if target.blocks.iter().any(|block| {
         used_registers(block).contains(&0)
             || block.statements.iter().any(|statement| {
-                instruction_destination(&statement.kind).is_some_and(|register| register <= abi_end)
+                statement
+                    .kind
+                    .destination()
+                    .is_some_and(|register| register <= abi_end)
             })
     }) {
         return None;

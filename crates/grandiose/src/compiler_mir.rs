@@ -447,6 +447,127 @@ pub enum InstructionKind {
     },
 }
 
+/// Ownership-relevant use of a register by one MIR instruction.
+///
+/// Keeping this structural fact beside the instruction algebra prevents each
+/// analysis from growing its own exhaustive match. `Consume` includes both
+/// move-mode operands and the bare-register operations which end an owned MIR
+/// state (`EndBorrow` and `Deconstruct`).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RegisterUseKind {
+    Inspect,
+    Consume,
+}
+
+impl InstructionKind {
+    pub(crate) fn destination(&self) -> Option<Register> {
+        match self {
+            Self::Const { dst, .. }
+            | Self::Copy { dst, .. }
+            | Self::Move { dst, .. }
+            | Self::Borrow { dst, .. }
+            | Self::ProjectBorrow { dst, .. }
+            | Self::Reborrow { dst, .. }
+            | Self::DerefCopy { dst, .. }
+            | Self::DerefMove { dst, .. }
+            | Self::Construct { dst, .. }
+            | Self::ProjectCopy { dst, .. }
+            | Self::ProjectMove { dst, .. }
+            | Self::EnumTag { dst, .. }
+            | Self::Primitive { dst, .. }
+            | Self::MakeCallable { dst, .. }
+            | Self::MakeHandler { dst, .. }
+            | Self::MakeHandlerShared { dst, .. }
+            | Self::MakeBindingPack { dst, .. } => Some(*dst),
+            Self::EndBorrow { .. }
+            | Self::DerefStore { .. }
+            | Self::Deconstruct { .. }
+            | Self::LabelPush { .. }
+            | Self::LabelPop { .. }
+            | Self::Drop { .. } => None,
+        }
+    }
+
+    pub(crate) fn destination_mut(&mut self) -> Option<&mut Register> {
+        match self {
+            Self::Const { dst, .. }
+            | Self::Copy { dst, .. }
+            | Self::Move { dst, .. }
+            | Self::Borrow { dst, .. }
+            | Self::ProjectBorrow { dst, .. }
+            | Self::Reborrow { dst, .. }
+            | Self::DerefCopy { dst, .. }
+            | Self::DerefMove { dst, .. }
+            | Self::Construct { dst, .. }
+            | Self::ProjectCopy { dst, .. }
+            | Self::ProjectMove { dst, .. }
+            | Self::EnumTag { dst, .. }
+            | Self::Primitive { dst, .. }
+            | Self::MakeCallable { dst, .. }
+            | Self::MakeHandler { dst, .. }
+            | Self::MakeHandlerShared { dst, .. }
+            | Self::MakeBindingPack { dst, .. } => Some(dst),
+            Self::EndBorrow { .. }
+            | Self::DerefStore { .. }
+            | Self::Deconstruct { .. }
+            | Self::LabelPush { .. }
+            | Self::LabelPop { .. }
+            | Self::Drop { .. } => None,
+        }
+    }
+
+    pub(crate) fn for_each_register_use(&self, mut visit: impl FnMut(Register, RegisterUseKind)) {
+        fn operand(value: &Operand, visit: &mut impl FnMut(Register, RegisterUseKind)) {
+            visit(
+                value.register,
+                match value.mode {
+                    UseMode::Copy => RegisterUseKind::Inspect,
+                    UseMode::Move => RegisterUseKind::Consume,
+                },
+            );
+        }
+        match self {
+            Self::Copy { src, .. } | Self::Move { src, .. } | Self::Drop { owner: src } => {
+                operand(src, &mut visit)
+            }
+            Self::Borrow { src, .. }
+            | Self::ProjectBorrow { src, .. }
+            | Self::Reborrow { src, .. }
+            | Self::DerefCopy { src, .. }
+            | Self::DerefMove { src, .. }
+            | Self::EnumTag { src, .. } => visit(*src, RegisterUseKind::Inspect),
+            Self::EndBorrow { reference } | Self::Deconstruct { src: reference } => {
+                visit(*reference, RegisterUseKind::Consume)
+            }
+            Self::DerefStore { dst, src } => {
+                visit(*dst, RegisterUseKind::Inspect);
+                operand(src, &mut visit);
+            }
+            Self::Construct { fields, .. }
+            | Self::Primitive { args: fields, .. }
+            | Self::MakeCallable {
+                captures: fields, ..
+            }
+            | Self::MakeHandler {
+                clauses: fields, ..
+            }
+            | Self::MakeHandlerShared {
+                captures: fields, ..
+            }
+            | Self::MakeBindingPack {
+                payloads: fields, ..
+            } => fields.iter().for_each(|field| operand(field, &mut visit)),
+            // A projection move empties one field, not the entire aggregate
+            // register. It is therefore a use of the base for whole-register
+            // analyses, not a complete consumption.
+            Self::ProjectCopy { src, .. } | Self::ProjectMove { src, .. } => {
+                visit(src.register, RegisterUseKind::Inspect)
+            }
+            Self::Const { .. } | Self::LabelPush { .. } | Self::LabelPop { .. } => {}
+        }
+    }
+}
+
 /// Storage class of a local.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StorageClass {
