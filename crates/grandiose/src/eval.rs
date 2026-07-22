@@ -3930,7 +3930,12 @@ impl Evaluator<'_> {
             locals: locals.clone(),
             span,
         }));
-        if expects_callable && matches!(&argument.kind, ExprKind::Block(_)) {
+        if expects_callable
+            && matches!(
+                &argument.kind,
+                ExprKind::Block(_) | ExprKind::ContextBlock(_)
+            )
+        {
             Ok(Control::Value(Value::Closure {
                 params: Rc::from([]),
                 body: Rc::new(argument),

@@ -1312,3 +1312,19 @@ fn callable_constraints_contextually_turn_trailing_blocks_into_closures() {
     .unwrap();
     assert_eq!(result, Value::Int(42));
 }
+
+#[test]
+fn user_callable_constraints_thunk_context_blocks() {
+    let source = r#"
+        invoke<F>(body: F) -> i64 where F: Fn<(), Output=i64> { body() }
+        main() -> i64 { invoke() { 42 } }
+    "#;
+    let result = run_source(
+        "contextual-user-callable.glorious",
+        source,
+        Vec::new(),
+        &mut TestHost::default(),
+    )
+    .unwrap();
+    assert_eq!(result, Value::Int(42));
+}
