@@ -2182,117 +2182,86 @@ pub(crate) fn substitute(
     ty: &ProvisionalType,
     substitutions: &BTreeMap<GenericParamKey, SpecializationArgument>,
 ) -> Option<ProvisionalType> {
-    fn resolve_value(
-        ty: &ProvisionalType,
-        substitutions: &BTreeMap<GenericParamKey, SpecializationArgument>,
-        visiting: &mut BTreeSet<GenericParamKey>,
-    ) -> Option<ProvisionalType> {
-        match ty {
-            ProvisionalType::Param(key) => {
-                let Some(argument) = substitutions.get(key) else {
-                    // Substitution values may terminate in a rigid variable
-                    // owned by the generic caller.
-                    return Some(ty.clone());
-                };
-                if !visiting.insert(key.clone()) {
-                    return None;
-                }
-                let resolved = match argument {
-                    SpecializationArgument::Type(value) => {
-                        resolve_value(value, substitutions, visiting)
-                    }
-                    SpecializationArgument::Closure(_, shape, _, _) => {
-                        Some(ProvisionalType::Callable(shape.clone()))
-                    }
-                    SpecializationArgument::EffectRow(_) => None,
-                };
-                visiting.remove(key);
-                resolved
-            }
-            ProvisionalType::Shared(inner) => {
-                resolve_value(inner, substitutions, visiting).map(ProvisionalType::shared)
-            }
-            ProvisionalType::Unique(inner) => {
-                resolve_value(inner, substitutions, visiting).map(ProvisionalType::unique)
-            }
-            ProvisionalType::Tuple(elements) => Some(ProvisionalType::Tuple(
-                elements
-                    .iter()
-                    .map(|element| resolve_value(element, substitutions, visiting))
-                    .collect::<Option<Vec<_>>>()?,
-            )),
-            ProvisionalType::Nominal(instance) => {
-                fold_const_expression_identity(ProvisionalType::Nominal(NominalInstanceKey {
-                    declaration: instance.declaration.clone(),
-                    arguments: instance
-                        .arguments
-                        .iter()
-                        .map(|argument| resolve_value(argument, substitutions, visiting))
-                        .collect::<Option<Vec<_>>>()?,
-                }))
-            }
-            ProvisionalType::Callable(shape) => {
-                Some(ProvisionalType::Callable(Box::new(CallableShape {
-                    params: shape
-                        .params
-                        .iter()
-                        .map(|param| resolve_value(param, substitutions, visiting))
-                        .collect::<Option<Vec<_>>>()?,
-                    result: resolve_value(&shape.result, substitutions, visiting)?,
-                    effects: shape
-                        .effects
-                        .iter()
-                        .map(|effect| {
-                            Some(crate::compiler_typeck::CallableEffect {
-                                declaration: effect.declaration.clone(),
-                                arguments: effect
-                                    .arguments
-                                    .iter()
-                                    .map(|argument| {
-                                        resolve_value(argument, substitutions, visiting)
-                                    })
-                                    .collect::<Option<Vec<_>>>()?,
-                            })
-                        })
-                        .collect::<Option<Vec<_>>>()?,
-                    effect_tail: shape.effect_tail.clone(),
-                    infer_effects: shape.infer_effects,
-                })))
-            }
-            ProvisionalType::Predefined(_) => Some(ty.clone()),
-        }
-    }
+    substitute_type(
+        ty,
+        substitutions,
+        &mut BTreeSet::new(),
+        MissingParameter::Reject,
+    )
+}
 
+/// Controls the one intentional distinction between substituting an input
+/// type and recursively resolving a substitution value: a value may terminate
+/// in a rigid parameter owned by its generic caller.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum MissingParameter {
+    Reject,
+    Preserve,
+}
+
+fn substitute_type(
+    ty: &ProvisionalType,
+    substitutions: &BTreeMap<GenericParamKey, SpecializationArgument>,
+    visiting: &mut BTreeSet<GenericParamKey>,
+    missing: MissingParameter,
+) -> Option<ProvisionalType> {
     match ty {
-        ProvisionalType::Param(key) => match substitutions.get(key)? {
-            SpecializationArgument::Type(value) => {
-                if value == ty {
-                    // Recursive symbolic validation uses the declaration's
-                    // canonical binder as both caller-rigid and callee-local.
-                    Some(value.clone())
-                } else {
-                    resolve_value(value, substitutions, &mut BTreeSet::from([key.clone()]))
+        ProvisionalType::Param(key) => {
+            let Some(argument) = substitutions.get(key) else {
+                return (missing == MissingParameter::Preserve).then(|| ty.clone());
+            };
+            if visiting.is_empty()
+                && matches!(argument, SpecializationArgument::Type(value) if value == ty)
+            {
+                // Recursive symbolic validation uses the declaration's
+                // canonical binder as both caller-rigid and callee-local.
+                return Some(ty.clone());
+            }
+            if !visiting.insert(key.clone()) {
+                return None;
+            }
+            let resolved = match argument {
+                SpecializationArgument::Type(value) => {
+                    substitute_type(value, substitutions, visiting, MissingParameter::Preserve)
                 }
-            }
-            SpecializationArgument::Closure(_, shape, _, _) => {
-                Some(ProvisionalType::Callable(shape.clone()))
-            }
-            SpecializationArgument::EffectRow(_) => None,
-        },
-        ProvisionalType::Shared(referent) => {
-            substitute(referent, substitutions).map(ProvisionalType::shared)
+                SpecializationArgument::Closure(_, shape, _, _) => {
+                    Some(ProvisionalType::Callable(shape.clone()))
+                }
+                SpecializationArgument::EffectRow(_) => None,
+            };
+            visiting.remove(key);
+            resolved
         }
-        ProvisionalType::Unique(referent) => {
-            substitute(referent, substitutions).map(ProvisionalType::unique)
+        ProvisionalType::Shared(inner) => {
+            substitute_type(inner, substitutions, visiting, missing).map(ProvisionalType::shared)
+        }
+        ProvisionalType::Unique(inner) => {
+            substitute_type(inner, substitutions, visiting, missing).map(ProvisionalType::unique)
+        }
+        ProvisionalType::Tuple(elements) => Some(ProvisionalType::Tuple(
+            elements
+                .iter()
+                .map(|element| substitute_type(element, substitutions, visiting, missing))
+                .collect::<Option<Vec<_>>>()?,
+        )),
+        ProvisionalType::Nominal(instance) => {
+            fold_const_expression_identity(ProvisionalType::Nominal(NominalInstanceKey {
+                declaration: instance.declaration.clone(),
+                arguments: instance
+                    .arguments
+                    .iter()
+                    .map(|argument| substitute_type(argument, substitutions, visiting, missing))
+                    .collect::<Option<Vec<_>>>()?,
+            }))
         }
         ProvisionalType::Callable(shape) => {
             Some(ProvisionalType::Callable(Box::new(CallableShape {
                 params: shape
                     .params
                     .iter()
-                    .map(|param| substitute(param, substitutions))
+                    .map(|param| substitute_type(param, substitutions, visiting, missing))
                     .collect::<Option<Vec<_>>>()?,
-                result: substitute(&shape.result, substitutions)?,
+                result: substitute_type(&shape.result, substitutions, visiting, missing)?,
                 effects: shape
                     .effects
                     .iter()
@@ -2302,7 +2271,9 @@ pub(crate) fn substitute(
                             arguments: effect
                                 .arguments
                                 .iter()
-                                .map(|argument| substitute(argument, substitutions))
+                                .map(|argument| {
+                                    substitute_type(argument, substitutions, visiting, missing)
+                                })
                                 .collect::<Option<Vec<_>>>()?,
                         })
                     })
@@ -2311,23 +2282,7 @@ pub(crate) fn substitute(
                 infer_effects: shape.infer_effects,
             })))
         }
-        ProvisionalType::Nominal(instance) => {
-            fold_const_expression_identity(ProvisionalType::Nominal(NominalInstanceKey {
-                declaration: instance.declaration.clone(),
-                arguments: instance
-                    .arguments
-                    .iter()
-                    .map(|argument| substitute(argument, substitutions))
-                    .collect::<Option<Vec<_>>>()?,
-            }))
-        }
-        ProvisionalType::Tuple(elements) => Some(ProvisionalType::Tuple(
-            elements
-                .iter()
-                .map(|element| substitute(element, substitutions))
-                .collect::<Option<Vec<_>>>()?,
-        )),
-        concrete => Some(concrete.clone()),
+        ProvisionalType::Predefined(_) => Some(ty.clone()),
     }
 }
 
@@ -8727,6 +8682,32 @@ pub(crate) fn discover_with_traits_and_budgets(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn substitution_distinguishes_unbound_inputs_from_rigid_value_tails() {
+        let local = GenericParamKey {
+            owner: DeclarationKey::Function("callee".into()),
+            ordinal: 0,
+        };
+        let caller_rigid = GenericParamKey {
+            owner: DeclarationKey::Function("caller".into()),
+            ordinal: 0,
+        };
+        let local_type = ProvisionalType::Param(local.clone());
+        let rigid_type = ProvisionalType::Param(caller_rigid.clone());
+
+        assert_eq!(substitute(&rigid_type, &BTreeMap::new()), None);
+        assert_eq!(
+            substitute(
+                &local_type,
+                &BTreeMap::from([(
+                    local,
+                    SpecializationArgument::Type(ProvisionalType::Tuple(vec![rigid_type.clone()])),
+                )]),
+            ),
+            Some(ProvisionalType::Tuple(vec![rigid_type]))
+        );
+    }
 
     #[test]
     fn mutable_unification_flattens_chains_checks_occurs_and_is_order_independent() {
