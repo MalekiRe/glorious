@@ -270,8 +270,8 @@ fn module_aware_grc_receives_only_ordered_crate_roots_and_watches_children() {
     assert!(run().status.success());
     assert_eq!(
         sandbox.args_log().lines().count(),
-        9,
-        "fresh check recompiled"
+        6,
+        "fresh check reran compilation or interface scans"
     );
     write(
         &app.join("src/helper.glorious"),
@@ -280,7 +280,7 @@ fn module_aware_grc_receives_only_ordered_crate_roots_and_watches_children() {
     assert!(run().status.success());
     assert_eq!(
         sandbox.args_log().lines().count(),
-        14,
+        11,
         "child module edit did not invalidate the fingerprint"
     );
 }
@@ -615,7 +615,7 @@ fn selected_vm_identity_is_part_of_the_atomic_bytecode_fingerprint() {
     assert!(run_build().status.success());
     assert_eq!(
         sandbox.args_log().lines().count(),
-        7,
+        5,
         "an unchanged VM must preserve the fresh compiler output"
     );
 
@@ -627,7 +627,7 @@ fn selected_vm_identity_is_part_of_the_atomic_bytecode_fingerprint() {
     assert!(run_build().status.success());
     assert_eq!(
         sandbox.args_log().lines().count(),
-        11,
+        9,
         "changing the selected compatible VM must force recompilation"
     );
 }

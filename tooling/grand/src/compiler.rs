@@ -1,11 +1,13 @@
-use std::process::Command;
 use std::{
     ffi::OsString,
+    io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
+    process::{Child, ChildStdin, ChildStdout, Command, Stdio},
+    sync::Mutex,
 };
 
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::contract::{parse_stderr, Capabilities, Declaration, Diagnostic};
 use crate::util::find_upwards;
@@ -64,6 +66,39 @@ impl VmToolchain {
 pub struct Compiler {
     path: PathBuf,
     pub caps: Capabilities,
+    sessions: Mutex<SessionPool>,
+}
+
+#[derive(Default)]
+struct SessionPool {
+    idle: Vec<CompilerSession>,
+    disabled: bool,
+}
+
+struct CompilerSession {
+    child: Child,
+    input: ChildStdin,
+    output: BufReader<ChildStdout>,
+    next_id: u64,
+    generation: u64,
+}
+
+#[derive(Serialize)]
+struct SessionRequest<'a> {
+    protocol: u32,
+    id: u64,
+    method: &'a str,
+    arguments: &'a [String],
+}
+
+#[derive(Deserialize)]
+struct SessionResponse {
+    protocol: u32,
+    id: Option<u64>,
+    status: u8,
+    stderr: String,
+    generation: u64,
+    transaction: String,
 }
 
 pub struct CompileReport {
@@ -71,6 +106,106 @@ pub struct CompileReport {
     pub diagnostics: Vec<Diagnostic>,
     /// Non-diagnostic compiler stderr, verbatim.
     pub passthrough: String,
+}
+
+impl CompilerSession {
+    fn spawn(path: &Path) -> Result<Self> {
+        let mut child = Command::new(path)
+            .arg("--serve")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .with_context(|| format!("failed to launch compiler session {}", path.display()))?;
+        let input = child
+            .stdin
+            .take()
+            .context("compiler session did not expose stdin")?;
+        let output = child
+            .stdout
+            .take()
+            .context("compiler session did not expose stdout")?;
+        Ok(Self {
+            child,
+            input,
+            output: BufReader::new(output),
+            next_id: 1,
+            generation: 0,
+        })
+    }
+
+    fn serialized_request_size(&self, arguments: &[String]) -> Result<usize> {
+        let request = SessionRequest {
+            protocol: 1,
+            id: self.next_id,
+            method: "compile",
+            arguments,
+        };
+        Ok(serde_json::to_vec(&request)
+            .context("serializing compiler session request")?
+            .len()
+            + 1)
+    }
+
+    fn compile(&mut self, arguments: &[String]) -> Result<SessionResponse> {
+        let id = self.next_id;
+        self.next_id = self
+            .next_id
+            .checked_add(1)
+            .context("session id exhausted")?;
+        serde_json::to_writer(
+            &mut self.input,
+            &SessionRequest {
+                protocol: 1,
+                id,
+                method: "compile",
+                arguments,
+            },
+        )
+        .context("writing compiler session request")?;
+        self.input.write_all(b"\n")?;
+        self.input.flush()?;
+
+        let mut line = String::new();
+        if self.output.read_line(&mut line)? == 0 {
+            bail!("compiler session closed before responding");
+        }
+        let response: SessionResponse =
+            serde_json::from_str(&line).context("invalid compiler session response")?;
+        if response.protocol != 1 || response.id != Some(id) {
+            bail!("compiler session response did not match request {id}");
+        }
+        if response.status > 2 {
+            bail!(
+                "compiler session returned invalid status {}",
+                response.status
+            );
+        }
+        let valid_transaction = match response.status {
+            0 => matches!(response.transaction.as_str(), "committed" | "unchanged"),
+            _ => response.transaction == "retained",
+        };
+        if !valid_transaction || response.generation < self.generation {
+            bail!("compiler session returned an invalid transaction state");
+        }
+        if response.status == 2 {
+            bail!(
+                "compiler rejected a valid session request: {}",
+                response.stderr
+            );
+        }
+        self.generation = response.generation;
+        Ok(response)
+    }
+}
+
+impl Drop for CompilerSession {
+    fn drop(&mut self) {
+        // Never let cleanup wait on a wedged compiler. Closing a pooled session
+        // is an implementation detail, so killing the owned child is safe.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
 }
 
 impl Compiler {
@@ -184,7 +319,11 @@ impl Compiler {
                 );
             }
         }
-        Ok(Compiler { path, caps })
+        Ok(Compiler {
+            path,
+            caps,
+            sessions: Mutex::new(SessionPool::default()),
+        })
     }
 
     /// Compile canonical crate roots. `None` requests check-only.
@@ -195,39 +334,142 @@ impl Compiler {
         output: Option<&Path>,
         opt: Option<u8>,
     ) -> Result<CompileReport> {
-        {
-            let mut command = Command::new(&self.path);
-            command.args(["--diagnostics", "json"]);
-            if let Some(level) = opt {
-                command.arg(format!("-O{level}"));
+        let mut arguments = vec![OsString::from("--diagnostics"), OsString::from("json")];
+        if let Some(level) = opt {
+            arguments.push(OsString::from(format!("-O{level}")));
+        }
+        match output {
+            Some(path) => {
+                arguments.extend([OsString::from("--emit"), OsString::from("bytecode")]);
+                arguments.push(OsString::from("-o"));
+                arguments.push(path.as_os_str().to_owned());
             }
-            match output {
-                Some(path) => {
-                    command.args(["--emit", "bytecode"]);
-                    command.arg("-o").arg(path);
-                }
-                None => {
-                    command.args(["--phase", "check"]);
-                }
+            None => arguments.extend([OsString::from("--phase"), OsString::from("check")]),
+        }
+        arguments.extend(inputs.iter().map(|path| path.as_os_str().to_owned()));
+        for (name, path) in dependency_roots {
+            let mut specification = OsString::from(name);
+            specification.push("=");
+            specification.push(path);
+            arguments.push(OsString::from("--dependency"));
+            arguments.push(specification);
+        }
+
+        if let Some(response) = self.request_session(&arguments)? {
+            if response.status != 0
+                && [
+                    "session input limit exceeded",
+                    "session source-byte limit exceeded",
+                    "declared module closure exceeds input-count limit",
+                ]
+                .iter()
+                .any(|message| response.stderr.contains(message))
+            {
+                return self.compile_batch(&arguments);
             }
-            command.args(inputs);
-            for (name, path) in dependency_roots {
-                let mut specification = OsString::from(name);
-                specification.push("=");
-                specification.push(path);
-                command.arg("--dependency").arg(specification);
-            }
-            let out = command
-                .output()
-                .with_context(|| format!("failed to launch compiler {}", self.path.display()))?;
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let (diagnostics, passthrough) = parse_stderr(&stderr);
-            Ok(CompileReport {
-                success: out.status.success(),
+            let (diagnostics, passthrough) = parse_stderr(&response.stderr);
+            return Ok(CompileReport {
+                success: response.status == 0,
                 diagnostics,
                 passthrough,
-            })
+            });
         }
+        self.compile_batch(&arguments)
+    }
+
+    fn compile_batch(&self, arguments: &[OsString]) -> Result<CompileReport> {
+        let out = Command::new(&self.path)
+            .args(arguments)
+            .output()
+            .with_context(|| format!("failed to launch compiler {}", self.path.display()))?;
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let (diagnostics, passthrough) = parse_stderr(&stderr);
+        Ok(CompileReport {
+            success: out.status.success(),
+            diagnostics,
+            passthrough,
+        })
+    }
+
+    /// Route a compile through an idle persistent compiler, spawning another
+    /// one when all existing sessions are busy. The mutex only protects the
+    /// idle list, so parallel test compilation remains parallel.
+    ///
+    /// `None` requests a batch fallback. This covers compilers without the
+    /// optional protocol, non-UTF-8 paths (which JSON cannot represent), and
+    /// requests exceeding the compiler's advertised transport bounds.
+    fn request_session(&self, arguments: &[OsString]) -> Result<Option<SessionResponse>> {
+        let Some(capabilities) = self.caps.serve.as_ref() else {
+            return Ok(None);
+        };
+        let Some(arguments) = arguments
+            .iter()
+            .map(|argument| argument.clone().into_string().ok())
+            .collect::<Option<Vec<_>>>()
+        else {
+            return Ok(None);
+        };
+        if arguments.len() > capabilities.max_arguments {
+            return Ok(None);
+        }
+
+        let mut session = {
+            let mut pool = self
+                .sessions
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if pool.disabled {
+                return Ok(None);
+            }
+            pool.idle.pop()
+        };
+        if session.is_none() {
+            match CompilerSession::spawn(&self.path) {
+                Ok(created) => session = Some(created),
+                Err(_) => {
+                    self.disable_sessions();
+                    return Ok(None);
+                }
+            }
+        }
+        let mut session = session.expect("session was reused or created");
+        let request_size = session.serialized_request_size(&arguments)?;
+        if request_size > capabilities.max_request_bytes {
+            self.return_session(session);
+            return Ok(None);
+        }
+        match session.compile(&arguments) {
+            Ok(response) => {
+                self.return_session(session);
+                Ok(Some(response))
+            }
+            Err(_) => {
+                // A broken transaction is safe to retry in batch: compilation
+                // has no external effect other than deterministically replacing
+                // the requested output artifact.
+                self.disable_sessions();
+                Ok(None)
+            }
+        }
+    }
+
+    fn return_session(&self, session: CompilerSession) {
+        let mut pool = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !pool.disabled {
+            pool.idle.push(session);
+        }
+    }
+
+    fn disable_sessions(&self) {
+        let mut pool = self
+            .sessions
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        pool.disabled = true;
+        pool.idle.clear();
     }
 
     /// Run the compiler's early resolver boundary when it is advertised.
@@ -442,6 +684,46 @@ fn which(name: &str) -> Result<PathBuf> {
 mod tests {
     use super::{executable_digest, find_checkout_release_tool, Compiler};
 
+    #[cfg(unix)]
+    fn session_compiler(directory: &std::path::Path) -> (Compiler, std::path::PathBuf) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let executable = directory.join("grc-session");
+        let log = directory.join("session.log");
+        std::fs::write(
+            &executable,
+            format!(
+                r##"#!/bin/sh
+if [ "$1" = --capabilities ]; then
+  echo '{{"grc":"test","contract":1,"contract-min":1,"contract-max":1,"artifact-major":1,"artifact-minor":0,"multi-file":true,"modules":true,"phases":["check"],"emit":["bytecode","interfaces-json","std-interfaces-json"],"diagnostics-json":true,"serve":{{"protocol":1,"transport":"json-lines","max-request-bytes":1048576,"max-arguments":256,"max-inputs":256,"max-source-bytes":1048576}}}}'
+  exit 0
+fi
+if [ "$1" = --serve ]; then
+  echo serve >> "{}"
+  id=1
+  generation=0
+  while IFS= read -r request; do
+    generation=$((generation + 1))
+    sleep 0.05
+    echo "{{\"protocol\":1,\"id\":$id,\"status\":0,\"stdout\":\"\",\"stderr\":\"\",\"generation\":$generation,\"transaction\":\"committed\"}}"
+    id=$((id + 1))
+  done
+  exit 0
+fi
+echo batch >> "{}"
+exit 0
+"##,
+                log.display(),
+                log.display(),
+            ),
+        )
+        .unwrap();
+        let mut permissions = std::fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions).unwrap();
+        (Compiler::probe(executable).unwrap(), log)
+    }
+
     #[test]
     fn executable_identity_hashes_content_not_only_metadata() {
         let directory = tempfile::tempdir().unwrap();
@@ -468,6 +750,70 @@ mod tests {
         std::fs::create_dir_all(release.parent().unwrap()).unwrap();
         std::fs::write(&release, b"release compiler").unwrap();
         assert_eq!(find_checkout_release_tool(&nested, "grc"), Some(release));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn compile_reuses_persistent_session_for_sequential_requests() {
+        let directory = tempfile::tempdir().unwrap();
+        let (compiler, log) = session_compiler(directory.path());
+        let input = directory.path().join("input.glorious");
+        std::fs::write(&input, "main() -> () { () }").unwrap();
+
+        assert!(
+            compiler
+                .compile(std::slice::from_ref(&input), &[], None, None)
+                .unwrap()
+                .success
+        );
+        assert!(
+            compiler
+                .compile(std::slice::from_ref(&input), &[], None, None)
+                .unwrap()
+                .success
+        );
+
+        assert_eq!(std::fs::read_to_string(log).unwrap(), "serve\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_arguments_fall_back_without_starting_a_session() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let (compiler, log) = session_compiler(directory.path());
+        let input = std::path::PathBuf::from(std::ffi::OsString::from_vec(vec![0xff]));
+
+        assert!(compiler.compile(&[input], &[], None, None).unwrap().success);
+        assert_eq!(std::fs::read_to_string(log).unwrap(), "batch\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn busy_sessions_do_not_serialize_parallel_compiles() {
+        let directory = tempfile::tempdir().unwrap();
+        let (compiler, log) = session_compiler(directory.path());
+        let input = directory.path().join("input.glorious");
+        std::fs::write(&input, "main() -> () { () }").unwrap();
+        let barrier = std::sync::Barrier::new(3);
+
+        std::thread::scope(|scope| {
+            for _ in 0..2 {
+                scope.spawn(|| {
+                    barrier.wait();
+                    assert!(
+                        compiler
+                            .compile(std::slice::from_ref(&input), &[], None, None)
+                            .unwrap()
+                            .success
+                    );
+                });
+            }
+            barrier.wait();
+        });
+
+        assert_eq!(std::fs::read_to_string(log).unwrap(), "serve\nserve\n");
     }
 
     #[cfg(unix)]

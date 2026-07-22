@@ -1,14 +1,15 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{bail, Context, Result};
+use serde::{Deserialize, Serialize};
 
 use crate::bundle::{input_files, module_input_files, package_sources};
-use crate::compiler::{Compiler, discover_vm};
+use crate::compiler::{discover_vm, Compiler};
 use crate::contract::{Declaration, DeclarationKind, Diagnostic, Fix, Severity};
-use crate::lock::{LOCK_NAME, Lockfile};
-use crate::manifest::{MANIFEST_NAME, Manifest};
-use crate::resolve::{Resolution, ResolveOptions, resolve};
+use crate::lock::{Lockfile, LOCK_NAME};
+use crate::manifest::{Manifest, MANIFEST_NAME};
+use crate::resolve::{resolve, Resolution, ResolveOptions};
 use crate::target::Artifact;
 use crate::util::{copy_dir, is_source_path, valid_package_name};
 
@@ -152,6 +153,19 @@ pub struct Compiled {
     pub success: bool,
 }
 
+/// Exact-input build state. Keeping compiler-owned preflight diagnostics with
+/// the artifact fingerprint means a fresh build does not launch two more
+/// compiler processes merely to rediscover the same interfaces. Lint policy
+/// is deliberately not cached; it is reapplied to these raw diagnostics.
+#[derive(Deserialize, Serialize)]
+struct FreshnessRecord {
+    version: u32,
+    fingerprint: String,
+    preflight: Vec<Diagnostic>,
+}
+
+const FRESHNESS_RECORD_VERSION: u32 = 1;
+
 #[derive(Clone, Copy)]
 pub struct CompileOptions<'a> {
     pub entry: Option<&'a Path>,
@@ -200,7 +214,6 @@ fn compile(
     }
     let watched_files = input_files(resolution, entry)?;
     let files = module_input_files(resolution, entry)?;
-    let mut diagnostics = preflight(compiler, &files)?;
     progress!(
         "  Collected {} file(s), {} package(s)",
         files.len(),
@@ -242,9 +255,19 @@ fn compile(
     };
     let fingerprint_path = build_dir.join(format!("{stem}.fingerprint"));
     let outputs_present = output.as_deref().map(|o| o.is_file()).unwrap_or(true);
-    if outputs_present
-        && std::fs::read_to_string(&fingerprint_path).ok().as_deref() == Some(&fingerprint)
-    {
+    let cached = std::fs::read(&fingerprint_path)
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<FreshnessRecord>(&bytes).ok())
+        .filter(|record| {
+            record.version == FRESHNESS_RECORD_VERSION && record.fingerprint == fingerprint
+        });
+    let fresh = outputs_present && cached.is_some();
+    let preflight_diagnostics = match cached {
+        Some(record) => record.preflight,
+        None => preflight(compiler, &files)?,
+    };
+    let mut diagnostics = preflight_diagnostics.clone();
+    if fresh {
         lints.apply(&mut diagnostics);
         if !quiet {
             for diagnostic in &diagnostics {
@@ -264,7 +287,14 @@ fn compile(
     progress!("  Compiling {}", project.manifest.project.name);
     let mut report = compiler.compile(&inputs, &dependency_roots, output.as_deref(), opt)?;
     if report.success && report.diagnostics.is_empty() {
-        let _ = std::fs::write(&fingerprint_path, &fingerprint);
+        let record = FreshnessRecord {
+            version: FRESHNESS_RECORD_VERSION,
+            fingerprint,
+            preflight: preflight_diagnostics,
+        };
+        if let Ok(bytes) = serde_json::to_vec(&record) {
+            let _ = std::fs::write(&fingerprint_path, bytes);
+        }
     } else {
         let _ = std::fs::remove_file(&fingerprint_path);
     }
@@ -542,37 +572,33 @@ pub fn test(filter: Option<&str>, bless: bool, cli_lints: &[(String, LintLevel)]
         .min(8);
     std::thread::scope(|scope| {
         for _ in 0..workers.min(run_tests.len().max(1)) {
-            scope.spawn(|| {
-                loop {
-                    let Some(test) = queue.lock().unwrap().pop() else {
-                        break;
-                    };
-                    let name = test.file_stem().unwrap().to_string_lossy().to_string();
-                    let stem = format!("test-{name}");
-                    let outcome = build_artifact(
-                        &project,
-                        &resolution,
-                        &compiler,
-                        BuildOptions {
-                            entry: Some(&test),
-                            stem: &stem,
-                            opt: None,
-                            cli_lints,
-                        },
-                    )
-                    .and_then(|artifact| {
-                        artifact.execute(&[], &project.manifest.runtime.capabilities)
-                    });
-                    match outcome {
-                        Ok(0) => eprintln!("test {name} ... ok"),
-                        Ok(code) => {
-                            eprintln!("test {name} ... FAILED (exit code {code})");
-                            failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        }
-                        Err(error) => {
-                            eprintln!("test {name} ... FAILED ({error:#})");
-                            failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        }
+            scope.spawn(|| loop {
+                let Some(test) = queue.lock().unwrap().pop() else {
+                    break;
+                };
+                let name = test.file_stem().unwrap().to_string_lossy().to_string();
+                let stem = format!("test-{name}");
+                let outcome = build_artifact(
+                    &project,
+                    &resolution,
+                    &compiler,
+                    BuildOptions {
+                        entry: Some(&test),
+                        stem: &stem,
+                        opt: None,
+                        cli_lints,
+                    },
+                )
+                .and_then(|artifact| artifact.execute(&[], &project.manifest.runtime.capabilities));
+                match outcome {
+                    Ok(0) => eprintln!("test {name} ... ok"),
+                    Ok(code) => {
+                        eprintln!("test {name} ... FAILED (exit code {code})");
+                        failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    Err(error) => {
+                        eprintln!("test {name} ... FAILED ({error:#})");
+                        failures.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     }
                 }
             });

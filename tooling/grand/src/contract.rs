@@ -10,9 +10,8 @@
 //!   array of [`Declaration`] on stdout; `--emit std-interfaces-json` does
 //!   the same for the implicit prelude.
 //! - Persistent session: an optional bounded versioned `grc --serve`
-//!   JSON-lines transport, described by [`ServeCapabilities`]. Grand validates
-//!   this contract but remains a batch client because one build has no request
-//!   stream to amortize.
+//!   JSON-lines transport, described by [`ServeCapabilities`]. Grand pools
+//!   sessions so repeated and parallel test builds amortize compiler startup.
 
 use std::fmt::Write as _;
 use std::path::PathBuf;
@@ -40,9 +39,7 @@ pub struct Capabilities {
     pub seed_identity_version: Option<u32>,
     #[serde(default, rename = "seed-identity")]
     pub seed_identity: Option<String>,
-    /// Optional persistent subprocess protocol. Grand currently remains a
-    /// batch client, but records and validates this shape for editor/build
-    /// clients that can amortize multiple requests.
+    /// Optional persistent subprocess protocol used for repeated builds.
     #[serde(default)]
     pub serve: Option<ServeCapabilities>,
     #[serde(default, rename = "multi-file")]
