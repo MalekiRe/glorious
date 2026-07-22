@@ -18,7 +18,7 @@ use crate::compiler_traits::{
 };
 use crate::compiler_typeck::{
     CallableShape, DeclarationKey, GenericParamKey, NominalInstanceKey, NominalKey,
-    ProvisionalType, ProvisionalTypeFolder, fold_provisional_type_children,
+    ProvisionalConst, ProvisionalType, ProvisionalTypeFolder, fold_provisional_type_children,
     provisional_signature_children_any, provisional_signature_type_any, provisional_type_any,
 };
 
@@ -580,9 +580,7 @@ fn specialization_type_embeds(ancestor: &ProvisionalType, descendant: &Provision
         return true;
     }
     let coupled = match (ancestor, descendant) {
-        (ProvisionalType::Predefined(left), ProvisionalType::Predefined(right)) => {
-            left.starts_with("$const$") && right.starts_with("$const$")
-        }
+        (ProvisionalType::Const(_), ProvisionalType::Const(_)) => true,
         (ProvisionalType::Nominal(left), ProvisionalType::Nominal(right)) => {
             left.declaration == right.declaration
                 && left.arguments.len() == right.arguments.len()
@@ -682,6 +680,8 @@ fn symbolic_type(
                         .map(|shape| ProvisionalType::Callable(Box::new(shape)))
                         .unwrap_or_else(|| ProvisionalType::Param(key.clone())),
                 )
+            } else if let Some(value) = ProvisionalConst::decode_encoded_name(name) {
+                Some(ProvisionalType::Const(value))
             } else if matches!(
                 name.as_str(),
                 "Unit"
@@ -776,14 +776,12 @@ fn const_expression_identity(
 ) -> Option<ProvisionalType> {
     use crate::ast::{ConstBinaryOp, ConstExprSyntaxKind, EvaluatedConst};
     if let Ok(value) = crate::ast::evaluate_const_expression(expression, |_| None) {
-        let name = match value {
-            EvaluatedConst::U32(value) => format!("$const$u32${value}"),
-            EvaluatedConst::Quantity { lower, upper } => format!(
-                "$const$quantity${lower}${}",
-                upper.map_or_else(|| "infinity".to_owned(), |upper| upper.to_string())
-            ),
-        };
-        return Some(ProvisionalType::Predefined(name));
+        return Some(ProvisionalType::Const(match value {
+            EvaluatedConst::U32(value) => ProvisionalConst::U32(value),
+            EvaluatedConst::Quantity { lower, upper } => {
+                ProvisionalConst::Quantity { lower, upper }
+            }
+        }));
     }
     match &expression.kind {
         ConstExprSyntaxKind::Path(path) if path.len() == 1 => generics
@@ -821,25 +819,20 @@ fn const_identity(
     value: &crate::ast::ConstArgumentValueSyntax,
     generics: &BTreeMap<String, GenericParamKey>,
 ) -> Option<ProvisionalType> {
-    let name = match value {
+    let value = match value {
         crate::ast::ConstArgumentValueSyntax::U32 { value, .. } => {
-            format!("$const$u32${}", u32::try_from(*value).ok()?)
+            ProvisionalConst::U32(u32::try_from(*value).ok()?)
         }
         crate::ast::ConstArgumentValueSyntax::Quantity(quantity) => {
             let lower = u32::try_from(quantity.lower).ok()?;
-            let upper = quantity
-                .upper
-                .map(u32::try_from)
-                .transpose()
-                .ok()?
-                .map_or_else(|| "infinity".to_owned(), |upper| upper.to_string());
-            format!("$const$quantity${lower}${upper}")
+            let upper = quantity.upper.map(u32::try_from).transpose().ok()?;
+            ProvisionalConst::Quantity { lower, upper }
         }
         crate::ast::ConstArgumentValueSyntax::Expression(expression) => {
             return const_expression_identity(expression, generics);
         }
     };
-    Some(ProvisionalType::Predefined(name))
+    Some(ProvisionalType::Const(value))
 }
 
 /// Enrich the compatibility type/lifetime application tree with structural const
@@ -920,6 +913,12 @@ pub(crate) fn normalize_projection_placeholders(
             ProvisionalType::Predefined(name) => {
                 TypeSyntaxKind::Path(vec![crate::ast::TypePathSegment {
                     name: name.clone(),
+                    span,
+                }])
+            }
+            ProvisionalType::Const(value) => {
+                TypeSyntaxKind::Path(vec![crate::ast::TypePathSegment {
+                    name: value.encoded_name(),
                     span,
                 }])
             }
@@ -2115,23 +2114,21 @@ fn fold_const_expression_identity(ty: ProvisionalType) -> Option<ProvisionalType
         return Some(ty);
     }
     let [
-        ProvisionalType::Predefined(left),
-        ProvisionalType::Predefined(right),
+        ProvisionalType::Const(ProvisionalConst::U32(left)),
+        ProvisionalType::Const(ProvisionalConst::U32(right)),
     ] = instance.arguments.as_slice()
     else {
         return Some(ty);
     };
-    let left = left.strip_prefix("$const$u32$")?.parse::<u32>().ok()?;
-    let right = right.strip_prefix("$const$u32$")?.parse::<u32>().ok()?;
     let value = match instance.declaration.0.as_str() {
-        "$const$expr$add" => left.checked_add(right),
-        "$const$expr$sub" => left.checked_sub(right),
-        "$const$expr$mul" => left.checked_mul(right),
-        "$const$expr$div" => left.checked_div(right),
-        "$const$expr$rem" => left.checked_rem(right),
+        "$const$expr$add" => left.checked_add(*right),
+        "$const$expr$sub" => left.checked_sub(*right),
+        "$const$expr$mul" => left.checked_mul(*right),
+        "$const$expr$div" => left.checked_div(*right),
+        "$const$expr$rem" => left.checked_rem(*right),
         _ => return Some(ty),
     }?;
-    Some(ProvisionalType::Predefined(format!("$const$u32${value}")))
+    Some(ProvisionalType::Const(ProvisionalConst::U32(value)))
 }
 
 pub(crate) fn substitute(
@@ -2216,22 +2213,15 @@ fn substitute_generic_arg(
             .iter()
             .find(|(key, _)| key.ordinal == *ordinal)
             .and_then(|(_, argument)| match argument {
-                SpecializationArgument::Type(ProvisionalType::Predefined(name)) => match kind {
-                    crate::ast::ConstKind::U32 => name
-                        .strip_prefix("$const$u32$")
-                        .and_then(|value| value.parse().ok())
-                        .map(ConstValue::U32),
-                    crate::ast::ConstKind::Quantity => {
-                        let value = name.strip_prefix("$const$quantity$")?;
-                        let (lower, upper) = value.split_once('$')?;
-                        let lower = lower.parse().ok()?;
-                        let upper = (upper != "infinity")
-                            .then(|| upper.parse())
-                            .transpose()
-                            .ok()?;
-                        Some(ConstValue::Quantity { lower, upper })
-                    }
-                },
+                SpecializationArgument::Type(ProvisionalType::Const(ProvisionalConst::U32(
+                    value,
+                ))) if *kind == crate::ast::ConstKind::U32 => Some(ConstValue::U32(*value)),
+                SpecializationArgument::Type(ProvisionalType::Const(
+                    ProvisionalConst::Quantity { lower, upper },
+                )) if *kind == crate::ast::ConstKind::Quantity => Some(ConstValue::Quantity {
+                    lower: *lower,
+                    upper: *upper,
+                }),
                 _ => None,
             })
             .map(GenericArg::Const),
@@ -3870,7 +3860,9 @@ impl<'a> Walker<'a> {
                 }
                 (lower, upper)
             }
-            ProvisionalType::Callable(_) | ProvisionalType::Param(_) => return None,
+            ProvisionalType::Const(_)
+            | ProvisionalType::Callable(_)
+            | ProvisionalType::Param(_) => return None,
         };
         visiting.remove(subject);
         Some(principal)

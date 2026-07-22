@@ -620,15 +620,18 @@ struct NominalInfo {
 fn diagnostic_type_name(ty: TypeId, nominals: &BTreeMap<String, NominalInfo>) -> String {
     fn provisional(ty: &typeck::ProvisionalType) -> String {
         match ty {
-            typeck::ProvisionalType::Predefined(name) => {
-                if let Some(value) = name.strip_prefix("$const$u32$") {
-                    value.to_owned()
-                } else if let Some(value) = name.strip_prefix("$const$quantity$") {
-                    let (lower, upper) = value.split_once('$').unwrap_or((value, "?"));
-                    format!("[{lower},{upper}]")
-                } else {
-                    name.clone()
-                }
+            typeck::ProvisionalType::Predefined(name) => name.clone(),
+            typeck::ProvisionalType::Const(typeck::ProvisionalConst::U32(value)) => {
+                value.to_string()
+            }
+            typeck::ProvisionalType::Const(typeck::ProvisionalConst::Quantity { lower, upper }) => {
+                format!(
+                    "[{lower},{}]",
+                    upper.map_or("infinity".into(), |v| v.to_string())
+                )
+            }
+            typeck::ProvisionalType::Const(typeck::ProvisionalConst::Rigid { .. }) => {
+                "<const>".into()
             }
             typeck::ProvisionalType::Nominal(instance) => {
                 let arguments = instance
@@ -3102,6 +3105,7 @@ fn provisional_reference_leaf_paths(
                 visiting.remove(key);
             }
             typeck::ProvisionalType::Predefined(_)
+            | typeck::ProvisionalType::Const(_)
             | typeck::ProvisionalType::Param(_)
             | typeck::ProvisionalType::Callable(_)
             | typeck::ProvisionalType::Nominal(_) => {}
@@ -7797,6 +7801,12 @@ fn normalize_ground_projections(
             typeck::ProvisionalType::Predefined(name) => {
                 TypeSyntaxKind::Path(vec![crate::ast::TypePathSegment {
                     name: name.clone(),
+                    span,
+                }])
+            }
+            typeck::ProvisionalType::Const(value) => {
+                TypeSyntaxKind::Path(vec![crate::ast::TypePathSegment {
+                    name: value.encoded_name(),
                     span,
                 }])
             }
@@ -12551,6 +12561,10 @@ fn encode_nominal_instance(instance: &typeck::NominalInstanceKey) -> String {
             typeck::ProvisionalType::Predefined(name) => {
                 write!(output, "p{}:{name}", name.len()).unwrap();
             }
+            typeck::ProvisionalType::Const(value) => {
+                let name = value.encoded_name();
+                write!(output, "p{}:{name}", name.len()).unwrap();
+            }
             typeck::ProvisionalType::Nominal(instance) => {
                 write!(
                     output,
@@ -12627,7 +12641,9 @@ fn canonical_ground_type(ty: &typeck::ProvisionalType) -> typeck::ProvisionalTyp
                 infer_effects: shape.infer_effects,
             }))
         }
-        typeck::ProvisionalType::Predefined(_) | typeck::ProvisionalType::Param(_) => ty.clone(),
+        typeck::ProvisionalType::Predefined(_)
+        | typeck::ProvisionalType::Const(_)
+        | typeck::ProvisionalType::Param(_) => ty.clone(),
     }
 }
 
@@ -12661,9 +12677,13 @@ fn decode_nominal_instance(name: &str) -> Option<typeck::NominalInstanceKey> {
         match tag {
             'p' => {
                 let length = take_length(rest)?;
-                Some(typeck::ProvisionalType::Predefined(take_name(
-                    rest, length,
-                )?))
+                let name = take_name(rest, length)?;
+                Some(
+                    typeck::ProvisionalConst::decode_encoded_name(&name).map_or_else(
+                        || typeck::ProvisionalType::Predefined(name),
+                        typeck::ProvisionalType::Const,
+                    ),
+                )
             }
             'n' => {
                 let length = take_length(rest)?;
@@ -12698,31 +12718,25 @@ fn decode_nominal_instance(name: &str) -> Option<typeck::NominalInstanceKey> {
 fn const_nominal_identity(
     value: &crate::ast::ConstArgumentValueSyntax,
 ) -> Option<typeck::ProvisionalType> {
-    let name = match value {
+    let value = match value {
         crate::ast::ConstArgumentValueSyntax::U32 { value, .. } => {
-            format!("$const$u32${}", u32::try_from(*value).ok()?)
+            typeck::ProvisionalConst::U32(u32::try_from(*value).ok()?)
         }
         crate::ast::ConstArgumentValueSyntax::Quantity(quantity) => {
             let lower = u32::try_from(quantity.lower).ok()?;
-            let upper = quantity
-                .upper
-                .map(u32::try_from)
-                .transpose()
-                .ok()?
-                .map_or_else(|| "infinity".to_owned(), |upper| upper.to_string());
-            format!("$const$quantity${lower}${upper}")
+            let upper = quantity.upper.map(u32::try_from).transpose().ok()?;
+            typeck::ProvisionalConst::Quantity { lower, upper }
         }
         crate::ast::ConstArgumentValueSyntax::Expression(expression) => {
             match crate::ast::evaluate_const_expression(expression, |_| None).ok()? {
-                crate::ast::EvaluatedConst::U32(value) => format!("$const$u32${value}"),
-                crate::ast::EvaluatedConst::Quantity { lower, upper } => format!(
-                    "$const$quantity${lower}${}",
-                    upper.map_or_else(|| "infinity".to_owned(), |upper| upper.to_string())
-                ),
+                crate::ast::EvaluatedConst::U32(value) => typeck::ProvisionalConst::U32(value),
+                crate::ast::EvaluatedConst::Quantity { lower, upper } => {
+                    typeck::ProvisionalConst::Quantity { lower, upper }
+                }
             }
         }
     };
-    Some(typeck::ProvisionalType::Predefined(name))
+    Some(typeck::ProvisionalType::Const(value))
 }
 
 fn instantiate_ground_nominals(
@@ -12771,11 +12785,9 @@ fn instantiate_ground_nominals(
         ) -> bool {
             match ty {
                 typeck::ProvisionalType::Predefined(name) => {
-                    name == "Never"
-                        || name.starts_with("$const$u32$")
-                        || name.starts_with("$const$quantity$")
-                        || scalar_type(name).is_some()
+                    name == "Never" || scalar_type(name).is_some()
                 }
+                typeck::ProvisionalType::Const(_) => true,
                 typeck::ProvisionalType::Nominal(instance) => {
                     if instance.arguments.is_empty() {
                         monomorphic.contains(instance.declaration.0.as_str())
@@ -12961,6 +12973,7 @@ fn instantiate_ground_nominals(
                     }
                 }
                 typeck::ProvisionalType::Predefined(_)
+                | typeck::ProvisionalType::Const(_)
                 | typeck::ProvisionalType::Param(_)
                 | typeck::ProvisionalType::Callable(_) => {}
             }
@@ -13310,6 +13323,12 @@ fn instantiate_ground_nominals(
                     span,
                 }])
             }
+            typeck::ProvisionalType::Const(value) => {
+                TypeSyntaxKind::Path(vec![crate::ast::TypePathSegment {
+                    name: value.encoded_name(),
+                    span,
+                }])
+            }
             typeck::ProvisionalType::Nominal(instance) => {
                 if instance.arguments.is_empty() {
                     TypeSyntaxKind::Path(vec![crate::ast::TypePathSegment {
@@ -13562,7 +13581,9 @@ fn instantiate_ground_nominals(
                     typeck::ProvisionalType::Callable(shape) => {
                         1 + shape.params.iter().map(ty).sum::<usize>() + ty(&shape.result)
                     }
-                    typeck::ProvisionalType::Predefined(_) | typeck::ProvisionalType::Param(_) => 1,
+                    typeck::ProvisionalType::Predefined(_)
+                    | typeck::ProvisionalType::Const(_)
+                    | typeck::ProvisionalType::Param(_) => 1,
                 }
             }
             1 + instance.arguments.iter().map(ty).sum::<usize>()
@@ -13694,6 +13715,7 @@ fn instantiate_ground_nominals(
                     }
                 }
                 typeck::ProvisionalType::Predefined(_)
+                | typeck::ProvisionalType::Const(_)
                 | typeck::ProvisionalType::Param(_)
                 | typeck::ProvisionalType::Callable(_) => {}
             }
@@ -13739,11 +13761,14 @@ fn instantiate_ground_nominals(
         let arguments = params
             .filter_map(|parameter| match parameter.kind {
                 GenericParamKind::Type => Some(typeck::ProvisionalType::Predefined("Unit".into())),
-                GenericParamKind::Const(crate::ast::ConstKind::U32) => {
-                    Some(typeck::ProvisionalType::Predefined("$const$u32$0".into()))
-                }
+                GenericParamKind::Const(crate::ast::ConstKind::U32) => Some(
+                    typeck::ProvisionalType::Const(typeck::ProvisionalConst::U32(0)),
+                ),
                 GenericParamKind::Const(crate::ast::ConstKind::Quantity) => Some(
-                    typeck::ProvisionalType::Predefined("$const$quantity$0$0".into()),
+                    typeck::ProvisionalType::Const(typeck::ProvisionalConst::Quantity {
+                        lower: 0,
+                        upper: Some(0),
+                    }),
                 ),
                 GenericParamKind::Lifetime | GenericParamKind::EffectRow => None,
             })
@@ -15010,6 +15035,12 @@ fn instantiate_ground_nominals(
             let kind = match ty {
                 typeck::ProvisionalType::Predefined(name) if name == "Never" => {
                     TypeSyntaxKind::Never
+                }
+                typeck::ProvisionalType::Const(value) => {
+                    TypeSyntaxKind::Path(vec![crate::ast::TypePathSegment {
+                        name: value.encoded_name(),
+                        span,
+                    }])
                 }
                 typeck::ProvisionalType::Predefined(name) => {
                     TypeSyntaxKind::Path(vec![crate::ast::TypePathSegment {
@@ -18138,6 +18169,7 @@ fn provisional_to_resolved(
                 .collect::<Option<Vec<_>>>()?,
         )),
         typeck::ProvisionalType::Param(_) | typeck::ProvisionalType::Callable(_) => None,
+        typeck::ProvisionalType::Const(_) => None,
     }
 }
 
@@ -21311,6 +21343,7 @@ impl<'a> CoreLowerer<'a> {
                                     this.existing_structural_type_id(&resolved)
                                 }
                                 typeck::ProvisionalType::Param(_)
+                                | typeck::ProvisionalType::Const(_)
                                 | typeck::ProvisionalType::Callable(_) => None,
                             }
                         }
@@ -23373,6 +23406,7 @@ impl<'a> CoreLowerer<'a> {
                 self.late_closure_type_id(&ty)
             }
             typeck::ProvisionalType::Callable(_) => None,
+            typeck::ProvisionalType::Const(_) => None,
         }
     }
 

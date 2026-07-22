@@ -12,8 +12,8 @@ use crate::ast::{
     TraitRefSyntax, TypeSyntax, TypeSyntaxKind,
 };
 use crate::compiler_typeck::{
-    DeclarationKey, GenericParamKey, NominalInstanceKey, NominalKey, ProvisionalType,
-    provisional_signature_type_any,
+    DeclarationKey, GenericParamKey, NominalInstanceKey, NominalKey, ProvisionalConst,
+    ProvisionalType, provisional_signature_type_any,
 };
 use crate::diagnostic::Diagnostic;
 
@@ -664,56 +664,44 @@ fn instantiate_bound_const(
 }
 
 fn encode_const_value(value: &ConstValue) -> ProvisionalType {
-    let name = match value {
-        ConstValue::U32(value) => format!("$const$u32${value}"),
-        ConstValue::Quantity { lower, upper } => format!(
-            "$const$quantity${lower}${}",
-            upper.map_or_else(|| "infinity".to_owned(), |upper| upper.to_string())
-        ),
-    };
-    ProvisionalType::Predefined(name)
+    ProvisionalType::Const(match value {
+        ConstValue::U32(value) => ProvisionalConst::U32(*value),
+        ConstValue::Quantity { lower, upper } => ProvisionalConst::Quantity {
+            lower: *lower,
+            upper: *upper,
+        },
+    })
 }
 
 fn encode_const_argument(argument: &GenericArg) -> Option<ProvisionalType> {
     match argument {
         GenericArg::Const(value) => Some(encode_const_value(value)),
-        GenericArg::RigidConst(index, kind) => Some(ProvisionalType::Predefined(format!(
-            "$const$rigid${kind:?}${index}"
-        ))),
+        GenericArg::RigidConst(index, kind) => {
+            Some(ProvisionalType::Const(ProvisionalConst::Rigid {
+                index: *index,
+                kind: *kind,
+            }))
+        }
         GenericArg::Type(_) | GenericArg::Lifetime(_) => None,
     }
 }
 
 fn decode_const_argument(ty: &ProvisionalType) -> Option<GenericArg> {
-    let ProvisionalType::Predefined(name) = ty else {
-        return None;
-    };
-    if let Some(value) = name.strip_prefix("$const$u32$") {
-        return value
-            .parse::<u32>()
-            .ok()
-            .map(|value| GenericArg::Const(ConstValue::U32(value)));
-    }
-    if let Some(value) = name.strip_prefix("$const$quantity$") {
-        let (lower, upper) = value.split_once('$')?;
-        let upper = if upper == "infinity" {
-            None
-        } else {
-            Some(upper.parse().ok()?)
-        };
-        return Some(GenericArg::Const(ConstValue::Quantity {
-            lower: lower.parse().ok()?,
-            upper,
-        }));
-    }
-    let value = name.strip_prefix("$const$rigid$")?;
-    let (kind, index) = value.split_once('$')?;
-    let kind = match kind {
-        "U32" => ConstKind::U32,
-        "Quantity" => ConstKind::Quantity,
+    Some(match ty {
+        ProvisionalType::Const(ProvisionalConst::U32(value)) => {
+            GenericArg::Const(ConstValue::U32(*value))
+        }
+        ProvisionalType::Const(ProvisionalConst::Quantity { lower, upper }) => {
+            GenericArg::Const(ConstValue::Quantity {
+                lower: *lower,
+                upper: *upper,
+            })
+        }
+        ProvisionalType::Const(ProvisionalConst::Rigid { index, kind }) => {
+            GenericArg::RigidConst(*index, *kind)
+        }
         _ => return None,
-    };
-    Some(GenericArg::RigidConst(index.parse().ok()?, kind))
+    })
 }
 
 fn instantiate_ground_pattern(ty: &ProvisionalType, universe: u32) -> ProvisionalType {

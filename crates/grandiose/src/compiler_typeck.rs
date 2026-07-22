@@ -12,9 +12,9 @@ use grandiose_vm::bytecode::NEVER;
 use grandiose_vm::{BYTES, CHAR, F32, F64, I64, TEXT, TypeId, U8, UNIT};
 
 use crate::ast::{
-    AssignmentPlace, AssignmentPlaceKind, BinaryOp, Expr, ExprKind, ExprVisitor, GenericParamKind,
-    PatternKind, Program, Stmt, TypeSyntax, TypeSyntaxKind, UnaryOp, pattern_field_index,
-    walk_expr,
+    AssignmentPlace, AssignmentPlaceKind, BinaryOp, ConstKind, Expr, ExprKind, ExprVisitor,
+    GenericParamKind, PatternKind, Program, Stmt, TypeSyntax, TypeSyntaxKind, UnaryOp,
+    pattern_field_index, walk_expr,
 };
 use crate::ast_visit::TypeSyntaxVisitor;
 use crate::compiler_core as core;
@@ -396,8 +396,56 @@ pub(crate) fn type_lifetime_variance(
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum ProvisionalConst {
+    U32(u32),
+    Quantity { lower: u32, upper: Option<u32> },
+    Rigid { index: u32, kind: ConstKind },
+}
+
+impl ProvisionalConst {
+    pub(crate) fn encoded_name(&self) -> String {
+        match self {
+            Self::U32(value) => format!("$const$u32${value}"),
+            Self::Quantity { lower, upper } => format!(
+                "$const$quantity${lower}${}",
+                upper.map_or_else(|| "infinity".to_owned(), |upper| upper.to_string())
+            ),
+            Self::Rigid { index, kind } => format!("$const$rigid${kind:?}${index}"),
+        }
+    }
+
+    pub(crate) fn decode_encoded_name(name: &str) -> Option<Self> {
+        if let Some(value) = name.strip_prefix("$const$u32$") {
+            return Some(Self::U32(value.parse().ok()?));
+        }
+        if let Some(value) = name.strip_prefix("$const$quantity$") {
+            let (lower, upper) = value.split_once('$')?;
+            return Some(Self::Quantity {
+                lower: lower.parse().ok()?,
+                upper: (upper != "infinity")
+                    .then(|| upper.parse())
+                    .transpose()
+                    .ok()?,
+            });
+        }
+        let value = name.strip_prefix("$const$rigid$")?;
+        let (kind, index) = value.split_once('$')?;
+        let kind = match kind {
+            "U32" => ConstKind::U32,
+            "Quantity" => ConstKind::Quantity,
+            _ => return None,
+        };
+        Some(Self::Rigid {
+            index: index.parse().ok()?,
+            kind,
+        })
+    }
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub(crate) enum ProvisionalType {
     Predefined(String),
+    Const(ProvisionalConst),
     Nominal(NominalInstanceKey),
     Tuple(Vec<ProvisionalType>),
     Shared(Box<Self>),
@@ -422,6 +470,7 @@ impl ProvisionalType {
     fn write(&self, output: &mut String) {
         match self {
             Self::Predefined(name) => output.push_str(name),
+            Self::Const(value) => output.push_str(&value.encoded_name()),
             Self::Nominal(instance) => {
                 write!(output, "nominal:{:?}", instance.declaration.0).unwrap();
                 if !instance.arguments.is_empty() {
@@ -527,7 +576,9 @@ pub(crate) fn fold_provisional_type_children<F: ProvisionalTypeFolder + ?Sized>(
     ty: &ProvisionalType,
 ) -> Result<ProvisionalType, F::Error> {
     Ok(match ty {
-        ProvisionalType::Predefined(_) | ProvisionalType::Param(_) => ty.clone(),
+        ProvisionalType::Predefined(_) | ProvisionalType::Const(_) | ProvisionalType::Param(_) => {
+            ty.clone()
+        }
         ProvisionalType::Nominal(instance) => ProvisionalType::Nominal(NominalInstanceKey {
             declaration: instance.declaration.clone(),
             arguments: instance
@@ -599,7 +650,9 @@ pub(crate) fn provisional_signature_children_any(
             .iter()
             .chain(std::iter::once(&shape.result))
             .any(predicate),
-        ProvisionalType::Predefined(_) | ProvisionalType::Param(_) => false,
+        ProvisionalType::Predefined(_) | ProvisionalType::Const(_) | ProvisionalType::Param(_) => {
+            false
+        }
     }
 }
 
@@ -633,7 +686,9 @@ fn provisional_type_any_with(
                             })
                         })
             }
-            ProvisionalType::Predefined(_) | ProvisionalType::Param(_) => false,
+            ProvisionalType::Predefined(_)
+            | ProvisionalType::Const(_)
+            | ProvisionalType::Param(_) => false,
         }
 }
 
@@ -1555,6 +1610,7 @@ fn provisional_contains_references(ty: &ProvisionalType) -> bool {
         ProvisionalType::Tuple(elements) => elements.iter().any(provisional_contains_references),
         ProvisionalType::Nominal(_)
         | ProvisionalType::Predefined(_)
+        | ProvisionalType::Const(_)
         | ProvisionalType::Param(_)
         | ProvisionalType::Callable(_) => false,
     }
@@ -3209,5 +3265,30 @@ mod tests {
                 variant: 0,
             }]
         );
+    }
+
+    #[test]
+    fn provisional_const_identity_round_trips_only_at_text_boundaries() {
+        for identity in [
+            ProvisionalConst::U32(42),
+            ProvisionalConst::Quantity {
+                lower: 2,
+                upper: Some(7),
+            },
+            ProvisionalConst::Quantity {
+                lower: 3,
+                upper: None,
+            },
+            ProvisionalConst::Rigid {
+                index: 9,
+                kind: ConstKind::Quantity,
+            },
+        ] {
+            assert_eq!(
+                ProvisionalConst::decode_encoded_name(&identity.encoded_name()),
+                Some(identity)
+            );
+        }
+        assert_eq!(ProvisionalConst::decode_encoded_name("i64"), None);
     }
 }

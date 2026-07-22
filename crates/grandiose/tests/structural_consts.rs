@@ -106,6 +106,7 @@ fn reordered_structural_manifest() -> TrustedTraitManifest {
 #[test]
 fn external_quantity_arguments_are_structural_and_forward_through_param_envs() {
     let source = r#"
+        infixl 40 /;
         struct Token { marker:i64 }
         struct Infinite { marker:i64 }
         struct Missing { marker:i64 }
