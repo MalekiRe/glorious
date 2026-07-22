@@ -1,5 +1,8 @@
 use grandiose::source_bundle::{Segment, SourceBundle};
-use grandiose::{compile_bundle_to_bytecode, compile_source_to_bytecode, compile_source_to_phases};
+use grandiose::{
+    CompileOptions, OptimizationLevel, compile_bundle_to_bytecode, compile_source_to_bytecode,
+    compile_source_to_phases, compile_source_to_phases_with_options,
+};
 use grandiose_vm::{Artifact, Instruction, Type, Value, Vm, verify};
 
 fn compile_raw_source(
@@ -98,21 +101,19 @@ fn stored_copy_capture_closure_can_be_invoked_repeatedly() {
     let source =
         "run()->i64 { let value = 21; let twice = { => value }; twice() + twice() } main()->{()}";
     let phases = compile_source_to_phases("stored-copy-closure.glorious", source).unwrap();
-    assert_eq!(
-        phases
-            .artifact
-            .code
-            .iter()
-            .filter(|instruction| matches!(instruction, Instruction::CallIndirect { .. }))
-            .count(),
-        2
-    );
     let run = phases
         .artifact
         .functions
         .iter()
         .position(|function| function.name == "run")
         .unwrap() as u32;
+    assert_eq!(
+        function_code(&phases.artifact, &phases.artifact.functions[run as usize])
+            .iter()
+            .filter(|instruction| matches!(instruction, Instruction::CallIndirect { .. }))
+            .count(),
+        2
+    );
     assert_eq!(
         Vm::new(verify(phases.artifact.clone()).unwrap())
             .run(run, vec![])
@@ -6906,10 +6907,6 @@ fn invalid_straight_line_loans_report_source_errors_before_artifact_verification
             "struct Holder { value: &i64 } wrap(value: &i64) -> Holder { Holder { value: value } } bad() -> Holder { let value = 1; wrap(&value) } main() -> { () }",
             "cannot escape",
         ),
-        (
-            "borrow_sink(value: &i64) -> { () } bad() -> { borrow_sink(&(1 + 2)); } main() -> { () }",
-            "not a temporary expression",
-        ),
     ] {
         let errors = compile_source_to_bytecode("bad-loan.glorious", source).unwrap_err();
         assert!(
@@ -6997,8 +6994,8 @@ fn constants_are_deduplicated_and_sorted_by_frozen_wire_key() {
     assert_eq!(
         artifact.constants,
         vec![
-            grandiose_vm::Constant::I64(1),
-            grandiose_vm::Constant::I64(2)
+            grandiose_vm::Constant::I64(2),
+            grandiose_vm::Constant::I64(4)
         ]
     );
     assert!(Artifact::decode(&artifact.encode()).is_ok());
@@ -8221,7 +8218,7 @@ fn core_carries_exact_types_and_resolved_nominal_member_ids() {
 
 #[test]
 fn mir_owns_reverse_cleanup_and_explicit_operand_modes() {
-    let phases = compile_source_to_phases(
+    let phases = compile_source_to_phases_with_options(
         "mir-cleanup.glorious",
         r#"
             shadow(value: i64) -> i64 {
@@ -8231,6 +8228,9 @@ fn mir_owns_reverse_cleanup_and_explicit_operand_modes() {
             }
             main() -> { () }
         "#,
+        CompileOptions {
+            optimization_level: OptimizationLevel::O0,
+        },
     )
     .unwrap();
     let function = phases

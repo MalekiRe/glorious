@@ -6864,9 +6864,13 @@ fn compile_program_with_phases(
                 unreachable!("drop glue is emitted by the later dedicated lowering loop")
             }
         };
-        let discovery_root =
+        let discovery_root = if matches!(body_instance, specialization::BodyInstanceKey::Closure(_))
+        {
+            root
+        } else {
             specialization::body_root(&function_item_normalized_program, discovery_owner)
-                .expect("every emitted specialization body has a discovery root");
+                .expect("every emitted specialization body has a discovery root")
+        };
         let (mut lowerer, core_params, core_receiver_captures) = CoreLowerer::new(
             core_tables,
             &mut effect_lowering,
@@ -24177,6 +24181,14 @@ impl<'a> CoreLowerer<'a> {
     }
 
     fn later_binding_expected_type(&self, binding: &str, remaining: &[Stmt]) -> Option<TypeId> {
+        fn direct_binding(expression: &Expr, binding: &str) -> bool {
+            let expression = match &expression.kind {
+                ExprKind::Move(value) => value.as_ref(),
+                _ => expression,
+            };
+            matches!(&expression.kind, ExprKind::Variable(path) if path.len() == 1 && path[0].as_ref() == binding)
+        }
+
         let mut pending = remaining
             .iter()
             .map(|statement| match statement {
@@ -24189,12 +24201,12 @@ impl<'a> CoreLowerer<'a> {
         while let Some(expression) = pending.pop() {
             match &expression.kind {
                 ExprKind::Binary { lhs, rhs, .. } => {
-                    if expression_uses_name(lhs, binding)
+                    if direct_binding(lhs, binding)
                         && let Some(ty) = self.integer_comparison_operand_type(rhs)
                     {
                         return Some(ty);
                     }
-                    if expression_uses_name(rhs, binding)
+                    if direct_binding(rhs, binding)
                         && let Some(ty) = self.integer_comparison_operand_type(lhs)
                     {
                         return Some(ty);

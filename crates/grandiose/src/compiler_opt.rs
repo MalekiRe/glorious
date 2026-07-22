@@ -15605,7 +15605,14 @@ mod tests {
             forward(value: Scratch) -> i64 { leaf() }
             main() -> { () }
         "#;
-        let phases = crate::compile_source_to_phases("optimizer-input.glorious", source).unwrap();
+        let phases = crate::compile_source_to_phases_with_options(
+            "optimizer-input.glorious",
+            source,
+            crate::CompileOptions {
+                optimization_level: OptimizationLevel::O0,
+            },
+        )
+        .unwrap();
         let mut program = phases.mir;
         for function in &mut program.functions {
             function.phase = MirPhase::Raw;
