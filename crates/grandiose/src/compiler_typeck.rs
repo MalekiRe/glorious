@@ -6,13 +6,15 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::ops::ControlFlow;
 
 use grandiose_vm::bytecode::NEVER;
 use grandiose_vm::{BYTES, CHAR, F32, F64, I64, TEXT, TypeId, U8, UNIT};
 
 use crate::ast::{
-    AssignmentPlace, AssignmentPlaceKind, BinaryOp, Expr, ExprKind, GenericParamKind, PatternKind,
-    Program, Stmt, TypeSyntax, TypeSyntaxKind, UnaryOp, pattern_field_index,
+    AssignmentPlace, AssignmentPlaceKind, BinaryOp, Expr, ExprKind, ExprVisitor, GenericParamKind,
+    PatternKind, Program, Stmt, TypeSyntax, TypeSyntaxKind, UnaryOp, pattern_field_index,
+    walk_expr,
 };
 use crate::compiler_core as core;
 use crate::span::Span;
@@ -1438,160 +1440,86 @@ fn provisional_contains_references(ty: &ProvisionalType) -> bool {
 }
 
 fn collect_label_evidence(owner: DeclarationKey, root: &Expr) -> Vec<LabelEvidence> {
-    fn visit(
-        owner: &DeclarationKey,
-        expression: &Expr,
-        active: &mut BTreeMap<String, usize>,
-        evidence: &mut Vec<LabelEvidence>,
-    ) {
-        match &expression.kind {
-            ExprKind::Labeled { label, body } => {
-                let index = evidence.len();
-                evidence.push(LabelEvidence {
-                    brand: LabelBrand {
-                        owner: owner.clone(),
-                        ordinal: index as u32,
-                    },
-                    name: label.name.to_string(),
-                    binder_span: label.span,
-                    destination_result: None,
-                    result_contains_references: false,
-                    references: vec![],
-                    leaves: vec![],
-                });
-                let previous = active.insert(label.name.to_string(), index);
-                visit(owner, body, active, evidence);
-                if let Some(previous) = previous {
-                    active.insert(label.name.to_string(), previous);
-                } else {
-                    active.remove(label.name.as_ref());
-                }
+    struct Collector<'a> {
+        owner: &'a DeclarationKey,
+        active: BTreeMap<String, usize>,
+        evidence: Vec<LabelEvidence>,
+    }
+
+    impl Collector<'_> {
+        fn bind(
+            &mut self,
+            label: &crate::ast::LabelSyntax,
+            result: Option<ProvisionalType>,
+            body: &Expr,
+        ) {
+            let index = self.evidence.len();
+            self.evidence.push(LabelEvidence {
+                brand: LabelBrand {
+                    owner: self.owner.clone(),
+                    ordinal: index as u32,
+                },
+                name: label.name.to_string(),
+                binder_span: label.span,
+                result_contains_references: result
+                    .as_ref()
+                    .is_some_and(provisional_contains_references),
+                destination_result: result,
+                references: vec![],
+                leaves: vec![],
+            });
+            let previous = self.active.insert(label.name.to_string(), index);
+            let _ = self.visit_expr(body);
+            if let Some(previous) = previous {
+                self.active.insert(label.name.to_string(), previous);
+            } else {
+                self.active.remove(label.name.as_ref());
             }
-            ExprKind::LabelDestination { label, ty, body } => {
-                let result =
-                    provisional_label_type(ty.as_deref()).unwrap_or_else(|| predefined(UNIT));
-                let index = evidence.len();
-                evidence.push(LabelEvidence {
-                    brand: LabelBrand {
-                        owner: owner.clone(),
-                        ordinal: index as u32,
-                    },
-                    name: label.name.to_string(),
-                    binder_span: label.span,
-                    destination_result: Some(result.clone()),
-                    result_contains_references: provisional_contains_references(&result),
-                    references: vec![],
-                    leaves: vec![],
-                });
-                let previous = active.insert(label.name.to_string(), index);
-                visit(owner, body, active, evidence);
-                if let Some(previous) = previous {
-                    active.insert(label.name.to_string(), previous);
-                } else {
-                    active.remove(label.name.as_ref());
-                }
-            }
-            ExprKind::LabelReference(label) => {
-                if let Some(index) = active.get(label.name.as_ref()).copied() {
-                    evidence[index].references.push(label.span);
-                }
-            }
-            ExprKind::Leave { label, value } => {
-                if let Some(index) = active.get(label.name.as_ref()).copied()
-                    && let Some(result) = evidence[index].destination_result.clone()
-                {
-                    evidence[index].leaves.push(LabelLeaveEvidence {
-                        span: expression.span,
-                        value_span: value.as_deref().map(|value| value.span),
-                        result_contains_references: provisional_contains_references(&result),
-                        result,
-                    });
-                }
-                if let Some(value) = value {
-                    visit(owner, value, active, evidence);
-                }
-            }
-            ExprKind::Move(value)
-            | ExprKind::Field(value, _)
-            | ExprKind::Unary { operand: value, .. } => visit(owner, value, active, evidence),
-            ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
-                visit(owner, body, active, evidence)
-            }
-            ExprKind::List(values) | ExprKind::Tuple(values) => {
-                for value in values.iter() {
-                    visit(owner, value, active, evidence);
-                }
-            }
-            ExprKind::Struct { fields, .. } => {
-                for (_, value) in fields.iter() {
-                    visit(owner, value, active, evidence);
-                }
-            }
-            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
-                for statement in statements.iter() {
-                    match statement {
-                        Stmt::Let { value, .. }
-                        | Stmt::Deconstruct { value, .. }
-                        | Stmt::Expr(value) => visit(owner, value, active, evidence),
-                        Stmt::Assign {
-                            destination, value, ..
-                        } => {
-                            visit(owner, value, active, evidence);
-                            if let AssignmentPlaceKind::Dereference { reference, .. } =
-                                &destination.kind
-                            {
-                                visit(owner, reference, active, evidence);
-                            }
-                        }
-                    }
-                }
-            }
-            ExprKind::Call(callee, arguments) => {
-                visit(owner, callee, active, evidence);
-                for argument in arguments.iter() {
-                    visit(owner, argument, active, evidence);
-                }
-            }
-            ExprKind::Perform { args, .. } => {
-                for argument in args.iter() {
-                    visit(owner, argument, active, evidence);
-                }
-            }
-            ExprKind::Handle {
-                computation,
-                clauses,
-            } => {
-                visit(owner, computation, active, evidence);
-                for clause in clauses.iter() {
-                    visit(owner, &clause.body, active, evidence);
-                }
-            }
-            ExprKind::Binary { lhs, rhs, .. } => {
-                visit(owner, lhs, active, evidence);
-                visit(owner, rhs, active, evidence);
-            }
-            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
-                visit(owner, resumption, active, evidence);
-                if let Some(value) = value {
-                    visit(owner, value, active, evidence);
-                }
-            }
-            ExprKind::Cancel { resumption } => visit(owner, resumption, active, evidence),
-            ExprKind::Is { subject, .. } => visit(owner, subject, active, evidence),
-            ExprKind::Unit
-            | ExprKind::Int(_)
-            | ExprKind::Float(_)
-            | ExprKind::String(_)
-            | ExprKind::Char(_)
-            | ExprKind::Byte(_)
-            | ExprKind::ByteString(_)
-            | ExprKind::Variable(_) => {}
         }
     }
 
-    let mut evidence = Vec::new();
-    visit(&owner, root, &mut BTreeMap::new(), &mut evidence);
-    evidence
+    impl<'ast> ExprVisitor<'ast> for Collector<'_> {
+        type Break = ();
+
+        fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<()> {
+            match &expression.kind {
+                ExprKind::Labeled { label, body } => self.bind(label, None, body),
+                ExprKind::LabelDestination { label, ty, body } => self.bind(
+                    label,
+                    Some(provisional_label_type(ty.as_deref()).unwrap_or_else(|| predefined(UNIT))),
+                    body,
+                ),
+                ExprKind::LabelReference(label) => {
+                    if let Some(index) = self.active.get(label.name.as_ref()).copied() {
+                        self.evidence[index].references.push(label.span);
+                    }
+                }
+                ExprKind::Leave { label, value } => {
+                    if let Some(index) = self.active.get(label.name.as_ref()).copied()
+                        && let Some(result) = self.evidence[index].destination_result.clone()
+                    {
+                        self.evidence[index].leaves.push(LabelLeaveEvidence {
+                            span: expression.span,
+                            value_span: value.as_deref().map(|value| value.span),
+                            result_contains_references: provisional_contains_references(&result),
+                            result,
+                        });
+                    }
+                    walk_expr(self, expression)?;
+                }
+                _ => walk_expr(self, expression)?,
+            }
+            ControlFlow::Continue(())
+        }
+    }
+
+    let mut collector = Collector {
+        owner: &owner,
+        active: BTreeMap::new(),
+        evidence: Vec::new(),
+    };
+    let _ = collector.visit_expr(root);
+    collector.evidence
 }
 
 pub(crate) fn type_program(

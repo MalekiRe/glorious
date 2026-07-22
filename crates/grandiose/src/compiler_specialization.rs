@@ -5,11 +5,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::ops::ControlFlow;
 
 use crate::ast::{
-    AssignmentPlaceKind, AssociatedArgumentSyntax, BinaryOp, Expr, ExprKind, GenericParamKind,
-    GoalArgument, GoalPolarity, PatternKind, Program, Stmt, TypeSyntax, TypeSyntaxKind, UnaryOp,
-    pattern_field_index,
+    AssignmentPlaceKind, AssociatedArgumentSyntax, BinaryOp, Expr, ExprKind, ExprVisitor,
+    GenericParamKind, GoalArgument, GoalPolarity, PatternKind, Program, Stmt, TypeSyntax,
+    TypeSyntaxKind, UnaryOp, pattern_field_index, visit_expr_preorder, walk_expr,
 };
 use crate::compiler_traits::{
     AssociatedValue, ConstValue, GenericArg, GenericParameterKind, IntrinsicRole, LifetimeArg,
@@ -2812,25 +2813,20 @@ fn passed_as_unique_call_argument(
     name: &str,
     templates: &BTreeMap<String, FunctionTemplate>,
 ) -> bool {
-    let ordinals = expression_ordinals(body);
-    let count = ordinals.values().copied().max().map_or(0, |last| last + 1);
-    (0..count).any(|ordinal| {
-        let Some(expression) = expression_at_ordinal(body, ordinal) else {
-            return false;
-        };
+    visit_expr_preorder(body, |expression| {
         let ExprKind::Call(callee, arguments) = &expression.kind else {
-            return false;
+            return ControlFlow::Continue(());
         };
         let ExprKind::Variable(path) = &callee.kind else {
-            return false;
+            return ControlFlow::Continue(());
         };
         let Some(template) = (path.len() == 1)
             .then(|| templates.get(path[0].as_ref()))
             .flatten()
         else {
-            return false;
+            return ControlFlow::Continue(());
         };
-        arguments
+        if arguments
             .iter()
             .zip(&template.params)
             .any(|(argument, formal)| {
@@ -2842,7 +2838,13 @@ fn passed_as_unique_call_argument(
                     && matches!(&argument.kind, ExprKind::Variable(argument_path)
                     if argument_path.len() == 1 && argument_path[0].as_ref() == name)
             })
+        {
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(())
+        }
     })
+    .is_break()
 }
 
 pub(crate) fn recursive_closure_binding(value: &Expr, name: &str) -> bool {
@@ -2874,107 +2876,56 @@ fn direct_closure_effects(
     expression: &Expr,
     resolve: &impl Fn(crate::span::Span, &str) -> Option<crate::compiler_typeck::CallableEffect>,
 ) -> BTreeSet<crate::compiler_typeck::CallableEffect> {
-    fn visit(
-        expression: &Expr,
-        resolve: &impl Fn(crate::span::Span, &str) -> Option<crate::compiler_typeck::CallableEffect>,
-        output: &mut BTreeSet<crate::compiler_typeck::CallableEffect>,
-    ) {
-        match &expression.kind {
-            ExprKind::Perform { effect, args, .. } => {
-                for argument in args.iter() {
-                    visit(argument, resolve, output);
-                }
-                if let Some(effect) = resolve(expression.span, effect) {
-                    output.insert(effect);
-                }
-            }
-            ExprKind::Handle {
-                computation,
-                clauses,
-            } => {
-                let mut nested = BTreeSet::new();
-                visit(computation, resolve, &mut nested);
-                for clause in clauses.iter() {
-                    if let Some(effect) = resolve(clause.span, &clause.effect) {
-                        nested.remove(&effect);
+    struct Collector<'a, R> {
+        resolve: &'a R,
+        output: BTreeSet<crate::compiler_typeck::CallableEffect>,
+    }
+
+    impl<'ast, R> ExprVisitor<'ast> for Collector<'_, R>
+    where
+        R: Fn(crate::span::Span, &str) -> Option<crate::compiler_typeck::CallableEffect>,
+    {
+        type Break = ();
+
+        fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<()> {
+            match &expression.kind {
+                ExprKind::Perform { effect, .. } => {
+                    walk_expr(self, expression)?;
+                    if let Some(effect) = (self.resolve)(expression.span, effect) {
+                        self.output.insert(effect);
                     }
-                    visit(&clause.body, resolve, output);
                 }
-                output.extend(nested);
-            }
-            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
-                for statement in statements.iter() {
-                    match statement {
-                        Stmt::Let { value, .. }
-                        | Stmt::Deconstruct { value, .. }
-                        | Stmt::Expr(value) => visit(value, resolve, output),
-                        Stmt::Assign {
-                            destination, value, ..
-                        } => {
-                            visit(value, resolve, output);
-                            if let AssignmentPlaceKind::Dereference { reference, .. } =
-                                &destination.kind
-                            {
-                                visit(reference, resolve, output);
-                            }
+                ExprKind::Handle {
+                    computation,
+                    clauses,
+                } => {
+                    let mut nested = Collector {
+                        resolve: self.resolve,
+                        output: BTreeSet::new(),
+                    };
+                    nested.visit_expr(computation)?;
+                    for clause in clauses.iter() {
+                        if let Some(effect) = (self.resolve)(clause.span, &clause.effect) {
+                            nested.output.remove(&effect);
                         }
+                        self.visit_expr(&clause.body)?;
                     }
+                    self.output.extend(nested.output);
                 }
+                // Nested anonymous callables have independent outward rows.
+                ExprKind::Closure { .. } | ExprKind::TypedClosure { .. } => {}
+                _ => walk_expr(self, expression)?,
             }
-            ExprKind::List(values) | ExprKind::Tuple(values) => {
-                for value in values.iter() {
-                    visit(value, resolve, output);
-                }
-            }
-            ExprKind::Struct { fields, .. } => {
-                for (_, value) in fields.iter() {
-                    visit(value, resolve, output);
-                }
-            }
-            ExprKind::Closure { .. } | ExprKind::TypedClosure { .. } => {}
-            ExprKind::Move(value)
-            | ExprKind::Field(value, _)
-            | ExprKind::Unary { operand: value, .. } => visit(value, resolve, output),
-            ExprKind::Call(callee, arguments) => {
-                visit(callee, resolve, output);
-                for argument in arguments.iter() {
-                    visit(argument, resolve, output);
-                }
-            }
-            ExprKind::Binary { lhs, rhs, .. } => {
-                visit(lhs, resolve, output);
-                visit(rhs, resolve, output);
-            }
-            ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
-                visit(body, resolve, output)
-            }
-            ExprKind::Leave { value, .. } => {
-                if let Some(value) = value {
-                    visit(value, resolve, output);
-                }
-            }
-            ExprKind::Is { subject, .. } => visit(subject, resolve, output),
-            ExprKind::Unit
-            | ExprKind::Int(_)
-            | ExprKind::Float(_)
-            | ExprKind::Char(_)
-            | ExprKind::Byte(_)
-            | ExprKind::ByteString(_)
-            | ExprKind::String(_)
-            | ExprKind::Variable(_) => {}
-            ExprKind::LabelReference(_) => {}
-            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
-                visit(resumption, resolve, output);
-                if let Some(value) = value {
-                    visit(value, resolve, output);
-                }
-            }
-            ExprKind::Cancel { resumption } => visit(resumption, resolve, output),
+            ControlFlow::Continue(())
         }
     }
-    let mut effects = BTreeSet::new();
-    visit(expression, resolve, &mut effects);
-    effects
+
+    let mut collector = Collector {
+        resolve,
+        output: BTreeSet::new(),
+    };
+    let _ = collector.visit_expr(expression);
+    collector.output
 }
 
 #[derive(Clone)]
@@ -7539,125 +7490,19 @@ impl<'a> Walker<'a> {
 pub(crate) fn expression_ordinal_maps(
     root: &Expr,
 ) -> (BTreeMap<usize, u32>, BTreeMap<(usize, usize), u32>) {
-    fn visit(
-        expression: &Expr,
-        next: &mut u32,
-        ordinals: &mut BTreeMap<usize, u32>,
-        spans: &mut BTreeMap<(usize, usize), u32>,
-        ambiguous_spans: &mut BTreeSet<(usize, usize)>,
-    ) {
-        ordinals.insert(std::ptr::from_ref(expression) as usize, *next);
-        let span = (expression.span.start, expression.span.end);
-        if spans.insert(span, *next).is_some() {
-            ambiguous_spans.insert(span);
-        }
-        *next += 1;
-        match &expression.kind {
-            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
-                for statement in statements.iter() {
-                    match statement {
-                        Stmt::Let { value, .. }
-                        | Stmt::Deconstruct { value, .. }
-                        | Stmt::Expr(value) => {
-                            visit(value, next, ordinals, spans, ambiguous_spans);
-                        }
-                        Stmt::Assign {
-                            destination, value, ..
-                        } => {
-                            visit(value, next, ordinals, spans, ambiguous_spans);
-                            if let AssignmentPlaceKind::Dereference { reference, .. } =
-                                &destination.kind
-                            {
-                                visit(reference, next, ordinals, spans, ambiguous_spans);
-                            }
-                        }
-                    }
-                }
-            }
-            ExprKind::List(values) | ExprKind::Tuple(values) => {
-                for value in values.iter() {
-                    visit(value, next, ordinals, spans, ambiguous_spans);
-                }
-            }
-            ExprKind::Struct { fields, .. } => {
-                for (_, value) in fields.iter() {
-                    visit(value, next, ordinals, spans, ambiguous_spans);
-                }
-            }
-            ExprKind::Field(subject, _)
-            | ExprKind::Move(subject)
-            | ExprKind::Unary {
-                operand: subject, ..
-            } => {
-                visit(subject, next, ordinals, spans, ambiguous_spans);
-            }
-            ExprKind::Call(callee, arguments) => {
-                visit(callee, next, ordinals, spans, ambiguous_spans);
-                for argument in arguments.iter() {
-                    visit(argument, next, ordinals, spans, ambiguous_spans);
-                }
-            }
-            ExprKind::Perform { args, .. } => {
-                for argument in args.iter() {
-                    visit(argument, next, ordinals, spans, ambiguous_spans);
-                }
-            }
-            ExprKind::Handle {
-                computation,
-                clauses,
-            } => {
-                visit(computation, next, ordinals, spans, ambiguous_spans);
-                for clause in clauses.iter() {
-                    visit(&clause.body, next, ordinals, spans, ambiguous_spans);
-                }
-            }
-            ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
-                visit(body, next, ordinals, spans, ambiguous_spans)
-            }
-            ExprKind::Binary { lhs, rhs, .. } => {
-                visit(lhs, next, ordinals, spans, ambiguous_spans);
-                visit(rhs, next, ordinals, spans, ambiguous_spans);
-            }
-            ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
-                visit(body, next, ordinals, spans, ambiguous_spans)
-            }
-            ExprKind::Leave { value, .. } => {
-                if let Some(value) = value {
-                    visit(value, next, ordinals, spans, ambiguous_spans);
-                }
-            }
-            ExprKind::Is { subject, .. } => visit(subject, next, ordinals, spans, ambiguous_spans),
-            ExprKind::Unit
-            | ExprKind::Int(_)
-            | ExprKind::Float(_)
-            | ExprKind::Char(_)
-            | ExprKind::Byte(_)
-            | ExprKind::ByteString(_)
-            | ExprKind::String(_)
-            | ExprKind::Variable(_) => {}
-            ExprKind::LabelReference(_) => {}
-            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
-                visit(resumption, next, ordinals, spans, ambiguous_spans);
-                if let Some(value) = value {
-                    visit(value, next, ordinals, spans, ambiguous_spans);
-                }
-            }
-            ExprKind::Cancel { resumption } => {
-                visit(resumption, next, ordinals, spans, ambiguous_spans)
-            }
-        }
-    }
-
+    let mut next = 0;
     let mut ordinals = BTreeMap::new();
     let mut spans = BTreeMap::new();
     let mut ambiguous_spans = BTreeSet::new();
-    visit(
-        root,
-        &mut 0,
-        &mut ordinals,
-        &mut spans,
-        &mut ambiguous_spans,
-    );
+    let _: ControlFlow<()> = visit_expr_preorder(root, |expression| {
+        ordinals.insert(std::ptr::from_ref(expression) as usize, next);
+        let span = (expression.span.start, expression.span.end);
+        if spans.insert(span, next).is_some() {
+            ambiguous_spans.insert(span);
+        }
+        next += 1;
+        ControlFlow::Continue(())
+    });
     for span in ambiguous_spans {
         spans.remove(&span);
     }
@@ -7669,88 +7514,19 @@ pub(crate) fn expression_ordinals(root: &Expr) -> BTreeMap<usize, u32> {
 }
 
 fn expression_at_ordinal(root: &Expr, target: u32) -> Option<&Expr> {
-    fn find<'a>(expression: &'a Expr, target: u32, next: &mut u32) -> Option<&'a Expr> {
-        let ordinal = *next;
-        *next += 1;
+    let mut next = 0;
+    match visit_expr_preorder(root, |expression| {
+        let ordinal = next;
+        next += 1;
         if ordinal == target {
-            return Some(expression);
+            ControlFlow::Break(expression)
+        } else {
+            ControlFlow::Continue(())
         }
-        let mut children = Vec::new();
-        match &expression.kind {
-            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
-                for statement in statements.iter() {
-                    match statement {
-                        Stmt::Let { value, .. }
-                        | Stmt::Deconstruct { value, .. }
-                        | Stmt::Expr(value) => children.push(value),
-                        Stmt::Assign {
-                            destination, value, ..
-                        } => {
-                            children.push(value);
-                            if let AssignmentPlaceKind::Dereference { reference, .. } =
-                                &destination.kind
-                            {
-                                children.push(reference);
-                            }
-                        }
-                    }
-                }
-            }
-            ExprKind::List(values) | ExprKind::Tuple(values) => children.extend(values.iter()),
-            ExprKind::Struct { fields, .. } => {
-                children.extend(fields.iter().map(|(_, value)| value));
-            }
-            ExprKind::Field(subject, _)
-            | ExprKind::Move(subject)
-            | ExprKind::Unary {
-                operand: subject, ..
-            } => {
-                children.push(subject);
-            }
-            ExprKind::Call(callee, arguments) => {
-                children.push(callee);
-                children.extend(arguments.iter());
-            }
-            ExprKind::Perform { args, .. } => children.extend(args.iter()),
-            ExprKind::Handle {
-                computation,
-                clauses,
-            } => {
-                children.push(computation);
-                children.extend(clauses.iter().map(|clause| &clause.body));
-            }
-            ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
-                children.push(body)
-            }
-            ExprKind::Binary { lhs, rhs, .. } => {
-                children.push(lhs);
-                children.push(rhs);
-            }
-            ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
-                children.push(body)
-            }
-            ExprKind::Leave { value, .. } => children.extend(value.iter().map(AsRef::as_ref)),
-            ExprKind::Is { subject, .. } => children.push(subject),
-            ExprKind::Unit
-            | ExprKind::Int(_)
-            | ExprKind::Float(_)
-            | ExprKind::Char(_)
-            | ExprKind::Byte(_)
-            | ExprKind::ByteString(_)
-            | ExprKind::String(_)
-            | ExprKind::Variable(_) => {}
-            ExprKind::LabelReference(_) => {}
-            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
-                children.push(resumption);
-                children.extend(value.iter().map(AsRef::as_ref));
-            }
-            ExprKind::Cancel { resumption } => children.push(resumption),
-        }
-        children
-            .into_iter()
-            .find_map(|child| find(child, target, next))
+    }) {
+        ControlFlow::Break(expression) => Some(expression),
+        ControlFlow::Continue(()) => None,
     }
-    find(root, target, &mut 0)
 }
 
 pub(crate) fn body_root<'a>(program: &'a Program, owner: &DeclarationKey) -> Option<&'a Expr> {

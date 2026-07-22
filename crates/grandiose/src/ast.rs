@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::{ops::ControlFlow, rc::Rc};
 
 use crate::{lexer::NumberLiteral, span::Span};
 
@@ -971,6 +971,143 @@ pub enum AssignmentPlaceKind {
     },
 }
 
+/// A read-only source-expression visitor. Override `visit_expr` to inspect a
+/// node, then call `walk_expr` when its children should also be visited.
+///
+/// The associated break value makes searches stop without allocating a child
+/// list or walking the remainder of the tree.
+pub trait ExprVisitor<'ast> {
+    type Break;
+
+    fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<Self::Break> {
+        walk_expr(self, expression)
+    }
+}
+
+/// Visit the immediate expression children in source evaluation order.
+///
+/// This match is intentionally exhaustive: adding an `ExprKind` variant forces
+/// the shared traversal definition to be updated once.
+pub fn walk_expr<'ast, V>(visitor: &mut V, expression: &'ast Expr) -> ControlFlow<V::Break>
+where
+    V: ExprVisitor<'ast> + ?Sized,
+{
+    let mut visit = |child| visitor.visit_expr(child);
+    match &expression.kind {
+        ExprKind::Move(value)
+        | ExprKind::Field(value, _)
+        | ExprKind::Unary { operand: value, .. }
+        | ExprKind::Labeled { body: value, .. }
+        | ExprKind::LabelDestination { body: value, .. }
+        | ExprKind::Cancel { resumption: value }
+        | ExprKind::Is { subject: value, .. } => visit(value),
+        ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => visit(body),
+        ExprKind::Leave { value, .. } => {
+            if let Some(value) = value {
+                visit(value)?;
+            }
+            ControlFlow::Continue(())
+        }
+        ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+            visit(resumption)?;
+            if let Some(value) = value {
+                visit(value)?;
+            }
+            ControlFlow::Continue(())
+        }
+        ExprKind::ContextBlock(statements) | ExprKind::Block(statements) => {
+            for statement in statements.iter() {
+                match statement {
+                    Stmt::Let { value, .. }
+                    | Stmt::Deconstruct { value, .. }
+                    | Stmt::Expr(value) => visit(value)?,
+                    Stmt::Assign {
+                        destination, value, ..
+                    } => {
+                        visit(value)?;
+                        if let AssignmentPlaceKind::Dereference { reference, .. } =
+                            &destination.kind
+                        {
+                            visit(reference)?;
+                        }
+                    }
+                }
+            }
+            ControlFlow::Continue(())
+        }
+        ExprKind::List(values) | ExprKind::Tuple(values) => {
+            for value in values.iter() {
+                visit(value)?;
+            }
+            ControlFlow::Continue(())
+        }
+        ExprKind::Struct { fields, .. } => {
+            for (_, value) in fields.iter() {
+                visit(value)?;
+            }
+            ControlFlow::Continue(())
+        }
+        ExprKind::Call(callee, arguments) => {
+            visit(callee)?;
+            for argument in arguments.iter() {
+                visit(argument)?;
+            }
+            ControlFlow::Continue(())
+        }
+        ExprKind::Perform { args, .. } => {
+            for argument in args.iter() {
+                visit(argument)?;
+            }
+            ControlFlow::Continue(())
+        }
+        ExprKind::Handle {
+            computation,
+            clauses,
+        } => {
+            visit(computation)?;
+            for clause in clauses.iter() {
+                visit(&clause.body)?;
+            }
+            ControlFlow::Continue(())
+        }
+        ExprKind::Binary { lhs, rhs, .. } => {
+            visit(lhs)?;
+            visit(rhs)
+        }
+        ExprKind::Unit
+        | ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::String(_)
+        | ExprKind::Char(_)
+        | ExprKind::Byte(_)
+        | ExprKind::ByteString(_)
+        | ExprKind::Variable(_)
+        | ExprKind::LabelReference(_) => ControlFlow::Continue(()),
+    }
+}
+
+/// Visit a source expression tree in preorder, stopping on the first break.
+pub fn visit_expr_preorder<'ast, B>(
+    root: &'ast Expr,
+    visit: impl FnMut(&'ast Expr) -> ControlFlow<B>,
+) -> ControlFlow<B> {
+    struct Preorder<F>(F);
+
+    impl<'ast, B, F> ExprVisitor<'ast> for Preorder<F>
+    where
+        F: FnMut(&'ast Expr) -> ControlFlow<B>,
+    {
+        type Break = B;
+
+        fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<B> {
+            (self.0)(expression)?;
+            walk_expr(self, expression)
+        }
+    }
+
+    Preorder(visit).visit_expr(root)
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AssignmentField {
     pub name: String,
@@ -1002,4 +1139,66 @@ pub enum BinaryOp {
     LtEq,
     Gt,
     GtEq,
+}
+
+#[cfg(test)]
+mod traversal_tests {
+    use super::*;
+
+    fn int(value: i64, at: usize) -> Expr {
+        Expr {
+            kind: ExprKind::Int(value),
+            span: Span::new(at, at + 1),
+        }
+    }
+
+    fn assignment_tree() -> Expr {
+        Expr {
+            kind: ExprKind::Block(Rc::new(vec![Stmt::Assign {
+                destination: AssignmentPlace {
+                    kind: AssignmentPlaceKind::Dereference {
+                        reference: Rc::new(int(4, 4)),
+                        fields: vec![],
+                    },
+                    span: Span::new(4, 5),
+                },
+                value: Expr {
+                    kind: ExprKind::Binary {
+                        op: BinaryOp::Add,
+                        lhs: Rc::new(int(1, 1)),
+                        rhs: Rc::new(int(2, 2)),
+                    },
+                    span: Span::new(0, 3),
+                },
+                span: Span::new(0, 5),
+            }])),
+            span: Span::new(0, 5),
+        }
+    }
+
+    #[test]
+    fn preorder_follows_source_evaluation_order() {
+        let mut starts = Vec::new();
+        let result: ControlFlow<()> = visit_expr_preorder(&assignment_tree(), |expression| {
+            starts.push(expression.span.start);
+            ControlFlow::Continue(())
+        });
+        assert!(result.is_continue());
+        assert_eq!(starts, [0, 0, 1, 2, 4]);
+    }
+
+    #[test]
+    fn preorder_stops_before_unvisited_siblings() {
+        let mut starts = Vec::new();
+        let result = visit_expr_preorder(&assignment_tree(), |expression| {
+            starts.push(expression.span.start);
+            if matches!(expression.kind, ExprKind::Int(2)) {
+                ControlFlow::Break(expression.span)
+            } else {
+                ControlFlow::Continue(())
+            }
+        });
+        assert_eq!(result, ControlFlow::Break(Span::new(2, 3)));
+        assert_eq!(starts, [0, 0, 1, 2]);
+    }
 }
