@@ -480,16 +480,13 @@ impl TrustedRuntimeManifest {
         }
         push_float_leaf("__g1_f32_to_f64".into(), Primitive::FloatConvert);
         push_float_leaf("__g1_f64_to_f32".into(), Primitive::FloatConvert);
-        let integers = [
-            "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
-        ];
         for target in ["f32", "f64"] {
-            for source in integers {
+            for &source in crate::builtins::INTEGER_SCALAR_NAMES {
                 push_float_leaf(format!("__g1_{source}_to_{target}"), Primitive::IntToFloat);
             }
         }
         for source in ["f32", "f64"] {
-            for target in integers {
+            for &target in crate::builtins::INTEGER_SCALAR_NAMES {
                 push_float_leaf(
                     format!("__g1_{source}_to_{target}_checked"),
                     Primitive::FloatToIntChecked,
@@ -6117,16 +6114,13 @@ mod tests {
         }
         push_float("__g1_f32_to_f64".into(), Primitive::FloatConvert);
         push_float("__g1_f64_to_f32".into(), Primitive::FloatConvert);
-        let integers = [
-            "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
-        ];
         for target in ["f32", "f64"] {
-            for source in integers {
+            for &source in crate::builtins::INTEGER_SCALAR_NAMES {
                 push_float(format!("__g1_{source}_to_{target}"), Primitive::IntToFloat);
             }
         }
         for source in ["f32", "f64"] {
-            for target in integers {
+            for &target in crate::builtins::INTEGER_SCALAR_NAMES {
                 push_float(
                     format!("__g1_{source}_to_{target}_checked"),
                     Primitive::FloatToIntChecked,

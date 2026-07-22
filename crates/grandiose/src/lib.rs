@@ -1,6 +1,7 @@
 #![allow(clippy::result_large_err)]
 
 pub mod ast;
+mod builtins;
 mod compiler;
 pub mod compiler_core;
 pub mod compiler_mir;
@@ -176,125 +177,22 @@ fn runtime_leaf_authority(
             )
         }))
         .chain(
-            [
-                (
-                    "__g1_int_wrapping_add",
-                    grandiose_vm::Primitive::IntWrappingAdd,
-                ),
-                (
-                    "__g1_int_wrapping_sub",
-                    grandiose_vm::Primitive::IntWrappingSub,
-                ),
-                (
-                    "__g1_int_wrapping_mul",
-                    grandiose_vm::Primitive::IntWrappingMul,
-                ),
-                ("__g1_int_bit_and", grandiose_vm::Primitive::IntBitAnd),
-                ("__g1_int_bit_or", grandiose_vm::Primitive::IntBitOr),
-                ("__g1_int_bit_xor", grandiose_vm::Primitive::IntBitXor),
-                ("__g1_int_bit_not", grandiose_vm::Primitive::IntBitNot),
-                ("__g1_int_shl", grandiose_vm::Primitive::IntShl),
-                ("__g1_int_shr", grandiose_vm::Primitive::IntShr),
-                (
-                    "__g1_int_convert_checked_to_u8",
-                    grandiose_vm::Primitive::IntConvertChecked,
-                ),
-                (
-                    "__g1_int_convert_checked_to_u16",
-                    grandiose_vm::Primitive::IntConvertChecked,
-                ),
-                (
-                    "__g1_int_convert_checked_to_u32",
-                    grandiose_vm::Primitive::IntConvertChecked,
-                ),
-                (
-                    "__g1_int_convert_checked_to_u64",
-                    grandiose_vm::Primitive::IntConvertChecked,
-                ),
-                (
-                    "__g1_int_convert_checked_to_u128",
-                    grandiose_vm::Primitive::IntConvertChecked,
-                ),
-                (
-                    "__g1_int_convert_checked_to_usize",
-                    grandiose_vm::Primitive::IntConvertChecked,
-                ),
-                (
-                    "__g1_int_convert_checked_to_i8",
-                    grandiose_vm::Primitive::IntConvertChecked,
-                ),
-                (
-                    "__g1_int_convert_checked_to_i16",
-                    grandiose_vm::Primitive::IntConvertChecked,
-                ),
-                (
-                    "__g1_int_convert_checked_to_i32",
-                    grandiose_vm::Primitive::IntConvertChecked,
-                ),
-                (
-                    "__g1_int_convert_checked_to_i64",
-                    grandiose_vm::Primitive::IntConvertChecked,
-                ),
-                (
-                    "__g1_int_convert_checked_to_i128",
-                    grandiose_vm::Primitive::IntConvertChecked,
-                ),
-                (
-                    "__g1_int_convert_checked_to_isize",
-                    grandiose_vm::Primitive::IntConvertChecked,
-                ),
-                (
-                    "__g1_int_convert_wrapping_to_u8",
-                    grandiose_vm::Primitive::IntConvertWrapping,
-                ),
-                (
-                    "__g1_int_convert_wrapping_to_u16",
-                    grandiose_vm::Primitive::IntConvertWrapping,
-                ),
-                (
-                    "__g1_int_convert_wrapping_to_u32",
-                    grandiose_vm::Primitive::IntConvertWrapping,
-                ),
-                (
-                    "__g1_int_convert_wrapping_to_u64",
-                    grandiose_vm::Primitive::IntConvertWrapping,
-                ),
-                (
-                    "__g1_int_convert_wrapping_to_u128",
-                    grandiose_vm::Primitive::IntConvertWrapping,
-                ),
-                (
-                    "__g1_int_convert_wrapping_to_usize",
-                    grandiose_vm::Primitive::IntConvertWrapping,
-                ),
-                (
-                    "__g1_int_convert_wrapping_to_i8",
-                    grandiose_vm::Primitive::IntConvertWrapping,
-                ),
-                (
-                    "__g1_int_convert_wrapping_to_i16",
-                    grandiose_vm::Primitive::IntConvertWrapping,
-                ),
-                (
-                    "__g1_int_convert_wrapping_to_i32",
-                    grandiose_vm::Primitive::IntConvertWrapping,
-                ),
-                (
-                    "__g1_int_convert_wrapping_to_i64",
-                    grandiose_vm::Primitive::IntConvertWrapping,
-                ),
-                (
-                    "__g1_int_convert_wrapping_to_i128",
-                    grandiose_vm::Primitive::IntConvertWrapping,
-                ),
-                (
-                    "__g1_int_convert_wrapping_to_isize",
-                    grandiose_vm::Primitive::IntConvertWrapping,
-                ),
-            ]
-            .into_iter()
-            .map(|(name, primitive)| (name.to_owned(), eval::RuntimeLeaf::Primitive(primitive))),
+            builtins::INTEGER_PRIMITIVE_LEAVES
+                .iter()
+                .map(|(name, primitive, _)| {
+                    ((*name).to_owned(), eval::RuntimeLeaf::Primitive(*primitive))
+                }),
         )
+        .chain(builtins::INTEGER_SCALAR_NAMES.iter().flat_map(|target| {
+            builtins::INTEGER_CONVERSION_KINDS
+                .iter()
+                .map(move |(operation, primitive)| {
+                    (
+                        builtins::integer_conversion_leaf_name(operation, target),
+                        eval::RuntimeLeaf::Primitive(*primitive),
+                    )
+                })
+        }))
         .chain(std::iter::once((
             "__g1_abort".to_owned(),
             eval::RuntimeLeaf::Abort,

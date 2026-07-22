@@ -3770,20 +3770,7 @@ fn bind_runtime_manifest(
                         if quantity.lower == 0 && quantity.upper.is_none()))
     }
     fn is_integer_scalar(name: &str) -> bool {
-        matches!(
-            name,
-            "u8" | "u16"
-                | "u32"
-                | "u64"
-                | "u128"
-                | "usize"
-                | "i8"
-                | "i16"
-                | "i32"
-                | "i64"
-                | "i128"
-                | "isize"
-        )
+        crate::builtins::INTEGER_SCALAR_NAMES.contains(&name)
     }
     fn concrete_float_leaf_signature(
         name: &str,
@@ -4182,17 +4169,7 @@ fn bind_runtime_manifest(
     // custom-manifest ABI finite to machine types and allocation primitives.
     // Ordinary public wrappers below these leaves are specialized to concrete
     // integer types before Core lowering.
-    for (name, primitive, shape) in [
-        ("__g1_int_wrapping_add", Primitive::IntWrappingAdd, "binary"),
-        ("__g1_int_wrapping_sub", Primitive::IntWrappingSub, "binary"),
-        ("__g1_int_wrapping_mul", Primitive::IntWrappingMul, "binary"),
-        ("__g1_int_bit_and", Primitive::IntBitAnd, "binary"),
-        ("__g1_int_bit_or", Primitive::IntBitOr, "binary"),
-        ("__g1_int_bit_xor", Primitive::IntBitXor, "binary"),
-        ("__g1_int_bit_not", Primitive::IntBitNot, "unary"),
-        ("__g1_int_shl", Primitive::IntShl, "shift"),
-        ("__g1_int_shr", Primitive::IntShr, "shift"),
-    ] {
+    for &(name, primitive, shape) in crate::builtins::INTEGER_PRIMITIVE_LEAVES {
         let Some(function) = program
             .functions
             .iter()
@@ -4215,12 +4192,13 @@ fn bind_runtime_manifest(
             .map(|parameter| &parameter.ty)
             .collect::<Vec<_>>();
         let exact_params = match shape {
-            "binary" => matches!(params.as_slice(), [left, right]
+            crate::builtins::IntegerLeafShape::Binary => matches!(params.as_slice(), [left, right]
                 if path_is(left, "T") && path_is(right, "T")),
-            "unary" => matches!(params.as_slice(), [value] if path_is(value, "T")),
-            "shift" => matches!(params.as_slice(), [value, count]
+            crate::builtins::IntegerLeafShape::Unary => {
+                matches!(params.as_slice(), [value] if path_is(value, "T"))
+            }
+            crate::builtins::IntegerLeafShape::Shift => matches!(params.as_slice(), [value, count]
                 if path_is(value, "T") && path_is(count, "u32")),
-            _ => unreachable!(),
         };
         let exact = authorized
             && generic_t
@@ -4236,21 +4214,17 @@ fn bind_runtime_manifest(
             errors.push(type_error(
                 function.span,
                 format!(
-                    "trusted scalar leaf `{name}` does not match its frozen generic {shape} signature"
+                    "trusted scalar leaf `{name}` does not match its frozen generic {} signature",
+                    shape.diagnostic_name(),
                 ),
             ));
             continue;
         }
         leaves.insert(function.name.clone(), primitive);
     }
-    for target in [
-        "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
-    ] {
-        for (operation, primitive) in [
-            ("checked", Primitive::IntConvertChecked),
-            ("wrapping", Primitive::IntConvertWrapping),
-        ] {
-            let name = format!("__g1_int_convert_{operation}_to_{target}");
+    for &target in crate::builtins::INTEGER_SCALAR_NAMES {
+        for (operation, primitive) in crate::builtins::INTEGER_CONVERSION_KINDS {
+            let name = crate::builtins::integer_conversion_leaf_name(operation, target);
             let Some(function) = program
                 .functions
                 .iter()
@@ -4284,7 +4258,7 @@ fn bind_runtime_manifest(
                 ));
                 continue;
             }
-            leaves.insert(function.name.clone(), primitive);
+            leaves.insert(function.name.clone(), *primitive);
         }
     }
     let mut host_leaves = BTreeMap::new();
