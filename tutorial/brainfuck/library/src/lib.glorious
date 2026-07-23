@@ -55,8 +55,8 @@ append_instructions(instructions: &mut Vec<Instruction>, remainder: Vec<Instruct
 
 next_byte(parser: &mut Parser) -> NextByte {
     let next = parser.bytes.next();
-    if(next is Option::Some(_)) {
-        NextByte { found: true, byte: next.0 }
+    if(next is Option::Some(byte)) {
+        NextByte { found: true, byte: byte }
     } else {
         NextByte { found: false, byte: 0 }
     }
@@ -180,12 +180,12 @@ parse_sequence(parser: &mut Parser, nested: Bool) -> Result<Sequence, ParseError
 pub parse(bytes: BytesIter) -> Result<Program, ParseError> {
     let parser = Parser { bytes: bytes, offset: 0 };
     let parsed = parse_sequence(&mut parser, false);
-    if(parsed is Result::Err(_)) {
-        Result::Err(parsed.0)
-    } else {
-        let sequence = parsed.0;
+    match(parsed) {
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(sequence) => {
         let Sequence { instructions, length, closed: _ } = sequence;
         Result::Ok(Program { instructions: instructions, length: length })
+        }
     }
 }
 
@@ -283,8 +283,8 @@ move_left(tape: &mut Tape) -> Result<(), RuntimeError> {
 
 read_byte(input: &mut BytesIter) -> u8 {
     let next = BytesIter::next(input);
-    if(next is Option::Some(_)) {
-        next.0
+    if(next is Option::Some(byte)) {
+        byte
     } else { 0 }
 }
 

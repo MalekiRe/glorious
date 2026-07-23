@@ -22582,14 +22582,15 @@ impl<'a> CoreLowerer<'a> {
         pattern: &core::DecisionPattern,
         path: &mut Vec<core::DecisionProjection>,
         bindings: &mut Vec<core::DecisionBinding>,
+        consuming: bool,
     ) -> Result<(), Vec<Diagnostic>> {
         match &pattern.kind {
             core::DecisionPatternKind::Binding { name } => {
-                if !self.is_copy(pattern.ty) {
+                if !consuming && !self.is_copy(pattern.ty) {
                     return Err(vec![unsupported(
                         pattern.span,
                         "noncopy positive refinement binder",
-                        "branch-local observational bindings currently require a duplicable projected value",
+                        "a pattern behind a reference cannot move a noncopy projected value",
                     )]);
                 }
                 let local = self.next_local;
@@ -22622,7 +22623,7 @@ impl<'a> CoreLowerer<'a> {
                         variant: Some(*variant),
                         field_types: field_types.clone(),
                     });
-                    self.install_decision_bindings(child, path, bindings)?;
+                    self.install_decision_bindings(child, path, bindings, consuming)?;
                     path.pop();
                 }
             }
@@ -22635,7 +22636,7 @@ impl<'a> CoreLowerer<'a> {
                         variant: None,
                         field_types: field_types.clone(),
                     });
-                    self.install_decision_bindings(child, path, bindings)?;
+                    self.install_decision_bindings(child, path, bindings, consuming)?;
                     path.pop();
                 }
             }
@@ -29499,8 +29500,6 @@ impl<'a> CoreLowerer<'a> {
                             };
                             (condition, &synthetic_pattern)
                         };
-                    let subject_actual_uses_before = self.actual_uses.clone();
-                    let subject_actual_use_lowers_before = self.actual_use_lowers.clone();
                     let borrowed_subject = match &subject_source.kind {
                         ExprKind::Unary {
                             op: UnaryOp::Dereference,
@@ -29525,6 +29524,11 @@ impl<'a> CoreLowerer<'a> {
                         },
                         _ => None,
                     };
+                    let consuming_subject = borrowed_subject.is_none();
+                    let moved_before_subject = self.moved.clone();
+                    let moved_paths_before_subject = self.moved_paths.clone();
+                    let actual_uses_before_subject = self.actual_uses.clone();
+                    let actual_use_lowers_before_subject = self.actual_use_lowers.clone();
                     let (subject, decision_ty) =
                         if let Some((local, reference, referent)) = borrowed_subject {
                             (
@@ -29540,31 +29544,6 @@ impl<'a> CoreLowerer<'a> {
                             let ty = subject.ty;
                             (subject, ty)
                         };
-                    if let core::ExprKind::Local { local, copy: false } = &subject.kind {
-                        // Pattern decisions inspect their subject through an
-                        // observational temporary. MIR moves the owner into
-                        // that temporary and restores the same register on
-                        // each decision edge; source ownership and Use counts
-                        // therefore remain available inside both refined
-                        // branches.
-                        self.moved.remove(local);
-                        match subject_actual_uses_before.get(local).copied() {
-                            Some(count) => {
-                                self.actual_uses.insert(*local, count);
-                            }
-                            None => {
-                                self.actual_uses.remove(local);
-                            }
-                        }
-                        match subject_actual_use_lowers_before.get(local).copied() {
-                            Some(count) => {
-                                self.actual_use_lowers.insert(*local, count);
-                            }
-                            None => {
-                                self.actual_use_lowers.remove(local);
-                            }
-                        }
-                    }
                     let decision = self.decision_pattern(pattern, decision_ty)?;
                     let refined_variant = match (&subject.kind, &decision.kind) {
                         (
@@ -29603,9 +29582,26 @@ impl<'a> CoreLowerer<'a> {
                     let baseline_actual_uses = self.actual_uses.clone();
                     let baseline_actual_use_lowers = self.actual_use_lowers.clone();
                     let baseline_active_variant_proofs = self.active_variant_proofs.clone();
+                    let negative_moved = consuming_subject
+                        .then_some(moved_before_subject)
+                        .unwrap_or_else(|| baseline_moved.clone());
+                    let negative_moved_paths = consuming_subject
+                        .then_some(moved_paths_before_subject)
+                        .unwrap_or_else(|| baseline_moved_paths.clone());
+                    let negative_actual_uses = consuming_subject
+                        .then_some(actual_uses_before_subject)
+                        .unwrap_or_else(|| baseline_actual_uses.clone());
+                    let negative_actual_use_lowers = consuming_subject
+                        .then_some(actual_use_lowers_before_subject)
+                        .unwrap_or_else(|| baseline_actual_use_lowers.clone());
 
                     let mut bindings = Vec::new();
-                    self.install_decision_bindings(&decision, &mut Vec::new(), &mut bindings)?;
+                    self.install_decision_bindings(
+                        &decision,
+                        &mut Vec::new(),
+                        &mut bindings,
+                        consuming_subject,
+                    )?;
                     if let Some((local, variant)) = refined_variant {
                         self.active_variant_proofs.insert(local, variant);
                     }
@@ -29622,14 +29618,14 @@ impl<'a> CoreLowerer<'a> {
                     let mut positive_actual_use_lowers = self.actual_use_lowers.clone();
 
                     self.locals = baseline_locals.clone();
-                    self.moved = baseline_moved.clone();
-                    self.moved_paths = baseline_moved_paths.clone();
+                    self.moved = negative_moved;
+                    self.moved_paths = negative_moved_paths;
                     self.empty_referents = baseline_empty_referents.clone();
                     self.loans = baseline_loans.clone();
                     self.projected_loans = baseline_projected_loans.clone();
                     self.suspended = baseline_suspended.clone();
-                    self.actual_uses = baseline_actual_uses;
-                    self.actual_use_lowers = baseline_actual_use_lowers;
+                    self.actual_uses = negative_actual_uses;
+                    self.actual_use_lowers = negative_actual_use_lowers;
                     self.active_variant_proofs = baseline_active_variant_proofs.clone();
                     let mut negative_variant = None;
                     if let Some((local, excluded_variant)) = refined_variant
@@ -29660,17 +29656,13 @@ impl<'a> CoreLowerer<'a> {
                     for binding in baseline_locals.values() {
                         let positive_whole_moved = positive_moved.contains(&binding.local);
                         let negative_whole_moved = self.moved.contains(&binding.local);
-                        if positive_whole_moved != negative_whole_moved && self.is_copy(binding.ty)
-                        {
-                            // A copyable owner captured by one branch can be
-                            // consumed from the copied handler environment,
-                            // while a sibling branch consumes the source
-                            // directly. The join conservatively invalidates
-                            // the surviving source handle. Tell MIR to retire
-                            // that handle on the edge where it remains; merely
-                            // aligning the source ownership sets would leave
-                            // the two join predecessor argument lists with
-                            // different locals.
+                        if positive_whole_moved != negative_whole_moved {
+                            // A consuming refinement moves the scrutinee on a
+                            // successful edge while a failed test retains it
+                            // for the else arm (and therefore for subsequent
+                            // match arms). Once the branches rejoin, retire the
+                            // still-live edge so the scrutinee is consumed by
+                            // the complete conditional on every path.
                             retire_at_join.push(binding.local);
                             positive_moved.insert(binding.local);
                             self.moved.insert(binding.local);
@@ -31152,38 +31144,7 @@ impl<'a> CoreLowerer<'a> {
                         ));
                     }
                 }
-                let observational_local = match &subject.kind {
-                    ExprKind::Variable(path) if path.len() == 1 => {
-                        self.locals.get(path[0].as_ref()).map(|local| {
-                            (
-                                local.local,
-                                self.actual_uses.get(&local.local).copied(),
-                                self.actual_use_lowers.get(&local.local).copied(),
-                            )
-                        })
-                    }
-                    _ => None,
-                };
                 let subject = self.expression(subject, None)?;
-                if let Some((local, upper, lower)) = observational_local {
-                    self.moved.remove(&local);
-                    match upper {
-                        Some(count) => {
-                            self.actual_uses.insert(local, count);
-                        }
-                        None => {
-                            self.actual_uses.remove(&local);
-                        }
-                    }
-                    match lower {
-                        Some(count) => {
-                            self.actual_use_lowers.insert(local, count);
-                        }
-                        None => {
-                            self.actual_use_lowers.remove(&local);
-                        }
-                    }
-                }
                 let decision = self.decision_pattern(pattern, subject.ty)?;
                 let raw = self.typed(
                     span,
@@ -35658,6 +35619,74 @@ impl MirLowerer {
         }
     }
 
+    /// Consume a successfully matched owned refinement subject. Pattern
+    /// testing itself is observational so the failure edge can still dispose
+    /// the intact value; only the proven-success edge deconstructs it and
+    /// transfers bound payloads into their branch-local owners.
+    fn consume_refinement_pattern(
+        &mut self,
+        register: u32,
+        pattern: &core::DecisionPattern,
+        bindings: &[core::DecisionBinding],
+    ) {
+        match &pattern.kind {
+            core::DecisionPatternKind::Binding { name } => {
+                let binding = bindings
+                    .iter()
+                    .find(|binding| binding.name == *name)
+                    .expect("every refinement binder has a decision binding");
+                self.locals.insert(binding.local, register);
+            }
+            core::DecisionPatternKind::Wildcard
+            | core::DecisionPatternKind::Unit
+            | core::DecisionPatternKind::Int(_)
+            | core::DecisionPatternKind::Float(_)
+            | core::DecisionPatternKind::Char(_)
+            | core::DecisionPatternKind::String(_) => {
+                self.destroy(register, pattern.span);
+                self.transfer_owner(register);
+            }
+            core::DecisionPatternKind::Variant { variant, fields } => {
+                self.prove_enum_variant(register, *variant, pattern.span);
+                self.consume_refinement_fields(register, pattern, fields, bindings);
+            }
+            core::DecisionPatternKind::Aggregate { fields } => {
+                self.consume_refinement_fields(register, pattern, fields, bindings);
+            }
+        }
+    }
+
+    fn consume_refinement_fields(
+        &mut self,
+        register: u32,
+        pattern: &core::DecisionPattern,
+        fields: &[core::DecisionPattern],
+        bindings: &[core::DecisionBinding],
+    ) {
+        let mut projected = Vec::with_capacity(fields.len());
+        for (field, child) in fields.iter().enumerate() {
+            let dst = self.allocate(child.ty);
+            self.push(
+                child.span,
+                mir::InstructionKind::ProjectMove {
+                    dst,
+                    src: Self::operand(register, mir::UseMode::Move),
+                    field: field as u32,
+                },
+            );
+            projected.push((dst, child));
+        }
+        self.push(
+            pattern.span,
+            mir::InstructionKind::Deconstruct { src: register },
+        );
+        self.transfer_owner(register);
+        for (field, child) in projected.into_iter().rev() {
+            self.owned.push(field);
+            self.consume_refinement_pattern(field, child, bindings);
+        }
+    }
+
     /// Re-establish a source refinement as an ownership-flow fact on the
     /// exact enum register that a payload projection will read. The earlier
     /// pattern test produces a Boolean and intentionally does not leak its
@@ -36019,20 +36048,14 @@ impl MirLowerer {
                 MirFlow::Value(Some(dst))
             }
             core::ExprKind::PatternTest { subject, pattern } => {
-                let subject_local = match &subject.kind {
-                    core::ExprKind::Local { local, .. } => Some(*local),
-                    _ => None,
-                };
                 let subject_flow = self.expression(subject);
                 let MirFlow::Value(subject_value) = subject_flow else {
                     return MirFlow::Diverged;
                 };
                 let subject = self.materialize(subject_value, subject.span);
                 let test = self.lower_pattern_test(subject, pattern, expression.span);
-                if let Some(local) = subject_local {
-                    self.locals.insert(local, subject);
-                    self.uninitialized_locals.remove(&local);
-                }
+                self.destroy(subject, expression.span);
+                self.transfer_owner(subject);
                 MirFlow::Value(Some(test))
             }
             core::ExprKind::PatternTestBorrowed { reference, pattern } => {
@@ -36061,9 +36084,15 @@ impl MirLowerer {
                     return MirFlow::Diverged;
                 };
                 let subject_register = self.materialize(subject_value, subject.span);
+                let borrowed_refinement =
+                    matches!(subject.kind, core::ExprKind::LocalReferenceView { .. });
                 let subject_local = match &subject.kind {
                     core::ExprKind::Local { local, .. }
                     | core::ExprKind::LocalReferenceView { local } => Some(*local),
+                    _ => None,
+                };
+                let moved_subject_local = match &subject.kind {
+                    core::ExprKind::Local { local, copy: false } => Some(*local),
                     _ => None,
                 };
                 let matched = if matches!(subject.kind, core::ExprKind::LocalReferenceView { .. }) {
@@ -36100,42 +36129,10 @@ impl MirLowerer {
 
                 self.mark(positive_block, positive.span);
                 self.destroy(matched, expression.span);
-                self.install_refinement_bindings(subject_register, bindings);
-                if let Some(local) = subject_local {
-                    // `subject` may be a duplicable aggregate reference
-                    // carrier.  Evaluating the local creates a distinct
-                    // runtime aggregate even though its source-level use is
-                    // zero-use-safe.  Once that value replaces the local for
-                    // the refined branches, carry it as an owner so the join
-                    // drops it (and its reference leaves) before the borrowed
-                    // owner.  The original local value remains owned and is
-                    // retired on the edge after the replacement is selected.
-                    if baseline_locals
-                        .get(&local)
-                        .is_some_and(|register| baseline_owned.contains(register))
-                        && !self.owned.contains(&subject_register)
-                    {
-                        self.owned.push(subject_register);
-                    }
-                    self.locals.insert(local, subject_register);
-                    self.uninitialized_locals.remove(&local);
-                }
-                if let core::DecisionPatternKind::Variant { variant, .. } = &pattern.kind {
-                    // The library-level boolean pattern test hides the enum
-                    // tag edge from MIR/bytecode ownership analyses. Reassert
-                    // the already-proven variant with a redundant exact tag
-                    // switch so payload assignment carries a dominating proof
-                    // in every downstream representation.
-                    self.prove_enum_variant(subject_register, *variant, expression.span);
-                }
-                // A temporary refinement subject has no source-level name that
-                // can observe its residual shell. Retire that shell before
-                // lowering the branch body. Nested refinement joins remap live
-                // registers to block parameters, so retaining this raw register
-                // ID until after the body would later drop a moved predecessor.
-                if subject_local.is_none() {
-                    self.destroy(subject_register, subject.span);
-                    self.transfer_owner(subject_register);
+                if borrowed_refinement {
+                    self.install_refinement_bindings(subject_register, bindings);
+                } else {
+                    self.consume_refinement_pattern(subject_register, pattern, bindings);
                 }
                 let mut join_local_ids = Vec::new();
                 let mut join_detached_keys = Vec::new();
@@ -36149,9 +36146,9 @@ impl MirLowerer {
                 if let MirFlow::Value(value) = self.expression(positive) {
                     positive_reaches_join = true;
                     let value = self.materialize(value, positive.span);
-                    if let Some(local) =
-                        subject_local.filter(|local| retire_at_join.contains(local))
-                    {
+                    if let Some(local) = subject_local.filter(|local| {
+                        retire_at_join.contains(local) && !self.uninitialized_locals.contains(local)
+                    }) {
                         if let Some(current_subject) = self.locals.remove(&local) {
                             self.destroy(current_subject, subject.span);
                             self.transfer_owner(current_subject);
@@ -36217,7 +36214,17 @@ impl MirLowerer {
                 self.loan_of = baseline_loan_of.clone();
                 self.mark(negative_block, negative.span);
                 self.destroy(matched, expression.span);
-                if let Some(local) = subject_local {
+                if borrowed_refinement {
+                    if let Some(variant) = negative_variant {
+                        self.prove_enum_variant(subject_register, *variant, expression.span);
+                    }
+                } else if let Some(local) = moved_subject_local {
+                    // Failure retains the intact moved temporary as the
+                    // source owner for the else arm. A later refinement may
+                    // test it again; the complete conditional still retires
+                    // it at the eventual join when no arm consumes it.
+                    self.locals.insert(local, subject_register);
+                    self.uninitialized_locals.remove(&local);
                     if baseline_locals
                         .get(&local)
                         .is_some_and(|register| baseline_owned.contains(register))
@@ -36225,21 +36232,15 @@ impl MirLowerer {
                     {
                         self.owned.push(subject_register);
                     }
-                    self.locals.insert(local, subject_register);
-                    self.uninitialized_locals.remove(&local);
-                }
-                if let Some(variant) = negative_variant {
-                    self.prove_enum_variant(subject_register, *variant, expression.span);
-                }
-                if subject_local.is_none() {
+                } else {
                     self.destroy(subject_register, subject.span);
                     self.transfer_owner(subject_register);
                 }
                 if let MirFlow::Value(value) = self.expression(negative) {
                     let value = self.materialize(value, negative.span);
-                    if let Some(local) =
-                        subject_local.filter(|local| retire_at_join.contains(local))
-                    {
+                    if let Some(local) = subject_local.filter(|local| {
+                        retire_at_join.contains(local) && !self.uninitialized_locals.contains(local)
+                    }) {
                         if let Some(current_subject) = self.locals.remove(&local) {
                             self.destroy(current_subject, subject.span);
                             self.transfer_owner(current_subject);

@@ -97,6 +97,71 @@ fn library_match_syntax_elaborates_to_source_defined_refinement_calls() {
 }
 
 #[test]
+fn owned_refinement_moves_noncopy_payloads_into_if_arms() {
+    let source = r#"
+        struct Token { value: i64 }
+        impl Use<[0,1]> for Token {}
+        enum Choice { Some(Token), None }
+        make() -> Choice { Choice::Some(Token { value: 42 }) }
+        answer() -> i64 {
+            let choice = make();
+            if(choice is Choice::Some(token)) {
+                token.value
+            } else {
+                0
+            }
+        }
+        main() -> { () }
+    "#;
+    assert_eq!(run(source, "answer"), Value::I64(42));
+}
+
+#[test]
+fn match_moves_noncopy_payloads_out_of_its_subject() {
+    let source = r#"
+        struct Token { value: i64 }
+        impl Use<[0,1]> for Token {}
+        enum Choice { Some(Token), None }
+        make() -> Choice { Choice::Some(Token { value: 42 }) }
+        answer() -> i64 {
+            match(make()) {
+                Choice::Some(token) => token.value,
+                Choice::None => 0
+            }
+        }
+        main() -> { () }
+    "#;
+    assert_eq!(run(source, "answer"), Value::I64(42));
+}
+
+#[test]
+fn owned_refinement_consumes_the_scrutinee_across_the_join() {
+    let source = r#"
+        struct Token { value: i64 }
+        impl Use<[0,1]> for Token {}
+        enum Choice { Some(Token), None }
+        bad(choice: Choice) -> i64 {
+            let answer = if(choice is Choice::Some(token)) {
+                token.value
+            } else {
+                0
+            };
+            choice;
+            answer
+        }
+        main() -> { () }
+    "#;
+    let errors = compile_source_to_bytecode("surface-simplifications.glorious", source)
+        .expect_err("the scrutinee must be consumed after the refinement joins");
+    assert!(
+        errors
+            .iter()
+            .any(|error| error.message.contains("already moved")),
+        "{errors:#?}"
+    );
+}
+
+#[test]
 fn generic_case_resolves_module_local_nominals_in_its_payload() {
     let source = r#"
         mod app {

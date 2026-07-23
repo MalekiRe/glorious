@@ -491,20 +491,19 @@ fn nested_projection_moves_preserve_double_move_and_custom_drop_rejections() {
 }
 
 #[test]
-fn proven_enum_payload_assignment_replaces_and_reinitializes_at_all_levels() {
+fn consuming_enum_refinement_moves_its_payload_at_all_levels() {
     let source = r#"
         struct Resource { marker: i64 }
         impl Use<[0,1]> for Resource {}
         enum Choice { Some(Resource), None }
         update_choice(choice: Choice) -> i64 {
-            if(choice is Choice::Some(_)) {
-                choice.0 = Resource { marker: 42 };
-                42
+            if(choice is Choice::Some(resource)) {
+                resource.marker
             } else {
                 0
             }
         }
-        selected() -> i64 { update_choice(Choice::Some(Resource { marker: 1 })) }
+        selected() -> i64 { update_choice(Choice::Some(Resource { marker: 42 })) }
         main() -> { () }
     "#;
     for level in [
