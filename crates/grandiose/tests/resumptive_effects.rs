@@ -845,10 +845,6 @@ fn mandatory_one_shot_carries_a_partially_moved_owner_residual() {
 fn deferred_resumptive_forms_have_stable_source_diagnostics() {
     let cases = [
         (
-            "effect Ask { ask() -> i64 } main() -> { () }",
-            "must declare a finite bounded",
-        ),
-        (
             "effect Ask { [0,0] ask() -> i64 } main() -> { () }",
             "must declare a finite bounded",
         ),

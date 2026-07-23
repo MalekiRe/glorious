@@ -1,10 +1,10 @@
-main() -> {
+main() {
     let source = "++++++++++[>+++++++>++++++++++>+++>+<<<<-]>++.>+.+++++++..+++.>++.<<+++++++++++++++.>.+++.------.--------.>+.>.";
     let parsed = brainfuck_core::parse(Bytes::iter(&String::as_bytes(&source)));
-    handle perform Case<Result<brainfuck_core::Program, brainfuck_core::ParseError>>::inspect(parsed) {
+    handle parsed {
         Result::Ok(program) => {
             let output = brainfuck_core::run_with_io(&program, Bytes::iter(&String::as_bytes(&"")));
-            handle perform Case<Result<Vec<u8>, brainfuck_core::RuntimeError>>::inspect(output) {
+            handle output {
                 Result::Ok(bytes) => {
                     let expected = "Hello World!\n";
                     assert(Bytes::eq(&Bytes::from_vec(bytes), &String::as_bytes(&expected)))

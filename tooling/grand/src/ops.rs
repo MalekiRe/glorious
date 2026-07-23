@@ -889,6 +889,8 @@ pub fn fmt(check: bool, paths: Vec<PathBuf>) -> Result<()> {
                     .as_ref()
                     .map(|(path, source)| (path.as_str(), *source)),
                 sources: &borrowed_context,
+                include_distributed_standard_library: source.as_str()
+                    != grandiose::source_bundle::DISTRIBUTED_STANDARD_LIBRARY_SOURCE,
                 ..grandfmt::Context::default()
             },
         )

@@ -1,4 +1,4 @@
-main() -> {
+main() {
     let source = "ignored + [->+<] ignored";
     let bytes = String::as_bytes(&source);
     let parsed = brainfuck_core::parse(Bytes::iter(&bytes));

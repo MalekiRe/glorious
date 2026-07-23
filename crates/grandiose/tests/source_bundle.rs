@@ -1278,8 +1278,8 @@ fn recursive_vec_moving_algorithms_form_tail_edges_and_run_in_constant_frame_spa
     }
     assert_eq!(
         ordinary_edges,
-        [0, 1, 1, 0],
-        "only remove/insert's non-tail rotate-then-finish calls may remain ordinary"
+        [0, 0, 1, 0],
+        "only insert's cleanup-sensitive rotate call may remain ordinary"
     );
     assert!(
         tail_edges.iter().all(|edges| *edges >= 1),

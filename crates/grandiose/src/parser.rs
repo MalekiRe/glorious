@@ -1,4 +1,8 @@
-use std::{collections::HashMap, mem::discriminant, rc::Rc};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap},
+    mem::discriminant,
+    rc::Rc,
+};
 
 use crate::{
     ast::{
@@ -48,6 +52,7 @@ pub fn parse_recovering(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         type_const_arguments: Vec::new(),
         fixed_array_types: Vec::new(),
         numeric_literals: Vec::new(),
+        handling_scrutinee: false,
     }
     .program(diagnostics)
 }
@@ -80,6 +85,7 @@ pub fn parse_recovering_with_fixity_regions(
         type_const_arguments: Vec::new(),
         fixed_array_types: Vec::new(),
         numeric_literals: Vec::new(),
+        handling_scrutinee: false,
     }
     .program(diagnostics)
 }
@@ -216,6 +222,7 @@ struct Parser {
     type_const_arguments: Vec<crate::ast::TypeConstApplicationSyntax>,
     fixed_array_types: Vec<crate::ast::FixedArrayTypeSyntax>,
     numeric_literals: Vec<crate::ast::NumericLiteralSyntax>,
+    handling_scrutinee: bool,
 }
 
 impl Parser {
@@ -252,7 +259,7 @@ impl Parser {
                 self.recover(declaration_start);
             }
         }
-        let program = Program {
+        let mut program = Program {
             modules: draft.modules,
             imports: draft.imports,
             item_visibilities: draft.item_visibilities,
@@ -273,6 +280,7 @@ impl Parser {
             fixed_array_types: self.fixed_array_types,
             numeric_literals: self.numeric_literals,
         };
+        diagnostics.extend(normalize_effect_surface(&mut program));
         (program, diagnostics)
     }
 
@@ -729,8 +737,9 @@ impl Parser {
             "expected `)` after method parameters",
             |parser| parser.typed_parameter("expected a method parameter name"),
         )?;
-        self.expect(TokenKind::Arrow, "every method signature must contain `->`")?;
-        let return_type = if self.at(&TokenKind::LBrace)
+        let has_arrow = self.eat(&TokenKind::Arrow);
+        let return_type = if !has_arrow
+            || self.at(&TokenKind::LBrace)
             || self.at(&TokenKind::Slash)
             || self.at(&TokenKind::Semicolon)
         {
@@ -1173,13 +1182,14 @@ impl Parser {
                 "expected `)` after operation parameters",
                 |parser| parser.typed_parameter("expected an operation parameter name"),
             )?;
-            self.expect(TokenKind::Arrow, "expected `->` in the operation signature")?;
-            let terminal = self.at(&TokenKind::Bang);
-            let return_type = if self.at(&TokenKind::Semicolon) || self.at(&TokenKind::RBrace) {
-                None
-            } else {
-                Some(self.type_syntax()?)
-            };
+            let has_arrow = self.eat(&TokenKind::Arrow);
+            let terminal = has_arrow && self.at(&TokenKind::Bang);
+            let return_type =
+                if !has_arrow || self.at(&TokenKind::Semicolon) || self.at(&TokenKind::RBrace) {
+                    None
+                } else {
+                    Some(self.type_syntax()?)
+                };
             operations.push(EffectOperationDecl {
                 name: operation,
                 params,
@@ -1211,11 +1221,9 @@ impl Parser {
             "expected `)` after parameters",
             |parser| parser.typed_parameter("expected a parameter name"),
         )?;
-        self.expect(
-            TokenKind::Arrow,
-            "every callable signature must contain `->`",
-        )?;
-        let return_type = if self.at(&TokenKind::LBrace) || self.at(&TokenKind::Slash) {
+        let has_arrow = self.eat(&TokenKind::Arrow);
+        let return_type = if !has_arrow || self.at(&TokenKind::LBrace) || self.at(&TokenKind::Slash)
+        {
             None
         } else {
             Some(self.type_syntax()?)
@@ -1399,6 +1407,14 @@ impl Parser {
     }
 
     fn effect_row(&mut self) -> Result<EffectRowSyntax, Diagnostic> {
+        if !self.at(&TokenKind::LBrace) {
+            let effect = self.type_syntax()?;
+            return Ok(EffectRowSyntax {
+                span: effect.span,
+                effects: vec![effect],
+                tail: None,
+            });
+        }
         let start = self
             .expect(TokenKind::LBrace, "expected `{` to begin an effect row")?
             .span;
@@ -2450,7 +2466,9 @@ impl Parser {
             }
         };
         loop {
-            if self.at(&TokenKind::LBrace)
+            if self.handling_scrutinee && self.looks_like_handler_clause_block() {
+                break;
+            } else if self.at(&TokenKind::LBrace)
                 && matches!(&expr.kind, ExprKind::Call(callee, args)
                     if matches!(&callee.kind, ExprKind::Variable(path)
                         if path.len() == 1 && path[0].as_ref() == "match")
@@ -2793,52 +2811,25 @@ impl Parser {
             return false;
         }
         let mut cursor = self.cursor + 1;
-        if !matches!(
-            self.tokens.get(cursor).map(|token| &token.kind),
-            Some(TokenKind::Ident(_))
-        ) || !matches!(
-            self.tokens.get(cursor + 1).map(|token| &token.kind),
-            Some(TokenKind::DoubleColon)
-        ) || !matches!(
-            self.tokens.get(cursor + 2).map(|token| &token.kind),
-            Some(TokenKind::Ident(_))
-        ) || !matches!(
-            self.tokens.get(cursor + 3).map(|token| &token.kind),
-            Some(TokenKind::LParen)
-        ) {
-            return false;
-        }
-        cursor += 4;
-        let mut depth = 1_usize;
-        while depth != 0 {
-            let Some(token) = self.tokens.get(cursor) else {
-                return false;
-            };
+        let mut delimiters = Vec::new();
+        while let Some(token) = self.tokens.get(cursor) {
             match token.kind {
-                TokenKind::LParen => depth += 1,
-                TokenKind::RParen => depth -= 1,
+                TokenKind::FatArrow if delimiters.is_empty() => return true,
+                TokenKind::LParen => delimiters.push(TokenKind::RParen),
+                TokenKind::LBracket => delimiters.push(TokenKind::RBracket),
+                TokenKind::LBrace => delimiters.push(TokenKind::RBrace),
+                TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
+                    if delimiters.is_empty() {
+                        return false;
+                    }
+                    delimiters.pop();
+                }
                 TokenKind::Eof => return false,
                 _ => {}
             }
             cursor += 1;
         }
-        if matches!(
-            self.tokens.get(cursor).map(|token| &token.kind),
-            Some(TokenKind::Ident(name)) if name == "with"
-        ) {
-            cursor += 1;
-            if !matches!(
-                self.tokens.get(cursor).map(|token| &token.kind),
-                Some(TokenKind::Ident(_))
-            ) {
-                return false;
-            }
-            cursor += 1;
-        }
-        matches!(
-            self.tokens.get(cursor).map(|token| &token.kind),
-            Some(TokenKind::FatArrow)
-        )
+        false
     }
 
     fn compact_closure_ahead(&self) -> bool {
@@ -2940,7 +2931,11 @@ impl Parser {
 
     fn handle(&mut self) -> Result<Expr, Diagnostic> {
         let start = self.bump().span;
-        let computation = self.expression(0)?;
+        let was_handling_scrutinee = self.handling_scrutinee;
+        self.handling_scrutinee = true;
+        let computation = self.expression(0);
+        self.handling_scrutinee = was_handling_scrutinee;
+        let computation = computation?;
         // A direct perform names the only operation this handler can possibly
         // be spelling.  Keep that head around so clauses may write just the
         // payload pattern (`Result::Ok(value) => ...`).  The compatibility AST
@@ -3017,10 +3012,17 @@ impl Parser {
                     self.cursor = saved_cursor;
                     self.type_const_arguments
                         .truncate(saved_type_const_arguments);
-                    return Err(self.error(
-                        "unexpected syntax",
-                        "expected an explicit `Effect::operation(...)` handler clause",
-                    ));
+                    let pattern = self.pattern()?;
+                    let pattern_span = pattern.span;
+                    (
+                        String::new(),
+                        TypeSyntax {
+                            kind: TypeSyntaxKind::Path(Vec::new()),
+                            span: pattern_span,
+                        },
+                        String::new(),
+                        vec![pattern],
+                    )
                 }
             };
             Self::reject_duplicate_binders(&patterns)?;
@@ -3033,10 +3035,12 @@ impl Parser {
             self.expect(TokenKind::FatArrow, "expected `=>` before the handler body")?;
             let body = self.expression(0)?;
             let span = clause_start.join(body.span);
-            self.effect_paths.push(EffectPathSyntax {
-                site: span,
-                effect: effect_path,
-            });
+            if !effect.is_empty() {
+                self.effect_paths.push(EffectPathSyntax {
+                    site: span,
+                    effect: effect_path,
+                });
+            }
             clauses.push(HandlerClause {
                 effect,
                 operation,
@@ -4002,6 +4006,628 @@ impl Parser {
         }
         &self.tokens[index]
     }
+}
+
+#[derive(Clone, Copy)]
+struct SurfaceOperation {
+    payloads: usize,
+    terminal: bool,
+}
+
+/// Resolves the redesigned effect surface into the structural nodes consumed
+/// by the existing semantic and MIR pipeline. This deliberately happens only
+/// after the whole program has parsed, so operation calls and handler-pattern
+/// heads are declaration-directed rather than guessed from capitalization.
+fn normalize_effect_surface(program: &mut Program) -> Vec<Diagnostic> {
+    let mut operations = program
+        .effects
+        .iter()
+        .flat_map(|effect| {
+            effect.operations.iter().map(move |operation| {
+                (
+                    (effect.name.clone(), operation.name.clone()),
+                    SurfaceOperation {
+                        payloads: operation.params.len(),
+                        terminal: operation.terminal,
+                    },
+                )
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    // Associated value bindings occupy the callable namespace at an ordinary
+    // `Owner::name(...)` call site. They must not be reinterpreted merely
+    // because an effect happens to use the same qualified spelling.
+    for binding in &program.globals {
+        if let Some(owner) = &binding.owner {
+            operations.remove(&(owner.clone(), binding.name.clone()));
+        }
+    }
+    if operations.is_empty() {
+        return Vec::new();
+    }
+
+    fn variable(name: &str, span: Span) -> Expr {
+        Expr {
+            kind: ExprKind::Variable(Rc::from([Rc::<str>::from(name)])),
+            span,
+        }
+    }
+
+    fn completion_pattern(mut clause: HandlerClause) -> Option<(Pattern, Expr)> {
+        if clause.effect.is_empty() {
+            let [pattern] = clause.patterns.as_slice() else {
+                return None;
+            };
+            return Some((pattern.clone(), clause.body));
+        }
+        Some((
+            Pattern {
+                kind: PatternKind::Variant {
+                    path: crate::ast::PatternPath {
+                        segments: vec![clause.effect, clause.operation],
+                        span: clause.span,
+                    },
+                    fields: std::mem::take(&mut clause.patterns),
+                    rest: None,
+                },
+                span: clause.span,
+            },
+            clause.body,
+        ))
+    }
+
+    fn completion_match(subject: Expr, arms: Vec<(Pattern, Expr)>, span: Span) -> Expr {
+        let binding = format!("$handle$result${}", span.start);
+        let subject_span = subject.span;
+        let value = || variable(&binding, subject_span);
+        let abort = Expr {
+            kind: ExprKind::Call(Rc::new(variable("unreachable", span)), Rc::new(Vec::new())),
+            span,
+        };
+        let mut next = abort;
+        for (pattern, body) in arms.into_iter().rev() {
+            let arm_span = pattern.span.join(body.span);
+            let condition = Expr {
+                kind: ExprKind::Is {
+                    subject: Rc::new(value()),
+                    pattern: Rc::new(pattern),
+                },
+                span: arm_span,
+            };
+            let positive = Expr {
+                kind: ExprKind::ContextBlock(Rc::new(vec![Stmt::Expr(body)])),
+                span: arm_span,
+            };
+            let conditional = Expr {
+                kind: ExprKind::Call(
+                    Rc::new(variable("if", arm_span)),
+                    Rc::new(vec![condition, positive]),
+                ),
+                span: arm_span,
+            };
+            let negative = Expr {
+                kind: ExprKind::ContextBlock(Rc::new(vec![Stmt::Expr(next)])),
+                span: arm_span,
+            };
+            next = Expr {
+                kind: ExprKind::Call(
+                    Rc::new(variable("else", arm_span)),
+                    Rc::new(vec![conditional, negative]),
+                ),
+                span: arm_span,
+            };
+        }
+        Expr {
+            kind: ExprKind::Block(Rc::new(vec![
+                Stmt::Let {
+                    name: binding,
+                    value: subject,
+                    span: subject_span,
+                },
+                Stmt::Expr(next),
+            ])),
+            span,
+        }
+    }
+
+    fn normalize(
+        expression: &mut Expr,
+        operations: &BTreeMap<(String, String), SurfaceOperation>,
+        resumptions: &BTreeSet<String>,
+        effect_paths: &mut Vec<EffectPathSyntax>,
+        completion_sites: &mut BTreeSet<(usize, usize)>,
+        errors: &mut Vec<Diagnostic>,
+    ) {
+        match &mut expression.kind {
+            ExprKind::Handle {
+                computation,
+                clauses,
+            } => {
+                normalize(
+                    Rc::make_mut(computation),
+                    operations,
+                    resumptions,
+                    effect_paths,
+                    completion_sites,
+                    errors,
+                );
+                let mut operation_clauses = Vec::new();
+                let mut completion_arms = Vec::new();
+                for mut clause in std::mem::take(Rc::make_mut(clauses)) {
+                    let Some(operation) = operations
+                        .get(&(clause.effect.clone(), clause.operation.clone()))
+                        .copied()
+                    else {
+                        completion_sites.insert((clause.span.start, clause.span.end));
+                        normalize(
+                            &mut clause.body,
+                            operations,
+                            resumptions,
+                            effect_paths,
+                            completion_sites,
+                            errors,
+                        );
+                        if let Some(arm) = completion_pattern(clause) {
+                            completion_arms.push(arm);
+                        }
+                        continue;
+                    };
+
+                    if operation.terminal {
+                        if clause.resumption.is_some() {
+                            // Preserve the legacy shape so validation emits its
+                            // established terminal-resumption diagnostic.
+                        } else if clause.patterns.len() != operation.payloads {
+                            errors.push(
+                                Diagnostic::error(
+                                    "wrong number of handler patterns",
+                                    format!(
+                                        "`{}::{}` declares {} payload(s), but this arm has {} pattern(s)",
+                                        clause.effect,
+                                        clause.operation,
+                                        operation.payloads,
+                                        clause.patterns.len()
+                                    ),
+                                    clause.span,
+                                )
+                                .with_code("G0140"),
+                            );
+                        }
+                    } else if clause.resumption.is_none() {
+                        match clause.patterns.len() {
+                            count if count == operation.payloads => {
+                                let binder = format!("$resume${}", clause.span.start);
+                                let body = clause.body;
+                                clause.body = Expr {
+                                    kind: ExprKind::TailResume {
+                                        resumption: Rc::new(variable(&binder, clause.span)),
+                                        value: Some(Rc::new(body)),
+                                    },
+                                    span: clause.span,
+                                };
+                                clause.resumption = Some(binder);
+                            }
+                            count if count == operation.payloads + 1 => {
+                                let continuation = clause.patterns.pop().unwrap();
+                                match continuation.kind {
+                                    PatternKind::Binding(name) => {
+                                        clause.resumption = Some(name);
+                                    }
+                                    PatternKind::Wildcard => {
+                                        let binder =
+                                            format!("$discarded$resume${}", clause.span.start);
+                                        let body = clause.body;
+                                        clause.body = Expr {
+                                            kind: ExprKind::Block(Rc::new(vec![
+                                                Stmt::Expr(Expr {
+                                                    kind: ExprKind::Cancel {
+                                                        resumption: Rc::new(variable(
+                                                            &binder,
+                                                            continuation.span,
+                                                        )),
+                                                    },
+                                                    span: continuation.span,
+                                                }),
+                                                Stmt::Expr(body),
+                                            ])),
+                                            span: clause.span,
+                                        };
+                                        clause.resumption = Some(binder);
+                                    }
+                                    _ => errors.push(
+                                        Diagnostic::error(
+                                            "invalid continuation pattern",
+                                            "the final operation pattern must bind the continuation or discard it with `_`",
+                                            continuation.span,
+                                        )
+                                        .with_code("G0141"),
+                                    ),
+                                }
+                            }
+                            count => errors.push(
+                                Diagnostic::error(
+                                    "wrong number of handler patterns",
+                                    format!(
+                                        "`{}::{}` accepts {} payload pattern(s), optionally followed by one continuation pattern; found {count}",
+                                        clause.effect, clause.operation, operation.payloads
+                                    ),
+                                    clause.span,
+                                )
+                                .with_code("G0140"),
+                            ),
+                        }
+                    }
+
+                    let mut nested = resumptions.clone();
+                    if let Some(resumption) = &clause.resumption {
+                        nested.insert(resumption.clone());
+                    }
+                    normalize(
+                        &mut clause.body,
+                        operations,
+                        &nested,
+                        effect_paths,
+                        completion_sites,
+                        errors,
+                    );
+                    operation_clauses.push(clause);
+                }
+
+                if completion_arms.is_empty() {
+                    *clauses = Rc::new(operation_clauses);
+                    return;
+                }
+                let subject = if operation_clauses.is_empty() {
+                    computation.as_ref().clone()
+                } else {
+                    Expr {
+                        kind: ExprKind::Handle {
+                            computation: computation.clone(),
+                            clauses: Rc::new(operation_clauses),
+                        },
+                        span: expression.span,
+                    }
+                };
+                *expression = completion_match(subject, completion_arms, expression.span);
+            }
+            ExprKind::Call(callee, arguments) => {
+                normalize(
+                    Rc::make_mut(callee),
+                    operations,
+                    resumptions,
+                    effect_paths,
+                    completion_sites,
+                    errors,
+                );
+                for argument in Rc::make_mut(arguments).iter_mut() {
+                    normalize(
+                        argument,
+                        operations,
+                        resumptions,
+                        effect_paths,
+                        completion_sites,
+                        errors,
+                    );
+                }
+                let path = match &callee.kind {
+                    ExprKind::Variable(path) => Some(path.clone()),
+                    _ => None,
+                };
+                if let Some(path) = &path
+                    && let [name] = path.as_ref()
+                    && resumptions.contains(name.as_ref())
+                {
+                    if arguments.len() == 1 {
+                        let value = Rc::new(arguments[0].clone());
+                        expression.kind = ExprKind::Resume {
+                            resumption: Rc::new(callee.as_ref().clone()),
+                            value: Some(value),
+                        };
+                    } else {
+                        errors.push(
+                            Diagnostic::error(
+                                "invalid continuation call",
+                                "a continuation is called with exactly one operation-result value",
+                                expression.span,
+                            )
+                            .with_code("G0142"),
+                        );
+                    }
+                    return;
+                }
+                if let Some(path) = &path
+                    && let [name] = path.as_ref()
+                    && name.as_ref() == "discard"
+                    && let [argument] = arguments.as_slice()
+                    && matches!(&argument.kind, ExprKind::Variable(path)
+                        if path.len() == 1 && resumptions.contains(path[0].as_ref()))
+                {
+                    expression.kind = ExprKind::Cancel {
+                        resumption: Rc::new(argument.clone()),
+                    };
+                    return;
+                }
+                if let Some(path) = path
+                    && path.len() == 2
+                    && operations.contains_key(&(path[0].to_string(), path[1].to_string()))
+                {
+                    let effect = path[0].to_string();
+                    let operation = path[1].to_string();
+                    let args = arguments.clone();
+                    effect_paths.push(EffectPathSyntax {
+                        site: expression.span,
+                        effect: TypeSyntax {
+                            kind: TypeSyntaxKind::Path(vec![TypePathSegment {
+                                name: effect.clone(),
+                                span: callee.span,
+                            }]),
+                            span: callee.span,
+                        },
+                    });
+                    expression.kind = ExprKind::Perform {
+                        effect: Rc::from(effect),
+                        operation: Rc::from(operation),
+                        args,
+                    };
+                }
+            }
+            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                for statement in Rc::make_mut(statements) {
+                    let (value, reference) = match statement {
+                        Stmt::Let { value, .. }
+                        | Stmt::Deconstruct { value, .. }
+                        | Stmt::Expr(value) => (value, None),
+                        Stmt::Assign {
+                            destination, value, ..
+                        } => (
+                            value,
+                            match &mut destination.kind {
+                                AssignmentPlaceKind::Dereference { reference, .. } => {
+                                    Some(Rc::make_mut(reference))
+                                }
+                                AssignmentPlaceKind::Local { .. } => None,
+                            },
+                        ),
+                    };
+                    normalize(
+                        value,
+                        operations,
+                        resumptions,
+                        effect_paths,
+                        completion_sites,
+                        errors,
+                    );
+                    if let Some(reference) = reference {
+                        normalize(
+                            reference,
+                            operations,
+                            resumptions,
+                            effect_paths,
+                            completion_sites,
+                            errors,
+                        );
+                    }
+                }
+            }
+            ExprKind::Closure { params, body } => {
+                let mut nested = resumptions.clone();
+                for param in params.iter() {
+                    nested.remove(param.as_ref());
+                }
+                normalize(
+                    Rc::make_mut(body),
+                    operations,
+                    &nested,
+                    effect_paths,
+                    completion_sites,
+                    errors,
+                );
+            }
+            ExprKind::TypedClosure { params, body, .. } => {
+                let mut nested = resumptions.clone();
+                for param in params.iter() {
+                    nested.remove(&param.name);
+                }
+                normalize(
+                    Rc::make_mut(body),
+                    operations,
+                    &nested,
+                    effect_paths,
+                    completion_sites,
+                    errors,
+                );
+            }
+            ExprKind::Move(value)
+            | ExprKind::Field(value, _)
+            | ExprKind::Labeled { body: value, .. }
+            | ExprKind::LabelDestination { body: value, .. }
+            | ExprKind::Unary { operand: value, .. } => normalize(
+                Rc::make_mut(value),
+                operations,
+                resumptions,
+                effect_paths,
+                completion_sites,
+                errors,
+            ),
+            ExprKind::List(values) | ExprKind::Tuple(values) => {
+                for value in Rc::make_mut(values) {
+                    normalize(
+                        value,
+                        operations,
+                        resumptions,
+                        effect_paths,
+                        completion_sites,
+                        errors,
+                    );
+                }
+            }
+            ExprKind::Struct { fields, .. } => {
+                for (_, value) in Rc::make_mut(fields) {
+                    normalize(
+                        value,
+                        operations,
+                        resumptions,
+                        effect_paths,
+                        completion_sites,
+                        errors,
+                    );
+                }
+            }
+            ExprKind::Perform { args, .. } => {
+                for value in Rc::make_mut(args) {
+                    normalize(
+                        value,
+                        operations,
+                        resumptions,
+                        effect_paths,
+                        completion_sites,
+                        errors,
+                    );
+                }
+            }
+            ExprKind::Binary { lhs, rhs, .. } => {
+                normalize(
+                    Rc::make_mut(lhs),
+                    operations,
+                    resumptions,
+                    effect_paths,
+                    completion_sites,
+                    errors,
+                );
+                normalize(
+                    Rc::make_mut(rhs),
+                    operations,
+                    resumptions,
+                    effect_paths,
+                    completion_sites,
+                    errors,
+                );
+            }
+            ExprKind::Leave { value, .. } => {
+                if let Some(value) = value {
+                    normalize(
+                        Rc::make_mut(value),
+                        operations,
+                        resumptions,
+                        effect_paths,
+                        completion_sites,
+                        errors,
+                    );
+                }
+            }
+            ExprKind::Is { subject, .. } => normalize(
+                Rc::make_mut(subject),
+                operations,
+                resumptions,
+                effect_paths,
+                completion_sites,
+                errors,
+            ),
+            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+                normalize(
+                    Rc::make_mut(resumption),
+                    operations,
+                    resumptions,
+                    effect_paths,
+                    completion_sites,
+                    errors,
+                );
+                if let Some(value) = value {
+                    normalize(
+                        Rc::make_mut(value),
+                        operations,
+                        resumptions,
+                        effect_paths,
+                        completion_sites,
+                        errors,
+                    );
+                }
+            }
+            ExprKind::Cancel { resumption } => normalize(
+                Rc::make_mut(resumption),
+                operations,
+                resumptions,
+                effect_paths,
+                completion_sites,
+                errors,
+            ),
+            ExprKind::Unit
+            | ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::String(_)
+            | ExprKind::Char(_)
+            | ExprKind::Byte(_)
+            | ExprKind::ByteString(_)
+            | ExprKind::Variable(_)
+            | ExprKind::LabelReference(_) => {}
+        }
+    }
+
+    let mut errors = Vec::new();
+    let mut completion_sites = BTreeSet::new();
+    let empty = BTreeSet::new();
+    for global in &mut program.globals {
+        normalize(
+            &mut global.value,
+            &operations,
+            &empty,
+            &mut program.effect_paths,
+            &mut completion_sites,
+            &mut errors,
+        );
+    }
+    for function in &mut program.functions {
+        normalize(
+            &mut function.body,
+            &operations,
+            &empty,
+            &mut program.effect_paths,
+            &mut completion_sites,
+            &mut errors,
+        );
+    }
+    for implementation in &mut program.impls {
+        for method in &mut implementation.methods {
+            if let Some(body) = &mut method.body {
+                normalize(
+                    body,
+                    &operations,
+                    &empty,
+                    &mut program.effect_paths,
+                    &mut completion_sites,
+                    &mut errors,
+                );
+            }
+        }
+    }
+    for declaration in &mut program.traits {
+        for method in &mut declaration.methods {
+            if let Some(body) = &mut method.body {
+                normalize(
+                    body,
+                    &operations,
+                    &empty,
+                    &mut program.effect_paths,
+                    &mut completion_sites,
+                    &mut errors,
+                );
+            }
+        }
+    }
+    for drop in &mut program.drops {
+        normalize(
+            &mut drop.body,
+            &operations,
+            &empty,
+            &mut program.effect_paths,
+            &mut completion_sites,
+            &mut errors,
+        );
+    }
+    program
+        .effect_paths
+        .retain(|path| !completion_sites.contains(&(path.site.start, path.site.end)));
+    errors
 }
 
 fn same_kind(lhs: &TokenKind, rhs: &TokenKind) -> bool {

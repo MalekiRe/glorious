@@ -147,7 +147,7 @@ run(value: Result<u8, Error>) -> u8 {
           (arguments
             (path_expression
               (identifier))))
-        (handler_clause
+        (legacy_handler_clause
           effect: (effect_reference
             (effect_identifier
               (effect_identifier))
@@ -163,7 +163,7 @@ run(value: Result<u8, Error>) -> u8 {
             variant: (variant_identifier
               (variant_identifier))
             (identifier))
-          resumption: (identifier)
+          continuation: (identifier)
           body: (resumption_expression
             (arguments
               (path_expression
@@ -171,7 +171,7 @@ run(value: Result<u8, Error>) -> u8 {
               (unary_expression
                 operand: (path_expression
                   (identifier))))))
-        (handler_clause
+        (legacy_handler_clause
           effect: (effect_reference
             (effect_identifier
               (effect_identifier))
@@ -187,7 +187,7 @@ run(value: Result<u8, Error>) -> u8 {
             variant: (variant_identifier
               (variant_identifier))
             (identifier))
-          resumption: (identifier)
+          continuation: (identifier)
           body: (resumption_expression
             (arguments
               (path_expression

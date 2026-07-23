@@ -20,6 +20,7 @@ module.exports = grammar({
     [$.block, $.struct_expression],
     [$.block, $.closure_expression],
     [$.effect_row, $.block],
+    [$.effect_row, $._type],
     [$._type, $._expression],
     [$._pattern, $._expression],
     [$._pattern, $.type_identifier],
@@ -80,11 +81,17 @@ module.exports = grammar({
     associated_type_definition: $ => seq('type', field('name', $.type_identifier), optional($.generic_parameters), '=', choice($._type, $.effect_row), ';'),
 
     effect_declaration: $ => seq(optional($.visibility_modifier), 'effect', field('name', $.effect_identifier), optional($.generic_parameters), '{', repeat($.effect_operation), '}'),
-    effect_operation: $ => prec.right(seq(optional($.quantity), field('name', $.effect_operation_identifier), $.parameters, '->', optional($._type), optional(';'))),
+    effect_operation: $ => prec.right(seq(
+      optional($.quantity),
+      field('name', $.effect_operation_identifier),
+      $.parameters,
+      optional(seq('->', optional($._type))),
+      optional(';'),
+    )),
     quantity: $ => seq('[', $.integer_literal, ',', choice($.integer_literal, 'infinity', '*'), ']'),
 
-    function_declaration: $ => seq(optional($.visibility_modifier), field('name', $.identifier), optional($.generic_parameters), $.parameters, '->', optional($._type), optional(seq('/', $.effect_row)), optional($.where_clause), field('body', $.block)),
-    function_signature: $ => seq(field('name', $.identifier), optional($.generic_parameters), $.parameters, '->', optional($._type), optional(seq('/', $.effect_row)), optional($.where_clause), ';'),
+    function_declaration: $ => seq(optional($.visibility_modifier), field('name', $.identifier), optional($.generic_parameters), $.parameters, optional(seq('->', optional($._type))), optional(seq('/', $.effect_row)), optional($.where_clause), field('body', $.block)),
+    function_signature: $ => seq(field('name', $.identifier), optional($.generic_parameters), $.parameters, optional(seq('->', optional($._type))), optional(seq('/', $.effect_row)), optional($.where_clause), ';'),
     parameters: $ => seq('(', commaSep($.parameter), ')'),
     parameter: $ => seq(field('name', $.identifier), ':', field('type', $._type)),
 
@@ -102,7 +109,10 @@ module.exports = grammar({
       seq(optional(seq('for', $.generic_parameters)), $._type, ':', sep1($.trait_reference, '+')),
     ),
     trait_reference: $ => seq($.type_path, optional($.generic_arguments)),
-    effect_row: $ => seq('{', commaSep($._type), optional(seq('|', $.identifier)), '}'),
+    effect_row: $ => choice(
+      seq('{', commaSep($._type), optional(seq('|', $.identifier)), '}'),
+      field('effect', $.type_path),
+    ),
 
     _type: $ => choice(
       $.type_path,
@@ -187,9 +197,21 @@ module.exports = grammar({
     pattern_test_expression: $ => prec.left(3, seq(field('value', $._expression), 'is', field('pattern', $._pattern))),
     match_expression: $ => prec(14, seq('match', '(', field('value', $._expression), ')', '{', repeat1($.match_arm), '}')),
     match_arm: $ => seq(field('pattern', $._pattern), '=>', field('body', $._expression), optional(choice(',', ';'))),
-    handle_expression: $ => prec.right(seq('handle', field('computation', $._expression), '{', repeat(choice($.handler_clause, $.elided_handler_clause)), '}')),
+    handle_expression: $ => prec.right(seq(
+      'handle',
+      field('computation', $._expression),
+      '{',
+      repeat(choice(
+        $.handler_clause,
+        $.legacy_handler_clause,
+        $.handler_completion_arm,
+      )),
+      '}',
+    )),
     effect_reference: $ => seq($.effect_identifier, optional($.generic_arguments)),
-    handler_clause: $ => prec.dynamic(2, seq(field('effect', $.effect_reference), '::', field('operation', $.effect_operation_identifier), '(', commaSep($._pattern), ')', optional(seq('with', field('resumption', $.identifier))), '=>', field('body', $._expression), optional(choice(',', ';')))),
+    handler_clause: $ => prec.dynamic(30, prec(30, seq(field('effect', $.effect_reference), '::', field('operation', $.effect_operation_identifier), '(', commaSep($._pattern), ')', '=>', field('body', $._expression), optional(choice(',', ';'))))),
+    legacy_handler_clause: $ => prec.dynamic(30, prec(30, seq(field('effect', $.effect_reference), '::', field('operation', $.effect_operation_identifier), '(', commaSep($._pattern), ')', 'with', field('continuation', $.identifier), '=>', field('body', $._expression), optional(choice(',', ';'))))),
+    handler_completion_arm: $ => prec.dynamic(1, seq(field('pattern', $._pattern), '=>', field('body', $._expression), optional(choice(',', ';')))),
     elided_handler_clause: $ => prec.dynamic(1, seq(field('pattern', $._elided_handler_pattern), '=>', field('body', $._expression), optional(choice(',', ';')))),
     perform_expression: $ => seq('perform', field('effect', $.effect_reference), '::', field('operation', $.effect_operation_identifier), $.arguments),
     resumption_expression: $ => seq(choice('resume', 'cancel', 'tail'), $.arguments),

@@ -1,14 +1,14 @@
-main() -> {
+main() {
     let source = ",.,.,.";
     let input = "abc";
     let parsed = brainfuck_core::parse(Bytes::iter(&String::as_bytes(&source)));
-    handle perform Case<Result<brainfuck_core::Program, brainfuck_core::ParseError>>::inspect(parsed) {
+    handle parsed {
         Result::Ok(program) => {
             let output = brainfuck_core::run_with_io(
                 &program,
                 Bytes::iter(&String::as_bytes(&input))
             );
-            handle perform Case<Result<Vec<u8>, brainfuck_core::RuntimeError>>::inspect(output) {
+            handle output {
                 Result::Ok(bytes) => {
                     assert(Bytes::eq(&Bytes::from_vec(bytes), &String::as_bytes(&input)));
                     assert(brainfuck_core::input_character_count(&"hé") == 2)

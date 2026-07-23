@@ -15,9 +15,6 @@
 (variant_pattern
   type: (identifier) @type
   variant: (variant_identifier) @constructor)
-(elided_variant_pattern
-  ["Result" "Option"] @type
-  variant: (identifier) @constructor)
 (struct_expression type: (identifier) @type)
 (struct_pattern (identifier) @type . "{")
 ; Keep effects distinct from the nominal types used in their parameters, and
@@ -44,6 +41,16 @@
 
 (parameter name: (identifier) @variable.parameter)
 (generic_parameter (identifier) @variable.parameter)
+(handler_clause (identifier) @variable.parameter)
+(legacy_handler_clause continuation: (identifier) @variable.parameter)
+; A new-surface operation arm and a qualified completion pattern are
+; syntactically identical. The compiler resolves them from effect declarations;
+; Tree-sitter uses the lowercase operation convention for highlighting.
+(handler_completion_arm
+  pattern: (variant_pattern
+    type: (identifier) @tag
+    variant: (variant_identifier) @variant
+    (#match? @variant "^[a-z_]")))
 (let_statement (identifier) @variable)
 
 

@@ -61,12 +61,12 @@ their continuation may be resumed:
 
 ```rust
 effect Ask {
-    [1,1] ask() -> i64
+    ask() -> i64
 }
 
 answer() -> i64 {
-    handle perform Ask::ask() {
-        Ask::ask() with continuation => resume(continuation, 42)
+    handle Ask::ask() {
+        Ask::ask(continuation) => continuation(42)
     }
 }
 ```

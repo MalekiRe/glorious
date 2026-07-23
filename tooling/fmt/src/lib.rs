@@ -259,6 +259,18 @@ fn leading_comment_start(source: &str, declaration: usize) -> usize {
 }
 
 fn normalize(tokens: &mut Vec<Token>) {
+    rewrite_inspection_handlers(tokens);
+    rewrite_legacy_effect_control(tokens);
+    for token in tokens.iter_mut() {
+        if token.text == "infinity" {
+            token.text = "*".into();
+            token.kind = Kind::Punctuation;
+        }
+    }
+    remove_default_effect_quantities(tokens);
+    remove_singleton_row_braces(tokens);
+    remove_effect_operation_semicolons(tokens);
+
     let mut index = 0;
     let mut brace_depth = 0usize;
     while index + 2 < tokens.len() {
@@ -268,14 +280,18 @@ fn normalize(tokens: &mut Vec<Token>) {
             tokens[index + 2].text.as_str(),
         );
         if triple == ("->", "(", ")")
-            && brace_depth == 0
             && !is_comment(&tokens[index + 1])
             && !is_comment(&tokens[index + 2])
             && tokens
                 .get(index + 3)
-                .is_some_and(|next| matches!(next.text.as_str(), "{" | "/" | ";" | "!"))
+                .is_some_and(|next| {
+                    matches!(
+                        next.text.as_str(),
+                        "{" | "/" | ";" | "}" | "where"
+                    )
+                })
         {
-            tokens.drain(index + 1..=index + 2);
+            tokens.drain(index..=index + 2);
             continue;
         }
         if triple == ("/", "{", "}")
@@ -293,7 +309,313 @@ fn normalize(tokens: &mut Vec<Token>) {
         }
         index += 1;
     }
+    let mut index = 0;
+    while index + 1 < tokens.len() {
+        if tokens[index].text != "->" {
+            index += 1;
+            continue;
+        }
+        if tokens[index + 1].text == "/" {
+            tokens.remove(index);
+            continue;
+        }
+        if tokens[index + 1].text == "{" {
+            let old_row = matching_token(tokens, index + 1)
+                .and_then(|close| tokens.get(close + 1))
+                .is_some_and(|next| next.text == "{");
+            if old_row {
+                tokens[index].text = "/".into();
+            } else {
+                tokens.remove(index);
+            }
+            continue;
+        }
+        index += 1;
+    }
     remove_redundant_trailing_commas(tokens);
+}
+
+fn matching_token(tokens: &[Token], opening: usize) -> Option<usize> {
+    let close = matching_close(tokens.get(opening)?.text.as_str())?;
+    let mut depth = 0usize;
+    for (index, token) in tokens.iter().enumerate().skip(opening) {
+        if token.text == tokens[opening].text {
+            depth += 1;
+        } else if token.text == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+    }
+    None
+}
+
+fn rewrite_inspection_handlers(tokens: &mut Vec<Token>) {
+    let mut cursor = 0usize;
+    while cursor + 6 < tokens.len() {
+        if tokens[cursor].text != "handle"
+            || tokens[cursor + 1].text != "perform"
+        {
+            cursor += 1;
+            continue;
+        }
+        let Some(inspect) = (cursor + 3..tokens.len().saturating_sub(1)).find(|index| {
+            tokens[*index - 1].text == "::"
+                && tokens[*index + 1].text == "("
+        }) else {
+            cursor += 1;
+            continue;
+        };
+        if tokens[inspect].text != "inspect" {
+            cursor += 1;
+            continue;
+        }
+        let head = tokens[cursor + 2..inspect - 1]
+            .iter()
+            .map(|token| token.text.clone())
+            .collect::<Vec<_>>();
+        let outer_open = inspect + 1;
+        let Some(outer_close) = matching_token(tokens, outer_open) else {
+            cursor += 1;
+            continue;
+        };
+        let Some(block_open) = tokens
+            .get(outer_close + 1)
+            .filter(|token| token.text == "{")
+            .map(|_| outer_close + 1)
+        else {
+            cursor += 1;
+            continue;
+        };
+        let Some(block_close) = matching_token(tokens, block_open) else {
+            cursor += 1;
+            continue;
+        };
+
+        let mut removals = Vec::<(usize, usize)>::new();
+        let mut arm = block_open + 1;
+        while arm < block_close {
+            let starts_head = arm + head.len() + 3 < block_close
+                && tokens[arm..arm + head.len()]
+                    .iter()
+                    .map(|token| token.text.as_str())
+                    .eq(head.iter().map(String::as_str))
+                && tokens[arm + head.len()].text == "::"
+                && tokens[arm + head.len() + 1].text == "inspect"
+                && tokens[arm + head.len() + 2].text == "(";
+            if starts_head {
+                let open = arm + head.len() + 2;
+                if let Some(close) = matching_token(tokens, open) {
+                    if tokens.get(close + 1).is_some_and(|token| token.text == "=>") {
+                        removals.push((arm, open + 1));
+                        removals.push((close, close + 1));
+                        arm = close + 2;
+                        continue;
+                    }
+                }
+            }
+            arm += 1;
+        }
+        for (start, end) in removals.into_iter().rev() {
+            tokens.drain(start..end);
+        }
+        tokens.remove(outer_close);
+        tokens.drain(cursor + 2..=outer_open);
+        tokens.remove(cursor + 1);
+        cursor += 1;
+    }
+}
+
+fn rewrite_legacy_effect_control(tokens: &mut Vec<Token>) {
+    let mut index = 0usize;
+    while index < tokens.len() {
+        if tokens[index].text == "perform" {
+            tokens.remove(index);
+            continue;
+        }
+        if tokens[index].text == "cancel" {
+            tokens[index].text = "discard".into();
+        }
+        if tokens[index].text == "with"
+            && tokens.get(index + 1).is_some_and(|token| token.kind == Kind::Word)
+            && tokens.get(index + 2).is_some_and(|token| token.text == "=>")
+        {
+            let Some(close) = (0..index).rev().find(|candidate| tokens[*candidate].text == ")")
+            else {
+                index += 1;
+                continue;
+            };
+            let Some(open) = (0..close).rev().find(|candidate| {
+                tokens[*candidate].text == "("
+                    && matching_token(tokens, *candidate) == Some(close)
+            }) else {
+                index += 1;
+                continue;
+            };
+            let binder = tokens[index + 1].clone();
+            tokens.drain(index..index + 2);
+            let mut insertion = vec![binder];
+            if close > open + 1 {
+                let mut comma = tokens[open].clone();
+                comma.text = ",".into();
+                comma.kind = Kind::Punctuation;
+                comma.spaced = false;
+                insertion.insert(0, comma);
+            }
+            tokens.splice(close..close, insertion);
+            index = close + 1;
+            continue;
+        }
+        if tokens[index].text == "resume"
+            && tokens.get(index + 1).is_some_and(|token| token.text == "(")
+        {
+            let open = index + 1;
+            let Some(close) = matching_token(tokens, open) else {
+                index += 1;
+                continue;
+            };
+            let mut depth = 0usize;
+            let comma = (open + 1..close).find(|candidate| {
+                match tokens[*candidate].text.as_str() {
+                    "(" | "[" | "{" => depth += 1,
+                    ")" | "]" | "}" => depth = depth.saturating_sub(1),
+                    "," if depth == 0 => return true,
+                    _ => {}
+                }
+                false
+            });
+            let Some(comma) = comma else {
+                index += 1;
+                continue;
+            };
+            let first = &tokens[open + 1..comma];
+            let binder = match first {
+                [binder] if binder.kind == Kind::Word => Some(binder.clone()),
+                [move_keyword, binder]
+                    if move_keyword.text == "move" && binder.kind == Kind::Word =>
+                {
+                    Some(binder.clone())
+                }
+                _ => None,
+            };
+            if let Some(binder) = binder {
+                let opening = tokens[open].clone();
+                tokens.splice(index..=comma, [binder, opening]);
+                index += 2;
+                continue;
+            }
+        }
+        index += 1;
+    }
+}
+
+fn remove_default_effect_quantities(tokens: &mut Vec<Token>) {
+    let mut index = 0usize;
+    while index + 6 < tokens.len() {
+        let default = tokens[index].text == "["
+            && tokens[index + 1].text == "1"
+            && tokens[index + 2].text == ","
+            && tokens[index + 3].text == "1"
+            && tokens[index + 4].text == "]"
+            && tokens[index + 5].kind == Kind::Word
+            && tokens[index + 6].text == "(";
+        if default {
+            tokens.drain(index..index + 5);
+        } else {
+            index += 1;
+        }
+    }
+}
+
+fn remove_singleton_row_braces(tokens: &mut Vec<Token>) {
+    fn signature_slash(tokens: &[Token], slash: usize) -> bool {
+        for token in tokens[..slash].iter().rev() {
+            match token.text.as_str() {
+                "->" | ")" => return true,
+                "{" | "}" | ";" | "=" | "=>" => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    let mut index = 0usize;
+    while index + 3 < tokens.len() {
+        if tokens[index].text != "/"
+            || tokens[index + 1].text != "{"
+            || !signature_slash(tokens, index)
+        {
+            index += 1;
+            continue;
+        }
+        let open = index + 1;
+        let Some(close) = matching_token(tokens, open) else {
+            index += 1;
+            continue;
+        };
+        let mut nested = Vec::<&str>::new();
+        let multiple = tokens[open + 1..close].iter().any(|token| {
+            match token.text.as_str() {
+                "(" => nested.push(")"),
+                "[" => nested.push("]"),
+                "{" => nested.push("}"),
+                "<" => nested.push(">"),
+                ")" | "]" | "}" | ">" => {
+                    nested.pop();
+                }
+                "," | "|" if nested.is_empty() => return true,
+                _ => {}
+            }
+            false
+        });
+        if close == open + 1 {
+            index = close + 1;
+            continue;
+        }
+        if !multiple {
+            tokens.remove(close);
+            tokens.remove(open);
+            continue;
+        }
+        index = close + 1;
+    }
+}
+
+fn remove_effect_operation_semicolons(tokens: &mut Vec<Token>) {
+    let mut index = 0usize;
+    while index + 2 < tokens.len() {
+        if tokens[index].text != "effect" {
+            index += 1;
+            continue;
+        }
+        let Some(open) = (index + 1..tokens.len()).find(|candidate| tokens[*candidate].text == "{")
+        else {
+            break;
+        };
+        let Some(mut close) = matching_token(tokens, open) else {
+            break;
+        };
+        let mut cursor = open + 1;
+        let mut nested = 0usize;
+        while cursor < close {
+            match tokens[cursor].text.as_str() {
+                "(" | "[" | "{" => nested += 1,
+                ")" | "]" | "}" => nested = nested.saturating_sub(1),
+                ";" if nested == 0 => {
+                    tokens.remove(cursor);
+                    close -= 1;
+                    if let Some(next) = tokens.get_mut(cursor) {
+                        next.newlines_before = next.newlines_before.max(2);
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            cursor += 1;
+        }
+        index = close + 1;
+    }
 }
 
 /// The renderer used to add a trailing comma whenever a parenthesized group
@@ -502,7 +824,7 @@ impl<'tokens> DocumentBuilder<'tokens> {
                 };
             }
             "(" | "[" => {
-                return if previous.text == "is" {
+                return if matches!(previous.text.as_str(), "is" | "for") {
                     Doc::Space
                 } else if matches!(previous.kind, Kind::Word | Kind::Number | Kind::String)
                     || matches!(previous.text.as_str(), ")" | "]" | ">")
@@ -805,7 +1127,7 @@ mod tests {
     #[test]
     fn normalizes_signatures_spacing_and_indentation() {
         let input = "main( ) -> () {\n  let x=1 ;\n        finish (x , 2)\n}\n";
-        let expected = "main() -> {\n    let x = 1;\n    finish(x, 2)\n}\n";
+        let expected = "main() {\n    let x = 1;\n    finish(x, 2)\n}\n";
         assert_eq!(formatted(input), expected);
     }
 
@@ -898,7 +1220,37 @@ mod tests {
     fn spec_normalizations_are_safe_and_idempotent() {
         let source = "main() -> () / {} { () }";
         let once = formatted(source);
-        assert_eq!(once, "main() -> { () }\n");
+        assert_eq!(once, "main() { () }\n");
+        assert_eq!(formatted(&once), once);
+    }
+
+    #[test]
+    fn canonicalizes_the_effect_surface() {
+        let source = r#"
+            effect Ask { [1,1] ask() -> i64; }
+            answer() -> i64 / {Ask} {
+                handle perform Ask::ask() {
+                    Ask::ask() with continuation => resume(move continuation, 42)
+                }
+            }
+            selected(value: Result<i64, ()>) -> i64 {
+                handle perform Case<Result<i64, ()>>::inspect(value) {
+                    Case<Result<i64, ()>>::inspect(Result::Ok(item)) => item,
+                    Case<Result<i64, ()>>::inspect(Result::Err(_)) => 0
+                }
+            }
+            main() -> () { () }
+        "#;
+        let once = formatted(source);
+        assert!(once.contains("ask() -> i64"), "{once}");
+        assert!(!once.contains("ask() -> i64;"), "{once}");
+        assert!(!once.contains("[1, 1]"), "{once}");
+        assert!(once.contains("answer() -> i64 / Ask"), "{once}");
+        assert!(once.contains("Ask::ask(continuation) => continuation(42)"), "{once}");
+        assert!(once.contains("handle value {"), "{once}");
+        assert!(!once.contains("perform"), "{once}");
+        assert!(!once.contains(" with "), "{once}");
+        assert!(!once.contains("resume("), "{once}");
         assert_eq!(formatted(&once), once);
     }
 

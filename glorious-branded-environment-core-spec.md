@@ -99,15 +99,15 @@ length(text: &String) -> usize {
 }
 
 write_line(text: &String) -> / {Console} {
-    perform Console::write_line(text)
+    Console::write_line(text)
 }
 
 read_line() -> String / {Console} {
-    perform Console::read_line()
+    Console::read_line()
 }
 
 fail<E>(error: E) -> ! / {Fail<E>} {
-    perform Fail<E>::fail(error)
+    Fail<E>::fail(error)
 }
 ```
 
@@ -1117,10 +1117,11 @@ Terminality is determined before operation-generic substitution and never change
 ### 10.2 Performance
 
 ```rust
-perform Protocol<Args...>::operation(values)
+Protocol<Args...>::operation(values)
 ```
 
 performs left-to-right argument evaluation, resolves the normalized protocol key, and transfers to the nearest matching handler.
+The legacy `perform` prefix is accepted only as migration syntax.
 
 For a resumptive operation, the delimited continuation is captured. For a
 terminal operation, no resumption exists and the abandoned continuation is
@@ -1131,7 +1132,11 @@ proved eligible for zero-use cleanup.
 
 Handlers are deep. Resuming reinstalls the same handler around the continuation.
 
-Operation clauses use structural patterns and first-match semantics. Exhaustive coverage removes the protocol from the outward effect row. Inline partial handlers forward uncovered operations.
+Operation and normal-completion clauses use structural patterns and first-match
+semantics in one arm block. A payload-only resumptive operation clause
+tail-resumes with its body value; a final continuation pattern gives full
+control. Exhaustive coverage removes the protocol from the outward effect row.
+Inline partial handlers forward uncovered operations.
 
 Handler literals create anonymous nominal handler types. Their clause bodies receive compiler-generated `Fn` and `RunsIn` evidence.
 
@@ -1158,14 +1163,14 @@ K: RunsIn<CapturedEnvironment, (OperationResult,), After=...>
 
 for a one-shot resumption, or borrowed callable forms when a multi-shot resumption is sound.
 
-`resume(k, value)` consumes or borrows `k` according to the applicable callable and quantity evidence, then reinstalls the captured continuation and deep handler.
+At the surface, `k(value)` consumes or borrows `k` according to the applicable callable and quantity evidence, then reinstalls the captured continuation and deep handler. `resume(k, value)` remains a migration spelling for the same structural Core operation.
 
 For an exact finite multi-shot resumption, each borrowed resume runs an
 independent snapshot of the captured continuation. The final resume consumes
 the original resumption. Compiler and verifier agree on the declared exact
 quantity; under-use and over-use are rejected.
 
-`cancel(k)` consumes the resumption and attempts to destroy the captured
+`discard(k)` consumes the resumption and attempts to destroy the captured
 continuation environment. Cancellation is legal only when every abandoned
 captured subtree permits zero use; it cannot serve as nonlocal cleanup for a
 must-move value.

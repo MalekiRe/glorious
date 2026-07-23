@@ -8218,10 +8218,20 @@ pub(crate) fn discover_with_traits(program: &Program, trait_db: &TraitDb) -> Dis
     discover_with_traits_and_budgets(program, trait_db, &mut BTreeMap::new())
 }
 
+#[cfg(test)]
 pub(crate) fn discover_with_traits_and_budgets(
     program: &Program,
     trait_db: &TraitDb,
     solver_budgets: &mut BTreeMap<DeclarationKey, SolverBudget>,
+) -> Discovery {
+    discover_with_traits_and_budgets_from(program, trait_db, solver_budgets, None)
+}
+
+pub(crate) fn discover_with_traits_and_budgets_from(
+    program: &Program,
+    trait_db: &TraitDb,
+    solver_budgets: &mut BTreeMap<DeclarationKey, SolverBudget>,
+    roots: Option<&BTreeSet<DeclarationKey>>,
 ) -> Discovery {
     let (templates_by_name, errors) = discover_templates(program, trait_db);
     let nominal_templates = discover_nominal_templates(program);
@@ -8286,6 +8296,9 @@ pub(crate) fn discover_with_traits_and_budgets(
         let Some(template) = templates_by_name.get(&function.name) else {
             continue;
         };
+        if roots.is_some_and(|roots| !roots.contains(&template.declaration)) {
+            continue;
+        }
         let symbolic = !template.generic_params.is_empty();
         let declared_param_env = template_param_env(trait_db, template, None)
             .expect("unsubstituted template facts preserve their owner-qualified parameters");

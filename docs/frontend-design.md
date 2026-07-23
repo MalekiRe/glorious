@@ -1173,9 +1173,10 @@ erased.
 ### 8.4 Effects and rows
 
 Protocol identity is declaration identity plus normalized type/const/brand
-arguments. `perform` first checks payloads left to right, then adds the protocol
+arguments. A call whose path resolves in the effect namespace first checks
+payloads left to right, then adds the protocol
 to the outward row unless an active matching handler removes it. A callable may
-therefore execute a `perform` without a lexical handler exactly when the
+therefore invoke an operation without a lexical handler exactly when the
 normalized protocol instance is a member of its declared outward row. Every
 caller must either handle that instance or include it in its own outward row.
 Payload evaluation and ownership transfer are unchanged by crossing callable
@@ -1199,6 +1200,12 @@ the same residual. Known members are retained when the row is sealed, omitted
 `Fn::Effects` remains anonymous whole-row inference, and executable outward rows
 must be closed before finalization. Effect-row aliases remain closed in this
 compiler slice.
+
+Surface handlers admit completion and operation patterns in one arm block. A
+payload-only operation arm tail-resumes with its body value; a final
+continuation binding gives full control and calls ordinarily as `k(value)`.
+Legacy `perform`, `with`, `resume`, and `cancel` spellings remain accepted
+during migration and normalize to the same structural Core nodes.
 
 Handler checking proceeds in source order:
 
@@ -1229,11 +1236,11 @@ delimiter. It creates an anonymous `CallableId` of kind `Resumption` whose
 principal interval is the operation's declared quantity and whose continuation
 brand summarizes that captured state.
 
-One-shot resume moves the resumption and transitions its environment. Multi-shot
+One-shot invocation moves the resumption and transitions its environment. Multi-shot
 shared/unique forms are synthesized only if every capture is structurally
 duplicable, no unique loan crosses capture, all handler dependencies are
-duplicable, and multiplied use intervals remain legal. `cancel` consumes the
-resumption and applies its cleanup plan. A performance site is rejected if
+duplicable, and multiplied use intervals remain legal. Ordinary `discard(k)`
+consumes a cancellable resumption and applies its cleanup plan. A performance site is rejected if
 cancellation exposes a captured owner's zero-use path whose principal lower bound
 forbids zero.
 

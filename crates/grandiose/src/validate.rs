@@ -648,6 +648,27 @@ fn validate_trait_methods(
         }
     }
 
+    fn is_unit_type(
+        ty: &TypeSyntax,
+        self_ty: &TypeSyntax,
+        binders: &HashMap<&str, &str>,
+        trait_arguments: &HashMap<&str, &TypeSyntax>,
+    ) -> bool {
+        if ty.simple_name() == Some("Self") {
+            return is_unit_type(self_ty, self_ty, binders, trait_arguments);
+        }
+        if let Some(name) = ty.simple_name() {
+            if let Some(mapped) = binders.get(name) {
+                return *mapped == "Unit";
+            }
+            if let Some(argument) = trait_arguments.get(name) {
+                return is_unit_type(argument, self_ty, binders, trait_arguments);
+            }
+        }
+        matches!(&ty.kind, TypeSyntaxKind::Tuple(elements) if elements.is_empty())
+            || ty.simple_name() == Some("Unit")
+    }
+
     fn same_trait_ref(
         template: &TraitRefSyntax,
         actual: &TraitRefSyntax,
@@ -931,7 +952,12 @@ fn validate_trait_methods(
                     &binders,
                     &trait_arguments,
                 ),
-                _ => false,
+                (Some(left), None) => {
+                    is_unit_type(left, &implementation.self_ty, &binders, &trait_arguments)
+                }
+                (None, Some(right)) => {
+                    is_unit_type(right, &implementation.self_ty, &binders, &trait_arguments)
+                }
             };
             let same_effects = match (&declared.outward_effects, &defined.outward_effects) {
                 (None, None) => true,

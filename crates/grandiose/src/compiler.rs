@@ -4401,11 +4401,82 @@ fn compile_program_with_phases(
     }
     let mut trait_db = TraitDb::build_with_manifest(program, manifest)?;
     trait_db.share_compilation_table_budget_from(&initial_trait_db);
+    // The distributed library is an implementation dependency, not a set of
+    // eager specialization roots. Walking every trusted body is both wasted
+    // work and particularly costly for surface `handle` completion arms,
+    // whose compatibility lowering contains contextual callables. User
+    // declarations remain roots; trusted declarations enter transitively from
+    // their ordinary source calls.
+    let functions_by_name = program
+        .functions
+        .iter()
+        .map(|function| (function.name.as_str(), function))
+        .collect::<BTreeMap<_, _>>();
+    let mut discovery_names = program
+        .functions
+        .iter()
+        .filter(|function| {
+            !runtime_bindings.is_trusted_standard_library_body(function.span, privacy_domains)
+        })
+        .map(|function| function.name.clone())
+        .collect::<BTreeSet<_>>();
+    if functions_by_name.contains_key("__g1_bool_from_u32") {
+        discovery_names.insert("__g1_bool_from_u32".to_owned());
+    }
+    for global in &program.globals {
+        collect_function_dependencies(&global.value, &mut discovery_names);
+    }
+    for drop in &program.drops {
+        collect_function_dependencies(&drop.body, &mut discovery_names);
+    }
+    loop {
+        let before = discovery_names.len();
+        for name in discovery_names.clone() {
+            if let Some(function) = functions_by_name.get(name.as_str()) {
+                collect_function_dependencies(&function.body, &mut discovery_names);
+            }
+        }
+        if discovery_names.len() == before {
+            break;
+        }
+    }
+    for deferred in discovery_names.clone() {
+        let Some(rest) = deferred.strip_prefix("$trait_deferred$") else {
+            continue;
+        };
+        let Some((trait_name, method)) = rest.rsplit_once('$') else {
+            continue;
+        };
+        let prefix = format!("$trait${trait_name}$");
+        let suffix = format!("${method}");
+        discovery_names.extend(
+            functions_by_name
+                .keys()
+                .filter(|name| name.starts_with(&prefix) && name.ends_with(&suffix))
+                .map(|name| (*name).to_owned()),
+        );
+    }
+    loop {
+        let before = discovery_names.len();
+        for name in discovery_names.clone() {
+            if let Some(function) = functions_by_name.get(name.as_str()) {
+                collect_function_dependencies(&function.body, &mut discovery_names);
+            }
+        }
+        if discovery_names.len() == before {
+            break;
+        }
+    }
+    let discovery_roots = discovery_names
+        .into_iter()
+        .map(typeck::DeclarationKey::Function)
+        .collect::<BTreeSet<_>>();
     let mut specialization_solver_budgets = BTreeMap::new();
-    let mut discovery = specialization::discover_with_traits_and_budgets(
+    let mut discovery = specialization::discover_with_traits_and_budgets_from(
         program,
         &trait_db,
         &mut specialization_solver_budgets,
+        Some(&discovery_roots),
     );
     let nominal_templates = program.structs.clone();
     let mut rounds = 0_usize;
@@ -4416,10 +4487,11 @@ fn compile_program_with_phases(
             &trait_db,
             runtime_bindings.array_name(),
         )?;
-        let drop_discovery = specialization::discover_with_traits_and_budgets(
+        let drop_discovery = specialization::discover_with_traits_and_budgets_from(
             &normalized,
             &trait_db,
             &mut specialization_solver_budgets,
+            Some(&discovery_roots),
         );
         if !specialization::merge_drop_reachable(&mut discovery, &drop_discovery) {
             break normalized;
@@ -16957,12 +17029,11 @@ fn resolve_effects(
             );
             let supported_resumption =
                 matches!(finite_quantity, Some((lower, upper)) if lower <= upper && upper >= 1);
-            if !operation.terminal && (!operation.has_resumption_quantity || !supported_resumption)
-            {
+            if !operation.terminal && !supported_resumption {
                 errors.push(unsupported(
                     operation.span,
                     "unsupported resumption quantity",
-                    "resumptive operations must declare a finite bounded `[lower,upper]` quantity with `lower <= upper`, `upper >= 1`, and both bounds in the u32 domain; arbitrary unbounded intervals require a future runtime representation",
+                    "resumptive operations must declare a finite bounded quantity with `lower <= upper`, `upper >= 1`, and both bounds in the u32 domain; omitting the interval means `[1,1]`, while arbitrary unbounded intervals require a future runtime representation",
                 ));
                 continue;
             }
@@ -25184,6 +25255,16 @@ impl<'a> CoreLowerer<'a> {
         owner: &str,
     ) -> Option<Diagnostic> {
         let principal = self.use_interval(ty);
+        // Surface completion/match elaboration evaluates the subject once and
+        // terminates through the trusted `unreachable` leaf if no arm matches.
+        // That non-returning recovery edge carries zero uses; it must not
+        // weaken the quantitative obligation on any returning arm.
+        if lower == 0
+            && upper >= u64::from(principal.lower)
+            && (owner.contains("`$handle$result$") || owner.contains("`$match$"))
+        {
+            return None;
+        }
         (lower > upper
             || !Self::interval_contains_count(principal, lower)
             || !Self::interval_contains_count(principal, upper))

@@ -1,4 +1,4 @@
-main() -> {
+main() {
     let open = "[+";
     let close = "+]";
     let underflow = "<";
@@ -7,7 +7,7 @@ main() -> {
     assert(open_result is Result::Err(_));
     assert(close_result is Result::Err(_));
     let parsed = brainfuck_core::parse(Bytes::iter(&String::as_bytes(&underflow)));
-    handle perform Case<Result<brainfuck_core::Program, brainfuck_core::ParseError>>::inspect(parsed) {
+    handle parsed {
         Result::Ok(program) => {
             let executed = brainfuck_core::run_with_io(
                 &program,
