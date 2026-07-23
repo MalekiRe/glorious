@@ -15,7 +15,7 @@ version = "0.7.0"
 [grammars.grandiose]
 repository = "https://github.com/MalekiRe/glorious"
 # First immutable revision containing match and elided-handler grammar nodes.
-rev = "38710c49ad794ef3bca24453338fc99e0216c107"
+rev = "38710c402f7c9962759dd75e172c9ee4e31db22f"
 
 [language_servers.grand-lsp]
 name = "Grandiose Language Server"
