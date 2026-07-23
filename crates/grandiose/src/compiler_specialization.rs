@@ -3269,6 +3269,43 @@ impl<'a> Walker<'a> {
             .iter()
             .map(|argument| symbolic_type(argument, &generic_map, &BTreeMap::new()))
             .collect::<Option<Vec<_>>>()?;
+        fn canonicalize_module_nominals(
+            ty: &mut ProvisionalType,
+            templates: &BTreeMap<String, NominalTemplate>,
+        ) {
+            match ty {
+                ProvisionalType::Nominal(instance) => {
+                    for argument in &mut instance.arguments {
+                        canonicalize_module_nominals(argument, templates);
+                    }
+                    if !templates.contains_key(instance.declaration.0.as_str()) {
+                        let suffix = format!(":{}", instance.declaration.0);
+                        let mut candidates =
+                            templates.keys().filter(|name| name.ends_with(&suffix));
+                        if let Some(candidate) = candidates.next()
+                            && candidates.next().is_none()
+                        {
+                            instance.declaration.0 = candidate.clone();
+                        }
+                    }
+                }
+                ProvisionalType::Tuple(elements) => {
+                    for element in elements {
+                        canonicalize_module_nominals(element, templates);
+                    }
+                }
+                ProvisionalType::Shared(referent) | ProvisionalType::Unique(referent) => {
+                    canonicalize_module_nominals(referent, templates)
+                }
+                ProvisionalType::Predefined(_)
+                | ProvisionalType::Const(_)
+                | ProvisionalType::Param(_)
+                | ProvisionalType::Callable(_) => {}
+            }
+        }
+        for argument in &mut arguments {
+            canonicalize_module_nominals(argument, &self.nominal_templates);
+        }
         if let BodyInstanceKey::Specialization(key) = &self.body_instance
             && let DeclarationKey::Function(template_name) = &key.template
             && let Some(template) = self.templates.get(template_name)
@@ -5697,12 +5734,23 @@ impl<'a> Walker<'a> {
                 closures.insert(closure);
             } else {
                 let contextual_formal = substitute(formal, &substitutions);
-                let actual = self.expression(
+                let mut actual = self.expression(
                     argument,
                     contextual_formal
                         .as_ref()
                         .filter(|formal| self.symbolic_validation || ground(formal)),
                 )?;
+                // Call-site reference elaboration reborrows a unique handle
+                // and may demote it to a shared reference. Discovery must use
+                // that same effective argument type or an enclosing generic
+                // call can disappear merely because its nested monomorphic
+                // argument used `value` instead of `&*value`.
+                if matches!((&resolved_formal, &actual),
+                    (ProvisionalType::Shared(expected), ProvisionalType::Unique(actual))
+                        if expected == actual)
+                {
+                    actual = resolved_formal.clone();
+                }
                 if !unify_inference(formal, &actual, &mutable_inference, &mut substitutions)
                     && !self.symbolic_validation
                 {

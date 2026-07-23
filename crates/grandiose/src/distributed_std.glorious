@@ -252,6 +252,11 @@ swap<T>(left: &mut T, right: &mut T) -> () {
 
 enum Result<T, E> { Ok(T), Err(E) }
 
+// The one inspection protocol used by source-defined control flow.  Pattern
+// elimination remains an ordinary terminal effect; callers no longer need to
+// mint a nominal protocol for every inspected payload type.
+effect Case<T> { inspect(value: T) -> !; }
+
 type Option<T> = Result<T, ()>;
 let Option::Some = Result::Ok;
 let None = Result::Err(());

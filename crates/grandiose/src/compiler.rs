@@ -9506,6 +9506,69 @@ pub(crate) fn normalize_ground_trait_methods(
             });
         }
     }
+    // Associated value bindings already form nominal method namespaces in
+    // source (`let Vec::push = __g1_vec_push`).  Expose callable aliases with
+    // a receiver-shaped first parameter to the same dot-call rewrite used for
+    // trait methods.  This is UFCS sugar only: the selected target remains the
+    // ordinary function named by the binding.
+    for binding in &program.globals {
+        let Some(owner) = &binding.owner else {
+            continue;
+        };
+        let ExprKind::Variable(target) = &binding.value.kind else {
+            continue;
+        };
+        let [target] = target.as_ref() else { continue };
+        let Some(function) = program
+            .functions
+            .iter()
+            .find(|function| function.name == target.as_ref())
+        else {
+            continue;
+        };
+        let Some(first) = function.params.first() else {
+            continue;
+        };
+        let Some(first) = canonical_source_receiver_type(program, &first.ty) else {
+            continue;
+        };
+        let (receiver, access) = match first {
+            ReceiverType::Shared(receiver) => (*receiver, ReceiverAccess::Shared),
+            ReceiverType::Unique(receiver) => (*receiver, ReceiverAccess::Unique),
+            receiver => (receiver, ReceiverAccess::Owned),
+        };
+        let nominal_owner = match receiver_subject_type(&receiver) {
+            ReceiverType::Name(name) => Some(name.as_str()),
+            ReceiverType::Application(constructor, _) => match constructor.as_ref() {
+                ReceiverType::Name(name) => Some(name.as_str()),
+                _ => None,
+            },
+            _ => None,
+        };
+        if nominal_owner != Some(owner.as_str()) {
+            continue;
+        }
+        let binders = function
+            .generics
+            .iter()
+            .flat_map(|generics| &generics.params)
+            .filter(|parameter| {
+                matches!(
+                    parameter.kind,
+                    GenericParamKind::Type | GenericParamKind::Const(_)
+                )
+            })
+            .map(|parameter| parameter.name.clone())
+            .collect();
+        dot_methods.push(DotMethod {
+            trait_name: owner.clone(),
+            method: binding.name.clone(),
+            receiver,
+            binders,
+            target: target.to_string(),
+            access,
+        });
+    }
     if !errors.is_empty() {
         return Err(errors);
     }
@@ -16070,6 +16133,37 @@ fn resolve_source_type(
                 array_name,
             )?)))
         }
+        TypeSyntaxKind::Application {
+            constructor,
+            arguments,
+            ..
+        } => {
+            let head = constructor
+                .simple_name()
+                .ok_or(TypeResolutionError::Complex)?;
+            let arguments = arguments
+                .iter()
+                .map(|argument| resolve_source_type(argument, ids, aliases, array_name))
+                .collect::<Result<Vec<_>, _>>()?;
+            ids.iter()
+                .find_map(|(identity, id)| {
+                    let instance = decode_nominal_instance(identity)?;
+                    let same_head = instance.declaration.0 == head
+                        || instance.declaration.0.ends_with(&format!(":{head}"));
+                    (same_head && instance.arguments.len() == arguments.len())
+                        .then(|| {
+                            instance
+                                .arguments
+                                .iter()
+                                .map(|argument| provisional_to_resolved(argument, ids, array_name))
+                                .collect::<Option<Vec<_>>>()
+                        })
+                        .flatten()
+                        .filter(|candidate| candidate == &arguments)
+                        .map(|_| ResolvedType::Concrete(*id))
+                })
+                .ok_or_else(|| TypeResolutionError::Unknown(head.to_owned()))
+        }
         _ => Err(TypeResolutionError::Complex),
     }
 }
@@ -18223,24 +18317,77 @@ fn provisional_to_resolved(
                 array_name,
             )?)))
         }
-        typeck::ProvisionalType::Nominal(key) => nominal_ids
-            .get(
-                if key.arguments.is_empty() {
-                    key.declaration.0.clone()
-                } else {
-                    encode_nominal_instance(key)
+        typeck::ProvisionalType::Nominal(key) => {
+            fn canonicalize(
+                ty: &mut typeck::ProvisionalType,
+                nominal_ids: &BTreeMap<&str, TypeId>,
+            ) {
+                match ty {
+                    typeck::ProvisionalType::Nominal(instance) => {
+                        for argument in &mut instance.arguments {
+                            canonicalize(argument, nominal_ids);
+                        }
+                        if instance.arguments.is_empty()
+                            && !nominal_ids.contains_key(instance.declaration.0.as_str())
+                        {
+                            let suffix = format!(":{}", instance.declaration.0);
+                            let mut matches =
+                                nominal_ids.keys().filter(|name| name.ends_with(&suffix));
+                            if let Some(name) = matches.next()
+                                && matches.next().is_none()
+                            {
+                                instance.declaration.0 = (*name).to_owned();
+                            }
+                        }
+                    }
+                    typeck::ProvisionalType::Tuple(elements) => {
+                        for element in elements {
+                            canonicalize(element, nominal_ids);
+                        }
+                    }
+                    typeck::ProvisionalType::Shared(referent)
+                    | typeck::ProvisionalType::Unique(referent) => {
+                        canonicalize(referent, nominal_ids)
+                    }
+                    typeck::ProvisionalType::Predefined(_)
+                    | typeck::ProvisionalType::Const(_)
+                    | typeck::ProvisionalType::Param(_)
+                    | typeck::ProvisionalType::Callable(_) => {}
                 }
-                .as_str(),
-            )
-            .copied()
-            .or_else(|| {
-                nominal_ids.iter().find_map(|(name, id)| {
-                    decode_nominal_instance(name)
-                        .is_some_and(|decoded| decoded == *key)
-                        .then_some(*id)
+            }
+            let mut canonical = typeck::ProvisionalType::Nominal(key.clone());
+            canonicalize(&mut canonical, nominal_ids);
+            let typeck::ProvisionalType::Nominal(canonical) = canonical else {
+                unreachable!()
+            };
+            nominal_ids
+                .get(
+                    if canonical.arguments.is_empty() {
+                        canonical.declaration.0.clone()
+                    } else {
+                        encode_nominal_instance(&canonical)
+                    }
+                    .as_str(),
+                )
+                .copied()
+                .or_else(|| {
+                    nominal_ids.iter().find_map(|(name, id)| {
+                        decode_nominal_instance(name)
+                            .is_some_and(|decoded| decoded == canonical)
+                            .then_some(*id)
+                    })
                 })
-            })
-            .map(ResolvedType::Concrete),
+                .or_else(|| {
+                    canonical.arguments.is_empty().then_some(())?;
+                    let suffix = format!(":{}", canonical.declaration.0);
+                    let mut matches = nominal_ids
+                        .iter()
+                        .filter(|(name, _)| name.ends_with(&suffix));
+                    let (_, id) = matches.next()?;
+                    matches.next().is_none().then_some(*id)
+                })
+                .map(ResolvedType::Concrete)
+        }
         typeck::ProvisionalType::Shared(referent) => Some(ResolvedType::Shared(Box::new(
             provisional_to_resolved(referent, nominal_ids, array_name)?,
         ))),
@@ -26188,6 +26335,15 @@ impl<'a> CoreLowerer<'a> {
                         format!("reference `{}` is moved or suspended", path[0]),
                     ));
                 }
+                if self.empty_referents.contains(&local.local) {
+                    return Err(self.borrow_error(
+                        operand.span,
+                        format!(
+                            "unique reference `{}` cannot be used, transferred, called, or dropped while its referent is uninitialized",
+                            path[0]
+                        ),
+                    ));
+                }
                 if unique && !parent.unique {
                     return Err(self.borrow_error(
                         operand.span,
@@ -26451,6 +26607,43 @@ impl<'a> CoreLowerer<'a> {
             }
             _ => None,
         }
+    }
+
+    /// Elaborate the reference coercions that are unambiguous at a call site.
+    /// Passing a reference handle to a reference parameter borrows through the
+    /// handle for the duration of the call instead of transporting the handle
+    /// itself.  Core and MIR therefore continue to see an explicit Reborrow.
+    fn call_argument(
+        &mut self,
+        argument: &Expr,
+        expected: TypeId,
+    ) -> Result<core::Expr, Vec<Diagnostic>> {
+        if let ExprKind::Variable(path) = &argument.kind
+            && path.len() == 1
+            && let Some(actual) = self.locals.get(path[0].as_ref()).map(|local| local.ty)
+        {
+            let expected_shape = self.resolved_type(expected);
+            let actual_shape = self.resolved_type(actual);
+            let unique = matches!(expected_shape, ResolvedType::Unique(_));
+            let compatible = match (&expected_shape, &actual_shape) {
+                (ResolvedType::Unique(expected), ResolvedType::Unique(actual))
+                | (ResolvedType::Shared(expected), ResolvedType::Unique(actual)) => {
+                    self.structural_id(expected) == self.structural_id(actual)
+                }
+                _ => false,
+            };
+            if compatible {
+                let dereference = Expr {
+                    kind: ExprKind::Unary {
+                        op: UnaryOp::Dereference,
+                        operand: Rc::new(argument.clone()),
+                    },
+                    span: argument.span,
+                };
+                return self.borrow(&dereference, unique, argument.span, Some(expected));
+            }
+        }
+        self.expression(argument, Some(expected))
     }
 
     /// Resolve a trait call retained under lexical generic evidence once the
@@ -27546,7 +27739,7 @@ impl<'a> CoreLowerer<'a> {
                     let callable = self.expression(&moved, Some(runtime.callable_type))?;
                     let mut args = Vec::with_capacity(arguments.len());
                     for (argument, ty) in arguments.iter().zip(&signature.params) {
-                        let argument = self.expression(argument, Some(*ty))?;
+                        let argument = self.call_argument(argument, *ty)?;
                         self.validate_anonymous_use(&argument, 1, "owned indirect call argument")?;
                         args.push(argument);
                     }
@@ -27822,28 +28015,6 @@ impl<'a> CoreLowerer<'a> {
                         format!("`{name}` is not an owned local available to `move`"),
                     ));
                 };
-                if self.is_copy(local.ty)
-                    && self.use_interval(local.ty) == UseInterval::UNRESTRICTED
-                {
-                    self.check(span, expected, local.ty)?;
-                    self.record_local_use(local.local, span)?;
-                    for origin in Self::local_reference_fields(&local).values() {
-                        self.mark_region_live(origin.region);
-                    }
-                    let mut expression = self.typed(
-                        span,
-                        local.ty,
-                        core::ExprKind::Local {
-                            local: local.local,
-                            copy: true,
-                        },
-                    );
-                    Self::set_expression_reference_fields(
-                        &mut expression,
-                        Self::local_reference_fields(&local),
-                    );
-                    return Ok(expression);
-                }
                 if self.empty_referents.contains(&local.local) {
                     return Err(self.borrow_error(
                         operand.span,
@@ -29850,7 +30021,7 @@ impl<'a> CoreLowerer<'a> {
                     self.check(span, expected, result)?;
                     let mut args = Vec::with_capacity(arguments.len());
                     for (argument, ty) in arguments.iter().zip(params) {
-                        let argument = self.expression(argument, Some(ty))?;
+                        let argument = self.call_argument(argument, ty)?;
                         self.validate_anonymous_use(
                             &argument,
                             1,
@@ -29919,7 +30090,7 @@ impl<'a> CoreLowerer<'a> {
                     self.check(span, expected, target.result)?;
                     let mut args = Vec::with_capacity(arguments.len());
                     for (argument, (_, ty, _)) in arguments.iter().zip(&target.params) {
-                        let argument = self.expression(argument, Some(*ty))?;
+                        let argument = self.call_argument(argument, *ty)?;
                         self.validate_anonymous_use(
                             &argument,
                             1,
@@ -30080,7 +30251,7 @@ impl<'a> CoreLowerer<'a> {
                     )?;
                     let mut args = Vec::with_capacity(arguments.len());
                     for (argument, ty) in arguments.iter().zip(&signature.params) {
-                        let argument = self.expression(argument, Some(*ty))?;
+                        let argument = self.call_argument(argument, *ty)?;
                         self.validate_anonymous_use(&argument, 1, "indirect call argument")?;
                         args.push(argument);
                     }
@@ -30140,7 +30311,7 @@ impl<'a> CoreLowerer<'a> {
                         self.indirect_callable_operand(callee, local.ty, runtime.receiver_mode)?;
                     let mut args = Vec::with_capacity(arguments.len());
                     for (argument, ty) in arguments.iter().zip(&signature.params) {
-                        let argument = self.expression(argument, Some(*ty))?;
+                        let argument = self.call_argument(argument, *ty)?;
                         self.validate_anonymous_use(&argument, 1, "indirect call argument")?;
                         args.push(argument);
                     }
@@ -30199,7 +30370,7 @@ impl<'a> CoreLowerer<'a> {
                         self.indirect_callable_operand(callee, local.ty, *receiver_mode)?;
                     let mut args = Vec::with_capacity(arguments.len());
                     for (argument, ty) in arguments.iter().zip(&signature.params) {
-                        let argument = self.expression(argument, Some(*ty))?;
+                        let argument = self.call_argument(argument, *ty)?;
                         self.validate_anonymous_use(&argument, 1, "indirect call argument")?;
                         args.push(argument);
                     }
@@ -30347,7 +30518,7 @@ impl<'a> CoreLowerer<'a> {
                     for (argument, ty) in runtime_arguments.iter().zip(&signature.params) {
                         let argument = match argument {
                             GeneratedArgument::Source(index) => {
-                                self.expression(&arguments[*index], Some(*ty))?
+                                self.call_argument(&arguments[*index], *ty)?
                             }
                             GeneratedArgument::Capture {
                                 source,
@@ -30600,16 +30771,32 @@ impl<'a> CoreLowerer<'a> {
                 {
                     let argument = &arguments[index];
                     let ty = signature.params[index];
-                    let argument = if let ExprKind::Variable(path) = &argument.kind
-                        && path.len() == 1
-                        && self.environment_capture_modes.get(path[0].as_ref())
-                            == Some(&specialization::CaptureMode::Mutate)
-                        && matches!(self.resolved_type(ty), ResolvedType::Unique(_))
-                    {
-                        self.borrow(argument, true, argument.span, Some(ty))?
-                    } else {
-                        self.expression(argument, Some(ty))?
+                    let overlapping_two_phase_use = match &argument.kind {
+                        ExprKind::Variable(path) if path.len() == 1 => {
+                            arguments.iter().enumerate().any(|(other, candidate)| {
+                                other != index
+                                    && expression_mentions_name(candidate, path[0].as_ref())
+                            })
+                        }
+                        _ => false,
                     };
+                    let argument =
+                        if deferred_unique_handles.contains(&index) && overlapping_two_phase_use {
+                            // Keep the established owner-transfer form until MIR
+                            // models two-phase reborrow reservation. Otherwise a
+                            // source-order unique reborrow would suspend the same
+                            // handle needed by a later argument expression.
+                            self.expression(argument, Some(ty))?
+                        } else if let ExprKind::Variable(path) = &argument.kind
+                            && path.len() == 1
+                            && self.environment_capture_modes.get(path[0].as_ref())
+                                == Some(&specialization::CaptureMode::Mutate)
+                            && matches!(self.resolved_type(ty), ResolvedType::Unique(_))
+                        {
+                            self.borrow(argument, true, argument.span, Some(ty))?
+                        } else {
+                            self.call_argument(argument, ty)?
+                        };
                     let uses = self.expression_use_weight(&argument);
                     self.validate_anonymous_use(&argument, uses, "call argument temporary")?;
                     self.register_temporary_reference(&argument);

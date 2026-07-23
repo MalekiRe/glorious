@@ -2669,11 +2669,9 @@ impl<'a> Typer<'a> {
                 self.locals.get(path[0].as_ref()).cloned()
         {
             let mut children = vec![self.expression(callee, None)];
-            children.extend(
-                args.iter()
-                    .enumerate()
-                    .map(|(index, argument)| self.expression(argument, shape.params.get(index))),
-            );
+            children.extend(args.iter().enumerate().map(|(index, argument)| {
+                self.call_argument_in(argument, shape.params.get(index), args, index)
+            }));
             return self.node(
                 source,
                 Some(shape.result.clone()),
@@ -2686,7 +2684,9 @@ impl<'a> Typer<'a> {
             let args = args
                 .iter()
                 .enumerate()
-                .map(|(index, arg)| self.expression(arg, shape.params.get(index)))
+                .map(|(index, arg)| {
+                    self.call_argument_in(arg, shape.params.get(index), args, index)
+                })
                 .collect();
             return self.node(
                 source,
@@ -2735,6 +2735,70 @@ impl<'a> Typer<'a> {
         }
         let children = args.iter().map(|arg| self.expression(arg, None)).collect();
         self.node(source, None, TypedExprKind::Unsupported(children))
+    }
+
+    fn call_argument(&mut self, source: &Expr, expected: Option<&ProvisionalType>) -> TypedExpr {
+        if let (Some(expected), ExprKind::Variable(path)) = (expected, &source.kind)
+            && path.len() == 1
+            && let Some((local, actual)) = self.locals.get(path[0].as_ref()).cloned()
+        {
+            let unique = matches!(expected, ProvisionalType::Unique(_));
+            let compatible = match (expected, &actual) {
+                (ProvisionalType::Unique(expected), ProvisionalType::Unique(actual))
+                | (ProvisionalType::Shared(expected), ProvisionalType::Unique(actual)) => {
+                    expected == actual
+                }
+                _ => false,
+            };
+            if compatible {
+                return self.node(
+                    source,
+                    Some(expected.clone()),
+                    TypedExprKind::Borrow {
+                        source: local,
+                        path: vec![],
+                        projection_types: vec![],
+                        reborrow: true,
+                        unique,
+                    },
+                );
+            }
+        }
+        self.expression(source, expected)
+    }
+
+    fn call_argument_in(
+        &mut self,
+        source: &Expr,
+        expected: Option<&ProvisionalType>,
+        arguments: &[Expr],
+        index: usize,
+    ) -> TypedExpr {
+        let overlapping = match (&source.kind, expected) {
+            (ExprKind::Variable(path), Some(ProvisionalType::Unique(_))) if path.len() == 1 => {
+                arguments.iter().enumerate().any(|(other, argument)| {
+                    other != index
+                        && matches!(
+                            crate::ast::visit_expr_preorder(argument, |expression| {
+                                if matches!(&expression.kind, ExprKind::Variable(candidate)
+                                    if candidate.len() == 1 && candidate[0] == path[0])
+                                {
+                                    ControlFlow::Break(())
+                                } else {
+                                    ControlFlow::Continue(())
+                                }
+                            }),
+                            ControlFlow::Break(())
+                        )
+                })
+            }
+            _ => false,
+        };
+        if overlapping {
+            self.expression(source, expected)
+        } else {
+            self.call_argument(source, expected)
+        }
     }
 
     fn construct_struct(

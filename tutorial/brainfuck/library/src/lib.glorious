@@ -10,7 +10,7 @@ pub enum Instruction {
 }
 
 infixl 20 represents;
-represents(byte: u8, command: u8) -> Bool { move byte == move command }
+represents(byte: u8, command: u8) -> Bool { byte == command }
 
 pub struct Program { private instructions: Vec<Instruction>, private length: usize }
 
@@ -28,93 +28,85 @@ struct Sequence {
     private closed: Bool
 }
 
-effect SequenceCase {
-    inspect(value: Result<Sequence, ParseError>) -> !;
-}
-
-effect ProgramCase {
-    inspect(value: Result<Program, ParseError>) -> !;
-}
-
 pub expect_program(value: Result<Program, ParseError>) -> Program {
-    handle perform ProgramCase::inspect(move value) {
-        ProgramCase::inspect(Result::Ok(program)) => program,
-        ProgramCase::inspect(Result::Err(_)) => abort()
+    handle perform Case<Result<Program, ParseError>>::inspect(value) {
+        Result::Ok(program) => program,
+        Result::Err(_) => abort()
     }
 }
 
-sequence_ok(value: Sequence) -> Result<Sequence, ParseError> { Result::Ok(move value) }
+sequence_ok(value: Sequence) -> Result<Sequence, ParseError> { Result::Ok(value) }
 
-sequence_error(error: ParseError) -> Result<Sequence, ParseError> { Result::Err(move error) }
+sequence_error(error: ParseError) -> Result<Sequence, ParseError> { Result::Err(error) }
 
 sequence_error_after(error: ParseError, instructions: Vec<Instruction>) -> Result<Sequence, ParseError> {
-    sequence_error(move error)
+    sequence_error(error)
 }
 
 new_instructions() -> Vec<Instruction> { Vec::new() }
 
 push_instruction(instructions: &mut Vec<Instruction>, instruction: Instruction) -> () {
-    Vec::push(instructions, move instruction)
+    instructions.push(instruction)
 }
 
 append_instructions(instructions: &mut Vec<Instruction>, remainder: Vec<Instruction>) -> () {
-    Vec::append(instructions, move remainder)
+    instructions.append(remainder)
 }
 
 next_byte(parser: &mut Parser) -> NextByte {
-    let next = BytesIter::next(&mut parser.bytes);
+    let next = parser.bytes.next();
     if(next is Option::Some(_)) {
-        NextByte { found: true, byte: move next.0 }
+        NextByte { found: true, byte: next.0 }
     } else {
         NextByte { found: false, byte: 0 }
     }
 }
 
 parse_sequence(parser: &mut Parser, nested: Bool) -> Result<Sequence, ParseError> {
-    let next = next_byte(&mut *parser);
+    let next = next_byte(parser);
     if(next.found) {
         let byte = next.byte;
         let offset = parser.offset;
-        parser.offset = move offset + 1;
+        parser.offset = offset + 1;
         if(byte represents 93) {
             if(nested) {
                 sequence_ok(Sequence { instructions: Vec::new(), length: 0, closed: true })
             } else {
                 sequence_error(
-                    ParseError { kind: ParseErrorKind::UnexpectedClose, offset: move offset }
+                    ParseError { kind: ParseErrorKind::UnexpectedClose, offset: offset }
                 )
             }
         } else {
             if(byte == 91) {
-                let body_result = parse_sequence(&mut *parser, true);
-                handle perform SequenceCase::inspect(move body_result) {
-                    SequenceCase::inspect(Result::Err(error)) => {
+                let body_result = parse_sequence(parser, true);
+                handle perform Case<Result<Sequence, ParseError>>::inspect(body_result) {
+                    Result::Err(error) => {
                         sequence_error(error)
                     },
-                    SequenceCase::inspect(Result::Ok(sequence)) => {
-                    let Sequence { instructions: body, length: body_length, closed: _ } = move sequence;
-                    let rest_result = parse_sequence(&mut *parser, nested);
-                        handle perform SequenceCase::inspect(move rest_result) {
-                            SequenceCase::inspect(Result::Err(error)) => {
-                                sequence_error_after(error, move body)
+                    Result::Ok(sequence) => {
+                    let Sequence { instructions: body, length: body_length, closed: _ } = sequence;
+                    let rest_result = parse_sequence(parser, nested);
+                        handle perform Case<Result<Sequence, ParseError>>::inspect(rest_result) {
+                            Result::Err(error) => {
+                                sequence_error_after(error, body)
                             },
-                            SequenceCase::inspect(Result::Ok(rest)) => {
+                            Result::Ok(rest) => {
                                 let Sequence {
                                     instructions: remainder,
                                     length: remainder_length,
                                     closed
-                                } = move rest;
+                                } = rest;
                                 let instructions = new_instructions();
                                 let span = body_length + 1;
-                                push_instruction(&mut instructions, Instruction::LoopStart(move span));
-                                append_instructions(&mut instructions, move body);
+                                push_instruction(&mut instructions, Instruction::LoopStart(span));
+                                append_instructions(&mut instructions, body);
                                 push_instruction(&mut instructions, Instruction::LoopEnd);
-                                append_instructions(&mut instructions, move remainder);
+                                append_instructions(&mut instructions, remainder);
                                 sequence_ok(
                                     Sequence {
-                                        instructions: move instructions,
-                                        length: move span + move remainder_length + 1,
-                                        closed: move closed
+                                        instructions: instructions,
+                                        length: span + remainder_length + 1,
+                                        closed: closed
                                     }
                                 )
                             }
@@ -122,17 +114,17 @@ parse_sequence(parser: &mut Parser, nested: Bool) -> Result<Sequence, ParseError
                     }
                 }
             } else {
-                let rest_result = parse_sequence(&mut *parser, nested);
-                handle perform SequenceCase::inspect(move rest_result) {
-                    SequenceCase::inspect(Result::Err(error)) => {
+                let rest_result = parse_sequence(parser, nested);
+                handle perform Case<Result<Sequence, ParseError>>::inspect(rest_result) {
+                    Result::Err(error) => {
                         sequence_error(error)
                     },
-                    SequenceCase::inspect(Result::Ok(rest)) => {
+                    Result::Ok(rest) => {
                         let Sequence {
                             instructions: remainder,
                             length: remainder_length,
                             closed
-                        } = move rest;
+                        } = rest;
                         let instructions = new_instructions();
                         let added = if(byte == 62) {
                             push_instruction(&mut instructions, Instruction::MoveRight);
@@ -163,12 +155,12 @@ parse_sequence(parser: &mut Parser, nested: Bool) -> Result<Sequence, ParseError
                                 }
                             }
                         };
-                        append_instructions(&mut instructions, move remainder);
+                        append_instructions(&mut instructions, remainder);
                         sequence_ok(
                             Sequence {
-                                instructions: move instructions,
-                                length: move added + move remainder_length,
-                                closed: move closed
+                                instructions: instructions,
+                                length: added + remainder_length,
+                                closed: closed
                             }
                         )
                     }
@@ -179,21 +171,21 @@ parse_sequence(parser: &mut Parser, nested: Bool) -> Result<Sequence, ParseError
         let offset = parser.offset;
         if(nested) {
             sequence_error(
-                ParseError { kind: ParseErrorKind::UnclosedLoop, offset: move offset }
+                ParseError { kind: ParseErrorKind::UnclosedLoop, offset: offset }
             )
         } else { sequence_ok(Sequence { instructions: Vec::new(), length: 0, closed: false }) }
     }
 }
 
 pub parse(bytes: BytesIter) -> Result<Program, ParseError> {
-    let parser = Parser { bytes: move bytes, offset: 0 };
+    let parser = Parser { bytes: bytes, offset: 0 };
     let parsed = parse_sequence(&mut parser, false);
     if(parsed is Result::Err(_)) {
-        Result::Err(move parsed.0)
+        Result::Err(parsed.0)
     } else {
-        let sequence = move parsed.0;
-        let Sequence { instructions, length, closed: _ } = move sequence;
-        Result::Ok(Program { instructions: move instructions, length: move length })
+        let sequence = parsed.0;
+        let Sequence { instructions, length, closed: _ } = sequence;
+        Result::Ok(Program { instructions: instructions, length: length })
     }
 }
 
@@ -202,7 +194,7 @@ pub program_instructions(program: &Program) -> &Vec<Instruction> { &program.inst
 pub program_len(program: &Program) -> usize { program.length }
 
 pub parse_error_message(error: ParseError) -> String {
-    let ParseError { kind, offset: _ } = move error;
+    let ParseError { kind, offset: _ } = error;
     if(kind is ParseErrorKind::UnexpectedClose) {
         "parse error: unexpected closing bracket"
     } else { "parse error: unclosed loop" }
@@ -218,47 +210,39 @@ pub trait CellArithmetic {
 }
 
 impl CellArithmetic for u8 {
-    increment(self: u8) -> u8 { wrapping_add(move self, 1) }
+    increment(self: u8) -> u8 { wrapping_add(self, 1) }
 
-    decrement(self: u8) -> u8 { wrapping_sub(move self, 1) }
+    decrement(self: u8) -> u8 { wrapping_sub(self, 1) }
 }
 
-increment_cell<T>(value: T) -> T where T: CellArithmetic { CellArithmetic::increment(move value) }
+increment_cell<T>(value: T) -> T where T: CellArithmetic { CellArithmetic::increment(value) }
 
-decrement_cell<T>(value: T) -> T where T: CellArithmetic { CellArithmetic::decrement(move value) }
+decrement_cell<T>(value: T) -> T where T: CellArithmetic { CellArithmetic::decrement(value) }
 
 effect BrainIo {
     [1, 1] read() -> u8;
     [1, 1] write(value: u8) -> ();
 }
 
-effect RuntimeCase {
-    inspect(value: Result<(), RuntimeError>) -> !;
-}
-
-effect OutputCase {
-    inspect(value: Result<Vec<u8>, RuntimeError>) -> !;
-}
-
 pub expect_output(value: Result<Vec<u8>, RuntimeError>) -> Vec<u8> {
-    handle perform OutputCase::inspect(move value) {
-        OutputCase::inspect(Result::Ok(output)) => output,
-        OutputCase::inspect(Result::Err(_)) => abort()
+    handle perform Case<Result<Vec<u8>, RuntimeError>>::inspect(value) {
+        Result::Ok(output) => output,
+        Result::Err(_) => abort()
     }
 }
 
 runtime_ok() -> Result<(), RuntimeError> { Result::Ok(()) }
 
-runtime_error(error: RuntimeError) -> Result<(), RuntimeError> { Result::Err(move error) }
+runtime_error(error: RuntimeError) -> Result<(), RuntimeError> { Result::Err(error) }
 
 runtime_result_failed(value: &Result<(), RuntimeError>) -> Bool {
     *value is Result::Err(_)
 }
 
 runtime_error_from_result(value: Result<(), RuntimeError>) -> Result<(), RuntimeError> {
-    handle perform RuntimeCase::inspect(move value) {
-        RuntimeCase::inspect(Result::Err(error)) => runtime_error(error),
-        RuntimeCase::inspect(Result::Ok(_)) => runtime_ok()
+    handle perform Case<Result<(), RuntimeError>>::inspect(value) {
+        Result::Err(error) => runtime_error(error),
+        Result::Ok(_) => runtime_ok()
     }
 }
 
@@ -267,15 +251,15 @@ discard_runtime_result(value: Result<(), RuntimeError>) -> () { () }
 new_tape() -> Tape {
     let cells = Vec::new();
     fill_cells(&mut cells, 256);
-    Tape { cells: move cells, length: 256, cursor: 0 }
+    Tape { cells: cells, length: 256, cursor: 0 }
 }
 
 fill_cells(cells: &mut Vec<u8>, remaining: usize) -> {
     if(remaining == 0) {
         ()
     } else {
-        Vec::push(&mut *cells, 0);
-        fill_cells(&mut *cells, move remaining - 1)
+        cells.push(0);
+        fill_cells(cells, remaining - 1)
     }
 }
 
@@ -283,7 +267,7 @@ current(tape: &Tape) -> u8 { *Vec::index(&tape.cells, tape.cursor) }
 
 set_current(tape: &mut Tape, value: u8) -> {
     let cursor = tape.cursor;
-    *Vec::index_mut(&mut tape.cells, move cursor) = move value;
+    *Vec::index_mut(&mut tape.cells, cursor) = value;
     ()
 }
 
@@ -292,7 +276,7 @@ move_left(tape: &mut Tape) -> Result<(), RuntimeError> {
         runtime_error(RuntimeError::PointerUnderflow)
     } else {
         let cursor = tape.cursor;
-        tape.cursor = move cursor - 1;
+        tape.cursor = cursor - 1;
         runtime_ok()
     }
 }
@@ -306,7 +290,7 @@ read_byte(input: &mut BytesIter) -> u8 {
 
 read_into_current(tape: &mut Tape) -> Result<(), RuntimeError> / { BrainIo } {
     let value = perform BrainIo::read();
-    set_current(tape, move value);
+    set_current(tape, value);
     runtime_ok()
 }
 
@@ -316,17 +300,15 @@ execute_loop(
     body_start: usize,
     tape: &mut Tape
 ) -> Result<(), RuntimeError> / { BrainIo } {
-    if(current(&*tape) == 0) {
-        move tape;
+    if(current(tape) == 0) {
         runtime_ok()
     } else {
-        let step = execute_sequence(instructions, end, body_start, &mut *tape);
+        let step = execute_sequence(instructions, end, body_start, tape);
         let failed = runtime_result_failed(&step);
         if(failed) {
-            move tape;
-            runtime_error_from_result(move step)
+            runtime_error_from_result(step)
         } else {
-            discard_runtime_result(move step);
+            discard_runtime_result(step);
             execute_loop(instructions, end, body_start, tape)
         }
     }
@@ -339,7 +321,6 @@ execute_sequence(
     tape: &mut Tape
 ) -> Result<(), RuntimeError> / { BrainIo } {
     if(index == end) {
-        move tape;
         runtime_ok()
     } else {
         let instruction = Vec::index(instructions, index);
@@ -355,7 +336,6 @@ execute_sequence(
         } else { 0 };
         let is_loop_start = *instruction is Instruction::LoopStart(_);
         if(is_loop_end) {
-            move tape;
             runtime_ok()
         } else {
             let step = if(is_move_right) {
@@ -363,35 +343,35 @@ execute_sequence(
                 if(next == tape.length) {
                     runtime_error(RuntimeError::PointerOverflow)
                 } else {
-                    tape.cursor = move next;
+                    tape.cursor = next;
                     runtime_ok()
                 }
             } else {
                 if(is_move_left) {
-                    move_left(&mut *tape)
+                    move_left(tape)
                 } else {
                     if(is_increment) {
-                        let value = increment_cell(current(&*tape));
-                        set_current(&mut *tape, move value);
+                        let value = increment_cell(current(tape));
+                        set_current(tape, value);
                         runtime_ok()
                     } else {
                         if(is_decrement) {
-                            let value = decrement_cell(current(&*tape));
-                            set_current(&mut *tape, move value);
+                            let value = decrement_cell(current(tape));
+                            set_current(tape, value);
                             runtime_ok()
                         } else {
                             if(is_output) {
-                                perform BrainIo::write(current(&*tape));
+                                perform BrainIo::write(current(tape));
                                 runtime_ok()
                             } else {
                                 if(is_input) {
-                                    read_into_current(&mut *tape)
+                                    read_into_current(tape)
                                 } else {
                                     execute_loop(
                                         instructions,
                                         end,
                                         index + 1,
-                                        &mut *tape
+                                        tape
                                     )
                                 }
                             }
@@ -400,18 +380,17 @@ execute_sequence(
                 }
             };
             let next = if(is_loop_start) {
-                index + move loop_span + 1
+                index + loop_span + 1
             } else { index + 1 };
             let failed = runtime_result_failed(&step);
             if(failed) {
-                move tape;
-                runtime_error_from_result(move step)
+                runtime_error_from_result(step)
             } else {
-                discard_runtime_result(move step);
+                discard_runtime_result(step);
                 execute_sequence(
                     instructions,
                     end,
-                    move next,
+                    next,
                     tape
                 )
             }
@@ -421,9 +400,9 @@ execute_sequence(
 
 pub run_with_io(program: &Program, input: BytesIter) -> Result<Vec<u8>, RuntimeError> {
     let tape = new_tape();
-    let input = move input;
+    let input = input;
     let output = empty_output();
-    handle perform RuntimeCase::inspect(
+    handle perform Case<Result<(), RuntimeError>>::inspect(
         execute_sequence(
             program_instructions(program),
             program.length,
@@ -431,15 +410,15 @@ pub run_with_io(program: &Program, input: BytesIter) -> Result<Vec<u8>, RuntimeE
             &mut tape
         )
     ) {
-        RuntimeCase::inspect(Result::Err(error)) => Result::Err(error),
-        RuntimeCase::inspect(Result::Ok(_)) => Result::Ok(move output),
+        Result::Err(error) => Result::Err(error),
+        Result::Ok(_) => Result::Ok(output),
         BrainIo::read() with continuation => resume(
-            move continuation,
+            continuation,
             read_byte(&mut input)
         ),
         BrainIo::write(byte) with continuation => {
-            Vec::push(&mut output, move byte);
-            resume(move continuation, ())
+            Vec::push(&mut output, byte);
+            resume(continuation, ())
         }
     }
 }
@@ -452,8 +431,8 @@ pub input_character_count(input: &String) -> usize {
 }
 
 count_chars(chars: &mut Chars, count: usize) -> usize {
-    if(Chars::next(&mut *chars) is Option::Some(_)) {
-        count_chars(&mut *chars, move count + 1)
+    if(Chars::next(chars) is Option::Some(_)) {
+        count_chars(chars, count + 1)
     } else { count }
 }
 

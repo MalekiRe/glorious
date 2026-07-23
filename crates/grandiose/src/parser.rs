@@ -2451,6 +2451,13 @@ impl Parser {
         };
         loop {
             if self.at(&TokenKind::LBrace)
+                && matches!(&expr.kind, ExprKind::Call(callee, args)
+                    if matches!(&callee.kind, ExprKind::Variable(path)
+                        if path.len() == 1 && path[0].as_ref() == "match")
+                    && args.len() == 1)
+            {
+                expr = self.match_expression(expr)?;
+            } else if self.at(&TokenKind::LBrace)
                 && matches!(&expr.kind, ExprKind::Call(_, _))
                 && !self.looks_like_handler_clause_block()
             {
@@ -2579,6 +2586,105 @@ impl Parser {
         Ok(expr)
     }
 
+    /// Elaborate library `match(value) { pattern => body, ... }` into the
+    /// already-existing source-defined refinement calls.  A synthetic local
+    /// evaluates the subject exactly once; every arm becomes
+    /// `if(subject is pattern) { body } else { next }`.
+    fn match_expression(&mut self, call: Expr) -> Result<Expr, Diagnostic> {
+        let ExprKind::Call(_, arguments) = call.kind else {
+            unreachable!()
+        };
+        let [subject] = arguments.as_slice() else {
+            unreachable!()
+        };
+        self.bump(); // `{`
+        let mut arms = Vec::new();
+        while !self.at(&TokenKind::RBrace) {
+            let pattern = self.pattern()?;
+            Self::reject_duplicate_binders(std::slice::from_ref(&pattern))?;
+            self.expect(TokenKind::FatArrow, "expected `=>` after the match pattern")?;
+            let body = self.expression(0)?;
+            arms.push((pattern, body));
+            self.eat(&TokenKind::Comma);
+            self.eat(&TokenKind::Semicolon);
+        }
+        let end = self
+            .expect(TokenKind::RBrace, "expected `}` after match arms")?
+            .span;
+        if arms.is_empty() {
+            return Err(Diagnostic::error(
+                "empty match",
+                "a match block requires at least one pattern arm",
+                call.span.join(end),
+            ));
+        }
+        let binding = format!("$match${}", call.span.start);
+        let variable = || Expr {
+            kind: ExprKind::Variable(Rc::from([Rc::<str>::from(binding.as_str())])),
+            span: subject.span,
+        };
+        let abort = Expr {
+            kind: ExprKind::Call(
+                Rc::new(Expr {
+                    kind: ExprKind::Variable(Rc::from([Rc::<str>::from("unreachable")])),
+                    span: end,
+                }),
+                Rc::new(vec![]),
+            ),
+            span: end,
+        };
+        let mut next = abort;
+        for (pattern, body) in arms.into_iter().rev() {
+            let arm_span = pattern.span.join(body.span);
+            let condition = Expr {
+                kind: ExprKind::Is {
+                    subject: Rc::new(variable()),
+                    pattern: Rc::new(pattern),
+                },
+                span: arm_span,
+            };
+            let positive = Expr {
+                kind: ExprKind::ContextBlock(Rc::new(vec![Stmt::Expr(body)])),
+                span: arm_span,
+            };
+            let if_call = Expr {
+                kind: ExprKind::Call(
+                    Rc::new(Expr {
+                        kind: ExprKind::Variable(Rc::from([Rc::<str>::from("if")])),
+                        span: arm_span,
+                    }),
+                    Rc::new(vec![condition, positive]),
+                ),
+                span: arm_span,
+            };
+            let negative = Expr {
+                kind: ExprKind::ContextBlock(Rc::new(vec![Stmt::Expr(next)])),
+                span: arm_span,
+            };
+            next = Expr {
+                kind: ExprKind::Call(
+                    Rc::new(Expr {
+                        kind: ExprKind::Variable(Rc::from([Rc::<str>::from("else")])),
+                        span: arm_span,
+                    }),
+                    Rc::new(vec![if_call, negative]),
+                ),
+                span: arm_span,
+            };
+        }
+        Ok(Expr {
+            kind: ExprKind::Block(Rc::new(vec![
+                Stmt::Let {
+                    name: binding,
+                    value: subject.clone(),
+                    span: subject.span,
+                },
+                Stmt::Expr(next),
+            ])),
+            span: call.span.join(end),
+        })
+    }
+
     /// A call followed by `{...}` normally receives a contextual block
     /// argument. Inside `handle call(...) { Effect::op(...) ... => ... }`, the
     /// same brace starts the handler matrix. Recognize that boundary by nested
@@ -2672,23 +2778,88 @@ impl Parser {
     fn handle(&mut self) -> Result<Expr, Diagnostic> {
         let start = self.bump().span;
         let computation = self.expression(0)?;
+        // A direct perform names the only operation this handler can possibly
+        // be spelling.  Keep that head around so clauses may write just the
+        // payload pattern (`Result::Ok(value) => ...`).  The compatibility AST
+        // remains fully explicit: elision is parser sugar only.
+        let elided_head = match &computation.kind {
+            ExprKind::Perform {
+                effect, operation, ..
+            } => Some((effect.to_string(), operation.to_string())),
+            _ => None,
+        };
+        let elided_effect_path = elided_head.as_ref().and_then(|_| {
+            self.effect_paths
+                .iter()
+                .find(|path| path.site == computation.span)
+                .map(|path| path.effect.clone())
+        });
         self.expect(TokenKind::LBrace, "expected `{` and handler clauses")?;
         let mut clauses = Vec::new();
         while !self.at(&TokenKind::RBrace) {
             let clause_start = self.peek().span;
-            let (effect, effect_path) =
-                self.effect_path_syntax("expected an effect name in this handler clause")?;
-            self.expect(
-                TokenKind::DoubleColon,
-                "expected `::` in the handler clause",
-            )?;
-            let (operation, _) = self.ident("expected an operation name in the handler clause")?;
-            self.expect(TokenKind::LParen, "expected `(` before handler patterns")?;
-            let (patterns, _) = self.collect_comma_delimited(
-                TokenKind::RParen,
-                "expected `)` after handler patterns",
-                Self::pattern,
-            )?;
+            let saved_cursor = self.cursor;
+            let saved_type_const_arguments = self.type_const_arguments.len();
+            let explicit = (|| {
+                let (effect, effect_path) = self
+                    .effect_path_syntax("expected an effect name in this handler clause")
+                    .ok()?;
+                self.eat(&TokenKind::DoubleColon).then_some(())?;
+                let (operation, _) = self.ident("expected an operation name").ok()?;
+                self.eat(&TokenKind::LParen).then_some(())?;
+                let (patterns, _) = self
+                    .collect_comma_delimited(
+                        TokenKind::RParen,
+                        "expected `)` after handler patterns",
+                        Self::pattern,
+                    )
+                    .ok()?;
+                Some((effect, effect_path, operation, patterns))
+            })();
+            let (effect, effect_path, operation, patterns) = match (explicit, &elided_head) {
+                (Some((effect, effect_path, operation, patterns)), _)
+                    if Some((&effect, &operation))
+                        == elided_head
+                            .as_ref()
+                            .map(|(effect, operation)| (effect, operation)) =>
+                {
+                    (effect, effect_path, operation, patterns)
+                }
+                (Some((effect, effect_path, operation, patterns)), Some(_))
+                    if operation.chars().next().is_some_and(char::is_lowercase) =>
+                {
+                    // A different lower-case operation head is an ordinary
+                    // additional handled effect, not an enum variant pattern
+                    // with its operation wrapper elided.
+                    (effect, effect_path, operation, patterns)
+                }
+                (_, Some((effect, operation))) => {
+                    self.cursor = saved_cursor;
+                    self.type_const_arguments
+                        .truncate(saved_type_const_arguments);
+                    let pattern = self.pattern()?;
+                    (
+                        effect.clone(),
+                        elided_effect_path
+                            .clone()
+                            .expect("a parsed perform always records its complete effect path"),
+                        operation.clone(),
+                        vec![pattern],
+                    )
+                }
+                (Some((effect, effect_path, operation, patterns)), None) => {
+                    (effect, effect_path, operation, patterns)
+                }
+                (None, None) => {
+                    self.cursor = saved_cursor;
+                    self.type_const_arguments
+                        .truncate(saved_type_const_arguments);
+                    return Err(self.error(
+                        "unexpected syntax",
+                        "expected an explicit `Effect::operation(...)` handler clause",
+                    ));
+                }
+            };
             Self::reject_duplicate_binders(&patterns)?;
             let resumption = if self.at_ident("with") {
                 self.bump();

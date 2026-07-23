@@ -909,6 +909,60 @@ fn rewrite_program_ast(
     resolution: &mut ModuleResolution,
     scopes: &Scopes,
 ) -> Vec<Diagnostic> {
+    fn rewrite_effect_argument_type(
+        ty: &mut crate::ast::TypeSyntax,
+        current: ModuleId,
+        resolution: &mut ModuleResolution,
+        scopes: &Scopes,
+        errors: &mut Vec<Diagnostic>,
+    ) {
+        use crate::ast::TypeSyntaxKind;
+        match &mut ty.kind {
+            TypeSyntaxKind::Path(path) => {
+                let names = path_names(path);
+                let span = syntax_path_span(path).unwrap_or(ty.span);
+                if let Some(definition) = resolve_definition(
+                    resolution,
+                    scopes,
+                    current,
+                    Namespace::Type,
+                    &names,
+                    span,
+                    errors,
+                ) {
+                    let spelling = resolution.backend_spelling(&definition);
+                    resolution
+                        .resolved_paths
+                        .insert((span.start, span.end), definition);
+                    *path = vec![crate::ast::TypePathSegment {
+                        name: spelling,
+                        span: ty.span,
+                    }];
+                }
+            }
+            TypeSyntaxKind::SharedReference { referent, .. }
+            | TypeSyntaxKind::UniqueReference { referent, .. } => {
+                rewrite_effect_argument_type(referent, current, resolution, scopes, errors)
+            }
+            TypeSyntaxKind::Tuple(elements) => {
+                for element in elements {
+                    rewrite_effect_argument_type(element, current, resolution, scopes, errors);
+                }
+            }
+            TypeSyntaxKind::Application {
+                constructor,
+                arguments,
+                ..
+            } => {
+                rewrite_effect_argument_type(constructor, current, resolution, scopes, errors);
+                for argument in arguments {
+                    rewrite_effect_argument_type(argument, current, resolution, scopes, errors);
+                }
+            }
+            TypeSyntaxKind::Projection { .. } | TypeSyntaxKind::Never => {}
+        }
+    }
+
     let mut errors = Vec::new();
     let mut effect_sites = BTreeMap::new();
     for entry in &mut program.effect_paths {
@@ -966,6 +1020,19 @@ fn rewrite_program_ast(
                         }]);
                 }
                 _ => unreachable!(),
+            }
+            if let crate::ast::TypeSyntaxKind::Application { arguments, .. } =
+                &mut entry.effect.kind
+            {
+                for argument in arguments {
+                    rewrite_effect_argument_type(
+                        argument,
+                        current,
+                        resolution,
+                        scopes,
+                        &mut errors,
+                    );
+                }
             }
         }
     }

@@ -58,7 +58,7 @@
       "patterns": [
         {
           "name": "keyword.control.grandiose",
-          "match": "\\b(handle|perform|resume|cancel|tail|label|leave|is)\\b"
+          "match": "\\b(handle|perform|resume|cancel|tail|label|leave|is|match)\\b"
         },
         {
           "name": "keyword.declaration.grandiose",

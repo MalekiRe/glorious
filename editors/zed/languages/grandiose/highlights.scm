@@ -15,6 +15,9 @@
 (variant_pattern
   type: (identifier) @type
   variant: (variant_identifier) @constructor)
+(elided_variant_pattern
+  ["Result" "Option"] @type
+  variant: (identifier) @constructor)
 (struct_expression type: (identifier) @type)
 (struct_pattern (identifier) @type . "{")
 ; Keep effects distinct from the nominal types used in their parameters, and
@@ -47,7 +50,7 @@
 [
  "mod" "use" "as" "self" "type" "cases" "let"
  "struct" "enum" "trait" "impl" "effect" "where" "for" "const"
- "handle" "perform" "resume" "cancel" "tail" "label" "leave" "is"
+ "handle" "perform" "resume" "cancel" "tail" "label" "leave" "is" "match"
  "with" "move" "mut"
 ] @keyword
 

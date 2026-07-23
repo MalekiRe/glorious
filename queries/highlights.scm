@@ -22,6 +22,9 @@
 (variant_pattern
   type: (identifier) @type
   variant: (variant_identifier) @constructor)
+(elided_variant_pattern
+  ["Result" "Option"] @type
+  variant: (identifier) @constructor)
 
 (field_declaration name: (identifier) @property)
 (field_initializer name: (identifier) @property)
@@ -55,6 +58,6 @@
 [
  "mod" "use" "as" "self" "type" "cases" "let"
  "struct" "enum" "trait" "impl" "effect" "where" "for" "const"
- "handle" "perform" "resume" "cancel" "tail" "label" "leave" "is"
+ "handle" "perform" "resume" "cancel" "tail" "label" "leave" "is" "match"
  "with" "move" "mut"
 ] @keyword

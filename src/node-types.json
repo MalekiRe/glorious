@@ -106,6 +106,10 @@
         "named": true
       },
       {
+        "type": "match_expression",
+        "named": true
+      },
+      {
         "type": "parenthesized_expression",
         "named": true
       },
@@ -661,6 +665,88 @@
     }
   },
   {
+    "type": "elided_handler_clause",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "_expression",
+            "named": true
+          }
+        ]
+      },
+      "pattern": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "elided_variant_pattern",
+            "named": true
+          },
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "literal_pattern",
+            "named": true
+          },
+          {
+            "type": "struct_pattern",
+            "named": true
+          },
+          {
+            "type": "tuple_pattern",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "elided_variant_pattern",
+    "named": true,
+    "fields": {
+      "type": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "Option",
+            "named": false
+          },
+          {
+            "type": "Result",
+            "named": false
+          }
+        ]
+      },
+      "variant": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": false,
+      "types": [
+        {
+          "type": "_pattern",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
     "type": "empty_statement",
     "named": true,
     "fields": {}
@@ -1167,6 +1253,10 @@
       "required": false,
       "types": [
         {
+          "type": "elided_handler_clause",
+          "named": true
+        },
+        {
           "type": "handler_clause",
           "named": true
         }
@@ -1416,6 +1506,58 @@
       "types": [
         {
           "type": "literal",
+          "named": true
+        }
+      ]
+    }
+  },
+  {
+    "type": "match_arm",
+    "named": true,
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "_expression",
+            "named": true
+          }
+        ]
+      },
+      "pattern": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "_pattern",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "match_expression",
+    "named": true,
+    "fields": {
+      "value": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "_expression",
+            "named": true
+          }
+        ]
+      }
+    },
+    "children": {
+      "multiple": true,
+      "required": true,
+      "types": [
+        {
+          "type": "match_arm",
           "named": true
         }
       ]
@@ -2285,7 +2427,15 @@
     "named": false
   },
   {
+    "type": "Option",
+    "named": false
+  },
+  {
     "type": "Quantity",
+    "named": false
+  },
+  {
+    "type": "Result",
     "named": false
   },
   {
@@ -2429,6 +2579,10 @@
     "type": "line_comment",
     "named": true,
     "extra": true
+  },
+  {
+    "type": "match",
+    "named": false
   },
   {
     "type": "mod",

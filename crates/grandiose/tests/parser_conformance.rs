@@ -47,6 +47,41 @@ fn declaration_only_programs_parse() {
 }
 
 #[test]
+fn direct_perform_handlers_allow_operation_head_elision() {
+    let program = parse_ok(
+        "effect Case<T> { inspect(value: T) -> !; } \
+         enum Result<T, E> { Ok(T), Err(E) } \
+         pick(value: Result<i64, ()>) -> i64 { \
+           handle perform Case<Result<i64, ()>>::inspect(value) { \
+             Result::Ok(answer) => answer, Result::Err(_) => 0 \
+           } \
+         }",
+    );
+    let ExprKind::Handle {
+        computation,
+        clauses,
+    } = body_expr(&program, "pick")
+    else {
+        panic!("pick ends in a handler")
+    };
+    assert!(
+        matches!(&computation.kind, ExprKind::Perform { effect, operation, .. }
+        if effect.as_ref() == "Case" && operation.as_ref() == "inspect")
+    );
+    assert!(clauses.iter().all(|clause| {
+        clause.effect == "Case"
+            && clause.operation == "inspect"
+            && matches!(
+                clause.patterns.as_slice(),
+                [grandiose::ast::Pattern {
+                    kind: PatternKind::Variant { .. },
+                    ..
+                }]
+            )
+    }));
+}
+
+#[test]
 fn numeric_source_payloads_survive_parsing_without_eager_narrowing() {
     let integer = "0xffff_ffff_ffff_ffff_ffff_ffff_ffff_ffff";
     let oversized = "340282366920938463463374607431768211456";

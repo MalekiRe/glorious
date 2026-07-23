@@ -2,6 +2,6 @@ main() -> {
     let source = "ignored + [->+<] ignored";
     let bytes = String::as_bytes(&source);
     let parsed = brainfuck_core::parse(Bytes::iter(&bytes));
-    let program = brainfuck_core::expect_program(move parsed);
+    let program = brainfuck_core::expect_program(parsed);
     assert(brainfuck_core::program_len(&program) == 7)
 }
