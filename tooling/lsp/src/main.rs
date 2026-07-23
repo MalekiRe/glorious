@@ -169,14 +169,17 @@ fn main() -> Result<()> {
     });
 
     let initial_root = std::env::current_dir()?;
+    let standard_library_path = materialize_standard_library()?;
     let (analysis_sender, analysis_commands) = mpsc::channel();
     let (analysis_results, analysis_receiver) = mpsc::channel();
     let worker_root = initial_root.clone();
+    let worker_standard_library_path = standard_library_path.clone();
     std::thread::Builder::new()
         .name("grandiose-lsp-analysis".into())
         .stack_size(32 * 1024 * 1024)
         .spawn(move || {
             let mut workspace = Workspace::new(worker_root);
+            workspace.exclude_from_analysis(worker_standard_library_path);
             while let Ok(command) = analysis_commands.recv() {
                 match command {
                     AnalysisCommand::SetRoots(roots) => workspace.set_roots(roots),
@@ -207,14 +210,18 @@ fn main() -> Result<()> {
         .context("spawn LSP analysis worker")?;
 
     let mut server = Server {
-        workspace: Workspace::new(initial_root),
+        workspace: {
+            let mut workspace = Workspace::new(initial_root);
+            workspace.exclude_from_analysis(standard_library_path.clone());
+            workspace
+        },
         analysis: std::rc::Rc::new(Analysis::default()),
         analysis_sender,
         analysis_receiver,
         analysis_generation: None,
         analysis_in_flight: None,
         pending_requests: Vec::new(),
-        standard_library_path: materialize_standard_library()?,
+        standard_library_path,
         output: std::io::stdout(),
         published: Default::default(),
         dirty: false,
@@ -294,6 +301,8 @@ impl Server {
                         .and_then(|uri| uri_to_path(uri).ok())
                 }) {
                     self.workspace = Workspace::new(root);
+                    self.workspace
+                        .exclude_from_analysis(self.standard_library_path.clone());
                     self.workspace.set_roots(roots);
                 }
                 self.analysis_sender

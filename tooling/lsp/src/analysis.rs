@@ -30,6 +30,7 @@ use grandiose::{CompileOptions, OptimizationLevel};
 pub struct Workspace {
     roots: Vec<PathBuf>,
     overlays: HashMap<PathBuf, String>,
+    analysis_exclusions: BTreeSet<PathBuf>,
     revision: u64,
     cache: RefCell<Option<(u64, Rc<Analysis>)>>,
     root_cache: RefCell<BTreeMap<PathBuf, CachedRootAnalysis>>,
@@ -285,6 +286,7 @@ impl Workspace {
         Workspace {
             roots: vec![root],
             overlays: HashMap::new(),
+            analysis_exclusions: BTreeSet::new(),
             revision: 0,
             cache: RefCell::new(None),
             root_cache: RefCell::new(BTreeMap::new()),
@@ -293,6 +295,15 @@ impl Workspace {
             compiler_sessions: RefCell::new(BTreeMap::new()),
             #[cfg(test)]
             root_analysis_runs: Cell::new(0),
+        }
+    }
+
+    /// Keep generated source documents available to editor requests without
+    /// compiling them as user segments. The embedded standard library is one
+    /// such document: `SourceBundle::distributed` already includes it.
+    pub fn exclude_from_analysis(&mut self, path: PathBuf) {
+        if self.analysis_exclusions.insert(path) {
+            self.invalidate();
         }
     }
 
@@ -367,7 +378,12 @@ impl Workspace {
         // manifest for every open source instead of assuming the workspace
         // folder itself is a package root.
         let mut project_roots = BTreeSet::new();
-        for candidate in self.roots.iter().chain(self.overlays.keys()) {
+        for candidate in self
+            .roots
+            .iter()
+            .chain(self.overlays.keys())
+            .filter(|candidate| !self.analysis_exclusions.contains(*candidate))
+        {
             if let Ok((project_root, _)) = grand::manifest::find_project(candidate) {
                 project_roots.insert(project_root);
             }
@@ -406,7 +422,9 @@ impl Workspace {
         for file in self
             .overlays
             .keys()
-            .filter(|file| !assigned.contains(*file))
+            .filter(|file| {
+                !assigned.contains(*file) && !self.analysis_exclusions.contains(*file)
+            })
         {
             let root = file.parent().unwrap_or(file).to_path_buf();
             groups.push((root, vec![file.clone()], BTreeMap::new()));
@@ -477,7 +495,13 @@ impl Workspace {
         self.last_good
             .borrow_mut()
             .retain(|root, _| active_roots.contains(root));
-        let mut diagnostics: BTreeMap<PathBuf, Vec<FileDiagnostic>> = BTreeMap::new();
+        let mut diagnostics = self
+            .overlays
+            .keys()
+            .filter(|file| self.analysis_exclusions.contains(*file))
+            .cloned()
+            .map(|file| (file, Vec::new()))
+            .collect::<BTreeMap<PathBuf, Vec<FileDiagnostic>>>();
         let mut declarations = Vec::new();
         let mut std_declarations = Vec::new();
         let mut occurrences = Vec::new();
@@ -1217,6 +1241,27 @@ mod tests {
         let groups = workspace.project_groups();
         assert_eq!(groups[0].1[0], main);
         assert!(groups[0].1.contains(&module));
+    }
+
+    #[test]
+    fn materialized_standard_library_is_not_compiled_twice() {
+        let temporary = tempfile::TempDir::new().unwrap();
+        let standard_library = temporary.path().join("distributed_std.glorious");
+        let source = grandiose::source_bundle::DISTRIBUTED_STANDARD_LIBRARY_SOURCE;
+        std::fs::write(&standard_library, source).unwrap();
+
+        let mut workspace = Workspace::new(temporary.path().to_path_buf());
+        workspace.exclude_from_analysis(standard_library.clone());
+        workspace.open(standard_library.clone(), source.to_string());
+
+        assert!(workspace.project_groups().is_empty());
+        let analysis = workspace.analyze();
+        assert!(
+            analysis
+                .diagnostics
+                .get(&standard_library)
+                .is_some_and(Vec::is_empty)
+        );
     }
 
     #[test]
