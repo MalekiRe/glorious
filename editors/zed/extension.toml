@@ -1,6 +1,6 @@
 id = "grandiose"
 name = "Grandiose"
-version = "0.1.0"
+version = "0.1.1"
 schema_version = 1
 authors = ["Grandiose contributors"]
 description = "Grandiose language support backed by grand-lsp."
@@ -14,8 +14,8 @@ version = "0.7.0"
 
 [grammars.grandiose]
 repository = "https://github.com/MalekiRe/glorious"
-# First immutable revision containing the root Grandiose grammar.
-rev = "447ce5a6b3556addc8ccde577e6aa8084e145f10"
+# First immutable revision containing match and elided-handler grammar nodes.
+rev = "38710c49ad794ef3bca24453338fc99e0216c107"
 
 [language_servers.grand-lsp]
 name = "Grandiose Language Server"
