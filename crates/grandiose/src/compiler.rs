@@ -10526,10 +10526,6 @@ pub(crate) fn normalize_constructor_aliases(program: &Program) -> Result<Program
                 .map(|owner| ((owner.clone(), binding.name.clone()), binding))
         })
         .collect::<BTreeMap<_, _>>();
-    if declarations.is_empty() {
-        return Ok(program.clone());
-    }
-
     let functions = program
         .functions
         .iter()
@@ -10680,10 +10676,178 @@ pub(crate) fn normalize_constructor_aliases(program: &Program) -> Result<Program
         return Err(errors);
     }
 
+    fn pattern_alias(
+        expression: &Expr,
+        globals: &BTreeMap<&str, &GlobalBinding>,
+        functions: &BTreeMap<&str, &Function>,
+        associated: &BTreeMap<ValueKey, AssociatedTarget>,
+        visiting: &mut BTreeSet<String>,
+    ) -> Option<crate::ast::Pattern> {
+        if let ExprKind::Block(statements) = &expression.kind
+            && let [Stmt::Expr(value)] = statements.as_slice()
+        {
+            return pattern_alias(value, globals, functions, associated, visiting);
+        }
+        if let ExprKind::Move(value) = &expression.kind {
+            return pattern_alias(value, globals, functions, associated, visiting);
+        }
+        let pattern = match &expression.kind {
+            ExprKind::Unit => PatternKind::Unit,
+            ExprKind::Int(value) => PatternKind::Int(*value),
+            ExprKind::Float(value) => PatternKind::Float(*value),
+            ExprKind::String(value) => PatternKind::String(value.to_string()),
+            ExprKind::Char(value) => PatternKind::Char(*value),
+            ExprKind::Byte(value) => PatternKind::Byte(*value),
+            ExprKind::Variable(path) if path.len() == 1 => {
+                let name = path[0].as_ref();
+                if !visiting.insert(name.to_owned()) {
+                    return None;
+                }
+                let result = globals.get(name).and_then(|global| {
+                    pattern_alias(&global.value, globals, functions, associated, visiting)
+                });
+                visiting.remove(name);
+                return result;
+            }
+            ExprKind::Variable(path) if path.len() == 2 => {
+                let mut owner = path[0].to_string();
+                let mut variant = path[1].to_string();
+                if let Some(AssociatedTarget::Constructor(target)) =
+                    associated.get(&(owner.clone(), variant.clone()))
+                {
+                    owner = target.0.clone();
+                    variant = target.1.clone();
+                }
+                PatternKind::Variant {
+                    path: crate::ast::PatternPath {
+                        segments: vec![owner, variant],
+                        span: expression.span,
+                    },
+                    fields: Vec::new(),
+                    rest: None,
+                }
+            }
+            ExprKind::Call(callee, arguments) => {
+                let ExprKind::Variable(path) = &callee.kind else {
+                    return None;
+                };
+                if let [name] = path.as_ref()
+                    && arguments.is_empty()
+                    && let Some(function) = functions.get(name.as_ref())
+                    && function.params.is_empty()
+                {
+                    let key = format!("fn:{name}");
+                    if !visiting.insert(key.clone()) {
+                        return None;
+                    }
+                    let result =
+                        pattern_alias(&function.body, globals, functions, associated, visiting);
+                    visiting.remove(&key);
+                    return result;
+                }
+                let [owner, variant] = path.as_ref() else {
+                    return None;
+                };
+                let mut owner = owner.to_string();
+                let mut variant = variant.to_string();
+                if let Some(AssociatedTarget::Constructor(target)) =
+                    associated.get(&(owner.clone(), variant.clone()))
+                {
+                    owner = target.0.clone();
+                    variant = target.1.clone();
+                }
+                let fields = arguments
+                    .iter()
+                    .map(|argument| {
+                        pattern_alias(argument, globals, functions, associated, visiting)
+                    })
+                    .collect::<Option<Vec<_>>>()?;
+                PatternKind::Variant {
+                    path: crate::ast::PatternPath {
+                        segments: vec![owner, variant],
+                        span: callee.span,
+                    },
+                    fields,
+                    rest: None,
+                }
+            }
+            _ => return None,
+        };
+        Some(crate::ast::Pattern {
+            kind: pattern,
+            span: expression.span,
+        })
+    }
+
+    let ordinary_globals = program
+        .globals
+        .iter()
+        .filter(|binding| binding.owner.is_none())
+        .map(|binding| (binding.name.as_str(), binding))
+        .collect::<BTreeMap<_, _>>();
+    let ordinary_functions = program
+        .functions
+        .iter()
+        .map(|function| (function.name.as_str(), function))
+        .collect::<BTreeMap<_, _>>();
+    let pattern_aliases = ordinary_globals
+        .keys()
+        .filter_map(|name| {
+            pattern_alias(
+                &ordinary_globals[name].value,
+                &ordinary_globals,
+                &ordinary_functions,
+                &resolved,
+                &mut BTreeSet::from([(*name).to_owned()]),
+            )
+            .map(|pattern| ((*name).to_owned(), pattern))
+        })
+        .collect::<BTreeMap<_, _>>();
+
     fn rewrite_pattern(
         pattern: &mut crate::ast::Pattern,
         aliases: &BTreeMap<ValueKey, AssociatedTarget>,
+        pattern_aliases: &BTreeMap<String, crate::ast::Pattern>,
     ) {
+        fn retarget(pattern: &mut crate::ast::Pattern, span: Span) {
+            pattern.span = span;
+            let child_span = Span::new(span.start.saturating_add(1).min(span.end), span.end);
+            match &mut pattern.kind {
+                PatternKind::Variant { path, fields, .. } => {
+                    path.span = span;
+                    for field in fields {
+                        retarget(field, child_span);
+                    }
+                }
+                PatternKind::Tuple { elements, .. } => {
+                    for element in elements {
+                        retarget(element, child_span);
+                    }
+                }
+                PatternKind::Struct { fields, .. } => {
+                    for field in fields {
+                        field.span = child_span;
+                        retarget(&mut field.pattern, child_span);
+                    }
+                }
+                PatternKind::Wildcard
+                | PatternKind::Binding(_)
+                | PatternKind::Unit
+                | PatternKind::Int(_)
+                | PatternKind::Float(_)
+                | PatternKind::String(_)
+                | PatternKind::Char(_)
+                | PatternKind::Byte(_) => {}
+            }
+        }
+        if let PatternKind::Binding(name) = &pattern.kind
+            && let Some(alias) = pattern_aliases.get(name)
+        {
+            let span = pattern.span;
+            *pattern = alias.clone();
+            retarget(pattern, span);
+            return;
+        }
         match &mut pattern.kind {
             PatternKind::Variant { path, fields, .. } => {
                 if path.len() == 2
@@ -10693,17 +10857,17 @@ pub(crate) fn normalize_constructor_aliases(program: &Program) -> Result<Program
                     path.segments = vec![target.0.clone(), target.1.clone()];
                 }
                 for field in fields {
-                    rewrite_pattern(field, aliases);
+                    rewrite_pattern(field, aliases, pattern_aliases);
                 }
             }
             PatternKind::Tuple { elements, .. } => {
                 for element in elements {
-                    rewrite_pattern(element, aliases);
+                    rewrite_pattern(element, aliases, pattern_aliases);
                 }
             }
             PatternKind::Struct { fields, .. } => {
                 for field in fields {
-                    rewrite_pattern(&mut field.pattern, aliases);
+                    rewrite_pattern(&mut field.pattern, aliases, pattern_aliases);
                 }
             }
             PatternKind::Wildcard
@@ -10717,7 +10881,11 @@ pub(crate) fn normalize_constructor_aliases(program: &Program) -> Result<Program
         }
     }
 
-    fn rewrite_expression(expression: &mut Expr, aliases: &BTreeMap<ValueKey, AssociatedTarget>) {
+    fn rewrite_expression(
+        expression: &mut Expr,
+        aliases: &BTreeMap<ValueKey, AssociatedTarget>,
+        pattern_aliases: &BTreeMap<String, crate::ast::Pattern>,
+    ) {
         if let ExprKind::Variable(path) = &mut expression.kind
             && path.len() == 2
             && let Some(target) = aliases.get(&(path[0].to_string(), path[1].to_string()))
@@ -10735,19 +10903,19 @@ pub(crate) fn normalize_constructor_aliases(program: &Program) -> Result<Program
         }
         match &mut expression.kind {
             ExprKind::Move(value) | ExprKind::Field(value, _) => {
-                rewrite_expression(std::rc::Rc::make_mut(value), aliases)
+                rewrite_expression(std::rc::Rc::make_mut(value), aliases, pattern_aliases)
             }
             ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
-                rewrite_expression(std::rc::Rc::make_mut(body), aliases)
+                rewrite_expression(std::rc::Rc::make_mut(body), aliases, pattern_aliases)
             }
             ExprKind::List(values) | ExprKind::Tuple(values) => {
                 for value in std::rc::Rc::make_mut(values) {
-                    rewrite_expression(value, aliases);
+                    rewrite_expression(value, aliases, pattern_aliases);
                 }
             }
             ExprKind::Struct { fields, .. } => {
                 for (_, value) in std::rc::Rc::make_mut(fields) {
-                    rewrite_expression(value, aliases);
+                    rewrite_expression(value, aliases, pattern_aliases);
                 }
             }
             ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
@@ -10755,61 +10923,65 @@ pub(crate) fn normalize_constructor_aliases(program: &Program) -> Result<Program
                     match statement {
                         Stmt::Let { value, .. }
                         | Stmt::Deconstruct { value, .. }
-                        | Stmt::Expr(value) => rewrite_expression(value, aliases),
+                        | Stmt::Expr(value) => rewrite_expression(value, aliases, pattern_aliases),
                         Stmt::Assign {
                             destination, value, ..
                         } => {
-                            rewrite_expression(value, aliases);
+                            rewrite_expression(value, aliases, pattern_aliases);
                             if let AssignmentPlaceKind::Dereference { reference, .. } =
                                 &mut destination.kind
                             {
-                                rewrite_expression(Rc::make_mut(reference), aliases);
+                                rewrite_expression(
+                                    Rc::make_mut(reference),
+                                    aliases,
+                                    pattern_aliases,
+                                );
                             }
                         }
                     }
                 }
             }
             ExprKind::Call(callee, arguments) => {
-                rewrite_expression(std::rc::Rc::make_mut(callee), aliases);
+                rewrite_expression(std::rc::Rc::make_mut(callee), aliases, pattern_aliases);
                 for argument in std::rc::Rc::make_mut(arguments) {
-                    rewrite_expression(argument, aliases);
+                    rewrite_expression(argument, aliases, pattern_aliases);
                 }
             }
             ExprKind::Perform { args, .. } => {
                 for argument in std::rc::Rc::make_mut(args) {
-                    rewrite_expression(argument, aliases);
+                    rewrite_expression(argument, aliases, pattern_aliases);
                 }
             }
             ExprKind::Handle {
                 computation,
                 clauses,
             } => {
-                rewrite_expression(std::rc::Rc::make_mut(computation), aliases);
+                rewrite_expression(std::rc::Rc::make_mut(computation), aliases, pattern_aliases);
                 for clause in std::rc::Rc::make_mut(clauses) {
                     for pattern in &mut clause.patterns {
-                        rewrite_pattern(pattern, aliases);
+                        rewrite_pattern(pattern, aliases, pattern_aliases);
                     }
-                    rewrite_expression(&mut clause.body, aliases);
+                    rewrite_expression(&mut clause.body, aliases, pattern_aliases);
                 }
             }
             ExprKind::Unary { operand, .. } => {
-                rewrite_expression(std::rc::Rc::make_mut(operand), aliases)
+                rewrite_expression(std::rc::Rc::make_mut(operand), aliases, pattern_aliases)
             }
             ExprKind::Binary { lhs, rhs, .. } => {
-                rewrite_expression(std::rc::Rc::make_mut(lhs), aliases);
-                rewrite_expression(std::rc::Rc::make_mut(rhs), aliases);
+                rewrite_expression(std::rc::Rc::make_mut(lhs), aliases, pattern_aliases);
+                rewrite_expression(std::rc::Rc::make_mut(rhs), aliases, pattern_aliases);
             }
             ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
-                rewrite_expression(std::rc::Rc::make_mut(body), aliases)
+                rewrite_expression(std::rc::Rc::make_mut(body), aliases, pattern_aliases)
             }
             ExprKind::Leave { value, .. } => {
                 if let Some(value) = value {
-                    rewrite_expression(std::rc::Rc::make_mut(value), aliases);
+                    rewrite_expression(std::rc::Rc::make_mut(value), aliases, pattern_aliases);
                 }
             }
             ExprKind::Is { subject, pattern } => {
-                rewrite_expression(std::rc::Rc::make_mut(subject), aliases);
-                rewrite_pattern(std::rc::Rc::make_mut(pattern), aliases);
+                rewrite_expression(std::rc::Rc::make_mut(subject), aliases, pattern_aliases);
+                rewrite_pattern(std::rc::Rc::make_mut(pattern), aliases, pattern_aliases);
             }
             ExprKind::Unit
             | ExprKind::Int(_)
@@ -10821,13 +10993,13 @@ pub(crate) fn normalize_constructor_aliases(program: &Program) -> Result<Program
             | ExprKind::Variable(_) => {}
             ExprKind::LabelReference(_) => {}
             ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
-                rewrite_expression(Rc::make_mut(resumption), aliases);
+                rewrite_expression(Rc::make_mut(resumption), aliases, pattern_aliases);
                 if let Some(value) = value {
-                    rewrite_expression(Rc::make_mut(value), aliases);
+                    rewrite_expression(Rc::make_mut(value), aliases, pattern_aliases);
                 }
             }
             ExprKind::Cancel { resumption } => {
-                rewrite_expression(Rc::make_mut(resumption), aliases)
+                rewrite_expression(Rc::make_mut(resumption), aliases, pattern_aliases)
             }
         }
     }
@@ -10835,20 +11007,20 @@ pub(crate) fn normalize_constructor_aliases(program: &Program) -> Result<Program
     let mut normalized = program.clone();
     normalized.globals.retain(|binding| binding.owner.is_none());
     for global in &mut normalized.globals {
-        rewrite_expression(&mut global.value, &resolved);
+        rewrite_expression(&mut global.value, &resolved, &pattern_aliases);
     }
     for function in &mut normalized.functions {
-        rewrite_expression(&mut function.body, &resolved);
+        rewrite_expression(&mut function.body, &resolved, &pattern_aliases);
     }
     for implementation in &mut normalized.impls {
         for method in &mut implementation.methods {
             if let Some(body) = &mut method.body {
-                rewrite_expression(body, &resolved);
+                rewrite_expression(body, &resolved, &pattern_aliases);
             }
         }
     }
     for drop in &mut normalized.drops {
-        rewrite_expression(&mut drop.body, &resolved);
+        rewrite_expression(&mut drop.body, &resolved, &pattern_aliases);
     }
     Ok(normalized)
 }

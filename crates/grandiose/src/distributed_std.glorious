@@ -12506,3 +12506,103 @@ run_compiler_host<F, R>(main: F) -> R
         }
     }
 }
+
+// Source-defined structured iteration. `Break` and `Continue` are ordinary
+// terminal effects; the nearest combinator handles its own control requests,
+// so nested loops compose without compiler-known loop nodes. A labeled
+// trailing block (`loop @name: { ... }`) retains the language's existing
+// generative lexical brand for APIs that need to name the loop region.
+effect Break { stop() -> !; }
+effect Continue { next() -> !; }
+
+break() -> ! / {Break} { perform Break::stop() }
+continue() -> ! / {Continue} { perform Continue::next() }
+
+__g1_loop_continue_flag() -> u32 { 1 }
+__g1_loop_stop_flag() -> u32 { 0 }
+
+__g1_loop_step<F>(body: F) -> () / {Break}
+    where F: Fn<(), Output=(), Effects={Break, Continue}> {
+    handle body() {
+        Continue::next() => ()
+    };
+    __g1_loop_step(body)
+}
+
+loop<F>(body: F) -> ()
+    where F: Fn<(), Output=(), Effects={Break, Continue}> {
+    handle __g1_loop_step(body) {
+        Break::stop() => ()
+    }
+}
+
+__g1_while_step<F>(step: F) -> () / {Break}
+    where F: Fn<(), Output=u32, Effects={Break, Continue}> {
+    match((handle step() { Continue::next() => 1 }) == 0) {
+        true => (),
+        false => __g1_while_step(step)
+    }
+}
+
+while<F>(step: F) -> ()
+    where F: Fn<(), Output=u32, Effects={Break, Continue}> {
+    handle __g1_while_step(step) {
+        Break::stop() => ()
+    }
+}
+
+until<F>(step: F) -> ()
+    where F: Fn<(), Output=u32, Effects={Break, Continue}> {
+    while(step)
+}
+
+__g1_times_step<F>(remaining: usize, body: F) -> () / {Break}
+    where F: Fn<(), Output=(), Effects={Break, Continue}> {
+    match(remaining == 0) {
+        true => (),
+        false => {
+            handle body() {
+                Continue::next() => ()
+            };
+            __g1_times_step(remaining - 1, body)
+        }
+    }
+}
+
+times<F>(count: usize, body: F) -> ()
+    where F: Fn<(), Output=(), Effects={Break, Continue}> {
+    handle __g1_times_step(count, body) {
+        Break::stop() => ()
+    }
+}
+
+__g1_for_each_step<T, F>(iterator: VecIntoIter<T>, body: F) -> () / {Break}
+    where T: Use<[0,0]>,
+          F: Fn<(T), Output=(), Effects={Break, Continue}> {
+    match(VecIntoIter::next(iterator)) {
+        Option::Some((item, remaining)) => {
+            handle body(item) {
+                Continue::next() => ()
+            };
+            __g1_for_each_step(remaining, body)
+        },
+        None => ()
+    }
+}
+
+for_each<T, F>(iterator: VecIntoIter<T>, body: F) -> ()
+    where T: Use<[0,0]>,
+          F: Fn<(T), Output=(), Effects={Break, Continue}> {
+    handle __g1_for_each_step(iterator, body) {
+        Break::stop() => ()
+    }
+}
+
+fold<T, A, F>(iterator: VecIntoIter<T>, seed: A, body: F) -> A
+    where F: Fn<(A, T), Output=A, Effects={}> {
+    match(VecIntoIter::next(iterator)) {
+        Option::Some((item, remaining)) =>
+            fold(remaining, body(seed, item), body),
+        None => seed
+    }
+}

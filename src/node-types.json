@@ -82,6 +82,10 @@
         "named": true
       },
       {
+        "type": "control_application",
+        "named": true
+      },
+      {
         "type": "field_expression",
         "named": true
       },
@@ -454,11 +458,19 @@
     "named": true,
     "fields": {
       "context": {
-        "multiple": false,
+        "multiple": true,
         "required": true,
         "types": [
           {
             "type": "block",
+            "named": true
+          },
+          {
+            "type": "closure_expression",
+            "named": true
+          },
+          {
+            "type": "label_expression",
             "named": true
           }
         ]
@@ -469,6 +481,40 @@
         "types": [
           {
             "type": "call_expression",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
+    "type": "control_application",
+    "named": true,
+    "fields": {
+      "context": {
+        "multiple": true,
+        "required": true,
+        "types": [
+          {
+            "type": "block",
+            "named": true
+          },
+          {
+            "type": "closure_expression",
+            "named": true
+          },
+          {
+            "type": "label_expression",
+            "named": true
+          }
+        ]
+      },
+      "function": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
             "named": true
           }
         ]

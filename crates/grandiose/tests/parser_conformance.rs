@@ -353,6 +353,23 @@ fn contextual_blocks_stay_undecided_in_trailing_and_operand_positions() {
 }
 
 #[test]
+fn library_loops_accept_bare_and_multiple_trailing_blocks() {
+    let program = parse_ok("main() -> { while { true } { () } }");
+    let ExprKind::Call(_, arguments) = body_expr(&program, "main") else {
+        panic!("expected the outer while call");
+    };
+    assert_eq!(arguments.len(), 1);
+    assert!(matches!(arguments[0].kind, ExprKind::ContextBlock(_)));
+
+    let program = parse_ok("main() -> { loop { () } }");
+    let ExprKind::Call(_, arguments) = body_expr(&program, "main") else {
+        panic!("expected the loop call");
+    };
+    assert_eq!(arguments.len(), 1);
+    assert!(matches!(arguments[0].kind, ExprKind::ContextBlock(_)));
+}
+
+#[test]
 fn flat_operator_sequences_group_by_declared_fixity() {
     // A library declaration gives the operator left associativity.
     let program = parse_ok("infixl 30 -; main() -> { 1 - 2 - 3 }");

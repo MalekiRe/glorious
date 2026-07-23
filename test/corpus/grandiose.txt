@@ -13,31 +13,53 @@ map<T, E: EffectRow>(value: T) -> T / { Read<T> | E } { move value }
 (source_file
   (struct_declaration
     (visibility_modifier)
-    name: (type_identifier (type_identifier))
-    (generic_parameters (generic_parameter (identifier)))
+    name: (type_identifier
+      (type_identifier))
+    (generic_parameters
+      (generic_parameter
+        (identifier)))
     (field_declaration
       (field_visibility_modifier)
       name: (identifier)
-      type: (type_path name: (type_identifier (type_identifier)))))
+      type: (type_path
+        name: (type_identifier
+          (type_identifier)))))
   (enum_declaration
-    name: (type_identifier (type_identifier))
-    (generic_parameters (generic_parameter (identifier)))
+    name: (type_identifier
+      (type_identifier))
+    (generic_parameters
+      (generic_parameter
+        (identifier)))
     (enum_variant
-      name: (variant_identifier (variant_identifier))
-      (type_path name: (type_identifier (type_identifier))))
-    (enum_variant name: (variant_identifier (variant_identifier))))
+      name: (variant_identifier
+        (variant_identifier))
+      (type_path
+        name: (type_identifier
+          (type_identifier))))
+    (enum_variant
+      name: (variant_identifier
+        (variant_identifier))))
   (effect_declaration
-    name: (effect_identifier (effect_identifier))
-    (generic_parameters (generic_parameter (identifier)))
+    name: (effect_identifier
+      (effect_identifier))
+    (generic_parameters
+      (generic_parameter
+        (identifier)))
     (effect_operation
-      (quantity (integer_literal))
-      name: (effect_operation_identifier (effect_operation_identifier))
+      (quantity
+        (integer_literal))
+      name: (effect_operation_identifier
+        (effect_operation_identifier))
       (parameters
         (parameter
           name: (identifier)
           type: (reference_type
-            (type_path name: (type_identifier (type_identifier))))))
-      (type_path name: (type_identifier (type_identifier)))))
+            (type_path
+              name: (type_identifier
+                (type_identifier))))))
+      (type_path
+        name: (type_identifier
+          (type_identifier)))))
   (fixity_declaration
     precedence: (integer_literal)
     operator: (operator_sequence
@@ -47,23 +69,33 @@ map<T, E: EffectRow>(value: T) -> T / { Read<T> | E } { move value }
   (function_declaration
     name: (identifier)
     (generic_parameters
-      (generic_parameter (identifier))
-      (generic_parameter (identifier)))
+      (generic_parameter
+        (identifier))
+      (generic_parameter
+        (identifier)))
     (parameters
       (parameter
         name: (identifier)
-        type: (type_path name: (type_identifier (type_identifier)))))
-    (type_path name: (type_identifier (type_identifier)))
+        type: (type_path
+          name: (type_identifier
+            (type_identifier)))))
+    (type_path
+      name: (type_identifier
+        (type_identifier)))
     (effect_row
       (type_path
-        name: (type_identifier (type_identifier))
+        name: (type_identifier
+          (type_identifier))
         (generic_arguments
           (generic_argument
-            (type_path name: (type_identifier (type_identifier))))))
+            (type_path
+              name: (type_identifier
+                (type_identifier))))))
       (identifier))
     body: (block
       (unary_expression
-        operand: (path_expression (identifier))))))
+        operand: (path_expression
+          (identifier))))))
 
 ==================
 Handlers and patterns
@@ -85,51 +117,197 @@ run(value: Result<u8, Error>) -> u8 {
       (parameter
         name: (identifier)
         type: (type_path
-          name: (type_identifier (type_identifier))
+          name: (type_identifier
+            (type_identifier))
           (generic_arguments
             (generic_argument
-              (type_path name: (type_identifier (type_identifier))))
+              (type_path
+                name: (type_identifier
+                  (type_identifier))))
             (generic_argument
-              (type_path name: (type_identifier (type_identifier))))))))
-    (type_path name: (type_identifier (type_identifier)))
+              (type_path
+                name: (type_identifier
+                  (type_identifier))))))))
+    (type_path
+      name: (type_identifier
+        (type_identifier)))
     body: (block
       (handle_expression
         computation: (perform_expression
           effect: (effect_reference
-            (effect_identifier (effect_identifier))
+            (effect_identifier
+              (effect_identifier))
             (generic_arguments
               (generic_argument
-                (type_path name: (type_identifier (type_identifier))))))
-          operation: (effect_operation_identifier (effect_operation_identifier))
-          (arguments (path_expression (identifier))))
+                (type_path
+                  name: (type_identifier
+                    (type_identifier))))))
+          operation: (effect_operation_identifier
+            (effect_operation_identifier))
+          (arguments
+            (path_expression
+              (identifier))))
         (handler_clause
           effect: (effect_reference
-            (effect_identifier (effect_identifier))
+            (effect_identifier
+              (effect_identifier))
             (generic_arguments
               (generic_argument
-                (type_path name: (type_identifier (type_identifier))))))
-          operation: (effect_operation_identifier (effect_operation_identifier))
+                (type_path
+                  name: (type_identifier
+                    (type_identifier))))))
+          operation: (effect_operation_identifier
+            (effect_operation_identifier))
           (variant_pattern
             type: (identifier)
-            variant: (variant_identifier (variant_identifier))
+            variant: (variant_identifier
+              (variant_identifier))
             (identifier))
           resumption: (identifier)
           body: (resumption_expression
             (arguments
-              (path_expression (identifier))
+              (path_expression
+                (identifier))
               (unary_expression
-                operand: (path_expression (identifier))))))
+                operand: (path_expression
+                  (identifier))))))
         (handler_clause
           effect: (effect_reference
-            (effect_identifier (effect_identifier))
+            (effect_identifier
+              (effect_identifier))
             (generic_arguments
               (generic_argument
-                (type_path name: (type_identifier (type_identifier))))))
-          operation: (effect_operation_identifier (effect_operation_identifier))
+                (type_path
+                  name: (type_identifier
+                    (type_identifier))))))
+          operation: (effect_operation_identifier
+            (effect_operation_identifier))
           (variant_pattern
             type: (identifier)
-            variant: (variant_identifier (variant_identifier))
+            variant: (variant_identifier
+              (variant_identifier))
             (identifier))
           resumption: (identifier)
           body: (resumption_expression
-            (arguments (path_expression (identifier)))))))))
+            (arguments
+              (path_expression
+                (identifier)))))))))
+
+==================
+Source-defined loop applications
+==================
+
+run() -> () {
+  while { ready() } { step() };
+  until { done() } { step() };
+  loop @outer: { break() };
+  times(3) { continue() };
+  for_each(items()) { item => consume(item) };
+  fold(items(), 0) { (sum, item) => sum + item };
+  ()
+}
+
+---
+
+(source_file
+  (function_declaration
+    name: (identifier)
+    (parameters)
+    (tuple_type)
+    body: (block
+      (statement
+        (expression_statement
+          (control_application
+            function: (identifier)
+            context: (block
+              (call_expression
+                function: (path_expression
+                  (identifier))
+                arguments: (arguments)))
+            context: (block
+              (call_expression
+                function: (path_expression
+                  (identifier))
+                arguments: (arguments))))))
+      (statement
+        (expression_statement
+          (control_application
+            function: (identifier)
+            context: (block
+              (call_expression
+                function: (path_expression
+                  (identifier))
+                arguments: (arguments)))
+            context: (block
+              (call_expression
+                function: (path_expression
+                  (identifier))
+                arguments: (arguments))))))
+      (statement
+        (expression_statement
+          (control_application
+            function: (identifier)
+            context: (label_expression
+              (label)
+              (block
+                (call_expression
+                  function: (path_expression
+                    (identifier))
+                  arguments: (arguments)))))))
+      (statement
+        (expression_statement
+          (context_application
+            function: (call_expression
+              function: (path_expression
+                (identifier))
+              arguments: (arguments
+                (literal
+                  (integer_literal))))
+            context: (block
+              (call_expression
+                function: (path_expression
+                  (identifier))
+                arguments: (arguments))))))
+      (statement
+        (expression_statement
+          (context_application
+            function: (call_expression
+              function: (path_expression
+                (identifier))
+              arguments: (arguments
+                (call_expression
+                  function: (path_expression
+                    (identifier))
+                  arguments: (arguments))))
+            context: (closure_expression
+              (identifier)
+              (call_expression
+                function: (path_expression
+                  (identifier))
+                arguments: (arguments
+                  (path_expression
+                    (identifier))))))))
+      (statement
+        (expression_statement
+          (context_application
+            function: (call_expression
+              function: (path_expression
+                (identifier))
+              arguments: (arguments
+                (call_expression
+                  function: (path_expression
+                    (identifier))
+                  arguments: (arguments))
+                (literal
+                  (integer_literal))))
+            context: (closure_expression
+              (identifier)
+              (identifier)
+              (binary_expression
+                left: (path_expression
+                  (identifier))
+                operator: (operator_sequence
+                  (builtin_operator))
+                right: (path_expression
+                  (identifier)))))))
+      (unit_expression))))

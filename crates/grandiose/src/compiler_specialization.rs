@@ -4366,6 +4366,12 @@ impl<'a> Walker<'a> {
             ExprKind::Block(_) | ExprKind::ContextBlock(_) if expected.params.is_empty() => {
                 (vec![], expression, ClosureBodyKind::ContextualBlock)
             }
+            ExprKind::Labeled { body, .. }
+                if expected.params.is_empty()
+                    && matches!(body.kind, ExprKind::Block(_) | ExprKind::ContextBlock(_)) =>
+            {
+                (vec![], body, ClosureBodyKind::ContextualBlock)
+            }
             _ => {
                 self.error("callable argument is not a contextually matching closure");
                 return None;
@@ -7418,6 +7424,11 @@ pub(crate) fn closure_body<'a>(
         )),
         (ExprKind::Block(_) | ExprKind::ContextBlock(_), ClosureBodyKind::ContextualBlock) => {
             Some((vec![], expression))
+        }
+        (ExprKind::Labeled { body, .. }, ClosureBodyKind::ContextualBlock)
+            if matches!(body.kind, ExprKind::Block(_) | ExprKind::ContextBlock(_)) =>
+        {
+            Some((vec![], body))
         }
         _ => None,
     }

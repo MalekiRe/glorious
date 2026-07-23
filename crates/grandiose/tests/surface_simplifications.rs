@@ -179,3 +179,63 @@ fn generic_case_resolves_module_local_nominals_in_its_payload() {
     "#;
     compile_source_to_bytecode("surface-simplifications.glorious", source).unwrap();
 }
+
+#[test]
+fn constructor_and_nullary_value_aliases_are_patterns() {
+    let source = r#"
+        enum Signal { Stop, Value(i64) }
+        let Signal::Item = Signal::Value;
+        selected(signal: Signal) -> i64 {
+            match(signal) {
+                Signal::Stop => 0,
+                Signal::Item(value) => value
+            }
+        }
+        bool_value(value: Bool) -> i64 {
+            match(value) {
+                true => 42,
+                false => 0
+            }
+        }
+        answer() -> i64 { selected(Signal::Item(bool_value(true))) }
+        main() -> { () }
+    "#;
+    assert_eq!(run(source, "answer"), Value::I64(42));
+}
+
+#[test]
+fn source_defined_loop_combinators_handle_break_and_continue() {
+    let source = r#"
+        answer() -> i64 {
+            while { false } { () };
+            until { true } { () };
+            loop @outer: { break() };
+            times(3) { continue() };
+            times(10) { break() };
+            42
+        }
+        main() -> { () }
+    "#;
+    assert_eq!(run(source, "answer"), Value::I64(42));
+}
+
+#[test]
+fn vector_iterator_for_each_and_fold_are_source_combinators() {
+    let source = r#"
+        add(left: i64, right: i64) -> i64 { left + right }
+        values() -> Vec<i64> {
+            let values = Vec::new();
+            Vec::push(&mut values, 20);
+            Vec::push(&mut values, 22);
+            values
+        }
+        answer() -> i64 {
+            fold(Vec::into_iter(values()), 0) { (sum, item) => add(sum, item) }
+        }
+        exercise_for_each() -> () {
+            for_each(Vec::into_iter(values())) { item => { item; continue() } }
+        }
+        main() -> { () }
+    "#;
+    assert_eq!(run(source, "answer"), Value::I64(42));
+}

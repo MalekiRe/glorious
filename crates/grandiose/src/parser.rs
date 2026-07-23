@@ -2461,7 +2461,11 @@ impl Parser {
                 && matches!(&expr.kind, ExprKind::Call(_, _))
                 && !self.looks_like_handler_clause_block()
             {
-                let mut block = self.block()?;
+                let mut block = if self.compact_closure_ahead() {
+                    self.primary()?
+                } else {
+                    self.block()?
+                };
                 if let ExprKind::Block(statements) = &block.kind {
                     block.kind = ExprKind::ContextBlock(statements.clone());
                 }
@@ -2471,6 +2475,79 @@ impl Parser {
                 };
                 let mut args = Rc::try_unwrap(args).unwrap_or_else(|shared| (*shared).clone());
                 args.push(block);
+                if args.len() == 2
+                    && let ExprKind::Variable(path) = &callee.kind
+                    && let [name] = path.as_ref()
+                    && matches!(name.as_ref(), "while" | "until")
+                    && matches!(args[0].kind, ExprKind::ContextBlock(_))
+                    && matches!(args[1].kind, ExprKind::ContextBlock(_))
+                {
+                    let condition = args.remove(0);
+                    let body = args.remove(0);
+                    let ExprKind::ContextBlock(body_statements) = body.kind else {
+                        unreachable!()
+                    };
+                    let mut body_statements =
+                        Rc::try_unwrap(body_statements).unwrap_or_else(|shared| (*shared).clone());
+                    body_statements.push(Stmt::Expr(Expr {
+                        kind: ExprKind::Call(
+                            Rc::new(Expr {
+                                kind: ExprKind::Variable(Rc::from([Rc::<str>::from(
+                                    "__g1_loop_continue_flag",
+                                )])),
+                                span: body.span,
+                            }),
+                            Rc::new(vec![]),
+                        ),
+                        span: body.span,
+                    }));
+                    let mut positive = Expr {
+                        kind: ExprKind::ContextBlock(Rc::new(body_statements)),
+                        span: body.span,
+                    };
+                    let mut negative = Expr {
+                        kind: ExprKind::ContextBlock(Rc::new(vec![Stmt::Expr(Expr {
+                            kind: ExprKind::Call(
+                                Rc::new(Expr {
+                                    kind: ExprKind::Variable(Rc::from([Rc::<str>::from(
+                                        "__g1_loop_stop_flag",
+                                    )])),
+                                    span: condition.span,
+                                }),
+                                Rc::new(vec![]),
+                            ),
+                            span: condition.span,
+                        })])),
+                        span: condition.span,
+                    };
+                    if name.as_ref() == "until" {
+                        std::mem::swap(&mut positive, &mut negative);
+                    }
+                    let conditional = Expr {
+                        kind: ExprKind::Call(
+                            Rc::new(Expr {
+                                kind: ExprKind::Variable(Rc::from([Rc::<str>::from("if")])),
+                                span: condition.span,
+                            }),
+                            Rc::new(vec![condition, positive]),
+                        ),
+                        span,
+                    };
+                    let step = Expr {
+                        kind: ExprKind::Call(
+                            Rc::new(Expr {
+                                kind: ExprKind::Variable(Rc::from([Rc::<str>::from("else")])),
+                                span,
+                            }),
+                            Rc::new(vec![conditional, negative]),
+                        ),
+                        span,
+                    };
+                    args.push(Expr {
+                        kind: ExprKind::ContextBlock(Rc::new(vec![Stmt::Expr(step)])),
+                        span,
+                    });
+                }
                 expr = Expr {
                     kind: ExprKind::Call(callee, Rc::new(args)),
                     span,
@@ -2518,6 +2595,28 @@ impl Parser {
                         kind: ExprKind::Call(Rc::new(expr), Rc::new(vec![argument])),
                         span,
                     },
+                };
+            } else if self.at(&TokenKind::LBrace)
+                && matches!(&expr.kind, ExprKind::Variable(path)
+                    if path.len() == 1
+                        && matches!(path[0].as_ref(), "loop" | "while" | "until"))
+            {
+                // Library control callables may take their first contextual
+                // argument without an empty `()`: `loop { ... }` and
+                // `while { condition } { body }` remain ordinary calls after
+                // this grammar-only elaboration.
+                let mut block = if self.compact_closure_ahead() {
+                    self.primary()?
+                } else {
+                    self.block()?
+                };
+                if let ExprKind::Block(statements) = &block.kind {
+                    block.kind = ExprKind::ContextBlock(statements.clone());
+                }
+                let span = expr.span.join(block.span);
+                expr = Expr {
+                    kind: ExprKind::Call(Rc::new(expr), Rc::new(vec![block])),
+                    span,
                 };
             } else if self.at(&TokenKind::LBrace)
                 && matches!(&expr.kind, ExprKind::Variable(path) if path.len() == 1)
@@ -2742,8 +2841,62 @@ impl Parser {
         )
     }
 
+    fn compact_closure_ahead(&self) -> bool {
+        if !self.at(&TokenKind::LBrace) {
+            return false;
+        }
+        let first = self.tokens.get(self.cursor + 1).map(|token| &token.kind);
+        if matches!(first, Some(TokenKind::FatArrow))
+            || matches!(first, Some(TokenKind::Ident(_)))
+                && matches!(
+                    self.tokens.get(self.cursor + 2).map(|token| &token.kind),
+                    Some(TokenKind::FatArrow | TokenKind::Comma)
+                )
+        {
+            return true;
+        }
+        if !matches!(first, Some(TokenKind::LParen)) {
+            return false;
+        }
+        let mut cursor = self.cursor + 2;
+        let mut expect_name = true;
+        loop {
+            match self.tokens.get(cursor).map(|token| &token.kind) {
+                Some(TokenKind::RParen) if !expect_name || cursor == self.cursor + 2 => {
+                    return matches!(
+                        self.tokens.get(cursor + 1).map(|token| &token.kind),
+                        Some(TokenKind::FatArrow)
+                    );
+                }
+                Some(TokenKind::Ident(_)) if expect_name => expect_name = false,
+                Some(TokenKind::Comma) if !expect_name => expect_name = true,
+                _ => return false,
+            }
+            cursor += 1;
+        }
+    }
+
     fn braced_expression(&mut self, start: Span) -> Result<Expr, Diagnostic> {
-        let closure = self.at(&TokenKind::FatArrow)
+        let parenthesized_closure = self.at(&TokenKind::LParen) && {
+            let mut cursor = self.cursor + 1;
+            let mut expect_name = true;
+            loop {
+                match self.tokens.get(cursor).map(|token| &token.kind) {
+                    Some(TokenKind::RParen) if !expect_name || cursor == self.cursor + 1 => {
+                        break matches!(
+                            self.tokens.get(cursor + 1).map(|token| &token.kind),
+                            Some(TokenKind::FatArrow)
+                        );
+                    }
+                    Some(TokenKind::Ident(_)) if expect_name => expect_name = false,
+                    Some(TokenKind::Comma) if !expect_name => expect_name = true,
+                    _ => break false,
+                }
+                cursor += 1;
+            }
+        };
+        let closure = parenthesized_closure
+            || self.at(&TokenKind::FatArrow)
             || matches!(self.peek().kind, TokenKind::Ident(_))
                 && (self.tokens.get(self.cursor + 1).is_some_and(|token| {
                     self.same_token(&token.kind, &TokenKind::FatArrow)
@@ -2754,12 +2907,22 @@ impl Parser {
             return self.block();
         }
         let mut params: Vec<Rc<str>> = Vec::new();
-        while !self.at(&TokenKind::FatArrow) {
+        if parenthesized_closure {
+            self.bump();
+        }
+        while !self.at(if parenthesized_closure {
+            &TokenKind::RParen
+        } else {
+            &TokenKind::FatArrow
+        }) {
             let (param, _) = self.ident("expected a closure parameter")?;
             params.push(Rc::from(param.as_str()));
             if !self.eat(&TokenKind::Comma) {
                 break;
             }
+        }
+        if parenthesized_closure {
+            self.expect(TokenKind::RParen, "expected `)` after closure parameters")?;
         }
         self.expect(TokenKind::FatArrow, "expected `=>` in this closure")?;
         let body = self.expression(0)?;

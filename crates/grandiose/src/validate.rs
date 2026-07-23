@@ -2522,6 +2522,7 @@ fn validate_pattern_with_context(
                         .iter()
                         .find(|variant| variant.name == *variant_name)
                     {
+                        None if declared_constructor_alias => {}
                         None => errors.push(
                             Diagnostic::error(
                                 "unknown enum variant pattern",
