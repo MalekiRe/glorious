@@ -167,6 +167,17 @@ expected).
   (cleanups + `LEAVE`), not a dynamic search. A program where this cannot be
   proven is a compile error, not a deoptimization. `Label` being intrinsic
   and instance-only is load-bearing here: no erased labels can exist.
+- **Control inlining is a required lowering, not an optimization.**
+  Monomorphization identifies the label's static destination but, by itself,
+  does not make that destination active in an out-of-line callee's runtime
+  frame. Any specialization that may invoke a label MUST therefore be
+  transitively control-inlined (or equivalently fused) into the frame that
+  introduces that label before MIR emits `LEAVE`. This applies through generic
+  helpers, closures, and handlers. If an unavailable body, recursive cycle,
+  indirect call, or other boundary prevents the fusion, compilation fails
+  with the directness diagnostic; the compiler must not materialize a runtime
+  label target or fall back to stack search. Consequently label values and
+  `Label` evidence remain proof-only ZSTs in all accepted programs.
 - **Multishot exclusion.** A label captured in a multishot-replayable
   continuation could target an exited scope on replay. Forbid labels crossing
   multishot capture — same family and same enforcement point as the existing
@@ -248,12 +259,15 @@ concurrently by sol.
    evidence + lifetimes. Grep for both names across
    `compiler_regions.rs`/`compiler_typeck.rs`/docs and remove.
 4. Generic `Label` bounds on functions and effect declarations/operations;
-   monomorphization-time directness check (§0.5) with a dedicated diagnostic
-   when an invocation site cannot be resolved to a concrete brand.
+   monomorphization-time directness check plus mandatory transitive control
+   inlining (§0.5), with a dedicated diagnostic when an invocation cannot be
+   fused into the frame that introduces its concrete brand.
 5. Multishot exclusion check at continuation-capture sites.
-6. MIR: label-value invocation lowers to today's leave sequence; passing a
-   label lowers to brand evidence (ZST at runtime — confirm labels erase like
-   other proof-only values in the existing loan-proof erasure pass).
+6. MIR: after required control inlining, every label-value invocation lowers
+   inside its destination frame to today's leave sequence; passing a label
+   lowers to brand evidence (ZST at runtime — confirm labels erase like other
+   proof-only values in the existing loan-proof erasure pass). Reject any
+   residual label-bearing call boundary before MIR finalization.
 7. New tests, `tests/label_values.rs`: label passed as parameter; label
    captured by closure and invoked (the `first_match` shape); `or_leave`
    propagation including generic `S` inference; label carried in an effect
