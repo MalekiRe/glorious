@@ -76,7 +76,7 @@ parse(input: Bytes) -> Result<Program, ParseError> {
 - The implicit label is in scope as `@parse`; the bare name `parse` retains its
   ordinary meaning everywhere. Thus `parse(rest)` is a recursive call,
   `@parse(v)` is an early return, and
-  `or_leave(read_header(&input), @parse)` passes the label as a
+  `try(read_header(&input), @parse)` passes the label as a
   `Label<Result<Program, ParseError>>` value.
 - Rule for the resolver: a bare identifier never resolves to a lexical label;
   `@name` always resolves to the innermost label binder of that name. No
@@ -100,10 +100,11 @@ anywhere live."
 ### 0.3 Destinations as ordinary generics
 
 No destination parameter category, no new signature syntax — `Label` bounds
-on ordinary generic parameters:
+on ordinary generic parameters. A speculative standard-library addition is
+`try`, an ordinary function taking the result and the destination label:
 
 ```rust
-or_leave<T, E, S, L>(value: Result<T, E>, exit: L) -> T
+try<T, E, S, L>(value: Result<T, E>, exit: L) -> T
     where L: Label<Result<S, E>> {
     handle value {
         Result::Ok(inner) => inner,
@@ -112,16 +113,17 @@ or_leave<T, E, S, L>(value: Result<T, E>, exit: L) -> T
 }
 
 parse(input: Bytes) -> Result<Program, ParseError> {
-    let header = or_leave(read_header(&input), @parse);
-    let body = or_leave(read_body(&input, &header), @parse);
+    let header = try(read_header(&input), @parse);
+    let body = try(read_body(&input, &header), @parse);
     Result::Ok(assemble(move header, move body))
 }
 ```
 
 `S` stays a free generic (the Ok side is never constructed) — plain
 inference, no higher-rank machinery. This function is the `?` operator as a
-two-line library. Ship `or_leave` (naming TBD) in the std as part of this
-change's migration stage.
+two-line library. The compiler capability and example are normative; exporting
+this helper from std under the name `try` is speculative and can be accepted
+or rejected independently during the migration stage.
 
 Closure capture of labels is ordinary capture, checked by lifetimes:
 
@@ -195,7 +197,7 @@ expected).
 - `Destination` as a distinct evidence kind (becomes the `Label` relation).
 - `CallDestination` evidence entirely.
 - Any need for a std `return`-like construct: early return is `@name(v)`;
-  error propagation is `or_leave`.
+  error propagation can use the speculative `try(value, @name)` helper.
 
 ## 1. Reference example (must round-trip through the whole pipeline)
 
@@ -219,7 +221,7 @@ New:
 }
 ```
 
-Plus a new-capability example that must compile and run: `or_leave` /
+Plus a new-capability example that must compile and run: `try` /
 `first_match` from §0.3 verbatim.
 
 ## 2. Implementation stages
@@ -269,7 +271,7 @@ concurrently by sol.
    proof-only values in the existing loan-proof erasure pass). Reject any
    residual label-bearing call boundary before MIR finalization.
 7. New tests, `tests/label_values.rs`: label passed as parameter; label
-   captured by closure and invoked (the `first_match` shape); `or_leave`
+   captured by closure and invoked (the `first_match` shape); `try`
    propagation including generic `S` inference; label carried in an effect
    payload and invoked by a handler; effect generic over `L: Label<..>`;
    escaping-label lifetime error; multishot-capture rejection; recursive
@@ -290,9 +292,10 @@ sections.
 
 ### Stage 5 — migrate, then remove legacy forms
 
-1. std: add `or_leave` (and consider `each`/`first`-style combinators that
-   take label parameters, since they now cost nothing to express); migrate
-   any std label uses.
+1. std: consider the speculative `try(value, @label)` helper from §0.3 (and
+   `each`/`first`-style combinators that take label parameters, since they now
+   cost nothing to express); if accepted, add it and migrate applicable std
+   label uses.
 2. Migrate tutorial and test fixtures; rewrite early-return-shaped
    `__FooCase` remnants (anything Stage 5 of the effect redesign left because
    it was really a return, not a match) using implicit function labels.
@@ -319,7 +322,7 @@ sections.
 
 - Full `cargo test -p grandiose` green at every stage boundary.
 - §1's old/new examples compile to byte-identical bytecode (differential).
-- `or_leave` and `first_match` compile, run correctly under the VM, and the
+- `try` and `first_match` compile, run correctly under the VM, and the
   invocation sites verifiably lower to direct `LEAVE` sequences (assert via
   bytecode inspection in the test, not just behavior).
 - After Stage 5, `grep -rn "\bleave@\|\blabel @" --include=*.glorious` over
