@@ -28,6 +28,7 @@ const SESSION_MAX_ARGUMENTS: usize = 128;
 const SESSION_MAX_INPUTS: usize = 64;
 const SESSION_MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 const NATIVE_HOST_RUNTIME: &[u8] = include_bytes!("native_host_runtime.c");
+const NATIVE_RUNTIME: &[u8] = include_bytes!("native_runtime.c");
 
 struct TemporaryNativeHost {
     path: PathBuf,
@@ -45,6 +46,11 @@ impl TemporaryNativeHost {
             match OpenOptions::new().write(true).create_new(true).open(&path) {
                 Ok(mut file) => {
                     if let Err(error) = file.write_all(NATIVE_HOST_RUNTIME) {
+                        drop(file);
+                        let _ = std::fs::remove_file(&path);
+                        return Err(error);
+                    }
+                    if let Err(error) = file.write_all(NATIVE_RUNTIME) {
                         drop(file);
                         let _ = std::fs::remove_file(&path);
                         return Err(error);

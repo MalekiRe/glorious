@@ -6,6 +6,12 @@ use std::{
 
 use grandiose_vm::{Host, HostFault, Type, Value, Vm, verify};
 
+fn clang_with_native_runtime() -> Command {
+    let mut command = Command::new("clang");
+    command.arg(concat!(env!("CARGO_MANIFEST_DIR"), "/src/native_runtime.c"));
+    command
+}
+
 const SYNC_OWNED_INDIRECT_EFFECT_SOURCE: &str = r#"
     effect Ask { [1,1] ask() -> i64 }
     tail_candidate() -> i64 / {Ask} {
@@ -34,7 +40,7 @@ fn run_native_i64(module: grandiose::LlvmModule, function: usize, expected: i64,
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
@@ -81,6 +87,165 @@ fn compile_cli_executable(
         String::from_utf8_lossy(&output.stderr)
     );
     executable
+}
+
+#[test]
+fn portable_native_runtime_formats_every_stable_fault_detail() {
+    let directory = tempfile::tempdir().unwrap();
+    let harness = directory.path().join("runtime-fault-harness.c");
+    let executable = directory.path().join("runtime-fault-harness");
+    fs::write(
+        &harness,
+        r#"
+#include <stddef.h>
+#include <stdint.h>
+#include <stdlib.h>
+_Noreturn void g1_runtime_fault(uint32_t, uint32_t, uint32_t,
+                                const unsigned char *, size_t);
+int main(int argc, char **argv) {
+    uint32_t detail = (uint32_t)strtoul(argv[1], NULL, 10);
+    uint32_t arg0 = detail == 12 ? 17u : (detail == 13 ? (uint32_t)(argc > 2) : 0u);
+    const unsigned char *message =
+        detail == 13 && argc > 2 ? (const unsigned char *)argv[2] : NULL;
+    size_t length = detail == 13 && argc > 2 ? (size_t)strtoul(argv[3], NULL, 10) : 0u;
+    g1_runtime_fault(detail, arg0, detail == 12 ? 23u : 0u, message, length);
+}
+"#,
+    )
+    .unwrap();
+    let output = clang_with_native_runtime()
+        .args(["-std=c11", "-Wall", "-Wextra", "-Werror"])
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let expected = [
+        "checked arithmetic overflow",
+        "division by zero",
+        "invalid integer shift count",
+        "invalid Unicode scalar value",
+        "invalid UTF-8",
+        "index or slice is out of bounds",
+        "array slot is empty",
+        "array slot is already initialized",
+        "array still contains initialized slots",
+        "array capacity overflow",
+        "runtime allocation limit exceeded",
+        "unhandled effect 17/23",
+    ];
+    for (detail, body) in (1u32..=12).zip(expected) {
+        let execution = Command::new(&executable)
+            .arg(detail.to_string())
+            .output()
+            .unwrap();
+        assert!(!execution.status.success(), "{detail}");
+        assert_eq!(
+            execution.stderr,
+            format!("grandiose: {body}\n").as_bytes(),
+            "{detail}"
+        );
+    }
+    for (arguments, expected) in [
+        (vec!["13"], "grandiose: aborted\n"),
+        (vec!["13", "", "0"], "grandiose: aborted: \n"),
+        (vec!["13", "hello", "5"], "grandiose: aborted: hello\n"),
+    ] {
+        let execution = Command::new(&executable).args(arguments).output().unwrap();
+        assert!(!execution.status.success());
+        assert_eq!(execution.stderr, expected.as_bytes());
+    }
+}
+
+#[test]
+fn llvm_abort_abi_distinguishes_absent_and_present_empty_messages() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-abort-abi.glorious",
+        "main() -> () { () }",
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let main = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "main")
+        .unwrap();
+
+    let mut absent = phases.clone();
+    let entry = absent.mir.functions[main].entry;
+    absent.mir.functions[main]
+        .blocks
+        .iter_mut()
+        .find(|block| block.id == entry)
+        .unwrap()
+        .terminator = grandiose::compiler_mir::Terminator::Abort { message: None };
+    let absent = grandiose::emit_llvm_ir(&absent, &grandiose::LlvmOptions::default()).unwrap();
+    assert!(
+        absent
+            .ir
+            .contains("call void @g1_runtime_fault(i32 13, i32 0, i32 0, ptr null, i64 0)")
+    );
+    assert!(!absent.ir.contains("@g1.runtime_fault."));
+
+    let mut reached_unreachable = phases.clone();
+    let entry = reached_unreachable.mir.functions[main].entry;
+    reached_unreachable.mir.functions[main]
+        .blocks
+        .iter_mut()
+        .find(|block| block.id == entry)
+        .unwrap()
+        .terminator = grandiose::compiler_mir::Terminator::Unreachable;
+    let reached_unreachable =
+        grandiose::emit_llvm_ir(&reached_unreachable, &grandiose::LlvmOptions::default()).unwrap();
+    assert!(reached_unreachable.ir.contains(&format!(
+        "bb{entry}:\n  call void @llvm.trap()\n  unreachable"
+    )));
+
+    let mut present_empty = phases;
+    let entry = present_empty.mir.functions[main].entry;
+    present_empty.mir.functions[main]
+        .blocks
+        .iter_mut()
+        .find(|block| block.id == entry)
+        .unwrap()
+        .terminator = grandiose::compiler_mir::Terminator::Abort {
+        message: Some(String::new()),
+    };
+    let present_empty =
+        grandiose::emit_llvm_ir(&present_empty, &grandiose::LlvmOptions::default()).unwrap();
+    assert!(
+        present_empty
+            .ir
+            .contains("@g1.runtime_fault.0 = private constant [0 x i8] c\"\"")
+    );
+    assert!(present_empty
+        .ir
+        .contains("call void @g1_runtime_fault(i32 13, i32 1, i32 0, ptr getelementptr inbounds ([0 x i8], ptr @g1.runtime_fault.0, i32 0, i32 0), i64 0)"));
+}
+
+#[test]
+fn cli_native_array_allocation_enforces_the_primitive_output_limit() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = compile_cli_executable(
+        directory.path(),
+        "native-array-allocation-limit",
+        "new_values() -> Vec<u8> { Vec::with_capacity(40000000) }\nmain() -> () { new_values(); () }",
+    );
+    let execution = Command::new(executable).output().unwrap();
+    assert!(!execution.status.success());
+    assert_eq!(
+        execution.stderr,
+        b"grandiose: runtime allocation limit exceeded\n"
+    );
 }
 
 #[test]
@@ -227,7 +392,7 @@ fn custom_drop_hooks_run_before_native_structural_cleanup() {
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
@@ -504,6 +669,14 @@ fn checked_integer_and_shift_primitives_emit_valid_guarded_ir() {
     assert!(module.ir.contains("icmp eq i64"));
     assert!(module.ir.contains("icmp uge i32"));
     assert!(module.ir.contains("shl i64"));
+    assert!(
+        module
+            .ir
+            .contains("declare void @g1_runtime_fault(i32, i32, i32, ptr, i64) cold noreturn")
+    );
+    assert!(module.ir.contains("call void @g1_runtime_fault(i32 2,"));
+    assert!(module.ir.contains("call void @g1_runtime_fault(i32 1,"));
+    assert!(module.ir.contains("call void @g1_runtime_fault(i32 3,"));
 
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("integer-primitives.ll");
@@ -518,6 +691,70 @@ fn checked_integer_and_shift_primitives_emit_valid_guarded_ir() {
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn checked_division_reports_the_exact_vm_runtime_error_natively() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-division-fault.glorious",
+        "selected(value: i64) -> i64 { 84 / value }\nmain() -> () { selected(1); () }",
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("division-fault.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("division-fault");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\nextern int64_t g1_f{selected}(int64_t);\nint main(void) {{ (void)g1_f{selected}(0); return 0; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = clang_with_native_runtime()
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable).output().unwrap();
+    assert!(!execution.status.success());
+    assert_eq!(execution.stderr, b"grandiose: division by zero\n");
+}
+
+#[test]
+fn cli_native_abort_preserves_its_message() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = compile_cli_executable(
+        directory.path(),
+        "native-explicit-abort",
+        "main() -> () { abort() }",
+    );
+    let execution = Command::new(executable).output().unwrap();
+    assert!(!execution.status.success());
+    assert_eq!(
+        execution.stderr,
+        b"grandiose: aborted: explicit source abort\n"
     );
 }
 
@@ -632,7 +869,7 @@ fn outward_effects_propagate_through_indirect_callables() {
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
@@ -890,7 +1127,7 @@ fn host_calls_execute_and_consume_arguments_inside_effect_frames() {
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
@@ -1386,7 +1623,7 @@ fn owned_captured_outward_callable_returns_directly_from_wrapper() {
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
@@ -1519,7 +1756,7 @@ fn text_and_bytes_use_the_native_reference_counted_runtime() {
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
@@ -1587,7 +1824,7 @@ fn llvm_and_vm_backends_execute_the_same_scalar_program() {
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg(source)
         .arg(harness)
         .arg("-o")
@@ -1649,7 +1886,7 @@ fn llvm_and_vm_backends_execute_the_same_captured_callable_program() {
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
@@ -1738,7 +1975,7 @@ fn llvm_handler_values_own_and_destroy_their_clause_callables() {
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
@@ -1818,7 +2055,7 @@ fn llvm_and_vm_backends_execute_the_same_terminal_handler() {
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
@@ -1895,7 +2132,7 @@ fn llvm_terminal_clause_keeps_reference_payload_origin_live_until_dereference() 
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
@@ -1988,7 +2225,7 @@ fn llvm_effectful_terminal_clause_keeps_reference_payload_origin_live_across_rou
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
@@ -2071,7 +2308,7 @@ fn llvm_terminal_clause_routes_outward_effect_to_outer_handler() {
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
@@ -2162,7 +2399,7 @@ fn llvm_nested_same_protocol_handler_keeps_inner_activation_on_replay() {
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
@@ -2395,7 +2632,7 @@ fn llvm_effectful_terminal_clause_drops_abandoned_body_and_keeps_capture() {
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
@@ -2800,7 +3037,7 @@ fn llvm_and_vm_backends_execute_the_same_one_shot_resumption() {
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
@@ -2889,7 +3126,7 @@ fn llvm_one_shot_tail_resume_and_cancel_match_the_vm() {
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
@@ -2957,7 +3194,7 @@ fn llvm_two_shot_resumption_clones_each_native_frame_snapshot() {
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
@@ -3120,7 +3357,7 @@ fn llvm_two_shot_clones_and_drops_only_live_residual_fields() {
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
@@ -3538,7 +3775,7 @@ fn llvm_two_shot_deep_clones_vec_snapshots_with_vm_parity() {
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
@@ -3648,7 +3885,7 @@ fn llvm_two_shot_preserves_internal_and_projected_shared_aliases() {
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
@@ -3741,7 +3978,7 @@ fn llvm_two_shot_retains_nested_aggregate_and_callable_captures() {
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
@@ -3824,7 +4061,7 @@ fn llvm_borrowed_replays_do_not_consume_shared_terminal_clause_callable() {
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
@@ -4072,7 +4309,7 @@ fn llvm_replayed_terminal_clause_keeps_borrowed_payload_origin_live() {
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
@@ -4158,7 +4395,7 @@ fn llvm_multishot_cancel_drops_owned_suspended_graph() {
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
@@ -4217,7 +4454,7 @@ fn llvm_backend_invokes_the_native_host_abi_and_consumes_arguments() {
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)
@@ -4273,6 +4510,9 @@ fn llvm_and_vm_backends_execute_the_same_vec_program() {
     let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
     assert!(module.ir.contains("%g1.array = type"));
     assert!(module.ir.contains("@g1_array_grow"));
+    assert!(module.ir.contains("call void @g1_runtime_fault(i32 10,"));
+    assert!(module.ir.contains("call void @g1_runtime_fault(i32 11,"));
+    assert!(module.ir.contains("67108864"));
 
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("array.ll");
@@ -4286,7 +4526,7 @@ fn llvm_and_vm_backends_execute_the_same_vec_program() {
         ),
     )
     .unwrap();
-    let output = Command::new("clang")
+    let output = clang_with_native_runtime()
         .arg("-fsanitize=address")
         .arg(&source)
         .arg(&harness)

@@ -12,9 +12,9 @@ Use:
 
 ```text
 grc --emit llvm-ir program.glorious
-clang program.ll -o program
+# Embedders link program.ll with the runtime/host ABI implementations below.
 
-# Or ask the compiler driver to invoke clang:
+# Or ask the compiler driver to invoke clang; executable emission bundles them:
 grc --emit llvm-object program.glorious
 grc --emit executable program.glorious -o program
 ```
@@ -52,6 +52,41 @@ allocation failures, and filesystem open/read/write/close failures. Native
 host faults therefore remain terminal like VM `HostFault` values rather than
 becoming language-visible `Result` values.
 
+Language/runtime failures use a separate stable C-linkage entry point:
+
+```c
+_Noreturn void g1_runtime_fault(
+    uint32_t detail,
+    uint32_t arg0,
+    uint32_t arg1,
+    const unsigned char *message,
+    size_t message_len
+);
+```
+
+The generation-1 detail values are `1` arithmetic overflow, `2` division by
+zero, `3` invalid shift count, `4` invalid character, `5` invalid UTF-8, `6`
+index out of bounds, `7` empty array slot, `8` already-initialized array slot,
+`9` array not drained, `10` allocation overflow, `11` allocation limit, `12`
+unhandled effect, and `13` explicit abort. For an unhandled effect `arg0` and
+`arg1` are its protocol and operation. For an abort, `arg0` distinguishes no
+message (`0`) from a present message (`1`), so a present empty message remains
+different from no message; `message`/`message_len` carry its UTF-8 bytes without
+requiring NUL termination. Other arguments are zero.
+Details 1–10 map to the VM's primitive-trap category, detail 11 to memory-limit,
+detail 12 to unhandled-effect, and detail 13 to explicit-abort.
+
+The bundled native runtime prints `grandiose: ` followed by the exact VM
+`RuntimeError` body and exits unsuccessfully. These faults are terminal and do
+not run ordinary cleanup. Verifier-impossible states continue to use
+`llvm.trap`; reaching MIR `Unreachable` now traps explicitly rather than
+falling directly into LLVM undefined behavior. Native primitive-created
+`Text`, `Bytes`, and `Array` storage has a deterministic 64 MiB output limit:
+size arithmetic overflow reports detail 10, while an over-limit request or
+allocator failure reports detail 11. LLVM IR/object embedding leaves both the
+host-fault and runtime-fault implementations to the embedder; compiler-produced
+executables link the portable runtime automatically.
+
 The current vertical slice supports:
 
 - fixed-width signed and unsigned integers, `usize`/`isize`, `char`, `f32`,
@@ -61,7 +96,8 @@ The current vertical slice supports:
 - shared and unique references, borrow/reborrow, projection borrows, and
   dereference load/move/store;
 - direct calls, self calls, tail calls, block arguments, returns, switches,
-  statically resolved typed-label leaves, and traps;
+  statically resolved typed-label leaves, structured runtime faults, and
+  verifier-impossible traps;
 - checked integer add/subtract/multiply through LLVM overflow intrinsics;
 - checked division, remainder, negation, and shift bounds without relying on
   LLVM poison behavior;

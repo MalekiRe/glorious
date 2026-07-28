@@ -15,6 +15,21 @@ use crate::{
     diagnostic::Diagnostic,
 };
 
+const RUNTIME_FAULT_ARITHMETIC_OVERFLOW: u32 = 1;
+const RUNTIME_FAULT_DIVISION_BY_ZERO: u32 = 2;
+const RUNTIME_FAULT_INVALID_SHIFT_COUNT: u32 = 3;
+const RUNTIME_FAULT_INVALID_CHARACTER: u32 = 4;
+const RUNTIME_FAULT_INVALID_UTF8: u32 = 5;
+const RUNTIME_FAULT_INDEX_OUT_OF_BOUNDS: u32 = 6;
+const RUNTIME_FAULT_EMPTY_ARRAY_SLOT: u32 = 7;
+const RUNTIME_FAULT_ARRAY_SLOT_ALREADY_INITIALIZED: u32 = 8;
+const RUNTIME_FAULT_ARRAY_NOT_DRAINED: u32 = 9;
+const RUNTIME_FAULT_ALLOCATION_OVERFLOW: u32 = 10;
+const RUNTIME_FAULT_ALLOCATION_LIMIT: u32 = 11;
+const RUNTIME_FAULT_UNHANDLED_EFFECT: u32 = 12;
+const RUNTIME_FAULT_EXPLICIT_ABORT: u32 = 13;
+const NATIVE_PRIMITIVE_OUTPUT_LIMIT: u64 = 64 * 1024 * 1024;
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LlvmModule {
     pub ir: String,
@@ -81,6 +96,7 @@ struct Emitter<'a> {
     temporary: u32,
     overflow_widths: BTreeSet<(u16, &'static str)>,
     byte_literals: BTreeMap<Vec<u8>, u32>,
+    runtime_fault_literals: BTreeMap<Vec<u8>, u32>,
     uses_byte_runtime: bool,
     uses_array_runtime: bool,
     uses_callable_runtime: bool,
@@ -121,6 +137,7 @@ impl<'a> Emitter<'a> {
             temporary: 0,
             overflow_widths: BTreeSet::new(),
             byte_literals: BTreeMap::new(),
+            runtime_fault_literals: BTreeMap::new(),
             uses_byte_runtime: false,
             uses_array_runtime: false,
             uses_callable_runtime: false,
@@ -146,6 +163,17 @@ impl<'a> Emitter<'a> {
         }
         self.line("");
         self.line("declare void @llvm.trap() cold noreturn nounwind");
+        self.line(&format!(
+            "declare void @g1_runtime_fault(i32, i32, i32, ptr, i{}) cold noreturn",
+            self.pointer_width()
+        ));
+        for (bytes, index) in self.runtime_fault_literals.clone() {
+            self.line(&format!(
+                "@g1.runtime_fault.{index} = private constant [{} x i8] c\"{}\"",
+                bytes.len(),
+                llvm_bytes(&bytes)
+            ));
+        }
         if self.uses_byte_runtime {
             self.emit_byte_runtime();
         }
@@ -320,6 +348,7 @@ impl<'a> Emitter<'a> {
 
     fn prepare_runtime(&mut self, reachable: &[usize]) -> Result<(), Vec<Diagnostic>> {
         let mut literals = BTreeSet::new();
+        let mut runtime_fault_literals = BTreeSet::new();
         for &index in reachable {
             let function = &self.phases.mir.functions[index];
             for &ty in function
@@ -343,6 +372,12 @@ impl<'a> Emitter<'a> {
                 if let Terminator::HostCall { import, .. } = &block.terminator {
                     self.host_imports.insert(*import);
                 }
+                if let Terminator::Abort {
+                    message: Some(message),
+                } = &block.terminator
+                {
+                    runtime_fault_literals.insert(message.as_bytes().to_vec());
+                }
                 for instruction in &block.statements {
                     if let InstructionKind::Const { value, .. } = &instruction.kind {
                         match value {
@@ -359,6 +394,11 @@ impl<'a> Emitter<'a> {
             }
         }
         self.byte_literals = literals
+            .into_iter()
+            .enumerate()
+            .map(|(index, bytes)| (bytes, index as u32))
+            .collect();
+        self.runtime_fault_literals = runtime_fault_literals
             .into_iter()
             .enumerate()
             .map(|(index, bytes)| (bytes, index as u32))
@@ -401,6 +441,7 @@ impl<'a> Emitter<'a> {
 
     fn emit_byte_runtime(&mut self) {
         let usize_ty = format!("i{}", self.pointer_width());
+        self.overflow_widths.insert((self.pointer_width(), "uadd"));
         self.line(&format!("%g1.bytes = type {{ i64, {usize_ty}, [0 x i8] }}"));
         let literals = self
             .byte_literals
@@ -465,13 +506,31 @@ impl<'a> Emitter<'a> {
             "  %end = getelementptr %g1.bytes, ptr null, {usize_ty} 1"
         ));
         self.line(&format!("  %header = ptrtoint ptr %end to {usize_ty}"));
-        self.line(&format!("  %size = add {usize_ty} %header, %length"));
+        self.line(&format!(
+            "  %size.pair = call {{ {usize_ty}, i1 }} @llvm.uadd.with.overflow.{usize_ty}({usize_ty} %header, {usize_ty} %length)"
+        ));
+        self.line(&format!(
+            "  %size = extractvalue {{ {usize_ty}, i1 }} %size.pair, 0"
+        ));
+        self.line(&format!(
+            "  %size.overflow = extractvalue {{ {usize_ty}, i1 }} %size.pair, 1"
+        ));
+        self.line("  br i1 %size.overflow, label %size.overflow.fault, label %limit.check");
+        self.line("size.overflow.fault:");
+        self.emit_runtime_fault(RUNTIME_FAULT_ALLOCATION_OVERFLOW, "0", "0", "null", "0");
+        self.line("limit.check:");
+        self.line(&format!(
+            "  %over.limit = icmp ugt {usize_ty} %length, {NATIVE_PRIMITIVE_OUTPUT_LIMIT}"
+        ));
+        self.line("  br i1 %over.limit, label %limit.fault, label %allocate");
+        self.line("limit.fault:");
+        self.emit_runtime_fault(RUNTIME_FAULT_ALLOCATION_LIMIT, "0", "0", "null", "0");
+        self.line("allocate:");
         self.line(&format!("  %object = call ptr @malloc({usize_ty} %size)"));
         self.line("  %allocation.failed = icmp eq ptr %object, null");
         self.line("  br i1 %allocation.failed, label %allocation.trap, label %allocation.ready");
         self.line("allocation.trap:");
-        self.line("  call void @llvm.trap()");
-        self.line("  unreachable");
+        self.emit_runtime_fault(RUNTIME_FAULT_ALLOCATION_LIMIT, "0", "0", "null", "0");
         self.line("allocation.ready:");
         self.line("  %count.address = getelementptr inbounds %g1.bytes, ptr %object, i32 0, i32 0");
         self.line("  store i64 1, ptr %count.address");
@@ -681,8 +740,7 @@ impl<'a> Emitter<'a> {
         self.line("  %header.failed = icmp eq ptr %array, null");
         self.line("  br i1 %header.failed, label %header.trap, label %header.ready");
         self.line("header.trap:");
-        self.line("  call void @llvm.trap()");
-        self.line("  unreachable");
+        self.emit_runtime_fault(RUNTIME_FAULT_ALLOCATION_LIMIT, "0", "0", "null", "0");
         self.line("header.ready:");
         self.line("  %length.address = getelementptr inbounds %g1.array, ptr %array, i32 0, i32 0");
         self.line(&format!("  store {usize_ty} 0, ptr %length.address"));
@@ -714,9 +772,28 @@ impl<'a> Emitter<'a> {
         ));
         self.line("  br i1 %size.overflow, label %trap, label %allocate.storage");
         self.line("trap:");
-        self.line("  call void @llvm.trap()");
-        self.line("  unreachable");
+        self.emit_runtime_fault(RUNTIME_FAULT_ALLOCATION_OVERFLOW, "0", "0", "null", "0");
         self.line("allocate.storage:");
+        self.line(&format!(
+            "  %total.pair = call {{ {usize_ty}, i1 }} @llvm.uadd.with.overflow.{usize_ty}({usize_ty} %data.size, {usize_ty} %capacity)"
+        ));
+        self.line(&format!(
+            "  %total.size = extractvalue {{ {usize_ty}, i1 }} %total.pair, 0"
+        ));
+        self.line(&format!(
+            "  %total.overflow = extractvalue {{ {usize_ty}, i1 }} %total.pair, 1"
+        ));
+        self.line("  br i1 %total.overflow, label %total.overflow.trap, label %limit.check");
+        self.line("total.overflow.trap:");
+        self.emit_runtime_fault(RUNTIME_FAULT_ALLOCATION_OVERFLOW, "0", "0", "null", "0");
+        self.line("limit.check:");
+        self.line(&format!(
+            "  %over.limit = icmp ugt {usize_ty} %total.size, {NATIVE_PRIMITIVE_OUTPUT_LIMIT}"
+        ));
+        self.line("  br i1 %over.limit, label %limit.trap, label %allocate.storage.checked");
+        self.line("limit.trap:");
+        self.emit_runtime_fault(RUNTIME_FAULT_ALLOCATION_LIMIT, "0", "0", "null", "0");
+        self.line("allocate.storage.checked:");
         self.line(&format!(
             "  %data = call ptr @malloc({usize_ty} %data.size)"
         ));
@@ -728,8 +805,7 @@ impl<'a> Emitter<'a> {
         self.line("  %storage.failed = or i1 %data.failed, %initialized.failed");
         self.line("  br i1 %storage.failed, label %storage.trap, label %initialize.storage");
         self.line("storage.trap:");
-        self.line("  call void @llvm.trap()");
-        self.line("  unreachable");
+        self.emit_runtime_fault(RUNTIME_FAULT_ALLOCATION_LIMIT, "0", "0", "null", "0");
         self.line("initialize.storage:");
         self.line(&format!(
             "  call void @llvm.memset.p0.{usize_ty}(ptr %initialized, i8 0, {usize_ty} %capacity, i1 false)"
@@ -803,9 +879,28 @@ impl<'a> Emitter<'a> {
         ));
         self.line("  br i1 %size.overflow, label %trap, label %resize");
         self.line("trap:");
-        self.line("  call void @llvm.trap()");
-        self.line("  unreachable");
+        self.emit_runtime_fault(RUNTIME_FAULT_ALLOCATION_OVERFLOW, "0", "0", "null", "0");
         self.line("resize:");
+        self.line(&format!(
+            "  %total.pair = call {{ {usize_ty}, i1 }} @llvm.uadd.with.overflow.{usize_ty}({usize_ty} %data.size, {usize_ty} %new.capacity)"
+        ));
+        self.line(&format!(
+            "  %total.size = extractvalue {{ {usize_ty}, i1 }} %total.pair, 0"
+        ));
+        self.line(&format!(
+            "  %total.overflow = extractvalue {{ {usize_ty}, i1 }} %total.pair, 1"
+        ));
+        self.line("  br i1 %total.overflow, label %total.overflow.trap, label %limit.check");
+        self.line("total.overflow.trap:");
+        self.emit_runtime_fault(RUNTIME_FAULT_ALLOCATION_OVERFLOW, "0", "0", "null", "0");
+        self.line("limit.check:");
+        self.line(&format!(
+            "  %over.limit = icmp ugt {usize_ty} %total.size, {NATIVE_PRIMITIVE_OUTPUT_LIMIT}"
+        ));
+        self.line("  br i1 %over.limit, label %limit.trap, label %resize.checked");
+        self.line("limit.trap:");
+        self.emit_runtime_fault(RUNTIME_FAULT_ALLOCATION_LIMIT, "0", "0", "null", "0");
+        self.line("resize.checked:");
         self.line("  %data.address = getelementptr inbounds %g1.array, ptr %array, i32 0, i32 3");
         self.line("  %data = load ptr, ptr %data.address");
         self.line(&format!(
@@ -814,8 +909,7 @@ impl<'a> Emitter<'a> {
         self.line("  %data.failed = icmp eq ptr %new.data, null");
         self.line("  br i1 %data.failed, label %allocation.trap, label %data.ready");
         self.line("allocation.trap:");
-        self.line("  call void @llvm.trap()");
-        self.line("  unreachable");
+        self.emit_runtime_fault(RUNTIME_FAULT_ALLOCATION_LIMIT, "0", "0", "null", "0");
         self.line("data.ready:");
         self.line("  store ptr %new.data, ptr %data.address");
         self.line(
@@ -828,8 +922,7 @@ impl<'a> Emitter<'a> {
         self.line("  %initialized.failed = icmp eq ptr %new.initialized, null");
         self.line("  br i1 %initialized.failed, label %initialized.trap, label %initialized.ready");
         self.line("initialized.trap:");
-        self.line("  call void @llvm.trap()");
-        self.line("  unreachable");
+        self.emit_runtime_fault(RUNTIME_FAULT_ALLOCATION_LIMIT, "0", "0", "null", "0");
         self.line("initialized.ready:");
         self.line(&format!(
             "  %added = sub {usize_ty} %new.capacity, %capacity"
@@ -1037,8 +1130,7 @@ impl<'a> Emitter<'a> {
         self.line("  %failed = icmp eq ptr %node, null");
         self.line("  br i1 %failed, label %trap, label %ready");
         self.line("trap:");
-        self.line("  call void @llvm.trap()");
-        self.line("  unreachable");
+        self.emit_runtime_fault(RUNTIME_FAULT_ALLOCATION_LIMIT, "0", "0", "null", "0");
         self.line("ready:");
         self.line("  %head = load ptr, ptr %context");
         for (field, ty, value) in [
@@ -1267,7 +1359,7 @@ impl<'a> Emitter<'a> {
         let failed = self.temp();
         self.line(&format!("  %{guard} = call ptr @malloc({usize_ty} {size})"));
         self.line(&format!("  %{failed} = icmp eq ptr %{guard}, null"));
-        self.emit_trap_if(failed);
+        self.emit_runtime_fault_if(failed, RUNTIME_FAULT_ALLOCATION_LIMIT);
         for (field, ty, value) in [
             (0, "i64", "1".to_owned()),
             (1, "ptr", top.to_owned()),
@@ -1301,7 +1393,7 @@ impl<'a> Emitter<'a> {
             "  %{activation} = call ptr @malloc({usize_ty} {size})"
         ));
         self.line(&format!("  %{failed} = icmp eq ptr %{activation}, null"));
-        self.emit_trap_if(failed);
+        self.emit_runtime_fault_if(failed, RUNTIME_FAULT_ALLOCATION_LIMIT);
         for (field, ty, value) in [
             (0, "i64", "1".to_owned()),
             (1, "ptr", handler.to_owned()),
@@ -1391,7 +1483,7 @@ impl<'a> Emitter<'a> {
         self.line(&format!(
             "  %{callable_failed} = icmp eq ptr %{callable}, null"
         ));
-        self.emit_trap_if(callable_failed);
+        self.emit_runtime_fault_if(callable_failed, RUNTIME_FAULT_ALLOCATION_LIMIT);
         let capture_size = self.emit_array_element_size(&capture_ty);
         let capture = self.temp();
         self.line(&format!(
@@ -1401,7 +1493,7 @@ impl<'a> Emitter<'a> {
         self.line(&format!(
             "  %{capture_failed} = icmp eq ptr %{capture}, null"
         ));
-        self.emit_trap_if(capture_failed);
+        self.emit_runtime_fault_if(capture_failed, RUNTIME_FAULT_ALLOCATION_LIMIT);
         self.line(&format!(
             "  store {capture_ty} {capture_value}, ptr %{capture}"
         ));
@@ -1421,7 +1513,7 @@ impl<'a> Emitter<'a> {
         self.line(&format!(
             "  %{capture_handle_failed} = icmp eq ptr %{capture_handle}, null"
         ));
-        self.emit_trap_if(capture_handle_failed);
+        self.emit_runtime_fault_if(capture_handle_failed, RUNTIME_FAULT_ALLOCATION_LIMIT);
         let capture_count_address = self.temp();
         self.line(&format!(
             "  %{capture_count_address} = getelementptr inbounds %g1.capture, ptr %{capture_handle}, i32 0, i32 0"
@@ -1509,7 +1601,7 @@ impl<'a> Emitter<'a> {
         self.line(&format!(
             "  %{capture_failed} = icmp eq ptr %{capture}, null"
         ));
-        self.emit_trap_if(capture_failed);
+        self.emit_runtime_fault_if(capture_failed, RUNTIME_FAULT_ALLOCATION_LIMIT);
         self.line(&format!(
             "  store {capture_ty} {capture_value}, ptr %{capture}"
         ));
@@ -1527,7 +1619,7 @@ impl<'a> Emitter<'a> {
         ));
         let handle_failed = self.temp();
         self.line(&format!("  %{handle_failed} = icmp eq ptr %{handle}, null"));
-        self.emit_trap_if(handle_failed);
+        self.emit_runtime_fault_if(handle_failed, RUNTIME_FAULT_ALLOCATION_LIMIT);
         let count_address = self.temp();
         self.line(&format!(
             "  %{count_address} = getelementptr inbounds %g1.capture, ptr %{handle}, i32 0, i32 0"
@@ -1555,7 +1647,7 @@ impl<'a> Emitter<'a> {
         ));
         let failed = self.temp();
         self.line(&format!("  %{failed} = icmp eq ptr %{callable}, null"));
-        self.emit_trap_if(failed);
+        self.emit_runtime_fault_if(failed, RUNTIME_FAULT_ALLOCATION_LIMIT);
         let count_address = self.temp();
         self.line(&format!(
             "  %{count_address} = getelementptr inbounds %g1.callable, ptr %{callable}, i32 0, i32 0"
@@ -1649,7 +1741,7 @@ impl<'a> Emitter<'a> {
         self.line(&format!(
             "  %{handler_failed} = icmp eq ptr %{handler}, null"
         ));
-        self.emit_trap_if(handler_failed);
+        self.emit_runtime_fault_if(handler_failed, RUNTIME_FAULT_ALLOCATION_LIMIT);
         let clauses_storage = if clauses.is_empty() {
             "null".to_owned()
         } else {
@@ -1663,7 +1755,7 @@ impl<'a> Emitter<'a> {
             self.line(&format!(
                 "  %{clauses_failed} = icmp eq ptr %{clauses_storage}, null"
             ));
-            self.emit_trap_if(clauses_failed);
+            self.emit_runtime_fault_if(clauses_failed, RUNTIME_FAULT_ALLOCATION_LIMIT);
             format!("%{clauses_storage}")
         };
         let definition_address = self.temp();
@@ -1835,7 +1927,7 @@ impl<'a> Emitter<'a> {
         self.line(&format!(
             "  %{handler_failed} = icmp eq ptr %{handler}, null"
         ));
-        self.emit_trap_if(handler_failed);
+        self.emit_runtime_fault_if(handler_failed, RUNTIME_FAULT_ALLOCATION_LIMIT);
         let clauses_storage = if clauses.is_empty() {
             "null".to_owned()
         } else {
@@ -1847,7 +1939,7 @@ impl<'a> Emitter<'a> {
             ));
             let failed = self.temp();
             self.line(&format!("  %{failed} = icmp eq ptr %{storage}, null"));
-            self.emit_trap_if(failed);
+            self.emit_runtime_fault_if(failed, RUNTIME_FAULT_ALLOCATION_LIMIT);
             format!("%{storage}")
         };
         let definition_address = self.temp();
@@ -2035,7 +2127,7 @@ impl<'a> Emitter<'a> {
         ));
         let failed = self.temp();
         self.line(&format!("  %{failed} = icmp eq ptr %{frame}, null"));
-        self.emit_trap_if(failed);
+        self.emit_runtime_fault_if(failed, RUNTIME_FAULT_ALLOCATION_LIMIT);
         let header = self.temp();
         self.line(&format!(
             "  %{header} = getelementptr inbounds {frame_ty}, ptr %{frame}, i32 0, i32 0"
@@ -2154,7 +2246,7 @@ impl<'a> Emitter<'a> {
         ));
         let clone_failed = self.temp();
         self.line(&format!("  %{clone_failed} = icmp eq ptr %{clone}, null"));
-        self.emit_trap_if(clone_failed);
+        self.emit_runtime_fault_if(clone_failed, RUNTIME_FAULT_ALLOCATION_LIMIT);
         self.line(&format!(
             "  call void @llvm.memcpy.p0.p0.{usize_ty}(ptr %{clone}, ptr %source, {usize_ty} {clone_size}, i1 false)"
         ));
@@ -2732,7 +2824,7 @@ impl<'a> Emitter<'a> {
                 "  %{guard} = call ptr @malloc({usize_ty} {guard_size})"
             ));
             self.line(&format!("  %{failed} = icmp eq ptr %{guard}, null"));
-            self.emit_trap_if(failed);
+            self.emit_runtime_fault_if(failed, RUNTIME_FAULT_ALLOCATION_LIMIT);
             for (field, ty, value) in [
                 (0, "i64", "1".to_owned()),
                 (1, "ptr", "%callable".to_owned()),
@@ -3083,7 +3175,7 @@ impl<'a> Emitter<'a> {
                 ));
                 let failed = self.temp();
                 self.line(&format!("  %{failed} = icmp eq ptr %{payload}, null"));
-                self.emit_trap_if(failed);
+                self.emit_runtime_fault_if(failed, RUNTIME_FAULT_ALLOCATION_LIMIT);
                 for (index, (operand, ty)) in payloads.iter().zip(&payload_types).enumerate() {
                     let value = self.load_operand(function, operand)?;
                     if operand.mode == mir::UseMode::Copy {
@@ -3120,11 +3212,11 @@ impl<'a> Emitter<'a> {
             Terminator::Leave { target, .. } => {
                 self.emit_effect_edge(function, target, BTreeSet::new())?
             }
-            Terminator::Abort { .. } => {
+            Terminator::Abort { message } => self.emit_abort(message.as_deref()),
+            Terminator::Unreachable => {
                 self.line("  call void @llvm.trap()");
                 self.line("  unreachable");
             }
-            Terminator::Unreachable => self.line("  unreachable"),
         }
         Ok(())
     }
@@ -4919,8 +5011,7 @@ impl<'a> Emitter<'a> {
                     "  br i1 %{overflow}, label %trap{trap}, label %cont{continuation}"
                 ));
                 self.line(&format!("trap{trap}:"));
-                self.line("  call void @llvm.trap()");
-                self.line("  unreachable");
+                self.emit_runtime_fault(RUNTIME_FAULT_ARITHMETIC_OVERFLOW, "0", "0", "null", "0");
                 self.line(&format!("cont{continuation}:"));
                 format!("%{value}")
             }
@@ -4939,12 +5030,12 @@ impl<'a> Emitter<'a> {
                 })?;
                 let zero = self.temp();
                 self.line(&format!("  %{zero} = icmp eq {ty} {right}, 0"));
-                let invalid = if self.register_is_signed(function, args[0].register)? {
+                self.emit_runtime_fault_if(zero, RUNTIME_FAULT_DIVISION_BY_ZERO);
+                if self.register_is_signed(function, args[0].register)? {
                     let minimum = signed_minimum(width);
                     let minimum_operand = self.temp();
                     let negative_one = self.temp();
                     let overflow = self.temp();
-                    let invalid = self.temp();
                     self.line(&format!(
                         "  %{minimum_operand} = icmp eq {ty} {left}, {minimum}"
                     ));
@@ -4952,12 +5043,8 @@ impl<'a> Emitter<'a> {
                     self.line(&format!(
                         "  %{overflow} = and i1 %{minimum_operand}, %{negative_one}"
                     ));
-                    self.line(&format!("  %{invalid} = or i1 %{zero}, %{overflow}"));
-                    invalid
-                } else {
-                    zero
-                };
-                self.emit_trap_if(invalid);
+                    self.emit_runtime_fault_if(overflow, RUNTIME_FAULT_ARITHMETIC_OVERFLOW);
+                }
                 let temporary = self.temp();
                 let operation = match (
                     primitive,
@@ -5008,7 +5095,7 @@ impl<'a> Emitter<'a> {
                     self.line(&format!(
                         "  %{invalid} = icmp uge {count_ty} {right}, {width}"
                     ));
-                    self.emit_trap_if(invalid);
+                    self.emit_runtime_fault_if(invalid, RUNTIME_FAULT_INVALID_SHIFT_COUNT);
                 }
                 let right = if shift && loaded[1].0 != ty {
                     let widened = self.temp();
@@ -5047,7 +5134,7 @@ impl<'a> Emitter<'a> {
                     } else {
                         self.line(&format!("  %{invalid} = icmp ne {ty} {value}, 0"));
                     }
-                    self.emit_trap_if(invalid);
+                    self.emit_runtime_fault_if(invalid, RUNTIME_FAULT_ARITHMETIC_OVERFLOW);
                 }
                 let temporary = self.temp();
                 let operation = if primitive == Primitive::IntBitNot {
@@ -5166,7 +5253,7 @@ impl<'a> Emitter<'a> {
                         _ => {}
                     }
                     if let Some(invalid) = invalid {
-                        self.emit_trap_if(invalid);
+                        self.emit_runtime_fault_if(invalid, RUNTIME_FAULT_ARITHMETIC_OVERFLOW);
                     }
                 }
                 if source_width == target_width {
@@ -5335,7 +5422,7 @@ impl<'a> Emitter<'a> {
                 self.line(&format!(
                     "  %{invalid} = or i1 %{unordered}, %{invalid_range}"
                 ));
-                self.emit_trap_if(invalid);
+                self.emit_runtime_fault_if(invalid, RUNTIME_FAULT_ARITHMETIC_OVERFLOW);
                 let temporary = self.temp();
                 let operation = if signed { "fptosi" } else { "fptoui" };
                 self.line(&format!(
@@ -5674,7 +5761,7 @@ impl<'a> Emitter<'a> {
                 self.line(&format!(
                     "  %{overflow} = extractvalue {{ {usize_ty}, i1 }} %{pair}, 1"
                 ));
-                self.emit_trap_if(overflow);
+                self.emit_runtime_fault_if(overflow, RUNTIME_FAULT_ALLOCATION_OVERFLOW);
                 self.line(&format!(
                     "  call void @g1_array_grow(ptr {array}, {usize_ty} %{required})"
                 ));
@@ -5731,7 +5818,7 @@ impl<'a> Emitter<'a> {
                     "  %{length} = load {usize_ty}, ptr %{length_address}"
                 ));
                 self.line(&format!("  %{empty} = icmp eq {usize_ty} %{length}, 0"));
-                self.emit_trap_if(empty);
+                self.emit_runtime_fault_if(empty, RUNTIME_FAULT_INDEX_OUT_OF_BOUNDS);
                 let index = self.temp();
                 self.line(&format!("  %{index} = sub {usize_ty} %{length}, 1"));
                 let (slot, initialized) = self.emit_checked_array_slot(
@@ -5779,7 +5866,7 @@ impl<'a> Emitter<'a> {
                 self.line(&format!(
                     "  %{overflow} = extractvalue {{ {additional_ty}, i1 }} %{pair}, 1"
                 ));
-                self.emit_trap_if(overflow);
+                self.emit_runtime_fault_if(overflow, RUNTIME_FAULT_ALLOCATION_OVERFLOW);
                 self.line(&format!(
                     "  call void @g1_array_grow(ptr {array}, {additional_ty} %{required})"
                 ));
@@ -5840,8 +5927,7 @@ impl<'a> Emitter<'a> {
                     "  br i1 %{occupied}, label %array.drain.trap{trap_label}, label %array.drain.continue{continue_label}"
                 ));
                 self.line(&format!("array.drain.trap{trap_label}:"));
-                self.line("  call void @llvm.trap()");
-                self.line("  unreachable");
+                self.emit_runtime_fault(RUNTIME_FAULT_ARRAY_NOT_DRAINED, "0", "0", "null", "0");
                 self.line(&format!("array.drain.continue{continue_label}:"));
                 let next = self.temp();
                 let more = self.temp();
@@ -5907,7 +5993,7 @@ impl<'a> Emitter<'a> {
                 ));
                 let invalid = self.temp();
                 self.line(&format!("  %{invalid} = xor i1 %{valid}, true"));
-                self.emit_trap_if(invalid);
+                self.emit_runtime_fault_if(invalid, RUNTIME_FAULT_INVALID_UTF8);
                 object.clone()
             }
             Primitive::TextAsBytes => {
@@ -5938,7 +6024,7 @@ impl<'a> Emitter<'a> {
                 self.line(&format!(
                     "  %{invalid} = icmp uge {index_ty} {index}, %{length}"
                 ));
-                self.emit_trap_if(invalid);
+                self.emit_runtime_fault_if(invalid, RUNTIME_FAULT_INDEX_OUT_OF_BOUNDS);
                 let data = self.temp();
                 let address = self.temp();
                 let byte = self.temp();
@@ -5986,7 +6072,7 @@ impl<'a> Emitter<'a> {
                     "  %{beyond} = icmp ugt {index_ty} {end}, %{source_length}"
                 ));
                 self.line(&format!("  %{invalid} = or i1 %{reverse}, %{beyond}"));
-                self.emit_trap_if(invalid);
+                self.emit_runtime_fault_if(invalid, RUNTIME_FAULT_INDEX_OUT_OF_BOUNDS);
                 let length = self.temp();
                 let result = self.temp();
                 let source_data = self.temp();
@@ -6059,7 +6145,7 @@ impl<'a> Emitter<'a> {
                 self.line(&format!(
                     "  %{invalid} = or i1 %{above_unicode}, %{surrogate}"
                 ));
-                self.emit_trap_if(invalid);
+                self.emit_runtime_fault_if(invalid, RUNTIME_FAULT_INVALID_CHARACTER);
                 value.clone()
             }
         };
@@ -6234,11 +6320,11 @@ impl<'a> Emitter<'a> {
                 }
             }
             Terminator::Leave { target, .. } => self.emit_edge(function, target)?,
-            Terminator::Abort { .. } => {
+            Terminator::Abort { message } => self.emit_abort(message.as_deref()),
+            Terminator::Unreachable => {
                 self.line("  call void @llvm.trap()");
                 self.line("  unreachable");
             }
-            Terminator::Unreachable => self.line("  unreachable"),
             other => {
                 return Err(vec![unsupported(
                     function,
@@ -6955,17 +7041,28 @@ impl<'a> Emitter<'a> {
         self.line(&format!("  br label %resume.done{done_label}"));
 
         self.line(&format!("resume.perform{perform_label}:"));
+        let unhandled = self.temp();
         self.emit_effect_request_router(
             function,
             &format!("%{runtime}"),
             &format!("resume.loop{loop_label}"),
-            &format!("resume.invalid{invalid}"),
+            &format!("resume.unhandled{unhandled}"),
             if clone_snapshot {
                 EffectRoutingMode::ReplayBorrowed
             } else {
                 EffectRoutingMode::ReplayConditional(preserve_clauses)
             },
         )?;
+        self.line(&format!("resume.unhandled{unhandled}:"));
+        let protocol = self.load_effect_runtime_field(&format!("%{runtime}"), 2, "i32");
+        let operation = self.load_effect_runtime_field(&format!("%{runtime}"), 3, "i32");
+        self.emit_runtime_fault(
+            RUNTIME_FAULT_UNHANDLED_EFFECT,
+            &protocol,
+            &operation,
+            "null",
+            "0",
+        );
         self.line(&format!("resume.done{done_label}:"));
         Ok(())
     }
@@ -7129,14 +7226,25 @@ impl<'a> Emitter<'a> {
         self.emit_edge_with_preassigned(function, normal, [result].into_iter().collect())?;
 
         self.line(&format!("handle.perform{perform_label}:"));
+        let unhandled = self.temp();
         self.emit_effect_request_router(
             function,
             &format!("%{runtime}"),
             &format!("handle.loop{loop_label}"),
-            &format!("handle.invalid{miss}"),
+            &format!("handle.unhandled{unhandled}"),
             EffectRoutingMode::Initial,
         )?;
 
+        self.line(&format!("handle.unhandled{unhandled}:"));
+        let protocol = self.load_effect_runtime_field(&format!("%{runtime}"), 2, "i32");
+        let operation = self.load_effect_runtime_field(&format!("%{runtime}"), 3, "i32");
+        self.emit_runtime_fault(
+            RUNTIME_FAULT_UNHANDLED_EFFECT,
+            &protocol,
+            &operation,
+            "null",
+            "0",
+        );
         self.line(&format!("handle.invalid{miss}:"));
         self.line("  call void @llvm.trap()");
         self.line("  unreachable");
@@ -7399,7 +7507,7 @@ impl<'a> Emitter<'a> {
                     ));
                     let failed = self.temp();
                     self.line(&format!("  %{failed} = icmp eq ptr %{resumption}, null"));
-                    self.emit_trap_if(failed);
+                    self.emit_runtime_fault_if(failed, RUNTIME_FAULT_ALLOCATION_LIMIT);
                     for (field, value) in [
                         (0, suspended.clone()),
                         (1, format!("%{current}")),
@@ -9131,7 +9239,7 @@ impl<'a> Emitter<'a> {
             "  %{cloned} = call ptr @malloc({usize_ty} {guard_size})"
         ));
         self.line(&format!("  %{failed} = icmp eq ptr %{cloned}, null"));
-        self.emit_trap_if(failed);
+        self.emit_runtime_fault_if(failed, RUNTIME_FAULT_ALLOCATION_LIMIT);
         self.line(&format!(
             "  call void @llvm.memcpy.p0.p0.{usize_ty}(ptr %{cloned}, ptr %{current}, {usize_ty} {guard_size}, i1 false)"
         ));
@@ -9381,7 +9489,7 @@ impl<'a> Emitter<'a> {
             "  %{cloned} = call ptr @malloc({usize_ty} {shell_size})"
         ));
         self.line(&format!("  %{failed} = icmp eq ptr %{cloned}, null"));
-        self.emit_trap_if(failed);
+        self.emit_runtime_fault_if(failed, RUNTIME_FAULT_ALLOCATION_LIMIT);
         self.line(&format!(
             "  call void @llvm.memcpy.p0.p0.{usize_ty}(ptr %{cloned}, ptr {source}, {usize_ty} {shell_size}, i1 false)"
         ));
@@ -9460,7 +9568,7 @@ impl<'a> Emitter<'a> {
             "  %{cloned} = call ptr @malloc({usize_ty} {shell_size})"
         ));
         self.line(&format!("  %{failed} = icmp eq ptr %{cloned}, null"));
-        self.emit_trap_if(failed);
+        self.emit_runtime_fault_if(failed, RUNTIME_FAULT_ALLOCATION_LIMIT);
         self.line(&format!(
             "  call void @llvm.memcpy.p0.p0.{usize_ty}(ptr %{cloned}, ptr {source}, {usize_ty} {shell_size}, i1 false)"
         ));
@@ -9494,7 +9602,7 @@ impl<'a> Emitter<'a> {
             self.line(&format!(
                 "  %{storage_failed} = icmp eq ptr %{storage}, null"
             ));
-            self.emit_trap_if(storage_failed);
+            self.emit_runtime_fault_if(storage_failed, RUNTIME_FAULT_ALLOCATION_LIMIT);
             format!("%{storage}")
         };
         let cloned_clauses_address = self.temp();
@@ -9608,7 +9716,7 @@ impl<'a> Emitter<'a> {
             "  %{cloned} = call ptr @malloc({usize_ty} {handle_size})"
         ));
         self.line(&format!("  %{failed} = icmp eq ptr %{cloned}, null"));
-        self.emit_trap_if(failed);
+        self.emit_runtime_fault_if(failed, RUNTIME_FAULT_ALLOCATION_LIMIT);
         let count_address = self.temp();
         self.line(&format!(
             "  %{count_address} = getelementptr inbounds %g1.capture, ptr %{cloned}, i32 0, i32 0"
@@ -9652,7 +9760,7 @@ impl<'a> Emitter<'a> {
         self.line(&format!(
             "  %{data_failed} = icmp eq ptr %{cloned_data}, null"
         ));
-        self.emit_trap_if(data_failed);
+        self.emit_runtime_fault_if(data_failed, RUNTIME_FAULT_ALLOCATION_LIMIT);
         self.snapshot_capture_fix_types.insert(capture_type);
         self.line(&format!(
             "  call void @g1_snapshot_record(ptr {context}, ptr %{source_data}, {usize_ty} {data_size}, ptr %{cloned_data}, ptr @g1_snapshot_fix_capture_t{capture_type})"
@@ -9929,7 +10037,7 @@ impl<'a> Emitter<'a> {
             "  %{cloned} = call ptr @malloc({usize_ty} {size})"
         ));
         self.line(&format!("  %{failed} = icmp eq ptr %{cloned}, null"));
-        self.emit_trap_if(failed);
+        self.emit_runtime_fault_if(failed, RUNTIME_FAULT_ALLOCATION_LIMIT);
         for field in 0..5 {
             let address = self.temp();
             self.line(&format!(
@@ -10891,7 +10999,7 @@ impl<'a> Emitter<'a> {
         self.line(&format!(
             "  %{overflow} = extractvalue {{ {usize_ty}, i1 }} %{pair}, 1"
         ));
-        self.emit_trap_if(overflow);
+        self.emit_runtime_fault_if(overflow, RUNTIME_FAULT_ALLOCATION_OVERFLOW);
         let result = self.temp();
         let result_data = self.temp();
         let left_data = self.temp();
@@ -10983,7 +11091,6 @@ impl<'a> Emitter<'a> {
         let initialized_slot = self.temp();
         let state = self.temp();
         let wrong_state = self.temp();
-        let invalid = self.temp();
         self.line(&format!(
             "  %{length_address} = getelementptr inbounds %g1.array, ptr {array}, i32 0, i32 0"
         ));
@@ -10993,6 +11100,7 @@ impl<'a> Emitter<'a> {
         self.line(&format!(
             "  %{out_of_bounds} = icmp uge {index_ty} {index}, %{length}"
         ));
+        self.emit_runtime_fault_if(out_of_bounds, RUNTIME_FAULT_INDEX_OUT_OF_BOUNDS);
         self.line(&format!(
             "  %{initialized_address_address} = getelementptr inbounds %g1.array, ptr {array}, i32 0, i32 4"
         ));
@@ -11007,10 +11115,14 @@ impl<'a> Emitter<'a> {
             "  %{wrong_state} = icmp {} i8 %{state}, 0",
             if require_initialized { "eq" } else { "ne" }
         ));
-        self.line(&format!(
-            "  %{invalid} = or i1 %{out_of_bounds}, %{wrong_state}"
-        ));
-        self.emit_trap_if(invalid);
+        self.emit_runtime_fault_if(
+            wrong_state,
+            if require_initialized {
+                RUNTIME_FAULT_EMPTY_ARRAY_SLOT
+            } else {
+                RUNTIME_FAULT_ARRAY_SLOT_ALREADY_INITIALIZED
+            },
+        );
         let data_address = self.temp();
         let data = self.temp();
         let slot = self.temp();
@@ -11061,8 +11173,7 @@ impl<'a> Emitter<'a> {
             "  br i1 %{empty_slot}, label %array.dense.trap{trap_label}, label %array.dense.continue{continue_label}"
         ));
         self.line(&format!("array.dense.trap{trap_label}:"));
-        self.line("  call void @llvm.trap()");
-        self.line("  unreachable");
+        self.emit_runtime_fault(RUNTIME_FAULT_EMPTY_ARRAY_SLOT, "0", "0", "null", "0");
         self.line(&format!("array.dense.continue{continue_label}:"));
         let next = self.temp();
         let more = self.temp();
@@ -11529,6 +11640,52 @@ impl<'a> Emitter<'a> {
         self.line("  call void @llvm.trap()");
         self.line("  unreachable");
         self.line(&format!("cont{continuation}:"));
+    }
+
+    fn emit_runtime_fault(
+        &mut self,
+        detail: u32,
+        arg0: &str,
+        arg1: &str,
+        message: &str,
+        message_len: &str,
+    ) {
+        self.line(&format!(
+            "  call void @g1_runtime_fault(i32 {detail}, i32 {arg0}, i32 {arg1}, ptr {message}, i{} {message_len})",
+            self.pointer_width()
+        ));
+        self.line("  unreachable");
+    }
+
+    fn emit_runtime_fault_if(&mut self, condition: u32, detail: u32) {
+        let fault = self.temp();
+        let continuation = self.temp();
+        self.line(&format!(
+            "  br i1 %{condition}, label %runtime.fault{fault}, label %runtime.cont{continuation}"
+        ));
+        self.line(&format!("runtime.fault{fault}:"));
+        self.emit_runtime_fault(detail, "0", "0", "null", "0");
+        self.line(&format!("runtime.cont{continuation}:"));
+    }
+
+    fn emit_abort(&mut self, message: Option<&str>) {
+        if let Some(message) = message {
+            let bytes = message.as_bytes();
+            let index = self.runtime_fault_literals[bytes];
+            let pointer = format!(
+                "getelementptr inbounds ([{} x i8], ptr @g1.runtime_fault.{index}, i32 0, i32 0)",
+                bytes.len()
+            );
+            self.emit_runtime_fault(
+                RUNTIME_FAULT_EXPLICIT_ABORT,
+                "1",
+                "0",
+                &pointer,
+                &bytes.len().to_string(),
+            );
+        } else {
+            self.emit_runtime_fault(RUNTIME_FAULT_EXPLICIT_ABORT, "0", "0", "null", "0");
+        }
     }
 
     fn emit_host_fault_if(&mut self, condition: u32, operation: u32) {
