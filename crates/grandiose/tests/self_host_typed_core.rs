@@ -1,0 +1,637 @@
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ffi::OsString,
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
+
+use grandiose::{
+    CompileOptions, LlvmOptions, OptimizationLevel, ast,
+    compiler_core::{self as core, ExprKind, Stmt},
+    modules::{ModuleResolution, ResolvedProgram},
+    source_bundle::{Segment, SourceBundle},
+};
+use grandiose_vm::{Constant, I64, SystemHost, U64, UNIT, Value, Vm, verify};
+
+const INPUT_NAME: &str = "typed-core-input.glorious";
+const WRAPPER: &str = "\nmain() { () }\n";
+
+fn repository_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_owned()
+}
+
+fn self_host_bundle() -> SourceBundle {
+    let root = repository_root().join("self-host/src");
+    let primary = Segment::new(
+        root.join("main.glorious").to_string_lossy(),
+        "mod frontend;\n\nmain() { run_compiler_host(frontend::elaboration::application) }\n",
+    );
+    let paths = [
+        root.join("frontend/frontend.glorious"),
+        root.join("frontend/lexer/lexer.glorious"),
+        root.join("frontend/scanner/scanner.glorious"),
+        root.join("frontend/headers/headers.glorious"),
+        root.join("frontend/bodies/bodies.glorious"),
+        root.join("frontend/resolution/resolution.glorious"),
+        root.join("frontend/elaboration/elaboration.glorious"),
+    ];
+    SourceBundle::distributed(
+        primary,
+        paths.into_iter().map(|path| {
+            let source = fs::read_to_string(&path).unwrap();
+            Segment::new(path.to_string_lossy(), source)
+        }),
+    )
+}
+
+fn push_u32(output: &mut Vec<u8>, value: u32) {
+    output.extend(value.to_le_bytes());
+}
+
+fn push_u64(output: &mut Vec<u8>, value: u64) {
+    output.extend(value.to_le_bytes());
+}
+
+fn push_string(output: &mut Vec<u8>, value: &str) {
+    push_u32(output, value.len().try_into().unwrap());
+    output.extend(value.as_bytes());
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct FunctionIdentity {
+    path: Vec<String>,
+    name: String,
+}
+
+fn encode_identity(output: &mut Vec<u8>, identity: &FunctionIdentity) {
+    push_u32(output, identity.path.len().try_into().unwrap());
+    for component in &identity.path {
+        push_string(output, component);
+    }
+    push_string(output, &identity.name);
+}
+
+fn source_identity(
+    graph: &ModuleResolution,
+    bundle: &SourceBundle,
+    function: &ast::Function,
+) -> Result<FunctionIdentity, String> {
+    let module = graph
+        .owner(bundle, function.span)
+        .ok_or_else(|| format!("no module owns source function {:?}", function.name))?;
+    Ok(FunctionIdentity {
+        path: graph.module(module).path.clone(),
+        name: function.name.clone(),
+    })
+}
+
+struct SourceFunction<'a> {
+    source: &'a ast::Function,
+    identity: FunctionIdentity,
+    backend_name: String,
+}
+
+fn source_functions<'a>(
+    resolved: &'a ResolvedProgram,
+    bundle: &SourceBundle,
+    original_len: usize,
+) -> Result<Vec<SourceFunction<'a>>, String> {
+    let input = &bundle.segments()[1];
+    let input_end = input.global_range().start + original_len;
+    let mut functions = resolved
+        .program
+        .functions
+        .iter()
+        .filter(|function| {
+            let start = function.span.start;
+            start >= input.global_range().start && start < input_end
+        })
+        .map(|function| {
+            let module = resolved
+                .resolution
+                .owner(bundle, function.span)
+                .ok_or_else(|| format!("source function {:?} has no owner", function.name))?;
+            let backend_name = match resolved.resolution.definition_at(function.span) {
+                Some(definition) => resolved.resolution.backend_spelling(definition),
+                None if resolved.resolution.module(module).path.is_empty() => function.name.clone(),
+                None => {
+                    return Err(format!(
+                        "non-root source function {:?} has no resolved definition",
+                        function.name
+                    ));
+                }
+            };
+            Ok(SourceFunction {
+                source: function,
+                identity: source_identity(&resolved.resolution, bundle, function)?,
+                backend_name,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    functions.sort_by_key(|function| function.source.span.start);
+    Ok(functions)
+}
+
+fn check_type(ty: u32) -> Result<(), String> {
+    match ty {
+        UNIT | U64 | I64 => Ok(()),
+        _ => Err(format!(
+            "typed-Core fixture escaped scalar contract with type t{ty}"
+        )),
+    }
+}
+
+struct Encoder<'a> {
+    declaration_identities: &'a BTreeMap<u32, FunctionIdentity>,
+    current_function: &'a FunctionIdentity,
+    locals: BTreeMap<u32, u32>,
+    next_local: u32,
+}
+
+impl Encoder<'_> {
+    fn bind(&mut self, local: u32) -> Result<u32, String> {
+        let normalized = self.next_local;
+        self.next_local = self
+            .next_local
+            .checked_add(1)
+            .ok_or_else(|| "normalized local identity overflow".to_owned())?;
+        if self.locals.insert(local, normalized).is_some() {
+            return Err(format!("Core local l{local} was bound twice"));
+        }
+        Ok(normalized)
+    }
+
+    fn local(&self, local: u32) -> Result<u32, String> {
+        self.locals
+            .get(&local)
+            .copied()
+            .ok_or_else(|| format!("Core references unbound local l{local}"))
+    }
+
+    fn target(&self, declaration: u32) -> Result<&FunctionIdentity, String> {
+        self.declaration_identities
+            .get(&declaration)
+            .ok_or_else(|| format!("call escaped focused corpus through fn#{declaration}"))
+    }
+
+    fn expression(&mut self, output: &mut Vec<u8>, expression: &core::Expr) -> Result<(), String> {
+        check_type(expression.ty)?;
+        if expression.reference.is_some() || !expression.reference_fields.is_empty() {
+            return Err(
+                "scalar typed-Core fixture unexpectedly retained reference evidence".into(),
+            );
+        }
+
+        match &expression.kind {
+            ExprKind::Unit => {
+                output.push(0);
+                push_u32(output, expression.ty);
+            }
+            ExprKind::Constant(value) => {
+                output.push(1);
+                push_u32(output, expression.ty);
+                match value {
+                    Constant::U64(value) if expression.ty == U64 => push_u64(output, *value),
+                    Constant::I64(value) if expression.ty == I64 => {
+                        output.extend(value.to_le_bytes())
+                    }
+                    _ => {
+                        return Err(format!(
+                            "unsupported constant in focused typed-Core corpus: {value:?}:t{}",
+                            expression.ty
+                        ));
+                    }
+                }
+            }
+            ExprKind::Local { local, copy } => {
+                output.push(2);
+                push_u32(output, expression.ty);
+                push_u32(output, self.local(*local)?);
+                output.push(u8::from(*copy));
+            }
+            ExprKind::Call { declaration, args } => {
+                output.push(3);
+                push_u32(output, expression.ty);
+                encode_identity(output, self.target(*declaration)?);
+                push_u32(output, args.len().try_into().unwrap());
+                for argument in args {
+                    self.expression(output, argument)?;
+                }
+            }
+            ExprKind::TailCall { declaration, args } => {
+                output.push(4);
+                push_u32(output, expression.ty);
+                encode_identity(output, self.target(*declaration)?);
+                push_u32(output, args.len().try_into().unwrap());
+                for argument in args {
+                    self.expression(output, argument)?;
+                }
+            }
+            ExprKind::CallSelf { args } => {
+                output.push(3);
+                push_u32(output, expression.ty);
+                encode_identity(output, self.current_function);
+                push_u32(output, args.len().try_into().unwrap());
+                for argument in args {
+                    self.expression(output, argument)?;
+                }
+            }
+            ExprKind::TailCallSelf { args } => {
+                output.push(4);
+                push_u32(output, expression.ty);
+                encode_identity(output, self.current_function);
+                push_u32(output, args.len().try_into().unwrap());
+                for argument in args {
+                    self.expression(output, argument)?;
+                }
+            }
+            ExprKind::Block { statements, tail } => {
+                output.push(5);
+                push_u32(output, expression.ty);
+                push_u32(output, statements.len().try_into().unwrap());
+                for statement in statements {
+                    self.statement(output, statement)?;
+                }
+                self.expression(output, tail)?;
+            }
+            other => {
+                return Err(format!(
+                    "unsupported wrapper in focused typed-Core oracle: {other:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn statement(&mut self, output: &mut Vec<u8>, statement: &Stmt) -> Result<(), String> {
+        match statement {
+            Stmt::Let {
+                local,
+                name,
+                ty,
+                value,
+                ..
+            } => {
+                check_type(*ty)?;
+                let normalized = self.bind(*local)?;
+                output.push(1);
+                push_u32(output, normalized);
+                push_string(output, name);
+                push_u32(output, *ty);
+                self.expression(output, value)
+            }
+            Stmt::Expr(expression) => {
+                output.push(2);
+                self.expression(output, expression)
+            }
+            other => Err(format!(
+                "unsupported statement in focused typed-Core oracle: {other:?}"
+            )),
+        }
+    }
+}
+
+fn encode_success(
+    output: &mut Vec<u8>,
+    bundle: &SourceBundle,
+    resolved: &ResolvedProgram,
+    original_len: usize,
+    core: &core::Program,
+) -> Result<(), String> {
+    let sources = source_functions(resolved, bundle, original_len)?;
+    let by_backend = core
+        .functions
+        .iter()
+        .map(|function| (function.name.as_str(), function))
+        .collect::<BTreeMap<_, _>>();
+
+    let mut declarations = BTreeMap::new();
+    let mut seen_identities = BTreeSet::new();
+    for source in &sources {
+        if !seen_identities.insert(source.identity.clone()) {
+            return Err(format!("duplicate source identity {:?}", source.identity));
+        }
+        let function = by_backend
+            .get(source.backend_name.as_str())
+            .ok_or_else(|| {
+                format!(
+                    "no Core function corresponds to source identity {:?} ({:?})",
+                    source.identity, source.backend_name
+                )
+            })?;
+        if declarations
+            .insert(function.declaration, source.identity.clone())
+            .is_some()
+        {
+            return Err(format!(
+                "two source functions share Core declaration fn#{}",
+                function.declaration
+            ));
+        }
+    }
+
+    push_u32(output, sources.len().try_into().unwrap());
+    for source in &sources {
+        let function = by_backend[source.backend_name.as_str()];
+        if function.global_factory
+            || function.receiver_mode.is_some()
+            || function.receiver_type != UNIT
+            || !function.receiver_captures.is_empty()
+            || function.no_return
+            || !function.outward_protocols.is_empty()
+            || !function.regions.is_empty()
+        {
+            return Err(format!(
+                "focused source function acquired unsupported Core ABI state: {function:?}"
+            ));
+        }
+        check_type(function.result)?;
+
+        encode_identity(output, &source.identity);
+        push_u32(output, function.params.len().try_into().unwrap());
+        let mut encoder = Encoder {
+            declaration_identities: &declarations,
+            current_function: &source.identity,
+            locals: BTreeMap::new(),
+            next_local: 0,
+        };
+        for parameter in &function.params {
+            check_type(parameter.ty)?;
+            let normalized = encoder.bind(parameter.local)?;
+            push_u32(output, normalized);
+            push_string(output, &parameter.name);
+            push_u32(output, parameter.ty);
+        }
+        push_u32(output, function.result);
+        encoder.expression(output, &function.body)?;
+    }
+    Ok(())
+}
+
+fn encode_rust_core(output: &mut Vec<u8>, source: &str) {
+    if grandiose::lexer::lex(source).is_err() {
+        output.push(1);
+        return;
+    }
+
+    let augmented = format!("{source}{WRAPPER}");
+    let bundle = SourceBundle::distributed(Segment::new(INPUT_NAME, augmented), []);
+    let Ok(program) = grandiose::modules::parse_bundle(&bundle) else {
+        output.push(3);
+        return;
+    };
+    let Ok(resolved) = grandiose::modules::resolve_program(&bundle, program) else {
+        output.push(3);
+        return;
+    };
+    let Ok(phases) = grandiose::compile_bundle_to_phases_with_options(
+        &bundle,
+        CompileOptions {
+            optimization_level: OptimizationLevel::O0,
+        },
+    ) else {
+        output.push(4);
+        return;
+    };
+
+    let mut encoded = Vec::new();
+    encode_success(&mut encoded, &bundle, &resolved, source.len(), &phases.core)
+        .unwrap_or_else(|error| panic!("Rust Core projection failed for {source:?}: {error}"));
+    output.push(0);
+    output.extend(encoded);
+}
+
+fn corpus(directory: &Path) -> Vec<PathBuf> {
+    let valid = [
+        "probe_unit() { () }",
+        "probe_i64() -> i64 { 7 } probe_u64() -> u64 { 7 }",
+        "probe_param(value: i64) -> i64 { value }",
+        "probe_target(value: i64) -> i64 { value } \
+         probe_forward(value: i64) -> i64 { probe_target(value) }",
+        "probe_let() -> i64 { let value = 1; value }",
+        "probe_chain() -> i64 { let first = 1; let second = first; second }",
+        "probe_shadow(value: i64) -> i64 { \
+         { let value = 2; value }; value }",
+        "probe_target(value: i64) -> i64 { value } \
+         probe_statement(value: i64) { probe_target(value); () }",
+    ];
+    let errors = [
+        "probe_bad_result() -> i64 { () }",
+        "probe_bad_default_result() { 1 }",
+        "probe_target(value: i64) -> i64 { value } \
+         probe_bad_arity() -> i64 { probe_target() }",
+        "probe_target(value: u64) -> u64 { value } \
+         probe_bad_argument(value: i64) -> u64 { probe_target(value) }",
+        "probe_value() -> i64 { 1 } \
+         probe_bad_call_result() -> u64 { probe_value() }",
+    ];
+
+    let mut paths = Vec::new();
+    for (index, source) in valid.into_iter().enumerate() {
+        let path = directory.join(format!("valid-{index}.glorious"));
+        fs::write(&path, source).unwrap();
+        paths.push(path);
+    }
+    for (index, source) in errors.into_iter().enumerate() {
+        let path = directory.join(format!("error-{index}.glorious"));
+        fs::write(&path, source).unwrap();
+        paths.push(path);
+    }
+    paths
+}
+
+#[test]
+fn rust_typed_core_oracle_classifies_the_focused_corpus() {
+    let directory = tempfile::tempdir().unwrap();
+    for path in corpus(directory.path()) {
+        let mut encoded = Vec::new();
+        encode_rust_core(&mut encoded, &fs::read_to_string(&path).unwrap());
+        let expected = if path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("valid-")
+        {
+            0
+        } else {
+            4
+        };
+        assert_eq!(
+            encoded.first().copied(),
+            Some(expected),
+            "unexpected Rust-oracle status for input {}: {encoded:?}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn self_hosted_typed_core_matches_rust_in_vm_and_native_execution() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            if std::env::var_os("G1_SELF_HOST_TYPED_CORE_CHECK_ONLY").is_some() {
+                let bundle = self_host_bundle();
+                grandiose::compile_bundle_to_phases_with_options(
+                    &bundle,
+                    CompileOptions {
+                        optimization_level: OptimizationLevel::O0,
+                    },
+                )
+                .unwrap_or_else(|errors| {
+                    for error in &errors {
+                        if let Some(span) = error.span
+                            && let Some(segment) = bundle.segment_at(span.start)
+                        {
+                            let base = segment.global_range().start;
+                            eprintln!(
+                                "{}:{}..{} (global {}..{}): {}",
+                                segment.name(),
+                                span.start - base,
+                                span.end - base,
+                                span.start,
+                                span.end,
+                                error.message
+                            );
+                        }
+                    }
+                    panic!("{errors:#?}")
+                });
+                return;
+            }
+
+            let directory = tempfile::tempdir().unwrap();
+            let corpus = corpus(directory.path());
+            let mut expected = Vec::new();
+            push_u32(&mut expected, corpus.len().try_into().unwrap());
+            for path in &corpus {
+                encode_rust_core(&mut expected, &fs::read_to_string(path).unwrap());
+            }
+
+            let phases = grandiose::compile_bundle_to_phases_with_options(
+                &self_host_bundle(),
+                CompileOptions {
+                    optimization_level: OptimizationLevel::O2,
+                },
+            )
+            .unwrap();
+            let entry = phases.artifact.entry_function.unwrap();
+            let verified = verify(phases.artifact.clone()).unwrap();
+
+            for (index, path) in corpus.iter().enumerate() {
+                let output_path = directory.path().join(format!("vm-{index}.bin"));
+                let vm = Vm::with_host(
+                    verified.clone(),
+                    ["process.args", "fs.read", "fs.write", "diagnostic"],
+                    SystemHost::new(vec![
+                        output_path.clone().into_os_string(),
+                        path.clone().into_os_string(),
+                    ]),
+                )
+                .unwrap();
+                assert_eq!(
+                    vm.run(entry, vec![]).unwrap_or_else(|error| {
+                        panic!("VM input {index} ({}) failed: {error:?}", path.display())
+                    }),
+                    Value::Unit
+                );
+                let mut expected_one = Vec::new();
+                push_u32(&mut expected_one, 1);
+                encode_rust_core(&mut expected_one, &fs::read_to_string(path).unwrap());
+                assert_eq!(
+                    fs::read(&output_path).unwrap(),
+                    expected_one,
+                    "VM typed Core diverged for input {index} ({})",
+                    path.display()
+                );
+            }
+
+            let vm_all_path = directory.path().join("vm-all.bin");
+            let vm_args = std::iter::once(vm_all_path.clone().into_os_string())
+                .chain(corpus.iter().map(|path| path.clone().into_os_string()))
+                .collect::<Vec<OsString>>();
+            let vm = Vm::with_host(
+                verified,
+                ["process.args", "fs.read", "fs.write", "diagnostic"],
+                SystemHost::new(vm_args),
+            )
+            .unwrap();
+            assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
+            assert_eq!(
+                fs::read(&vm_all_path).unwrap(),
+                expected,
+                "VM whole-corpus typed Core diverged"
+            );
+
+            let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
+            let llvm = directory.path().join("self-host-typed-core.ll");
+            let executable = directory.path().join("self-host-typed-core");
+            fs::write(&llvm, module.ir).unwrap();
+            let clang = Command::new("clang")
+                .arg(&llvm)
+                .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
+                .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
+                .arg("-O0")
+                .arg("-o")
+                .arg(&executable)
+                .output()
+                .unwrap();
+            assert!(
+                clang.status.success(),
+                "{}",
+                String::from_utf8_lossy(&clang.stderr)
+            );
+
+            let native_all_path = directory.path().join("native-all.bin");
+            let native_all = Command::new(&executable)
+                .arg(&native_all_path)
+                .args(&corpus)
+                .output()
+                .unwrap();
+            assert!(
+                native_all.status.success(),
+                "native whole-corpus status: {:?}\n{}",
+                native_all.status,
+                String::from_utf8_lossy(&native_all.stderr)
+            );
+            assert_eq!(
+                fs::read(&native_all_path).unwrap(),
+                expected,
+                "native whole-corpus typed Core diverged"
+            );
+
+            for (index, path) in corpus.iter().enumerate() {
+                let output_path = directory.path().join(format!("native-{index}.bin"));
+                let native = Command::new(&executable)
+                    .arg(&output_path)
+                    .arg(path)
+                    .output()
+                    .unwrap();
+                assert!(
+                    native.status.success(),
+                    "native input {index} ({}) status: {:?}\n{}",
+                    path.display(),
+                    native.status,
+                    String::from_utf8_lossy(&native.stderr)
+                );
+                let mut expected_one = Vec::new();
+                push_u32(&mut expected_one, 1);
+                encode_rust_core(&mut expected_one, &fs::read_to_string(path).unwrap());
+                assert_eq!(
+                    fs::read(&output_path).unwrap(),
+                    expected_one,
+                    "native typed Core diverged for input {index} ({})",
+                    path.display()
+                );
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}

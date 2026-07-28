@@ -34,7 +34,8 @@ fn self_host_bundle() -> SourceBundle {
             .replace("pub mod scanner;\n", "")
             .replace("pub mod headers;\n", "")
             .replace("pub mod bodies;\n", "")
-            .replace("pub mod resolution;\n", "");
+            .replace("pub mod resolution;\n", "")
+            .replace("pub mod elaboration;\n", "");
         Segment::new(path.to_string_lossy(), source)
     });
     let primary = segments.next().unwrap();

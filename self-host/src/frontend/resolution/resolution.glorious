@@ -436,41 +436,49 @@ resolve_block_children(
                             super::headers::parsed_source(headers),
                             token
                         ) {
-                            TokenKind::Ident(name) => handle resolve_expression(
-                                headers,
-                                declarations,
-                                body,
-                                bindings,
-                                output,
-                                value,
-                                module_plus_one
-                            ) {
-                                Result::Err(error) => Result::Err(move error),
-                                Result::Ok(_) => {
-                                    let local = Vec::len(&output.locals)
-                                        / usize_value(2);
-                                    push_word(
-                                        &mut output.locals,
-                                        u32_from_usize(token)
-                                    );
-                                    push_word(&mut output.locals, expression);
-                                    push_binding(
-                                        bindings,
-                                        Id::to_u32(move name),
-                                        2,
-                                        super::bodies::body_shell(body),
-                                        u32_from_usize(local)
-                                    );
-                                    resolve_block_children(
-                                        headers,
-                                        declarations,
-                                        body,
-                                        bindings,
-                                        output,
-                                        expression,
-                                        module_plus_one,
-                                        child + u32_value(1)
-                                    )
+                            TokenKind::Ident(name) => {
+                                // Allocate the source binder identity when its
+                                // declaration is encountered, but do not add it
+                                // to lexical lookup until its initializer has
+                                // resolved. Nested initializer lets therefore
+                                // cannot steal an earlier local ID.
+                                let local = Vec::len(&output.locals)
+                                    / usize_value(2);
+                                push_word(
+                                    &mut output.locals,
+                                    u32_from_usize(token)
+                                );
+                                push_word(&mut output.locals, expression);
+                                handle resolve_expression(
+                                    headers,
+                                    declarations,
+                                    body,
+                                    bindings,
+                                    output,
+                                    value,
+                                    module_plus_one
+                                ) {
+                                    Result::Err(error) =>
+                                        Result::Err(move error),
+                                    Result::Ok(_) => {
+                                        push_binding(
+                                            bindings,
+                                            Id::to_u32(move name),
+                                            2,
+                                            super::bodies::body_shell(body),
+                                            u32_from_usize(local)
+                                        );
+                                        resolve_block_children(
+                                            headers,
+                                            declarations,
+                                            body,
+                                            bindings,
+                                            output,
+                                            expression,
+                                            module_plus_one,
+                                            child + u32_value(1)
+                                        )
+                                    }
                                 }
                             },
                             _ => Result::Err(resolution_error(3, token, token))

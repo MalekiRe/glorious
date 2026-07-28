@@ -40,7 +40,9 @@ fn self_host_bundle() -> SourceBundle {
     SourceBundle::distributed(
         primary,
         paths.into_iter().map(|path| {
-            let source = fs::read_to_string(&path).unwrap();
+            let source = fs::read_to_string(&path)
+                .unwrap()
+                .replace("pub mod elaboration;\n", "");
             Segment::new(path.to_string_lossy(), source)
         }),
     )
@@ -324,6 +326,8 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "probe_same_block() { let x = 1; let x = x; x }",
         "probe_outer() { let x = 1; { x }; x }",
         "probe_nested_shadow() { let x = 1; { let x = x; x }; x }",
+        "probe_initializer_order() { \
+         let outer = { let inner = 1; inner }; outer }",
         "probe_target() { 1 } \
          probe_local_call() { let f = probe_target; f() }",
         "probe_pick() { 1 } \

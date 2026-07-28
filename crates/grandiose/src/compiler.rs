@@ -7120,6 +7120,10 @@ fn compile_program_with_phases(
                     )
                     .map(|ty| reference_types.id(&ty))
                 },
+                &|declaration| match declaration {
+                    typeck::DeclarationKey::Function(name) => runtime_bindings.leaf(name),
+                    typeck::DeclarationKey::Global(_) => None,
+                },
             )
         {
             return Err(vec![
@@ -10017,6 +10021,141 @@ pub(crate) fn normalize_ground_trait_methods(
         }
     }
 
+    fn receiver_mentions_binder(ty: &ReceiverType, binders: &BTreeSet<String>) -> bool {
+        match ty {
+            ReceiverType::Name(name) => binders.contains(name),
+            ReceiverType::Application(constructor, arguments) => {
+                receiver_mentions_binder(constructor, binders)
+                    || arguments
+                        .iter()
+                        .any(|argument| receiver_mentions_binder(argument, binders))
+            }
+            ReceiverType::Tuple(elements) => elements
+                .iter()
+                .any(|element| receiver_mentions_binder(element, binders)),
+            ReceiverType::Shared(referent) | ReceiverType::Unique(referent) => {
+                receiver_mentions_binder(referent, binders)
+            }
+            ReceiverType::Const(_) | ReceiverType::Never => false,
+        }
+    }
+
+    /// Infer the result of an ordinary generic direct call from the ground
+    /// argument shapes already available to the trait-surface pass. This pass
+    /// runs before full specialization, but it still needs enough structural
+    /// information to type projections and operators inside enum-handler
+    /// clauses.
+    fn structural_call_result(
+        program: &Program,
+        callee: &Expr,
+        argument_types: &[Option<ReceiverType>],
+        expected: Option<&ReceiverType>,
+        call_span: Span,
+        trusted_standard_range: Option<&std::ops::Range<usize>>,
+    ) -> Option<ReceiverType> {
+        if trusted_standard_range
+            .is_some_and(|range| call_span.start >= range.start && call_span.end <= range.end)
+        {
+            return None;
+        }
+        let ExprKind::Variable(path) = &callee.kind else {
+            return None;
+        };
+        let [name] = path.as_ref() else {
+            return None;
+        };
+        let function = program
+            .functions
+            .iter()
+            .find(|function| function.name == name.as_ref())?;
+        let binders = function
+            .generics
+            .iter()
+            .flat_map(|generics| &generics.params)
+            .filter(|parameter| {
+                matches!(
+                    parameter.kind,
+                    crate::ast::GenericParamKind::Type | crate::ast::GenericParamKind::Const(_)
+                )
+            })
+            .map(|parameter| parameter.name.clone())
+            .collect::<BTreeSet<_>>();
+        let result = function
+            .return_type
+            .as_ref()
+            .and_then(|result| source_receiver_type(program, result))
+            .unwrap_or_else(|| ReceiverType::Name("Unit".into()));
+        if binders.is_empty() {
+            return Some(result);
+        }
+        let mut substitutions = BTreeMap::new();
+        for (parameter, actual) in function.params.iter().zip(argument_types) {
+            let Some(actual) = actual else {
+                continue;
+            };
+            let pattern = source_receiver_type(program, &parameter.ty)?;
+            if !matches_receiver(&pattern, actual, &binders, &mut substitutions) {
+                return None;
+            }
+        }
+        if let Some(expected) = expected
+            && !matches_receiver(&result, expected, &binders, &mut substitutions)
+        {
+            return None;
+        }
+        let result = substitute_receiver(&result, &substitutions);
+        (!receiver_mentions_binder(&result, &binders)).then_some(result)
+    }
+
+    fn bind_handler_clause_patterns(
+        program: &Program,
+        clause: &crate::ast::HandlerClause,
+        computation: &ReceiverType,
+        locals: &mut BTreeMap<String, ReceiverType>,
+    ) {
+        let computation = expand_receiver_alias(program, computation, &mut BTreeSet::new());
+        let (name, arguments) = match &computation {
+            ReceiverType::Name(name) => (name.as_str(), &[][..]),
+            ReceiverType::Application(constructor, arguments) => {
+                let ReceiverType::Name(name) = constructor.as_ref() else {
+                    return;
+                };
+                (name.as_str(), arguments.as_slice())
+            }
+            _ => return,
+        };
+        if clause.effect != name {
+            return;
+        }
+        let Some(declaration) = program.enums.iter().find(|item| item.name == name) else {
+            return;
+        };
+        let Some(variant) = declaration
+            .variants
+            .iter()
+            .find(|item| item.name == clause.operation)
+        else {
+            return;
+        };
+        let substitutions = declaration
+            .generics
+            .iter()
+            .flat_map(|generics| &generics.params)
+            .map(|parameter| parameter.name.clone())
+            .zip(arguments.iter().cloned())
+            .collect::<BTreeMap<_, _>>();
+        for (pattern, field) in clause.patterns.iter().zip(&variant.fields) {
+            if let Some(ty) = source_receiver_type(program, field) {
+                bind_refinement_pattern(
+                    program,
+                    pattern,
+                    &substitute_receiver(&ty, &substitutions),
+                    locals,
+                );
+            }
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn rewrite(
         expression: &mut Expr,
@@ -10031,6 +10170,7 @@ pub(crate) fn normalize_ground_trait_methods(
         expected: Option<&ReceiverType>,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<ReceiverType> {
+        let expression_span = expression.span;
         match &mut expression.kind {
             ExprKind::Variable(path) if path.len() == 1 => locals.get(path[0].as_ref()).cloned(),
             ExprKind::Struct { name, fields } => {
@@ -10392,7 +10532,9 @@ pub(crate) fn normalize_ground_trait_methods(
                 let comparison_trait_call = qualified
                     .as_ref()
                     .is_some_and(|(name, _)| matches!(name.as_str(), "Equal" | "Less" | "Greater"));
-                if let Some((trait_name, method)) = qualified.filter(|_| qualified_trait_call) {
+                let qualified_receiver = if let Some((trait_name, method)) =
+                    qualified.filter(|_| qualified_trait_call)
+                {
                     // Homogeneous operator traits can still be selected when
                     // a refinement/deconstruction leaves the left operand
                     // temporarily opaque but the right operand is concrete.
@@ -10536,6 +10678,7 @@ pub(crate) fn normalize_ground_trait_methods(
                             .with_note(format!("available receivers: {available}")),
                         );
                     }
+                    receiver
                 } else {
                     rewrite(
                         Rc::make_mut(callee),
@@ -10550,22 +10693,27 @@ pub(crate) fn normalize_ground_trait_methods(
                         None,
                         errors,
                     );
-                }
+                    None
+                };
                 if qualified_trait_call {
                     if comparison_trait_call {
                         Some(ReceiverType::Name("Bool".into()))
                     } else {
                         expected.cloned().or_else(|| {
-                            argument_types
-                                .iter()
-                                .find_map(Clone::clone)
+                            qualified_receiver
                                 .map(|receiver| receiver_subject_type(&receiver).clone())
                         })
                     }
                 } else {
-                    expected.cloned().or_else(|| {
-                        concrete_call_result(program, expression, trusted_standard_range)
-                    })
+                    structural_call_result(
+                        program,
+                        callee,
+                        &argument_types,
+                        expected,
+                        expression_span,
+                        trusted_standard_range,
+                    )
+                    .or_else(|| expected.cloned())
                 }
             }
             ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
@@ -10730,7 +10878,7 @@ pub(crate) fn normalize_ground_trait_methods(
                 computation,
                 clauses,
             } => {
-                rewrite(
+                let computation_ty = rewrite(
                     Rc::make_mut(computation),
                     locals,
                     program,
@@ -10743,9 +10891,13 @@ pub(crate) fn normalize_ground_trait_methods(
                     expected,
                     errors,
                 );
+                let mut result = None;
                 for clause in Rc::make_mut(clauses) {
                     let saved = locals.clone();
-                    rewrite(
+                    if let Some(computation_ty) = &computation_ty {
+                        bind_handler_clause_patterns(program, clause, computation_ty, locals);
+                    }
+                    let clause_result = rewrite(
                         &mut clause.body,
                         locals,
                         program,
@@ -10755,12 +10907,15 @@ pub(crate) fn normalize_ground_trait_methods(
                         dot_methods,
                         deferred_evidence,
                         trusted_standard_range,
-                        expected,
+                        result.as_ref().or(expected),
                         errors,
                     );
+                    if result.is_none() {
+                        result = clause_result;
+                    }
                     *locals = saved;
                 }
-                None
+                result.or_else(|| expected.cloned())
             }
             ExprKind::Binary { lhs, rhs, .. } => {
                 rewrite(
@@ -27837,7 +27992,12 @@ impl<'a> CoreLowerer<'a> {
             | core::ExprKind::ProjectBorrow { .. }
             | core::ExprKind::TemporaryProjectBorrow { .. }
             | core::ExprKind::Reborrow { .. }
-            | core::ExprKind::Call { .. } => {
+            | core::ExprKind::Call { .. }
+            | core::ExprKind::Block { .. }
+            | core::ExprKind::Primitive {
+                primitive: Primitive::ArrayGetBorrowShared | Primitive::ArrayGetBorrowUnique,
+                ..
+            } => {
                 for origin in origins.into_values() {
                     self.release_loan(origin);
                 }
@@ -30999,28 +31159,31 @@ impl<'a> CoreLowerer<'a> {
                             };
                             (condition, &synthetic_pattern)
                         };
+                    let borrowed_local = |path: &[Rc<str>]| {
+                        (path.len() == 1)
+                            .then(|| self.locals.get(path[0].as_ref()))
+                            .flatten()
+                            .filter(|local| {
+                                !self.moved.contains(&local.local)
+                                    && !self.suspended.contains(&local.local)
+                                    && !self.empty_referents.contains(&local.local)
+                            })
+                            .and_then(|local| match self.resolved_type(local.ty) {
+                                ResolvedType::Shared(referent) | ResolvedType::Unique(referent) => {
+                                    Some((local.local, local.ty, self.structural_id(&referent)))
+                                }
+                                _ => None,
+                            })
+                    };
                     let borrowed_subject = match &subject_source.kind {
                         ExprKind::Unary {
                             op: UnaryOp::Dereference,
                             operand,
                         } => match &operand.kind {
-                            ExprKind::Variable(path) if path.len() == 1 => self
-                                .locals
-                                .get(path[0].as_ref())
-                                .filter(|local| {
-                                    !self.moved.contains(&local.local)
-                                        && !self.suspended.contains(&local.local)
-                                        && !self.empty_referents.contains(&local.local)
-                                })
-                                .and_then(|local| match self.resolved_type(local.ty) {
-                                    ResolvedType::Shared(referent)
-                                    | ResolvedType::Unique(referent) => {
-                                        Some((local.local, local.ty, self.structural_id(&referent)))
-                                    }
-                                    _ => None,
-                                }),
+                            ExprKind::Variable(path) => borrowed_local(path),
                             _ => None,
                         },
+                        ExprKind::Variable(path) => borrowed_local(path),
                         _ => None,
                     };
                     let consuming_subject = borrowed_subject.is_none();
@@ -31047,6 +31210,10 @@ impl<'a> CoreLowerer<'a> {
                     let refined_variant = match (&subject.kind, &decision.kind) {
                         (
                             core::ExprKind::Local { local, .. },
+                            core::DecisionPatternKind::Variant { variant, .. },
+                        ) => Some((*local, *variant)),
+                        (
+                            core::ExprKind::LocalReferenceView { local },
                             core::DecisionPatternKind::Variant { variant, .. },
                         ) => Some((*local, *variant)),
                         _ => None,
@@ -32151,6 +32318,114 @@ impl<'a> CoreLowerer<'a> {
                     .map(|function| function.name.clone());
                 if let Some(template) = runtime_callable_wrapper {
                     return self.inline_late_generic_call(&template, arguments, span, expected);
+                }
+                if let Some(
+                    primitive @ (Primitive::ArrayGetBorrowShared | Primitive::ArrayGetBorrowUnique),
+                ) = self.runtime_bindings.leaf(name)
+                    && let Some(result) = expected
+                {
+                    if !self
+                        .runtime_bindings
+                        .call_is_authorized(name, span, self.privacy_domains)
+                    {
+                        return Err(vec![type_error(
+                            span,
+                            "manifest-bound primitive leaves may be called only from their trusted standard-library source segment",
+                        )]);
+                    }
+                    let unique = primitive == Primitive::ArrayGetBorrowUnique;
+                    let resolved_result = self.resolved_type(result);
+                    if !matches!(
+                        resolved_result,
+                        ResolvedType::Unique(_) if unique
+                    ) && !matches!(
+                        resolved_result,
+                        ResolvedType::Shared(_) if !unique
+                    ) {
+                        return Err(vec![self.mismatch(span, result, UNIT)]);
+                    }
+                    if arguments.len() != 2 {
+                        return Err(vec![type_error(
+                            span,
+                            format!("`{name}` expects 2 arguments, got {}", arguments.len()),
+                        )]);
+                    }
+                    let mut args = Vec::with_capacity(arguments.len());
+                    for argument in arguments.iter() {
+                        let argument = self.expression(argument, None)?;
+                        self.validate_anonymous_use(
+                            &argument,
+                            1,
+                            "late primitive call argument temporary",
+                        )?;
+                        self.register_temporary_reference(&argument);
+                        args.push(argument);
+                    }
+                    let mut origin = Self::expression_reference_fields(&args[0])
+                        .into_values()
+                        .next()
+                        .ok_or_else(|| {
+                            self.borrow_error(
+                                span,
+                                "an Array element borrow leaf requires its first reference argument to carry a tracked origin",
+                            )
+                        })?;
+                    self.adjust_transferred_reference_kind(&origin, unique);
+                    origin.unique = unique;
+                    self.finish_consumed_reference_paths(&args[0], &BTreeSet::from([Vec::new()]));
+                    self.finish_consumed_reference(&args[1], false);
+                    let mut expression =
+                        self.typed(span, result, core::ExprKind::Primitive { primitive, args });
+                    Self::set_expression_reference_fields(
+                        &mut expression,
+                        singleton_reference_fields(Some(origin)),
+                    );
+                    return Ok(expression);
+                }
+                if let Some(primitive) = self.runtime_bindings.leaf(name)
+                    && let Some(result) = expected
+                {
+                    if !self
+                        .runtime_bindings
+                        .call_is_authorized(name, span, self.privacy_domains)
+                    {
+                        return Err(vec![type_error(
+                            span,
+                            "manifest-bound primitive leaves may be called only from their trusted standard-library source segment",
+                        )]);
+                    }
+                    let mut args = Vec::with_capacity(arguments.len());
+                    for argument in arguments.iter() {
+                        let argument = self.expression(argument, None)?;
+                        self.validate_anonymous_use(
+                            &argument,
+                            1,
+                            "late primitive call argument temporary",
+                        )?;
+                        self.register_temporary_reference(&argument);
+                        args.push(argument);
+                    }
+                    for argument in &args {
+                        self.finish_consumed_reference(argument, false);
+                    }
+                    return Ok(self.typed(
+                        span,
+                        result,
+                        core::ExprKind::Primitive { primitive, args },
+                    ));
+                }
+                if !self.signatures.contains_key(name)
+                    && self
+                        .function_templates
+                        .iter()
+                        .any(|function| function.name == name && function.generics.is_some())
+                {
+                    // Structural branch/refinement lowering can synthesize a
+                    // generic standard-library helper after specialization
+                    // discovery has assigned call-site keys. Elaborate that
+                    // source template at the late site instead of requiring an
+                    // impossible pre-existing monomorphic signature.
+                    return self.inline_late_generic_call(name, arguments, span, expected);
                 }
                 let Some(signature) = self.signatures.get(name).cloned() else {
                     return Err(vec![unsupported(
@@ -34536,7 +34811,15 @@ impl<'a> CoreLowerer<'a> {
                         (!origin.external).then_some((origin.root, origin.path)),
                     )
                 } else {
-                    let reference = self.expression(reference, None)?;
+                    // A dereference assignment fixes the temporary reference's
+                    // result type even when the reference expression is a
+                    // generic call synthesized after specialization
+                    // discovery. Propagate that fact so late elaboration
+                    // preserves `&mut T` instead of defaulting an opaque
+                    // trusted leaf body to `()`.
+                    let reference_expected =
+                        Some(self.reference_id(expected.unwrap_or(value.ty), true));
+                    let reference = self.expression(reference, reference_expected)?;
                     let ResolvedType::Unique(referent) = self.resolved_type(reference.ty) else {
                         return Err(self.borrow_error(
                             reference.span,

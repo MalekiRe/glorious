@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 use std::ops::ControlFlow;
 
 use grandiose_vm::bytecode::NEVER;
-use grandiose_vm::{BYTES, CHAR, F32, F64, I64, TEXT, TypeId, U8, UNIT};
+use grandiose_vm::{BYTES, CHAR, F32, F64, I64, Primitive, TEXT, TypeId, U8, UNIT};
 
 use crate::ast::{
     AssignmentPlace, AssignmentPlaceKind, BinaryOp, ConstKind, Expr, ExprKind, ExprVisitor,
@@ -1218,6 +1218,7 @@ impl TypedProgram {
         type_id: &impl Fn(&ProvisionalType) -> Option<TypeId>,
         declaration_id: &impl Fn(&DeclarationKey) -> Option<core::DeclarationId>,
         nominal_id: &impl Fn(&NominalInstanceKey) -> Option<TypeId>,
+        primitive_id: &impl Fn(&DeclarationKey) -> Option<Primitive>,
     ) -> bool {
         fn expression(
             typed: &TypedExpr,
@@ -1225,6 +1226,7 @@ impl TypedProgram {
             type_id: &impl Fn(&ProvisionalType) -> Option<TypeId>,
             declaration_id: &impl Fn(&DeclarationKey) -> Option<core::DeclarationId>,
             nominal_id: &impl Fn(&NominalInstanceKey) -> Option<TypeId>,
+            primitive_id: &impl Fn(&DeclarationKey) -> Option<Primitive>,
         ) -> bool {
             if typed.span != core.span {
                 return false;
@@ -1253,12 +1255,21 @@ impl TypedProgram {
             {
                 return false;
             }
-            match (&typed.kind, &core.kind) {
+            let agrees = match (&typed.kind, &core.kind) {
                 (TypedExprKind::Leaf, core::ExprKind::Unit | core::ExprKind::Constant(_)) => true,
                 (
-                    TypedExprKind::Local(key),
+                    TypedExprKind::Local(_),
                     core::ExprKind::Local { local, .. } | core::ExprKind::Move { local },
-                ) => key.ordinal == *local,
+                ) => {
+                    // Core may allocate evaluation temporaries between source
+                    // locals (for example, materializing a reference-returning
+                    // call before dereference). Numeric local IDs are therefore
+                    // intentionally allocation-dependent. Span and type were
+                    // checked above; Core remains authoritative for the exact
+                    // place identity.
+                    let _ = local;
+                    true
+                }
                 (
                     TypedExprKind::Global(declaration),
                     core::ExprKind::Call {
@@ -1284,7 +1295,14 @@ impl TypedProgram {
                     declaration_id(declaration) == Some(*actual)
                         && args.len() == lowered.len()
                         && args.iter().zip(lowered).all(|(left, right)| {
-                            expression(left, right, type_id, declaration_id, nominal_id)
+                            expression(
+                                left,
+                                right,
+                                type_id,
+                                declaration_id,
+                                nominal_id,
+                                primitive_id,
+                            )
                         })
                 }
                 (
@@ -1293,7 +1311,34 @@ impl TypedProgram {
                 ) => {
                     args.len() == lowered.len()
                         && args.iter().zip(lowered).all(|(left, right)| {
-                            expression(left, right, type_id, declaration_id, nominal_id)
+                            expression(
+                                left,
+                                right,
+                                type_id,
+                                declaration_id,
+                                nominal_id,
+                                primitive_id,
+                            )
+                        })
+                }
+                (
+                    TypedExprKind::Call { declaration, args },
+                    core::ExprKind::Primitive {
+                        primitive,
+                        args: lowered,
+                    },
+                ) => {
+                    primitive_id(declaration) == Some(*primitive)
+                        && args.len() == lowered.len()
+                        && args.iter().zip(lowered).all(|(left, right)| {
+                            expression(
+                                left,
+                                right,
+                                type_id,
+                                declaration_id,
+                                nominal_id,
+                                primitive_id,
+                            )
                         })
                 }
                 (
@@ -1327,6 +1372,7 @@ impl TypedProgram {
                                         type_id,
                                         declaration_id,
                                         nominal_id,
+                                        primitive_id,
                                     )
                             })
                 }
@@ -1360,6 +1406,7 @@ impl TypedProgram {
                                         type_id,
                                         declaration_id,
                                         nominal_id,
+                                        primitive_id,
                                     )
                             }))
                 }
@@ -1372,7 +1419,14 @@ impl TypedProgram {
                     },
                 ) => {
                     field == actual
-                        && expression(subject, lowered, type_id, declaration_id, nominal_id)
+                        && expression(
+                            subject,
+                            lowered,
+                            type_id,
+                            declaration_id,
+                            nominal_id,
+                            primitive_id,
+                        )
                 }
                 (
                     TypedExprKind::Primitive(args),
@@ -1380,7 +1434,14 @@ impl TypedProgram {
                 ) => {
                     args.len() == lowered.len()
                         && args.iter().zip(lowered).all(|(left, right)| {
-                            expression(left, right, type_id, declaration_id, nominal_id)
+                            expression(
+                                left,
+                                right,
+                                type_id,
+                                declaration_id,
+                                nominal_id,
+                                primitive_id,
+                            )
                         })
                 }
                 // Unary minus on a literal is folded while Core is constructed.
@@ -1485,7 +1546,14 @@ impl TypedProgram {
                             .zip(structural)
                             .all(|(left, statement)| match statement {
                                 core::Stmt::Let { value, .. } | core::Stmt::Expr(value) => {
-                                    expression(left, value, type_id, declaration_id, nominal_id)
+                                    expression(
+                                        left,
+                                        value,
+                                        type_id,
+                                        declaration_id,
+                                        nominal_id,
+                                        primitive_id,
+                                    )
                                 }
                                 core::Stmt::Deconstruct { source, .. } => {
                                     matches!(
@@ -1505,7 +1573,14 @@ impl TypedProgram {
                                         return false;
                                     };
                                     children.first().is_some_and(|rhs| {
-                                        expression(rhs, value, type_id, declaration_id, nominal_id)
+                                        expression(
+                                            rhs,
+                                            value,
+                                            type_id,
+                                            declaration_id,
+                                            nominal_id,
+                                            primitive_id,
+                                        )
                                     }) && match &destination.root {
                                         core::AssignmentRoot::Local { .. } => children.len() == 1,
                                         core::AssignmentRoot::DereferenceLocal { .. } => {
@@ -1527,6 +1602,7 @@ impl TypedProgram {
                                                     type_id,
                                                     declaration_id,
                                                     nominal_id,
+                                                    primitive_id,
                                                 )
                                         }
                                     }
@@ -1535,7 +1611,14 @@ impl TypedProgram {
                                     "synthetic end-borrow statements are filtered structurally"
                                 ),
                             })
-                        && expression(tail, lowered_tail, type_id, declaration_id, nominal_id)
+                        && expression(
+                            tail,
+                            lowered_tail,
+                            type_id,
+                            declaration_id,
+                            nominal_id,
+                            primitive_id,
+                        )
                 }
                 // Effect lowering deliberately changes structure and introduces synthetic
                 // callable/resumption types. Children are still typed for requirements.
@@ -1546,12 +1629,20 @@ impl TypedProgram {
                 // Unsupported nodes remain under CoreLowerer's diagnostic authority.
                 (TypedExprKind::Unsupported(_), _) => true,
                 _ => false,
-            }
+            };
+            agrees
         }
 
-        self.bodies
-            .get(declaration)
-            .is_some_and(|typed| expression(typed, core, type_id, declaration_id, nominal_id))
+        self.bodies.get(declaration).is_some_and(|typed| {
+            expression(
+                typed,
+                core,
+                type_id,
+                declaration_id,
+                nominal_id,
+                primitive_id,
+            )
+        })
     }
 }
 

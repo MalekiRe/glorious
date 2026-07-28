@@ -78,6 +78,10 @@ pub expression_token_start_at(value: &ParsedBody, index: u32) -> usize {
     Vec::index(&value.nodes, usize_from_u32(index)).tokens.start
 }
 
+pub expression_token_end_at(value: &ParsedBody, index: u32) -> usize {
+    Vec::index(&value.nodes, usize_from_u32(index)).tokens.end
+}
+
 pub expression_child_count_at(value: &ParsedBody, index: u32) -> u32 {
     Vec::index(&value.nodes, usize_from_u32(index)).children.count
 }

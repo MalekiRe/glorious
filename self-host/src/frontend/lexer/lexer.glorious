@@ -202,6 +202,18 @@ pub number_spelling(value: &NumberToken) -> Span {
 
 pub number_base(value: &NumberToken) -> &NumberBase { &value.base }
 
+pub number_base_code(value: &NumberToken) -> u8 { value.base_code }
+
+pub number_is_float(value: &NumberToken) -> Bool {
+    handle Option::as_ref(&value.fraction) {
+        Result::Ok(_) => true,
+        Result::Err(_) => handle Option::as_ref(&value.exponent) {
+            Result::Ok(_) => true,
+            Result::Err(_) => false
+        }
+    }
+}
+
 pub number_digits(value: &NumberToken) -> Span {
     Span { start: value.digits.start, end: value.digits.end }
 }

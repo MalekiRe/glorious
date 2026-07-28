@@ -51,6 +51,150 @@ fn comparison_uses_the_known_operand_when_handler_binding_is_opaque() {
 }
 
 #[test]
+fn generic_option_handler_binding_types_field_projection_for_operator_selection() {
+    let source = r#"
+        struct TypeId { index: u32 }
+        struct CallableHeader { result: Option<TypeId> }
+
+        result_index_plus_one(value: &CallableHeader) -> u32 {
+            handle Option::as_ref(&value.result) {
+                Result::Err(_) => 0,
+                Result::Ok(result) => result.index + wrapping_convert_to_u32(1)
+            }
+        }
+
+        main() -> () { () }
+    "#;
+    grandiose::compile_source_to_bytecode("generic-option-handler-projection.glorious", source)
+        .unwrap();
+}
+
+#[test]
+fn structural_call_results_flow_through_nested_operators_and_projection() {
+    let source = r#"
+        struct Entry { value: u32 }
+
+        usize_value<T>(value: T) -> usize { wrapping_convert_to_usize(value) }
+        usize_from_u32(value: u32) -> usize { wrapping_convert_to_usize(value) }
+        u32_value<T>(value: T) -> u32 { wrapping_convert_to_u32(value) }
+
+        projected(values: &Vec<Entry>, index: usize) -> u32 {
+            Vec::index(values, index * usize_value(4) + usize_value(1)).value
+        }
+
+        before(values: &Vec<Entry>, shell: u32) -> Bool {
+            usize_from_u32(shell) < Vec::len(values)
+        }
+
+        equal(found: u32) -> Bool {
+            found == u32_value(0)
+        }
+
+        main() -> () { () }
+    "#;
+    grandiose::compile_source_to_bytecode("nested-structural-call-results.glorious", source)
+        .unwrap();
+}
+
+#[test]
+fn inferred_handler_result_types_flow_to_following_operators() {
+    let source = r#"
+        u8_value(value: u8) -> u8 { value }
+
+        selected(flag: Bool) -> Bool {
+            let kind = handle flag {
+                Result::Err(_) => u8_value(0),
+                Result::Ok(_) => u8_value(1)
+            };
+            kind == u8_value(0)
+        }
+
+        main() -> () { () }
+    "#;
+    grandiose::compile_source_to_bytecode("inferred-handler-result.glorious", source).unwrap();
+}
+
+#[test]
+fn public_generic_associated_call_remains_callable_inside_comparison() {
+    let source = r#"
+        fill_zeroes(value: &mut Vec<u32>, count: usize) -> Bool {
+            Vec::len(value) < count
+        }
+
+        main() -> () { () }
+    "#;
+    grandiose::compile_source_to_bytecode("public-generic-associated-comparison.glorious", source)
+        .unwrap();
+}
+
+#[test]
+fn generic_array_len_wrapper_remains_manifest_lowered() {
+    let source = r#"
+        generic_len<T>(value: &Vec<T>) -> usize {
+            Vec::len(value)
+        }
+
+        len(value: &Vec<u32>) -> usize {
+            generic_len(value)
+        }
+
+        main() -> () { () }
+    "#;
+    grandiose::compile_source_to_bytecode("late-generic-array-len.glorious", source).unwrap();
+}
+
+#[test]
+fn byte_view_wrapper_agrees_with_manifest_bytes_slice_lowering() {
+    let source = r#"
+        copy(value: &ByteView) -> Bytes {
+            ByteView::to_bytes(value)
+        }
+
+        main() -> () { () }
+    "#;
+    grandiose::compile_source_to_bytecode("late-byte-view-bytes-slice.glorious", source).unwrap();
+}
+
+#[test]
+fn assignment_accepts_temporary_unique_reference_from_generic_associated_call() {
+    let source = r#"
+        struct Values { items: Vec<u32> }
+
+        write(value: &mut Values) -> () {
+            *Vec::index_mut(&mut value.items, wrapping_convert_to_usize(0)) =
+                wrapping_convert_to_u32(42);
+            ()
+        }
+
+        main() -> () { () }
+    "#;
+    grandiose::compile_source_to_bytecode(
+        "generic-associated-unique-reference-assignment.glorious",
+        source,
+    )
+    .unwrap();
+}
+
+#[test]
+fn borrowed_enum_scrutinee_supports_non_consuming_variant_patterns() {
+    let source = r#"
+        enum NumberBase { Binary, Octal, Decimal, Hex }
+
+        number_base(value: &NumberBase) -> u32 {
+            handle value {
+                NumberBase::Binary => 2,
+                NumberBase::Octal => 8,
+                NumberBase::Decimal => 10,
+                NumberBase::Hex => 16
+            }
+        }
+
+        main() -> () { () }
+    "#;
+    grandiose::compile_source_to_bytecode("borrowed-enum-handler.glorious", source).unwrap();
+}
+
+#[test]
 fn reference_carrier_pattern_binding_preserves_its_origin() {
     let source = r#"
         struct ProbeRange { count: u32 }

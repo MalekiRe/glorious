@@ -6046,11 +6046,14 @@ impl<'a> Walker<'a> {
                 // that same effective argument type or an enclosing generic
                 // call can disappear merely because its nested monomorphic
                 // argument used `value` instead of `&*value`.
-                if matches!((&resolved_formal, &actual),
-                    (ProvisionalType::Shared(expected), ProvisionalType::Unique(actual))
-                        if expected == actual)
+                if let (ProvisionalType::Shared(_), ProvisionalType::Unique(actual_referent)) =
+                    (&resolved_formal, &actual)
                 {
-                    actual = resolved_formal.clone();
+                    // A unique reference always admits a shared reborrow. Do
+                    // not require the referent to be ground before applying
+                    // that coercion: a generic formal such as `&Vec<T>` must
+                    // still infer `T` from an actual `&mut Vec<u32>`.
+                    actual = ProvisionalType::shared((**actual_referent).clone());
                 }
                 if !unify_inference(formal, &actual, &mutable_inference, &mut substitutions)
                     && !self.symbolic_validation

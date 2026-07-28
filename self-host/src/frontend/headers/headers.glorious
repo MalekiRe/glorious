@@ -286,6 +286,64 @@ pub parameter_name_raw(value: &Parameter) -> u32 {
 
 pub parameter_name_token(value: &Parameter) -> usize { value.name_token }
 
+pub parameter_type_index(value: &Parameter) -> u32 { value.ty.index }
+
+pub callable_generic_count(value: &CallableHeader) -> u32 {
+    value.generics.count
+}
+
+pub callable_has_effects(value: &CallableHeader) -> Bool {
+    Option::is_some(&value.effects)
+}
+
+pub callable_result_index_plus_one(value: &CallableHeader) -> u32 {
+    handle Option::as_ref(&value.result) {
+        Result::Err(_) => 0,
+        Result::Ok(result) => result.index + wrapping_convert_to_u32(1)
+    }
+}
+
+pub type_kind_code_at(value: &HeaderIndex, index: u32) -> u8 {
+    let node = Vec::index(&value.types, wrapping_convert_to_usize(index));
+    node.kind_code
+}
+
+pub type_child_count_at(value: &HeaderIndex, index: u32) -> u32 {
+    let node = Vec::index(&value.types, wrapping_convert_to_usize(index));
+    node.children.count
+}
+
+pub type_name_count_at(value: &HeaderIndex, index: u32) -> u32 {
+    let node = Vec::index(&value.types, wrapping_convert_to_usize(index));
+    node.names.count
+}
+
+pub type_name_raw_at(
+    value: &HeaderIndex,
+    index: u32,
+    ordinal: u32
+) -> u32 {
+    let node = Vec::index(&value.types, wrapping_convert_to_usize(index));
+    let name = Vec::index(
+        &value.names,
+        wrapping_convert_to_usize(node.names.start + ordinal)
+    );
+    Id::to_u32(name.name)
+}
+
+pub type_name_token_at(
+    value: &HeaderIndex,
+    index: u32,
+    ordinal: u32
+) -> usize {
+    let node = Vec::index(&value.types, wrapping_convert_to_usize(index));
+    let name = Vec::index(
+        &value.names,
+        wrapping_convert_to_usize(node.names.start + ordinal)
+    );
+    name.token
+}
+
 pub token_range_start(value: &HeaderTokenRange) -> usize { value.start }
 
 pub token_range_end(value: &HeaderTokenRange) -> usize { value.end }
