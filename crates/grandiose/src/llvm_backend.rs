@@ -42,6 +42,25 @@ fn effect_frame_tail_target(terminator: &Terminator) -> Option<u32> {
     }
 }
 
+fn known_direct_call_target(terminator: &Terminator, self_declaration: u32) -> Option<u32> {
+    match terminator {
+        Terminator::Call { function, .. }
+        | Terminator::CallKnownReceiver { function, .. }
+        | Terminator::TailCall { function, .. }
+        | Terminator::TailCallKnownReceiver { function, .. } => Some(*function),
+        Terminator::CallSelf { .. } | Terminator::TailCallSelf { .. } => Some(self_declaration),
+        Terminator::CallIndirect {
+            known_function: Some(function),
+            ..
+        }
+        | Terminator::TailCallIndirect {
+            known_function: Some(function),
+            ..
+        } => Some(*function),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LlvmModule {
     pub ir: String,
@@ -458,6 +477,32 @@ impl<'a> Emitter<'a> {
                     .iter()
                     .filter_map(|block| effect_frame_tail_target(&block.terminator)),
             );
+        }
+        // A source recursion cycle can mix terminal and ordinary calls. If
+        // only its tail-call members are framed, an ordinary member invokes a
+        // fresh scheduler wrapper on every trip around the cycle and still
+        // exhausts the native stack. Frame every member of a statically known
+        // direct-call SCC so ordinary calls become heap-frame continuations in
+        // the existing scheduler.
+        let mut pending = function
+            .blocks
+            .iter()
+            .filter_map(|block| known_direct_call_target(&block.terminator, function.declaration))
+            .collect::<Vec<_>>();
+        let mut visited = BTreeSet::new();
+        while let Some(target) = pending.pop() {
+            if target == function.declaration {
+                return true;
+            }
+            if !visited.insert(target) {
+                continue;
+            }
+            let Some(target) = self.phases.mir.functions.get(target as usize) else {
+                continue;
+            };
+            pending.extend(target.blocks.iter().filter_map(|block| {
+                known_direct_call_target(&block.terminator, target.declaration)
+            }));
         }
         false
     }
