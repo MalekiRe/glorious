@@ -2002,12 +2002,23 @@ impl<'a> Emitter<'a> {
         self.line("entry.allocas:");
         for (register, ty) in function.register_types.iter().enumerate() {
             self.line(&format!("  %r{register} = alloca {}", self.llvm_type(*ty)?));
+            for field in self.ordinary_aggregate_field_layout(function, register as u32)? {
+                self.line(&format!(
+                    "  %fieldinit{register}.{} = alloca i8",
+                    field.owned_mask_index
+                ));
+                self.line(&format!(
+                    "  store i8 0, ptr %fieldinit{register}.{}",
+                    field.owned_mask_index
+                ));
+            }
         }
         if function.receiver_mode.is_some() {
             self.line(&format!(
                 "  store {} %receiver, ptr %r0",
                 self.llvm_type(function.receiver_type)?
             ));
+            self.emit_set_ordinary_aggregate_fields(function, 0, true)?;
         }
         for (parameter, ty) in function.params.iter().enumerate() {
             self.line(&format!(
@@ -2015,13 +2026,87 @@ impl<'a> Emitter<'a> {
                 self.llvm_type(*ty)?,
                 parameter + 1
             ));
+            self.emit_set_ordinary_aggregate_fields(function, parameter as u32 + 1, true)?;
         }
         self.line(&format!("  br label %bb{}", function.entry));
 
         for block in &function.blocks {
             self.line(&format!("bb{}:", block.id));
             for instruction in &block.statements {
-                self.emit_instruction(function, &instruction.kind)?;
+                if let InstructionKind::Drop { owner } = &instruction.kind {
+                    let owner_type =
+                        self.register_runtime_type(function, owner.register)?;
+                    if !self
+                        .ordinary_aggregate_field_layout(function, owner.register)?
+                        .is_empty()
+                    {
+                        self.emit_ordinary_drop_aggregate_register(
+                            function,
+                            owner.register,
+                            owner_type,
+                        )?;
+                        continue;
+                    }
+                }
+                if let InstructionKind::Copy { dst, src } = &instruction.kind {
+                    if !self
+                        .ordinary_aggregate_field_layout(function, src.register)?
+                        .is_empty()
+                    {
+                        let value = self.load_operand(function, src)?;
+                        let ty = self.register_type(function, *dst)?;
+                        self.emit_retain_ordinary_aggregate_register(
+                            function,
+                            src.register,
+                            &value,
+                        )?;
+                        self.line(&format!("  store {ty} {value}, ptr %r{dst}"));
+                    } else {
+                        self.emit_instruction(function, &instruction.kind)?;
+                    }
+                } else {
+                    self.emit_instruction(function, &instruction.kind)?;
+                }
+                match &instruction.kind {
+                    InstructionKind::Copy { dst, src } | InstructionKind::Move { dst, src } => {
+                        self.emit_copy_ordinary_aggregate_fields(
+                            function,
+                            src.register,
+                            *dst,
+                        )?;
+                        if matches!(&instruction.kind, InstructionKind::Move { .. }) {
+                            self.emit_set_ordinary_aggregate_fields(
+                                function,
+                                src.register,
+                                false,
+                            )?;
+                        }
+                    }
+                    _ => {
+                        if let Some(destination) = instruction.kind.destination() {
+                            self.emit_set_ordinary_aggregate_fields(
+                                function,
+                                destination,
+                                true,
+                            )?;
+                        }
+                    }
+                }
+                if let InstructionKind::ProjectMove { src, field, .. } = &instruction.kind {
+                    let source_type =
+                        self.register_runtime_type(function, src.register)?;
+                    if !self
+                        .ordinary_aggregate_field_layout(function, src.register)?
+                        .is_empty()
+                    {
+                        let runtime_field =
+                            self.runtime_aggregate_owned_field_index(source_type, *field)?;
+                        self.line(&format!(
+                            "  store i8 0, ptr %fieldinit{}.{runtime_field}",
+                            src.register
+                        ));
+                    }
+                }
             }
             self.emit_terminator(index, function, &block.terminator)?;
         }
@@ -2032,6 +2117,71 @@ impl<'a> Emitter<'a> {
 
     fn effect_frame_type(&self, function_index: usize) -> String {
         format!("%g1.effect_frame.f{function_index}")
+    }
+
+    fn ordinary_aggregate_field_layout(
+        &self,
+        function: &mir::Function,
+        register: u32,
+    ) -> Result<Vec<AggregateFieldLayout>, Vec<Diagnostic>> {
+        let ty = self.register_runtime_type(function, register)?;
+        match self.runtime_type(ty)? {
+            Type::Tuple { .. } | Type::Struct { .. } | Type::BindingPack { .. } => {
+                self.runtime_aggregate_field_layout(ty, 0)
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    fn emit_set_ordinary_aggregate_fields(
+        &mut self,
+        function: &mir::Function,
+        register: u32,
+        initialized: bool,
+    ) -> Result<(), Vec<Diagnostic>> {
+        for field in self.ordinary_aggregate_field_layout(function, register)? {
+            self.line(&format!(
+                "  store i8 {}, ptr %fieldinit{register}.{}",
+                u8::from(initialized),
+                field.owned_mask_index
+            ));
+        }
+        Ok(())
+    }
+
+    fn emit_copy_ordinary_aggregate_fields(
+        &mut self,
+        function: &mir::Function,
+        source: u32,
+        destination: u32,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let source_fields = self.ordinary_aggregate_field_layout(function, source)?;
+        let destination_fields =
+            self.ordinary_aggregate_field_layout(function, destination)?;
+        if source_fields.len() != destination_fields.len() {
+            return Err(vec![unsupported(
+                function,
+                "aggregate field-state transfer layout mismatch",
+            )]);
+        }
+        let flags = source_fields
+            .iter()
+            .map(|field| {
+                let flag = self.temp();
+                self.line(&format!(
+                    "  %{flag} = load i8, ptr %fieldinit{source}.{}",
+                    field.owned_mask_index
+                ));
+                format!("%{flag}")
+            })
+            .collect::<Vec<_>>();
+        for (field, flag) in destination_fields.iter().zip(flags) {
+            self.line(&format!(
+                "  store i8 {flag}, ptr %fieldinit{destination}.{}",
+                field.owned_mask_index
+            ));
+        }
+        Ok(())
     }
 
     fn effect_field_layout(
@@ -4489,6 +4639,110 @@ impl<'a> Emitter<'a> {
         self.line(&format!("  br label %effect.drop.done{done_label}"));
         self.line(&format!("effect.drop.done{done_label}:"));
         self.emit_effect_set_initialized(function, register, false)
+    }
+
+    fn emit_ordinary_drop_aggregate_register(
+        &mut self,
+        function: &mir::Function,
+        register: u32,
+        aggregate_type: TypeId,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let fields = self.ordinary_aggregate_field_layout(function, register)?;
+        let aggregate_ty = self.llvm_type(aggregate_type)?;
+        let value = self.load_register(function, register)?;
+        let mut all_present = "true".to_owned();
+        for field in &fields {
+            let flag = self.temp();
+            let present = self.temp();
+            self.line(&format!(
+                "  %{flag} = load i8, ptr %fieldinit{register}.{}",
+                field.owned_mask_index
+            ));
+            self.line(&format!("  %{present} = icmp ne i8 %{flag}, 0"));
+            if all_present == "true" {
+                all_present = format!("%{present}");
+            } else {
+                let combined = self.temp();
+                self.line(&format!(
+                    "  %{combined} = and i1 {all_present}, %{present}"
+                ));
+                all_present = format!("%{combined}");
+            }
+        }
+        let full_label = self.temp();
+        let partial_label = self.temp();
+        let done_label = self.temp();
+        self.line(&format!(
+            "  br i1 {all_present}, label %drop.aggregate.full{full_label}, label %drop.aggregate.partial{partial_label}"
+        ));
+        self.line(&format!("drop.aggregate.full{full_label}:"));
+        self.emit_destroy(aggregate_type, &value, function)?;
+        self.line(&format!("  br label %drop.aggregate.done{done_label}"));
+        self.line(&format!("drop.aggregate.partial{partial_label}:"));
+        for field in fields.iter().rev() {
+            let flag = self.temp();
+            let present = self.temp();
+            let drop_label = self.temp();
+            let field_done = self.temp();
+            self.line(&format!(
+                "  %{flag} = load i8, ptr %fieldinit{register}.{}",
+                field.owned_mask_index
+            ));
+            self.line(&format!("  %{present} = icmp ne i8 %{flag}, 0"));
+            self.line(&format!(
+                "  br i1 %{present}, label %drop.aggregate.field{drop_label}, label %drop.aggregate.field.done{field_done}"
+            ));
+            self.line(&format!("drop.aggregate.field{drop_label}:"));
+            let extracted = self.temp();
+            self.line(&format!(
+                "  %{extracted} = extractvalue {aggregate_ty} {value}, {}",
+                field.physical_index
+            ));
+            self.emit_destroy(field.runtime_type, &format!("%{extracted}"), function)?;
+            self.line(&format!(
+                "  br label %drop.aggregate.field.done{field_done}"
+            ));
+            self.line(&format!("drop.aggregate.field.done{field_done}:"));
+        }
+        self.line(&format!("  br label %drop.aggregate.done{done_label}"));
+        self.line(&format!("drop.aggregate.done{done_label}:"));
+        self.emit_set_ordinary_aggregate_fields(function, register, false)
+    }
+
+    fn emit_retain_ordinary_aggregate_register(
+        &mut self,
+        function: &mir::Function,
+        register: u32,
+        value: &str,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let aggregate_type = self.register_runtime_type(function, register)?;
+        let aggregate_ty = self.llvm_type(aggregate_type)?;
+        for field in self.ordinary_aggregate_field_layout(function, register)? {
+            let flag = self.temp();
+            let present = self.temp();
+            let retain_label = self.temp();
+            let done_label = self.temp();
+            self.line(&format!(
+                "  %{flag} = load i8, ptr %fieldinit{register}.{}",
+                field.owned_mask_index
+            ));
+            self.line(&format!("  %{present} = icmp ne i8 %{flag}, 0"));
+            self.line(&format!(
+                "  br i1 %{present}, label %retain.aggregate.field{retain_label}, label %retain.aggregate.field.done{done_label}"
+            ));
+            self.line(&format!("retain.aggregate.field{retain_label}:"));
+            let extracted = self.temp();
+            self.line(&format!(
+                "  %{extracted} = extractvalue {aggregate_ty} {value}, {}",
+                field.physical_index
+            ));
+            self.emit_retain(field.runtime_type, &format!("%{extracted}"), function)?;
+            self.line(&format!(
+                "  br label %retain.aggregate.field.done{done_label}"
+            ));
+            self.line(&format!("retain.aggregate.field.done{done_label}:"));
+        }
+        Ok(())
     }
 
     fn emit_effect_set_initialized(
@@ -8624,6 +8878,9 @@ impl<'a> Emitter<'a> {
         edge: &mir::Edge,
         preassigned: BTreeSet<u32>,
     ) -> Result<(), Vec<Diagnostic>> {
+        for register in &preassigned {
+            self.emit_set_ordinary_aggregate_fields(function, *register, true)?;
+        }
         let target = function
             .blocks
             .iter()
@@ -8644,17 +8901,69 @@ impl<'a> Emitter<'a> {
                 let ty = self.register_type(function, operand.register)?;
                 let value = self.load_operand(function, operand)?;
                 if operand.mode == mir::UseMode::Copy {
-                    let runtime_ty = self.register_runtime_type(function, operand.register)?;
-                    self.emit_retain(runtime_ty, &value, function)?;
+                    if self
+                        .ordinary_aggregate_field_layout(function, operand.register)?
+                        .is_empty()
+                    {
+                        let runtime_ty =
+                            self.register_runtime_type(function, operand.register)?;
+                        self.emit_retain(runtime_ty, &value, function)?;
+                    } else {
+                        self.emit_retain_ordinary_aggregate_register(
+                            function,
+                            operand.register,
+                            &value,
+                        )?;
+                    }
                 }
-                Ok((ty, value))
+                let field_flags = self
+                    .ordinary_aggregate_field_layout(function, operand.register)?
+                    .into_iter()
+                    .map(|field| {
+                        let flag = self.temp();
+                        self.line(&format!(
+                            "  %{flag} = load i8, ptr %fieldinit{}.{}",
+                            operand.register, field.owned_mask_index
+                        ));
+                        format!("%{flag}")
+                    })
+                    .collect::<Vec<_>>();
+                Ok((ty, value, operand.register, operand.mode, field_flags))
             })
             .collect::<Result<Vec<_>, Vec<Diagnostic>>>()?;
-        for (parameter, (ty, value)) in parameters.into_iter().zip(values) {
+        let destination_registers = parameters
+            .iter()
+            .map(|parameter| parameter.register)
+            .collect::<BTreeSet<_>>();
+        let mut moved_sources = BTreeSet::new();
+        for (parameter, (ty, value, source, mode, field_flags)) in parameters.into_iter().zip(values)
+        {
             self.line(&format!(
                 "  store {ty} {value}, ptr %r{}",
                 parameter.register
             ));
+            let target_fields =
+                self.ordinary_aggregate_field_layout(function, parameter.register)?;
+            if target_fields.len() != field_flags.len() {
+                return Err(vec![unsupported(
+                    function,
+                    "block argument aggregate field-state layout mismatch",
+                )]);
+            }
+            for (field, flag) in target_fields.iter().zip(&field_flags) {
+                self.line(&format!(
+                    "  store i8 {flag}, ptr %fieldinit{}.{}",
+                    parameter.register, field.owned_mask_index
+                ));
+            }
+            if mode == mir::UseMode::Move {
+                moved_sources.insert(source);
+            }
+        }
+        for source in moved_sources {
+            if !destination_registers.contains(&source) {
+                self.emit_set_ordinary_aggregate_fields(function, source, false)?;
+            }
         }
         self.line(&format!("  br label %bb{}", edge.target));
         Ok(())

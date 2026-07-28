@@ -4758,3 +4758,73 @@ fn llvm_effect_framed_terminal_clause_with_empty_outward_row_uses_starter_abi() 
         "internally-effect-framed-clause",
     );
 }
+
+#[test]
+fn llvm_ordinary_partial_aggregate_move_drops_only_residual_fields() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-ordinary-partial-aggregate-move.glorious",
+        r#"
+            struct Pair { selected: String, residual: String }
+            add_usize(left: usize, right: usize) -> usize { left + right }
+            to_i64(value: usize) -> i64 { wrapping_convert_to_i64(value) }
+            extract_selected(value: Pair, first: Bool) -> String {
+                let selected = move value.selected;
+                handle move first {
+                    Result::Ok(_) => (),
+                    Result::Err(_) => ()
+                };
+                move selected
+            }
+            selected() -> i64 {
+                let left = extract_selected(
+                    Pair {
+                        selected: String::concat("forty", "two"),
+                        residual: String::concat("drop", "me")
+                    },
+                    true
+                );
+                let right = extract_selected(
+                    Pair {
+                        selected: String::concat("forty", "two"),
+                        residual: String::concat("drop", "me")
+                    },
+                    false
+                );
+                let left_length = String::byte_len(&left);
+                let right_length = String::byte_len(&right);
+                to_i64(add_usize(left_length, right_length))
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::I64(16)
+    );
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    run_native_i64(
+        grandiose::emit_llvm_ir(&phases, &options).unwrap(),
+        llvm_function,
+        16,
+        "ordinary-partial-aggregate-move",
+    );
+}
