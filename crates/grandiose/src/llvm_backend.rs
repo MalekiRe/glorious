@@ -84,6 +84,7 @@ struct Emitter<'a> {
     uses_byte_runtime: bool,
     uses_array_runtime: bool,
     uses_callable_runtime: bool,
+    uses_handler_runtime: bool,
     host_imports: BTreeSet<HostImportRole>,
 }
 
@@ -99,6 +100,7 @@ impl<'a> Emitter<'a> {
             uses_byte_runtime: false,
             uses_array_runtime: false,
             uses_callable_runtime: false,
+            uses_handler_runtime: false,
             host_imports: BTreeSet::new(),
         }
     }
@@ -124,6 +126,9 @@ impl<'a> Emitter<'a> {
         }
         if self.uses_callable_runtime {
             self.emit_callable_runtime();
+        }
+        if self.uses_handler_runtime {
+            self.emit_handler_runtime();
         }
         self.emit_host_import_declarations();
         self.line("");
@@ -193,6 +198,10 @@ impl<'a> Emitter<'a> {
                     } = &instruction.kind
                     {
                         pending.push(*target as usize);
+                    }
+                    if let InstructionKind::MakeHandlerShared { functions, .. } = &instruction.kind
+                    {
+                        pending.extend(functions.iter().map(|function| *function as usize));
                     }
                 }
                 match &block.terminator {
@@ -287,6 +296,8 @@ impl<'a> Emitter<'a> {
                 self.uses_array_runtime |= self.type_contains_array(ty, &mut BTreeSet::new())?;
                 self.uses_callable_runtime |=
                     self.type_contains_callable(ty, &mut BTreeSet::new())?;
+                self.uses_handler_runtime |=
+                    self.type_contains_handler(ty, &mut BTreeSet::new())?;
             }
             for block in &function.blocks {
                 if let Terminator::HostCall { import, .. } = &block.terminator {
@@ -802,8 +813,18 @@ impl<'a> Emitter<'a> {
 
     fn emit_callable_runtime(&mut self) {
         let usize_ty = format!("i{}", self.pointer_width());
+        self.line("%g1.capture = type { i64, ptr }");
         self.line("%g1.callable = type { i64, ptr, ptr }");
         if !self.uses_byte_runtime && !self.uses_array_runtime {
+            self.line(&format!("declare ptr @malloc({usize_ty})"));
+            self.line("declare void @free(ptr)");
+        }
+    }
+
+    fn emit_handler_runtime(&mut self) {
+        let usize_ty = format!("i{}", self.pointer_width());
+        self.line(&format!("%g1.handler = type {{ i32, {usize_ty}, ptr }}"));
+        if !self.uses_byte_runtime && !self.uses_array_runtime && !self.uses_callable_runtime {
             self.line(&format!("declare ptr @malloc({usize_ty})"));
             self.line("declare void @free(ptr)");
         }
@@ -904,6 +925,35 @@ impl<'a> Emitter<'a> {
         self.line(&format!(
             "  store {capture_ty} {capture_value}, ptr %{capture}"
         ));
+        let capture_handle_end = self.temp();
+        self.line(&format!(
+            "  %{capture_handle_end} = getelementptr %g1.capture, ptr null, {usize_ty} 1"
+        ));
+        let capture_handle_size = self.temp();
+        self.line(&format!(
+            "  %{capture_handle_size} = ptrtoint ptr %{capture_handle_end} to {usize_ty}"
+        ));
+        let capture_handle = self.temp();
+        self.line(&format!(
+            "  %{capture_handle} = call ptr @malloc({usize_ty} %{capture_handle_size})"
+        ));
+        let capture_handle_failed = self.temp();
+        self.line(&format!(
+            "  %{capture_handle_failed} = icmp eq ptr %{capture_handle}, null"
+        ));
+        self.emit_trap_if(capture_handle_failed);
+        let capture_count_address = self.temp();
+        self.line(&format!(
+            "  %{capture_count_address} = getelementptr inbounds %g1.capture, ptr %{capture_handle}, i32 0, i32 0"
+        ));
+        self.line(&format!("  store i64 1, ptr %{capture_count_address}"));
+        let capture_data_address = self.temp();
+        self.line(&format!(
+            "  %{capture_data_address} = getelementptr inbounds %g1.capture, ptr %{capture_handle}, i32 0, i32 1"
+        ));
+        self.line(&format!(
+            "  store ptr %{capture}, ptr %{capture_data_address}"
+        ));
         let count_address = self.temp();
         self.line(&format!(
             "  %{count_address} = getelementptr inbounds %g1.callable, ptr %{callable}, i32 0, i32 0"
@@ -920,7 +970,9 @@ impl<'a> Emitter<'a> {
         self.line(&format!(
             "  %{capture_address} = getelementptr inbounds %g1.callable, ptr %{callable}, i32 0, i32 2"
         ));
-        self.line(&format!("  store ptr %{capture}, ptr %{capture_address}"));
+        self.line(&format!(
+            "  store ptr %{capture_handle}, ptr %{capture_address}"
+        ));
         Ok(format!("%{callable}"))
     }
 
@@ -949,6 +1001,375 @@ impl<'a> Emitter<'a> {
             aggregate = format!("%{inserted}");
         }
         Ok(aggregate)
+    }
+
+    fn emit_allocate_shared_capture(
+        &mut self,
+        capture_ty: &str,
+        capture_value: &str,
+        references: usize,
+    ) -> String {
+        let usize_ty = format!("i{}", self.pointer_width());
+        let capture_size = self.emit_array_element_size(capture_ty);
+        let capture = self.temp();
+        self.line(&format!(
+            "  %{capture} = call ptr @malloc({usize_ty} {capture_size})"
+        ));
+        let capture_failed = self.temp();
+        self.line(&format!(
+            "  %{capture_failed} = icmp eq ptr %{capture}, null"
+        ));
+        self.emit_trap_if(capture_failed);
+        self.line(&format!(
+            "  store {capture_ty} {capture_value}, ptr %{capture}"
+        ));
+        let handle_end = self.temp();
+        self.line(&format!(
+            "  %{handle_end} = getelementptr %g1.capture, ptr null, {usize_ty} 1"
+        ));
+        let handle_size = self.temp();
+        self.line(&format!(
+            "  %{handle_size} = ptrtoint ptr %{handle_end} to {usize_ty}"
+        ));
+        let handle = self.temp();
+        self.line(&format!(
+            "  %{handle} = call ptr @malloc({usize_ty} %{handle_size})"
+        ));
+        let handle_failed = self.temp();
+        self.line(&format!("  %{handle_failed} = icmp eq ptr %{handle}, null"));
+        self.emit_trap_if(handle_failed);
+        let count_address = self.temp();
+        self.line(&format!(
+            "  %{count_address} = getelementptr inbounds %g1.capture, ptr %{handle}, i32 0, i32 0"
+        ));
+        self.line(&format!("  store i64 {references}, ptr %{count_address}"));
+        let data_address = self.temp();
+        self.line(&format!(
+            "  %{data_address} = getelementptr inbounds %g1.capture, ptr %{handle}, i32 0, i32 1"
+        ));
+        self.line(&format!("  store ptr %{capture}, ptr %{data_address}"));
+        format!("%{handle}")
+    }
+
+    fn emit_allocate_callable_shell(&mut self, target: usize, capture: &str) -> String {
+        let usize_ty = format!("i{}", self.pointer_width());
+        let end = self.temp();
+        self.line(&format!(
+            "  %{end} = getelementptr %g1.callable, ptr null, {usize_ty} 1"
+        ));
+        let size = self.temp();
+        self.line(&format!("  %{size} = ptrtoint ptr %{end} to {usize_ty}"));
+        let callable = self.temp();
+        self.line(&format!(
+            "  %{callable} = call ptr @malloc({usize_ty} %{size})"
+        ));
+        let failed = self.temp();
+        self.line(&format!("  %{failed} = icmp eq ptr %{callable}, null"));
+        self.emit_trap_if(failed);
+        let count_address = self.temp();
+        self.line(&format!(
+            "  %{count_address} = getelementptr inbounds %g1.callable, ptr %{callable}, i32 0, i32 0"
+        ));
+        self.line(&format!("  store i64 1, ptr %{count_address}"));
+        let function_address = self.temp();
+        self.line(&format!(
+            "  %{function_address} = getelementptr inbounds %g1.callable, ptr %{callable}, i32 0, i32 1"
+        ));
+        self.line(&format!(
+            "  store ptr @g1_f{target}, ptr %{function_address}"
+        ));
+        let capture_address = self.temp();
+        self.line(&format!(
+            "  %{capture_address} = getelementptr inbounds %g1.callable, ptr %{callable}, i32 0, i32 2"
+        ));
+        self.line(&format!("  store ptr {capture}, ptr %{capture_address}"));
+        format!("%{callable}")
+    }
+
+    fn emit_make_handler(
+        &mut self,
+        function: &mir::Function,
+        handler_type: TypeId,
+        handler_def: u32,
+        clauses: &[mir::Operand],
+    ) -> Result<String, Vec<Diagnostic>> {
+        let Type::Handler {
+            handler_def: described_def,
+            capture_type,
+            ..
+        } = self.runtime_type(handler_type)?.clone()
+        else {
+            return Err(vec![unsupported(
+                function,
+                "MakeHandler with a non-handler runtime type",
+            )]);
+        };
+        if described_def != handler_def {
+            return Err(vec![unsupported(
+                function,
+                "MakeHandler descriptor identity mismatch",
+            )]);
+        }
+        let clause_types = self.runtime_aggregate_fields(capture_type)?;
+        if clause_types.len() != clauses.len() {
+            return Err(vec![unsupported(
+                function,
+                "MakeHandler clause count mismatch",
+            )]);
+        }
+        for (clause, expected) in clauses.iter().zip(&clause_types) {
+            let actual = self.register_runtime_type(function, clause.register)?;
+            if actual != *expected || !matches!(self.runtime_type(actual)?, Type::Callable { .. }) {
+                return Err(vec![unsupported(
+                    function,
+                    "MakeHandler clause type mismatch",
+                )]);
+            }
+        }
+
+        let usize_ty = format!("i{}", self.pointer_width());
+        let handler_end = self.temp();
+        self.line(&format!(
+            "  %{handler_end} = getelementptr %g1.handler, ptr null, {usize_ty} 1"
+        ));
+        let handler_size = self.temp();
+        self.line(&format!(
+            "  %{handler_size} = ptrtoint ptr %{handler_end} to {usize_ty}"
+        ));
+        let handler = self.temp();
+        self.line(&format!(
+            "  %{handler} = call ptr @malloc({usize_ty} %{handler_size})"
+        ));
+        let handler_failed = self.temp();
+        self.line(&format!(
+            "  %{handler_failed} = icmp eq ptr %{handler}, null"
+        ));
+        self.emit_trap_if(handler_failed);
+        let clauses_storage = if clauses.is_empty() {
+            "null".to_owned()
+        } else {
+            let pointer_size = usize::from(self.pointer_width() / 8);
+            let clauses_storage = self.temp();
+            self.line(&format!(
+                "  %{clauses_storage} = call ptr @malloc({usize_ty} {})",
+                clauses.len() * pointer_size
+            ));
+            let clauses_failed = self.temp();
+            self.line(&format!(
+                "  %{clauses_failed} = icmp eq ptr %{clauses_storage}, null"
+            ));
+            self.emit_trap_if(clauses_failed);
+            format!("%{clauses_storage}")
+        };
+        let definition_address = self.temp();
+        self.line(&format!(
+            "  %{definition_address} = getelementptr inbounds %g1.handler, ptr %{handler}, i32 0, i32 0"
+        ));
+        self.line(&format!(
+            "  store i32 {handler_def}, ptr %{definition_address}"
+        ));
+        let count_address = self.temp();
+        self.line(&format!(
+            "  %{count_address} = getelementptr inbounds %g1.handler, ptr %{handler}, i32 0, i32 1"
+        ));
+        self.line(&format!(
+            "  store {usize_ty} {}, ptr %{count_address}",
+            clauses.len()
+        ));
+        let clauses_address = self.temp();
+        self.line(&format!(
+            "  %{clauses_address} = getelementptr inbounds %g1.handler, ptr %{handler}, i32 0, i32 2"
+        ));
+        self.line(&format!(
+            "  store ptr {clauses_storage}, ptr %{clauses_address}"
+        ));
+        for (index, (clause, clause_type)) in clauses.iter().zip(clause_types).enumerate() {
+            let callable = self.load_operand(function, clause)?;
+            if clause.mode == mir::UseMode::Copy {
+                self.emit_retain(clause_type, &callable, function)?;
+            }
+            let slot = self.temp();
+            self.line(&format!(
+                "  %{slot} = getelementptr inbounds ptr, ptr {clauses_storage}, {usize_ty} {index}"
+            ));
+            self.line(&format!("  store ptr {callable}, ptr %{slot}"));
+        }
+        Ok(format!("%{handler}"))
+    }
+
+    fn emit_make_handler_shared(
+        &mut self,
+        function: &mir::Function,
+        handler_type: TypeId,
+        handler_def: u32,
+        targets: &[u32],
+        captures: &[mir::Operand],
+    ) -> Result<String, Vec<Diagnostic>> {
+        let Type::Handler {
+            handler_def: described_def,
+            capture_type: clause_tuple,
+            ..
+        } = self.runtime_type(handler_type)?.clone()
+        else {
+            return Err(vec![unsupported(
+                function,
+                "MakeHandlerShared with a non-handler runtime type",
+            )]);
+        };
+        if described_def != handler_def {
+            return Err(vec![unsupported(
+                function,
+                "shared handler descriptor identity mismatch",
+            )]);
+        }
+        let clause_types = self.runtime_aggregate_fields(clause_tuple)?;
+        if clause_types.len() != targets.len() || targets.is_empty() {
+            return Err(vec![unsupported(
+                function,
+                "shared handler clause count mismatch",
+            )]);
+        }
+        let mut environment_type = None;
+        for (clause_type, target) in clause_types.iter().zip(targets) {
+            let Type::Callable {
+                capture_type,
+                receiver_mode,
+                ..
+            } = self.runtime_type(*clause_type)?
+            else {
+                return Err(vec![unsupported(
+                    function,
+                    "shared handler clause is not callable",
+                )]);
+            };
+            if environment_type
+                .replace(*capture_type)
+                .is_some_and(|known| known != *capture_type)
+            {
+                return Err(vec![unsupported(
+                    function,
+                    "shared handler clauses disagree on their environment type",
+                )]);
+            }
+            let target_function = self
+                .phases
+                .mir
+                .functions
+                .get(*target as usize)
+                .ok_or_else(|| vec![unsupported(function, "shared handler target is missing")])?;
+            if target_function.receiver_mode != Some(*receiver_mode) {
+                return Err(vec![unsupported(
+                    function,
+                    "shared handler target receiver mismatch",
+                )]);
+            }
+        }
+        let environment_type = environment_type.expect("nonempty clause list");
+        let environment_ty = self.llvm_type(environment_type)?;
+        let environment_value = match self.runtime_type(environment_type)? {
+            Type::Unit => {
+                if !captures.is_empty() {
+                    return Err(vec![unsupported(
+                        function,
+                        "captureless shared handler with capture operands",
+                    )]);
+                }
+                "0".to_owned()
+            }
+            Type::Tuple { .. } | Type::Struct { .. } => {
+                let fields = self.runtime_aggregate_fields(environment_type)?;
+                if fields.len() != captures.len() {
+                    return Err(vec![unsupported(
+                        function,
+                        "shared handler capture count mismatch",
+                    )]);
+                }
+                self.emit_capture_aggregate(function, &environment_ty, &fields, captures)?
+            }
+            other => {
+                return Err(vec![unsupported(
+                    function,
+                    format!("shared handler capture layout {other:?}"),
+                )]);
+            }
+        };
+        let capture =
+            self.emit_allocate_shared_capture(&environment_ty, &environment_value, targets.len());
+        let mut callables = Vec::with_capacity(targets.len());
+        for (target, clause_type) in targets.iter().zip(clause_types.iter().copied()) {
+            let callable = self.emit_allocate_callable_shell(*target as usize, &capture);
+            callables.push((clause_type, callable));
+        }
+        self.emit_handler_from_values(handler_def, &callables)
+    }
+
+    fn emit_handler_from_values(
+        &mut self,
+        handler_def: u32,
+        clauses: &[(TypeId, String)],
+    ) -> Result<String, Vec<Diagnostic>> {
+        let usize_ty = format!("i{}", self.pointer_width());
+        let handler_end = self.temp();
+        self.line(&format!(
+            "  %{handler_end} = getelementptr %g1.handler, ptr null, {usize_ty} 1"
+        ));
+        let handler_size = self.temp();
+        self.line(&format!(
+            "  %{handler_size} = ptrtoint ptr %{handler_end} to {usize_ty}"
+        ));
+        let handler = self.temp();
+        self.line(&format!(
+            "  %{handler} = call ptr @malloc({usize_ty} %{handler_size})"
+        ));
+        let handler_failed = self.temp();
+        self.line(&format!(
+            "  %{handler_failed} = icmp eq ptr %{handler}, null"
+        ));
+        self.emit_trap_if(handler_failed);
+        let clauses_storage = if clauses.is_empty() {
+            "null".to_owned()
+        } else {
+            let pointer_size = usize::from(self.pointer_width() / 8);
+            let storage = self.temp();
+            self.line(&format!(
+                "  %{storage} = call ptr @malloc({usize_ty} {})",
+                clauses.len() * pointer_size
+            ));
+            let failed = self.temp();
+            self.line(&format!("  %{failed} = icmp eq ptr %{storage}, null"));
+            self.emit_trap_if(failed);
+            format!("%{storage}")
+        };
+        let definition_address = self.temp();
+        self.line(&format!(
+            "  %{definition_address} = getelementptr inbounds %g1.handler, ptr %{handler}, i32 0, i32 0"
+        ));
+        self.line(&format!(
+            "  store i32 {handler_def}, ptr %{definition_address}"
+        ));
+        let count_address = self.temp();
+        self.line(&format!(
+            "  %{count_address} = getelementptr inbounds %g1.handler, ptr %{handler}, i32 0, i32 1"
+        ));
+        self.line(&format!(
+            "  store {usize_ty} {}, ptr %{count_address}",
+            clauses.len()
+        ));
+        let clauses_address = self.temp();
+        self.line(&format!(
+            "  %{clauses_address} = getelementptr inbounds %g1.handler, ptr %{handler}, i32 0, i32 2"
+        ));
+        self.line(&format!(
+            "  store ptr {clauses_storage}, ptr %{clauses_address}"
+        ));
+        for (index, (_, callable)) in clauses.iter().enumerate() {
+            let slot = self.temp();
+            self.line(&format!(
+                "  %{slot} = getelementptr inbounds ptr, ptr {clauses_storage}, {usize_ty} {index}"
+            ));
+            self.line(&format!("  store ptr {callable}, ptr %{slot}"));
+        }
+        Ok(format!("%{handler}"))
     }
 
     fn emit_function(&mut self, index: usize) -> Result<(), Vec<Diagnostic>> {
@@ -1256,6 +1677,32 @@ impl<'a> Emitter<'a> {
                     self.emit_make_callable(function, *callable_type, *target as usize, captures)?;
                 self.line(&format!("  store ptr {callable}, ptr %r{dst}"));
             }
+            InstructionKind::MakeHandler {
+                dst,
+                handler_def,
+                clauses,
+            } => {
+                let handler_type = self.register_runtime_type(function, *dst)?;
+                let handler =
+                    self.emit_make_handler(function, handler_type, *handler_def, clauses)?;
+                self.line(&format!("  store ptr {handler}, ptr %r{dst}"));
+            }
+            InstructionKind::MakeHandlerShared {
+                dst,
+                handler_def,
+                functions,
+                captures,
+            } => {
+                let handler_type = self.register_runtime_type(function, *dst)?;
+                let handler = self.emit_make_handler_shared(
+                    function,
+                    handler_type,
+                    *handler_def,
+                    functions,
+                    captures,
+                )?;
+                self.line(&format!("  store ptr {handler}, ptr %r{dst}"));
+            }
             InstructionKind::MakeBindingPack {
                 dst,
                 binding_type,
@@ -1331,12 +1778,6 @@ impl<'a> Emitter<'a> {
             | InstructionKind::Deconstruct { .. }
             | InstructionKind::LabelPush { .. }
             | InstructionKind::LabelPop { .. } => {}
-            other => {
-                return Err(vec![unsupported(
-                    function,
-                    format!("MIR instruction {other:?}"),
-                )]);
-            }
         }
         Ok(())
     }
@@ -2984,8 +3425,18 @@ impl<'a> Emitter<'a> {
         self.line(&format!(
             "  %{capture_address} = getelementptr inbounds %g1.callable, ptr {callable}, i32 0, i32 2"
         ));
+        let capture_handle = self.temp();
+        self.line(&format!(
+            "  %{capture_handle} = load ptr, ptr %{capture_address}"
+        ));
+        let capture_data_address = self.temp();
+        self.line(&format!(
+            "  %{capture_data_address} = getelementptr inbounds %g1.capture, ptr %{capture_handle}, i32 0, i32 1"
+        ));
         let capture = self.temp();
-        self.line(&format!("  %{capture} = load ptr, ptr %{capture_address}"));
+        self.line(&format!(
+            "  %{capture} = load ptr, ptr %{capture_data_address}"
+        ));
 
         let mut arguments = Vec::with_capacity(args.len() + 1);
         if receiver_mode == 2 {
@@ -2994,7 +3445,9 @@ impl<'a> Emitter<'a> {
             self.line(&format!(
                 "  %{receiver} = load {capture_ty}, ptr %{capture}"
             ));
+            self.line(&format!("  store ptr null, ptr %{capture_data_address}"));
             self.line(&format!("  call void @free(ptr %{capture})"));
+            self.emit_release_capture(&format!("%{capture_handle}"), capture_type, caller)?;
             self.line(&format!("  call void @free(ptr {callable})"));
             arguments.push(format!("{capture_ty} %{receiver}"));
         } else {
@@ -3309,6 +3762,46 @@ impl<'a> Emitter<'a> {
         Ok(contains)
     }
 
+    fn type_contains_handler(
+        &self,
+        ty: TypeId,
+        visiting: &mut BTreeSet<TypeId>,
+    ) -> Result<bool, Vec<Diagnostic>> {
+        if !visiting.insert(ty) {
+            return Ok(false);
+        }
+        let contains =
+            match self.runtime_type(ty)? {
+                Type::Handler { .. } => true,
+                Type::Array { element } => self
+                    .type_contains_handler(*element, visiting)
+                    .unwrap_or(true),
+                Type::Callable { capture_type, .. } => self
+                    .type_contains_handler(*capture_type, visiting)
+                    .unwrap_or(true),
+                Type::BindingPack { payload_type, .. } => self
+                    .type_contains_handler(*payload_type, visiting)
+                    .unwrap_or(true),
+                Type::Tuple { fields, .. } => fields
+                    .iter()
+                    .any(|field| self.type_contains_handler(*field, visiting).unwrap_or(true)),
+                Type::Struct { fields, .. } => fields.iter().any(|field| {
+                    self.type_contains_handler(field.ty, visiting)
+                        .unwrap_or(true)
+                }),
+                Type::Enum { variants, .. } => variants
+                    .iter()
+                    .flat_map(|variant| &variant.fields)
+                    .any(|field| {
+                        self.type_contains_handler(field.ty, visiting)
+                            .unwrap_or(true)
+                    }),
+                _ => false,
+            };
+        visiting.remove(&ty);
+        Ok(contains)
+    }
+
     fn ensure_plain_array_element(
         &self,
         ty: TypeId,
@@ -3378,6 +3871,7 @@ impl<'a> Emitter<'a> {
                 for (index, field) in fields.into_iter().enumerate() {
                     if self.type_contains_byte_object(field, &mut BTreeSet::new())?
                         || self.type_contains_callable(field, &mut BTreeSet::new())?
+                        || self.type_contains_handler(field, &mut BTreeSet::new())?
                     {
                         let extracted = self.temp();
                         self.line(&format!(
@@ -3392,6 +3886,7 @@ impl<'a> Emitter<'a> {
                 for (index, field) in fields.into_iter().enumerate() {
                     if self.type_contains_byte_object(field.ty, &mut BTreeSet::new())?
                         || self.type_contains_callable(field.ty, &mut BTreeSet::new())?
+                        || self.type_contains_handler(field.ty, &mut BTreeSet::new())?
                     {
                         let extracted = self.temp();
                         self.line(&format!(
@@ -3409,12 +3904,16 @@ impl<'a> Emitter<'a> {
             }
             Type::Enum { .. }
                 if self.type_contains_byte_object(ty, &mut BTreeSet::new())?
-                    || self.type_contains_callable(ty, &mut BTreeSet::new())? =>
+                    || self.type_contains_callable(ty, &mut BTreeSet::new())?
+                    || self.type_contains_handler(ty, &mut BTreeSet::new())? =>
             {
                 self.emit_visit_enum_payloads(ty, value, true, function)?;
             }
             Type::Array { .. } if self.type_contains_array(ty, &mut BTreeSet::new())? => {
                 return Err(vec![unsupported(function, "copying Array values")]);
+            }
+            Type::Handler { .. } => {
+                return Err(vec![unsupported(function, "copying Handler values")]);
             }
             _ => {}
         }
@@ -3470,6 +3969,9 @@ impl<'a> Emitter<'a> {
             Type::Callable { capture_type, .. } => {
                 self.emit_destroy_callable(&value, capture_type, function)?;
             }
+            Type::Handler { capture_type, .. } => {
+                self.emit_destroy_handler(&value, capture_type, function)?;
+            }
             Type::BindingPack { payload_type, .. } => {
                 self.emit_destroy(payload_type, &value, function)?;
             }
@@ -3484,6 +3986,7 @@ impl<'a> Emitter<'a> {
                     if self.type_contains_byte_object(field, &mut BTreeSet::new())?
                         || self.type_contains_array(field, &mut BTreeSet::new())?
                         || self.type_contains_callable(field, &mut BTreeSet::new())?
+                        || self.type_contains_handler(field, &mut BTreeSet::new())?
                     {
                         let extracted = self.temp();
                         self.line(&format!(
@@ -3499,6 +4002,7 @@ impl<'a> Emitter<'a> {
                     if self.type_contains_byte_object(field.ty, &mut BTreeSet::new())?
                         || self.type_contains_array(field.ty, &mut BTreeSet::new())?
                         || self.type_contains_callable(field.ty, &mut BTreeSet::new())?
+                        || self.type_contains_handler(field.ty, &mut BTreeSet::new())?
                     {
                         let extracted = self.temp();
                         self.line(&format!(
@@ -3511,7 +4015,8 @@ impl<'a> Emitter<'a> {
             Type::Enum { .. }
                 if self.type_contains_byte_object(ty, &mut BTreeSet::new())?
                     || self.type_contains_array(ty, &mut BTreeSet::new())?
-                    || self.type_contains_callable(ty, &mut BTreeSet::new())? =>
+                    || self.type_contains_callable(ty, &mut BTreeSet::new())?
+                    || self.type_contains_handler(ty, &mut BTreeSet::new())? =>
             {
                 self.emit_visit_enum_payloads(ty, &value, false, function)?;
             }
@@ -3550,18 +4055,97 @@ impl<'a> Emitter<'a> {
         self.line(&format!(
             "  %{capture_address} = getelementptr inbounds %g1.callable, ptr {callable}, i32 0, i32 2"
         ));
-        let capture = self.temp();
-        self.line(&format!("  %{capture} = load ptr, ptr %{capture_address}"));
-        let capture_ty = self.llvm_type(capture_type)?;
-        let capture_value = self.temp();
+        let capture_handle = self.temp();
         self.line(&format!(
-            "  %{capture_value} = load {capture_ty}, ptr %{capture}"
+            "  %{capture_handle} = load ptr, ptr %{capture_address}"
         ));
-        self.emit_destroy(capture_type, &format!("%{capture_value}"), function)?;
-        self.line(&format!("  call void @free(ptr %{capture})"));
+        self.emit_release_capture(&format!("%{capture_handle}"), capture_type, function)?;
         self.line(&format!("  call void @free(ptr {callable})"));
         self.line(&format!("  br label %callable.done{done_label}"));
         self.line(&format!("callable.done{done_label}:"));
+        Ok(())
+    }
+
+    fn emit_release_capture(
+        &mut self,
+        capture: &str,
+        capture_type: TypeId,
+        function: &mir::Function,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let count_address = self.temp();
+        self.line(&format!(
+            "  %{count_address} = getelementptr inbounds %g1.capture, ptr {capture}, i32 0, i32 0"
+        ));
+        let count = self.temp();
+        self.line(&format!("  %{count} = load i64, ptr %{count_address}"));
+        let last = self.temp();
+        self.line(&format!("  %{last} = icmp eq i64 %{count}, 1"));
+        let decrement_label = self.temp();
+        let destroy_label = self.temp();
+        let empty_label = self.temp();
+        let release_label = self.temp();
+        let done_label = self.temp();
+        self.line(&format!(
+            "  br i1 %{last}, label %capture.destroy{destroy_label}, label %capture.decrement{decrement_label}"
+        ));
+        self.line(&format!("capture.decrement{decrement_label}:"));
+        let next = self.temp();
+        self.line(&format!("  %{next} = sub i64 %{count}, 1"));
+        self.line(&format!("  store i64 %{next}, ptr %{count_address}"));
+        self.line(&format!("  br label %capture.done{done_label}"));
+        self.line(&format!("capture.destroy{destroy_label}:"));
+        let data_address = self.temp();
+        self.line(&format!(
+            "  %{data_address} = getelementptr inbounds %g1.capture, ptr {capture}, i32 0, i32 1"
+        ));
+        let data = self.temp();
+        self.line(&format!("  %{data} = load ptr, ptr %{data_address}"));
+        let empty = self.temp();
+        self.line(&format!("  %{empty} = icmp eq ptr %{data}, null"));
+        self.line(&format!(
+            "  br i1 %{empty}, label %capture.empty{empty_label}, label %capture.release{release_label}"
+        ));
+        self.line(&format!("capture.release{release_label}:"));
+        let capture_ty = self.llvm_type(capture_type)?;
+        let capture_value = self.temp();
+        self.line(&format!(
+            "  %{capture_value} = load {capture_ty}, ptr %{data}"
+        ));
+        self.emit_destroy(capture_type, &format!("%{capture_value}"), function)?;
+        self.line(&format!("  call void @free(ptr %{data})"));
+        self.line(&format!("  br label %capture.empty{empty_label}"));
+        self.line(&format!("capture.empty{empty_label}:"));
+        self.line(&format!("  call void @free(ptr {capture})"));
+        self.line(&format!("  br label %capture.done{done_label}"));
+        self.line(&format!("capture.done{done_label}:"));
+        Ok(())
+    }
+
+    fn emit_destroy_handler(
+        &mut self,
+        handler: &str,
+        capture_type: TypeId,
+        function: &mir::Function,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let clause_types = self.runtime_aggregate_fields(capture_type)?;
+        let clauses_address = self.temp();
+        self.line(&format!(
+            "  %{clauses_address} = getelementptr inbounds %g1.handler, ptr {handler}, i32 0, i32 2"
+        ));
+        let clauses = self.temp();
+        self.line(&format!("  %{clauses} = load ptr, ptr %{clauses_address}"));
+        let usize_ty = format!("i{}", self.pointer_width());
+        for (index, clause_type) in clause_types.into_iter().enumerate().rev() {
+            let slot = self.temp();
+            self.line(&format!(
+                "  %{slot} = getelementptr inbounds ptr, ptr %{clauses}, {usize_ty} {index}"
+            ));
+            let clause = self.temp();
+            self.line(&format!("  %{clause} = load ptr, ptr %{slot}"));
+            self.emit_destroy(clause_type, &format!("%{clause}"), function)?;
+        }
+        self.line(&format!("  call void @free(ptr %{clauses})"));
+        self.line(&format!("  call void @free(ptr {handler})"));
         Ok(())
     }
 
@@ -3607,7 +4191,8 @@ impl<'a> Emitter<'a> {
             for (field_index, field) in fields {
                 let owned = self.type_contains_byte_object(field.ty, &mut BTreeSet::new())?
                     || self.type_contains_array(field.ty, &mut BTreeSet::new())?
-                    || self.type_contains_callable(field.ty, &mut BTreeSet::new())?;
+                    || self.type_contains_callable(field.ty, &mut BTreeSet::new())?
+                    || self.type_contains_handler(field.ty, &mut BTreeSet::new())?;
                 if !owned {
                     continue;
                 }
@@ -4035,6 +4620,7 @@ impl<'a> Emitter<'a> {
             | Type::Bytes
             | Type::Array { .. }
             | Type::Callable { .. }
+            | Type::Handler { .. }
             | Type::RefShared { .. }
             | Type::RefUnique { .. } => usize::from(self.pointer_width() / 8),
             Type::BindingPack { payload_type, .. } => self.storage_size(*payload_type, visiting)?,
@@ -4108,6 +4694,29 @@ impl<'a> Emitter<'a> {
                 "aggregate t{aggregate} has no field {field}"
             ))]
         })
+    }
+
+    fn runtime_aggregate_fields(&self, aggregate: TypeId) -> Result<Vec<TypeId>, Vec<Diagnostic>> {
+        let fields = match self.runtime_type(aggregate)? {
+            Type::Tuple { fields, .. } => fields.clone(),
+            Type::Struct { fields, .. } => fields.iter().map(|field| field.ty).collect(),
+            Type::BindingPack { payload_type, .. } => {
+                return self.runtime_aggregate_fields(*payload_type);
+            }
+            other => {
+                return Err(vec![backend_error(format!(
+                    "LLVM runtime field layout requires a tuple or struct, found {other:?}"
+                ))]);
+            }
+        };
+        fields
+            .into_iter()
+            .filter_map(|field| match self.runtime_type(field) {
+                Ok(Type::Available { .. }) => None,
+                Ok(_) => Some(Ok(field)),
+                Err(error) => Some(Err(error)),
+            })
+            .collect()
     }
 
     fn register_is_signed(
@@ -4192,6 +4801,7 @@ impl<'a> Emitter<'a> {
             | Type::Bytes
             | Type::Array { .. }
             | Type::Callable { .. }
+            | Type::Handler { .. }
             | Type::RefShared { .. }
             | Type::RefUnique { .. } => "ptr".into(),
             Type::BindingPack { payload_type, .. } => self.llvm_type(*payload_type)?,

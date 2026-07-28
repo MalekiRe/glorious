@@ -575,6 +575,92 @@ fn llvm_and_vm_backends_execute_the_same_captured_callable_program() {
 }
 
 #[test]
+fn llvm_handler_values_own_and_destroy_their_clause_callables() {
+    let mut phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-handler-value.glorious",
+        "effect Stop { stop() -> ! }\nselected() -> i64 { handle perform Stop::stop() { Stop::stop() => 42 } }\nmain() -> () { selected(); () }",
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let block = &mut phases.mir.functions[selected].blocks[0];
+    block.statements.retain(|instruction| {
+        !matches!(
+            instruction.kind,
+            grandiose::compiler_mir::InstructionKind::MakeCallable { dst: 3, .. }
+        )
+    });
+    block.statements.push(grandiose::compiler_mir::Instruction {
+        span: grandiose::span::Span::default(),
+        kind: grandiose::compiler_mir::InstructionKind::Const {
+            dst: 4,
+            value: grandiose_vm::Constant::I64(42),
+        },
+    });
+    block.statements.push(grandiose::compiler_mir::Instruction {
+        span: grandiose::span::Span::default(),
+        kind: grandiose::compiler_mir::InstructionKind::Drop {
+            owner: grandiose::compiler_mir::Operand {
+                register: 2,
+                mode: grandiose::compiler_mir::UseMode::Move,
+            },
+        },
+    });
+    block.terminator = grandiose::compiler_mir::Terminator::Return {
+        value: Some(grandiose::compiler_mir::Operand {
+            register: 4,
+            mode: grandiose::compiler_mir::UseMode::Move,
+        }),
+    };
+
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    assert!(module.ir.contains("%g1.handler = type"));
+    assert!(module.ir.contains("%g1.capture = type"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("handler-value.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("handler-value");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\nextern int64_t g1_f{selected}(void);\nint main(void) {{ return g1_f{selected}() == 42 ? 0 : 1; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new("clang")
+        .arg("-fsanitize=address")
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable).output().unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
+    );
+}
+
+#[test]
 fn llvm_backend_invokes_the_native_host_abi_and_consumes_arguments() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-host-call.glorious",
