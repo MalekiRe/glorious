@@ -81,6 +81,7 @@ struct Emitter<'a> {
     overflow_widths: BTreeSet<(u16, &'static str)>,
     byte_literals: BTreeMap<Vec<u8>, u32>,
     uses_byte_runtime: bool,
+    uses_array_runtime: bool,
 }
 
 impl<'a> Emitter<'a> {
@@ -93,12 +94,13 @@ impl<'a> Emitter<'a> {
             overflow_widths: BTreeSet::new(),
             byte_literals: BTreeMap::new(),
             uses_byte_runtime: false,
+            uses_array_runtime: false,
         }
     }
 
     fn emit(mut self) -> Result<LlvmModule, Vec<Diagnostic>> {
         let reachable = self.reachable_functions()?;
-        self.prepare_byte_runtime(&reachable)?;
+        self.prepare_runtime(&reachable)?;
         self.line("; Grandiose LLVM backend");
         self.line(&format!(
             "target triple = \"{}\"",
@@ -111,6 +113,9 @@ impl<'a> Emitter<'a> {
         self.line("declare void @llvm.trap() cold noreturn nounwind");
         if self.uses_byte_runtime {
             self.emit_byte_runtime();
+        }
+        if self.uses_array_runtime {
+            self.emit_array_runtime();
         }
         self.line("");
 
@@ -191,7 +196,7 @@ impl<'a> Emitter<'a> {
         Ok(reachable.into_iter().collect())
     }
 
-    fn prepare_byte_runtime(&mut self, reachable: &[usize]) -> Result<(), Vec<Diagnostic>> {
+    fn prepare_runtime(&mut self, reachable: &[usize]) -> Result<(), Vec<Diagnostic>> {
         let mut literals = BTreeSet::new();
         for &index in reachable {
             let function = &self.phases.mir.functions[index];
@@ -203,6 +208,7 @@ impl<'a> Emitter<'a> {
             {
                 self.uses_byte_runtime |=
                     self.type_contains_byte_object(ty, &mut BTreeSet::new())?;
+                self.uses_array_runtime |= self.type_contains_array(ty, &mut BTreeSet::new())?;
             }
             for block in &function.blocks {
                 for instruction in &block.statements {
@@ -343,6 +349,195 @@ impl<'a> Emitter<'a> {
         self.line("}");
     }
 
+    fn emit_array_runtime(&mut self) {
+        let usize_ty = format!("i{}", self.pointer_width());
+        self.overflow_widths.insert((self.pointer_width(), "umul"));
+        self.overflow_widths.insert((self.pointer_width(), "uadd"));
+        self.line(&format!(
+            "%g1.array = type {{ {usize_ty}, {usize_ty}, {usize_ty}, ptr, ptr }}"
+        ));
+        if !self.uses_byte_runtime {
+            self.line(&format!("declare ptr @malloc({usize_ty})"));
+            self.line("declare void @free(ptr)");
+        }
+        self.line(&format!("declare ptr @realloc(ptr, {usize_ty})"));
+        self.line(&format!(
+            "declare void @llvm.memset.p0.{usize_ty}(ptr nocapture writeonly, i8, {usize_ty}, i1 immarg)"
+        ));
+        self.line("");
+        self.line(&format!(
+            "define internal ptr @g1_array_allocate({usize_ty} %capacity, {usize_ty} %element.size) {{"
+        ));
+        self.line("entry:");
+        self.line(&format!(
+            "  %header.end = getelementptr %g1.array, ptr null, {usize_ty} 1"
+        ));
+        self.line(&format!(
+            "  %header.size = ptrtoint ptr %header.end to {usize_ty}"
+        ));
+        self.line(&format!(
+            "  %array = call ptr @malloc({usize_ty} %header.size)"
+        ));
+        self.line("  %length.address = getelementptr inbounds %g1.array, ptr %array, i32 0, i32 0");
+        self.line(&format!("  store {usize_ty} 0, ptr %length.address"));
+        self.line(
+            "  %capacity.address = getelementptr inbounds %g1.array, ptr %array, i32 0, i32 1",
+        );
+        self.line(&format!(
+            "  store {usize_ty} %capacity, ptr %capacity.address"
+        ));
+        self.line(
+            "  %element.size.address = getelementptr inbounds %g1.array, ptr %array, i32 0, i32 2",
+        );
+        self.line(&format!(
+            "  store {usize_ty} %element.size, ptr %element.size.address"
+        ));
+        self.line(&format!("  %empty = icmp eq {usize_ty} %capacity, 0"));
+        self.line("  br i1 %empty, label %zero, label %allocate");
+        self.line("zero:");
+        self.line("  br label %finish");
+        self.line("allocate:");
+        self.line(&format!(
+            "  %size.pair = call {{ {usize_ty}, i1 }} @llvm.umul.with.overflow.{usize_ty}({usize_ty} %capacity, {usize_ty} %element.size)"
+        ));
+        self.line(&format!(
+            "  %data.size = extractvalue {{ {usize_ty}, i1 }} %size.pair, 0"
+        ));
+        self.line(&format!(
+            "  %size.overflow = extractvalue {{ {usize_ty}, i1 }} %size.pair, 1"
+        ));
+        self.line("  br i1 %size.overflow, label %trap, label %allocate.storage");
+        self.line("trap:");
+        self.line("  call void @llvm.trap()");
+        self.line("  unreachable");
+        self.line("allocate.storage:");
+        self.line(&format!(
+            "  %data = call ptr @malloc({usize_ty} %data.size)"
+        ));
+        self.line(&format!(
+            "  %initialized = call ptr @malloc({usize_ty} %capacity)"
+        ));
+        self.line(&format!(
+            "  call void @llvm.memset.p0.{usize_ty}(ptr %initialized, i8 0, {usize_ty} %capacity, i1 false)"
+        ));
+        self.line("  br label %finish");
+        self.line("finish:");
+        self.line("  %final.data = phi ptr [ null, %zero ], [ %data, %allocate.storage ]");
+        self.line(
+            "  %final.initialized = phi ptr [ null, %zero ], [ %initialized, %allocate.storage ]",
+        );
+        self.line("  %data.address = getelementptr inbounds %g1.array, ptr %array, i32 0, i32 3");
+        self.line("  store ptr %final.data, ptr %data.address");
+        self.line(
+            "  %initialized.address = getelementptr inbounds %g1.array, ptr %array, i32 0, i32 4",
+        );
+        self.line("  store ptr %final.initialized, ptr %initialized.address");
+        self.line("  ret ptr %array");
+        self.line("}");
+        self.line("");
+        self.line(&format!(
+            "define internal void @g1_array_grow(ptr %array, {usize_ty} %required) {{"
+        ));
+        self.line("entry:");
+        self.line(
+            "  %capacity.address = getelementptr inbounds %g1.array, ptr %array, i32 0, i32 1",
+        );
+        self.line(&format!(
+            "  %capacity = load {usize_ty}, ptr %capacity.address"
+        ));
+        self.line(&format!(
+            "  %enough = icmp uge {usize_ty} %capacity, %required"
+        ));
+        self.line("  br i1 %enough, label %return, label %grow");
+        self.line("grow:");
+        self.line(&format!(
+            "  %double.pair = call {{ {usize_ty}, i1 }} @llvm.uadd.with.overflow.{usize_ty}({usize_ty} %capacity, {usize_ty} %capacity)"
+        ));
+        self.line(&format!(
+            "  %doubled = extractvalue {{ {usize_ty}, i1 }} %double.pair, 0"
+        ));
+        self.line(&format!(
+            "  %double.overflow = extractvalue {{ {usize_ty}, i1 }} %double.pair, 1"
+        ));
+        self.line(&format!("  %minimum = icmp ult {usize_ty} %doubled, 1"));
+        self.line(&format!(
+            "  %at.least.one = select i1 %minimum, {usize_ty} 1, {usize_ty} %doubled"
+        ));
+        self.line(&format!(
+            "  %below.required = icmp ult {usize_ty} %at.least.one, %required"
+        ));
+        self.line(&format!(
+            "  %grown = select i1 %below.required, {usize_ty} %required, {usize_ty} %at.least.one"
+        ));
+        self.line(&format!(
+            "  %new.capacity = select i1 %double.overflow, {usize_ty} %required, {usize_ty} %grown"
+        ));
+        self.line(
+            "  %element.size.address = getelementptr inbounds %g1.array, ptr %array, i32 0, i32 2",
+        );
+        self.line(&format!(
+            "  %element.size = load {usize_ty}, ptr %element.size.address"
+        ));
+        self.line(&format!(
+            "  %size.pair = call {{ {usize_ty}, i1 }} @llvm.umul.with.overflow.{usize_ty}({usize_ty} %new.capacity, {usize_ty} %element.size)"
+        ));
+        self.line(&format!(
+            "  %data.size = extractvalue {{ {usize_ty}, i1 }} %size.pair, 0"
+        ));
+        self.line(&format!(
+            "  %size.overflow = extractvalue {{ {usize_ty}, i1 }} %size.pair, 1"
+        ));
+        self.line("  br i1 %size.overflow, label %trap, label %resize");
+        self.line("trap:");
+        self.line("  call void @llvm.trap()");
+        self.line("  unreachable");
+        self.line("resize:");
+        self.line("  %data.address = getelementptr inbounds %g1.array, ptr %array, i32 0, i32 3");
+        self.line("  %data = load ptr, ptr %data.address");
+        self.line(&format!(
+            "  %new.data = call ptr @realloc(ptr %data, {usize_ty} %data.size)"
+        ));
+        self.line("  store ptr %new.data, ptr %data.address");
+        self.line(
+            "  %initialized.address = getelementptr inbounds %g1.array, ptr %array, i32 0, i32 4",
+        );
+        self.line("  %initialized = load ptr, ptr %initialized.address");
+        self.line(&format!(
+            "  %new.initialized = call ptr @realloc(ptr %initialized, {usize_ty} %new.capacity)"
+        ));
+        self.line(&format!(
+            "  %added = sub {usize_ty} %new.capacity, %capacity"
+        ));
+        self.line(&format!(
+            "  %new.initialized.start = getelementptr inbounds i8, ptr %new.initialized, {usize_ty} %capacity"
+        ));
+        self.line(&format!(
+            "  call void @llvm.memset.p0.{usize_ty}(ptr %new.initialized.start, i8 0, {usize_ty} %added, i1 false)"
+        ));
+        self.line("  store ptr %new.initialized, ptr %initialized.address");
+        self.line(&format!(
+            "  store {usize_ty} %new.capacity, ptr %capacity.address"
+        ));
+        self.line("  br label %return");
+        self.line("return:");
+        self.line("  ret void");
+        self.line("}");
+        self.line("");
+        self.line("define internal void @g1_array_free(ptr %array) {");
+        self.line("entry:");
+        self.line("  %data.address = getelementptr inbounds %g1.array, ptr %array, i32 0, i32 3");
+        self.line("  %data = load ptr, ptr %data.address");
+        self.line("  call void @free(ptr %data)");
+        self.line(
+            "  %initialized.address = getelementptr inbounds %g1.array, ptr %array, i32 0, i32 4",
+        );
+        self.line("  %initialized = load ptr, ptr %initialized.address");
+        self.line("  call void @free(ptr %initialized)");
+        self.line("  call void @free(ptr %array)");
+        self.line("  ret void");
+        self.line("}");
+    }
+
     fn emit_function(&mut self, index: usize) -> Result<(), Vec<Diagnostic>> {
         let function = &self.phases.mir.functions[index];
         if function.receiver_mode.is_some() {
@@ -414,7 +609,13 @@ impl<'a> Emitter<'a> {
             InstructionKind::ProjectBorrow {
                 dst, src, field, ..
             } => {
-                let aggregate = self.register_runtime_type(function, *src)?;
+                let source = self.register_runtime_type(function, *src)?;
+                let (aggregate, base) = match self.runtime_type(source)? {
+                    Type::RefShared { referent } | Type::RefUnique { referent } => {
+                        (*referent, self.load_register(function, *src)?)
+                    }
+                    _ => (source, format!("%r{src}")),
+                };
                 let aggregate_ty = self.llvm_type(aggregate)?;
                 let llvm_field = if matches!(self.runtime_type(aggregate)?, Type::Enum { .. }) {
                     self.enum_slot_words(aggregate, *field)?;
@@ -425,7 +626,7 @@ impl<'a> Emitter<'a> {
                 };
                 let address = self.temp();
                 self.line(&format!(
-                    "  %{address} = getelementptr inbounds {aggregate_ty}, ptr %r{src}, i32 0, i32 {llvm_field}"
+                    "  %{address} = getelementptr inbounds {aggregate_ty}, ptr {base}, i32 0, i32 {llvm_field}"
                 ));
                 self.line(&format!("  store ptr %{address}, ptr %r{dst}"));
             }
@@ -597,15 +798,8 @@ impl<'a> Emitter<'a> {
             } => self.emit_primitive(function, *dst, *primitive, args)?,
             InstructionKind::Drop { owner } => {
                 let ty = self.register_runtime_type(function, owner.register)?;
-                if self.is_byte_object(ty)? {
-                    let value = self.load_operand(function, owner)?;
-                    self.line(&format!("  call void @g1_bytes_release(ptr {value})"));
-                } else if self.type_contains_byte_object(ty, &mut BTreeSet::new())? {
-                    return Err(vec![unsupported(
-                        function,
-                        "dropping aggregates that contain Text or Bytes",
-                    )]);
-                }
+                let value = self.load_operand(function, owner)?;
+                self.emit_destroy(ty, &value, function)?;
             }
             InstructionKind::EndBorrow { .. } | InstructionKind::Deconstruct { .. } => {}
             other => {
@@ -1100,6 +1294,520 @@ impl<'a> Emitter<'a> {
                     "  %{temporary} = {operation} {source_ty} {value} to {dst_ty}"
                 ));
                 format!("%{temporary}")
+            }
+            Primitive::BytesFromArrayMove => {
+                let Some((_, array)) = loaded.first() else {
+                    return Err(vec![unsupported(
+                        function,
+                        "malformed Array-to-Bytes conversion",
+                    )]);
+                };
+                let array_ty = self.register_runtime_type(function, args[0].register)?;
+                let element = self.array_element(array_ty)?;
+                if !matches!(self.runtime_type(element)?, Type::U8) {
+                    return Err(vec![unsupported(
+                        function,
+                        "Array-to-Bytes conversion with non-u8 elements",
+                    )]);
+                }
+                let usize_ty = format!("i{}", self.pointer_width());
+                let length_address = self.temp();
+                let length = self.temp();
+                self.line(&format!(
+                    "  %{length_address} = getelementptr inbounds %g1.array, ptr {array}, i32 0, i32 0"
+                ));
+                self.line(&format!(
+                    "  %{length} = load {usize_ty}, ptr %{length_address}"
+                ));
+                self.emit_array_dense_check(array, &format!("%{length}"), &usize_ty);
+                let bytes = self.temp();
+                let bytes_data = self.temp();
+                let array_data_address = self.temp();
+                let array_data = self.temp();
+                self.line(&format!(
+                    "  %{bytes} = call ptr @g1_bytes_allocate({usize_ty} %{length})"
+                ));
+                self.line(&format!(
+                    "  %{bytes_data} = call ptr @g1_bytes_data(ptr %{bytes})"
+                ));
+                self.line(&format!(
+                    "  %{array_data_address} = getelementptr inbounds %g1.array, ptr {array}, i32 0, i32 3"
+                ));
+                self.line(&format!(
+                    "  %{array_data} = load ptr, ptr %{array_data_address}"
+                ));
+                self.line(&format!(
+                    "  call void @llvm.memcpy.p0.p0.{usize_ty}(ptr %{bytes_data}, ptr %{array_data}, {usize_ty} %{length}, i1 false)"
+                ));
+                self.line(&format!("  call void @g1_array_free(ptr {array})"));
+                format!("%{bytes}")
+            }
+            Primitive::BytesToArray => {
+                let Some((_, bytes)) = loaded.first() else {
+                    return Err(vec![unsupported(
+                        function,
+                        "malformed Bytes-to-Array conversion",
+                    )]);
+                };
+                let array_ty = self.register_runtime_type(function, dst)?;
+                let element = self.array_element(array_ty)?;
+                if !matches!(self.runtime_type(element)?, Type::U8) {
+                    return Err(vec![unsupported(
+                        function,
+                        "Bytes-to-Array conversion with non-u8 elements",
+                    )]);
+                }
+                let usize_ty = format!("i{}", self.pointer_width());
+                let length_address = self.temp();
+                let length = self.temp();
+                let array = self.temp();
+                let array_length_address = self.temp();
+                let bytes_data = self.temp();
+                let array_data_address = self.temp();
+                let array_data = self.temp();
+                let initialized_address = self.temp();
+                let initialized = self.temp();
+                self.line(&format!(
+                    "  %{length_address} = getelementptr inbounds %g1.bytes, ptr {bytes}, i32 0, i32 1"
+                ));
+                self.line(&format!(
+                    "  %{length} = load {usize_ty}, ptr %{length_address}"
+                ));
+                self.line(&format!(
+                    "  %{array} = call ptr @g1_array_allocate({usize_ty} %{length}, {usize_ty} 1)"
+                ));
+                self.line(&format!(
+                    "  %{array_length_address} = getelementptr inbounds %g1.array, ptr %{array}, i32 0, i32 0"
+                ));
+                self.line(&format!(
+                    "  store {usize_ty} %{length}, ptr %{array_length_address}"
+                ));
+                self.line(&format!(
+                    "  %{bytes_data} = call ptr @g1_bytes_data(ptr {bytes})"
+                ));
+                self.line(&format!(
+                    "  %{array_data_address} = getelementptr inbounds %g1.array, ptr %{array}, i32 0, i32 3"
+                ));
+                self.line(&format!(
+                    "  %{array_data} = load ptr, ptr %{array_data_address}"
+                ));
+                self.line(&format!(
+                    "  call void @llvm.memcpy.p0.p0.{usize_ty}(ptr %{array_data}, ptr %{bytes_data}, {usize_ty} %{length}, i1 false)"
+                ));
+                self.line(&format!(
+                    "  %{initialized_address} = getelementptr inbounds %g1.array, ptr %{array}, i32 0, i32 4"
+                ));
+                self.line(&format!(
+                    "  %{initialized} = load ptr, ptr %{initialized_address}"
+                ));
+                self.line(&format!(
+                    "  call void @llvm.memset.p0.{usize_ty}(ptr %{initialized}, i8 1, {usize_ty} %{length}, i1 false)"
+                ));
+                self.line(&format!("  call void @g1_bytes_release(ptr {bytes})"));
+                format!("%{array}")
+            }
+            Primitive::ArrayEmpty => {
+                let array_ty = self.register_runtime_type(function, dst)?;
+                let element = self.array_element(array_ty)?;
+                self.ensure_plain_array_element(element, function)?;
+                let element_ty = self.llvm_type(element)?;
+                let element_size = self.emit_array_element_size(&element_ty);
+                let usize_ty = format!("i{}", self.pointer_width());
+                let array = self.temp();
+                self.line(&format!(
+                    "  %{array} = call ptr @g1_array_allocate({usize_ty} 0, {usize_ty} {element_size})"
+                ));
+                format!("%{array}")
+            }
+            Primitive::ArrayNew => {
+                let Some((length_ty, length)) = loaded.first() else {
+                    return Err(vec![unsupported(function, "malformed Array allocation")]);
+                };
+                let Some((fill_ty, fill)) = loaded.get(1) else {
+                    return Err(vec![unsupported(function, "malformed Array allocation")]);
+                };
+                let array_ty = self.register_runtime_type(function, dst)?;
+                let element = self.array_element(array_ty)?;
+                self.ensure_plain_array_element(element, function)?;
+                let expected = self.llvm_type(element)?;
+                if &expected != fill_ty {
+                    return Err(vec![unsupported(
+                        function,
+                        "Array fill value has the wrong LLVM type",
+                    )]);
+                }
+                let element_size = self.emit_array_element_size(fill_ty);
+                let array = self.temp();
+                self.line(&format!(
+                    "  %{array} = call ptr @g1_array_allocate({length_ty} {length}, {length_ty} {element_size})"
+                ));
+                let length_address = self.temp();
+                self.line(&format!(
+                    "  %{length_address} = getelementptr inbounds %g1.array, ptr %{array}, i32 0, i32 0"
+                ));
+                self.line(&format!(
+                    "  store {length_ty} {length}, ptr %{length_address}"
+                ));
+                let empty = self.temp();
+                let loop_id = self.temp();
+                let index_address = self.temp();
+                self.line(&format!("  %{empty} = icmp eq {length_ty} {length}, 0"));
+                self.line(&format!("  %{index_address} = alloca {length_ty}"));
+                self.line(&format!("  store {length_ty} 0, ptr %{index_address}"));
+                self.line(&format!(
+                    "  br i1 %{empty}, label %array.fill.done{loop_id}, label %array.fill{loop_id}"
+                ));
+                self.line(&format!("array.fill{loop_id}:"));
+                let index = self.temp();
+                self.line(&format!(
+                    "  %{index} = load {length_ty}, ptr %{index_address}"
+                ));
+                let data_address = self.temp();
+                let data = self.temp();
+                let slot = self.temp();
+                let initialized_address = self.temp();
+                let initialized = self.temp();
+                let initialized_slot = self.temp();
+                self.line(&format!(
+                    "  %{data_address} = getelementptr inbounds %g1.array, ptr %{array}, i32 0, i32 3"
+                ));
+                self.line(&format!("  %{data} = load ptr, ptr %{data_address}"));
+                self.line(&format!(
+                    "  %{slot} = getelementptr inbounds {fill_ty}, ptr %{data}, {length_ty} %{index}"
+                ));
+                self.emit_retain(element, fill, function)?;
+                self.line(&format!("  store {fill_ty} {fill}, ptr %{slot}"));
+                self.line(&format!(
+                    "  %{initialized_address} = getelementptr inbounds %g1.array, ptr %{array}, i32 0, i32 4"
+                ));
+                self.line(&format!(
+                    "  %{initialized} = load ptr, ptr %{initialized_address}"
+                ));
+                self.line(&format!(
+                    "  %{initialized_slot} = getelementptr inbounds i8, ptr %{initialized}, {length_ty} %{index}"
+                ));
+                self.line(&format!("  store i8 1, ptr %{initialized_slot}"));
+                let next = self.temp();
+                let more = self.temp();
+                self.line(&format!("  %{next} = add {length_ty} %{index}, 1"));
+                self.line(&format!(
+                    "  store {length_ty} %{next}, ptr %{index_address}"
+                ));
+                self.line(&format!(
+                    "  %{more} = icmp ult {length_ty} %{next}, {length}"
+                ));
+                self.line(&format!(
+                    "  br i1 %{more}, label %array.fill{loop_id}, label %array.fill.done{loop_id}"
+                ));
+                self.line(&format!("array.fill.done{loop_id}:"));
+                self.emit_destroy(element, fill, function)?;
+                format!("%{array}")
+            }
+            Primitive::ArrayLen | Primitive::ArrayCapacity => {
+                let Some((_, reference)) = loaded.first() else {
+                    return Err(vec![unsupported(
+                        function,
+                        "malformed Array metadata access",
+                    )]);
+                };
+                self.referenced_array_element(function, args[0].register)?;
+                let array = self.emit_array_from_reference(reference);
+                let address = self.temp();
+                let value = self.temp();
+                let field = if primitive == Primitive::ArrayLen {
+                    0
+                } else {
+                    1
+                };
+                self.line(&format!(
+                    "  %{address} = getelementptr inbounds %g1.array, ptr {array}, i32 0, i32 {field}"
+                ));
+                self.line(&format!("  %{value} = load {dst_ty}, ptr %{address}"));
+                format!("%{value}")
+            }
+            Primitive::ArrayGetCopy | Primitive::ArrayGetMove => {
+                let Some((_, reference)) = loaded.first() else {
+                    return Err(vec![unsupported(function, "malformed Array access")]);
+                };
+                let Some((index_ty, index)) = loaded.get(1) else {
+                    return Err(vec![unsupported(function, "malformed Array access")]);
+                };
+                let element = self.referenced_array_element(function, args[0].register)?;
+                let element_ty = self.llvm_type(element)?;
+                if element_ty != dst_ty {
+                    return Err(vec![unsupported(function, "Array element type mismatch")]);
+                }
+                let array = self.emit_array_from_reference(reference);
+                let (slot, initialized) =
+                    self.emit_checked_array_slot(&array, index_ty, index, &element_ty, true);
+                let value = self.temp();
+                self.line(&format!("  %{value} = load {element_ty}, ptr {slot}"));
+                if primitive == Primitive::ArrayGetCopy {
+                    self.emit_retain(element, &format!("%{value}"), function)?;
+                } else {
+                    self.line(&format!("  store i8 0, ptr {initialized}"));
+                }
+                format!("%{value}")
+            }
+            Primitive::ArrayGetBorrowShared | Primitive::ArrayGetBorrowUnique => {
+                let Some((_, reference)) = loaded.first() else {
+                    return Err(vec![unsupported(function, "malformed Array borrow")]);
+                };
+                let Some((index_ty, index)) = loaded.get(1) else {
+                    return Err(vec![unsupported(function, "malformed Array borrow")]);
+                };
+                let element = self.referenced_array_element(function, args[0].register)?;
+                let element_ty = self.llvm_type(element)?;
+                let array = self.emit_array_from_reference(reference);
+                let (slot, _) =
+                    self.emit_checked_array_slot(&array, index_ty, index, &element_ty, true);
+                slot
+            }
+            Primitive::ArraySetMove => {
+                let Some((_, reference)) = loaded.first() else {
+                    return Err(vec![unsupported(function, "malformed Array store")]);
+                };
+                let Some((index_ty, index)) = loaded.get(1) else {
+                    return Err(vec![unsupported(function, "malformed Array store")]);
+                };
+                let Some((value_ty, value)) = loaded.get(2) else {
+                    return Err(vec![unsupported(function, "malformed Array store")]);
+                };
+                let element = self.referenced_array_element(function, args[0].register)?;
+                let element_ty = self.llvm_type(element)?;
+                if &element_ty != value_ty {
+                    return Err(vec![unsupported(
+                        function,
+                        "Array stored value type mismatch",
+                    )]);
+                }
+                let array = self.emit_array_from_reference(reference);
+                let (slot, initialized) =
+                    self.emit_checked_array_slot(&array, index_ty, index, &element_ty, false);
+                self.line(&format!("  store {element_ty} {value}, ptr {slot}"));
+                self.line(&format!("  store i8 1, ptr {initialized}"));
+                "0".to_owned()
+            }
+            Primitive::ArrayPushMove => {
+                let Some((_, reference)) = loaded.first() else {
+                    return Err(vec![unsupported(function, "malformed Array push")]);
+                };
+                let Some((value_ty, value)) = loaded.get(1) else {
+                    return Err(vec![unsupported(function, "malformed Array push")]);
+                };
+                let element = self.referenced_array_element(function, args[0].register)?;
+                let element_ty = self.llvm_type(element)?;
+                if &element_ty != value_ty {
+                    return Err(vec![unsupported(
+                        function,
+                        "Array pushed value type mismatch",
+                    )]);
+                }
+                let usize_ty = format!("i{}", self.pointer_width());
+                self.overflow_widths.insert((self.pointer_width(), "uadd"));
+                let array = self.emit_array_from_reference(reference);
+                let length_address = self.temp();
+                let length = self.temp();
+                let pair = self.temp();
+                let required = self.temp();
+                let overflow = self.temp();
+                self.line(&format!(
+                    "  %{length_address} = getelementptr inbounds %g1.array, ptr {array}, i32 0, i32 0"
+                ));
+                self.line(&format!(
+                    "  %{length} = load {usize_ty}, ptr %{length_address}"
+                ));
+                self.line(&format!(
+                    "  %{pair} = call {{ {usize_ty}, i1 }} @llvm.uadd.with.overflow.{usize_ty}({usize_ty} %{length}, {usize_ty} 1)"
+                ));
+                self.line(&format!(
+                    "  %{required} = extractvalue {{ {usize_ty}, i1 }} %{pair}, 0"
+                ));
+                self.line(&format!(
+                    "  %{overflow} = extractvalue {{ {usize_ty}, i1 }} %{pair}, 1"
+                ));
+                self.emit_trap_if(overflow);
+                self.line(&format!(
+                    "  call void @g1_array_grow(ptr {array}, {usize_ty} %{required})"
+                ));
+                let data_address = self.temp();
+                let data = self.temp();
+                let slot = self.temp();
+                let initialized_address = self.temp();
+                let initialized = self.temp();
+                let initialized_slot = self.temp();
+                self.line(&format!(
+                    "  %{data_address} = getelementptr inbounds %g1.array, ptr {array}, i32 0, i32 3"
+                ));
+                self.line(&format!("  %{data} = load ptr, ptr %{data_address}"));
+                self.line(&format!(
+                    "  %{slot} = getelementptr inbounds {element_ty}, ptr %{data}, {usize_ty} %{length}"
+                ));
+                self.line(&format!("  store {element_ty} {value}, ptr %{slot}"));
+                self.line(&format!(
+                    "  %{initialized_address} = getelementptr inbounds %g1.array, ptr {array}, i32 0, i32 4"
+                ));
+                self.line(&format!(
+                    "  %{initialized} = load ptr, ptr %{initialized_address}"
+                ));
+                self.line(&format!(
+                    "  %{initialized_slot} = getelementptr inbounds i8, ptr %{initialized}, {usize_ty} %{length}"
+                ));
+                self.line(&format!("  store i8 1, ptr %{initialized_slot}"));
+                self.line(&format!(
+                    "  store {usize_ty} %{required}, ptr %{length_address}"
+                ));
+                "0".to_owned()
+            }
+            Primitive::ArrayPopMove => {
+                let Some((_, reference)) = loaded.first() else {
+                    return Err(vec![unsupported(function, "malformed Array pop")]);
+                };
+                let element = self.referenced_array_element(function, args[0].register)?;
+                let element_ty = self.llvm_type(element)?;
+                if element_ty != dst_ty {
+                    return Err(vec![unsupported(
+                        function,
+                        "Array popped value type mismatch",
+                    )]);
+                }
+                let usize_ty = format!("i{}", self.pointer_width());
+                let array = self.emit_array_from_reference(reference);
+                let length_address = self.temp();
+                let length = self.temp();
+                let empty = self.temp();
+                self.line(&format!(
+                    "  %{length_address} = getelementptr inbounds %g1.array, ptr {array}, i32 0, i32 0"
+                ));
+                self.line(&format!(
+                    "  %{length} = load {usize_ty}, ptr %{length_address}"
+                ));
+                self.line(&format!("  %{empty} = icmp eq {usize_ty} %{length}, 0"));
+                self.emit_trap_if(empty);
+                let index = self.temp();
+                self.line(&format!("  %{index} = sub {usize_ty} %{length}, 1"));
+                let (slot, initialized) = self.emit_checked_array_slot(
+                    &array,
+                    &usize_ty,
+                    &format!("%{index}"),
+                    &element_ty,
+                    true,
+                );
+                let value = self.temp();
+                self.line(&format!("  %{value} = load {element_ty}, ptr {slot}"));
+                self.line(&format!("  store i8 0, ptr {initialized}"));
+                self.line(&format!(
+                    "  store {usize_ty} %{index}, ptr %{length_address}"
+                ));
+                format!("%{value}")
+            }
+            Primitive::ArrayReserve => {
+                let Some((_, reference)) = loaded.first() else {
+                    return Err(vec![unsupported(function, "malformed Array reserve")]);
+                };
+                let Some((additional_ty, additional)) = loaded.get(1) else {
+                    return Err(vec![unsupported(function, "malformed Array reserve")]);
+                };
+                self.referenced_array_element(function, args[0].register)?;
+                self.overflow_widths.insert((self.pointer_width(), "uadd"));
+                let array = self.emit_array_from_reference(reference);
+                let length_address = self.temp();
+                let length = self.temp();
+                let pair = self.temp();
+                let required = self.temp();
+                let overflow = self.temp();
+                self.line(&format!(
+                    "  %{length_address} = getelementptr inbounds %g1.array, ptr {array}, i32 0, i32 0"
+                ));
+                self.line(&format!(
+                    "  %{length} = load {additional_ty}, ptr %{length_address}"
+                ));
+                self.line(&format!(
+                    "  %{pair} = call {{ {additional_ty}, i1 }} @llvm.uadd.with.overflow.{additional_ty}({additional_ty} %{length}, {additional_ty} {additional})"
+                ));
+                self.line(&format!(
+                    "  %{required} = extractvalue {{ {additional_ty}, i1 }} %{pair}, 0"
+                ));
+                self.line(&format!(
+                    "  %{overflow} = extractvalue {{ {additional_ty}, i1 }} %{pair}, 1"
+                ));
+                self.emit_trap_if(overflow);
+                self.line(&format!(
+                    "  call void @g1_array_grow(ptr {array}, {additional_ty} %{required})"
+                ));
+                "0".to_owned()
+            }
+            Primitive::ArrayFinishDrained => {
+                let Some((_, array)) = loaded.first() else {
+                    return Err(vec![unsupported(
+                        function,
+                        "malformed drained Array finish",
+                    )]);
+                };
+                let array_ty = self.register_runtime_type(function, args[0].register)?;
+                let element = self.array_element(array_ty)?;
+                self.ensure_plain_array_element(element, function)?;
+                let usize_ty = format!("i{}", self.pointer_width());
+                let length_address = self.temp();
+                let length = self.temp();
+                let empty = self.temp();
+                let loop_id = self.temp();
+                let index_address = self.temp();
+                self.line(&format!(
+                    "  %{length_address} = getelementptr inbounds %g1.array, ptr {array}, i32 0, i32 0"
+                ));
+                self.line(&format!(
+                    "  %{length} = load {usize_ty}, ptr %{length_address}"
+                ));
+                self.line(&format!("  %{empty} = icmp eq {usize_ty} %{length}, 0"));
+                self.line(&format!("  %{index_address} = alloca {usize_ty}"));
+                self.line(&format!("  store {usize_ty} 0, ptr %{index_address}"));
+                self.line(&format!(
+                    "  br i1 %{empty}, label %array.drain.done{loop_id}, label %array.drain.check{loop_id}"
+                ));
+                self.line(&format!("array.drain.check{loop_id}:"));
+                let index = self.temp();
+                let initialized_address = self.temp();
+                let initialized = self.temp();
+                let slot = self.temp();
+                let state = self.temp();
+                let occupied = self.temp();
+                self.line(&format!(
+                    "  %{index} = load {usize_ty}, ptr %{index_address}"
+                ));
+                self.line(&format!(
+                    "  %{initialized_address} = getelementptr inbounds %g1.array, ptr {array}, i32 0, i32 4"
+                ));
+                self.line(&format!(
+                    "  %{initialized} = load ptr, ptr %{initialized_address}"
+                ));
+                self.line(&format!(
+                    "  %{slot} = getelementptr inbounds i8, ptr %{initialized}, {usize_ty} %{index}"
+                ));
+                self.line(&format!("  %{state} = load i8, ptr %{slot}"));
+                self.line(&format!("  %{occupied} = icmp ne i8 %{state}, 0"));
+                let trap_label = self.temp();
+                let continue_label = self.temp();
+                self.line(&format!(
+                    "  br i1 %{occupied}, label %array.drain.trap{trap_label}, label %array.drain.continue{continue_label}"
+                ));
+                self.line(&format!("array.drain.trap{trap_label}:"));
+                self.line("  call void @llvm.trap()");
+                self.line("  unreachable");
+                self.line(&format!("array.drain.continue{continue_label}:"));
+                let next = self.temp();
+                let more = self.temp();
+                self.line(&format!("  %{next} = add {usize_ty} %{index}, 1"));
+                self.line(&format!("  store {usize_ty} %{next}, ptr %{index_address}"));
+                self.line(&format!(
+                    "  %{more} = icmp ult {usize_ty} %{next}, %{length}"
+                ));
+                self.line(&format!(
+                    "  br i1 %{more}, label %array.drain.check{loop_id}, label %array.drain.done{loop_id}"
+                ));
+                self.line(&format!("array.drain.done{loop_id}:"));
+                self.line(&format!("  call void @g1_array_free(ptr {array})"));
+                "0".to_owned()
             }
             Primitive::TextByteLen | Primitive::BytesLen => {
                 let Some((_, object)) = loaded.first() else {
@@ -1616,19 +2324,175 @@ impl<'a> Emitter<'a> {
         Ok(contains)
     }
 
+    fn type_contains_array(
+        &self,
+        ty: TypeId,
+        visiting: &mut BTreeSet<TypeId>,
+    ) -> Result<bool, Vec<Diagnostic>> {
+        if !visiting.insert(ty) {
+            return Ok(false);
+        }
+        let contains = match self.runtime_type(ty)? {
+            Type::Array { .. } => true,
+            Type::Tuple { fields, .. } => fields
+                .iter()
+                .any(|field| self.type_contains_array(*field, visiting).unwrap_or(true)),
+            Type::Struct { fields, .. } => fields
+                .iter()
+                .any(|field| self.type_contains_array(field.ty, visiting).unwrap_or(true)),
+            Type::Enum { variants, .. } => variants
+                .iter()
+                .flat_map(|variant| &variant.fields)
+                .any(|field| self.type_contains_array(field.ty, visiting).unwrap_or(true)),
+            _ => false,
+        };
+        visiting.remove(&ty);
+        Ok(contains)
+    }
+
+    fn ensure_plain_array_element(
+        &self,
+        ty: TypeId,
+        function: &mir::Function,
+    ) -> Result<(), Vec<Diagnostic>> {
+        match self.runtime_type(ty)? {
+            Type::Callable { .. }
+            | Type::Handler { .. }
+            | Type::Resumption { .. }
+            | Type::BindingPack { .. }
+            | Type::Available { .. } => {
+                return Err(vec![unsupported(
+                    function,
+                    "Array elements with callable or effect runtime state",
+                )]);
+            }
+            Type::Enum { .. }
+                if self.type_contains_byte_object(ty, &mut BTreeSet::new())?
+                    || self.type_contains_array(ty, &mut BTreeSet::new())? =>
+            {
+                return Err(vec![unsupported(
+                    function,
+                    "Array enum elements with runtime-owned payloads",
+                )]);
+            }
+            Type::Array { element } => self.ensure_plain_array_element(*element, function)?,
+            Type::Tuple { fields, .. } => {
+                for field in fields {
+                    self.ensure_plain_array_element(*field, function)?;
+                }
+            }
+            Type::Struct { fields, .. } => {
+                for field in fields {
+                    self.ensure_plain_array_element(field.ty, function)?;
+                }
+            }
+            _ => {}
+        }
+        self.llvm_type(ty)?;
+        Ok(())
+    }
+
     fn emit_retain(
         &mut self,
         ty: TypeId,
         value: &str,
         function: &mir::Function,
     ) -> Result<(), Vec<Diagnostic>> {
-        if self.is_byte_object(ty)? {
-            self.line(&format!("  call void @g1_bytes_retain(ptr {value})"));
-        } else if self.type_contains_byte_object(ty, &mut BTreeSet::new())? {
-            return Err(vec![unsupported(
-                function,
-                "copying aggregates that contain Text or Bytes",
-            )]);
+        match self.runtime_type(ty)?.clone() {
+            Type::Text | Type::Bytes => {
+                self.line(&format!("  call void @g1_bytes_retain(ptr {value})"));
+            }
+            Type::Tuple { fields, .. } => {
+                let aggregate_ty = self.llvm_type(ty)?;
+                for (index, field) in fields.into_iter().enumerate() {
+                    if self.type_contains_byte_object(field, &mut BTreeSet::new())? {
+                        let extracted = self.temp();
+                        self.line(&format!(
+                            "  %{extracted} = extractvalue {aggregate_ty} {value}, {index}"
+                        ));
+                        self.emit_retain(field, &format!("%{extracted}"), function)?;
+                    }
+                }
+            }
+            Type::Struct { fields, .. } => {
+                let aggregate_ty = self.llvm_type(ty)?;
+                for (index, field) in fields.into_iter().enumerate() {
+                    if self.type_contains_byte_object(field.ty, &mut BTreeSet::new())? {
+                        let extracted = self.temp();
+                        self.line(&format!(
+                            "  %{extracted} = extractvalue {aggregate_ty} {value}, {index}"
+                        ));
+                        self.emit_retain(field.ty, &format!("%{extracted}"), function)?;
+                    }
+                }
+            }
+            Type::Enum { .. } if self.type_contains_byte_object(ty, &mut BTreeSet::new())? => {
+                return Err(vec![unsupported(
+                    function,
+                    "copying enum values that contain Text or Bytes",
+                )]);
+            }
+            Type::Array { .. } if self.type_contains_array(ty, &mut BTreeSet::new())? => {
+                return Err(vec![unsupported(function, "copying Array values")]);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn emit_destroy(
+        &mut self,
+        ty: TypeId,
+        value: &str,
+        function: &mir::Function,
+    ) -> Result<(), Vec<Diagnostic>> {
+        match self.runtime_type(ty)?.clone() {
+            Type::Text | Type::Bytes => {
+                self.line(&format!("  call void @g1_bytes_release(ptr {value})"));
+            }
+            Type::Array { element } => {
+                self.ensure_plain_array_element(element, function)?;
+                self.emit_destroy_array_elements(value, element, function)?;
+                self.line(&format!("  call void @g1_array_free(ptr {value})"));
+            }
+            Type::Tuple { fields, .. } => {
+                let aggregate_ty = self.llvm_type(ty)?;
+                for (index, field) in fields.into_iter().enumerate().rev() {
+                    if self.type_contains_byte_object(field, &mut BTreeSet::new())?
+                        || self.type_contains_array(field, &mut BTreeSet::new())?
+                    {
+                        let extracted = self.temp();
+                        self.line(&format!(
+                            "  %{extracted} = extractvalue {aggregate_ty} {value}, {index}"
+                        ));
+                        self.emit_destroy(field, &format!("%{extracted}"), function)?;
+                    }
+                }
+            }
+            Type::Struct { fields, .. } => {
+                let aggregate_ty = self.llvm_type(ty)?;
+                for (index, field) in fields.into_iter().enumerate().rev() {
+                    if self.type_contains_byte_object(field.ty, &mut BTreeSet::new())?
+                        || self.type_contains_array(field.ty, &mut BTreeSet::new())?
+                    {
+                        let extracted = self.temp();
+                        self.line(&format!(
+                            "  %{extracted} = extractvalue {aggregate_ty} {value}, {index}"
+                        ));
+                        self.emit_destroy(field.ty, &format!("%{extracted}"), function)?;
+                    }
+                }
+            }
+            Type::Enum { .. }
+                if self.type_contains_byte_object(ty, &mut BTreeSet::new())?
+                    || self.type_contains_array(ty, &mut BTreeSet::new())? =>
+            {
+                return Err(vec![unsupported(
+                    function,
+                    "dropping enum values with runtime-owned payloads",
+                )]);
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -1709,6 +2573,250 @@ impl<'a> Emitter<'a> {
         format!("%{result}")
     }
 
+    fn array_element(&self, array: TypeId) -> Result<TypeId, Vec<Diagnostic>> {
+        match self.runtime_type(array)? {
+            Type::Array { element } => Ok(*element),
+            other => Err(vec![backend_error(format!(
+                "LLVM Array operation requires an Array type, found {other:?}"
+            ))]),
+        }
+    }
+
+    fn referenced_array_element(
+        &self,
+        function: &mir::Function,
+        reference_register: u32,
+    ) -> Result<TypeId, Vec<Diagnostic>> {
+        let reference = self.register_runtime_type(function, reference_register)?;
+        let array = match self.runtime_type(reference)? {
+            Type::RefShared { referent } | Type::RefUnique { referent } => *referent,
+            other => {
+                return Err(vec![unsupported(
+                    function,
+                    format!("Array operation through non-reference {other:?}"),
+                )]);
+            }
+        };
+        let element = self.array_element(array)?;
+        self.ensure_plain_array_element(element, function)?;
+        Ok(element)
+    }
+
+    fn emit_array_element_size(&mut self, element_ty: &str) -> String {
+        let usize_ty = format!("i{}", self.pointer_width());
+        let end = self.temp();
+        let size = self.temp();
+        self.line(&format!(
+            "  %{end} = getelementptr {element_ty}, ptr null, {usize_ty} 1"
+        ));
+        self.line(&format!("  %{size} = ptrtoint ptr %{end} to {usize_ty}"));
+        format!("%{size}")
+    }
+
+    fn emit_array_from_reference(&mut self, reference: &str) -> String {
+        let array = self.temp();
+        self.line(&format!("  %{array} = load ptr, ptr {reference}"));
+        format!("%{array}")
+    }
+
+    fn emit_checked_array_slot(
+        &mut self,
+        array: &str,
+        index_ty: &str,
+        index: &str,
+        element_ty: &str,
+        require_initialized: bool,
+    ) -> (String, String) {
+        let length_address = self.temp();
+        let length = self.temp();
+        let out_of_bounds = self.temp();
+        let initialized_address_address = self.temp();
+        let initialized = self.temp();
+        let initialized_slot = self.temp();
+        let state = self.temp();
+        let wrong_state = self.temp();
+        let invalid = self.temp();
+        self.line(&format!(
+            "  %{length_address} = getelementptr inbounds %g1.array, ptr {array}, i32 0, i32 0"
+        ));
+        self.line(&format!(
+            "  %{length} = load {index_ty}, ptr %{length_address}"
+        ));
+        self.line(&format!(
+            "  %{out_of_bounds} = icmp uge {index_ty} {index}, %{length}"
+        ));
+        self.line(&format!(
+            "  %{initialized_address_address} = getelementptr inbounds %g1.array, ptr {array}, i32 0, i32 4"
+        ));
+        self.line(&format!(
+            "  %{initialized} = load ptr, ptr %{initialized_address_address}"
+        ));
+        self.line(&format!(
+            "  %{initialized_slot} = getelementptr inbounds i8, ptr %{initialized}, {index_ty} {index}"
+        ));
+        self.line(&format!("  %{state} = load i8, ptr %{initialized_slot}"));
+        self.line(&format!(
+            "  %{wrong_state} = icmp {} i8 %{state}, 0",
+            if require_initialized { "eq" } else { "ne" }
+        ));
+        self.line(&format!(
+            "  %{invalid} = or i1 %{out_of_bounds}, %{wrong_state}"
+        ));
+        self.emit_trap_if(invalid);
+        let data_address = self.temp();
+        let data = self.temp();
+        let slot = self.temp();
+        self.line(&format!(
+            "  %{data_address} = getelementptr inbounds %g1.array, ptr {array}, i32 0, i32 3"
+        ));
+        self.line(&format!("  %{data} = load ptr, ptr %{data_address}"));
+        self.line(&format!(
+            "  %{slot} = getelementptr inbounds {element_ty}, ptr %{data}, {index_ty} {index}"
+        ));
+        (format!("%{slot}"), format!("%{initialized_slot}"))
+    }
+
+    fn emit_array_dense_check(&mut self, array: &str, length: &str, usize_ty: &str) {
+        let empty = self.temp();
+        let loop_id = self.temp();
+        let index_address = self.temp();
+        self.line(&format!("  %{empty} = icmp eq {usize_ty} {length}, 0"));
+        self.line(&format!("  %{index_address} = alloca {usize_ty}"));
+        self.line(&format!("  store {usize_ty} 0, ptr %{index_address}"));
+        self.line(&format!(
+            "  br i1 %{empty}, label %array.dense.done{loop_id}, label %array.dense.check{loop_id}"
+        ));
+        self.line(&format!("array.dense.check{loop_id}:"));
+        let index = self.temp();
+        let initialized_address = self.temp();
+        let initialized = self.temp();
+        let slot = self.temp();
+        let state = self.temp();
+        let empty_slot = self.temp();
+        self.line(&format!(
+            "  %{index} = load {usize_ty}, ptr %{index_address}"
+        ));
+        self.line(&format!(
+            "  %{initialized_address} = getelementptr inbounds %g1.array, ptr {array}, i32 0, i32 4"
+        ));
+        self.line(&format!(
+            "  %{initialized} = load ptr, ptr %{initialized_address}"
+        ));
+        self.line(&format!(
+            "  %{slot} = getelementptr inbounds i8, ptr %{initialized}, {usize_ty} %{index}"
+        ));
+        self.line(&format!("  %{state} = load i8, ptr %{slot}"));
+        self.line(&format!("  %{empty_slot} = icmp eq i8 %{state}, 0"));
+        let trap_label = self.temp();
+        let continue_label = self.temp();
+        self.line(&format!(
+            "  br i1 %{empty_slot}, label %array.dense.trap{trap_label}, label %array.dense.continue{continue_label}"
+        ));
+        self.line(&format!("array.dense.trap{trap_label}:"));
+        self.line("  call void @llvm.trap()");
+        self.line("  unreachable");
+        self.line(&format!("array.dense.continue{continue_label}:"));
+        let next = self.temp();
+        let more = self.temp();
+        self.line(&format!("  %{next} = add {usize_ty} %{index}, 1"));
+        self.line(&format!("  store {usize_ty} %{next}, ptr %{index_address}"));
+        self.line(&format!(
+            "  %{more} = icmp ult {usize_ty} %{next}, {length}"
+        ));
+        self.line(&format!(
+            "  br i1 %{more}, label %array.dense.check{loop_id}, label %array.dense.done{loop_id}"
+        ));
+        self.line(&format!("array.dense.done{loop_id}:"));
+    }
+
+    fn emit_destroy_array_elements(
+        &mut self,
+        array: &str,
+        element: TypeId,
+        function: &mir::Function,
+    ) -> Result<(), Vec<Diagnostic>> {
+        if !self.type_contains_byte_object(element, &mut BTreeSet::new())?
+            && !self.type_contains_array(element, &mut BTreeSet::new())?
+        {
+            return Ok(());
+        }
+        let usize_ty = format!("i{}", self.pointer_width());
+        let element_ty = self.llvm_type(element)?;
+        let length_address = self.temp();
+        let length = self.temp();
+        let empty = self.temp();
+        let loop_id = self.temp();
+        let index_address = self.temp();
+        self.line(&format!(
+            "  %{length_address} = getelementptr inbounds %g1.array, ptr {array}, i32 0, i32 0"
+        ));
+        self.line(&format!(
+            "  %{length} = load {usize_ty}, ptr %{length_address}"
+        ));
+        self.line(&format!("  %{empty} = icmp eq {usize_ty} %{length}, 0"));
+        self.line(&format!("  %{index_address} = alloca {usize_ty}"));
+        self.line(&format!("  store {usize_ty} 0, ptr %{index_address}"));
+        self.line(&format!(
+            "  br i1 %{empty}, label %array.destroy.done{loop_id}, label %array.destroy.check{loop_id}"
+        ));
+        self.line(&format!("array.destroy.check{loop_id}:"));
+        let index = self.temp();
+        let initialized_address = self.temp();
+        let initialized = self.temp();
+        let initialized_slot = self.temp();
+        let state = self.temp();
+        let occupied = self.temp();
+        let destroy_label = self.temp();
+        let continue_label = self.temp();
+        self.line(&format!(
+            "  %{index} = load {usize_ty}, ptr %{index_address}"
+        ));
+        self.line(&format!(
+            "  %{initialized_address} = getelementptr inbounds %g1.array, ptr {array}, i32 0, i32 4"
+        ));
+        self.line(&format!(
+            "  %{initialized} = load ptr, ptr %{initialized_address}"
+        ));
+        self.line(&format!(
+            "  %{initialized_slot} = getelementptr inbounds i8, ptr %{initialized}, {usize_ty} %{index}"
+        ));
+        self.line(&format!("  %{state} = load i8, ptr %{initialized_slot}"));
+        self.line(&format!("  %{occupied} = icmp ne i8 %{state}, 0"));
+        self.line(&format!(
+            "  br i1 %{occupied}, label %array.destroy.value{destroy_label}, label %array.destroy.continue{continue_label}"
+        ));
+        self.line(&format!("array.destroy.value{destroy_label}:"));
+        let data_address = self.temp();
+        let data = self.temp();
+        let slot = self.temp();
+        let value = self.temp();
+        self.line(&format!(
+            "  %{data_address} = getelementptr inbounds %g1.array, ptr {array}, i32 0, i32 3"
+        ));
+        self.line(&format!("  %{data} = load ptr, ptr %{data_address}"));
+        self.line(&format!(
+            "  %{slot} = getelementptr inbounds {element_ty}, ptr %{data}, {usize_ty} %{index}"
+        ));
+        self.line(&format!("  %{value} = load {element_ty}, ptr %{slot}"));
+        self.emit_destroy(element, &format!("%{value}"), function)?;
+        self.line(&format!(
+            "  br label %array.destroy.continue{continue_label}"
+        ));
+        self.line(&format!("array.destroy.continue{continue_label}:"));
+        let next = self.temp();
+        let more = self.temp();
+        self.line(&format!("  %{next} = add {usize_ty} %{index}, 1"));
+        self.line(&format!("  store {usize_ty} %{next}, ptr %{index_address}"));
+        self.line(&format!(
+            "  %{more} = icmp ult {usize_ty} %{next}, %{length}"
+        ));
+        self.line(&format!(
+            "  br i1 %{more}, label %array.destroy.check{loop_id}, label %array.destroy.done{loop_id}"
+        ));
+        self.line(&format!("array.destroy.done{loop_id}:"));
+        Ok(())
+    }
+
     fn llvm_constant(&self, value: &Constant) -> Result<String, Vec<Diagnostic>> {
         match value {
             Constant::Text(value) => self.byte_literal(value.as_bytes()),
@@ -1766,9 +2874,11 @@ impl<'a> Emitter<'a> {
             Type::U64 | Type::I64 | Type::F64 => 8,
             Type::Usize | Type::Isize => usize::from(self.pointer_width() / 8),
             Type::U128 | Type::I128 => 16,
-            Type::Text | Type::Bytes | Type::RefShared { .. } | Type::RefUnique { .. } => {
-                usize::from(self.pointer_width() / 8)
-            }
+            Type::Text
+            | Type::Bytes
+            | Type::Array { .. }
+            | Type::RefShared { .. }
+            | Type::RefUnique { .. } => usize::from(self.pointer_width() / 8),
             Type::Tuple { fields, .. } => {
                 let mut size = 0usize;
                 for field in fields {
@@ -1915,9 +3025,11 @@ impl<'a> Emitter<'a> {
             Type::U128 | Type::I128 => "i128".into(),
             Type::F32 => "float".into(),
             Type::F64 => "double".into(),
-            Type::Text | Type::Bytes | Type::RefShared { .. } | Type::RefUnique { .. } => {
-                "ptr".into()
-            }
+            Type::Text
+            | Type::Bytes
+            | Type::Array { .. }
+            | Type::RefShared { .. }
+            | Type::RefUnique { .. } => "ptr".into(),
             Type::Tuple { fields, .. } => format!(
                 "{{ {} }}",
                 fields

@@ -39,15 +39,19 @@ The current vertical slice supports:
   `usize`/`isize`;
 - immutable, reference-counted `Text`/`Bytes` storage, literals, length,
   concatenation, equality, byte indexing/slicing, and `Text`-to-`Bytes`
-  conversion.
+  conversion;
+- native arrays of supported scalar and owned aggregate values with capacity
+  growth, initialization-state tracking, move/copy/borrow access, mutation,
+  reserve, push/pop, recursive cleanup, and zero-copy-shaped
+  `Vec<u8>`/`Bytes` bridge operations.
 
 It emits only functions reachable from `main`, uses register allocas as the
 first stable ABI, and validates generated IR in tests with `llvm-as`. Native
 scalar and `Text`/`Bytes` programs are also executed against C harnesses and
 compared with the VM result; the owned-buffer path runs under AddressSanitizer.
-Unsupported arrays, escaping callable environments, host calls, and
-effect/resumption operations produce `G1LLVM001` instead of silently changing
-semantics.
+Unsupported owned enum, callable, or effect-state array elements, escaping
+callable environments, host calls, and effect/resumption operations produce
+`G1LLVM001` instead of silently changing semantics.
 
 ## Delivery chunks
 
@@ -58,7 +62,8 @@ semantics.
 3. References and ownership: core borrow/reborrow and dereference operations
    plus direct `Text`/`Bytes` retain/release are implemented; nested owned
    aggregate cleanup and custom drop glue remain.
-4. Runtime ABI: `Text` and `Bytes` are partially implemented; arrays, host
+4. Runtime ABI: `Text`, `Bytes`, and arrays of supported owned aggregates are
+   partially implemented; owned enum/callable/effect-state elements, host
    imports, UTF-8 validation, and the remaining checked conversion helpers
    remain.
 5. First-class callables: environments, indirect calls, receiver modes, and

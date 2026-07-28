@@ -444,3 +444,72 @@ fn llvm_and_vm_backends_execute_the_same_scalar_program() {
     );
     assert!(Command::new(executable).status().unwrap().success());
 }
+
+#[test]
+fn llvm_and_vm_backends_execute_the_same_vec_program() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-array-differential.glorious",
+        "new_values() -> Vec<i64> { Vec::with_capacity(1) }\nnew_byte_values() -> Vec<u8> { Vec::new() }\nnew_text_values() -> Vec<String> { Vec::new() }\nowned_elements() -> usize {\n  let values = new_text_values();\n  Vec::push(&mut values, \"a\");\n  Vec::push(&mut values, String::concat(\"b\", \"c\"));\n  Vec::len(&values)\n}\nselected() -> usize {\n  let values = new_values();\n  Vec::push(&mut values, 10);\n  Vec::push(&mut values, 32);\n  Vec::reserve(&mut values, 4);\n  Vec::len(&values);\n  owned_elements();\n  let byte_values = new_byte_values();\n  Vec::push(&mut byte_values, 65);\n  Vec::push(&mut byte_values, 66);\n  let bytes = Bytes::from_vec(move byte_values);\n  let restored = Bytes::to_vec(move bytes);\n  Vec::len(&restored)\n}\nmain() -> () { selected(); () }",
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::U64(2)
+    );
+
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    assert!(module.ir.contains("%g1.array = type"));
+    assert!(module.ir.contains("@g1_array_grow"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("array.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("array");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\nextern uint64_t g1_f{llvm_function}(void);\nint main(void) {{ return g1_f{llvm_function}() == 2 ? 0 : 1; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new("clang")
+        .arg("-fsanitize=address")
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable).output().unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
+    );
+}
