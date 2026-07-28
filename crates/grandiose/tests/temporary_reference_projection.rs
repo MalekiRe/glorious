@@ -199,6 +199,70 @@ fn assignment_accepts_temporary_unique_reference_from_generic_associated_call() 
 }
 
 #[test]
+fn call_returned_reference_crosses_handler_join_without_duplicate_cleanup() {
+    let source = r#"
+        struct ProbeRange { count: u32 }
+        struct ProbeCallable { parameters: ProbeRange }
+
+        parameters<'a>(value: &'a ProbeCallable) -> &'a ProbeRange {
+            &value.parameters
+        }
+
+        count_parameters(value: &ProbeCallable, ordinal: u32) -> u32 {
+            let range = parameters(value);
+            handle ordinal < range.count {
+                Result::Err(_) => ordinal,
+                Result::Ok(_) => count_parameters(value, ordinal + 1)
+            }
+        }
+
+        main() -> () { () }
+    "#;
+    grandiose::compile_source_to_bytecode("call-reference-across-handler-join.glorious", source)
+        .unwrap();
+}
+
+#[test]
+fn temporary_unique_reborrow_call_argument_is_transferred_once() {
+    let source = r#"
+        struct Probe { value: u32 }
+
+        read(value: &mut Probe) -> u32 {
+            value.value
+        }
+
+        read_twice(value: &mut Probe) -> u32 {
+            let first = read(&mut *value);
+            let second = read(&mut *value);
+            first + second
+        }
+
+        selected() -> u32 {
+            let value = Probe { value: 21 };
+            read_twice(&mut value)
+        }
+
+        main() -> () { () }
+    "#;
+    let artifact = grandiose::compile_source_to_bytecode(
+        "temporary-unique-reborrow-call-argument.glorious",
+        source,
+    )
+    .unwrap();
+    let selected = artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(artifact).unwrap())
+            .run(selected, vec![])
+            .unwrap(),
+        Value::U64(42)
+    );
+}
+
+#[test]
 fn borrowed_enum_scrutinee_supports_non_consuming_variant_patterns() {
     let source = r#"
         enum NumberBase { Binary, Octal, Decimal, Hex }

@@ -2506,6 +2506,15 @@ impl Interpreter<'_> {
                 }
                 if let Some(loan) = self.state.loans.remove(&src.register) {
                     self.state.loans.insert(*dst, loan);
+                    // Move is a pure SSA rename for a reference loan. Any
+                    // simultaneously live reborrow must follow that rename so
+                    // its eventual retirement unsuspends the transferred
+                    // parent rather than the now-consumed source register.
+                    for child in self.state.loans.values_mut() {
+                        if child.parent == Some(src.register) {
+                            child.parent = Some(*dst);
+                        }
+                    }
                 }
                 if self.state.holes.remove(&src.register) {
                     self.state.holes.insert(*dst);
@@ -3050,7 +3059,7 @@ impl Interpreter<'_> {
                     borrowed.projection.push(Projection::DynamicIndex);
                     let unique = *primitive == Primitive::ArrayGetBorrowUnique;
                     self.check_loan_conflict(&borrowed, unique, Some(source))?;
-                    Some((source, parent.external, borrowed, unique))
+                    Some((parent.parent, parent.external, borrowed, unique))
                 } else {
                     None
                 };
@@ -3059,7 +3068,12 @@ impl Interpreter<'_> {
                 }
                 self.define(*dst, "Primitive")?;
                 if let Some((parent, external, borrowed, unique)) = projected_loan {
-                    if let Some(loan) = self.state.loans.get_mut(&parent) {
+                    if let Some(parent) = parent
+                        && let Some(loan) = self.state.loans.get_mut(&parent)
+                    {
+                        // Moving the source reference temporarily removes its
+                        // suspension from this ancestor. The projected result
+                        // immediately inherits that same parent relationship.
                         loan.suspended += 1;
                     }
                     self.state.loans.insert(
@@ -3069,7 +3083,7 @@ impl Interpreter<'_> {
                             unique,
                             external,
                             borrowed,
-                            parent: Some(parent),
+                            parent,
                             suspended: 0,
                         },
                     );
@@ -7316,6 +7330,164 @@ mod ownership_engine_tests {
             &types,
         );
         solve_function(&disjoint, &types).expect("disjoint unique loans are legal");
+    }
+
+    #[test]
+    fn array_borrow_primitive_transfers_source_loan_to_projected_result() {
+        let mut types = Type::predefined();
+        let array = types.len() as grandiose_vm::TypeId;
+        types.push(Type::Array { element: I64 });
+        let unique_array = types.len() as grandiose_vm::TypeId;
+        types.push(Type::RefUnique { referent: array });
+        let unique_element = types.len() as grandiose_vm::TypeId;
+        types.push(Type::RefUnique { referent: I64 });
+        let function = exported_function(
+            vec![
+                UNIT,
+                array,
+                unique_array,
+                grandiose_vm::USIZE,
+                unique_element,
+            ],
+            1,
+            vec![block(
+                0,
+                vec![
+                    statement(InstructionKind::Borrow {
+                        dst: 2,
+                        src: 1,
+                        unique: true,
+                    }),
+                    statement(InstructionKind::Const {
+                        dst: 3,
+                        value: grandiose_vm::Constant::Usize(0),
+                    }),
+                    statement(InstructionKind::Primitive {
+                        dst: 4,
+                        primitive: Primitive::ArrayGetBorrowUnique,
+                        args: vec![move_operand(2), move_operand(3)],
+                    }),
+                    statement(InstructionKind::EndBorrow { reference: 4 }),
+                    statement(InstructionKind::Drop {
+                        owner: move_operand(1),
+                    }),
+                ],
+                Terminator::Return { value: None },
+            )],
+            &types,
+        );
+
+        solve_function(&function, &types).unwrap();
+    }
+
+    #[test]
+    fn edge_move_rebases_live_child_loan_to_transferred_parent() {
+        let (types, _, unique) = reference_types();
+        let function = exported_function(
+            vec![
+                UNIT,
+                I64,
+                unique,
+                unique,
+                grandiose_vm::U32,
+                unique,
+                unique,
+                unique,
+            ],
+            1,
+            vec![
+                block(
+                    0,
+                    vec![
+                        statement(InstructionKind::Borrow {
+                            dst: 2,
+                            src: 1,
+                            unique: true,
+                        }),
+                        statement(InstructionKind::Reborrow {
+                            dst: 3,
+                            src: 2,
+                            unique: true,
+                        }),
+                        statement(InstructionKind::Const {
+                            dst: 4,
+                            value: grandiose_vm::Constant::U32(0),
+                        }),
+                    ],
+                    Terminator::Switch {
+                        discr: Operand {
+                            register: 4,
+                            mode: UseMode::Copy,
+                        },
+                        cases: vec![(
+                            grandiose_vm::Constant::U32(0),
+                            Edge {
+                                target: 1,
+                                args: vec![],
+                            },
+                        )],
+                        otherwise: Edge {
+                            target: 2,
+                            args: vec![],
+                        },
+                    },
+                ),
+                block(
+                    1,
+                    vec![statement(InstructionKind::EndBorrow { reference: 3 })],
+                    Terminator::Goto(Edge {
+                        target: 3,
+                        args: vec![move_operand(2)],
+                    }),
+                ),
+                block(
+                    2,
+                    vec![],
+                    Terminator::Goto(Edge {
+                        target: 4,
+                        args: vec![move_operand(2), move_operand(3)],
+                    }),
+                ),
+                BasicBlock {
+                    id: 3,
+                    params: vec![BlockParam {
+                        register: 5,
+                        ty: unique,
+                        role: BlockParamRole::Ordinary,
+                    }],
+                    statements: vec![
+                        statement(InstructionKind::EndBorrow { reference: 5 }),
+                        statement(InstructionKind::Drop {
+                            owner: move_operand(1),
+                        }),
+                    ],
+                    terminator: Terminator::Return { value: None },
+                },
+                BasicBlock {
+                    id: 4,
+                    params: vec![
+                        BlockParam {
+                            register: 6,
+                            ty: unique,
+                            role: BlockParamRole::Ordinary,
+                        },
+                        BlockParam {
+                            register: 7,
+                            ty: unique,
+                            role: BlockParamRole::Ordinary,
+                        },
+                    ],
+                    statements: vec![statement(InstructionKind::EndBorrow { reference: 7 })],
+                    terminator: Terminator::Goto(Edge {
+                        target: 3,
+                        args: vec![move_operand(6)],
+                    }),
+                },
+            ],
+            &types,
+        );
+
+        solve_function(&function, &types).unwrap();
     }
 
     #[test]

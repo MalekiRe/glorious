@@ -10629,6 +10629,14 @@ fn validate_exported_facts(function: &Function, types: &[Type]) -> Result<(), Va
                 | InstructionKind::Reborrow { dst, unique, .. } => {
                     instruction_loans.push((*dst, *unique));
                 }
+                InstructionKind::Primitive {
+                    dst,
+                    primitive:
+                        primitive @ (Primitive::ArrayGetBorrowShared | Primitive::ArrayGetBorrowUnique),
+                    ..
+                } => {
+                    instruction_loans.push((*dst, *primitive == Primitive::ArrayGetBorrowUnique));
+                }
                 _ => {}
             }
         }

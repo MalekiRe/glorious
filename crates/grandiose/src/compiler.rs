@@ -36392,6 +36392,29 @@ impl MirLowerer {
                     .unwrap_or_else(|| mir::Place::local(*src));
                 self.record_loan(span, *dst, borrowed, *unique, parent);
             }
+            mir::InstructionKind::Primitive {
+                dst,
+                primitive:
+                    primitive @ (Primitive::ArrayGetBorrowShared | Primitive::ArrayGetBorrowUnique),
+                args,
+            } => {
+                let source = args[0].register;
+                let source_loan = self.loan_of.get(&source).copied();
+                let (mut borrowed, parent) = source_loan
+                    .map(|loan| {
+                        let fact = &self.flow.loans[loan.index()];
+                        (fact.borrowed.clone(), fact.parent)
+                    })
+                    .unwrap_or_else(|| (mir::Place::local(source), None));
+                borrowed.projection.push(mir::Projection::DynamicIndex);
+                self.record_loan(
+                    span,
+                    *dst,
+                    borrowed,
+                    *primitive == Primitive::ArrayGetBorrowUnique,
+                    parent,
+                );
+            }
             _ => {}
         }
         match &kind {
@@ -38103,6 +38126,7 @@ impl MirLowerer {
                     }
                     joined_entry_borrowed = entry_borrowed
                         .intersection(&self.borrowed)
+                        .filter(|reference| !survivors.contains(reference))
                         .copied()
                         .collect();
                     let mut args = vec![Self::operand(value, mir::UseMode::Move)];
@@ -38297,6 +38321,7 @@ impl MirLowerer {
                     }
                     let negative_entry_borrowed = entry_borrowed
                         .intersection(&self.borrowed)
+                        .filter(|reference| !survivors.contains(reference))
                         .copied()
                         .collect::<BTreeSet<_>>();
                     if positive_reaches_join {
@@ -38758,6 +38783,13 @@ impl MirLowerer {
                 MirFlow::Value(Some(dst))
             }
             core::ExprKind::Call { declaration, args } => {
+                let returned_argument = expression.reference.as_ref().and_then(|returned| {
+                    args.iter().position(|argument| {
+                        argument.reference_fields.values().any(|origin| {
+                            origin.region == returned.region && origin.root == returned.root
+                        })
+                    })
+                });
                 let deferred_unique_handles = args
                     .iter()
                     .enumerate()
@@ -38791,10 +38823,16 @@ impl MirLowerer {
                     .collect::<Vec<_>>();
                 let parents = args
                     .iter()
-                    .filter_map(|argument| self.borrow_parents.remove(&argument.register))
-                    .collect::<BTreeSet<_>>();
+                    .enumerate()
+                    .filter_map(|(index, argument)| {
+                        self.borrow_parents
+                            .remove(&argument.register)
+                            .map(|parent| (index, parent))
+                    })
+                    .collect::<Vec<_>>();
                 for argument in &args {
                     self.borrowed.remove(&argument.register);
+                    self.transfer_owner(argument.register);
                 }
                 let dst =
                     (!matches!(expression.ty, UNIT | NEVER)).then(|| self.allocate(expression.ty));
@@ -38822,14 +38860,22 @@ impl MirLowerer {
                     self.terminate(mir::Terminator::Unreachable);
                     return MirFlow::Diverged;
                 }
-                for parent in parents {
-                    self.release_borrow_parent(parent, expression.span);
-                }
                 if expression.reference.is_some()
                     && self.reference_types.contains(&expression.ty)
                     && let Some(dst) = dst
                 {
                     self.borrowed.insert(dst);
+                    if let Some((_, parent)) = parents
+                        .iter()
+                        .find(|(index, _)| Some(*index) == returned_argument)
+                    {
+                        self.borrow_parents.insert(dst, *parent);
+                    }
+                }
+                for (index, parent) in parents {
+                    if Some(index) != returned_argument {
+                        self.release_borrow_parent(parent, expression.span);
+                    }
                 }
                 MirFlow::Value(dst)
             }
@@ -38889,6 +38935,13 @@ impl MirLowerer {
                 }
             }
             core::ExprKind::CallSelf { args } => {
+                let returned_argument = expression.reference.as_ref().and_then(|returned| {
+                    args.iter().position(|argument| {
+                        argument.reference_fields.values().any(|origin| {
+                            origin.region == returned.region && origin.root == returned.root
+                        })
+                    })
+                });
                 let mut lowered_args = Vec::with_capacity(args.len());
                 for argument in args {
                     let span = argument.span;
@@ -38903,10 +38956,16 @@ impl MirLowerer {
                 let args = lowered_args;
                 let parents = args
                     .iter()
-                    .filter_map(|argument| self.borrow_parents.remove(&argument.register))
-                    .collect::<BTreeSet<_>>();
+                    .enumerate()
+                    .filter_map(|(index, argument)| {
+                        self.borrow_parents
+                            .remove(&argument.register)
+                            .map(|parent| (index, parent))
+                    })
+                    .collect::<Vec<_>>();
                 for argument in &args {
                     self.borrowed.remove(&argument.register);
+                    self.transfer_owner(argument.register);
                 }
                 let dst =
                     (!matches!(expression.ty, UNIT | NEVER)).then(|| self.allocate(expression.ty));
@@ -38933,14 +38992,22 @@ impl MirLowerer {
                     self.terminate(mir::Terminator::Unreachable);
                     return MirFlow::Diverged;
                 }
-                for parent in parents {
-                    self.release_borrow_parent(parent, expression.span);
-                }
                 if expression.reference.is_some()
                     && self.reference_types.contains(&expression.ty)
                     && let Some(dst) = dst
                 {
                     self.borrowed.insert(dst);
+                    if let Some((_, parent)) = parents
+                        .iter()
+                        .find(|(index, _)| Some(*index) == returned_argument)
+                    {
+                        self.borrow_parents.insert(dst, *parent);
+                    }
+                }
+                for (index, parent) in parents {
+                    if Some(index) != returned_argument {
+                        self.release_borrow_parent(parent, expression.span);
+                    }
                 }
                 MirFlow::Value(dst)
             }
@@ -39490,7 +39557,7 @@ impl MirLowerer {
                     ));
                 }
                 let args = lowered_args;
-                let borrow_parent = matches!(
+                let borrow_source = matches!(
                     primitive,
                     Primitive::ArrayGetBorrowShared | Primitive::ArrayGetBorrowUnique
                 )
@@ -39504,15 +39571,18 @@ impl MirLowerer {
                         args,
                     },
                 );
-                if let Some(parent) = borrow_parent {
-                    // These primitives create a live reference loan just like
-                    // Borrow/ProjectBorrow. Keep the result in MIR's borrowed
-                    // set so consuming the surrounding expression emits
-                    // EndBorrow rather than an ordinary Drop, and retain the
-                    // temporary argument as its projection carrier through an
-                    // enclosing Core block.
+                if let Some(source) = borrow_source {
+                    // The primitive consumes its reference operand and
+                    // transfers that loan into a dynamically projected result.
+                    // Mirror the MIR Move semantics in the lowerer's lexical
+                    // bookkeeping: the source handle is gone, while its
+                    // pre-existing parent (if any) now belongs to `dst`.
+                    self.borrowed.remove(&source);
                     self.borrowed.insert(dst);
-                    self.borrow_parents.insert(dst, parent);
+                    if let Some(parent) = self.borrow_parents.remove(&source) {
+                        self.borrow_parents.insert(dst, parent);
+                    }
+                    self.loan_of.remove(&source);
                 }
                 MirFlow::Value(Some(dst))
             }
