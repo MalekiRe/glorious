@@ -1,6 +1,6 @@
 use std::{fs, process::Command};
 
-use grandiose_vm::{Value, Vm, verify};
+use grandiose_vm::{verify, Value, Vm};
 
 #[test]
 fn scalar_main_emits_valid_llvm_ir() {
@@ -337,11 +337,9 @@ fn target_options_control_pointer_sized_integer_layout() {
         },
     )
     .unwrap();
-    assert!(
-        module
-            .ir
-            .contains("target triple = \"i686-unknown-linux-gnu\"")
-    );
+    assert!(module
+        .ir
+        .contains("target triple = \"i686-unknown-linux-gnu\""));
     assert!(module.ir.contains("target datalayout = \"e-m:e-p:32:32"));
     assert!(module.ir.contains("define i32 @g1_f"));
 
@@ -578,7 +576,7 @@ fn llvm_and_vm_backends_execute_the_same_captured_callable_program() {
 fn llvm_handler_values_own_and_destroy_their_clause_callables() {
     let mut phases = grandiose::compile_source_to_phases_with_options(
         "llvm-handler-value.glorious",
-        "effect Stop { stop() -> ! }\nprepare() -> String / {Stop} { String::concat(\"le\", \"ak\") }\nrelay() -> ! / {Stop} { perform Stop::stop() }\nselected() -> i64 { handle { let retained = prepare(); relay() } { Stop::stop() => 42 } }\nmain() -> () { selected(); () }",
+        "effect Stop { stop() -> ! }\nselected() -> i64 { handle perform Stop::stop() { Stop::stop() => 42 } }\nmain() -> () { selected(); () }",
         grandiose::CompileOptions {
             optimization_level: grandiose::OptimizationLevel::O0,
         },
@@ -664,12 +662,24 @@ fn llvm_handler_values_own_and_destroy_their_clause_callables() {
 fn llvm_and_vm_backends_execute_the_same_terminal_handler() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-terminal-handler.glorious",
-        "effect Stop { stop() -> ! }\nselected() -> i64 { handle perform Stop::stop() { Stop::stop() => 42 } }\nmain() -> () { selected(); () }",
+        "struct Resource { text: String }\nimpl Use<[0,1]> for Resource {}\nstruct Parcel { left: Resource, right: Resource }\nconsume(value: Resource) -> () { () }\neffect Stop { stop(value: i64) -> ! }\nprepare() -> String / {Stop} { String::concat(\"le\", \"ak\") }\nleaf(value: i64) -> i64 / {Stop} { perform Stop::stop(value) }\nforward(value: i64) -> i64 / {Stop} { leaf(value) }\nselected() -> i64 { handle { let retained = prepare(); let parcel = Parcel { left: Resource { text: String::concat(\"mo\", \"ved\") }, right: Resource { text: String::concat(\"ke\", \"pt\") } }; let left = parcel.left; consume(move left); forward(42) } { Stop::stop(value) => value } }\nmain() -> () { selected(); () }",
         grandiose::CompileOptions {
             optimization_level: grandiose::OptimizationLevel::O0,
         },
     )
     .unwrap();
+    let forward = phases
+        .mir
+        .functions
+        .iter()
+        .find(|function| function.name == "forward")
+        .unwrap();
+    assert!(forward.blocks.iter().any(|block| {
+        matches!(
+            block.terminator,
+            grandiose::compiler_mir::Terminator::TailCall { .. }
+        )
+    }));
     let vm_function = phases
         .artifact
         .functions
@@ -747,11 +757,9 @@ fn llvm_backend_invokes_the_native_host_abi_and_consumes_arguments() {
     let mut options = grandiose::LlvmOptions::default();
     options.emit_entry_wrapper = false;
     let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
-    assert!(
-        module
-            .ir
-            .contains("declare void @g1_host_diagnostic_write(ptr)")
-    );
+    assert!(module
+        .ir
+        .contains("declare void @g1_host_diagnostic_write(ptr)"));
 
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("host.ll");
