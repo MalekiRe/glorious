@@ -3075,7 +3075,11 @@ impl<'a> Typer<'a> {
                         kind: TypedExprKind::EffectBoundary(children),
                     });
                     if last {
-                        tail = self.node(value, Some(predefined(UNIT)), TypedExprKind::Leaf);
+                        tail = TypedExpr {
+                            ty: Some(predefined(UNIT)),
+                            span: *span,
+                            kind: TypedExprKind::Leaf,
+                        };
                     }
                 }
                 Stmt::Expr(value) if last => tail = self.expression(value, expected),

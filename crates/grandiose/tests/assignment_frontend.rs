@@ -174,6 +174,17 @@ fn assignment_typechecks_at_o1_through_o3_for_local_field_and_unique_deref() {
 }
 
 #[test]
+fn final_assignment_unit_tail_agrees_with_core() {
+    let source = r#"
+        set(value: &mut i64, next: i64) -> () {
+            *value = move next;
+        }
+        main() -> () { () }
+    "#;
+    compile(source, OptimizationLevel::O1).unwrap();
+}
+
+#[test]
 fn rhs_trap_precedes_deref_move_destroy_and_store() {
     let source = r#"
         replace_for_trap_test(target: &mut i64, divisor: i64) -> i64 {
