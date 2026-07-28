@@ -661,6 +661,74 @@ fn llvm_handler_values_own_and_destroy_their_clause_callables() {
 }
 
 #[test]
+fn llvm_and_vm_backends_execute_the_same_terminal_handler() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-terminal-handler.glorious",
+        "effect Stop { stop() -> ! }\nselected() -> i64 { handle perform Stop::stop() { Stop::stop() => 42 } }\nmain() -> () { selected(); () }",
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    assert!(module.ir.contains("%g1.effect_frame = type"));
+    assert!(module.ir.contains("%g1.effect_runtime = type"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("terminal-handler.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("terminal-handler");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\nextern int64_t g1_f{llvm_function}(void);\nint main(void) {{ return g1_f{llvm_function}() == 42 ? 0 : 1; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new("clang")
+        .arg("-fsanitize=address")
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable).output().unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
+    );
+}
+
+#[test]
 fn llvm_backend_invokes_the_native_host_abi_and_consumes_arguments() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-host-call.glorious",

@@ -62,6 +62,9 @@ The current vertical slice supports:
 - first-class callable environments, reference-counted callable copies,
   direct and indirect invocation, and shared, unique, and owned environment
   receivers;
+- first-class handler values and terminal handler dispatch; outward terminal
+  bodies run in typed heap frames with explicit program counters, parent/result
+  links, and effect-request records rather than relying on the native stack;
 - binding-pack payload construction, erased-evidence layout, projection,
   copying, and cleanup;
 - typed native host-import calls for process arguments, filesystem read/write,
@@ -74,9 +77,9 @@ It emits only functions reachable from `main`, uses register allocas as the
 first stable ABI, and validates generated IR in tests with `llvm-as`. Native
 scalar, `Text`/`Bytes`, array, and callable programs are also executed against
 C harnesses and compared with the VM result; owned runtime paths run under
-AddressSanitizer. Unsupported effect-state array elements, handlers, and
-effect/resumption operations produce `G1LLVM001` instead of silently changing
-semantics.
+AddressSanitizer. Unsupported effect-state array elements and resumptive,
+cancellation, or multishot effect paths produce `G1LLVM001` instead of
+silently changing semantics.
 
 ## Delivery chunks
 
@@ -96,8 +99,10 @@ semantics.
    callable ownership, and binding-pack value lowering are implemented;
    effect-bearing callable environments remain.
 6. Effects and control: static typed-label push/pop/leave lowering is
-   implemented; handlers, resumptions, cancellation, and multishot
-   continuation storage remain.
+   implemented. Handler values and terminal `Handle`/`Perform` dispatch now
+   use the native heap-frame ABI; resumption, cancellation, multishot
+   continuation cloning, and effect propagation through nested outward calls
+   remain.
 7. Production output: object/executable emission through clang and initial
    bytecode/LLVM differential conformance tests are implemented, and `-O0`
    through `-O3` are forwarded to native code generation; debug information,
