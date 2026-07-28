@@ -8,8 +8,9 @@ use std::{
 use grandiose::{
     CompileOptions, LlvmOptions, OptimizationLevel,
     ast::{
-        EffectRowSyntax, EnumDecl, FieldVisibility, Function, GenericParamKind, GenericParams,
-        StructDecl, TypeAliasDecl, TypeSyntax, TypeSyntaxKind, Visibility,
+        Associativity, EffectRowSyntax, EnumDecl, FieldVisibility, FixityDecl, FixityKind,
+        Function, GenericParamKind, GenericParams, StructDecl, TypeAliasDecl, TypeSyntax,
+        TypeSyntaxKind, Visibility,
     },
     source_bundle::{Segment, SourceBundle},
 };
@@ -268,8 +269,27 @@ fn encode_callable(
     Ok(())
 }
 
+fn encode_fixity(
+    output: &mut Vec<u8>,
+    program: &grandiose::ast::Program,
+    declaration: &FixityDecl,
+) {
+    output.push(u8::from(
+        program.visibility(declaration.span) == Visibility::Public,
+    ));
+    output.push(match declaration.kind {
+        FixityKind::Prefix => 1,
+        FixityKind::Infix(Associativity::Left) => 2,
+        FixityKind::Infix(Associativity::Right) => 3,
+        FixityKind::Infix(Associativity::None) => 4,
+    });
+    output.push(declaration.precedence);
+    push_string(output, &declaration.name);
+}
+
 enum Interface<'a> {
     Alias(&'a TypeAliasDecl),
+    Fixity(&'a FixityDecl),
     Struct(&'a StructDecl),
     Enum(&'a EnumDecl),
     Function(&'a Function),
@@ -279,6 +299,7 @@ impl Interface<'_> {
     fn start(&self) -> usize {
         match self {
             Self::Alias(declaration) => declaration.span.start,
+            Self::Fixity(declaration) => declaration.span.start,
             Self::Struct(declaration) => declaration.span.start,
             Self::Enum(declaration) => declaration.span.start,
             Self::Function(declaration) => declaration.span.start,
@@ -290,6 +311,11 @@ impl Interface<'_> {
             Self::Alias(declaration) => {
                 output.push(3);
                 encode_alias(output, program, declaration)
+            }
+            Self::Fixity(declaration) => {
+                output.push(6);
+                encode_fixity(output, program, declaration);
+                Ok(())
             }
             Self::Struct(declaration) => {
                 output.push(8);
@@ -320,6 +346,7 @@ fn encode_rust_interfaces(output: &mut Vec<u8>, source: &str) {
         .type_aliases
         .iter()
         .map(Interface::Alias)
+        .chain(program.fixities.iter().map(Interface::Fixity))
         .chain(program.structs.iter().map(Interface::Struct))
         .chain(program.enums.iter().map(Interface::Enum))
         .chain(program.functions.iter().map(Interface::Function))
@@ -339,7 +366,7 @@ fn encode_rust_interfaces(output: &mut Vec<u8>, source: &str) {
 }
 
 fn corpus(directory: &Path) -> Vec<PathBuf> {
-    let focused = [
+    let valid = [
         "",
         "type Word = u32; struct Empty {} enum Void {}",
         "pub type Pair<T, U> = core::Pair<T, U>; pub struct Wrap<'a, T, E: EffectRow> { private value: &'a T, marker: Phantom<T> } pub enum Maybe<T> { None, Some(T) }",
@@ -354,6 +381,15 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "mod outer { pub type A = u8; pub struct S { private x: u8 } pub enum E { V } pub f() { () } }",
         "type Borrowed<'a, T, E: EffectRow> = &'a T; type Double = ((u8)); enum GroupedPayload { V((u8), ((u16))) }",
         "type First = u8; effect Ignored { ping() -> !; } struct Middle { value: First } enum Last { Done }",
+        "infixl 30 +; infixr 1 else; infix 50 ==; prefix 90 !;",
+        "prefix 0 not; infixl 0xFF <*>; infixr 0b1_000 cons; infix 2_5_5 &=;",
+        "infixl 35 <*>=; prefix 99 !!; infix 17 &=;",
+        "type BeforeFixity = u8; infixl 42 combine; use dependency; trait Marker {} struct AfterFixity {} prefix 7 ~; let global = (); enum LastFixity {}",
+        "mod fixities { pub infixr 1 otherwise; infixl 40 <*>; pub type Local = u8; } prefix 90 not;",
+        "mod left { infixl 5 join; } mod right { pub infixl 5 join; }",
+        "pub prefix 255 negate; pub infixr 0 choose; private_name() { () }",
+    ];
+    let malformed = [
         "type Missing = ;",
         "type Bad = u8 u16;",
         "struct Bad { value u8 }",
@@ -364,10 +400,23 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "struct Unsupported<const N: u32> { value: u8 }",
         "type UnsupportedArray = [u8; 4];",
         "type UnsupportedLifetime<'a, T> = View<'a, T>;",
+        "infixl 256 too_high;",
+        "infixr 1.5 fractional;",
+        "infix 40 ;",
+        "infixl 30 + +;",
+        "infixl 30 ::;",
+        "infixr 30 ->;",
+        "prefix 30 .;",
+        "infix 30 where;",
     ];
     let mut paths = Vec::new();
-    for (index, source) in focused.into_iter().enumerate() {
-        let path = directory.join(format!("focused-{index}.glorious"));
+    for (index, source) in valid.into_iter().enumerate() {
+        let path = directory.join(format!("valid-{index}.glorious"));
+        fs::write(&path, source).unwrap();
+        paths.push(path);
+    }
+    for (index, source) in malformed.into_iter().enumerate() {
+        let path = directory.join(format!("error-{index}.glorious"));
         fs::write(&path, source).unwrap();
         paths.push(path);
     }
@@ -381,7 +430,7 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         deep.push('>');
     }
     deep.push(';');
-    let path = directory.join("deep.glorious");
+    let path = directory.join("valid-deep.glorious");
     fs::write(&path, deep).unwrap();
     paths.push(path);
     paths
@@ -391,10 +440,15 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
 fn rust_interface_oracle_classifies_the_focused_corpus() {
     let directory = tempfile::tempdir().unwrap();
     let corpus = corpus(directory.path());
-    for (index, path) in corpus.iter().enumerate() {
+    for path in &corpus {
         let mut encoded = Vec::new();
         encode_rust_interfaces(&mut encoded, &fs::read_to_string(path).unwrap());
-        let expected = if index <= 13 || index + 1 == corpus.len() {
+        let expected = if path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with("valid-")
+        {
             0
         } else {
             3
@@ -402,7 +456,7 @@ fn rust_interface_oracle_classifies_the_focused_corpus() {
         assert_eq!(
             encoded.first().copied(),
             Some(expected),
-            "unexpected Rust-oracle status for input {index} ({})",
+            "unexpected Rust-oracle status for input {}",
             path.display()
         );
     }

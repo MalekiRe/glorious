@@ -98,11 +98,21 @@ pub struct EnumHeader {
     tokens: HeaderTokenRange
 }
 
+pub struct FixityHeader {
+    shell: u32,
+    public: Bool,
+    form: u8,
+    precedence: u8,
+    operator: HeaderTokenRange,
+    tokens: HeaderTokenRange
+}
+
 struct AliasArena { values: Vec<TypeAliasHeader> }
 struct StructArena { values: Vec<StructHeader> }
 struct FieldArena { values: Vec<FieldHeader> }
 struct EnumArena { values: Vec<EnumHeader> }
 struct VariantArena { values: Vec<VariantHeader> }
+struct FixityArena { values: Vec<FixityHeader> }
 
 pub struct HeaderIndex {
     callables: Vec<CallableHeader>,
@@ -120,7 +130,8 @@ pub struct NominalIndex {
     structs: StructArena,
     fields: FieldArena,
     enums: EnumArena,
-    variants: VariantArena
+    variants: VariantArena,
+    fixities: FixityArena
 }
 
 pub struct ParsedHeaders {
@@ -167,6 +178,8 @@ pub field_count(value: &NominalIndex) -> usize { Vec::len(&value.fields.values) 
 pub enum_count(value: &NominalIndex) -> usize { Vec::len(&value.enums.values) }
 
 pub variant_count(value: &NominalIndex) -> usize { Vec::len(&value.variants.values) }
+
+pub fixity_count(value: &NominalIndex) -> usize { Vec::len(&value.fixities.values) }
 
 variant_arena_count(value: &VariantArena) -> usize { Vec::len(&value.values) }
 
@@ -218,6 +231,13 @@ pub variant_at<'a>(
     index: usize
 ) -> Option<&'a VariantHeader> {
     Vec::get(&value.variants.values, index)
+}
+
+pub fixity_at<'a>(
+    value: &'a NominalIndex,
+    index: usize
+) -> Option<&'a FixityHeader> {
+    Vec::get(&value.fixities.values, index)
 }
 
 pub type_at<'a>(value: &'a HeaderIndex, index: usize) -> Option<&'a TypeNode> {
@@ -300,6 +320,20 @@ whole_bounds(value: &super::scanner::DeclarationShell) -> HeaderBounds {
 
 token_code(value: &Parser, index: usize) -> u16 {
     super::lexer::token_code_at(&value.source, move index)
+}
+
+token_span_at(value: &Parser, index: usize) -> super::lexer::Span {
+    handle super::lexer::token_at(&value.source, move index) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(token) => super::lexer::token_span(token)
+    }
+}
+
+source_text(value: &String, start: usize, end: usize) -> String {
+    handle String::slice(value, Range { start: move start, end: move end }) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => move found
+    }
 }
 
 at_code(value: &Parser, code: u16) -> Bool {
@@ -1097,6 +1131,202 @@ finish_callable(
     }
 }
 
+fixity_form(value: &Parser) -> u8 {
+    handle at_ident(value, &"prefix") {
+        Result::Ok(_) => u8_value(1),
+        Result::Err(_) => handle at_ident(value, &"infixl") {
+            Result::Ok(_) => u8_value(2),
+            Result::Err(_) => handle at_ident(value, &"infixr") {
+                Result::Ok(_) => u8_value(3),
+                Result::Err(_) => handle at_ident(value, &"infix") {
+                    Result::Ok(_) => u8_value(4),
+                    Result::Err(_) => u8_value(0)
+                }
+            }
+        }
+    }
+}
+
+integer_number(value: &super::lexer::NumberToken) -> Bool {
+    handle Option::as_ref(super::lexer::number_fraction(value)) {
+        Result::Ok(_) => false,
+        Result::Err(_) => handle Option::as_ref(
+            super::lexer::number_exponent(value)
+        ) {
+            Result::Ok(_) => false,
+            Result::Err(_) => true
+        }
+    }
+}
+
+parse_precedence(
+    original: &String,
+    value: &mut Parser,
+    related: usize
+) -> Result<u8, HeaderError> {
+    let token = value.cursor;
+    handle super::lexer::token_kind_at(&value.source, token) {
+        super::lexer::TokenKind::Number(number) => handle integer_number(&number) {
+            Result::Err(_) => Result::Err(header_error(11, token, related)),
+            Result::Ok(_) => {
+                let spelling = super::lexer::number_spelling(&number);
+                let text = source_text(
+                    original,
+                    super::lexer::span_start(&spelling),
+                    super::lexer::span_end(&spelling)
+                );
+                handle parse_u64(&text) {
+                    Result::Err(_) => Result::Err(
+                        header_error(11, token, related)
+                    ),
+                    Result::Ok(found) => handle found <= u64_value(255) {
+                        Result::Err(_) => Result::Err(
+                            header_error(11, token, related)
+                        ),
+                        Result::Ok(_) => {
+                            value.cursor = token + usize_value(1);
+                            Result::Ok(wrapping_convert_to_u8(found))
+                        }
+                    }
+                }
+            }
+        },
+        _ => Result::Err(header_error(11, token, related))
+    }
+}
+
+operator_symbol(value: &Parser, index: usize) -> Bool {
+    // The lexer reserves 10 for arbitrary operator runs and the contiguous
+    // range 25..39 for structural operator tokens. Codes 20..24 are the
+    // deliberately excluded `.`, `..`, `->`, `=>`, and `::` punctuation.
+    let code = token_code(value, index);
+    handle code == u16_value(10) {
+        Result::Ok(_) => true,
+        Result::Err(_) => handle u16_value(25) <= code {
+            Result::Err(_) => false,
+            Result::Ok(_) => code <= u16_value(39)
+        }
+    }
+}
+
+operator_tail(value: &Parser, cursor: usize, previous_end: usize) -> usize {
+    handle cursor < value.limit {
+        Result::Err(_) => cursor,
+        Result::Ok(_) => {
+            handle operator_symbol(value, cursor) {
+                Result::Err(_) => cursor,
+                Result::Ok(_) => {
+                    let found = token_span_at(value, cursor);
+                    handle previous_end == super::lexer::span_start(&found) {
+                        Result::Err(_) => cursor,
+                        Result::Ok(_) => operator_tail(
+                            value,
+                            cursor + usize_value(1),
+                            super::lexer::span_end(&found)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+take_operator(
+    value: &mut Parser,
+    related: usize
+) -> Result<HeaderTokenRange, HeaderError> {
+    let start = value.cursor;
+    handle start < value.limit {
+        Result::Err(_) => Result::Err(header_error(12, start, related)),
+        Result::Ok(_) => handle token_code(&*value, start) == u16_value(1) {
+            Result::Ok(_) => {
+                value.cursor = start + usize_value(1);
+                Result::Ok(token_range(start, value.cursor))
+            },
+            Result::Err(_) => handle operator_symbol(&*value, start) {
+                Result::Err(_) => Result::Err(header_error(12, start, related)),
+                Result::Ok(_) => {
+                    let first = token_span_at(&*value, start);
+                    let end = operator_tail(
+                        &*value,
+                        start + usize_value(1),
+                        super::lexer::span_end(&first)
+                    );
+                    value.cursor = end;
+                    Result::Ok(token_range(start, end))
+                }
+            }
+        }
+    }
+}
+
+parse_fixity(
+    original: &String,
+    value: &mut Parser,
+    fixities: &mut FixityArena,
+    order_kinds: &mut Vec<u8>,
+    order_indices: &mut Vec<u32>,
+    shell: u32,
+    public: Bool,
+    start: usize,
+    whole_end: usize
+) -> Result<(), HeaderError> {
+    value.cursor = start;
+    value.limit = whole_end;
+    handle public {
+        Result::Ok(_) => { value.cursor = value.cursor + usize_value(1); },
+        Result::Err(_) => ()
+    };
+    let form = fixity_form(&*value);
+    handle form == u8_value(0) {
+        Result::Ok(_) => Result::Err(header_error(13, value.cursor, start)),
+        Result::Err(_) => {
+            value.cursor = value.cursor + usize_value(1);
+            handle parse_precedence(original, value, start) {
+                Result::Err(error) => Result::Err(move error),
+                Result::Ok(precedence) => handle take_operator(value, start) {
+                    Result::Err(error) => Result::Err(move error),
+                    Result::Ok(operator) => handle expect_code(
+                        value,
+                        22,
+                        8,
+                        start
+                    ) {
+                        Result::Err(error) => Result::Err(move error),
+                        Result::Ok(_) => handle value.cursor == value.limit {
+                            Result::Err(_) => Result::Err(
+                                header_error(9, value.cursor, start)
+                            ),
+                            Result::Ok(_) => {
+                                Vec::push(
+                                    &mut fixities.values,
+                                    FixityHeader {
+                                        shell: shell,
+                                        public: move public,
+                                        form: form,
+                                        precedence: precedence,
+                                        operator: move operator,
+                                        tokens: token_range(start, whole_end)
+                                    }
+                                );
+                                let index = Vec::len(&fixities.values)
+                                    - usize_value(1);
+                                record_header(
+                                    order_kinds,
+                                    order_indices,
+                                    6,
+                                    index
+                                );
+                                Result::Ok(())
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 parse_alias(
     value: &mut Parser,
     aliases: &mut AliasArena,
@@ -1518,6 +1748,7 @@ finish_enum(
 }
 
 parse_shells(
+    original: &String,
     declarations: &super::scanner::DeclarationIndex,
     index: usize,
     parser: Parser,
@@ -1541,8 +1772,8 @@ parse_shells(
                     limit: limit,
                     output: move parser.output
                 };
-                handle super::scanner::shell_kind_code(shell) == u8_value(12) {
-                    Result::Ok(_) => {
+                let parsed = handle super::scanner::shell_kind_code(shell) {
+                    12 => {
                         let callable_index = Vec::len(&next.output.callables);
                         record_header(
                             &mut nominal.order_kinds,
@@ -1550,97 +1781,69 @@ parse_shells(
                             12,
                             callable_index
                         );
-                        handle parse_callable(
+                        parse_callable(
                             &mut next,
                             wrapping_convert_to_u32(index),
                             super::scanner::shell_is_public(shell),
                             start
-                        ) {
-                            Result::Err(error) => Result::Err(move error),
-                            Result::Ok(_) => parse_shells(
-                                declarations,
-                                index + usize_value(1),
-                                move next,
-                                move nominal
-                            )
-                        }
+                        )
                     },
-                    Result::Err(_) => handle super::scanner::shell_kind_code(
-                        shell
-                    ) == u8_value(3) {
-                        Result::Ok(_) => handle parse_alias(
-                            &mut next,
-                            &mut nominal.aliases,
-                            &mut nominal.order_kinds,
-                            &mut nominal.order_indices,
-                            wrapping_convert_to_u32(index),
-                            super::scanner::shell_is_public(shell),
-                            start,
-                            whole_end
-                        ) {
-                            Result::Err(error) => Result::Err(move error),
-                            Result::Ok(_) => parse_shells(
-                                declarations,
-                                index + usize_value(1),
-                                move next,
-                                move nominal
-                            )
-                        },
-                        Result::Err(_) => handle super::scanner::shell_kind_code(
-                            shell
-                        ) == u8_value(8) {
-                            Result::Ok(_) => handle parse_struct(
-                                &mut next,
-                                &mut nominal.structs,
-                                &mut nominal.fields,
-                                &mut nominal.order_kinds,
-                                &mut nominal.order_indices,
-                                wrapping_convert_to_u32(index),
-                                super::scanner::shell_is_public(shell),
-                                start,
-                                limit,
-                                whole_end
-                            ) {
-                                Result::Err(error) => Result::Err(move error),
-                                Result::Ok(_) => parse_shells(
-                                    declarations,
-                                    index + usize_value(1),
-                                    move next,
-                                    move nominal
-                                )
-                            },
-                            Result::Err(_) => handle super::scanner::shell_kind_code(
-                                shell
-                            ) == u8_value(9) {
-                                Result::Ok(_) => handle parse_sum_header(
-                                    &mut next,
-                                    &mut nominal.enums,
-                                    &mut nominal.variants,
-                                    &mut nominal.order_kinds,
-                                    &mut nominal.order_indices,
-                                    wrapping_convert_to_u32(index),
-                                    super::scanner::shell_is_public(shell),
-                                    start,
-                                    limit,
-                                    whole_end
-                                ) {
-                                    Result::Err(error) => Result::Err(move error),
-                                    Result::Ok(_) => parse_shells(
-                                        declarations,
-                                        index + usize_value(1),
-                                        move next,
-                                        move nominal
-                                    )
-                                },
-                                Result::Err(_) => parse_shells(
-                                    declarations,
-                                    index + usize_value(1),
-                                    move next,
-                                    move nominal
-                                )
-                            }
-                        }
-                    }
+                    6 => parse_fixity(
+                        original,
+                        &mut next,
+                        &mut nominal.fixities,
+                        &mut nominal.order_kinds,
+                        &mut nominal.order_indices,
+                        wrapping_convert_to_u32(index),
+                        super::scanner::shell_is_public(shell),
+                        start,
+                        whole_end
+                    ),
+                    3 => parse_alias(
+                        &mut next,
+                        &mut nominal.aliases,
+                        &mut nominal.order_kinds,
+                        &mut nominal.order_indices,
+                        wrapping_convert_to_u32(index),
+                        super::scanner::shell_is_public(shell),
+                        start,
+                        whole_end
+                    ),
+                    8 => parse_struct(
+                        &mut next,
+                        &mut nominal.structs,
+                        &mut nominal.fields,
+                        &mut nominal.order_kinds,
+                        &mut nominal.order_indices,
+                        wrapping_convert_to_u32(index),
+                        super::scanner::shell_is_public(shell),
+                        start,
+                        limit,
+                        whole_end
+                    ),
+                    9 => parse_sum_header(
+                        &mut next,
+                        &mut nominal.enums,
+                        &mut nominal.variants,
+                        &mut nominal.order_kinds,
+                        &mut nominal.order_indices,
+                        wrapping_convert_to_u32(index),
+                        super::scanner::shell_is_public(shell),
+                        start,
+                        limit,
+                        whole_end
+                    ),
+                    _ => Result::Ok(())
+                };
+                handle move parsed {
+                    Result::Err(error) => Result::Err(move error),
+                    Result::Ok(_) => parse_shells(
+                        original,
+                        declarations,
+                        index + usize_value(1),
+                        move next,
+                        move nominal
+                    )
                 }
             }
         }
@@ -1656,10 +1859,12 @@ finish_parser(value: Parser, nominal: NominalIndex) -> ParsedHeaders {
 }
 
 pub parse(
+    original: &String,
     source: super::lexer::LexedSource,
     declarations: &super::scanner::DeclarationIndex
 ) -> Result<ParsedHeaders, HeaderError> {
     parse_shells(
+        original,
         declarations,
         0,
         Parser {
@@ -1682,7 +1887,8 @@ pub parse(
                 structs: StructArena { values: Vec::new() },
                 fields: FieldArena { values: Vec::new() },
                 enums: EnumArena { values: Vec::new() },
-                variants: VariantArena { values: Vec::new() }
+                variants: VariantArena { values: Vec::new() },
+                fixities: FixityArena { values: Vec::new() }
         }
     )
 }
@@ -2032,8 +2238,41 @@ write_enum(
     write_variants(move output, parsed, &value.variants, 0)
 }
 
+parsed_token_span(
+    value: &ParsedHeaders,
+    index: usize
+) -> super::lexer::Span {
+    handle super::lexer::token_at(&value.source, move index) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(token) => super::lexer::token_span(token)
+    }
+}
+
+write_fixity(
+    output: &mut ByteBuf,
+    original: &String,
+    parsed: &ParsedHeaders,
+    value: &FixityHeader
+) {
+    ByteBuf::push(&mut *output, bool_code(value.public));
+    ByteBuf::push(&mut *output, value.form);
+    ByteBuf::push(&mut *output, value.precedence);
+    let first = parsed_token_span(parsed, value.operator.start);
+    let last = parsed_token_span(
+        parsed,
+        previous_index(value.operator.end)
+    );
+    let spelling = source_text(
+        original,
+        super::lexer::span_start(&first),
+        super::lexer::span_end(&last)
+    );
+    write_string(move output, &spelling)
+}
+
 write_interfaces(
     output: &mut ByteBuf,
+    original: &String,
     parsed: &ParsedHeaders,
     index: usize
 ) {
@@ -2050,6 +2289,12 @@ write_interfaces(
                     &mut *output,
                     parsed,
                     Vec::index(&parsed.nominal.aliases.values, declaration)
+                ),
+                6 => write_fixity(
+                    &mut *output,
+                    original,
+                    parsed,
+                    Vec::index(&parsed.nominal.fixities.values, declaration)
                 ),
                 8 => write_struct(
                     &mut *output,
@@ -2070,6 +2315,7 @@ write_interfaces(
             };
             write_interfaces(
                 move output,
+                original,
                 parsed,
                 index + usize_value(1)
             )
@@ -2082,7 +2328,11 @@ encode_source(output: &mut ByteBuf, source: String) {
         Result::Err(_) => ByteBuf::push(move output, 1),
         Result::Ok(lexed) => handle super::scanner::scan(&lexed) {
             Result::Err(_) => ByteBuf::push(move output, 2),
-            Result::Ok(declarations) => handle parse(move lexed, &declarations) {
+            Result::Ok(declarations) => handle parse(
+                &source,
+                move lexed,
+                &declarations
+            ) {
                 Result::Err(_) => ByteBuf::push(move output, 3),
                 Result::Ok(parsed) => {
                     ByteBuf::push(&mut *output, 0);
@@ -2104,7 +2354,11 @@ encode_interface_source(output: &mut ByteBuf, source: String) {
         Result::Err(_) => ByteBuf::push(move output, 1),
         Result::Ok(lexed) => handle super::scanner::scan(&lexed) {
             Result::Err(_) => ByteBuf::push(move output, 2),
-            Result::Ok(declarations) => handle parse(move lexed, &declarations) {
+            Result::Ok(declarations) => handle parse(
+                &source,
+                move lexed,
+                &declarations
+            ) {
                 Result::Err(_) => ByteBuf::push(move output, 3),
                 Result::Ok(parsed) => {
                     ByteBuf::push(&mut *output, 0);
@@ -2112,7 +2366,7 @@ encode_interface_source(output: &mut ByteBuf, source: String) {
                         &mut *output,
                         wrapping_convert_to_u32(header_count(&parsed.nominal))
                     );
-                    write_interfaces(move output, &parsed, 0)
+                    write_interfaces(move output, &source, &parsed, 0)
                 }
             }
         }
@@ -2220,3 +2474,7 @@ bool_code(value: Bool) -> u8 {
 usize_value(value: usize) -> usize { move value }
 
 u8_value(value: u8) -> u8 { move value }
+
+u16_value(value: u16) -> u16 { move value }
+
+u64_value(value: u64) -> u64 { move value }
