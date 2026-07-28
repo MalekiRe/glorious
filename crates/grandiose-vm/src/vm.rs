@@ -616,6 +616,10 @@ impl Vm {
                     let return_dst = frame.return_dst;
                     let mut replacement = make_frame(a, function, values, Value::Unit, return_dst)?;
                     replacement.delimiter = frame.delimiter.take();
+                    replacement.guards.append(&mut frame.guards);
+                    replacement
+                        .deferred_frames
+                        .append(&mut frame.deferred_frames);
                     self.destroy_frame_registers(frame)?;
                     *frame = replacement;
                 }
@@ -645,6 +649,10 @@ impl Vm {
                     let return_dst = frame.return_dst;
                     let mut replacement = make_frame(a, function, values, receiver, return_dst)?;
                     replacement.delimiter = frame.delimiter.take();
+                    replacement.guards.append(&mut frame.guards);
+                    replacement
+                        .deferred_frames
+                        .append(&mut frame.deferred_frames);
                     self.destroy_frame_registers(frame)?;
                     *frame = replacement;
                 }
@@ -689,6 +697,10 @@ impl Vm {
                     let return_dst = frame.return_dst;
                     let mut replacement = make_frame(a, function, values, receiver, return_dst)?;
                     replacement.delimiter = frame.delimiter.take();
+                    replacement.guards.append(&mut frame.guards);
+                    replacement
+                        .deferred_frames
+                        .append(&mut frame.deferred_frames);
                     self.destroy_frame_registers(frame)?;
                     *frame = replacement;
                 }
@@ -888,6 +900,10 @@ impl Vm {
                         replacement.guards.push(guard);
                     }
                     replacement.delimiter = frame.delimiter.take();
+                    replacement.guards.append(&mut frame.guards);
+                    replacement
+                        .deferred_frames
+                        .append(&mut frame.deferred_frames);
                     self.destroy_frame_registers(frame)?;
                     *frame = replacement;
                 }
@@ -922,13 +938,12 @@ impl Vm {
                     let selected = select_handler_clause(a, &mut stack, protocol, operation)?;
                     let delimiter = selected.delimiter;
                     let return_dst = stack[delimiter].return_dst;
-                    while stack.len() > delimiter {
-                        self.destroy_frame(stack.pop().expect("delimiter frame exists"))?;
-                    }
+                    let deferred_frames = stack.split_off(delimiter);
                     let (function, receiver) =
                         owned_callable_receiver(a, selected.callable, selected.receiver_mode)?;
                     let mut clause = make_frame(a, function, values, receiver, return_dst)?;
                     clause.guards.push(selected.handler_guard);
+                    clause.deferred_frames = deferred_frames;
                     stack.push(clause);
                 }
                 Instruction::Perform {
@@ -963,6 +978,10 @@ impl Vm {
                     if upper_uses.is_none_or(|upper| upper > 1) {
                         for captured in &mut frames {
                             self.prune_frame_for_continuation(captured, CapturePruning::Multishot)?;
+                        }
+                        let mut validation = SnapshotValidationContext::default();
+                        for captured in &frames {
+                            validation.validate_frame(a, captured)?;
                         }
                     } else if *lower_uses == 0 {
                         for captured in &mut frames {
@@ -1127,6 +1146,7 @@ impl Vm {
                         return Err(RuntimeError::TypeConfusion);
                     };
                     put(last, perform_dst, value)?;
+                    transfer_tail_resume_deferred_frames(frame, last);
 
                     let mut resumed = captured.frames.into_iter();
                     let replacement = resumed.next().ok_or(RuntimeError::TypeConfusion)?;
@@ -1186,6 +1206,9 @@ impl Vm {
                     }
                     for guard in frame.guards.drain(..).rev() {
                         self.destroy_runtime_typed(guard)?;
+                    }
+                    for deferred in frame.deferred_frames.drain(..).rev() {
+                        self.destroy_frame(deferred)?;
                     }
                     stack.pop();
                     match stack.last_mut() {
@@ -1258,6 +1281,12 @@ impl Vm {
             }
         }
     }
+}
+
+fn transfer_tail_resume_deferred_frames(current: &mut Frame, resumed_innermost: &mut Frame) {
+    resumed_innermost
+        .deferred_frames
+        .append(&mut current.deferred_frames);
 }
 
 fn link_imports(
@@ -1415,6 +1444,7 @@ fn make_frame(
         return_dst,
         delimiter: None,
         guards: Vec::new(),
+        deferred_frames: Vec::new(),
         // `label_slot_count` is an artifact namespace bound, not the number
         // of simultaneously live labels. In particular, it is a compact u32
         // scalar and can be much larger than the artifact itself. Allocate
@@ -1472,6 +1502,9 @@ impl Vm {
         }
         for guard in frame.guards.drain(..).rev() {
             self.destroy_runtime_typed(guard)?;
+        }
+        for deferred in frame.deferred_frames.drain(..).rev() {
+            self.destroy_frame(deferred)?;
         }
         Ok(())
     }
@@ -2193,6 +2226,204 @@ fn copy_value(a: &ExecutionImage, ty: TypeId, value: &Value) -> Result<Value, Ru
 }
 
 #[derive(Default)]
+struct SnapshotValidationContext {
+    visited: BTreeSet<(u8, u128)>,
+}
+
+impl SnapshotValidationContext {
+    fn validate_frame(
+        &mut self,
+        a: &ExecutionImage,
+        frame: &RuntimeFrame,
+    ) -> Result<(), RuntimeError> {
+        let function = a
+            .functions
+            .get(frame.function as usize)
+            .ok_or(RuntimeError::InvalidFunction(frame.function))?;
+        if frame.registers.len() != function.register_types.len() {
+            return Err(RuntimeError::TypeConfusion);
+        }
+        for (slot, &ty) in frame.registers.iter().zip(&function.register_types) {
+            if let Some(value) = slot {
+                self.validate_value(a, ty, value, true)?;
+            }
+        }
+        if let Some(value) = &frame.delimiter {
+            self.validate_runtime_value(a, value, false)?;
+        }
+        for value in &frame.guards {
+            self.validate_runtime_value(a, value, false)?;
+        }
+        for deferred in &frame.deferred_frames {
+            self.validate_frame(a, deferred)?;
+        }
+        Ok(())
+    }
+
+    fn validate_runtime_value(
+        &mut self,
+        a: &ExecutionImage,
+        value: &Value,
+        callable_must_be_copy: bool,
+    ) -> Result<(), RuntimeError> {
+        self.validate_value(
+            a,
+            runtime_value_type(a, value)?,
+            value,
+            callable_must_be_copy,
+        )
+    }
+
+    fn validate_value(
+        &mut self,
+        a: &ExecutionImage,
+        ty: TypeId,
+        value: &Value,
+        callable_must_be_copy: bool,
+    ) -> Result<(), RuntimeError> {
+        if let Value::Place(slot) = value {
+            if self.visited.insert((0, slot.identity())) {
+                self.validate_value(
+                    a,
+                    ty,
+                    &slot.get().map_err(|_| RuntimeError::TypeConfusion)?,
+                    callable_must_be_copy,
+                )?;
+            }
+            return Ok(());
+        }
+        let descriptor = a.checked_type(ty).ok_or(RuntimeError::TypeConfusion)?;
+        match (value, descriptor.representation()) {
+            (Value::Unit, Type::Unit)
+            | (Value::I64(_), Type::I8 | Type::I16 | Type::I32 | Type::I64 | Type::Isize)
+            | (Value::I128(_), Type::I128)
+            | (
+                Value::U64(_),
+                Type::U8 | Type::U16 | Type::U32 | Type::U64 | Type::Usize | Type::Char,
+            )
+            | (Value::U128(_), Type::U128)
+            | (Value::F32(_), Type::F32)
+            | (Value::F64(_), Type::F64)
+            | (Value::Text(_), Type::Text)
+            | (Value::Bytes(_), Type::Bytes) => Ok(()),
+            (Value::Reference { unique: false, .. }, Type::RefShared { .. })
+                if value_matches(a, value, ty) =>
+            {
+                Ok(())
+            }
+            (Value::Reference { .. }, Type::RefUnique { .. }) => Err(RuntimeError::TypeConfusion),
+            (Value::Array(array), Type::Array { element }) => {
+                if !self.visited.insert((1, array.identity())) {
+                    return Ok(());
+                }
+                let array = array
+                    .try_borrow()
+                    .map_err(|_| RuntimeError::TypeConfusion)?;
+                if array.element_type != *element {
+                    return Err(RuntimeError::TypeConfusion);
+                }
+                for value in array.slots.iter().flatten() {
+                    self.validate_value(a, *element, value, true)?;
+                }
+                Ok(())
+            }
+            (
+                Value::Aggregate(aggregate),
+                Type::Tuple { .. }
+                | Type::Struct { .. }
+                | Type::Enum { .. }
+                | Type::BindingPack { .. },
+            ) => {
+                if matches!(
+                    descriptor.representation(),
+                    Type::BindingPack { copy: false, .. }
+                ) {
+                    return Err(RuntimeError::TypeConfusion);
+                }
+                if !self.visited.insert((2, aggregate.identity())) {
+                    return Ok(());
+                }
+                let aggregate = aggregate
+                    .try_borrow()
+                    .map_err(|_| RuntimeError::TypeConfusion)?;
+                if aggregate.ty != ty {
+                    return Err(RuntimeError::TypeConfusion);
+                }
+                let layout = match descriptor.representation() {
+                    Type::BindingPack { payload_type, .. } => *payload_type,
+                    _ => ty,
+                };
+                let fields = runtime_field_types(a, layout, aggregate.variant)?;
+                if fields.len() != aggregate.fields.len() {
+                    return Err(RuntimeError::TypeConfusion);
+                }
+                for (slot, field_ty) in aggregate.fields.iter().zip(fields) {
+                    if let Some(value) = slot {
+                        self.validate_value(a, field_ty, value, true)?;
+                    }
+                }
+                Ok(())
+            }
+            (
+                Value::Callable(callable),
+                Type::Callable {
+                    capture_type, copy, ..
+                },
+            ) => {
+                if callable.callable_type() != ty || (callable_must_be_copy && !copy) {
+                    return Err(RuntimeError::TypeConfusion);
+                }
+                let capture = callable.capture();
+                if self.visited.insert((3, capture.identity())) {
+                    let capture = capture
+                        .try_borrow()
+                        .map_err(|_| RuntimeError::TypeConfusion)?;
+                    self.validate_value(
+                        a,
+                        *capture_type,
+                        capture.as_ref().ok_or(RuntimeError::TypeConfusion)?,
+                        true,
+                    )?;
+                }
+                Ok(())
+            }
+            (Value::Handler(handler), Type::Handler { handler_def, .. }) => {
+                if !self.visited.insert((4, handler.identity())) {
+                    return Ok(());
+                }
+                let handler = handler
+                    .try_borrow()
+                    .map_err(|_| RuntimeError::TypeConfusion)?;
+                if handler.handler_type != ty || handler.handler_def != *handler_def {
+                    return Err(RuntimeError::TypeConfusion);
+                }
+                for clause in handler.clauses.iter().flatten() {
+                    self.validate_runtime_value(a, clause, false)?;
+                }
+                Ok(())
+            }
+            (Value::Resumption(resumption), Type::Resumption { copy: true, .. }) => {
+                if !self.visited.insert((5, resumption.identity())) {
+                    return Ok(());
+                }
+                let resumption = resumption
+                    .try_borrow()
+                    .map_err(|_| RuntimeError::TypeConfusion)?;
+                let resumption = resumption.as_ref().ok_or(RuntimeError::TypeConfusion)?;
+                if resumption.resumption_type != ty {
+                    return Err(RuntimeError::TypeConfusion);
+                }
+                for frame in &resumption.frames {
+                    self.validate_frame(a, frame)?;
+                }
+                Ok(())
+            }
+            _ => Err(RuntimeError::TypeConfusion),
+        }
+    }
+}
+
+#[derive(Default)]
 struct SnapshotCloneContext {
     places: BTreeMap<u128, crate::value::SlotHandle>,
     arrays: BTreeMap<u128, ArenaObject<ArrayValue>>,
@@ -2374,18 +2605,30 @@ impl SnapshotCloneContext {
         source: &ResumptionValue,
     ) -> Result<(), RuntimeError> {
         for frame in &source.frames {
-            let function = &a.functions[frame.function as usize];
-            for (slot, &ty) in frame.registers.iter().zip(&function.register_types) {
-                if let Some(value) = slot {
-                    self.pre_register(a, ty, value)?;
-                }
+            self.pre_register_frame(a, frame)?;
+        }
+        Ok(())
+    }
+
+    fn pre_register_frame(
+        &mut self,
+        a: &ExecutionImage,
+        frame: &RuntimeFrame,
+    ) -> Result<(), RuntimeError> {
+        let function = &a.functions[frame.function as usize];
+        for (slot, &ty) in frame.registers.iter().zip(&function.register_types) {
+            if let Some(value) = slot {
+                self.pre_register(a, ty, value)?;
             }
-            if let Some(value) = &frame.delimiter {
-                self.pre_register_runtime(a, value)?;
-            }
-            for value in &frame.guards {
-                self.pre_register_runtime(a, value)?;
-            }
+        }
+        if let Some(value) = &frame.delimiter {
+            self.pre_register_runtime(a, value)?;
+        }
+        for value in &frame.guards {
+            self.pre_register_runtime(a, value)?;
+        }
+        for deferred in &frame.deferred_frames {
+            self.pre_register_frame(a, deferred)?;
         }
         Ok(())
     }
@@ -2412,42 +2655,54 @@ fn clone_resumption_snapshot_with(
     let frames = source
         .frames
         .iter()
-        .map(|frame| {
-            let function = &a.functions[frame.function as usize];
-            let registers = frame
-                .registers
-                .iter()
-                .zip(&function.register_types)
-                .map(|(slot, &ty)| {
-                    slot.as_ref()
-                        .map(|value| snapshot_clone_value(a, ty, value, context))
-                        .transpose()
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let delimiter = frame
-                .delimiter
-                .as_ref()
-                .map(|value| snapshot_clone_runtime_value(a, value, context))
-                .transpose()?;
-            let guards = frame
-                .guards
-                .iter()
-                .map(|value| snapshot_clone_runtime_value(a, value, context))
-                .collect::<Result<Vec<_>, _>>()?;
-            Ok(RuntimeFrame {
-                function: frame.function,
-                pc: frame.pc,
-                registers,
-                return_dst: frame.return_dst,
-                delimiter,
-                guards,
-                labels: frame.labels.clone(),
-            })
-        })
+        .map(|frame| clone_runtime_frame_snapshot(a, frame, context))
         .collect::<Result<Vec<_>, RuntimeError>>()?;
     Ok(ResumptionValue {
         resumption_type: source.resumption_type,
         frames,
+    })
+}
+
+fn clone_runtime_frame_snapshot(
+    a: &ExecutionImage,
+    frame: &RuntimeFrame,
+    context: &mut SnapshotCloneContext,
+) -> Result<RuntimeFrame, RuntimeError> {
+    let function = &a.functions[frame.function as usize];
+    let registers = frame
+        .registers
+        .iter()
+        .zip(&function.register_types)
+        .map(|(slot, &ty)| {
+            slot.as_ref()
+                .map(|value| snapshot_clone_value(a, ty, value, context))
+                .transpose()
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let delimiter = frame
+        .delimiter
+        .as_ref()
+        .map(|value| snapshot_clone_runtime_value(a, value, context))
+        .transpose()?;
+    let guards = frame
+        .guards
+        .iter()
+        .map(|value| snapshot_clone_runtime_value(a, value, context))
+        .collect::<Result<Vec<_>, _>>()?;
+    let deferred_frames = frame
+        .deferred_frames
+        .iter()
+        .map(|deferred| clone_runtime_frame_snapshot(a, deferred, context))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(RuntimeFrame {
+        function: frame.function,
+        pc: frame.pc,
+        registers,
+        return_dst: frame.return_dst,
+        delimiter,
+        guards,
+        deferred_frames,
+        labels: frame.labels.clone(),
     })
 }
 
@@ -4089,6 +4344,7 @@ mod tests {
             return_dst: None,
             delimiter: Some(delimiter),
             guards: vec![],
+            deferred_frames: vec![],
             labels: vec![],
         };
         let mut stack = vec![frame(handler), frame(partial)];
@@ -7111,6 +7367,7 @@ mod tests {
                 return_dst: None,
                 delimiter: Some(handler(1, vec![Some(callable)])),
                 guards: vec![],
+                deferred_frames: vec![],
                 labels: vec![],
             },
             RuntimeFrame {
@@ -7120,6 +7377,7 @@ mod tests {
                 return_dst: None,
                 delimiter: Some(handler(0, vec![])),
                 guards: vec![],
+                deferred_frames: vec![],
                 labels: vec![],
             },
         ];
@@ -7183,6 +7441,7 @@ mod tests {
                 return_dst: None,
                 delimiter: None,
                 guards: vec![],
+                deferred_frames: vec![],
                 labels: vec![],
             }],
         })));
@@ -7873,6 +8132,7 @@ mod tests {
                     return_dst: None,
                     delimiter: None,
                     guards: vec![],
+                    deferred_frames: vec![],
                     labels: vec![],
                 }],
             })));
@@ -7974,6 +8234,7 @@ mod tests {
                 return_dst: None,
                 delimiter: None,
                 guards: vec![],
+                deferred_frames: vec![],
                 labels: vec![],
             }],
         })));
@@ -7996,6 +8257,68 @@ mod tests {
                 .unwrap(),
             Value::I64(42)
         );
+    }
+
+    #[test]
+    fn tail_resume_transfers_deferred_reference_owners_to_the_resumed_frame() {
+        let artifact = Artifact {
+            functions: vec![Function {
+                flags: 0,
+                name: "deferred_owner".into(),
+                params: vec![I64],
+                return_type: UNIT,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, I64],
+                code_start: 0,
+                code_len: 2,
+                label_slot_count: 0,
+            }],
+            code: vec![
+                Instruction::Drop { register: 1 },
+                Instruction::Return { src: None },
+            ],
+            ..Artifact::default()
+        };
+        let vm = Vm::new(verify(artifact).unwrap());
+        let owner = vm.slots.insert(Some(Value::I64(42))).unwrap();
+        let mut current = RuntimeFrame {
+            function: 0,
+            pc: 1,
+            registers: vec![Some(Value::Unit), None],
+            return_dst: None,
+            delimiter: None,
+            guards: vec![],
+            deferred_frames: vec![RuntimeFrame {
+                function: 0,
+                pc: 0,
+                registers: vec![Some(Value::Unit), Some(Value::Place(owner.clone()))],
+                return_dst: None,
+                delimiter: None,
+                guards: vec![],
+                deferred_frames: vec![],
+                labels: vec![],
+            }],
+            labels: vec![],
+        };
+        let mut resumed = RuntimeFrame {
+            function: 0,
+            pc: 1,
+            registers: vec![Some(Value::Unit), None],
+            return_dst: None,
+            delimiter: None,
+            guards: vec![],
+            deferred_frames: vec![],
+            labels: vec![],
+        };
+
+        transfer_tail_resume_deferred_frames(&mut current, &mut resumed);
+        vm.destroy_frame(current).unwrap();
+        assert_eq!(owner.get(), Ok(Value::I64(42)));
+        assert_eq!(resumed.deferred_frames.len(), 1);
+
+        vm.destroy_frame(resumed).unwrap();
+        assert!(owner.get().is_err());
     }
 
     #[test]
@@ -8100,6 +8423,7 @@ mod tests {
                 return_dst: None,
                 delimiter: None,
                 guards: vec![],
+                deferred_frames: vec![],
                 labels: vec![],
             }],
         })));
@@ -8194,6 +8518,7 @@ mod tests {
                 return_dst: None,
                 delimiter: Some(handler),
                 guards: vec![],
+                deferred_frames: vec![],
                 labels: vec![],
             }],
         };
@@ -8278,6 +8603,7 @@ mod tests {
                 return_dst: None,
                 delimiter: None,
                 guards: vec![],
+                deferred_frames: vec![],
                 labels: vec![],
             }],
         };
@@ -8390,6 +8716,7 @@ mod tests {
                 return_dst: None,
                 delimiter: None,
                 guards: vec![],
+                deferred_frames: vec![],
                 labels: vec![],
             }],
         };
@@ -8459,6 +8786,180 @@ mod tests {
     }
 
     #[test]
+    fn snapshot_clone_remaps_references_into_deferred_terminal_frames() {
+        let mut artifact = Artifact::default();
+        artifact.types.push(Type::RefShared { referent: I64 });
+        artifact.functions.push(Function {
+            flags: 0,
+            name: "terminal_clause".into(),
+            params: vec![],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, 19],
+            code_start: 0,
+            code_len: 1,
+            label_slot_count: 0,
+        });
+        artifact.functions.push(Function {
+            flags: 0,
+            name: "abandoned_body".into(),
+            params: vec![],
+            return_type: UNIT,
+            outward_protocols: vec![],
+            receiver_mode: None,
+            register_types: vec![UNIT, I64],
+            code_start: 0,
+            code_len: 1,
+            label_slot_count: 0,
+        });
+
+        let owner = SlotStore::default().insert(Some(Value::I64(42))).unwrap();
+        let source = ResumptionValue {
+            resumption_type: UNIT,
+            frames: vec![RuntimeFrame {
+                function: 0,
+                pc: 0,
+                registers: vec![
+                    Some(Value::Unit),
+                    Some(Value::Reference {
+                        referent_type: I64,
+                        unique: false,
+                        target: ReferenceTarget::WholePlace(owner.clone()),
+                    }),
+                ],
+                return_dst: None,
+                delimiter: None,
+                guards: vec![],
+                deferred_frames: vec![RuntimeFrame {
+                    function: 1,
+                    pc: 0,
+                    registers: vec![Some(Value::Unit), Some(Value::Place(owner.clone()))],
+                    return_dst: None,
+                    delimiter: None,
+                    guards: vec![],
+                    deferred_frames: vec![],
+                    labels: vec![],
+                }],
+                labels: vec![],
+            }],
+        };
+
+        let first = clone_resumption_snapshot(&image(artifact.clone()), &source).unwrap();
+        let second = clone_resumption_snapshot(&image(artifact), &source).unwrap();
+        let cloned_owner = |snapshot: &ResumptionValue| {
+            let Some(Value::Place(owner)) = &snapshot.frames[0].deferred_frames[0].registers[1]
+            else {
+                panic!("deferred owner place")
+            };
+            owner.clone()
+        };
+        let cloned_target = |snapshot: &ResumptionValue| {
+            let Some(Value::Reference {
+                target: ReferenceTarget::WholePlace(target),
+                ..
+            }) = &snapshot.frames[0].registers[1]
+            else {
+                panic!("terminal payload reference")
+            };
+            target.clone()
+        };
+        assert_eq!(cloned_target(&first), cloned_owner(&first));
+        assert_eq!(cloned_target(&second), cloned_owner(&second));
+        assert_ne!(cloned_owner(&first), cloned_owner(&second));
+        assert_ne!(cloned_owner(&first), owner);
+        assert_eq!(cloned_owner(&first).get(), Ok(Value::I64(42)));
+        assert_eq!(cloned_owner(&second).get(), Ok(Value::I64(42)));
+    }
+
+    #[test]
+    fn multishot_validation_recurses_into_deferred_cleanup_frames() {
+        let mut artifact = Artifact::default();
+        let shared = artifact.types.len() as TypeId;
+        artifact.types.push(Type::RefShared { referent: I64 });
+        let unique = artifact.types.len() as TypeId;
+        artifact.types.push(Type::RefUnique { referent: I64 });
+        artifact.functions.extend([
+            Function {
+                flags: 0,
+                name: "captured_clause".into(),
+                params: vec![],
+                return_type: UNIT,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, shared],
+                code_start: 0,
+                code_len: 1,
+                label_slot_count: 0,
+            },
+            Function {
+                flags: 0,
+                name: "deferred_owner".into(),
+                params: vec![],
+                return_type: UNIT,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, I64, unique],
+                code_start: 0,
+                code_len: 1,
+                label_slot_count: 0,
+            },
+        ]);
+        artifact.code.push(Instruction::Return { src: None });
+        let image = image(artifact);
+        let slots = SlotStore::default();
+        let owner = slots.insert(Some(Value::I64(42))).unwrap();
+        let unique_target = slots.insert(Some(Value::I64(7))).unwrap();
+        let frame = |unique_reference| RuntimeFrame {
+            function: 0,
+            pc: 0,
+            registers: vec![
+                Some(Value::Unit),
+                Some(Value::Reference {
+                    referent_type: I64,
+                    unique: false,
+                    target: ReferenceTarget::WholePlace(owner.clone()),
+                }),
+            ],
+            return_dst: None,
+            delimiter: None,
+            guards: vec![],
+            deferred_frames: vec![RuntimeFrame {
+                function: 1,
+                pc: 0,
+                registers: vec![
+                    Some(Value::Unit),
+                    Some(Value::Place(owner.clone())),
+                    unique_reference,
+                ],
+                return_dst: None,
+                delimiter: None,
+                guards: vec![],
+                deferred_frames: vec![],
+                labels: vec![],
+            }],
+            labels: vec![],
+        };
+
+        let copy_safe = frame(None);
+        SnapshotValidationContext::default()
+            .validate_frame(&image, &copy_safe)
+            .unwrap();
+        assert_eq!(owner.get(), Ok(Value::I64(42)));
+
+        let not_copy_safe = frame(Some(Value::Reference {
+            referent_type: I64,
+            unique: true,
+            target: ReferenceTarget::WholePlace(unique_target),
+        }));
+        assert!(matches!(
+            SnapshotValidationContext::default().validate_frame(&image, &not_copy_safe),
+            Err(RuntimeError::TypeConfusion)
+        ));
+        assert_eq!(owner.get(), Ok(Value::I64(42)));
+    }
+
+    #[test]
     fn snapshot_clone_rejects_unique_references() {
         let mut artifact = Artifact::default();
         artifact.types.push(Type::RefUnique { referent: I64 });
@@ -8491,6 +8992,7 @@ mod tests {
                 return_dst: None,
                 delimiter: None,
                 guards: vec![],
+                deferred_frames: vec![],
                 labels: vec![],
             }],
         };

@@ -168,6 +168,21 @@ fn track_capture_graph(capture: &ArenaObject<Option<Value>>, visited: &mut BTree
 }
 
 fn track_control_graph(control: &ArenaObject<ControlRecord>, visited: &mut BTreeSet<u128>) {
+    fn track_frame_graph(frame: &RuntimeFrame, visited: &mut BTreeSet<u128>) {
+        for value in frame
+            .registers
+            .iter()
+            .flatten()
+            .chain(frame.delimiter.iter())
+            .chain(&frame.guards)
+        {
+            track_value_graph(value, visited);
+        }
+        for deferred in &frame.deferred_frames {
+            track_frame_graph(deferred, visited);
+        }
+    }
+
     if !visited.insert(control.identity()) {
         return;
     }
@@ -182,15 +197,7 @@ fn track_control_graph(control: &ArenaObject<ControlRecord>, visited: &mut BTree
         ControlRecord::Resumption(value) => {
             if let Some(value) = value {
                 for frame in &value.frames {
-                    for value in frame
-                        .registers
-                        .iter()
-                        .flatten()
-                        .chain(frame.delimiter.iter())
-                        .chain(&frame.guards)
-                    {
-                        track_value_graph(value, visited);
-                    }
+                    track_frame_graph(frame, visited);
                 }
             }
         }
@@ -741,6 +748,9 @@ pub struct RuntimeFrame {
     /// Runtime-owned values whose lifetime must extend through this frame, but
     /// which must not participate in delimiter lookup.
     pub guards: Vec<Value>,
+    /// Terminally abandoned frames whose storage is still borrowed by values
+    /// passed to this frame. They are destroyed after this frame's own values.
+    pub deferred_frames: Vec<RuntimeFrame>,
     pub labels: Vec<RuntimeLabel>,
 }
 
@@ -900,6 +910,21 @@ impl RuntimeEdges for AggregateValue {
 
 impl RuntimeEdges for ControlRecord {
     fn edge_identities(&self, edges: &mut Vec<u128>) {
+        fn frame_edge_identities(frame: &RuntimeFrame, edges: &mut Vec<u128>) {
+            for value in frame
+                .registers
+                .iter()
+                .flatten()
+                .chain(frame.delimiter.iter())
+                .chain(&frame.guards)
+            {
+                value_edge_identities(value, edges);
+            }
+            for deferred in &frame.deferred_frames {
+                frame_edge_identities(deferred, edges);
+            }
+        }
+
         match self {
             ControlRecord::Callable(value) => edges.push(value.capture.identity()),
             ControlRecord::Handler(value) => {
@@ -910,15 +935,7 @@ impl RuntimeEdges for ControlRecord {
             ControlRecord::Resumption(value) => {
                 if let Some(value) = value {
                     for frame in &value.frames {
-                        for value in frame
-                            .registers
-                            .iter()
-                            .flatten()
-                            .chain(frame.delimiter.iter())
-                            .chain(&frame.guards)
-                        {
-                            value_edge_identities(value, edges);
-                        }
+                        frame_edge_identities(frame, edges);
                     }
                 }
             }
@@ -997,6 +1014,7 @@ mod slot_tests {
                 return_dst: None,
                 delimiter: None,
                 guards: vec![],
+                deferred_frames: vec![],
                 labels: vec![],
             }],
         });
@@ -1027,6 +1045,7 @@ mod slot_tests {
                 return_dst: None,
                 delimiter: None,
                 guards: vec![],
+                deferred_frames: vec![],
                 labels: vec![],
             }],
         });
@@ -1044,6 +1063,51 @@ mod slot_tests {
         assert!(weak_capture.upgrade().is_none());
         assert!(weak_callable.upgrade().is_none());
         assert!(weak_resumption.upgrade().is_none());
+    }
+
+    #[test]
+    fn boundary_reclamation_tracks_cycles_inside_deferred_resumption_frames() {
+        let capture = ArenaObject::new_tracked(None);
+        let callable = ControlHandle::new(CallableValue {
+            callable_type: 0,
+            function: 0,
+            capture: capture.clone(),
+        });
+        *capture.borrow_mut() = Some(Value::Callable(callable.clone()));
+        let resumption = ControlHandle::new(Some(ResumptionValue {
+            resumption_type: 0,
+            frames: vec![RuntimeFrame {
+                function: 0,
+                pc: 0,
+                registers: vec![],
+                return_dst: None,
+                delimiter: None,
+                guards: vec![],
+                deferred_frames: vec![RuntimeFrame {
+                    function: 0,
+                    pc: 0,
+                    registers: vec![Some(Value::Callable(callable.clone()))],
+                    return_dst: None,
+                    delimiter: None,
+                    guards: vec![],
+                    deferred_frames: vec![],
+                    labels: vec![],
+                }],
+                labels: vec![],
+            }],
+        }));
+        let weak_capture = Rc::downgrade(&capture.identity);
+        let weak_callable = Rc::downgrade(&callable.object.identity);
+
+        let scope = ReclamationScope::begin();
+        scope.track_values(&[Value::Resumption(resumption.clone())]);
+        drop(resumption);
+        drop(callable);
+        drop(capture);
+        scope.finish();
+
+        assert!(weak_capture.upgrade().is_none());
+        assert!(weak_callable.upgrade().is_none());
     }
 
     #[test]
