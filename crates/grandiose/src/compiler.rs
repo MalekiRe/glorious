@@ -7038,16 +7038,12 @@ fn compile_program_with_phases(
                     }
                 },
                 &|nominal| {
-                    nominal_ids
-                        .get(
-                            if nominal.arguments.is_empty() {
-                                nominal.declaration.0.clone()
-                            } else {
-                                encode_nominal_instance(nominal)
-                            }
-                            .as_str(),
-                        )
-                        .copied()
+                    provisional_to_resolved(
+                        &typeck::ProvisionalType::Nominal(nominal.clone()),
+                        &nominal_ids,
+                        runtime_bindings.array_name(),
+                    )
+                    .map(|ty| reference_types.id(&ty))
                 },
             )
         {

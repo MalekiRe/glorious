@@ -2121,6 +2121,14 @@ impl<'a> Typer<'a> {
             AssignmentPlaceKind::Local { fields, .. }
             | AssignmentPlaceKind::Dereference { fields, .. } => fields,
         };
+        // Field assignment auto-dereferences a named `&mut` owner in Core.
+        // Carry the same referent into provisional field selection so scalar
+        // RHS operators inherit the field's type instead of defaulting to i64.
+        if !fields.is_empty()
+            && let Some(ProvisionalType::Unique(referent)) = &ty
+        {
+            ty = Some((**referent).clone());
+        }
         for field in fields {
             ty = match ty.as_ref() {
                 Some(ProvisionalType::Tuple(elements)) => field
