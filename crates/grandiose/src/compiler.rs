@@ -36730,7 +36730,9 @@ impl MirLowerer {
                     self.destroy(subject_register, subject.span);
                     self.transfer_owner(subject_register);
                 }
+                let mut negative_reaches_join = false;
                 if let MirFlow::Value(value) = self.expression(negative) {
+                    negative_reaches_join = true;
                     let value = self.materialize(value, negative.span);
                     if let Some(local) = subject_local.filter(|local| {
                         retire_at_join.contains(local) && !self.uninitialized_locals.contains(local)
@@ -36880,6 +36882,9 @@ impl MirLowerer {
                     self.terminate(mir::Terminator::Goto(mir::Edge { target: join, args }));
                 }
 
+                if !positive_reaches_join && !negative_reaches_join {
+                    return MirFlow::Diverged;
+                }
                 let mut params = vec![mir::BlockParam {
                     register: result,
                     ty: expression.ty,

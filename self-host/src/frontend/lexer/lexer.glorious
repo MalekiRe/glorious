@@ -140,6 +140,11 @@ pub token_at<'a>(value: &'a LexedSource, index: usize) -> Option<&'a Token> {
 
 pub token_kind(value: &Token) -> &TokenKind { &value.kind }
 
+pub token_kind_at(value: &LexedSource, index: usize) -> TokenKind {
+    let token = Vec::index(&value.tokens, move index);
+    *token_kind(move token)
+}
+
 pub token_code(value: &Token) -> u16 { value.code }
 
 pub token_span(value: &Token) -> Span {
@@ -334,11 +339,31 @@ advance(value: &mut Lexer, amount: usize) {
     (*value).cursor = value.cursor + move amount;
 }
 
-text_slice(source: &String, start: usize, end: usize) -> String {
-    handle String::slice(source, Range { start: move start, end: move end }) {
+text_slice_result(result: Result<String, TextRangeError>) -> String {
+    handle move result {
         Result::Ok(text) => move text,
         Result::Err(_) => unreachable()
     }
+}
+
+interned_id(result: Result<Id<String>, String>) -> Id<String> {
+    handle move result {
+        Result::Ok(id) => move id,
+        Result::Err(_) => unreachable()
+    }
+}
+
+present_byte(result: Option<u8>) -> u8 {
+    handle move result {
+        Result::Ok(byte) => move byte,
+        Result::Err(_) => unreachable()
+    }
+}
+
+text_slice(source: &String, start: usize, end: usize) -> String {
+    text_slice_result(
+        String::slice(source, Range { start: move start, end: move end })
+    )
 }
 
 source_slice(value: &Lexer, start: usize, end: usize) -> String {
@@ -357,10 +382,7 @@ intern_slice(value: &mut Lexer, start: usize, end: usize) -> Id<String> {
 }
 
 intern_text(value: &mut Lexer, text: String) -> Id<String> {
-    handle Interner::intern_string(&mut value.lexemes, move text) {
-        Result::Ok(id) => move id,
-        Result::Err(_) => unreachable()
-    }
+    interned_id(Interner::intern_string(&mut value.lexemes, move text))
 }
 
 push_with_metadata(
@@ -725,10 +747,7 @@ scan_operator_tail(value: &mut Lexer) {
 
 scan_operator(value: &mut Lexer) {
     let start = value.cursor;
-    let first = handle peek(&*value, 0) {
-        Result::Ok(byte) => move byte,
-        Result::Err(_) => unreachable()
-    };
+    let first = present_byte(peek(&*value, 0));
     let pair = handle peek(&*value, 1) {
         Result::Ok(second) => structural_two(first, move second),
         Result::Err(_) => None
@@ -1666,10 +1685,7 @@ run(value: Lexer) -> Result<LexedSource, LexError> {
 
 run_one(value: Lexer) -> Result<LexedSource, LexError> {
     let start = value.cursor;
-    let byte = handle peek(&value, 0) {
-        Result::Ok(found) => move found,
-        Result::Err(_) => unreachable()
-    };
+    let byte = present_byte(peek(&value, 0));
     handle byte_is_whitespace(byte) {
         Result::Ok(_) => {
             advance(&mut value, 1);
