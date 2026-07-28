@@ -7,6 +7,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
+use std::ops::ControlFlow;
 use std::rc::Rc;
 
 use grandiose_vm::bytecode::{
@@ -24,9 +25,9 @@ use grandiose_vm::{
 use crate::{
     ast::{
         AssignmentPlace, AssignmentPlaceKind, BinaryOp, EffectRowSyntax, Expr, ExprKind,
-        FieldVisibility, Function, GenericParamKind, GlobalBinding, GoalArgument, GoalPolarity,
-        HandlerClause, Param, PatternKind, Program, Stmt, StructDecl, TypeSyntax, TypeSyntaxKind,
-        UnaryOp, pattern_field_index,
+        ExprVisitor, FieldVisibility, Function, GenericParamKind, GlobalBinding, GoalArgument,
+        GoalPolarity, HandlerClause, Param, PatternKind, Program, Stmt, StructDecl, TypeSyntax,
+        TypeSyntaxKind, UnaryOp, pattern_field_index, walk_expr,
     },
     ast_visit::{TypeSyntaxFolder, TypeSyntaxVisitor, type_syntax_any},
     compiler_core as core, compiler_mir as mir, compiler_regions,
@@ -416,6 +417,8 @@ struct EffectOperationInfo {
     terminal: bool,
     resumption_lower: u32,
     resumption_upper: Option<u32>,
+    static_label_params: Vec<usize>,
+    static_label_payloads: BTreeMap<usize, TypeId>,
     span: Span,
 }
 
@@ -441,6 +444,7 @@ enum EffectStaticArgument {
     ConstU32(u32),
     ConstQuantity(u32, Option<u32>),
     Brand(String),
+    LabelBrand(usize, typeck::ProvisionalType),
 }
 
 fn effect_protocol_display_name(key: &EffectInstanceKey) -> String {
@@ -457,6 +461,13 @@ fn effect_protocol_display_name(key: &EffectInstanceKey) -> String {
                 upper.map_or_else(|| "infinity".to_owned(), |upper| upper.to_string())
             ),
             EffectStaticArgument::Brand(brand) => format!("brand:{brand}"),
+            EffectStaticArgument::LabelBrand(position, brand) => {
+                let identity = match brand {
+                    typeck::ProvisionalType::Nominal(instance) => &instance.declaration.0,
+                    _ => "<invalid-label-brand>",
+                };
+                format!("label:{position}:{identity}")
+            }
         })
         .collect::<Vec<_>>()
         .join(",");
@@ -1066,14 +1077,9 @@ impl PerformanceSummaries {
                 | ExprKind::ByteString(_)
                 | ExprKind::String(_)
                 | ExprKind::Variable(_) => PerformanceFactors::identity(),
-                ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
+                ExprKind::LabelDestination { body, .. } => {
                     expression(body, effects, nominals, summaries)
                 }
-                ExprKind::Leave { value, .. } => value
-                    .as_deref()
-                    .map_or_else(PerformanceFactors::identity, |value| {
-                        expression(value, effects, nominals, summaries)
-                    }),
                 ExprKind::Is { subject, .. } => expression(subject, effects, nominals, summaries),
                 ExprKind::LabelReference(_) => PerformanceFactors::identity(),
                 ExprKind::Resume { resumption, value }
@@ -1448,6 +1454,14 @@ struct CoreLowerer<'a> {
     /// Lexically active direct destinations, keyed by source spelling. The
     /// value carries the allocation-independent typeck brand into Core.
     active_labels: BTreeMap<String, ActiveCoreLabel>,
+    /// Proof-only label parameters installed while a late generic helper is
+    /// control-inlined. They map directly to an enclosing lexical
+    /// destination and never receive a Core local or runtime representation.
+    static_labels: BTreeMap<String, crate::ast::LabelSyntax>,
+    /// Nonescaping closures that mention a static label. These are
+    /// beta-reduced in the destination frame for the same reason as generic
+    /// label helpers.
+    static_closures: BTreeMap<String, Expr>,
     recursive_receiver: Option<RecursiveReceiverContext>,
 }
 
@@ -2259,10 +2273,8 @@ fn generic_ast_reference_return_plans(
             | ExprKind::List(_) => Some(Vec::new()),
             ExprKind::Closure { .. }
             | ExprKind::TypedClosure { .. }
-            | ExprKind::Labeled { .. }
             | ExprKind::LabelReference(_)
             | ExprKind::LabelDestination { .. }
-            | ExprKind::Leave { .. }
             | ExprKind::Resume { value: None, .. }
             | ExprKind::Cancel { .. }
             | ExprKind::TailResume { .. }
@@ -4425,6 +4437,16 @@ fn compile_program_with_phases(
             function.generics = None;
         }
     }
+    let trusted_standard_range = trusted_standard_library_domain.and_then(|trusted_domain| {
+        privacy_domains
+            .ranges
+            .iter()
+            .find(|(domain, _)| *domain == trusted_domain)
+            .map(|(_, range)| range)
+    });
+    if let Some(range) = trusted_standard_range {
+        restore_trusted_scalar_operators(&mut lifetime_erased_program, range);
+    }
     // Qualified method selection needs ground associated projections in the
     // receiver type before it can choose an implementation. Build the source
     // trait database first, normalize source signatures, lower the selected
@@ -4434,8 +4456,10 @@ fn compile_program_with_phases(
     let initial_trait_db = TraitDb::build_with_manifest(&lifetime_erased_program, manifest)?;
     let source_projection_normalized_program =
         normalize_ground_projections(&lifetime_erased_program, &initial_trait_db)?;
-    let trait_method_normalized_program =
-        normalize_ground_trait_methods(&source_projection_normalized_program)?;
+    let trait_method_normalized_program = normalize_ground_trait_methods(
+        &source_projection_normalized_program,
+        trusted_standard_range,
+    )?;
     let trait_method_projection_normalized_program =
         normalize_ground_projections(&trait_method_normalized_program, &initial_trait_db)?;
     let constructor_alias_normalized_program =
@@ -4635,10 +4659,7 @@ fn compile_program_with_phases(
                     pending.push(lhs);
                     pending.push(rhs);
                 }
-                ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
-                    pending.push(body)
-                }
-                ExprKind::Leave { value, .. } => pending.extend(value.iter().map(AsRef::as_ref)),
+                ExprKind::LabelDestination { body, .. } => pending.push(body),
                 ExprKind::Is { subject, .. } => pending.push(subject),
                 ExprKind::Variable(path) => {
                     if let [name] = path.as_ref() {
@@ -6465,6 +6486,49 @@ fn compile_program_with_phases(
         runtime_reference_plans: BTreeMap::new(),
         warnings: Vec::new(),
     };
+    for function in &program.functions {
+        struct ImplicitLabelShadowFinder<'a> {
+            function: &'a str,
+            found: Vec<Span>,
+        }
+
+        impl<'ast> ExprVisitor<'ast> for ImplicitLabelShadowFinder<'_> {
+            type Break = ();
+
+            fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<()> {
+                if let ExprKind::LabelDestination { label, .. } = &expression.kind
+                    && label.name.as_ref() == self.function
+                {
+                    self.found.push(label.span);
+                }
+                walk_expr(self, expression)
+            }
+        }
+
+        let mut finder = ImplicitLabelShadowFinder {
+            function: &function.name,
+            found: Vec::new(),
+        };
+        let _ = finder.visit_expr(&function.body);
+        let implicit = Span::new(
+            function.span.start,
+            function.span.start + function.name.len(),
+        );
+        effect_lowering
+            .warnings
+            .extend(finder.found.into_iter().map(|span| {
+                Diagnostic::warning(
+                    "label shadows implicit function label",
+                    format!(
+                        "`@{}` refers to this inner generative label until its block ends",
+                        function.name
+                    ),
+                    span,
+                )
+                .with_code("G0131")
+                .with_related(implicit, "the implicit function label is introduced here")
+            }));
+    }
     let first_class_closures = discovery
         .graph
         .closure_values
@@ -6825,6 +6889,11 @@ fn compile_program_with_phases(
         provisional_types: &provisional,
     };
     let mut core_functions = Vec::new();
+    let implicit_function_bodies = program
+        .functions
+        .iter()
+        .map(|function| (function.name.clone(), function.semantic_body()))
+        .collect::<BTreeMap<_, _>>();
     for (wire_name, emission_key, emission) in ordered {
         let primitive_leaf = match &emission {
             Emission::Function(function) | Emission::Specialization { function, .. } => {
@@ -6854,18 +6923,21 @@ fn compile_program_with_phases(
             body_instance,
             allow_handler,
         ) = match &emission {
-            Emission::Function(function) => (
-                signatures[&function.name].clone(),
-                &function.body,
-                &function.body,
-                function.params.as_slice(),
-                false,
-                Some(typeck::DeclarationKey::Function(function.name.clone())),
-                specialization::BodyInstanceKey::Root(typeck::DeclarationKey::Function(
-                    function.name.clone(),
-                )),
-                true,
-            ),
+            Emission::Function(function) => {
+                let body = &implicit_function_bodies[&function.name];
+                (
+                    signatures[&function.name].clone(),
+                    body,
+                    &function.body,
+                    function.params.as_slice(),
+                    false,
+                    Some(typeck::DeclarationKey::Function(function.name.clone())),
+                    specialization::BodyInstanceKey::Root(typeck::DeclarationKey::Function(
+                        function.name.clone(),
+                    )),
+                    true,
+                )
+            }
             Emission::Global(global) => (
                 global_signatures[&global.name].clone(),
                 &global.value,
@@ -6882,16 +6954,19 @@ fn compile_program_with_phases(
                 function,
                 key,
                 params,
-            } => (
-                generated_signatures[&emission_key].clone(),
-                &function.body,
-                &function.body,
-                params.as_slice(),
-                false,
-                None,
-                specialization::BodyInstanceKey::Specialization(key.clone()),
-                true,
-            ),
+            } => {
+                let body = &implicit_function_bodies[&function.name];
+                (
+                    generated_signatures[&emission_key].clone(),
+                    body,
+                    &function.body,
+                    params.as_slice(),
+                    false,
+                    None,
+                    specialization::BodyInstanceKey::Specialization(key.clone()),
+                    true,
+                )
+            }
             Emission::Closure {
                 request,
                 body,
@@ -7976,6 +8051,148 @@ fn compile_program_with_phases(
     ))
 }
 
+/// The distributed library predates public symbolic operator traits and is the
+/// authority which implements them. Keep arithmetic inside that trusted source
+/// segment on the frozen scalar path; ordinary libraries and user source retain
+/// trait calls produced by the parser.
+pub(crate) fn restore_trusted_scalar_operators(
+    program: &mut Program,
+    range: &std::ops::Range<usize>,
+) {
+    fn rewrite(expression: &mut Expr, range: &std::ops::Range<usize>) {
+        let replacement = if expression.span.start >= range.start
+            && expression.span.end <= range.end
+        {
+            match &expression.kind {
+                ExprKind::Call(callee, arguments)
+                    if arguments.len() == 2
+                        && matches!(&callee.kind, ExprKind::Variable(path) if path.len() == 2) =>
+                {
+                    let ExprKind::Variable(path) = &callee.kind else {
+                        unreachable!()
+                    };
+                    let op = match (path[0].as_ref(), path[1].as_ref()) {
+                        ("Add", "+") => Some(BinaryOp::Add),
+                        ("Equal", "==") => Some(BinaryOp::Eq),
+                        ("Less", "<") => Some(BinaryOp::Lt),
+                        ("Greater", ">") => Some(BinaryOp::Gt),
+                        _ => None,
+                    };
+                    op.map(|op| {
+                        (
+                            op,
+                            Rc::new(arguments[0].clone()),
+                            Rc::new(arguments[1].clone()),
+                        )
+                    })
+                }
+                _ => None,
+            }
+        } else {
+            None
+        };
+        if let Some((op, lhs, rhs)) = replacement {
+            expression.kind = ExprKind::Binary { op, lhs, rhs };
+        }
+        match &mut expression.kind {
+            ExprKind::Move(value)
+            | ExprKind::Field(value, _)
+            | ExprKind::Unary { operand: value, .. }
+            | ExprKind::LabelDestination { body: value, .. } => rewrite(Rc::make_mut(value), range),
+            ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
+                rewrite(Rc::make_mut(body), range)
+            }
+            ExprKind::List(values) | ExprKind::Tuple(values) => {
+                for value in Rc::make_mut(values) {
+                    rewrite(value, range);
+                }
+            }
+            ExprKind::Struct { fields, .. } => {
+                for (_, value) in Rc::make_mut(fields) {
+                    rewrite(value, range);
+                }
+            }
+            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                for statement in Rc::make_mut(statements) {
+                    match statement {
+                        Stmt::Let { value, .. }
+                        | Stmt::Deconstruct { value, .. }
+                        | Stmt::Expr(value) => rewrite(value, range),
+                        Stmt::Assign {
+                            destination, value, ..
+                        } => {
+                            rewrite(value, range);
+                            if let AssignmentPlaceKind::Dereference { reference, .. } =
+                                &mut destination.kind
+                            {
+                                rewrite(Rc::make_mut(reference), range);
+                            }
+                        }
+                    }
+                }
+            }
+            ExprKind::Call(callee, arguments) => {
+                rewrite(Rc::make_mut(callee), range);
+                for argument in Rc::make_mut(arguments) {
+                    rewrite(argument, range);
+                }
+            }
+            ExprKind::Perform { args, .. } => {
+                for argument in Rc::make_mut(args) {
+                    rewrite(argument, range);
+                }
+            }
+            ExprKind::Handle {
+                computation,
+                clauses,
+            } => {
+                rewrite(Rc::make_mut(computation), range);
+                for clause in Rc::make_mut(clauses) {
+                    rewrite(&mut clause.body, range);
+                }
+            }
+            ExprKind::Binary { lhs, rhs, .. } => {
+                rewrite(Rc::make_mut(lhs), range);
+                rewrite(Rc::make_mut(rhs), range);
+            }
+            ExprKind::Is { subject, .. } => rewrite(Rc::make_mut(subject), range),
+            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+                rewrite(Rc::make_mut(resumption), range);
+                if let Some(value) = value {
+                    rewrite(Rc::make_mut(value), range);
+                }
+            }
+            ExprKind::Cancel { resumption } => rewrite(Rc::make_mut(resumption), range),
+            ExprKind::Unit
+            | ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Char(_)
+            | ExprKind::Byte(_)
+            | ExprKind::ByteString(_)
+            | ExprKind::String(_)
+            | ExprKind::Variable(_)
+            | ExprKind::LabelReference(_) => {}
+        }
+    }
+
+    for global in &mut program.globals {
+        rewrite(&mut global.value, range);
+    }
+    for function in &mut program.functions {
+        rewrite(&mut function.body, range);
+    }
+    for implementation in &mut program.impls {
+        for method in &mut implementation.methods {
+            if let Some(body) = &mut method.body {
+                rewrite(body, range);
+            }
+        }
+    }
+    for drop in &mut program.drops {
+        rewrite(&mut drop.body, range);
+    }
+}
+
 fn normalize_ground_projections(
     program: &Program,
     trait_db: &TraitDb,
@@ -8354,12 +8571,41 @@ fn normalize_ground_projections(
     }
     for effect in &mut normalized.effects {
         solver_budget.begin_declaration();
+        let binders = generic_binders(&effect.generics);
+        normalize_where_clause(
+            &mut effect.where_clause,
+            &binders,
+            trait_db,
+            &mut solver_budget,
+            &mut errors,
+        );
         for operation in &mut effect.operations {
+            let mut operation_binders = binders.clone();
+            operation_binders.extend(generic_binders(&operation.generics));
+            normalize_where_clause(
+                &mut operation.where_clause,
+                &operation_binders,
+                trait_db,
+                &mut solver_budget,
+                &mut errors,
+            );
             for parameter in &mut operation.params {
-                apply(&mut parameter.ty, trait_db, &mut solver_budget, &mut errors);
+                normalize_in_context(
+                    &mut parameter.ty,
+                    &operation_binders,
+                    trait_db,
+                    &mut solver_budget,
+                    &mut errors,
+                );
             }
             if let Some(result) = &mut operation.return_type {
-                apply(result, trait_db, &mut solver_budget, &mut errors);
+                normalize_in_context(
+                    result,
+                    &operation_binders,
+                    trait_db,
+                    &mut solver_budget,
+                    &mut errors,
+                );
             }
         }
     }
@@ -9014,6 +9260,7 @@ const GENERIC_NOMINAL_PREFIX: &str = "$ground_nominal$";
 /// construction whose positive implementation is unique.
 pub(crate) fn normalize_ground_trait_methods(
     program: &Program,
+    trusted_standard_range: Option<&std::ops::Range<usize>>,
 ) -> Result<Program, Vec<Diagnostic>> {
     type MethodKey = (String, String, String);
 
@@ -9725,28 +9972,22 @@ pub(crate) fn normalize_ground_trait_methods(
         return Ok(normalized);
     }
 
-    fn concrete_call_result(program: &Program, expression: &Expr) -> Option<ReceiverType> {
-        fn mentions_any(ty: &ReceiverType, names: &BTreeSet<String>) -> bool {
-            match ty {
-                ReceiverType::Name(name) | ReceiverType::Const(name) => names.contains(name),
-                ReceiverType::Application(constructor, arguments) => {
-                    mentions_any(constructor, names)
-                        || arguments
-                            .iter()
-                            .any(|argument| mentions_any(argument, names))
-                }
-                ReceiverType::Tuple(fields) => {
-                    fields.iter().any(|field| mentions_any(field, names))
-                }
-                ReceiverType::Shared(inner) | ReceiverType::Unique(inner) => {
-                    mentions_any(inner, names)
-                }
-                ReceiverType::Never => false,
-            }
+    // This pass only needs enough expression typing to select a ground trait
+    // implementation. Keep the inference deliberately shallow: concrete
+    // source functions expose trustworthy result annotations, while generic
+    // calls remain the responsibility of specialization.
+    fn concrete_call_result(
+        program: &Program,
+        expression: &Expr,
+        trusted_standard_range: Option<&std::ops::Range<usize>>,
+    ) -> Option<ReceiverType> {
+        if trusted_standard_range.is_some_and(|range| {
+            expression.span.start >= range.start && expression.span.end <= range.end
+        }) {
+            return None;
         }
-
         match &expression.kind {
-            ExprKind::Move(value) => concrete_call_result(program, value),
+            ExprKind::Move(value) => concrete_call_result(program, value, trusted_standard_range),
             ExprKind::Call(callee, _) => {
                 let ExprKind::Variable(path) = &callee.kind else {
                     return None;
@@ -9754,22 +9995,23 @@ pub(crate) fn normalize_ground_trait_methods(
                 let [name] = path.as_ref() else {
                     return None;
                 };
-                let function = program
-                    .functions
-                    .iter()
-                    .find(|function| function.name == name.as_ref())?;
-                let result = function
+                let function = program.functions.iter().find(|function| {
+                    function.name == name.as_ref()
+                        && function.generics.as_ref().is_none_or(|generics| {
+                            generics.params.iter().all(|parameter| {
+                                parameter.kind == crate::ast::GenericParamKind::Lifetime
+                            })
+                        })
+                })?;
+                function
                     .return_type
                     .as_ref()
                     .and_then(|result| source_receiver_type(program, result))
-                    .or_else(|| Some(ReceiverType::Name("Unit".into())))?;
-                let binders = function
-                    .generics
-                    .iter()
-                    .flat_map(|generics| generics.params.iter())
-                    .map(|parameter| parameter.name.to_string())
-                    .collect();
-                (!mentions_any(&result, &binders)).then_some(result)
+                    .or_else(|| Some(ReceiverType::Name("Unit".into())))
+            }
+            ExprKind::Binary { lhs, rhs, .. } => {
+                concrete_call_result(program, lhs, trusted_standard_range)
+                    .or_else(|| concrete_call_result(program, rhs, trusted_standard_range))
             }
             _ => None,
         }
@@ -9785,6 +10027,7 @@ pub(crate) fn normalize_ground_trait_methods(
         generic_methods: &[GenericMethod],
         dot_methods: &[DotMethod],
         deferred_evidence: &BTreeSet<(String, String)>,
+        trusted_standard_range: Option<&std::ops::Range<usize>>,
         expected: Option<&ReceiverType>,
         errors: &mut Vec<Diagnostic>,
     ) -> Option<ReceiverType> {
@@ -9801,6 +10044,7 @@ pub(crate) fn normalize_ground_trait_methods(
                         generic_methods,
                         dot_methods,
                         deferred_evidence,
+                        trusted_standard_range,
                         None,
                         errors,
                     );
@@ -9816,6 +10060,7 @@ pub(crate) fn normalize_ground_trait_methods(
                 generic_methods,
                 dot_methods,
                 deferred_evidence,
+                trusted_standard_range,
                 None,
                 errors,
             ),
@@ -9829,6 +10074,7 @@ pub(crate) fn normalize_ground_trait_methods(
                     generic_methods,
                     dot_methods,
                     deferred_evidence,
+                    trusted_standard_range,
                     None,
                     errors,
                 );
@@ -9863,6 +10109,7 @@ pub(crate) fn normalize_ground_trait_methods(
                         generic_methods,
                         dot_methods,
                         deferred_evidence,
+                        trusted_standard_range,
                         None,
                         errors,
                     );
@@ -9879,6 +10126,7 @@ pub(crate) fn normalize_ground_trait_methods(
                         generic_methods,
                         dot_methods,
                         deferred_evidence,
+                        trusted_standard_range,
                         expected,
                         errors,
                     );
@@ -9892,6 +10140,7 @@ pub(crate) fn normalize_ground_trait_methods(
                         generic_methods,
                         dot_methods,
                         deferred_evidence,
+                        trusted_standard_range,
                         expected,
                         errors,
                     );
@@ -9908,6 +10157,7 @@ pub(crate) fn normalize_ground_trait_methods(
                             generic_methods,
                             dot_methods,
                             deferred_evidence,
+                            trusted_standard_range,
                             None,
                             errors,
                         );
@@ -10115,6 +10365,7 @@ pub(crate) fn normalize_ground_trait_methods(
                             generic_methods,
                             dot_methods,
                             deferred_evidence,
+                            trusted_standard_range,
                             enum_argument_expectations
                                 .as_ref()
                                 .and_then(|expectations| expectations.get(index)),
@@ -10138,12 +10389,17 @@ pub(crate) fn normalize_ground_trait_methods(
                                     && candidate.method.as_str() == method.as_str()
                             })
                     });
-                let equality_trait_call =
-                    qualified.as_ref().is_some_and(|(name, _)| name == "Equal");
+                let comparison_trait_call = qualified
+                    .as_ref()
+                    .is_some_and(|(name, _)| matches!(name.as_str(), "Equal" | "Less" | "Greater"));
                 if let Some((trait_name, method)) = qualified.filter(|_| qualified_trait_call) {
+                    // Homogeneous operator traits can still be selected when
+                    // a refinement/deconstruction leaves the left operand
+                    // temporarily opaque but the right operand is concrete.
                     let receiver = argument_types.iter().enumerate().find_map(|(index, ty)| {
-                        ty.clone()
-                            .or_else(|| concrete_call_result(program, &args[index]))
+                        ty.clone().or_else(|| {
+                            concrete_call_result(program, &args[index], trusted_standard_range)
+                        })
                     });
                     let deferred_receiver = receiver
                         .as_ref()
@@ -10256,12 +10512,28 @@ pub(crate) fn normalize_ground_trait_methods(
                         };
                         errors.push(type_error(callee.span, message).with_help(help));
                     } else {
+                        let receiver_name = receiver
+                            .as_ref()
+                            .map(receiver_subject_type)
+                            .map(receiver_key)
+                            .unwrap_or_else(|| "<unknown>".into());
+                        let available = methods
+                            .keys()
+                            .filter(|(candidate_trait, candidate_method, _)| {
+                                candidate_trait == &trait_name && candidate_method == &method
+                            })
+                            .map(|(_, _, receiver)| receiver.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", ");
                         errors.push(
                             type_error(
                                 callee.span,
-                                format!("no ground `{trait_name}::{method}` implementation matches this receiver"),
+                                format!(
+                                    "no ground `{trait_name}::{method}` implementation matches receiver `{receiver_name}`"
+                                ),
                             )
-                            .with_help("pass a typed local or direct nominal construction with one coherent positive implementation"),
+                            .with_help("pass a typed local or direct nominal construction with one coherent positive implementation")
+                            .with_note(format!("available receivers: {available}")),
                         );
                     }
                 } else {
@@ -10274,14 +10546,26 @@ pub(crate) fn normalize_ground_trait_methods(
                         generic_methods,
                         dot_methods,
                         deferred_evidence,
+                        trusted_standard_range,
                         None,
                         errors,
                     );
                 }
-                if equality_trait_call {
-                    Some(ReceiverType::Name("Bool".into()))
+                if qualified_trait_call {
+                    if comparison_trait_call {
+                        Some(ReceiverType::Name("Bool".into()))
+                    } else {
+                        expected.cloned().or_else(|| {
+                            argument_types
+                                .iter()
+                                .find_map(Clone::clone)
+                                .map(|receiver| receiver_subject_type(&receiver).clone())
+                        })
+                    }
                 } else {
-                    qualified_trait_call.then(|| expected.cloned()).flatten()
+                    expected.cloned().or_else(|| {
+                        concrete_call_result(program, expression, trusted_standard_range)
+                    })
                 }
             }
             ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
@@ -10302,6 +10586,7 @@ pub(crate) fn normalize_ground_trait_methods(
                                 generic_methods,
                                 dot_methods,
                                 deferred_evidence,
+                                trusted_standard_range,
                                 None,
                                 errors,
                             );
@@ -10309,7 +10594,22 @@ pub(crate) fn normalize_ground_trait_methods(
                                 locals.insert(name.clone(), ty);
                             }
                         }
-                        Stmt::Deconstruct { value, .. } | Stmt::Expr(value) => {
+                        Stmt::Deconstruct { value, .. } => {
+                            rewrite(
+                                value,
+                                locals,
+                                program,
+                                methods,
+                                receiverless_methods,
+                                generic_methods,
+                                dot_methods,
+                                deferred_evidence,
+                                trusted_standard_range,
+                                None,
+                                errors,
+                            );
+                        }
+                        Stmt::Expr(value) => {
                             result = rewrite(
                                 value,
                                 locals,
@@ -10319,6 +10619,7 @@ pub(crate) fn normalize_ground_trait_methods(
                                 generic_methods,
                                 dot_methods,
                                 deferred_evidence,
+                                trusted_standard_range,
                                 tail_expected,
                                 errors,
                             );
@@ -10333,6 +10634,7 @@ pub(crate) fn normalize_ground_trait_methods(
                                 generic_methods,
                                 dot_methods,
                                 deferred_evidence,
+                                trusted_standard_range,
                                 None,
                                 errors,
                             );
@@ -10353,6 +10655,7 @@ pub(crate) fn normalize_ground_trait_methods(
                     generic_methods,
                     dot_methods,
                     deferred_evidence,
+                    trusted_standard_range,
                     None,
                     errors,
                 );
@@ -10370,6 +10673,7 @@ pub(crate) fn normalize_ground_trait_methods(
                         generic_methods,
                         dot_methods,
                         deferred_evidence,
+                        trusted_standard_range,
                         None,
                         errors,
                     );
@@ -10396,6 +10700,7 @@ pub(crate) fn normalize_ground_trait_methods(
                             generic_methods,
                             dot_methods,
                             deferred_evidence,
+                            trusted_standard_range,
                             expected_elements.and_then(|elements| elements.get(index)),
                             errors,
                         )
@@ -10414,6 +10719,7 @@ pub(crate) fn normalize_ground_trait_methods(
                         generic_methods,
                         dot_methods,
                         deferred_evidence,
+                        trusted_standard_range,
                         None,
                         errors,
                     );
@@ -10433,6 +10739,7 @@ pub(crate) fn normalize_ground_trait_methods(
                     generic_methods,
                     dot_methods,
                     deferred_evidence,
+                    trusted_standard_range,
                     expected,
                     errors,
                 );
@@ -10447,6 +10754,7 @@ pub(crate) fn normalize_ground_trait_methods(
                         generic_methods,
                         dot_methods,
                         deferred_evidence,
+                        trusted_standard_range,
                         expected,
                         errors,
                     );
@@ -10464,6 +10772,7 @@ pub(crate) fn normalize_ground_trait_methods(
                     generic_methods,
                     dot_methods,
                     deferred_evidence,
+                    trusted_standard_range,
                     None,
                     errors,
                 );
@@ -10476,12 +10785,13 @@ pub(crate) fn normalize_ground_trait_methods(
                     generic_methods,
                     dot_methods,
                     deferred_evidence,
+                    trusted_standard_range,
                     None,
                     errors,
                 );
                 None
             }
-            ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => rewrite(
+            ExprKind::LabelDestination { body, .. } => rewrite(
                 Rc::make_mut(body),
                 locals,
                 program,
@@ -10490,6 +10800,7 @@ pub(crate) fn normalize_ground_trait_methods(
                 generic_methods,
                 dot_methods,
                 deferred_evidence,
+                trusted_standard_range,
                 expected,
                 errors,
             ),
@@ -10502,24 +10813,11 @@ pub(crate) fn normalize_ground_trait_methods(
                 generic_methods,
                 dot_methods,
                 deferred_evidence,
+                trusted_standard_range,
                 None,
                 errors,
             )
             .and_then(|receiver| projected_receiver_type(program, receiver, field)),
-            ExprKind::Leave { value, .. } => value.as_mut().and_then(|value| {
-                rewrite(
-                    Rc::make_mut(value),
-                    locals,
-                    program,
-                    methods,
-                    receiverless_methods,
-                    generic_methods,
-                    dot_methods,
-                    deferred_evidence,
-                    None,
-                    errors,
-                )
-            }),
             ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
                 rewrite(
                     Rc::make_mut(resumption),
@@ -10530,6 +10828,7 @@ pub(crate) fn normalize_ground_trait_methods(
                     generic_methods,
                     dot_methods,
                     deferred_evidence,
+                    trusted_standard_range,
                     None,
                     errors,
                 );
@@ -10543,6 +10842,7 @@ pub(crate) fn normalize_ground_trait_methods(
                         generic_methods,
                         dot_methods,
                         deferred_evidence,
+                        trusted_standard_range,
                         None,
                         errors,
                     )
@@ -10557,6 +10857,7 @@ pub(crate) fn normalize_ground_trait_methods(
                 generic_methods,
                 dot_methods,
                 deferred_evidence,
+                trusted_standard_range,
                 None,
                 errors,
             ),
@@ -10569,6 +10870,7 @@ pub(crate) fn normalize_ground_trait_methods(
                 generic_methods,
                 dot_methods,
                 deferred_evidence,
+                trusted_standard_range,
                 None,
                 errors,
             ),
@@ -10614,6 +10916,7 @@ pub(crate) fn normalize_ground_trait_methods(
             &generic_methods,
             &dot_methods,
             &deferred_evidence,
+            trusted_standard_range,
             function
                 .return_type
                 .as_ref()
@@ -10634,11 +10937,12 @@ pub(crate) fn normalize_ground_trait_methods(
 /// grow a second, spelling-based associated-item resolver.
 pub(crate) fn normalize_trait_surface_for_recovery(
     program: &Program,
+    trusted_standard_range: Option<&std::ops::Range<usize>>,
 ) -> Result<Program, Vec<Diagnostic>> {
     let manifest = TrustedTraitManifest::trusted_distribution();
     let trait_db = TraitDb::build_with_manifest(program, &manifest)?;
     let projected = normalize_ground_projections(program, &trait_db)?;
-    let methods = normalize_ground_trait_methods(&projected)?;
+    let methods = normalize_ground_trait_methods(&projected, trusted_standard_range)?;
     normalize_ground_projections(&methods, &trait_db)
 }
 
@@ -11179,13 +11483,8 @@ pub(crate) fn normalize_constructor_aliases(program: &Program) -> Result<Program
                 rewrite_expression(std::rc::Rc::make_mut(lhs), aliases, pattern_aliases);
                 rewrite_expression(std::rc::Rc::make_mut(rhs), aliases, pattern_aliases);
             }
-            ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
+            ExprKind::LabelDestination { body, .. } => {
                 rewrite_expression(std::rc::Rc::make_mut(body), aliases, pattern_aliases)
-            }
-            ExprKind::Leave { value, .. } => {
-                if let Some(value) = value {
-                    rewrite_expression(std::rc::Rc::make_mut(value), aliases, pattern_aliases);
-                }
             }
             ExprKind::Is { subject, pattern } => {
                 rewrite_expression(std::rc::Rc::make_mut(subject), aliases, pattern_aliases);
@@ -12020,7 +12319,6 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
             ExprKind::Move(value)
             | ExprKind::Field(value, _)
             | ExprKind::Closure { body: value, .. }
-            | ExprKind::Labeled { body: value, .. }
             | ExprKind::Unary { operand: value, .. } => {
                 rewrite_expression_alias_types(
                     Rc::make_mut(value),
@@ -12030,9 +12328,7 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                     errors,
                 );
             }
-            ExprKind::Leave { value, .. }
-            | ExprKind::Resume { value, .. }
-            | ExprKind::TailResume { value, .. } => {
+            ExprKind::Resume { value, .. } | ExprKind::TailResume { value, .. } => {
                 if let Some(value) = value {
                     rewrite_expression_alias_types(
                         Rc::make_mut(value),
@@ -12273,7 +12569,9 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
         }
     }
     for effect in &mut normalized.effects {
+        rewrite_where_types(effect.where_clause.as_mut(), &mut rewrite);
         for operation in &mut effect.operations {
+            rewrite_where_types(operation.where_clause.as_mut(), &mut rewrite);
             for param in &mut operation.params {
                 rewrite(&mut param.ty);
             }
@@ -12448,11 +12746,19 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
             .map(|parameter| parameter.name.clone())
             .collect::<BTreeSet<_>>();
         for operation in &mut effect.operations {
+            let mut operation_bound = bound.clone();
+            operation_bound.extend(
+                operation
+                    .generics
+                    .iter()
+                    .flat_map(|generics| &generics.params)
+                    .map(|parameter| parameter.name.clone()),
+            );
             for param in &mut operation.params {
                 param.ty = expand_monomorphic_alias(
                     &param.ty,
                     &monomorphic_aliases,
-                    &bound,
+                    &operation_bound,
                     &mut BTreeSet::new(),
                 );
             }
@@ -12460,7 +12766,7 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                 *result = expand_monomorphic_alias(
                     result,
                     &monomorphic_aliases,
-                    &bound,
+                    &operation_bound,
                     &mut BTreeSet::new(),
                 );
             }
@@ -12730,14 +13036,7 @@ fn normalize_value_restricted_globals(program: &Program) -> Program {
                 rewrite(Rc::make_mut(lhs), values, bound);
                 rewrite(Rc::make_mut(rhs), values, bound);
             }
-            ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
-                rewrite(Rc::make_mut(body), values, bound)
-            }
-            ExprKind::Leave { value, .. } => {
-                if let Some(value) = value {
-                    rewrite(Rc::make_mut(value), values, bound);
-                }
-            }
+            ExprKind::LabelDestination { body, .. } => rewrite(Rc::make_mut(body), values, bound),
             ExprKind::Is { subject, .. } => rewrite(Rc::make_mut(subject), values, bound),
             ExprKind::Unit
             | ExprKind::Int(_)
@@ -12991,13 +13290,8 @@ fn normalize_capture_free_function_items(program: &Program) -> Program {
                 rewrite(Rc::make_mut(lhs), functions, bound, false);
                 rewrite(Rc::make_mut(rhs), functions, bound, false);
             }
-            ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
+            ExprKind::LabelDestination { body, .. } => {
                 rewrite(Rc::make_mut(body), functions, bound, false)
-            }
-            ExprKind::Leave { value, .. } => {
-                if let Some(value) = value {
-                    rewrite(Rc::make_mut(value), functions, bound, false);
-                }
             }
             ExprKind::Is { subject, .. } => rewrite(Rc::make_mut(subject), functions, bound, false),
             ExprKind::Unit
@@ -16904,14 +17198,7 @@ fn resolve_effects(
                 collect_sites(lhs, found);
                 collect_sites(rhs, found);
             }
-            ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
-                collect_sites(body, found)
-            }
-            ExprKind::Leave { value, .. } => {
-                if let Some(value) = value {
-                    collect_sites(value, found);
-                }
-            }
+            ExprKind::LabelDestination { body, .. } => collect_sites(body, found),
             ExprKind::Is { subject, .. } => collect_sites(subject, found),
             ExprKind::Unit
             | ExprKind::Int(_)
@@ -17114,26 +17401,38 @@ fn resolve_effects(
             let Some(declaration) = constructor.simple_name() else {
                 continue;
             };
-            let arguments = arguments
-                .iter()
-                .map(|argument| {
-                    let symbolic = symbolic_effect_argument(argument, &binders)?;
-                    let ty = specialization::substitute(&symbolic, &substitutions)?;
-                    let resolved = provisional_to_resolved(&ty, ids, array_name)?;
-                    Some(reference_types.intern(&resolved))
-                })
-                .collect::<Option<Vec<_>>>();
-            if let Some(arguments) = arguments {
+            let mut runtime_arguments = Vec::new();
+            let mut static_arguments = match effect_static_arguments(program, &path.effect) {
+                Ok(arguments) => arguments,
+                Err(error) => {
+                    errors.push(error);
+                    continue;
+                }
+            };
+            let mut valid = true;
+            for (position, argument) in arguments.iter().enumerate() {
+                let Some(symbolic) = symbolic_effect_argument(argument, &binders) else {
+                    valid = false;
+                    break;
+                };
+                let Some(ty) = specialization::substitute(&symbolic, &substitutions) else {
+                    valid = false;
+                    break;
+                };
+                if typeck::label_payload_type(&ty).is_some() {
+                    static_arguments.push(EffectStaticArgument::LabelBrand(position, ty));
+                } else if let Some(resolved) = provisional_to_resolved(&ty, ids, array_name) {
+                    runtime_arguments.push(reference_types.intern(&resolved));
+                } else {
+                    valid = false;
+                    break;
+                }
+            }
+            if valid {
                 requested.insert(EffectInstanceKey {
                     declaration: declaration.to_owned(),
-                    arguments,
-                    static_arguments: match effect_static_arguments(program, &path.effect) {
-                        Ok(arguments) => arguments,
-                        Err(error) => {
-                            errors.push(error);
-                            continue;
-                        }
-                    },
+                    arguments: runtime_arguments,
+                    static_arguments,
                 });
             }
         }
@@ -17147,17 +17446,130 @@ fn resolve_effects(
         let effect = declarations[&key.declaration.as_str()];
         let protocol = protocols.len() as u32;
         instances.insert(key.clone(), protocol);
+        let static_label_positions = key
+            .static_arguments
+            .iter()
+            .filter_map(|argument| match argument {
+                EffectStaticArgument::LabelBrand(position, _) => Some(*position),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
         let substitutions = effect
             .generics
             .as_ref()
             .into_iter()
             .flat_map(|generics| &generics.params)
             .filter(|parameter| parameter.kind == GenericParamKind::Type)
+            .enumerate()
+            .filter(|(position, _)| !static_label_positions.contains(position))
+            .map(|(_, parameter)| parameter)
             .zip(&key.arguments)
             .map(|(param, argument)| (param.name.as_str(), *argument))
             .collect::<BTreeMap<_, _>>();
+        if let Some(where_clause) = &effect.where_clause {
+            let type_parameters = effect
+                .generics
+                .iter()
+                .flat_map(|generics| &generics.params)
+                .filter(|parameter| parameter.kind == GenericParamKind::Type)
+                .collect::<Vec<_>>();
+            for goal in &where_clause.goals {
+                let is_label = goal.polarity == GoalPolarity::Positive
+                    && goal
+                        .relation
+                        .path
+                        .last()
+                        .is_some_and(|segment| segment.name == "Label");
+                if !is_label {
+                    continue;
+                }
+                let Some(position) = goal.subject.simple_name().and_then(|name| {
+                    type_parameters
+                        .iter()
+                        .position(|parameter| parameter.name == name)
+                }) else {
+                    errors.push(type_error(
+                        goal.span,
+                        "an effect Label bound must constrain one of its type parameters",
+                    ));
+                    continue;
+                };
+                let label = key
+                    .static_arguments
+                    .iter()
+                    .find_map(|argument| match argument {
+                        EffectStaticArgument::LabelBrand(candidate, label)
+                            if *candidate == position =>
+                        {
+                            Some(label)
+                        }
+                        _ => None,
+                    });
+                let expected = match goal.relation.arguments.as_slice() {
+                    [GoalArgument::Type(expected)] => substituted_member_type(
+                        expected,
+                        &substitutions,
+                        ids,
+                        aliases,
+                        array_name,
+                        reference_types,
+                    )
+                    .ok(),
+                    _ => None,
+                };
+                let actual = label
+                    .and_then(typeck::label_payload_type)
+                    .and_then(|payload| provisional_to_resolved(payload, ids, array_name));
+                if actual != expected {
+                    errors.push(type_error(
+                        goal.span,
+                        "effect instance does not satisfy its static Label payload bound",
+                    ));
+                }
+            }
+        }
         let mut bytecode_operations = Vec::new();
         for operation in &effect.operations {
+            let operation_type_parameters = operation
+                .generics
+                .iter()
+                .flat_map(|generics| &generics.params)
+                .filter(|parameter| parameter.kind == GenericParamKind::Type)
+                .map(|parameter| parameter.name.as_str())
+                .collect::<BTreeSet<_>>();
+            let mut operation_label_bounds = BTreeMap::new();
+            if let Some(where_clause) = &operation.where_clause {
+                for goal in &where_clause.goals {
+                    let is_label = goal.polarity == GoalPolarity::Positive
+                        && goal
+                            .relation
+                            .path
+                            .last()
+                            .is_some_and(|segment| segment.name == "Label");
+                    if !is_label {
+                        continue;
+                    }
+                    let Some(parameter) = goal
+                        .subject
+                        .simple_name()
+                        .filter(|name| operation_type_parameters.contains(name))
+                    else {
+                        errors.push(type_error(
+                            goal.span,
+                            "an operation Label bound must constrain one of that operation's type parameters",
+                        ));
+                        continue;
+                    };
+                    let [GoalArgument::Type(payload)] = goal.relation.arguments.as_slice() else {
+                        errors.push(type_error(
+                            goal.span,
+                            "an operation Label bound requires exactly one payload type",
+                        ));
+                        continue;
+                    };
+                    operation_label_bounds.insert(parameter, payload);
+                }
+            }
             let finite_quantity = u32::try_from(operation.resumption_lower).ok().zip(
                 operation
                     .resumption_upper
@@ -17174,7 +17586,46 @@ fn resolve_effects(
                 continue;
             }
             let mut params = Vec::new();
-            for param in &operation.params {
+            let mut static_label_params = Vec::new();
+            let mut static_label_payloads = BTreeMap::new();
+            for (position, param) in operation.params.iter().enumerate() {
+                if let Some(payload) = param
+                    .ty
+                    .simple_name()
+                    .and_then(|name| operation_label_bounds.get(name))
+                {
+                    static_label_params.push(position);
+                    match substituted_member_type(
+                        payload,
+                        &substitutions,
+                        ids,
+                        aliases,
+                        array_name,
+                        reference_types,
+                    ) {
+                        Ok(payload) => {
+                            static_label_payloads
+                                .insert(position, reference_types.intern(&payload));
+                        }
+                        Err(_) => errors.push(type_error(
+                            payload.span,
+                            "operation-local Label payload must resolve to a supported type",
+                        )),
+                    }
+                    continue;
+                }
+                let generic_position = effect
+                    .generics
+                    .iter()
+                    .flat_map(|generics| &generics.params)
+                    .filter(|parameter| parameter.kind == GenericParamKind::Type)
+                    .position(|parameter| param.ty.simple_name() == Some(parameter.name.as_str()));
+                if generic_position
+                    .is_some_and(|position| static_label_positions.contains(&position))
+                {
+                    static_label_params.push(position);
+                    continue;
+                }
                 let resolved = substituted_member_type(
                     &param.ty,
                     &substitutions,
@@ -17244,7 +17695,7 @@ fn resolve_effects(
                     },
                 }
             };
-            if params.len() == operation.params.len()
+            if params.len() + static_label_params.len() == operation.params.len()
                 && let Some(result) = result
             {
                 let info = EffectOperationInfo {
@@ -17263,6 +17714,8 @@ fn resolve_effects(
                     } else {
                         operation.resumption_upper.map(|upper| upper as u32)
                     },
+                    static_label_params,
+                    static_label_payloads,
                     span: operation.span,
                 };
                 instance_operations.insert((key.clone(), operation.name.clone()), info.clone());
@@ -17664,9 +18117,16 @@ fn resolve_specialized_callable_effect_row(
                     continue;
                 };
                 let mut grounded = Vec::with_capacity(arguments.len());
+                let mut static_arguments = match effect_static_arguments(program, effect) {
+                    Ok(arguments) => arguments,
+                    Err(error) => {
+                        errors.push(error);
+                        continue;
+                    }
+                };
                 let mut valid = true;
-                for argument in arguments {
-                    let ty = argument
+                for (position, argument) in arguments.iter().enumerate() {
+                    let specialized = argument
                         .simple_name()
                         .and_then(|name| binders.get(name))
                         .and_then(|binder| {
@@ -17674,7 +18134,15 @@ fn resolve_specialized_callable_effect_row(
                                 &typeck::ProvisionalType::Param((*binder).clone()),
                                 substitutions,
                             )
-                        })
+                        });
+                    if let Some(ty) = &specialized
+                        && typeck::label_payload_type(ty).is_some()
+                    {
+                        static_arguments
+                            .push(EffectStaticArgument::LabelBrand(position, ty.clone()));
+                        continue;
+                    }
+                    let ty = specialized
                         .and_then(|argument| provisional_to_resolved(&argument, ids, array_name))
                         .or_else(|| resolve_source_type(argument, ids, aliases, array_name).ok());
                     match ty.and_then(|ty| reference_types.get_id(&ty)) {
@@ -17694,13 +18162,7 @@ fn resolve_specialized_callable_effect_row(
                 EffectInstanceKey {
                     declaration: declaration.to_owned(),
                     arguments: grounded,
-                    static_arguments: match effect_static_arguments(program, effect) {
-                        Ok(arguments) => arguments,
-                        Err(error) => {
-                            errors.push(error);
-                            continue;
-                        }
-                    },
+                    static_arguments,
                 }
             }
             _ => {
@@ -17837,25 +18299,37 @@ fn resolve_specialized_effect_operation_sites(
             let Some(declaration) = constructor.simple_name() else {
                 continue;
             };
-            let arguments = arguments
-                .iter()
-                .map(|argument| {
-                    let symbolic = symbolic_effect_argument(argument, &binders)?;
-                    let ty = specialization::substitute(&symbolic, &substitutions)?;
-                    let resolved = provisional_to_resolved(&ty, ids, array_name)?;
-                    reference_types.get_id(&resolved)
-                })
-                .collect::<Option<Vec<_>>>();
-            let Some(arguments) = arguments else {
+            let mut runtime_arguments = Vec::new();
+            let mut static_arguments =
+                effect_static_arguments(program, &path.effect).unwrap_or_default();
+            let mut valid = true;
+            for (position, argument) in arguments.iter().enumerate() {
+                let Some(symbolic) = symbolic_effect_argument(argument, &binders) else {
+                    valid = false;
+                    break;
+                };
+                let Some(ty) = specialization::substitute(&symbolic, &substitutions) else {
+                    valid = false;
+                    break;
+                };
+                if typeck::label_payload_type(&ty).is_some() {
+                    static_arguments.push(EffectStaticArgument::LabelBrand(position, ty));
+                } else if let Some(resolved) = provisional_to_resolved(&ty, ids, array_name)
+                    && let Some(id) = reference_types.get_id(&resolved)
+                {
+                    runtime_arguments.push(id);
+                } else {
+                    valid = false;
+                    break;
+                }
+            }
+            if !valid {
                 continue;
-            };
+            }
             let instance = EffectInstanceKey {
                 declaration: declaration.to_owned(),
-                arguments,
-                static_arguments: match effect_static_arguments(program, &path.effect) {
-                    Ok(arguments) => arguments,
-                    Err(_) => continue,
-                },
+                arguments: runtime_arguments,
+                static_arguments,
             };
             let site = (path.site.start, path.site.end);
             let Some(operation) = effects.site_operations.get(&site) else {
@@ -19528,6 +20002,7 @@ fn contains_effect_control(expression: &Expr) -> bool {
                 }
             })
         }
+        ExprKind::Call(callee, args) if matches!(callee.kind, ExprKind::LabelReference(_)) => true,
         ExprKind::Call(callee, args) => {
             contains_effect_control(callee) || args.iter().any(contains_effect_control)
         }
@@ -19535,10 +20010,7 @@ fn contains_effect_control(expression: &Expr) -> bool {
         ExprKind::Binary { lhs, rhs, .. } => {
             contains_effect_control(lhs) || contains_effect_control(rhs)
         }
-        ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
-            contains_effect_control(body)
-        }
-        ExprKind::Leave { value, .. } => value.as_deref().is_some_and(contains_effect_control),
+        ExprKind::LabelDestination { body, .. } => contains_effect_control(body),
         ExprKind::Is { subject, .. } => contains_effect_control(subject),
         ExprKind::Unit
         | ExprKind::Int(_)
@@ -19586,10 +20058,7 @@ fn contains_closure(expression: &Expr) -> bool {
                 || clauses.iter().any(|clause| contains_closure(&clause.body))
         }
         ExprKind::Binary { lhs, rhs, .. } => contains_closure(lhs) || contains_closure(rhs),
-        ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
-            contains_closure(body)
-        }
-        ExprKind::Leave { value, .. } => value.as_deref().is_some_and(contains_closure),
+        ExprKind::LabelDestination { body, .. } => contains_closure(body),
         ExprKind::Is { subject, .. } => contains_closure(subject),
         ExprKind::Unit
         | ExprKind::Int(_)
@@ -19687,12 +20156,7 @@ fn expression_uses_name(expression: &Expr, searched: &str) -> bool {
         ExprKind::Binary { lhs, rhs, .. } => {
             expression_uses_name(lhs, searched) || expression_uses_name(rhs, searched)
         }
-        ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
-            expression_uses_name(body, searched)
-        }
-        ExprKind::Leave { value, .. } => value
-            .as_deref()
-            .is_some_and(|value| expression_uses_name(value, searched)),
+        ExprKind::LabelDestination { body, .. } => expression_uses_name(body, searched),
         ExprKind::Is { subject, .. } => expression_uses_name(subject, searched),
         ExprKind::Unit
         | ExprKind::Int(_)
@@ -19886,6 +20350,17 @@ fn scan_handled_computation(
             signatures,
             planned_signatures,
         ),
+        ExprKind::Call(callee, args) if matches!(callee.kind, ExprKind::LabelReference(_)) => {
+            let mut scan = sequence(
+                args.iter(),
+                operations,
+                operation_sites,
+                signatures,
+                planned_signatures,
+            )?;
+            scan.diverges = true;
+            Ok(scan)
+        }
         ExprKind::Call(callee, args) => {
             let mut scan = sequence(
                 std::iter::once(callee.as_ref()).chain(args.iter()),
@@ -20000,13 +20475,6 @@ fn scan_handled_computation(
             counts: BTreeMap::new(),
             diverges: false,
         }),
-        ExprKind::Labeled { body, .. } => scan_handled_computation(
-            body,
-            operations,
-            operation_sites,
-            signatures,
-            planned_signatures,
-        ),
         ExprKind::LabelDestination { body, .. } => {
             let mut scan = scan_handled_computation(
                 body,
@@ -20016,29 +20484,6 @@ fn scan_handled_computation(
                 planned_signatures,
             )?;
             scan.diverges = false;
-            Ok(scan)
-        }
-        ExprKind::Leave { value, .. } => {
-            let mut scan = value.as_deref().map_or_else(
-                || {
-                    Ok(ComputationScan {
-                        performed: BTreeSet::new(),
-                        outward_protocols: BTreeSet::new(),
-                        counts: BTreeMap::new(),
-                        diverges: true,
-                    })
-                },
-                |value| {
-                    scan_handled_computation(
-                        value,
-                        operations,
-                        operation_sites,
-                        signatures,
-                        planned_signatures,
-                    )
-                },
-            )?;
-            scan.diverges = true;
             Ok(scan)
         }
         ExprKind::Is { subject, .. } => scan_handled_computation(
@@ -20164,12 +20609,7 @@ fn expression_captures(
             ExprKind::Binary { lhs, rhs, .. } => {
                 visit(lhs, outer, bound) || visit(rhs, outer, bound)
             }
-            ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
-                visit(body, outer, bound)
-            }
-            ExprKind::Leave { value, .. } => value
-                .as_deref()
-                .is_some_and(|value| visit(value, outer, bound)),
+            ExprKind::LabelDestination { body, .. } => visit(body, outer, bound),
             ExprKind::Is { subject, .. } => visit(subject, outer, bound),
             ExprKind::Unit
             | ExprKind::Int(_)
@@ -20908,12 +21348,7 @@ fn expression_mentions_name(expression: &Expr, name: &str) -> bool {
         ExprKind::Binary { lhs, rhs, .. } => {
             expression_mentions_name(lhs, name) || expression_mentions_name(rhs, name)
         }
-        ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
-            expression_mentions_name(body, name)
-        }
-        ExprKind::Leave { value, .. } => value
-            .as_deref()
-            .is_some_and(|value| expression_mentions_name(value, name)),
+        ExprKind::LabelDestination { body, .. } => expression_mentions_name(body, name),
         ExprKind::Is { subject, .. } => expression_mentions_name(subject, name),
         ExprKind::Unit
         | ExprKind::Int(_)
@@ -21014,14 +21449,7 @@ fn prove_resumption_consumption(
                 collect_aliases(lhs, aliases);
                 collect_aliases(rhs, aliases);
             }
-            ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
-                collect_aliases(body, aliases)
-            }
-            ExprKind::Leave { value, .. } => {
-                if let Some(value) = value {
-                    collect_aliases(value, aliases);
-                }
-            }
+            ExprKind::LabelDestination { body, .. } => collect_aliases(body, aliases),
             ExprKind::Is { subject, .. } => collect_aliases(subject, aliases),
             ExprKind::Unit
             | ExprKind::Int(_)
@@ -21253,12 +21681,9 @@ fn prove_resumption_consumption(
                         + count(rhs, binder, aliases, allow_cancel, functions, visiting)?,
                 )
             }
-            ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
+            ExprKind::LabelDestination { body, .. } => {
                 count(body, binder, aliases, allow_cancel, functions, visiting)
             }
-            ExprKind::Leave { value, .. } => value.as_deref().map_or(Ok(0), |value| {
-                count(value, binder, aliases, allow_cancel, functions, visiting)
-            }),
             ExprKind::Is { subject, .. } => {
                 count(subject, binder, aliases, allow_cancel, functions, visiting)
             }
@@ -21332,12 +21757,7 @@ fn prove_resumption_consumption(
             }
             ExprKind::Unary { operand, .. } => named_calls(operand, name),
             ExprKind::Binary { lhs, rhs, .. } => named_calls(lhs, name) + named_calls(rhs, name),
-            ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
-                named_calls(body, name)
-            }
-            ExprKind::Leave { value, .. } => {
-                value.as_deref().map_or(0, |value| named_calls(value, name))
-            }
+            ExprKind::LabelDestination { body, .. } => named_calls(body, name),
             ExprKind::Is { subject, .. } => named_calls(subject, name),
             ExprKind::Unit
             | ExprKind::Int(_)
@@ -21572,12 +21992,9 @@ fn prove_resumption_consumption(
                 abandoning_resume_argument(lhs, aliases, terminally_diverges)
                     .or_else(|| abandoning_resume_argument(rhs, aliases, terminally_diverges))
             }
-            ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
+            ExprKind::LabelDestination { body, .. } => {
                 abandoning_resume_argument(body, aliases, terminally_diverges)
             }
-            ExprKind::Leave { value, .. } => value
-                .as_deref()
-                .and_then(|value| abandoning_resume_argument(value, aliases, terminally_diverges)),
             ExprKind::Is { subject, .. } => {
                 abandoning_resume_argument(subject, aliases, terminally_diverges)
             }
@@ -22196,6 +22613,8 @@ impl<'a> CoreLowerer<'a> {
                 defer_branch_region_ends: 0,
                 late_inline_stack: BTreeSet::new(),
                 active_labels: BTreeMap::new(),
+                static_labels: BTreeMap::new(),
+                static_closures: BTreeMap::new(),
                 recursive_receiver: None,
             },
             core_params,
@@ -22374,6 +22793,8 @@ impl<'a> CoreLowerer<'a> {
                 defer_branch_region_ends: 0,
                 late_inline_stack: BTreeSet::new(),
                 active_labels: BTreeMap::new(),
+                static_labels: BTreeMap::new(),
+                static_closures: BTreeMap::new(),
                 recursive_receiver: None,
             },
             core_params,
@@ -22585,6 +23006,7 @@ impl<'a> CoreLowerer<'a> {
                 | Primitive::TextFromUtf8Checked
                 | Primitive::TextAsBytes
                 | Primitive::BytesLen
+                | Primitive::BytesUtf8ValidUpTo
                 | Primitive::BytesConcat
                 | Primitive::BytesGet
                 | Primitive::BytesSlice
@@ -22962,6 +23384,7 @@ impl<'a> CoreLowerer<'a> {
         path: &mut Vec<core::DecisionProjection>,
         bindings: &mut Vec<core::DecisionBinding>,
         consuming: bool,
+        subject_reference_fields: &BTreeMap<Vec<u32>, core::ReferenceOrigin>,
     ) -> Result<(), Vec<Diagnostic>> {
         match &pattern.kind {
             core::DecisionPatternKind::Binding { name } => {
@@ -22975,14 +23398,29 @@ impl<'a> CoreLowerer<'a> {
                 let local = self.next_local;
                 self.next_local += 1;
                 self.owner_types.insert(local, pattern.ty);
+                let mut reference_path = Vec::new();
+                for projection in path.iter() {
+                    if let Some(variant) = projection.variant {
+                        reference_path.push(u32::MAX - variant);
+                    }
+                    reference_path.push(projection.field);
+                }
+                let reference_fields = consuming
+                    .then(|| {
+                        Self::projected_reference_path(subject_reference_fields, &reference_path)
+                    })
+                    .unwrap_or_default();
+                let reference = (reference_fields.len() == 1)
+                    .then(|| reference_fields.values().next().cloned())
+                    .flatten();
                 self.locals.insert(
                     name.clone(),
                     CoreLocal {
                         local,
                         ty: pattern.ty,
-                        reference: None,
-                        reference_fields: BTreeMap::new(),
-                        owns_loan: false,
+                        reference,
+                        owns_loan: !reference_fields.is_empty(),
+                        reference_fields,
                     },
                 );
                 bindings.push(core::DecisionBinding {
@@ -23002,7 +23440,13 @@ impl<'a> CoreLowerer<'a> {
                         variant: Some(*variant),
                         field_types: field_types.clone(),
                     });
-                    self.install_decision_bindings(child, path, bindings, consuming)?;
+                    self.install_decision_bindings(
+                        child,
+                        path,
+                        bindings,
+                        consuming,
+                        subject_reference_fields,
+                    )?;
                     path.pop();
                 }
             }
@@ -23015,7 +23459,13 @@ impl<'a> CoreLowerer<'a> {
                         variant: None,
                         field_types: field_types.clone(),
                     });
-                    self.install_decision_bindings(child, path, bindings, consuming)?;
+                    self.install_decision_bindings(
+                        child,
+                        path,
+                        bindings,
+                        consuming,
+                        subject_reference_fields,
+                    )?;
                     path.pop();
                 }
             }
@@ -23504,6 +23954,395 @@ impl<'a> CoreLowerer<'a> {
             })?
     }
 
+    fn static_label_argument(&self, expression: &Expr) -> Option<crate::ast::LabelSyntax> {
+        match &expression.kind {
+            ExprKind::LabelReference(label)
+                if self.active_labels.contains_key(label.name.as_ref()) =>
+            {
+                Some(label.clone())
+            }
+            ExprKind::Variable(path) if path.len() == 1 => {
+                self.static_labels.get(path[0].as_ref()).cloned()
+            }
+            ExprKind::Move(value) => self.static_label_argument(value),
+            _ => None,
+        }
+    }
+
+    fn expression_contains_active_label(&self, expression: &Expr) -> bool {
+        struct Finder<'a> {
+            labels: &'a BTreeMap<String, ActiveCoreLabel>,
+        }
+        impl<'ast> ExprVisitor<'ast> for Finder<'_> {
+            type Break = ();
+
+            fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<()> {
+                match &expression.kind {
+                    ExprKind::LabelReference(label)
+                        if self.labels.contains_key(label.name.as_ref()) =>
+                    {
+                        ControlFlow::Break(())
+                    }
+                    _ => walk_expr(self, expression),
+                }
+            }
+        }
+        Finder {
+            labels: &self.active_labels,
+        }
+        .visit_expr(expression)
+        .is_break()
+    }
+
+    fn multishot_perform_in(&self, expression: &Expr) -> Option<Span> {
+        struct Collector {
+            operations: Vec<(Span, String, String)>,
+        }
+        impl<'ast> ExprVisitor<'ast> for Collector {
+            type Break = ();
+
+            fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<()> {
+                if let ExprKind::Perform {
+                    effect, operation, ..
+                } = &expression.kind
+                {
+                    self.operations.push((
+                        expression.span,
+                        effect.to_string(),
+                        operation.to_string(),
+                    ));
+                }
+                walk_expr(self, expression)
+            }
+        }
+        let mut collector = Collector { operations: vec![] };
+        let _ = collector.visit_expr(expression);
+        collector
+            .operations
+            .into_iter()
+            .find_map(|(span, effect, operation)| {
+                self.operation_info(span, &effect, &operation)
+                    .filter(|info| {
+                        !info.terminal && info.resumption_upper.is_none_or(|upper| upper > 1)
+                    })
+                    .map(|_| span)
+            })
+    }
+
+    fn static_closure_argument(&self, expression: &Expr) -> Option<Expr> {
+        match &expression.kind {
+            ExprKind::Closure { .. } | ExprKind::TypedClosure { .. }
+                if self.expression_contains_active_label(expression) =>
+            {
+                Some(expression.clone())
+            }
+            ExprKind::Variable(path) if path.len() == 1 => {
+                self.static_closures.get(path[0].as_ref()).cloned()
+            }
+            ExprKind::Move(value) => self.static_closure_argument(value),
+            _ => None,
+        }
+    }
+
+    fn inline_static_closure(
+        &mut self,
+        closure: &Expr,
+        arguments: &[Expr],
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> Result<core::Expr, Vec<Diagnostic>> {
+        let (parameters, body) = match &closure.kind {
+            ExprKind::Closure { params, body } => (
+                params.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                body.as_ref(),
+            ),
+            ExprKind::TypedClosure { params, body, .. } => (
+                params
+                    .iter()
+                    .map(|param| param.name.clone())
+                    .collect::<Vec<_>>(),
+                body.as_ref(),
+            ),
+            _ => {
+                return Err(vec![unsupported(
+                    span,
+                    "static closure control inlining",
+                    "the planned static closure has no source body",
+                )]);
+            }
+        };
+        if parameters.len() != arguments.len() {
+            return Err(vec![type_error(
+                span,
+                format!(
+                    "inlined closure expects {} arguments, got {}",
+                    parameters.len(),
+                    arguments.len()
+                ),
+            )]);
+        }
+        let mut statements = parameters
+            .into_iter()
+            .zip(arguments.iter().cloned())
+            .map(|(name, value)| Stmt::Let {
+                name,
+                span: value.span,
+                value,
+            })
+            .collect::<Vec<_>>();
+        match &body.kind {
+            ExprKind::Block(body) | ExprKind::ContextBlock(body) => {
+                statements.extend(body.iter().cloned())
+            }
+            _ => statements.push(Stmt::Expr(body.clone())),
+        }
+        self.block(&statements, span, expected)
+    }
+
+    fn inline_static_label_handler(
+        &mut self,
+        computation: &Expr,
+        clauses: &[HandlerClause],
+        expected: Option<TypeId>,
+    ) -> Option<Result<core::Expr, Vec<Diagnostic>>> {
+        let ExprKind::Perform {
+            effect,
+            operation,
+            args,
+        } = &computation.kind
+        else {
+            return None;
+        };
+        let [clause] = clauses else {
+            return None;
+        };
+        if clause.effect != effect.as_ref()
+            || clause.operation != operation.as_ref()
+            || clause.resumption.is_some()
+            || clause.patterns.len() != args.len()
+        {
+            return None;
+        }
+        let info = self.operation_info(computation.span, effect, operation)?;
+        if !info.terminal
+            || info.static_label_params.is_empty()
+            || info.params.len() + info.static_label_params.len() != args.len()
+        {
+            return None;
+        }
+        let static_positions = info
+            .static_label_params
+            .iter()
+            .copied()
+            .collect::<BTreeSet<_>>();
+        let mut static_bindings = Vec::new();
+        let mut runtime_bindings = Vec::new();
+        for (position, (pattern, argument)) in clause.patterns.iter().zip(args.iter()).enumerate() {
+            if static_positions.contains(&position) {
+                let Some(label) = self.static_label_argument(argument) else {
+                    return Some(Err(vec![
+                        type_error(
+                            argument.span,
+                            "operation Label parameter requires a statically known label argument",
+                        )
+                        .with_related(info.span, "the operation is declared here"),
+                    ]));
+                };
+                let PatternKind::Binding(name) = &pattern.kind else {
+                    return None;
+                };
+                if let Some(expected) = info.static_label_payloads.get(&position) {
+                    let actual = self
+                        .active_labels
+                        .get(label.name.as_ref())
+                        .map(|destination| destination.result);
+                    if actual != Some(*expected) {
+                        return Some(Err(vec![
+                            type_error(
+                                argument.span,
+                                "operation argument does not satisfy its static Label payload bound",
+                            )
+                            .with_related(info.span, "the operation is declared here"),
+                        ]));
+                    }
+                }
+                static_bindings.push((name.clone(), label));
+            } else {
+                let PatternKind::Binding(name) = &pattern.kind else {
+                    return None;
+                };
+                runtime_bindings.push(Stmt::Let {
+                    name: name.clone(),
+                    value: argument.clone(),
+                    span: pattern.span,
+                });
+            }
+        }
+        let mut previous = Vec::new();
+        for (name, label) in static_bindings {
+            previous.push((name.clone(), self.static_labels.insert(name, label)));
+        }
+        runtime_bindings.push(Stmt::Expr(clause.body.clone()));
+        let result = self.block(&runtime_bindings, clause.body.span, expected);
+        for (name, prior) in previous.into_iter().rev() {
+            if let Some(prior) = prior {
+                self.static_labels.insert(name, prior);
+            } else {
+                self.static_labels.remove(&name);
+            }
+        }
+        Some(result)
+    }
+
+    fn inline_standard_try(
+        &mut self,
+        arguments: &[Expr],
+        label: crate::ast::LabelSyntax,
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> Result<core::Expr, Vec<Diagnostic>> {
+        let [value, _] = arguments else {
+            return Err(vec![type_error(span, "`try` expects a value and a label")]);
+        };
+        let function = self
+            .function_templates
+            .iter()
+            .find(|function| function.name == "try")
+            .ok_or_else(|| {
+                vec![unsupported(
+                    span,
+                    "static try lowering",
+                    "the distributed `try` source template is unavailable",
+                )]
+            })?;
+        fn fuse(
+            expression: &mut Expr,
+            value: &Expr,
+            label: &crate::ast::LabelSyntax,
+            replaced_value: &mut bool,
+            replaced_exit: &mut bool,
+        ) {
+            if matches!(&expression.kind, ExprKind::Variable(path)
+                if path.len() == 1 && path[0].as_ref() == "value")
+            {
+                *expression = value.clone();
+                *replaced_value = true;
+                return;
+            }
+            if let ExprKind::Call(callee, arguments) = &expression.kind
+                && matches!(&callee.kind, ExprKind::Variable(path)
+                    if path.len() == 1 && path[0].as_ref() == "exit")
+                && let [payload] = arguments.as_slice()
+            {
+                let mut payload = payload.clone();
+                fuse(&mut payload, value, label, replaced_value, replaced_exit);
+                expression.kind = ExprKind::Call(
+                    Rc::new(Expr {
+                        kind: ExprKind::LabelReference(label.clone()),
+                        span: label.span,
+                    }),
+                    Rc::new(vec![payload]),
+                );
+                *replaced_exit = true;
+                return;
+            }
+            match &mut expression.kind {
+                ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                    for statement in Rc::make_mut(statements) {
+                        let nested = match statement {
+                            Stmt::Let { value, .. }
+                            | Stmt::Deconstruct { value, .. }
+                            | Stmt::Expr(value)
+                            | Stmt::Assign { value, .. } => value,
+                        };
+                        fuse(nested, value, label, replaced_value, replaced_exit);
+                    }
+                }
+                ExprKind::Call(callee, arguments) => {
+                    fuse(
+                        Rc::make_mut(callee),
+                        value,
+                        label,
+                        replaced_value,
+                        replaced_exit,
+                    );
+                    for argument in Rc::make_mut(arguments) {
+                        fuse(argument, value, label, replaced_value, replaced_exit);
+                    }
+                }
+                ExprKind::Is { subject, .. }
+                | ExprKind::Field(subject, _)
+                | ExprKind::Move(subject)
+                | ExprKind::Unary {
+                    operand: subject, ..
+                } => fuse(
+                    Rc::make_mut(subject),
+                    value,
+                    label,
+                    replaced_value,
+                    replaced_exit,
+                ),
+                ExprKind::Binary { lhs, rhs, .. } => {
+                    fuse(
+                        Rc::make_mut(lhs),
+                        value,
+                        label,
+                        replaced_value,
+                        replaced_exit,
+                    );
+                    fuse(
+                        Rc::make_mut(rhs),
+                        value,
+                        label,
+                        replaced_value,
+                        replaced_exit,
+                    );
+                }
+                _ => {}
+            }
+        }
+
+        let value_binding = "$control_try_value";
+        let value_reference = Expr {
+            kind: ExprKind::Variable(Rc::from([Rc::<str>::from(value_binding)])),
+            span: value.span,
+        };
+        let mut fused = function.body.clone();
+        let mut replaced_value = false;
+        let mut replaced_exit = false;
+        fuse(
+            &mut fused,
+            &value_reference,
+            &label,
+            &mut replaced_value,
+            &mut replaced_exit,
+        );
+        if !replaced_value || !replaced_exit {
+            return Err(vec![unsupported(
+                span,
+                "static try lowering",
+                "the distributed `try` template no longer has its canonical value/label shape",
+            )]);
+        }
+        while let ExprKind::Block(statements) = &fused.kind
+            && let [Stmt::Expr(inner)] = statements.as_slice()
+        {
+            fused = inner.clone();
+        }
+        fused = Expr {
+            kind: ExprKind::Block(Rc::new(vec![
+                Stmt::Let {
+                    name: value_binding.into(),
+                    value: value.clone(),
+                    span: value.span,
+                },
+                Stmt::Expr(fused),
+            ])),
+            span,
+        };
+        self.expression(&fused, expected)
+    }
+
     fn inline_late_generic_call(
         &mut self,
         name: &str,
@@ -23537,34 +24376,108 @@ impl<'a> CoreLowerer<'a> {
             return Err(vec![unsupported(
                 span,
                 "recursive late generic specialization",
-                "recursive generic calls transporting a handler resumption require an emitted runtime specialization",
+                "recursive generic calls transporting a label or handler resumption cannot be control-inlined to one static destination frame",
             )]);
         }
+        let label_arguments = arguments
+            .iter()
+            .map(|argument| self.static_label_argument(argument))
+            .collect::<Vec<_>>();
+        let closure_arguments = arguments
+            .iter()
+            .map(|argument| self.static_closure_argument(argument))
+            .collect::<Vec<_>>();
+        let can_bind_directly = function.params.iter().enumerate().all(|(index, param)| {
+            arguments
+                .iter()
+                .skip(index + 1)
+                .all(|argument| !expression_mentions_name(argument, &param.name))
+        });
         let mut statements = Vec::with_capacity(arguments.len() * 2 + 1);
-        for (index, argument) in arguments.iter().enumerate() {
-            statements.push(Stmt::Let {
-                name: format!("$late_arg_{index}"),
-                value: argument.clone(),
-                span: argument.span,
-            });
-        }
-        for (index, param) in function.params.iter().enumerate() {
-            statements.push(Stmt::Let {
-                name: param.name.clone(),
-                value: Expr {
-                    kind: ExprKind::Move(Rc::new(Expr {
-                        kind: ExprKind::Variable(Rc::from([Rc::<str>::from(format!(
-                            "$late_arg_{index}"
-                        ))])),
-                        span: param.span,
-                    })),
+        if can_bind_directly {
+            for (index, (param, argument)) in function.params.iter().zip(arguments).enumerate() {
+                if label_arguments[index].is_some() || closure_arguments[index].is_some() {
+                    continue;
+                }
+                statements.push(Stmt::Let {
+                    name: param.name.clone(),
+                    value: argument.clone(),
                     span: param.span,
-                },
-                span: param.span,
-            });
+                });
+            }
+        } else {
+            for (index, argument) in arguments.iter().enumerate() {
+                if label_arguments[index].is_some() || closure_arguments[index].is_some() {
+                    continue;
+                }
+                statements.push(Stmt::Let {
+                    name: format!("$late_arg_{index}"),
+                    value: argument.clone(),
+                    span: argument.span,
+                });
+            }
+            for (index, param) in function.params.iter().enumerate() {
+                if label_arguments[index].is_some() || closure_arguments[index].is_some() {
+                    continue;
+                }
+                statements.push(Stmt::Let {
+                    name: param.name.clone(),
+                    value: Expr {
+                        kind: ExprKind::Move(Rc::new(Expr {
+                            kind: ExprKind::Variable(Rc::from([Rc::<str>::from(format!(
+                                "$late_arg_{index}"
+                            ))])),
+                            span: param.span,
+                        })),
+                        span: param.span,
+                    },
+                    span: param.span,
+                });
+            }
         }
-        statements.push(Stmt::Expr(function.body.clone()));
+        match &function.body.kind {
+            ExprKind::Block(body) => statements.extend(body.iter().cloned()),
+            _ => statements.push(Stmt::Expr(function.body.clone())),
+        }
+        let mut previous_labels = Vec::new();
+        for (param, label) in function
+            .params
+            .iter()
+            .zip(label_arguments)
+            .filter_map(|(param, label)| label.map(|label| (param, label)))
+        {
+            previous_labels.push((
+                param.name.clone(),
+                self.static_labels.insert(param.name.clone(), label),
+            ));
+        }
+        let mut previous_closures = Vec::new();
+        for (param, closure) in function
+            .params
+            .iter()
+            .zip(closure_arguments)
+            .filter_map(|(param, closure)| closure.map(|closure| (param, closure)))
+        {
+            previous_closures.push((
+                param.name.clone(),
+                self.static_closures.insert(param.name.clone(), closure),
+            ));
+        }
         let result = self.block(&statements, span, expected);
+        for (name, previous) in previous_closures.into_iter().rev() {
+            if let Some(previous) = previous {
+                self.static_closures.insert(name, previous);
+            } else {
+                self.static_closures.remove(&name);
+            }
+        }
+        for (name, previous) in previous_labels.into_iter().rev() {
+            if let Some(previous) = previous {
+                self.static_labels.insert(name, previous);
+            } else {
+                self.static_labels.remove(&name);
+            }
+        }
         self.late_inline_stack.remove(name);
         result
     }
@@ -24531,10 +25444,8 @@ impl<'a> CoreLowerer<'a> {
                 | ExprKind::Perform { .. }
                 | ExprKind::Handle { .. }
                 | ExprKind::Variable(_) => None,
-                ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
-                    known(lowerer, body, scoped)
-                }
-                ExprKind::LabelReference(_) | ExprKind::Leave { .. } => None,
+                ExprKind::LabelDestination { body, .. } => known(lowerer, body, scoped),
+                ExprKind::LabelReference(_) => None,
                 ExprKind::Is { .. } => None,
                 ExprKind::Resume { value, .. } => value
                     .as_deref()
@@ -24609,10 +25520,7 @@ impl<'a> CoreLowerer<'a> {
                     operand: subject, ..
                 } => pending.push(subject),
                 ExprKind::Perform { args, .. } => pending.extend(args.iter()),
-                ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
-                    pending.push(body)
-                }
-                ExprKind::Leave { value, .. } => pending.extend(value.iter().map(AsRef::as_ref)),
+                ExprKind::LabelDestination { body, .. } => pending.push(body),
                 ExprKind::Is { subject, .. } => pending.push(subject),
                 ExprKind::Resume { resumption, value }
                 | ExprKind::TailResume { resumption, value } => {
@@ -24717,14 +25625,7 @@ impl<'a> CoreLowerer<'a> {
                     visit(lowerer, lhs, found);
                     visit(lowerer, rhs, found);
                 }
-                ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
-                    visit(lowerer, body, found)
-                }
-                ExprKind::Leave { value, .. } => {
-                    if let Some(value) = value {
-                        visit(lowerer, value, found);
-                    }
-                }
+                ExprKind::LabelDestination { body, .. } => visit(lowerer, body, found),
                 ExprKind::Is { subject, .. } => visit(lowerer, subject, found),
                 ExprKind::Unit
                 | ExprKind::Int(_)
@@ -24826,14 +25727,7 @@ impl<'a> CoreLowerer<'a> {
                     visit(lowerer, lhs, found);
                     visit(lowerer, rhs, found);
                 }
-                ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
-                    visit(lowerer, body, found)
-                }
-                ExprKind::Leave { value, .. } => {
-                    if let Some(value) = value {
-                        visit(lowerer, value, found);
-                    }
-                }
+                ExprKind::LabelDestination { body, .. } => visit(lowerer, body, found),
                 ExprKind::Is { subject, .. } => visit(lowerer, subject, found),
                 ExprKind::Unit
                 | ExprKind::Int(_)
@@ -28565,6 +29459,16 @@ impl<'a> CoreLowerer<'a> {
             }
             ExprKind::Variable(path) if path.len() == 1 => {
                 let name = path[0].as_ref();
+                if let Some(label) = self.static_labels.get(name) {
+                    return Err(vec![unsupported(
+                        span,
+                        "static label directness",
+                        format!(
+                            "label `@{}` escapes as a value; labels have no runtime representation",
+                            label.name
+                        ),
+                    )]);
+                }
                 if let Some(local) = self.locals.get(name).cloned() {
                     if self.empty_referents.contains(&local.local) {
                         return Err(self.borrow_error(
@@ -29608,7 +30512,13 @@ impl<'a> CoreLowerer<'a> {
                 ) {
                     return Err(vec![error]);
                 }
-                if let ResolvedType::Tuple(elements) = self.resolved_type(subject.ty) {
+                // Field syntax observes through a reference regardless of
+                // whether that reference was first given a local name. Keep
+                // the reference expression as the Core projection subject,
+                // but select fields from its referent just as the direct-local
+                // fast path above does.
+                let projection_root = self.reference_referent(subject.ty).unwrap_or(subject.ty);
+                if let ResolvedType::Tuple(elements) = self.resolved_type(projection_root) {
                     let field_id = field.parse::<usize>().map_err(|_| {
                         vec![type_error(
                             span,
@@ -29658,7 +30568,11 @@ impl<'a> CoreLowerer<'a> {
                     Self::set_expression_reference_fields(&mut expression, projected_references);
                     return Ok(expression);
                 }
-                let Some(info) = self.nominals.values().find(|info| info.id == subject.ty) else {
+                let Some(info) = self
+                    .nominals
+                    .values()
+                    .find(|info| info.id == projection_root)
+                else {
                     return Err(vec![type_error(
                         span,
                         "field projection requires a supported struct value",
@@ -29931,6 +30845,57 @@ impl<'a> CoreLowerer<'a> {
                 Ok(expression)
             }
             ExprKind::Call(callee, arguments) => {
+                if let ExprKind::LabelReference(label) = &callee.kind {
+                    let mut destination = self
+                        .active_labels
+                        .get(label.name.as_ref())
+                        .cloned()
+                        .ok_or_else(|| {
+                            vec![type_error(
+                                label.span,
+                                format!("leave destination `@{}` is not active", label.name),
+                            )]
+                        })?;
+                    let value = match arguments.as_slice() {
+                        [value] => self.expression(value, Some(destination.result))?,
+                        [] => {
+                            self.check(span, Some(destination.result), UNIT)?;
+                            self.typed(span, UNIT, core::ExprKind::Unit)
+                        }
+                        _ => {
+                            return Err(vec![type_error(
+                                span,
+                                format!(
+                                    "label application expects zero or one payload argument, got {}",
+                                    arguments.len()
+                                ),
+                            )]);
+                        }
+                    };
+                    self.validate_anonymous_use(&value, 1, "typed label result")?;
+                    self.validate_leave_cleanup(&destination, span)?;
+                    let references = Self::expression_reference_fields(&value);
+                    if let Some(previous) = &destination.transferred_references
+                        && previous != &references
+                    {
+                        return Err(self.borrow_error(
+                            span,
+                            "label-call edges to one reference-bearing destination have incompatible origins",
+                        ));
+                    }
+                    destination.transferred_references = Some(references);
+                    self.active_labels
+                        .insert(label.name.to_string(), destination.clone());
+                    self.check(span, expected, NEVER)?;
+                    return Ok(self.typed(
+                        span,
+                        NEVER,
+                        core::ExprKind::Leave {
+                            label: destination.label,
+                            value: Box::new(value),
+                        },
+                    ));
+                }
                 let ExprKind::Variable(path) = &callee.kind else {
                     return Err(vec![unsupported(
                         callee.span,
@@ -29949,6 +30914,50 @@ impl<'a> CoreLowerer<'a> {
                     )]);
                 }
                 let source_name = path[0].as_ref();
+                if let Some(label) = self.static_labels.get(source_name).cloned() {
+                    let value = match arguments.as_slice() {
+                        [] => None,
+                        [value] => Some(Rc::new(value.clone())),
+                        _ => {
+                            return Err(vec![type_error(
+                                span,
+                                format!(
+                                    "label application expects zero or one payload argument, got {}",
+                                    arguments.len()
+                                ),
+                            )]);
+                        }
+                    };
+                    let callee = Expr {
+                        kind: ExprKind::LabelReference(label),
+                        span,
+                    };
+                    let arguments = value.into_iter().map(|value| (*value).clone()).collect();
+                    let transfer = Expr {
+                        kind: ExprKind::Call(Rc::new(callee), Rc::new(arguments)),
+                        span,
+                    };
+                    return self.expression(&transfer, expected);
+                }
+                if let Some(closure) = self.static_closures.get(source_name).cloned() {
+                    return self.inline_static_closure(&closure, arguments, span, expected);
+                }
+                if source_name == "try"
+                    && let [_, label_argument] = arguments.as_slice()
+                    && let Some(label) = self.static_label_argument(label_argument)
+                {
+                    return self.inline_standard_try(arguments, label, span, expected);
+                }
+                if self.function_templates.iter().any(|function| {
+                    function.name == source_name
+                        && function.generics.is_some()
+                        && function.params.len() == arguments.len()
+                }) && arguments.iter().any(|argument| {
+                    self.static_label_argument(argument).is_some()
+                        || self.static_closure_argument(argument).is_some()
+                }) {
+                    return self.inline_late_generic_call(source_name, arguments, span, expected);
+                }
                 let deferred_target =
                     self.deferred_trait_target(source_name, arguments, expected, callee.span)?;
                 let name = deferred_target.as_deref().unwrap_or(source_name);
@@ -30086,11 +31095,13 @@ impl<'a> CoreLowerer<'a> {
                         .unwrap_or_else(|| baseline_actual_use_lowers.clone());
 
                     let mut bindings = Vec::new();
+                    let subject_reference_fields = Self::expression_reference_fields(&subject);
                     self.install_decision_bindings(
                         &decision,
                         &mut Vec::new(),
                         &mut bindings,
                         consuming_subject,
+                        &subject_reference_fields,
                     )?;
                     if let Some((local, variant)) = refined_variant {
                         self.active_variant_proofs.insert(local, variant);
@@ -30133,8 +31144,9 @@ impl<'a> CoreLowerer<'a> {
                         self.active_variant_proofs.insert(local, complement);
                         negative_variant = Some(complement);
                     }
-                    let negative =
-                        self.expression(negative_source, expected.or(Some(positive.ty)))?;
+                    let negative_expected =
+                        expected.or_else(|| (positive.ty != NEVER).then_some(positive.ty));
+                    let negative = self.expression(negative_source, negative_expected)?;
                     self.defer_branch_region_ends -= 1;
 
                     let baseline_ids = baseline_locals
@@ -31692,6 +32704,16 @@ impl<'a> CoreLowerer<'a> {
                 let exact_multishot = (info.resumption_lower > 1
                     && info.resumption_upper == Some(info.resumption_lower))
                 .then_some(u64::from(info.resumption_lower));
+                if !info.terminal
+                    && info.resumption_upper.is_none_or(|upper| upper > 1)
+                    && !self.active_labels.is_empty()
+                {
+                    return Err(vec![unsupported(
+                        span,
+                        "label across multishot continuation capture",
+                        "an active label targets this frame and cannot be replayed by a multi-shot resumption",
+                    )]);
+                }
                 let performance_factors = (!info.terminal).then(|| PerformanceFactors {
                     normal: BTreeSet::from([exact_multishot.unwrap_or(1)]),
                     may_abandon: optional_one_shot
@@ -31824,6 +32846,20 @@ impl<'a> CoreLowerer<'a> {
                 computation,
                 clauses,
             } => {
+                if let Some(result) =
+                    self.inline_static_label_handler(computation, clauses, expected)
+                {
+                    return result;
+                }
+                if !self.active_labels.is_empty()
+                    && let Some(perform) = self.multishot_perform_in(computation)
+                {
+                    return Err(vec![unsupported(
+                        perform,
+                        "label across multishot continuation capture",
+                        "an active label targets this frame and cannot be replayed by a multi-shot resumption",
+                    )]);
+                }
                 if !self.empty_referents.is_empty() {
                     return Err(self.borrow_error(
                         span,
@@ -31873,6 +32909,18 @@ impl<'a> CoreLowerer<'a> {
                 let normal_references = (body.ty != NEVER)
                     .then(|| Self::expression_reference_fields(&body))
                     .filter(|fields| !fields.is_empty());
+                let has_inlined_leave = completed.transferred_references.is_some();
+                let current_declaration =
+                    self.body_instance
+                        .as_ref()
+                        .and_then(|instance| match instance {
+                            specialization::BodyInstanceKey::Root(declaration) => Some(declaration),
+                            specialization::BodyInstanceKey::Specialization(key) => {
+                                Some(&key.template)
+                            }
+                            specialization::BodyInstanceKey::Drop(_)
+                            | specialization::BodyInstanceKey::Closure(_) => None,
+                        });
                 let reference_fields = match (normal_references, completed.transferred_references) {
                     (Some(normal), Some(transferred)) if normal != transferred => {
                         return Err(self.borrow_error(
@@ -31889,53 +32937,25 @@ impl<'a> CoreLowerer<'a> {
                     result,
                     core::ExprKind::LabelDestination {
                         label: completed.label,
-                        has_leave: !evidence.leaves.is_empty(),
+                        has_leave: !evidence.leaves.is_empty() || has_inlined_leave,
+                        function_boundary: matches!(
+                            &evidence.brand.owner,
+                            typeck::DeclarationKey::Function(name)
+                                if name == label.name.as_ref()
+                                    && current_declaration == Some(&evidence.brand.owner)
+                                    && self
+                                        .function_templates
+                                        .iter()
+                                        .find(|function| function.name == *name)
+                                        .is_some_and(|function| {
+                                            function.span.start == label.span.start
+                                        })
+                        ),
                         body: Box::new(body),
                     },
                 );
                 Self::set_expression_reference_fields(&mut expression, reference_fields);
                 Ok(expression)
-            }
-            ExprKind::Leave { label, value } => {
-                let mut destination = self
-                    .active_labels
-                    .get(label.name.as_ref())
-                    .cloned()
-                    .ok_or_else(|| {
-                        vec![type_error(
-                            label.span,
-                            format!("leave destination `@{}` is not active", label.name),
-                        )]
-                    })?;
-                let value = if let Some(value) = value {
-                    self.expression(value, Some(destination.result))?
-                } else {
-                    self.check(span, Some(destination.result), UNIT)?;
-                    self.typed(span, UNIT, core::ExprKind::Unit)
-                };
-                self.validate_anonymous_use(&value, 1, "typed leave result")?;
-                self.validate_leave_cleanup(&destination, span)?;
-                let references = Self::expression_reference_fields(&value);
-                if let Some(previous) = &destination.transferred_references
-                    && previous != &references
-                {
-                    return Err(self.borrow_error(
-                        span,
-                        "leave edges to one reference-bearing destination have incompatible origins",
-                    ));
-                }
-                destination.transferred_references = Some(references);
-                self.active_labels
-                    .insert(label.name.to_string(), destination.clone());
-                self.check(span, expected, NEVER)?;
-                Ok(self.typed(
-                    span,
-                    NEVER,
-                    core::ExprKind::Leave {
-                        label: destination.label,
-                        value: Box::new(value),
-                    },
-                ))
             }
             ExprKind::Closure { params, body } => {
                 let Some(request) = self.planned_closure_value(expression) else {
@@ -32183,6 +33203,14 @@ impl<'a> CoreLowerer<'a> {
                 Self::set_expression_reference_fields(&mut expression, reference_fields);
                 Ok(expression)
             }
+            ExprKind::LabelReference(label) => Err(vec![unsupported(
+                label.span,
+                "static label directness",
+                format!(
+                    "label `@{}` survived mandatory control inlining; labels have no runtime representation",
+                    label.name
+                ),
+            )]),
             other => Err(vec![unsupported(
                 span,
                 expression_kind(other),
@@ -34280,7 +35308,9 @@ impl<'a> CoreLowerer<'a> {
                 Stmt::Expr(value) if last => tail = self.expression(value, expected)?,
                 Stmt::Expr(value) => {
                     let value = self.expression(value, None)?;
-                    self.validate_anonymous_use(&value, 0, "discarded expression result")?;
+                    if value.ty != NEVER {
+                        self.validate_anonymous_use(&value, 0, "discarded expression result")?;
+                    }
                     self.register_temporary_reference(&value);
                     self.finish_consumed_reference(&value, false);
                     lowered.push(core::Stmt::Expr(value));
@@ -34460,6 +35490,10 @@ struct ActiveMirLabel {
     /// Owners already live outside this destination. A `leave` preserves
     /// these and explicitly cleans owners introduced by the label body.
     outer_owned: BTreeSet<u32>,
+    /// The implicit destination surrounding a named function exits the whole
+    /// activation, so its parameters must be cleaned on both normal and leave
+    /// paths rather than preserved for code after the destination.
+    function_boundary: bool,
 }
 
 enum MirBuilderItem {
@@ -37730,6 +38764,7 @@ impl MirLowerer {
             core::ExprKind::LabelDestination {
                 label,
                 has_leave,
+                function_boundary,
                 body,
             } => {
                 if !has_leave {
@@ -37758,11 +38793,21 @@ impl MirLowerer {
                         result,
                         destination,
                         outer_owned: self.owned.iter().copied().collect(),
+                        function_boundary: *function_boundary,
                     },
                 );
                 if let MirFlow::Value(value) = self.expression(body) {
                     let value = self.materialize(value, body.span);
                     self.transfer_owner(value);
+                    let outer_owned = self.active_labels[label].outer_owned.clone();
+                    for register in
+                        self.owned.clone().into_iter().rev().filter(|register| {
+                            *function_boundary || !outer_owned.contains(register)
+                        })
+                    {
+                        self.destroy(register, expression.span);
+                        self.transfer_owner(register);
+                    }
                     self.push(
                         expression.span,
                         mir::InstructionKind::LabelPop {
@@ -37806,13 +38851,9 @@ impl MirLowerer {
                     self.register_types[value_register as usize]
                 );
                 self.transfer_owner(value_register);
-                for register in self
-                    .owned
-                    .clone()
-                    .into_iter()
-                    .rev()
-                    .filter(|register| !destination.outer_owned.contains(register))
-                {
+                for register in self.owned.clone().into_iter().rev().filter(|register| {
+                    destination.function_boundary || !destination.outer_owned.contains(register)
+                }) {
                     self.destroy(register, expression.span);
                     self.transfer_owner(register);
                 }

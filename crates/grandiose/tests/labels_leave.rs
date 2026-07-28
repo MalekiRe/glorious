@@ -4,7 +4,7 @@ use grandiose::{
     compiler_mir::{CleanupAction, CleanupEdge},
     lexer, parser, validate,
 };
-use grandiose_vm::{Value, Vm, verify};
+use grandiose_vm::{Artifact, Instruction, Value, Vm, verify};
 
 fn validate_source(source: &str) -> Result<(), Vec<grandiose::diagnostic::Diagnostic>> {
     let tokens = lexer::lex(source).map_err(|error| vec![error])?;
@@ -30,15 +30,33 @@ fn assert_label_error(source: &str, code: &str, message: &str) {
     );
 }
 
+fn has_direct_mir_leave(phases: &grandiose::CompiledPhases) -> bool {
+    phases.mir.functions.iter().any(|function| {
+        function.blocks.iter().any(|block| {
+            matches!(
+                block.terminator,
+                grandiose::compiler_mir::Terminator::Leave { .. }
+            )
+        })
+    })
+}
+
+fn has_direct_bytecode_leave(artifact: &Artifact) -> bool {
+    artifact
+        .code
+        .iter()
+        .any(|instruction| matches!(instruction, Instruction::Leave { .. }))
+}
+
 #[test]
 fn nested_typed_destinations_and_unit_destinations_validate_lexically() {
     validate_source(
         r#"
             answer() -> i64 {
-                label @outer: i64 {
-                    label @inner: {
-                        leave@inner();
-                        leave@outer(42)
+                @outer: i64 {
+                    @inner: {
+                        @inner();
+                        @outer(42)
                     }
                 }
             }
@@ -46,6 +64,387 @@ fn nested_typed_destinations_and_unit_destinations_validate_lexically() {
         "#,
     )
     .unwrap();
+}
+
+#[test]
+fn unified_binders_and_label_calls_compile_through_the_existing_leave_pipeline() {
+    let source = r#"
+        answer() -> i64 {
+            @outer: i64 {
+                @outer(42)
+            }
+        }
+        main() -> { () }
+    "#;
+    validate_source(source).unwrap();
+    compile_source_to_bytecode("unified-label-call.glorious", source).unwrap();
+}
+
+#[test]
+fn named_functions_have_implicit_result_labels() {
+    let source = r#"
+        answer() -> i64 {
+            @answer(42)
+        }
+        main() -> { () }
+    "#;
+    validate_source(source).unwrap();
+    let artifact = compile_source_to_bytecode("implicit-function-label.glorious", source).unwrap();
+    let answer = artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "answer")
+        .unwrap() as u32;
+    let vm = Vm::new(verify(artifact).unwrap());
+    assert_eq!(vm.run(answer, vec![]).unwrap(), Value::I64(42));
+}
+
+#[test]
+fn recursive_calls_and_implicit_labels_target_the_current_activation() {
+    let source = r#"
+        answer(recurse: i64) -> i64 {
+            if(recurse == 1) { answer(0) } else { @answer(42) }
+        }
+        run() -> i64 { answer(1) }
+        main() -> { () }
+    "#;
+    let artifact = compile_source_to_bytecode("recursive-implicit-label.glorious", source).unwrap();
+    let run = artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "run")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(artifact).unwrap()).run(run, vec![]).unwrap(),
+        Value::I64(42)
+    );
+}
+
+#[test]
+fn generic_label_helpers_are_specialized_to_direct_static_transfers() {
+    let source = r#"
+        exit<T, L>(value: T, destination: L) -> !
+            where L: Label<T> {
+            destination(value)
+        }
+        relay<T, L>(value: T, destination: L) -> !
+            where L: Label<T> {
+            exit(value, destination)
+        }
+        answer() -> i64 {
+            relay(42, @answer)
+        }
+        main() -> { () }
+    "#;
+    validate_source(source).unwrap();
+    let phases = compile_source_to_phases_with_options(
+        "generic-static-label.glorious",
+        source,
+        CompileOptions::default(),
+    )
+    .unwrap();
+    assert!(
+        has_direct_mir_leave(&phases),
+        "the transitively inlined generic label call did not become a direct MIR leave"
+    );
+    assert!(
+        has_direct_bytecode_leave(&phases.artifact),
+        "the transitively inlined generic label call did not become bytecode LEAVE"
+    );
+    let artifact = phases.artifact;
+    let answer = artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "answer")
+        .unwrap() as u32;
+    let vm = Vm::new(verify(artifact).unwrap());
+    assert_eq!(vm.run(answer, vec![]).unwrap(), Value::I64(42));
+}
+
+#[test]
+fn labels_cannot_escape_mandatory_control_inlining() {
+    let source = r#"
+        retain_label<T>(value: T) -> T { value }
+        bad() -> {
+            @out: {
+                retain_label(@out);
+                ()
+            }
+        }
+        main() -> { () }
+    "#;
+    let errors = compile_source_to_bytecode("escaping-static-label.glorious", source)
+        .expect_err("a proof-only label escaped as a runtime value");
+    assert!(
+        errors.iter().any(|error| {
+            error.message.contains("escapes as a value")
+                && error.message.contains("no runtime representation")
+        }),
+        "{errors:#?}"
+    );
+}
+
+#[test]
+fn recursive_label_transport_reports_a_directness_failure() {
+    let source = r#"
+        relay<L>(destination: L) -> ! where L: Label<i64> {
+            relay(destination)
+        }
+        answer() -> i64 { relay(@answer) }
+        main() -> { () }
+    "#;
+    let errors = compile_source_to_bytecode("recursive-label-inline.glorious", source)
+        .expect_err("recursive label transport escaped mandatory control inlining");
+    assert!(
+        errors.iter().any(|error| {
+            error.message.contains("recursive")
+                && (error.message.contains("label") || error.message.contains("control"))
+        }),
+        "{errors:#?}"
+    );
+}
+
+#[test]
+fn effects_can_be_instantiated_with_static_label_brands() {
+    let source = r#"
+        effect Route<L> where L: Label<i64> { finish(destination: L) -> ! }
+        route<L>(destination: L) -> i64 where L: Label<i64> {
+            handle perform Route<L>::finish(destination) {
+                Route<L>::finish(exit) => exit(42)
+            }
+        }
+        answer() -> i64 { route(@answer) }
+        main() -> { () }
+    "#;
+    let artifact = compile_source_to_bytecode("label-generic-effect.glorious", source).unwrap();
+    let answer = artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "answer")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(artifact).unwrap())
+            .run(answer, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+}
+
+#[test]
+fn effect_label_bounds_reject_runtime_type_instances() {
+    let source = r#"
+        effect Route<L> where L: Label<i64> { finish(destination: L) -> ! }
+        bad(value: i64) -> i64 {
+            handle perform Route<i64>::finish(value) {
+                Route<i64>::finish(_) => 42
+            }
+        }
+        main() -> { () }
+    "#;
+    let errors = compile_source_to_bytecode("runtime-label-effect.glorious", source)
+        .expect_err("a runtime type satisfied an effect Label bound");
+    assert!(
+        errors.iter().any(|error| error
+            .message
+            .contains("does not satisfy its static Label payload bound")),
+        "{errors:#?}"
+    );
+}
+
+#[test]
+fn effect_operations_can_infer_static_label_generics() {
+    let source = r#"
+        effect Spawn<T> {
+            task<L>(work: T, done: L) -> ! where L: Label<T>
+        }
+        answer() -> i64 {
+            handle perform Spawn<i64>::task(41, @answer) {
+                Spawn<i64>::task(work, done) => done(work + 1)
+            }
+        }
+        main() -> { () }
+    "#;
+    let phases = compile_source_to_phases_with_options(
+        "operation-label-generic.glorious",
+        source,
+        CompileOptions::default(),
+    )
+    .unwrap();
+    assert!(
+        has_direct_mir_leave(&phases),
+        "the operation-local label payload did not fuse into a direct MIR leave"
+    );
+    assert!(
+        has_direct_bytecode_leave(&phases.artifact),
+        "the operation-local label payload did not become bytecode LEAVE"
+    );
+    let artifact = verify(phases.artifact).unwrap();
+    let answer = artifact
+        .artifact()
+        .functions
+        .iter()
+        .position(|function| function.name == "answer")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(artifact).run(answer, vec![]).unwrap(),
+        Value::I64(42)
+    );
+}
+
+#[test]
+fn effect_operation_label_bounds_reject_mismatched_payloads() {
+    let source = r#"
+        effect Spawn {
+            task<L>(done: L) -> ! where L: Label<i64>
+        }
+        answer() -> Text {
+            handle perform Spawn::task(@answer) {
+                Spawn::task(done) => done("wrong")
+            }
+        }
+        main() -> { () }
+    "#;
+    let errors = compile_source_to_bytecode("operation-label-bound.glorious", source)
+        .expect_err("a mismatched operation-local label payload was accepted");
+    assert!(
+        errors.iter().any(|error| error
+            .message
+            .contains("does not satisfy its static Label payload bound")),
+        "{errors:#?}"
+    );
+}
+
+#[test]
+fn effect_operation_label_parameters_reject_runtime_values() {
+    let source = r#"
+        effect Spawn {
+            task<L>(done: L) -> ! where L: Label<i64>
+        }
+        bad(value: i64) -> i64 {
+            handle perform Spawn::task(value) {
+                Spawn::task(_) => 42
+            }
+        }
+        main() -> { () }
+    "#;
+    let errors = compile_source_to_bytecode("operation-runtime-label.glorious", source)
+        .expect_err("a runtime value was accepted for an operation Label parameter");
+    assert!(
+        errors.iter().any(|error| error
+            .message
+            .contains("requires a statically known label argument")),
+        "{errors:#?}"
+    );
+}
+
+#[test]
+fn standard_try_propagates_through_the_implicit_function_label() {
+    let source = r#"
+        fail() -> Result<i64, i64> { Result::Err(7) }
+        compute() -> Result<Text, i64> {
+            let ignored = try(fail(), @compute);
+            Result::Ok("unreachable")
+        }
+        answer() -> i64 {
+            handle compute() {
+                Result::Ok(_) => 0,
+                Result::Err(error) => error
+            }
+        }
+        main() -> { () }
+    "#;
+    let phases = compile_source_to_phases_with_options(
+        "standard-try-label.glorious",
+        source,
+        CompileOptions::default(),
+    )
+    .unwrap();
+    assert!(
+        has_direct_mir_leave(&phases),
+        "try propagation did not lower to a direct MIR leave"
+    );
+    assert!(
+        has_direct_bytecode_leave(&phases.artifact),
+        "try propagation did not lower to bytecode LEAVE"
+    );
+    let artifact = verify(phases.artifact).unwrap();
+    let answer = artifact
+        .artifact()
+        .functions
+        .iter()
+        .position(|function| function.name == "answer")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(artifact).run(answer, vec![]).unwrap(),
+        Value::I64(7)
+    );
+}
+
+#[test]
+fn a_label_captured_by_an_inlined_closure_stays_a_direct_transfer() {
+    let source = r#"
+        invoke<F>(body: F) -> () where F: Fn<(), Output=()> { body() }
+        answer() -> i64 {
+            @done: i64 {
+                invoke({ => @done(42) });
+                0
+            }
+        }
+        main() -> { () }
+    "#;
+    let phases = compile_source_to_phases_with_options(
+        "captured-static-label.glorious",
+        source,
+        CompileOptions::default(),
+    )
+    .unwrap();
+    assert!(
+        has_direct_mir_leave(&phases),
+        "the inlined closure label call did not become a direct MIR leave"
+    );
+    assert!(
+        has_direct_bytecode_leave(&phases.artifact),
+        "the inlined closure label call did not become bytecode LEAVE"
+    );
+    let artifact = phases.artifact;
+    let answer = artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "answer")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(artifact).unwrap())
+            .run(answer, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+}
+
+#[test]
+fn active_labels_cannot_cross_multishot_capture() {
+    let source = r#"
+        effect Replay { [2,2] replay() -> i64 }
+        bad() -> i64 {
+            @out: i64 {
+                handle perform Replay::replay() {
+                    Replay::replay() with continuation => {
+                        let first = resume(continuation, 1);
+                        let second = resume(continuation, 2);
+                        first + second
+                    }
+                }
+            }
+        }
+        main() -> { () }
+    "#;
+    let errors = compile_source_to_bytecode("label-multishot-reject.glorious", source)
+        .expect_err("an active label crossed a multi-shot capture");
+    assert!(
+        errors
+            .iter()
+            .any(|error| { error.message.contains("active label targets this frame") }),
+        "{errors:#?}"
+    );
 }
 
 #[test]
@@ -65,14 +464,16 @@ fn generative_labeled_blocks_expose_their_brand_only_inside_the_body() {
 }
 
 #[test]
-fn labeled_trailing_application_and_loop_syntax_share_lexical_brand_rules() {
+fn label_binders_can_enclose_ordinary_loop_calls() {
     validate_source(
         r#"
             loop<L>(body: L) -> { () }
             answer() -> {
-                loop @outer: {
-                    @outer;
-                    ()
+                @outer: {
+                    loop {
+                        @outer;
+                        ()
+                    }
                 }
             }
             main() -> { () }
@@ -94,8 +495,8 @@ fn unknown_and_out_of_scope_labels_are_rejected() {
     assert_label_error(
         r#"
             answer() -> {
-                label @done: { () };
-                leave@done()
+                @done: { () };
+                @done()
             }
             main() -> { () }
         "#,
@@ -105,33 +506,43 @@ fn unknown_and_out_of_scope_labels_are_rejected() {
 }
 
 #[test]
-fn an_active_label_name_cannot_be_shadowed_by_another_brand() {
-    assert_label_error(
-        r#"
-            answer() -> {
-                @scope: {
-                    label @scope: { () }
-                }
+fn shadowing_an_active_label_uses_the_inner_brand_and_warns() {
+    let source = r#"
+        answer() -> {
+            @answer: {
+                @answer()
             }
-            main() -> { () }
-        "#,
-        "G0131",
-        "already active",
+        }
+        main() -> { () }
+    "#;
+    validate_source(source).unwrap();
+    let phases = compile_source_to_phases_with_options(
+        "shadowed-label.glorious",
+        source,
+        Default::default(),
+    )
+    .unwrap();
+    assert!(
+        phases.diagnostics.iter().any(|diagnostic| {
+            diagnostic.severity == grandiose::diagnostic::Severity::Warning
+                && diagnostic.message.contains("inner generative label")
+        }),
+        "{:#?}",
+        phases.diagnostics
     );
 }
 
 #[test]
-fn generative_labels_do_not_grant_direct_destination_evidence() {
-    assert_label_error(
+fn inferred_binders_grant_unit_destination_evidence() {
+    validate_source(
         r#"
-            answer() -> i64 {
-                @scope: { leave@scope(42) }
+            answer() -> {
+                @scope: { @scope() }
             }
             main() -> { () }
         "#,
-        "G0133",
-        "no `Destination` evidence",
-    );
+    )
+    .unwrap();
 }
 
 #[test]
@@ -139,7 +550,7 @@ fn obvious_leave_value_mismatches_are_source_diagnostics() {
     assert_label_error(
         r#"
             answer() -> i64 {
-                label @done: i64 { leave@done("wrong") }
+                @done: i64 { @done("wrong") }
             }
             main() -> { () }
         "#,
@@ -149,7 +560,7 @@ fn obvious_leave_value_mismatches_are_source_diagnostics() {
     assert_label_error(
         r#"
             answer() -> i64 {
-                label @done: i64 { leave@done() }
+                @done: i64 { @done() }
             }
             main() -> { () }
         "#,
@@ -162,9 +573,9 @@ fn obvious_leave_value_mismatches_are_source_diagnostics() {
 fn nested_leave_executes_the_outer_typed_destination() {
     let source = r#"
         answer() -> i64 {
-            label @outer: i64 {
-                label @inner: i64 {
-                    leave@outer(42)
+            @outer: i64 {
+                @inner: i64 {
+                    @outer(42)
                 }
             }
         }
@@ -180,10 +591,10 @@ fn leave_cleans_intervening_linear_owners_without_bypassing_use() {
         impl Use<[1,1]> for Ticket {}
         consume(ticket: Ticket) -> { let Ticket { value: _ } = move ticket; () }
         answer() -> i64 {
-            label @done: i64 {
+            @done: i64 {
                 let ticket = Ticket { value: 1 };
                 consume(move ticket);
-                leave@done(42)
+                @done(42)
             }
         }
         main() -> { () }
@@ -195,7 +606,7 @@ fn leave_cleans_intervening_linear_owners_without_bypassing_use() {
 fn reference_result_provenance_crosses_leave_but_cannot_escape_its_referent() {
     let source = r#"
         select<'a>(value: &'a i64) -> &'a i64 {
-            label @done: &'a i64 { leave@done(value) }
+            @done: &'a i64 { @done(value) }
         }
         answer() -> i64 {
             let value = 42;
@@ -212,9 +623,9 @@ fn leave_does_not_bypass_private_deconstruction_authority() {
     let source = r#"
         struct Secret { private value: i64 }
         answer(secret: Secret) -> i64 {
-            label @done: i64 {
+            @done: i64 {
                 let Secret { value } = move secret;
-                leave@done(value)
+                @done(value)
             }
         }
         main() -> { () }
@@ -230,7 +641,7 @@ fn nested_leave_cleans_partial_owners_and_loans_at_all_optimization_levels() {
         struct Parcel { left: Resource, right: Resource }
         observe(value: &Resource) -> { () }
         answer() -> i64 {
-            label @outer: i64 {
+            @outer: i64 {
                 let parcel = Parcel {
                     left: Resource { value: 1 },
                     right: Resource { value: 2 },
@@ -238,9 +649,9 @@ fn nested_leave_cleans_partial_owners_and_loans_at_all_optimization_levels() {
                 let left = parcel.left;
                 let right = &parcel.right;
                 observe(right);
-                label @inner: i64 {
+                @inner: i64 {
                     let scratch = Resource { value: 3 };
-                    leave@outer(42)
+                    @outer(42)
                 }
             }
         }

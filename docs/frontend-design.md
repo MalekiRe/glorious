@@ -604,11 +604,12 @@ bindings become visible after their initializer. Callable parameters and pattern
 binders are visible only in their bodies. Generic parameters shadow outer generic
 parameters but cannot collide within one binder list.
 
-Label binders use a separate lexical namespace. `@name:` creates a fresh brand,
-scope region, and runtime-target association; `@name` resolves only to the
-nearest active binder. `label @name: T { ... }` additionally creates
-`Destination<'scope,T>` evidence. A named callable body's result label also gets
-`CallDestination`; ordinary nested labels do not.
+Label binders use a separate lexical namespace. `@name: T { ... }` creates a
+fresh nominal brand with intrinsic `Label<T>` evidence; `@name: { ... }`
+infers `T`. Every direct reference uses `@name` and resolves only to the nearest
+active binder. Each named callable also has an implicit label named after the
+callable, with its declared result as the payload type. Bare identifiers never
+resolve to labels.
 
 Refinement source names do not enter an ordinary lexical scope during parsing or
 resolution. A pattern creates fresh binder keys. A source name resolves to such a
@@ -1153,17 +1154,19 @@ it are rejected before Core finalization.
 
 ### 8.3 Labels
 
-A label binder allocates one invariant label `BrandId` with a scope region,
-sealed `Label<'scope>` evidence, optional `Destination<'scope,T>` and
-`CallDestination` evidence, and a `LabelTarget` runtime realization describing a
-Core target and cleanup boundary.
+A label binder allocates one invariant nominal `BrandId` with a scope region and
+sealed `Label<T>` evidence. `Label<T>` implies `Fn<(T), Output=!>`, so
+`@name(value)` and invocation through a bounded generic parameter are ordinary
+diverging applications at the typed surface.
 
-Typed Core stores the brand-to-target association, never a conversion. `leave`
-requires active matching destination evidence, checks its value against `T`,
-marks the current normal successor unreachable, and records cleanup to the
-target boundary. A closure/effect/environment mentioning the brand inherits the
-scope dependency. Recursive invocation uses a fresh dynamic target while the
-compiled body remains generic over its lexical brand schema.
+Labels are proof-only: they have no runtime representation or erased form.
+Specialization substitutes the exact generative brand, then mandatory control
+inlining fuses every invocation into the frame containing its binder. Typed
+Core records the resulting direct target and cleanup boundary, and MIR emits
+the existing `LEAVE` edge. If fusion cannot prove an exact active destination,
+compilation fails instead of materializing a dynamic label target. A
+closure/effect/environment mentioning the brand inherits its scope dependency;
+labels may not cross multishot continuation capture.
 
 Label-indexed protocol terms include normalized brand arguments statically.
 Before runtime serialization each active instantiation maps to a concrete
@@ -1569,8 +1572,8 @@ Acceptance includes positive and negative cases for:
   private-field rejection, zero-use wildcard/omission checks, illegal implicit
   cleanup, and explicit zero-use destroy;
 - custom drop order/restrictions and partial-move rejection;
-- label destination versus call-destination evidence and label-indexed effect
-  separation;
+- intrinsic `Label<T>` evidence, implicit function labels, mandatory
+  control-inlining directness, and label-generic effects;
 - total/partial deep handlers, terminal cleanup, one-shot resume, legal
   multi-shot resume, unique-capture rejection, and illegal cancellation;
 - positive/negative `is` contexts, binder lifetime, tuple context composition,
@@ -1578,7 +1581,7 @@ Acceptance includes positive and negative cases for:
 - closed-world negative facts versus ordinary absence of positive evidence;
 - no compiler-known behavior for standard-library control or operator names.
 
-The eight rejection examples and all seventeen safety invariants in Draft 0.1
+The rejection examples and all eighteen safety invariants in the core spec
 are permanent compile-fail suites with stable diagnostic codes.
 
 ## 13. Level 5: implementable vertical slices
@@ -1631,7 +1634,8 @@ pass with source-oriented diagnostics.
 
 Add open ledger formation across call islands, access selection, `After` states,
 environment sealing, availability witnesses, generative label brands, direct
-destinations, call destinations, `leave`, and nonlocal cleanup.
+`Label<T>` evidence, implicit function destinations, direct `LEAVE` lowering,
+and nonlocal cleanup.
 
 Gate: generic simultaneous/incremental selectors compile from ordinary source;
 sequential activation, post-state mismatch, forged availability, and escaping
@@ -1641,7 +1645,7 @@ labels reject.
 
 Add effect declarations/rows, normalized protocol keys, handler literals,
 pattern matrices, deep/partial coverage, terminal performance, continuation
-capture, resumption quantities, resume/cancel checking, and label-indexed effects.
+capture, resumption quantities, resume/cancel checking, and label-generic effects.
 
 Gate: effect semantics and cleanup agree with bytecode executed by `grvm`; one-shot,
 multi-shot, terminal, partial, and cancellation suites pass.

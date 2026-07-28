@@ -66,6 +66,49 @@ pub expression_at<'a>(
     Vec::get(&value.nodes, index)
 }
 
+pub body_shell(value: &ParsedBody) -> u32 { value.shell }
+
+pub body_root_index(value: &ParsedBody) -> u32 { value.root.index }
+
+pub expression_kind_at(value: &ParsedBody, index: u32) -> u8 {
+    Vec::index(&value.nodes, usize_from_u32(index)).kind_code
+}
+
+pub expression_token_start_at(value: &ParsedBody, index: u32) -> usize {
+    Vec::index(&value.nodes, usize_from_u32(index)).tokens.start
+}
+
+pub expression_child_count_at(value: &ParsedBody, index: u32) -> u32 {
+    Vec::index(&value.nodes, usize_from_u32(index)).children.count
+}
+
+pub expression_child_at(
+    value: &ParsedBody,
+    index: u32,
+    child: u32
+) -> u32 {
+    let node = Vec::index(&value.nodes, usize_from_u32(index));
+    edge_at(value, node, child).index
+}
+
+pub expression_child_position_at(
+    value: &ParsedBody,
+    index: u32,
+    child: u32
+) -> u8 {
+    let node = Vec::index(&value.nodes, usize_from_u32(index));
+    edge_position_at(value, node, child)
+}
+
+pub expression_child_metadata_at(
+    value: &ParsedBody,
+    index: u32,
+    child: u32
+) -> u32 {
+    let node = Vec::index(&value.nodes, usize_from_u32(index));
+    edge_metadata_at(value, node, child)
+}
+
 body_error(code: u8, token: usize, related: usize) -> BodyError {
     BodyError { code: code, token: move token, related: move related }
 }

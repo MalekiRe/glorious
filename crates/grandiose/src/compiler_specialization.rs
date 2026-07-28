@@ -3,9 +3,12 @@
 //! This phase is intentionally rejection-only: it records requirements that a
 //! future generic lowering could satisfy, but never authorizes bytecode emission.
 
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::ops::ControlFlow;
+use std::rc::Rc;
 
 use crate::ast::{
     AssignmentPlaceKind, AssociatedArgumentSyntax, BinaryOp, Expr, ExprKind, ExprVisitor,
@@ -19,7 +22,8 @@ use crate::compiler_traits::{
 use crate::compiler_typeck::{
     CallableShape, DeclarationKey, GenericParamKey, NominalInstanceKey, NominalKey,
     ProvisionalConst, ProvisionalType, ProvisionalTypeFolder, fold_provisional_type_children,
-    provisional_signature_children_any, provisional_signature_type_any, provisional_type_any,
+    label_payload_type, label_provisional_type, provisional_signature_children_any,
+    provisional_signature_type_any, provisional_type_any,
 };
 
 const ASSOCIATED_PROJECTION_PREFIX: &str = "$associated_projection$";
@@ -49,7 +53,9 @@ pub(crate) enum SpecializationArgument {
 }
 
 pub(crate) fn contains_late_callable(ty: &ProvisionalType) -> bool {
-    provisional_type_any(ty, &mut |ty| matches!(ty, ProvisionalType::Callable(_)))
+    provisional_type_any(ty, &mut |ty| {
+        matches!(ty, ProvisionalType::Callable(_)) || label_payload_type(ty).is_some()
+    })
 }
 
 fn late_specialization(key: &SpecializationKey) -> bool {
@@ -1861,12 +1867,9 @@ fn discover_templates(
                 callable_use_summary(lhs, aliases, callable_positions, dependencies)
                     || callable_use_summary(rhs, aliases, callable_positions, dependencies)
             }
-            ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
+            ExprKind::LabelDestination { body, .. } => {
                 callable_use_summary(body, aliases, callable_positions, dependencies)
             }
-            ExprKind::Leave { value, .. } => value.as_deref().is_some_and(|value| {
-                callable_use_summary(value, aliases, callable_positions, dependencies)
-            }),
             ExprKind::Is { subject, .. } => {
                 callable_use_summary(subject, aliases, callable_positions, dependencies)
             }
@@ -2582,13 +2585,8 @@ pub(crate) fn captured_outer_uses(
                 visit(lhs, outer, bound, found, CaptureMode::Observe);
                 visit(rhs, outer, bound, found, CaptureMode::Observe);
             }
-            ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
+            ExprKind::LabelDestination { body, .. } => {
                 visit(body, outer, bound, found, CaptureMode::Observe)
-            }
-            ExprKind::Leave { value, .. } => {
-                if let Some(value) = value {
-                    visit(value, outer, bound, found, CaptureMode::Observe);
-                }
             }
             ExprKind::Is { subject, .. } => {
                 visit(subject, outer, bound, found, CaptureMode::Observe)
@@ -2769,6 +2767,26 @@ enum PlannedClosure {
     Late(ClosureRequest),
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct ContextualValidationKey {
+    site: ClosureSiteKey,
+    shape: CallableShape,
+    captures: Vec<ClosureCapture>,
+    param_env: ParamEnv,
+    active_variants: BTreeMap<String, String>,
+    active_labels: BTreeMap<String, ProvisionalType>,
+}
+
+enum ContextualValidation {
+    InProgress(ProvisionalType),
+    Complete(ProvisionalType),
+}
+
+#[cfg(test)]
+thread_local! {
+    static CONTEXTUAL_VALIDATION_CACHE_HITS: Cell<usize> = const { Cell::new(0) };
+}
+
 #[derive(Clone)]
 struct NominalTemplate {
     params: Vec<GenericParamKey>,
@@ -2779,6 +2797,7 @@ struct NominalTemplate {
 #[derive(Clone)]
 struct OperationTemplate {
     effect_params: Vec<GenericParamKey>,
+    operation_params: Vec<GenericParamKey>,
     params: Vec<ProvisionalType>,
     result: ProvisionalType,
 }
@@ -2814,19 +2833,48 @@ fn discover_operation_templates(
                 .filter_map(|parameter| generic_map.get(&parameter.name).cloned())
                 .collect::<Vec<_>>();
             effect.operations.iter().filter_map(move |operation| {
+                let operation_owner = DeclarationKey::Function(format!(
+                    "$effect${}::{}",
+                    effect.name, operation.name
+                ));
+                let mut operation_generic_map = generic_map.clone();
+                operation_generic_map.extend(
+                    operation
+                        .generics
+                        .iter()
+                        .flat_map(|generics| &generics.params)
+                        .enumerate()
+                        .map(|(ordinal, parameter)| {
+                            (
+                                parameter.name.clone(),
+                                GenericParamKey {
+                                    owner: operation_owner.clone(),
+                                    ordinal: ordinal as u32,
+                                },
+                            )
+                        }),
+                );
+                let operation_params = operation
+                    .generics
+                    .iter()
+                    .flat_map(|generics| &generics.params)
+                    .filter(|parameter| parameter.kind == GenericParamKind::Type)
+                    .filter_map(|parameter| operation_generic_map.get(&parameter.name).cloned())
+                    .collect::<Vec<_>>();
                 let params = operation
                     .params
                     .iter()
-                    .map(|param| symbolic_type(&param.ty, &generic_map, &BTreeMap::new()))
+                    .map(|param| symbolic_type(&param.ty, &operation_generic_map, &BTreeMap::new()))
                     .collect::<Option<Vec<_>>>()?;
                 let result = operation.return_type.as_ref().map_or_else(
                     || Some(ProvisionalType::Predefined("Unit".into())),
-                    |ty| symbolic_type(ty, &generic_map, &BTreeMap::new()),
+                    |ty| symbolic_type(ty, &operation_generic_map, &BTreeMap::new()),
                 )?;
                 Some((
                     (effect.name.clone(), operation.name.clone()),
                     OperationTemplate {
                         effect_params: effect_params.clone(),
+                        operation_params,
                         params,
                         result,
                     },
@@ -2925,6 +2973,27 @@ fn discover_nominal_templates(program: &Program) -> BTreeMap<String, NominalTemp
     structs.chain(enums).collect()
 }
 
+fn implicit_function_labels(
+    function: &crate::ast::Function,
+    owner: &DeclarationKey,
+    result: ProvisionalType,
+) -> BTreeMap<String, ProvisionalType> {
+    if !function.uses_implicit_label() {
+        return BTreeMap::new();
+    }
+    let label = crate::ast::LabelSyntax {
+        name: Rc::from(function.name.as_str()),
+        span: crate::span::Span::new(
+            function.span.start,
+            function.span.start + function.name.len(),
+        ),
+    };
+    BTreeMap::from([(
+        function.name.clone(),
+        label_provisional_type(owner, &label, result),
+    )])
+}
+
 struct Walker<'a> {
     program: &'a Program,
     templates: &'a BTreeMap<String, FunctionTemplate>,
@@ -2937,6 +3006,7 @@ struct Walker<'a> {
     locals: BTreeMap<String, LocalBinding>,
     bindings: BTreeSet<String>,
     active_variants: BTreeMap<String, String>,
+    active_labels: BTreeMap<String, ProvisionalType>,
     expression_ordinals: &'a BTreeMap<usize, u32>,
     body_instance: BodyInstanceKey,
     recording: bool,
@@ -2945,9 +3015,92 @@ struct Walker<'a> {
     param_env: ParamEnv,
     symbolic_validation: bool,
     active_recursive_self: Option<RecursiveSelf>,
+    contextual_validations: &'a mut BTreeMap<ContextualValidationKey, ContextualValidation>,
 }
 
 impl<'a> Walker<'a> {
+    fn static_label_shape(&self, name: &str) -> Option<CallableShape> {
+        let LocalBinding::Type(subject) = self.locals.get(name)? else {
+            return None;
+        };
+        let payload = if let Some(payload) = label_payload_type(subject) {
+            payload.clone()
+        } else {
+            let ProvisionalType::Param(binder) = subject else {
+                return None;
+            };
+            let DeclarationKey::Function(owner) = &self.owner else {
+                return None;
+            };
+            let template = self.templates.get(owner)?;
+            template.marker_constraints.iter().find_map(|constraint| {
+                (constraint.polarity == GoalPolarity::Positive
+                    && self
+                        .trait_db
+                        .intrinsic_key(IntrinsicRole::Label)
+                        .is_some_and(|key| key == &constraint.trait_key)
+                    && constraint.subject_binder.as_ref() == Some(binder))
+                .then(|| match constraint.arguments.as_slice() {
+                    [GenericArg::Type(payload)] => Some(payload.clone()),
+                    _ => None,
+                })
+                .flatten()
+            })?
+        };
+        Some(CallableShape {
+            params: vec![payload],
+            result: ProvisionalType::Predefined("Never".into()),
+            effects: vec![],
+            effect_tail: None,
+            infer_effects: false,
+        })
+    }
+
+    fn source_type(&self, syntax: &TypeSyntax) -> Option<ProvisionalType> {
+        let generic_map = self
+            .program
+            .functions
+            .iter()
+            .find(|function| self.owner == DeclarationKey::Function(function.name.clone()))
+            .into_iter()
+            .flat_map(|function| {
+                function
+                    .generics
+                    .iter()
+                    .flat_map(|generics| &generics.params)
+                    .enumerate()
+                    .map(|(ordinal, parameter)| {
+                        (
+                            parameter.name.clone(),
+                            GenericParamKey {
+                                owner: self.owner.clone(),
+                                ordinal: ordinal as u32,
+                            },
+                        )
+                    })
+            })
+            .collect::<BTreeMap<_, _>>();
+        let callable_constraints = match &self.owner {
+            DeclarationKey::Function(name) => self
+                .templates
+                .get(name)
+                .map(|template| template.callable_constraints.clone())
+                .unwrap_or_default(),
+            DeclarationKey::Global(_) => BTreeMap::new(),
+        };
+        let ty = symbolic_type(syntax, &generic_map, &callable_constraints)?;
+        match &self.body_instance {
+            BodyInstanceKey::Specialization(key) => {
+                let DeclarationKey::Function(name) = &key.template else {
+                    return Some(ty);
+                };
+                let template = self.templates.get(name)?;
+                substitute(&ty, &substitutions_for_key(template, key))
+            }
+            _ => Some(ty),
+        }
+    }
+
     fn block_binding_expected_type(
         &self,
         binding: &str,
@@ -3133,10 +3286,7 @@ impl<'a> Walker<'a> {
                     pending.extend([lhs.as_ref(), rhs.as_ref()]);
                 }
                 ExprKind::Perform { args, .. } => pending.extend(args.iter()),
-                ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
-                    pending.push(body)
-                }
-                ExprKind::Leave { value, .. } => pending.extend(value.iter().map(AsRef::as_ref)),
+                ExprKind::LabelDestination { body, .. } => pending.push(body),
                 ExprKind::Is { subject, .. } => pending.push(subject),
                 ExprKind::Resume { resumption, value }
                 | ExprKind::TailResume { resumption, value } => {
@@ -3218,7 +3368,8 @@ impl<'a> Walker<'a> {
             matches!(
                 ty,
                 ProvisionalType::Nominal(instance)
-                    if !self.nominal_templates.contains_key(instance.declaration.0.as_str())
+                    if !instance.declaration.0.starts_with(crate::compiler_typeck::LABEL_TYPE_PREFIX)
+                        && !self.nominal_templates.contains_key(instance.declaration.0.as_str())
             )
         })
     }
@@ -3349,12 +3500,43 @@ impl<'a> Walker<'a> {
             .collect::<BTreeMap<_, _>>();
         Some(OperationTemplate {
             effect_params: vec![],
+            operation_params: template.operation_params.clone(),
             params: template
                 .params
                 .iter()
                 .map(|param| substitute(param, &substitutions))
                 .collect::<Option<Vec<_>>>()?,
             result: substitute(&template.result, &substitutions)?,
+        })
+    }
+
+    fn operation_at_for_args(
+        &self,
+        site: crate::span::Span,
+        effect: &str,
+        operation: &str,
+        args: &[Expr],
+    ) -> Option<OperationTemplate> {
+        let shape = self.operation_at(site, effect, operation)?;
+        let mutable = shape.operation_params.iter().cloned().collect();
+        let mut substitutions = BTreeMap::new();
+        for (argument, formal) in args.iter().zip(&shape.params) {
+            if let Some((actual, defaulted)) = self.obvious_argument_type(argument)
+                && !defaulted
+                && !unify_inference(formal, &actual, &mutable, &mut substitutions)
+            {
+                return None;
+            }
+        }
+        Some(OperationTemplate {
+            effect_params: vec![],
+            operation_params: vec![],
+            params: shape
+                .params
+                .iter()
+                .map(|param| substitute(param, &substitutions))
+                .collect::<Option<Vec<_>>>()?,
+            result: substitute(&shape.result, &substitutions)?,
         })
     }
 
@@ -3376,6 +3558,11 @@ impl<'a> Walker<'a> {
             ExprKind::Byte(_) => Some((ProvisionalType::Predefined("u8".into()), false)),
             ExprKind::ByteString(_) => Some((ProvisionalType::Predefined("Bytes".into()), false)),
             ExprKind::Move(operand) => self.obvious_argument_type(operand),
+            ExprKind::LabelReference(label) => self
+                .active_labels
+                .get(label.name.as_ref())
+                .cloned()
+                .map(|ty| (ty, false)),
             ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
                 let Stmt::Expr(tail) = statements.last()? else {
                     return None;
@@ -4373,12 +4560,6 @@ impl<'a> Walker<'a> {
             ExprKind::Block(_) | ExprKind::ContextBlock(_) if expected.params.is_empty() => {
                 (vec![], expression, ClosureBodyKind::ContextualBlock)
             }
-            ExprKind::Labeled { body, .. }
-                if expected.params.is_empty()
-                    && matches!(body.kind, ExprKind::Block(_) | ExprKind::ContextBlock(_)) =>
-            {
-                (vec![], body, ClosureBodyKind::ContextualBlock)
-            }
             _ => {
                 self.error("callable argument is not a contextually matching closure");
                 return None;
@@ -4471,6 +4652,59 @@ impl<'a> Walker<'a> {
                     _ => None,
                 })
         });
+        // A contextual block can be encountered first while validating every
+        // enclosing block and then once more as each planned closure body is
+        // discovered. For a closed, non-recursive environment those walks are
+        // identical and have no recording side effects. Canonicalize that
+        // validation context so a shared suffix is type-walked only once.
+        let validation_key = (!self.symbolic_validation
+            && recursive_local.is_none()
+            && captures.iter().all(|capture| ground(&capture.ty))
+            && self.active_labels.values().all(ground))
+        .then(|| {
+            Some(ContextualValidationKey {
+                site: site.clone(),
+                shape: CallableShape {
+                    params: expected
+                        .params
+                        .iter()
+                        .map(|param| substitute(param, substitutions))
+                        .collect::<Option<Vec<_>>>()?,
+                    result: substitute(&expected.result, substitutions)?,
+                    effects: expected
+                        .effects
+                        .iter()
+                        .map(|effect| {
+                            Some(crate::compiler_typeck::CallableEffect {
+                                declaration: effect.declaration.clone(),
+                                arguments: effect
+                                    .arguments
+                                    .iter()
+                                    .map(|argument| substitute(argument, substitutions))
+                                    .collect::<Option<Vec<_>>>()?,
+                            })
+                        })
+                        .collect::<Option<Vec<_>>>()?,
+                    effect_tail: expected.effect_tail.clone(),
+                    infer_effects: expected.infer_effects,
+                },
+                captures: captures.clone(),
+                param_env: self.param_env.clone(),
+                active_variants: self.active_variants.clone(),
+                active_labels: self.active_labels.clone(),
+            })
+        })
+        .flatten()
+        .filter(|key| {
+            key.shape.params.iter().all(ground)
+                && ground(&key.shape.result)
+                && key
+                    .shape
+                    .effects
+                    .iter()
+                    .flat_map(|effect| &effect.arguments)
+                    .all(ground)
+        });
         let saved = std::mem::take(&mut self.locals);
         let saved_bindings = std::mem::take(&mut self.bindings);
         if let Some((recursive_self, shape)) = &recursive_local {
@@ -4494,7 +4728,36 @@ impl<'a> Walker<'a> {
         self.recording = false;
         let expected_result =
             substitute(&expected.result, substitutions).unwrap_or_else(|| expected.result.clone());
-        let actual_result = self.expression(body, Some(&expected_result));
+        let cached_result = validation_key.as_ref().and_then(|key| {
+            self.contextual_validations
+                .get(key)
+                .map(|validation| match validation {
+                    ContextualValidation::InProgress(expected)
+                    | ContextualValidation::Complete(expected) => expected.clone(),
+                })
+        });
+        #[cfg(test)]
+        if cached_result.is_some() {
+            CONTEXTUAL_VALIDATION_CACHE_HITS.with(|hits| hits.set(hits.get() + 1));
+        }
+        let actual_result = cached_result.map(Some).unwrap_or_else(|| {
+            if let Some(key) = &validation_key {
+                self.contextual_validations.insert(
+                    key.clone(),
+                    ContextualValidation::InProgress(expected_result.clone()),
+                );
+            }
+            let result = self.expression(body, Some(&expected_result));
+            if let Some(key) = &validation_key {
+                if let Some(result) = &result {
+                    self.contextual_validations
+                        .insert(key.clone(), ContextualValidation::Complete(result.clone()));
+                } else {
+                    self.contextual_validations.remove(key);
+                }
+            }
+            result
+        });
         self.recording = saved_recording;
         self.locals = saved;
         self.bindings = saved_bindings;
@@ -5285,6 +5548,23 @@ impl<'a> Walker<'a> {
                 requested_receiver_mode,
             );
         }
+        if let Some(shape) = self.static_label_shape(name) {
+            if args.len() != 1 {
+                self.error(format!(
+                    "label parameter `{name}` expects one payload argument, but {} were supplied",
+                    args.len()
+                ));
+                return None;
+            }
+            let actual = self.expression(&args[0], shape.params.first())?;
+            if actual != shape.params[0]
+                && (!self.symbolic_validation || ground(&actual) && ground(&shape.params[0]))
+            {
+                self.error(format!("label parameter `{name}` has an ambiguous payload"));
+                return None;
+            }
+            return Some(shape.result);
+        }
         if let Some(LocalBinding::Type(ProvisionalType::Callable(shape))) =
             self.locals.get(name).cloned()
         {
@@ -5865,6 +6145,18 @@ impl<'a> Walker<'a> {
                 ));
                 return None;
             };
+            if self
+                .trait_db
+                .intrinsic_key(IntrinsicRole::Label)
+                .is_some_and(|key| key == &constraint.trait_key)
+                && let Some(payload) = label_payload_type(&subject)
+                && let [GenericArg::Type(formal_payload)] = constraint.arguments.as_slice()
+            {
+                let mut trial = substitutions.clone();
+                if unify_inference(formal_payload, payload, &mutable_inference, &mut trial) {
+                    substitutions = trial;
+                }
+            }
             let exact_argument =
                 Self::exact_constraint_argument(&constraint_subject, &substitutions);
             let Some(arguments) = constraint
@@ -5901,6 +6193,32 @@ impl<'a> Walker<'a> {
                 ));
                 return None;
             };
+            if self
+                .trait_db
+                .intrinsic_key(IntrinsicRole::Label)
+                .is_some_and(|key| key == &constraint.trait_key)
+            {
+                let concrete_label = constraint.polarity == GoalPolarity::Positive
+                    && bindings.is_empty()
+                    && label_payload_type(&subject).is_some_and(|payload| {
+                        arguments.as_slice() == [GenericArg::Type(payload.clone())]
+                    });
+                let lexical_label = self.param_env.contains_exact(
+                    constraint.polarity,
+                    &constraint.trait_key,
+                    &subject,
+                    &arguments,
+                    &bindings,
+                );
+                let proven = concrete_label || lexical_label;
+                if proven {
+                    continue;
+                }
+                self.error(format!(
+                    "intrinsic Label constraint for `{subject:?}` does not match its destination payload at call to `{name}`",
+                ));
+                return None;
+            }
             if let Some(proven) =
                 self.intrinsic_use_evidence(constraint, &subject, &arguments, exact_argument)
             {
@@ -6212,6 +6530,17 @@ impl<'a> Walker<'a> {
                 self.enum_construction(source, path[0].as_ref(), path[1].as_ref(), &[], expected)
             }
             ExprKind::Call(callee, args) => {
+                if let ExprKind::LabelReference(label) = &callee.kind {
+                    let destination = self
+                        .active_labels
+                        .get(label.name.as_ref())
+                        .and_then(label_payload_type)
+                        .cloned();
+                    for argument in args.iter() {
+                        self.expression(argument, destination.as_ref());
+                    }
+                    return None;
+                }
                 // `if(condition) { positive } else { negative }` remains an
                 // ordinary library surface, but a pattern-test condition also
                 // carries branch-local binders. Plan that composition as one
@@ -7136,7 +7465,7 @@ impl<'a> Walker<'a> {
                 operation,
                 args,
             } => {
-                let shape = self.operation_at(source.span, effect, operation);
+                let shape = self.operation_at_for_args(source.span, effect, operation, args);
                 for (index, argument) in args.iter().enumerate() {
                     self.expression(
                         argument,
@@ -7151,6 +7480,20 @@ impl<'a> Walker<'a> {
                 computation,
                 clauses,
             } => {
+                let handled_operation = match &computation.kind {
+                    ExprKind::Perform {
+                        effect,
+                        operation,
+                        args,
+                    } => self
+                        .operation_at(computation.span, effect, operation)
+                        .filter(|shape| !shape.operation_params.is_empty())
+                        .and_then(|_| {
+                            self.operation_at_for_args(computation.span, effect, operation, args)
+                        })
+                        .map(|shape| (effect.to_string(), operation.to_string(), shape)),
+                    _ => None,
+                };
                 let outer_locals = self.locals.clone();
                 let outer_bindings = self.bindings.clone();
                 let outer_active_variants = self.active_variants.clone();
@@ -7207,8 +7550,15 @@ impl<'a> Walker<'a> {
                     let saved = self.locals.clone();
                     let saved_bindings = self.bindings.clone();
                     let saved_active_variants = self.active_variants.clone();
-                    let operation =
-                        self.operation_at(clause.span, &clause.effect, &clause.operation);
+                    let operation = handled_operation
+                        .as_ref()
+                        .filter(|(effect, operation, _)| {
+                            effect == &clause.effect && operation == &clause.operation
+                        })
+                        .map(|(_, _, shape)| shape.clone())
+                        .or_else(|| {
+                            self.operation_at(clause.span, &clause.effect, &clause.operation)
+                        });
                     if let Some(operation) = &operation {
                         for (pattern, ty) in clause.patterns.iter().zip(&operation.params) {
                             self.bind_handler_pattern(pattern, ty);
@@ -7273,14 +7623,22 @@ impl<'a> Walker<'a> {
             ExprKind::TypedClosure { .. } => self
                 .typed_value_closure(source)
                 .map(|request| ProvisionalType::Callable(request.shape.clone())),
-            ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
-                self.expression(body, expected)
-            }
-            ExprKind::Leave { value, .. } => {
-                if let Some(value) = value {
-                    self.expression(value, None);
+            ExprKind::LabelDestination { label, ty, body } => {
+                let result = ty
+                    .as_deref()
+                    .and_then(|ty| self.source_type(ty))
+                    .unwrap_or_else(|| ProvisionalType::Predefined("Unit".into()));
+                let label_type = label_provisional_type(&self.owner, label, result.clone());
+                let previous = self
+                    .active_labels
+                    .insert(label.name.to_string(), label_type);
+                let body_result = self.expression(body, Some(&result));
+                if let Some(previous) = previous {
+                    self.active_labels.insert(label.name.to_string(), previous);
+                } else {
+                    self.active_labels.remove(label.name.as_ref());
                 }
-                None
+                body_result.or(Some(result))
             }
             ExprKind::Is { subject, .. } => {
                 self.expression(subject, None);
@@ -7292,7 +7650,7 @@ impl<'a> Walker<'a> {
                     ],
                 }))
             }
-            ExprKind::LabelReference(_) => None,
+            ExprKind::LabelReference(label) => self.active_labels.get(label.name.as_ref()).cloned(),
             ExprKind::Variable(_) => None,
             ExprKind::Resume { resumption, value } => {
                 let local = match &resumption.kind {
@@ -7446,11 +7804,6 @@ pub(crate) fn closure_body<'a>(
         )),
         (ExprKind::Block(_) | ExprKind::ContextBlock(_), ClosureBodyKind::ContextualBlock) => {
             Some((vec![], expression))
-        }
-        (ExprKind::Labeled { body, .. }, ClosureBodyKind::ContextualBlock)
-            if matches!(body.kind, ExprKind::Block(_) | ExprKind::ContextBlock(_)) =>
-        {
-            Some((vec![], body))
         }
         _ => None,
     }
@@ -7803,7 +8156,7 @@ where
                     escapes: lhs.escapes || rhs.escapes,
                 }
             }
-            ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => visit(
+            ExprKind::LabelDestination { body, .. } => visit(
                 body,
                 effect,
                 handled,
@@ -7812,19 +8165,6 @@ where
                 summaries,
                 handler_closes,
             ),
-            ExprKind::Leave { value, .. } => {
-                value.as_deref().map_or_else(ValueFlow::default, |value| {
-                    visit(
-                        value,
-                        effect,
-                        handled,
-                        locals,
-                        functions,
-                        summaries,
-                        handler_closes,
-                    )
-                })
-            }
             ExprKind::Is { subject, .. } => ValueFlow {
                 tracked: false,
                 escapes: visit(
@@ -8287,6 +8627,7 @@ pub(crate) fn discover_with_traits_and_budgets_from(
         },
         errors,
     };
+    let mut contextual_validations = BTreeMap::new();
     for global in &program.globals {
         let owner = DeclarationKey::Global(global.name.clone());
         let expression_ordinals = expression_ordinals(&global.value);
@@ -8303,6 +8644,7 @@ pub(crate) fn discover_with_traits_and_budgets_from(
             locals: BTreeMap::new(),
             bindings: BTreeSet::new(),
             active_variants: BTreeMap::new(),
+            active_labels: BTreeMap::new(),
             expression_ordinals: &expression_ordinals,
             body_instance: BodyInstanceKey::Root(DeclarationKey::Global(global.name.clone())),
             recording: true,
@@ -8311,6 +8653,7 @@ pub(crate) fn discover_with_traits_and_budgets_from(
             param_env: ParamEnv::default(),
             symbolic_validation: false,
             active_recursive_self: None,
+            contextual_validations: &mut contextual_validations,
         };
         walker.expression(&global.value, None);
     }
@@ -8379,6 +8722,11 @@ pub(crate) fn discover_with_traits_and_budgets_from(
                 .map(|param| param.name.clone())
                 .collect(),
             active_variants: BTreeMap::new(),
+            active_labels: implicit_function_labels(
+                function,
+                &template.declaration,
+                template.result.clone(),
+            ),
             expression_ordinals: &expression_ordinals,
             body_instance: BodyInstanceKey::Root(template.declaration.clone()),
             recording: !symbolic,
@@ -8391,9 +8739,9 @@ pub(crate) fn discover_with_traits_and_budgets_from(
             },
             symbolic_validation: symbolic,
             active_recursive_self: None,
+            contextual_validations: &mut contextual_validations,
         };
         walker.expression(&function.body, Some(&template.result));
-        drop(walker);
         if symbolic
             && !discovery
                 .errors
@@ -8431,6 +8779,7 @@ pub(crate) fn discover_with_traits_and_budgets_from(
             )]),
             bindings: BTreeSet::from(["self".into()]),
             active_variants: BTreeMap::new(),
+            active_labels: BTreeMap::new(),
             expression_ordinals: &expression_ordinals,
             body_instance: BodyInstanceKey::Drop(declaration.target.clone()),
             recording: true,
@@ -8439,6 +8788,7 @@ pub(crate) fn discover_with_traits_and_budgets_from(
             param_env: ParamEnv::default(),
             symbolic_validation: false,
             active_recursive_self: None,
+            contextual_validations: &mut contextual_validations,
         };
         walker.expression(
             &declaration.body,
@@ -8520,6 +8870,12 @@ pub(crate) fn discover_with_traits_and_budgets_from(
                     .map(|param| param.name.clone())
                     .collect(),
                 active_variants: BTreeMap::new(),
+                active_labels: implicit_function_labels(
+                    function,
+                    &template.declaration,
+                    substitute(&template.result, &substitutions)
+                        .unwrap_or_else(|| template.result.clone()),
+                ),
                 expression_ordinals: &expression_ordinals,
                 body_instance: BodyInstanceKey::Specialization(key.clone()),
                 recording: true,
@@ -8528,6 +8884,7 @@ pub(crate) fn discover_with_traits_and_budgets_from(
                 param_env,
                 symbolic_validation: false,
                 active_recursive_self: None,
+                contextual_validations: &mut contextual_validations,
             };
             let result = substitute(&template.result, &substitutions);
             walker.expression(&function.body, result.as_ref());
@@ -8583,6 +8940,7 @@ pub(crate) fn discover_with_traits_and_budgets_from(
                 locals,
                 bindings,
                 active_variants: BTreeMap::new(),
+                active_labels: BTreeMap::new(),
                 expression_ordinals: &expression_ordinals,
                 body_instance: BodyInstanceKey::Closure(closure.clone()),
                 recording: true,
@@ -8591,6 +8949,7 @@ pub(crate) fn discover_with_traits_and_budgets_from(
                 param_env,
                 symbolic_validation: false,
                 active_recursive_self: recursive_self,
+                contextual_validations: &mut contextual_validations,
             };
             walker.expression(body, Some(&closure.shape.result));
         }
@@ -8826,7 +9185,7 @@ mod tests {
              answer()->i64{
                  let value=40;
                  let borrowed=&mut value;
-                 let add=(delta:i64)->i64{*borrowed=*borrowed+delta;*borrowed};
+                 let add=(delta:i64)->i64{*borrowed = *borrowed + delta;*borrowed};
                  let escaped=retain(move add);
                  let first=escaped(1);
                  move escaped(1)
@@ -9101,6 +9460,39 @@ mod tests {
             })
             .collect::<BTreeSet<_>>();
         assert_eq!(sites.len(), 2);
+    }
+
+    #[test]
+    fn large_contextual_dispatch_suffixes_are_validated_once() {
+        std::thread::Builder::new()
+            .name("large-contextual-dispatch".into())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let mut dispatch = "()".to_owned();
+                for _ in 0..16 {
+                    dispatch = format!("apply({{ {dispatch} }})");
+                }
+                let source = format!(
+                    "apply<F, R>(body: F) -> R where F: Fn<(), Output=R> {{ body() }}
+                     dispatch()->() {{ {dispatch} }}
+                     main()->(){{()}}"
+                );
+                CONTEXTUAL_VALIDATION_CACHE_HITS.with(|hits| hits.set(0));
+                let first = parse_discovery(&source);
+                let cache_hits = CONTEXTUAL_VALIDATION_CACHE_HITS.with(Cell::get);
+                CONTEXTUAL_VALIDATION_CACHE_HITS.with(|hits| hits.set(0));
+                let second = parse_discovery(&source);
+                assert!(first.errors.is_empty(), "{:#?}", first.errors);
+                assert!(
+                    cache_hits >= 14,
+                    "nested dispatch should reuse its contextual suffix validations, got {cache_hits}"
+                );
+                assert_eq!(first.graph.canonical_text(), second.graph.canonical_text());
+                assert_eq!(first.graph.fingerprint(), second.graph.fingerprint());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]

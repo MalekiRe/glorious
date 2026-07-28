@@ -3,6 +3,8 @@
 //! test, malformed forms produce deterministic diagnostics with exact spans,
 //! and recovery always advances.
 
+use std::rc::Rc;
+
 use grandiose::{
     ast::{ExprKind, PatternKind, Program, Stmt},
     diagnostic::Diagnostic,
@@ -44,6 +46,54 @@ fn declaration_only_programs_parse() {
     assert!(program.functions.is_empty());
     let program = parse_ok("");
     assert!(program.functions.is_empty());
+}
+
+#[test]
+fn hyphenated_names_callable_references_and_whitespace_calls_parse() {
+    let program = parse_ok(
+        "sum-three(a: i64, b: i64, c: i64) -> i64 { a } \
+         main() -> { let callable = $sum-three; sum-three 1, 2, nested(3) }",
+    );
+    assert!(
+        program
+            .functions
+            .iter()
+            .any(|function| function.name == "sum-three")
+    );
+    let ExprKind::Call(callee, args) = body_expr(&program, "main") else {
+        panic!("expected whitespace application");
+    };
+    assert!(matches!(&callee.kind, ExprKind::Variable(path) if path[0].as_ref() == "sum-three"));
+    assert_eq!(args.len(), 3);
+    assert!(matches!(args[2].kind, ExprKind::Call(_, _)));
+
+    let ExprKind::Block(statements) = &program.functions[1].body.kind else {
+        panic!();
+    };
+    let Stmt::Let { value, .. } = &statements[0] else {
+        panic!();
+    };
+    assert!(matches!(&value.kind, ExprKind::Variable(path) if path[0].as_ref() == "sum-three"));
+
+    let diagnostics = parse_err("main() -> { $ separated }");
+    assert_eq!(diagnostics[0].title, "separated callable reference");
+}
+
+#[test]
+fn dereference_is_adjacent_and_infix_operators_require_spacing() {
+    let program = parse_ok("infixl 40 *; main(value: &i64) -> i64 { *value * 2 }");
+    let ExprKind::Binary { lhs, .. } = body_expr(&program, "main") else {
+        panic!("expected multiplication");
+    };
+    assert!(matches!(
+        lhs.kind,
+        ExprKind::Unary {
+            op: grandiose::ast::UnaryOp::Dereference,
+            ..
+        }
+    ));
+    assert!(!parse_err("infixl 30 +; main() -> i64 { 1+2 }").is_empty());
+    assert!(!parse_err("infixl 40 *; main(value: &i64) -> i64 { * value }").is_empty());
 }
 
 #[test]
@@ -167,38 +217,50 @@ fn typed_anonymous_callables_are_distinct_from_groups_and_tuples() {
 
 #[test]
 fn labels_parse_as_structural_nodes() {
-    let program = parse_ok("main() -> { @outer: { 1 } }");
-    let ExprKind::Labeled { label, body } = body_expr(&program, "main") else {
-        panic!("expected a labeled block");
+    let program = parse_ok("main() -> { @outer: { () } }");
+    let ExprKind::LabelDestination { label, ty, body } = body_expr(&program, "main") else {
+        panic!("expected an inferred label destination");
     };
     assert_eq!(label.name.as_ref(), "outer");
+    assert!(ty.is_none());
     assert!(matches!(body.kind, ExprKind::Block(_)));
 
-    let program = parse_ok("main() -> { label @done: i64 { 1 } }");
-    let ExprKind::LabelDestination { label, ty, .. } = body_expr(&program, "main") else {
-        panic!("expected a label destination");
+    let program = parse_ok("main() -> { @done: i64 { @done(42) } }");
+    let ExprKind::LabelDestination { label, ty, body } = body_expr(&program, "main") else {
+        panic!("expected a typed label destination");
     };
     assert_eq!(label.name.as_ref(), "done");
     assert!(ty.is_some());
+    let ExprKind::Block(statements) = &body.kind else {
+        panic!("expected the destination body");
+    };
+    let Stmt::Expr(transfer) = &statements[0] else {
+        panic!("expected the destination transfer");
+    };
+    assert!(
+        matches!(
+            &transfer.kind,
+            ExprKind::Call(callee, arguments)
+                if matches!(callee.kind, ExprKind::LabelReference(_))
+                    && arguments.len() == 1
+        ),
+        "{:#?}",
+        transfer.kind
+    );
 
-    let program = parse_ok("main() -> { leave@done(42) }");
-    let ExprKind::Leave { label, value } = body_expr(&program, "main") else {
-        panic!("expected a leave");
-    };
-    assert_eq!(label.name.as_ref(), "done");
-    assert!(matches!(value.unwrap().kind, ExprKind::Int(42)));
+    let diagnostics = parse_err("main() -> { label @done: i64 { 1 } }");
+    assert_eq!(diagnostics[0].title, "removed label syntax");
+    assert_eq!(
+        diagnostics[0].help.as_deref(),
+        Some("write `@name: T { ... }`")
+    );
 
-    // Labeled trailing application is a call with a labeled contextual block.
-    let program = parse_ok("main() -> { loop @outer: { 1 } }");
-    let ExprKind::Call(callee, args) = body_expr(&program, "main") else {
-        panic!("expected a labeled trailing application");
-    };
-    assert!(matches!(&callee.kind, ExprKind::Variable(path) if path[0].as_ref() == "loop"));
-    let ExprKind::Labeled { label, body } = &args[0].kind else {
-        panic!("expected a labeled argument");
-    };
-    assert_eq!(label.name.as_ref(), "outer");
-    assert!(matches!(body.kind, ExprKind::ContextBlock(_)));
+    let diagnostics = parse_err("main() -> { leave@done(42) }");
+    assert_eq!(diagnostics[0].title, "removed label syntax");
+    assert_eq!(diagnostics[0].help.as_deref(), Some("write `@name(value)`"));
+
+    let diagnostics = parse_err("main() -> { loop @outer: { 1 } }");
+    assert_eq!(diagnostics[0].title, "removed labeled trailing application");
 
     // A bare reference names an existing identity.
     let program = parse_ok("main() -> { retry(@outer) }");
@@ -479,10 +541,12 @@ fn new_literal_expressions_parse_structurally() {
         ExprKind::ByteString(_)
     ));
     let program = parse_ok("infixl 30 +; main() -> { 0xFF + 0b1_01 }");
-    assert!(matches!(
-        body_expr(&program, "main"),
-        ExprKind::Binary { .. }
-    ));
+    let ExprKind::Call(callee, arguments) = body_expr(&program, "main") else {
+        panic!("`+` lowers to its ordinary Add trait method call");
+    };
+    assert_eq!(arguments.len(), 2);
+    assert!(matches!(&callee.kind, ExprKind::Variable(path)
+        if path.as_ref() == [Rc::<str>::from("Add"), Rc::<str>::from("+")]));
 }
 
 #[test]
@@ -521,7 +585,7 @@ fn parse_preserves_structural_resumptions_and_context_blocks() {
 
 #[test]
 fn spans_are_exact_for_new_syntax_nodes() {
-    let source = "main() -> { leave@done(42) }";
+    let source = "main() -> { @done(42) }";
     let program = parse_ok(source);
     let ExprKind::Block(statements) = &program.functions[0].body.kind else {
         panic!();
@@ -529,8 +593,11 @@ fn spans_are_exact_for_new_syntax_nodes() {
     let Stmt::Expr(leave) = &statements[0] else {
         panic!();
     };
-    assert_eq!(&source[leave.span.start..leave.span.end], "leave@done(42)");
-    let ExprKind::Leave { label, .. } = &leave.kind else {
+    assert_eq!(&source[leave.span.start..leave.span.end], "@done(42)");
+    let ExprKind::Call(callee, _) = &leave.kind else {
+        panic!();
+    };
+    let ExprKind::LabelReference(label) = &callee.kind else {
         panic!();
     };
     assert_eq!(&source[label.span.start..label.span.end], "@done");

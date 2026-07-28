@@ -188,6 +188,7 @@ pub enum ExprKind {
     LabelDestination {
         label: LabelId,
         has_leave: bool,
+        function_boundary: bool,
         body: Box<Expr>,
     },
     /// Abandon the intervening lexical scopes and transfer `value` to the
@@ -630,9 +631,14 @@ impl Expr {
             ExprKind::LabelDestination {
                 label,
                 has_leave,
+                function_boundary,
                 body,
             } => {
-                writeln!(output, "label-destination label#{label} leaves={has_leave}").unwrap();
+                writeln!(
+                    output,
+                    "label-destination label#{label} leaves={has_leave} function-boundary={function_boundary}"
+                )
+                .unwrap();
                 body.write(output, depth + 1);
             }
             ExprKind::Leave { label, value } => {

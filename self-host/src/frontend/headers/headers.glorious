@@ -259,7 +259,32 @@ pub parsed_source(value: &ParsedHeaders) -> &super::lexer::LexedSource {
     &value.source
 }
 
+pub parsed_index(value: &ParsedHeaders) -> &HeaderIndex { &value.index }
+
 pub nominal_index(value: &ParsedHeaders) -> &NominalIndex { &value.nominal }
+
+pub callable_shell(value: &CallableHeader) -> u32 { value.shell }
+
+pub callable_name_raw(value: &CallableHeader) -> u32 {
+    Id::to_u32(value.name)
+}
+
+pub callable_parameters(value: &CallableHeader) -> &HeaderRange {
+    &value.parameters
+}
+
+pub parameter_at<'a>(
+    value: &'a HeaderIndex,
+    index: usize
+) -> Option<&'a Parameter> {
+    Vec::get(&value.parameters, index)
+}
+
+pub parameter_name_raw(value: &Parameter) -> u32 {
+    Id::to_u32(value.name)
+}
+
+pub parameter_name_token(value: &Parameter) -> usize { value.name_token }
 
 pub token_range_start(value: &HeaderTokenRange) -> usize { value.start }
 

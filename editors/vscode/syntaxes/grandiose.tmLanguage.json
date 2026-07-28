@@ -58,7 +58,7 @@
       "patterns": [
         {
           "name": "keyword.control.grandiose",
-          "match": "\\b(handle|perform|resume|cancel|tail|label|leave|is|match)\\b"
+          "match": "\\b(handle|perform|resume|cancel|tail|is|match)\\b"
         },
         {
           "name": "keyword.declaration.grandiose",
@@ -76,7 +76,7 @@
     },
     "types": {
       "patterns": [
-        { "name": "entity.name.type.grandiose", "match": "\\b[A-Z][A-Za-z0-9_]*\\b" },
+        { "name": "entity.name.type.grandiose", "match": "\\b[A-Z][A-Za-z0-9_]*(?:-[A-Za-z0-9_]+)*\\b" },
         {
           "name": "storage.type.primitive.grandiose",
           "match": "\\b(u8|u16|u32|u64|u128|usize|i8|i16|i32|i64|i128|isize|f32|f64|char|Text|Bytes|Array)\\b|!"
@@ -87,11 +87,11 @@
       "patterns": [
         {
           "name": "entity.name.function.declaration.grandiose",
-          "match": "^\\s*([a-z_][A-Za-z0-9_]*)\\s*(?=[(<])"
+          "match": "^\\s*([a-z_][A-Za-z0-9_]*(?:-[A-Za-z0-9_]+)*)\\s*(?=[(<])"
         },
         {
           "name": "entity.name.function.call.grandiose",
-          "match": "\\b([a-z_][A-Za-z0-9_]*)\\s*(?=\\()"
+          "match": "\\b([a-z_][A-Za-z0-9_]*(?:-[A-Za-z0-9_]+)*)\\s*(?=\\()"
         }
       ]
     },

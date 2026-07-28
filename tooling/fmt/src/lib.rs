@@ -1273,6 +1273,15 @@ mod tests {
     }
 
     #[test]
+    fn canonical_label_binders_and_calls_are_idempotent() {
+        let source = "answer()->i64{@done:i64{@done(42)}}";
+        let output = formatted(source);
+        assert!(output.contains("@done: i64"), "{output}");
+        assert!(output.contains("@done(42)"), "{output}");
+        assert_eq!(formatted(&output), output);
+    }
+
+    #[test]
     fn keeps_visibility_generics_and_prefix_operators_canonical() {
         let source = "pub struct Holder<T>{private value:T}\n\
                       pub parse<T,E>(value:& mut Holder<T>,tape:& Holder<T>)->Result<T,E>{\n\

@@ -104,8 +104,6 @@ pub enum IntrinsicRole {
     RunsIn,
     Label,
     Environment,
-    Destination,
-    CallDestination,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -443,8 +441,6 @@ impl TrustedTraitManifest {
             IntrinsicRole::RunsIn,
             IntrinsicRole::Label,
             IntrinsicRole::Environment,
-            IntrinsicRole::Destination,
-            IntrinsicRole::CallDestination,
         ] {
             if !roles.contains(&role) {
                 errors.push(Diagnostic::plain(format!(
@@ -508,7 +504,7 @@ impl TrustedTraitManifest {
             ManifestTrait {
                 id: 5,
                 display_name: "Label".into(),
-                parameters: vec![Lifetime],
+                parameters: vec![Type],
                 associated_items: vec![],
                 policy: TraitPolicy::CompilerSealed,
                 role: Some(IntrinsicRole::Label),
@@ -520,22 +516,6 @@ impl TrustedTraitManifest {
                 associated_items: vec![],
                 policy: TraitPolicy::CompilerSealed,
                 role: Some(IntrinsicRole::Environment),
-            },
-            ManifestTrait {
-                id: 7,
-                display_name: "Destination".into(),
-                parameters: vec![Lifetime, Type],
-                associated_items: vec![],
-                policy: TraitPolicy::CompilerSealed,
-                role: Some(IntrinsicRole::Destination),
-            },
-            ManifestTrait {
-                id: 8,
-                display_name: "CallDestination".into(),
-                parameters: vec![Lifetime, Type],
-                associated_items: vec![],
-                policy: TraitPolicy::CompilerSealed,
-                role: Some(IntrinsicRole::CallDestination),
             },
         ])
         .expect("the built-in trusted trait manifest is valid")
@@ -566,8 +546,6 @@ fn intrinsic_role_name(role: IntrinsicRole) -> &'static str {
         IntrinsicRole::RunsIn => "RunsIn",
         IntrinsicRole::Label => "Label",
         IntrinsicRole::Environment => "Environment",
-        IntrinsicRole::Destination => "Destination",
-        IntrinsicRole::CallDestination => "CallDestination",
     }
 }
 
@@ -594,10 +572,8 @@ fn intrinsic_role_schema(
             vec![Type, Type],
             vec![item("After", AssociatedItemKind::Type)],
         ),
-        IntrinsicRole::Label | IntrinsicRole::Environment => (vec![Lifetime], vec![]),
-        IntrinsicRole::Destination | IntrinsicRole::CallDestination => {
-            (vec![Lifetime, Type], vec![])
-        }
+        IntrinsicRole::Label => (vec![Type], vec![]),
+        IntrinsicRole::Environment => (vec![Lifetime], vec![]),
     }
 }
 
@@ -852,6 +828,23 @@ struct FactHead {
 impl ParamEnv {
     pub(crate) fn is_consistent(&self) -> bool {
         self.conflicts.is_empty() && self.equality_conflicts.is_empty()
+    }
+
+    pub(crate) fn contains_exact(
+        &self,
+        polarity: GoalPolarity,
+        trait_key: &TraitKey,
+        subject: &ProvisionalType,
+        arguments: &[GenericArg],
+        bindings: &[AssociatedValue],
+    ) -> bool {
+        self.facts.iter().any(|fact| {
+            fact.polarity == polarity
+                && &fact.trait_key == trait_key
+                && &fact.subject == subject
+                && fact.arguments == arguments
+                && fact.bindings == bindings
+        })
     }
 
     /// Returns whether lexical positive `Use` evidence contains the requested
@@ -1274,18 +1267,16 @@ impl TraitDb {
                     arguments: vec![SuperArgumentPattern::Type(Pattern::Bound(1))],
                     bindings: vec![],
                 }),
-                Some(IntrinsicRole::Destination) => Some(SupertraitTemplate {
-                    trait_key: intrinsic_keys[&IntrinsicRole::Label].clone(),
-                    arguments: vec![SuperArgumentPattern::LifetimeBound(0)],
-                    bindings: vec![],
-                }),
-                Some(IntrinsicRole::CallDestination) => Some(SupertraitTemplate {
-                    trait_key: intrinsic_keys[&IntrinsicRole::Destination].clone(),
-                    arguments: vec![
-                        SuperArgumentPattern::LifetimeBound(0),
-                        SuperArgumentPattern::Type(Pattern::Bound(1)),
-                    ],
-                    bindings: vec![],
+                Some(IntrinsicRole::Label) => Some(SupertraitTemplate {
+                    trait_key: intrinsic_keys[&IntrinsicRole::Fn].clone(),
+                    arguments: vec![SuperArgumentPattern::Type(Pattern::Tuple(vec![
+                        Pattern::Bound(0),
+                    ]))],
+                    bindings: vec![AssociatedPattern {
+                        item: "Output".into(),
+                        arguments: vec![],
+                        value: Pattern::Ground(ProvisionalType::Predefined("Never".into())),
+                    }],
                 }),
                 _ => None,
             };

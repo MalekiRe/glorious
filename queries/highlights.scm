@@ -64,6 +64,6 @@
 [
  "mod" "use" "as" "self" "type" "cases" "let"
  "struct" "enum" "trait" "impl" "effect" "where" "for" "const"
- "handle" "perform" "resume" "cancel" "tail" "label" "leave" "is" "match"
+ "handle" "perform" "resume" "cancel" "tail" "is" "match"
  "with" "move" "mut"
 ] @keyword

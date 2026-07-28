@@ -90,15 +90,19 @@
         "named": true
       },
       {
+        "type": "function_reference_expression",
+        "named": true
+      },
+      {
         "type": "handle_expression",
         "named": true
       },
       {
-        "type": "label_expression",
+        "type": "label_binder_expression",
         "named": true
       },
       {
-        "type": "leave_expression",
+        "type": "label_reference_expression",
         "named": true
       },
       {
@@ -468,10 +472,6 @@
           {
             "type": "closure_expression",
             "named": true
-          },
-          {
-            "type": "label_expression",
-            "named": true
           }
         ]
       },
@@ -501,10 +501,6 @@
           },
           {
             "type": "closure_expression",
-            "named": true
-          },
-          {
-            "type": "label_expression",
             "named": true
           }
         ]
@@ -570,6 +566,10 @@
         {
           "type": "visibility_modifier",
           "named": true
+        },
+        {
+          "type": "where_clause",
+          "named": true
         }
       ]
     }
@@ -613,11 +613,19 @@
           "named": true
         },
         {
+          "type": "generic_parameters",
+          "named": true
+        },
+        {
           "type": "parameters",
           "named": true
         },
         {
           "type": "quantity",
+          "named": true
+        },
+        {
+          "type": "where_clause",
           "named": true
         }
       ]
@@ -980,6 +988,10 @@
           {
             "type": "identifier",
             "named": true
+          },
+          {
+            "type": "operator_sequence",
+            "named": true
           }
         ]
       }
@@ -1016,6 +1028,26 @@
     }
   },
   {
+    "type": "function_reference_expression",
+    "named": true,
+    "fields": {
+      "function": {
+        "multiple": true,
+        "required": true,
+        "types": [
+          {
+            "type": "::",
+            "named": false
+          },
+          {
+            "type": "identifier",
+            "named": true
+          }
+        ]
+      }
+    }
+  },
+  {
     "type": "function_signature",
     "named": true,
     "fields": {
@@ -1025,6 +1057,10 @@
         "types": [
           {
             "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "operator_sequence",
             "named": true
           }
         ]
@@ -1373,36 +1409,49 @@
     }
   },
   {
-    "type": "label_expression",
+    "type": "label_binder_expression",
     "named": true,
-    "fields": {},
-    "children": {
-      "multiple": true,
-      "required": true,
-      "types": [
-        {
-          "type": "block",
-          "named": true
-        },
-        {
-          "type": "label",
-          "named": true
-        }
-      ]
+    "fields": {
+      "body": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "block",
+            "named": true
+          }
+        ]
+      },
+      "label": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "label",
+            "named": true
+          }
+        ]
+      },
+      "type": {
+        "multiple": false,
+        "required": false,
+        "types": [
+          {
+            "type": "_type",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {
-    "type": "leave_expression",
+    "type": "label_reference_expression",
     "named": true,
     "fields": {},
     "children": {
-      "multiple": true,
-      "required": false,
+      "multiple": false,
+      "required": true,
       "types": [
-        {
-          "type": "_expression",
-          "named": true
-        },
         {
           "type": "label",
           "named": true
@@ -2386,6 +2435,10 @@
     "named": false
   },
   {
+    "type": "$",
+    "named": false
+  },
+  {
     "type": "%",
     "named": false
   },
@@ -2600,15 +2653,7 @@
   },
   {
     "type": "label",
-    "named": false
-  },
-  {
-    "type": "label",
     "named": true
-  },
-  {
-    "type": "leave",
-    "named": false
   },
   {
     "type": "let",

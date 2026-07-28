@@ -1041,12 +1041,6 @@ pub(crate) struct RuntimeLeafAuthority {
     trusted_call_range: Option<Range<usize>>,
 }
 
-impl RuntimeLeafAuthority {
-    pub(crate) fn trusted_call_range(&self) -> Option<Range<usize>> {
-        self.trusted_call_range.clone()
-    }
-}
-
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum RuntimeLeaf {
     Primitive(Primitive),
@@ -2147,13 +2141,8 @@ fn collect_free_variables(expression: &Expr, bound: &HashSet<String>, free: &mut
             nested_bound.extend(params.iter().map(|param| param.name.clone()));
             collect_free_variables(body, &nested_bound, free);
         }
-        ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
+        ExprKind::LabelDestination { body, .. } => {
             collect_free_variables(body, bound, free);
-        }
-        ExprKind::Leave { value, .. } => {
-            if let Some(value) = value {
-                collect_free_variables(value, bound, free);
-            }
         }
         ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
             collect_free_variables(resumption, bound, free);
@@ -3077,10 +3066,7 @@ impl Evaluator<'_> {
                     // Structural forms the pipeline rewrites or `validate`
                     // rejects before evaluation; reaching one here means the
                     // caller skipped those phases.
-                    ExprKind::Labeled { .. }
-                    | ExprKind::LabelReference(_)
-                    | ExprKind::LabelDestination { .. }
-                    | ExprKind::Leave { .. } => {
+                    ExprKind::LabelReference(_) | ExprKind::LabelDestination { .. } => {
                         return Err(runtime(
                             expr.span,
                             "this syntax is parsed but not yet supported by the recovery evaluator",
@@ -5276,7 +5262,10 @@ fn eval_runtime_primitive(
 ) -> Result<Value, Diagnostic> {
     if matches!(
         primitive,
-        Primitive::IntEq
+        Primitive::IntCheckedAdd
+            | Primitive::IntEq
+            | Primitive::IntLt
+            | Primitive::IntGt
             | Primitive::IntWrappingAdd
             | Primitive::IntWrappingSub
             | Primitive::IntWrappingMul
@@ -5452,20 +5441,66 @@ fn eval_runtime_integer_primitive(
         raw: raw & integer_mask(kind.bits),
     };
     let first = raw(value)?;
-    if primitive == Primitive::IntEq {
+    if matches!(
+        primitive,
+        Primitive::IntEq | Primitive::IntLt | Primitive::IntGt
+    ) {
         let [_, right] = args else {
             return Err(runtime(
                 span,
-                "integer equality primitive expects two operands",
+                "integer comparison primitive expects two operands",
             ));
+        };
+        let right = raw(right)?;
+        let result = match primitive {
+            Primitive::IntEq => first == right,
+            Primitive::IntLt if kind.signed => {
+                signed_integer(first, kind.bits) < signed_integer(right, kind.bits)
+            }
+            Primitive::IntLt => first < right,
+            Primitive::IntGt if kind.signed => {
+                signed_integer(first, kind.bits) > signed_integer(right, kind.bits)
+            }
+            Primitive::IntGt => first > right,
+            _ => unreachable!(),
         };
         return Ok(Value::Integer {
             signed: false,
             bits: 32,
-            raw: u128::from(first == raw(right)?),
+            raw: u128::from(result),
         });
     }
     let result = match primitive {
+        Primitive::IntCheckedAdd => {
+            let [_, right] = args else {
+                return Err(runtime(
+                    span,
+                    "checked integer addition expects two operands",
+                ));
+            };
+            let right = raw(right)?;
+            if kind.signed {
+                let left = signed_integer(first, kind.bits);
+                let right = signed_integer(right, kind.bits);
+                let (minimum, maximum) = if kind.bits == 128 {
+                    (i128::MIN, i128::MAX)
+                } else {
+                    (
+                        -(1_i128 << (kind.bits - 1)),
+                        (1_i128 << (kind.bits - 1)) - 1,
+                    )
+                };
+                left.checked_add(right)
+                    .filter(|value| *value >= minimum && *value <= maximum)
+                    .map(|value| value as u128)
+                    .ok_or_else(|| runtime(span, "checked integer addition overflowed"))?
+            } else {
+                first
+                    .checked_add(right)
+                    .filter(|value| *value <= integer_mask(kind.bits))
+                    .ok_or_else(|| runtime(span, "checked integer addition overflowed"))?
+            }
+        }
         Primitive::IntBitNot => {
             if args.len() != 1 {
                 return Err(runtime(span, "bit_not expects one operand"));

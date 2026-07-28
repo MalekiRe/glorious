@@ -31,7 +31,6 @@ use std::path::Path;
 use diagnostic::Diagnostic;
 use eval::{Host, Value};
 use source_bundle::{Segment, SourceBundle};
-use span::Span;
 
 pub use ast::ConstKind;
 pub use compiler::{
@@ -71,8 +70,16 @@ fn run_source_stream(
     args: Vec<String>,
     host: &mut dyn Host,
     runtime_leaves: eval::RuntimeLeafAuthority,
+    trusted_standard_range: Option<std::ops::Range<usize>>,
 ) -> Result<Value, Vec<Diagnostic>> {
-    run_source_entry_stream(source, "main", args, host, runtime_leaves)
+    run_source_entry_stream(
+        source,
+        "main",
+        args,
+        host,
+        runtime_leaves,
+        trusted_standard_range,
+    )
 }
 
 fn run_source_entry_stream(
@@ -81,21 +88,19 @@ fn run_source_entry_stream(
     args: Vec<String>,
     host: &mut dyn Host,
     runtime_leaves: eval::RuntimeLeafAuthority,
+    trusted_standard_range: Option<std::ops::Range<usize>>,
 ) -> Result<Value, Vec<Diagnostic>> {
     let tokens = lexer::lex(source).map_err(|error| vec![error])?;
-    let legacy_equality_range = runtime_leaves
-        .trusted_call_range()
-        .map(|range| Span::new(range.start, range.end));
-    let (program, parse_diagnostics) = parser::parse_recovering_with_regions_and_legacy_equality(
-        tokens,
-        Vec::new(),
-        legacy_equality_range,
-    );
+    let (mut program, parse_diagnostics) = parser::parse_recovering(tokens);
     if !parse_diagnostics.is_empty() {
         return Err(parse_diagnostics);
     }
     validate::validate(&program)?;
-    let program = compiler::normalize_trait_surface_for_recovery(&program)?;
+    if let Some(range) = trusted_standard_range.as_ref() {
+        compiler::restore_trusted_scalar_operators(&mut program, range);
+    }
+    let program =
+        compiler::normalize_trait_surface_for_recovery(&program, trusted_standard_range.as_ref())?;
     let program = compiler::normalize_constructor_aliases(&program)?;
     eval::run_entry_with_runtime(&program, entry_name, args, host, runtime_leaves)
         .map_err(|error| vec![error])
@@ -136,7 +141,13 @@ pub fn run_bundle(
     } else {
         eval::RuntimeLeafAuthority::default()
     };
-    run_source_stream(bundle.source(), args, host, runtime_leaves)
+    run_source_stream(
+        bundle.source(),
+        args,
+        host,
+        runtime_leaves,
+        bundle.trusted_standard_global_range(),
+    )
 }
 
 /// Runs an explicitly trusted conformance bundle with its supplied finite
@@ -153,6 +164,7 @@ pub fn run_bundle_with_manifest_for_conformance(
         args,
         host,
         runtime_leaf_authority(bundle, manifest.runtime().clone()),
+        bundle.trusted_standard_global_range(),
     )
 }
 
@@ -171,6 +183,7 @@ pub fn run_bundle_entry_with_manifest_for_conformance(
         vec![],
         host,
         runtime_leaf_authority(bundle, manifest.runtime().clone()),
+        bundle.trusted_standard_global_range(),
     )
 }
 

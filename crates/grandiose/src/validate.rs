@@ -375,6 +375,29 @@ pub fn validate(program: &Program) -> Result<(), Vec<Diagnostic>> {
             }
         }
         for operation in &effect.operations {
+            let mut operation_generic_names = generic_names.clone();
+            for parameter in operation
+                .generics
+                .iter()
+                .flat_map(|generics| &generics.params)
+            {
+                if let Some(original) =
+                    operation_generic_names.insert(parameter.name.as_str(), parameter.span)
+                {
+                    errors.push(
+                        Diagnostic::error(
+                            "effect operation parameter declared more than once",
+                            format!(
+                                "generic parameter `{}` shadows or repeats an effect parameter",
+                                parameter.name
+                            ),
+                            parameter.span,
+                        )
+                        .with_code("G0113")
+                        .with_related(original, "the first parameter is here"),
+                    );
+                }
+            }
             if !operation_names.insert(operation.name.as_str()) {
                 errors.push(
                     Diagnostic::error(
@@ -422,6 +445,7 @@ pub fn validate(program: &Program) -> Result<(), Vec<Diagnostic>> {
     }
 
     for function in &program.functions {
+        let labeled_body = function.semantic_body();
         let generic_kinds = function
             .generics
             .iter()
@@ -430,12 +454,12 @@ pub fn validate(program: &Program) -> Result<(), Vec<Diagnostic>> {
             .collect();
         validate_expr(
             program,
-            &function.body,
+            &labeled_body,
             &effects,
             &generic_kinds,
             &mut errors,
         );
-        validate_label_scopes(&function.body, &mut errors);
+        validate_label_scopes(&labeled_body, &mut errors);
     }
     validate_trait_methods(program, &effects, &mut errors);
     let effectful_functions = program
@@ -1092,20 +1116,7 @@ fn validate_label_scopes(expression: &Expr, errors: &mut Vec<Diagnostic>) {
             destination: Option<&'ast TypeSyntax>,
             body: &'ast Expr,
         ) -> ControlFlow<()> {
-            if let Some(previous) = self.labels.get(label.name.as_ref()) {
-                self.errors.push(
-                    Diagnostic::error(
-                        "duplicate active label",
-                        format!("label `@{}` is already active in this lexical scope", label.name),
-                        label.span,
-                    )
-                    .with_code("G0131")
-                    .with_related(previous.binder, "the active label is introduced here")
-                    .with_help("rename one label; label identities are generative and cannot shadow an active brand"),
-                );
-                return self.visit_expr(body);
-            }
-            self.labels.insert(
+            let previous = self.labels.insert(
                 label.name.to_string(),
                 ActiveLabel {
                     binder: label.span,
@@ -1114,7 +1125,11 @@ fn validate_label_scopes(expression: &Expr, errors: &mut Vec<Diagnostic>) {
                 },
             );
             let result = self.visit_expr(body);
-            self.labels.remove(label.name.as_ref());
+            if let Some(previous) = previous {
+                self.labels.insert(label.name.to_string(), previous);
+            } else {
+                self.labels.remove(label.name.as_ref());
+            }
             result
         }
     }
@@ -1124,7 +1139,6 @@ fn validate_label_scopes(expression: &Expr, errors: &mut Vec<Diagnostic>) {
 
         fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<()> {
             match &expression.kind {
-                ExprKind::Labeled { label, body } => self.bind(label, false, None, body),
                 ExprKind::LabelDestination { label, ty, body } => {
                     self.bind(label, true, ty.as_deref(), body)
                 }
@@ -1142,12 +1156,15 @@ fn validate_label_scopes(expression: &Expr, errors: &mut Vec<Diagnostic>) {
                     }
                     ControlFlow::Continue(())
                 }
-                ExprKind::Leave { label, value } => {
+                ExprKind::Call(callee, arguments)
+                    if let ExprKind::LabelReference(label) = &callee.kind =>
+                {
+                    let value = arguments.first();
                     match self.labels.get(label.name.as_ref()) {
                         None => self.errors.push(
                             Diagnostic::error(
-                                "unknown leave destination",
-                                format!("`leave@{}` has no active lexical destination", label.name),
+                                "unknown label destination",
+                                format!("`@{}` has no active lexical destination", label.name),
                                 label.span,
                             )
                             .with_code("G0132"),
@@ -1155,29 +1172,19 @@ fn validate_label_scopes(expression: &Expr, errors: &mut Vec<Diagnostic>) {
                         Some(active) if !active.direct_destination => self.errors.push(
                             Diagnostic::error(
                                 "label is not a direct destination",
-                                format!(
-                                    "`@{}` introduces a label brand but no `Destination` evidence",
-                                    label.name
-                                ),
+                                format!("`@{}` does not carry a destination payload", label.name),
                                 label.span,
                             )
                             .with_code("G0133")
                             .with_related(active.binder, "this generative label is introduced here")
-                            .with_help(
-                                "use `label @name: Type { ... }` for a direct typed destination",
-                            ),
+                            .with_help("use `@name: Type { ... }` for a typed destination"),
                         ),
-                        Some(active)
-                            if !destination_accepts(active.destination, value.as_deref()) =>
-                        {
+                        Some(active) if !destination_accepts(active.destination, value) => {
                             self.errors.push(
                                 Diagnostic::error(
-                                    "leave value does not match destination",
-                                    format!(
-                                        "`leave@{}` supplies an incompatible value",
-                                        label.name
-                                    ),
-                                    value.as_deref().map_or(label.span, |value| value.span),
+                                    "label payload does not match destination",
+                                    format!("`@{}` supplies an incompatible value", label.name),
+                                    value.map_or(label.span, |value| value.span),
                                 )
                                 .with_code("G0134")
                                 .with_related(
@@ -1188,7 +1195,10 @@ fn validate_label_scopes(expression: &Expr, errors: &mut Vec<Diagnostic>) {
                         }
                         Some(_) => {}
                     }
-                    walk_expr(self, expression)
+                    for argument in arguments.iter() {
+                        self.visit_expr(argument)?;
+                    }
+                    ControlFlow::Continue(())
                 }
                 _ => walk_expr(self, expression),
             }
@@ -2082,10 +2092,12 @@ fn drop_body_has_outward_control(
                 }
                 // Structural resumption operations and direct label transfers
                 // are outward control without inspecting their operands.
-                ExprKind::Resume { .. }
-                | ExprKind::Cancel { .. }
-                | ExprKind::TailResume { .. }
-                | ExprKind::Leave { .. } => ControlFlow::Break(()),
+                ExprKind::Resume { .. } | ExprKind::Cancel { .. } | ExprKind::TailResume { .. } => {
+                    ControlFlow::Break(())
+                }
+                ExprKind::Call(callee, _) if matches!(callee.kind, ExprKind::LabelReference(_)) => {
+                    ControlFlow::Break(())
+                }
                 ExprKind::Handle {
                     computation,
                     clauses,

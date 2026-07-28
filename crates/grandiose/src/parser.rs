@@ -48,12 +48,12 @@ pub fn parse_recovering(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         cursor: 0,
         fixities,
         fixity_regions: Vec::new(),
-        legacy_equality_range: None,
         effect_paths: Vec::new(),
         type_const_arguments: Vec::new(),
         fixed_array_types: Vec::new(),
         numeric_literals: Vec::new(),
         handling_scrutinee: false,
+        in_whitespace_argument: false,
     }
     .program(diagnostics)
 }
@@ -75,14 +75,6 @@ pub fn parse_recovering_with_fixity_regions(
     tokens: Vec<Token>,
     fixity_regions: Vec<FixityRegion>,
 ) -> (Program, Vec<Diagnostic>) {
-    parse_recovering_with_regions_and_legacy_equality(tokens, fixity_regions, None)
-}
-
-pub(crate) fn parse_recovering_with_regions_and_legacy_equality(
-    tokens: Vec<Token>,
-    fixity_regions: Vec<FixityRegion>,
-    legacy_equality_range: Option<Span>,
-) -> (Program, Vec<Diagnostic>) {
     let mut diagnostics = Vec::new();
     let fixities = collect_fixities(&tokens, &mut diagnostics);
     Parser {
@@ -90,12 +82,12 @@ pub(crate) fn parse_recovering_with_regions_and_legacy_equality(
         cursor: 0,
         fixities,
         fixity_regions,
-        legacy_equality_range,
         effect_paths: Vec::new(),
         type_const_arguments: Vec::new(),
         fixed_array_types: Vec::new(),
         numeric_literals: Vec::new(),
         handling_scrutinee: false,
+        in_whitespace_argument: false,
     }
     .program(diagnostics)
 }
@@ -228,12 +220,14 @@ struct Parser {
     cursor: usize,
     fixities: HashMap<String, FixityEntry>,
     fixity_regions: Vec<FixityRegion>,
-    legacy_equality_range: Option<Span>,
     effect_paths: Vec<EffectPathSyntax>,
     type_const_arguments: Vec<crate::ast::TypeConstApplicationSyntax>,
     fixed_array_types: Vec<crate::ast::FixedArrayTypeSyntax>,
     numeric_literals: Vec<crate::ast::NumericLiteralSyntax>,
     handling_scrutinee: bool,
+    /// Whitespace application may not recursively consume another whitespace
+    /// application. Nested calls use the explicit `callee(...)` form.
+    in_whitespace_argument: bool,
 }
 
 impl Parser {
@@ -1138,6 +1132,7 @@ impl Parser {
         let (name, _) = self.ident("expected an effect name")?;
         let generics = self.generic_params()?;
         let generic_span = generics.as_ref().map(|generics| generics.span);
+        let where_clause = self.where_clause()?;
         self.expect(TokenKind::LBrace, "expected `{` after the effect name")?;
         let mut operations = Vec::new();
         while !self.at(&TokenKind::RBrace) {
@@ -1187,6 +1182,7 @@ impl Parser {
                     (1, Some(1), false)
                 };
             let (operation, operation_span) = self.ident("expected an operation name")?;
+            let operation_generics = self.generic_params()?;
             self.expect(TokenKind::LParen, "expected `(` after the operation name")?;
             let (params, _) = self.collect_comma_delimited(
                 TokenKind::RParen,
@@ -1201,8 +1197,11 @@ impl Parser {
                 } else {
                     Some(self.type_syntax()?)
                 };
+            let operation_where_clause = self.where_clause()?;
             operations.push(EffectOperationDecl {
                 name: operation,
+                generics: operation_generics,
+                where_clause: operation_where_clause,
                 params,
                 return_type,
                 terminal,
@@ -1218,6 +1217,7 @@ impl Parser {
             name,
             generics,
             generic_span,
+            where_clause,
             operations,
             span: start.join(end),
         })
@@ -1893,14 +1893,22 @@ impl Parser {
             if operator.precedence < min_precedence {
                 break;
             }
+            if !operator.is_word {
+                let left = operands.last().expect("an infix has a left operand");
+                let right = self.tokens.get(self.cursor + operator.token_count);
+                if left.span.end == operator.span.start
+                    || right.is_none_or(|token| operator.span.end == token.span.start)
+                {
+                    break;
+                }
+            }
             for _ in 0..operator.token_count {
                 self.bump();
             }
             operands.push(self.operand()?);
             operators.push(operator);
         }
-        let mut expression =
-            Self::group_operator_sequence(operands, operators, self.legacy_equality_range)?;
+        let mut expression = Self::group_operator_sequence(operands, operators)?;
         if min_precedence == 0 && self.at_kw(Kw::Is) {
             self.bump();
             let pattern = self.pattern()?;
@@ -1999,13 +2007,8 @@ impl Parser {
     fn group_operator_sequence(
         operands: Vec<Expr>,
         operators: Vec<InfixOccurrence>,
-        legacy_equality_range: Option<Span>,
     ) -> Result<Expr, Diagnostic> {
-        fn reduce(
-            output: &mut Vec<Expr>,
-            operator: &InfixOccurrence,
-            legacy_equality_range: Option<Span>,
-        ) {
+        fn reduce(output: &mut Vec<Expr>, operator: &InfixOccurrence) {
             let rhs = output
                 .pop()
                 .expect("grouping keeps one operand per operator");
@@ -2013,19 +2016,24 @@ impl Parser {
                 .pop()
                 .expect("grouping keeps one operand per operator");
             let span = lhs.span.join(rhs.span);
-            let legacy_equality = legacy_equality_range.is_some_and(|range| {
-                operator.span.start >= range.start && operator.span.end <= range.end
-            });
-            let kind = if operator.spelling == "==" && !legacy_equality {
-                ExprKind::Call(
+            let kind = match operator.spelling.as_str() {
+                "+" | "==" | "<" | ">" => ExprKind::Call(
                     Rc::new(Expr {
-                        kind: ExprKind::Variable(Rc::from([Rc::from("Equal"), Rc::from("==")])),
+                        kind: ExprKind::Variable(Rc::from([
+                            Rc::from(match operator.spelling.as_str() {
+                                "+" => "Add",
+                                "==" => "Equal",
+                                "<" => "Less",
+                                ">" => "Greater",
+                                _ => unreachable!(),
+                            }),
+                            Rc::from(operator.spelling.as_str()),
+                        ])),
                         span: operator.span,
                     }),
                     Rc::new(vec![lhs, rhs]),
-                )
-            } else {
-                match lowered_binary(&operator.spelling) {
+                ),
+                _ => match lowered_binary(&operator.spelling) {
                     Some(op) if !operator.is_word => ExprKind::Binary {
                         op,
                         lhs: Rc::new(lhs),
@@ -2040,7 +2048,7 @@ impl Parser {
                         }),
                         Rc::new(vec![lhs, rhs]),
                     ),
-                }
+                },
             };
             output.push(Expr { kind, span });
         }
@@ -2073,7 +2081,7 @@ impl Parser {
             let operand = operands.next().expect("one operand per operator");
             while let Some(top) = pending.last() {
                 if top.precedence > operator.precedence {
-                    reduce(&mut output, top, legacy_equality_range);
+                    reduce(&mut output, top);
                     pending.pop();
                     continue;
                 }
@@ -2091,7 +2099,7 @@ impl Parser {
                     }
                     match operator.associativity {
                         Associativity::Left => {
-                            reduce(&mut output, top, legacy_equality_range);
+                            reduce(&mut output, top);
                             pending.pop();
                             continue;
                         }
@@ -2115,7 +2123,7 @@ impl Parser {
             output.push(operand);
         }
         while let Some(top) = pending.pop() {
-            reduce(&mut output, &top, legacy_equality_range);
+            reduce(&mut output, &top);
         }
         let expression = output.pop().expect("grouping yields one expression");
         debug_assert!(output.is_empty());
@@ -2229,61 +2237,6 @@ impl Parser {
         Ok(Expr { kind, span })
     }
 
-    /// `label @done: i32 { body }` — a direct typed destination declaration.
-    fn label_destination(&mut self, start: Span) -> Result<Expr, Diagnostic> {
-        let label = self.label_token("expected `@name` after `label`")?;
-        self.expect(TokenKind::Colon, "expected `:` after the label binder")?;
-        let ty = if self.at(&TokenKind::LBrace) {
-            None
-        } else {
-            Some(Rc::new(self.type_syntax()?))
-        };
-        let body = self.block()?;
-        let span = start.join(body.span);
-        Ok(Expr {
-            kind: ExprKind::LabelDestination {
-                label,
-                ty,
-                body: Rc::new(body),
-            },
-            span,
-        })
-    }
-
-    /// `leave@done(42)` — direct typed transfer.
-    fn leave(&mut self, start: Span) -> Result<Expr, Diagnostic> {
-        let label = self.label_token("expected `@name` after `leave`")?;
-        let mut end = label.span;
-        let value = if self.eat(&TokenKind::LParen) {
-            let value = if self.at(&TokenKind::RParen) {
-                None
-            } else {
-                Some(Rc::new(self.expression(0)?))
-            };
-            end = self
-                .expect(TokenKind::RParen, "expected `)` after the leave value")?
-                .span;
-            value
-        } else {
-            None
-        };
-        Ok(Expr {
-            kind: ExprKind::Leave { label, value },
-            span: start.join(end),
-        })
-    }
-
-    fn label_token(&mut self, message: &str) -> Result<LabelSyntax, Diagnostic> {
-        let token = self.bump().clone();
-        match token.kind {
-            TokenKind::Label(name) => Ok(LabelSyntax {
-                name: Rc::from(name.as_str()),
-                span: token.span,
-            }),
-            _ => Err(Diagnostic::error("expected a label", message, token.span)),
-        }
-    }
-
     fn primary(&mut self) -> Result<Expr, Diagnostic> {
         if self.at_kw(Kw::Perform) {
             return self.perform();
@@ -2334,7 +2287,11 @@ impl Parser {
                 span,
             });
         }
-        if self.at(&TokenKind::Star) {
+        if self.at(&TokenKind::Star)
+            && self
+                .peek_n(1)
+                .is_some_and(|operand| self.peek().span.end == operand.span.start)
+        {
             let start = self.bump().span;
             let operand = self.primary()?;
             let span = start.join(operand.span);
@@ -2412,8 +2369,6 @@ impl Parser {
             TokenKind::Keyword(keyword @ (Kw::Resume | Kw::Cancel | Kw::Tail)) => {
                 return self.resumption_operation(keyword, token.span);
             }
-            TokenKind::Keyword(Kw::Label) => return self.label_destination(token.span),
-            TokenKind::Keyword(Kw::Leave) => return self.leave(token.span),
             TokenKind::Label(name) => {
                 let label = LabelSyntax {
                     name: Rc::from(name.as_str()),
@@ -2421,24 +2376,68 @@ impl Parser {
                 };
                 if self.at(&TokenKind::Colon) {
                     self.bump();
+                    let ty = if self.at(&TokenKind::LBrace) {
+                        None
+                    } else {
+                        Some(Rc::new(self.type_syntax()?))
+                    };
                     let body = self.block()?;
                     let span = token.span.join(body.span);
                     return Ok(Expr {
-                        kind: ExprKind::Labeled {
+                        kind: ExprKind::LabelDestination {
                             label,
+                            ty,
                             body: Rc::new(body),
                         },
                         span,
                     });
                 }
-                return Ok(Expr {
+                Expr {
                     kind: ExprKind::LabelReference(label),
                     span: token.span,
-                });
+                }
             }
             TokenKind::Ident(name) => {
+                if name == "label" && matches!(self.peek().kind, TokenKind::Label(_)) {
+                    return Err(Diagnostic::error(
+                        "removed label syntax",
+                        "`label @name: T { ... }` is no longer part of the grammar",
+                        token.span,
+                    )
+                    .with_help("write `@name: T { ... }`"));
+                }
+                if name == "leave" && matches!(self.peek().kind, TokenKind::Label(_)) {
+                    return Err(Diagnostic::error(
+                        "removed label syntax",
+                        "`leave@name(value)` is no longer part of the grammar",
+                        token.span,
+                    )
+                    .with_help("write `@name(value)`"));
+                }
                 let mut path: Vec<Rc<str>> = vec![Rc::from(name.as_str())];
                 let mut end = token.span;
+                while self.eat(&TokenKind::DoubleColon) {
+                    let (part, span) = self.ident("expected a name after `::`")?;
+                    path.push(Rc::from(part.as_str()));
+                    end = span;
+                }
+                Expr {
+                    kind: ExprKind::Variable(Rc::from(path)),
+                    span: token.span.join(end),
+                }
+            }
+            TokenKind::Dollar => {
+                let (name, name_span) =
+                    self.ident("expected a callable name immediately after `$`")?;
+                if token.span.end != name_span.start {
+                    return Err(Diagnostic::error(
+                        "separated callable reference",
+                        "`$` must be directly adjacent to the callable name",
+                        token.span.join(name_span),
+                    ));
+                }
+                let mut path: Vec<Rc<str>> = vec![Rc::from(name.as_str())];
+                let mut end = name_span;
                 while self.eat(&TokenKind::DoubleColon) {
                     let (part, span) = self.ident("expected a name after `::`")?;
                     path.push(Rc::from(part.as_str()));
@@ -2603,49 +2602,17 @@ impl Parser {
                     span,
                 };
             } else if matches!(&self.peek().kind, TokenKind::Label(_))
-                && matches!(&expr.kind, ExprKind::Call(_, _) | ExprKind::Variable(_))
                 && matches!(
                     self.peek_n(1).map(|token| &token.kind),
                     Some(TokenKind::Colon)
                 )
-                && matches!(
-                    self.peek_n(2).map(|token| &token.kind),
-                    Some(TokenKind::LBrace)
-                )
             {
-                // A labeled trailing application: `loop @outer: { body }`.
-                let label = self.label_token("expected a label")?;
-                self.bump();
-                let block = self.block()?;
-                let ExprKind::Block(statements) = &block.kind else {
-                    unreachable!()
-                };
-                let argument = Expr {
-                    kind: ExprKind::Labeled {
-                        label: label.clone(),
-                        body: Rc::new(Expr {
-                            kind: ExprKind::ContextBlock(statements.clone()),
-                            span: block.span,
-                        }),
-                    },
-                    span: label.span.join(block.span),
-                };
-                let span = expr.span.join(block.span);
-                expr = match expr.kind {
-                    ExprKind::Call(callee, args) => {
-                        let mut args =
-                            Rc::try_unwrap(args).unwrap_or_else(|shared| (*shared).clone());
-                        args.push(argument);
-                        Expr {
-                            kind: ExprKind::Call(callee, Rc::new(args)),
-                            span,
-                        }
-                    }
-                    _ => Expr {
-                        kind: ExprKind::Call(Rc::new(expr), Rc::new(vec![argument])),
-                        span,
-                    },
-                };
+                return Err(Diagnostic::error(
+                    "removed labeled trailing application",
+                    "a label binder may no longer trail a callable application",
+                    self.peek().span,
+                )
+                .with_help("introduce `@name: { ... }` as an ordinary enclosing binder"));
             } else if self.at(&TokenKind::LBrace)
                 && matches!(&expr.kind, ExprKind::Variable(path)
                     if path.len() == 1
@@ -2728,11 +2695,71 @@ impl Parser {
                     kind: ExprKind::Call(Rc::new(expr), Rc::new(args)),
                     span,
                 };
+            } else if !self.in_whitespace_argument
+                && self.starts_whitespace_argument()
+                && expr.span.end < self.peek().span.start
+            {
+                let callee = expr;
+                let mut args = Vec::new();
+                loop {
+                    let previous = self.in_whitespace_argument;
+                    self.in_whitespace_argument = true;
+                    let argument = self.expression(0);
+                    self.in_whitespace_argument = previous;
+                    args.push(argument?);
+                    if !self.eat(&TokenKind::Comma) {
+                        break;
+                    }
+                    if !self.starts_expression() {
+                        return Err(self.error(
+                            "expected a call argument",
+                            "expected an expression after `,`",
+                        ));
+                    }
+                }
+                let span = callee.span.join(args.last().expect("one argument").span);
+                expr = Expr {
+                    kind: ExprKind::Call(Rc::new(callee), Rc::new(args)),
+                    span,
+                };
             } else {
                 break;
             }
         }
         Ok(expr)
+    }
+
+    fn starts_expression(&self) -> bool {
+        matches!(
+            self.peek().kind,
+            TokenKind::Number(_)
+                | TokenKind::String(_)
+                | TokenKind::Char(_)
+                | TokenKind::Byte(_)
+                | TokenKind::ByteString(_)
+                | TokenKind::Ident(_)
+                | TokenKind::Label(_)
+                | TokenKind::Keyword(_)
+                | TokenKind::LParen
+                | TokenKind::LBracket
+                | TokenKind::LBrace
+                | TokenKind::Minus
+                | TokenKind::Amp
+                | TokenKind::Star
+                | TokenKind::Dollar
+        )
+    }
+
+    fn starts_whitespace_argument(&self) -> bool {
+        self.starts_expression()
+            && self.peek_infix().is_none()
+            && !matches!(
+                self.peek().kind,
+                TokenKind::LBrace
+                    | TokenKind::Keyword(Kw::Is)
+                    | TokenKind::Keyword(Kw::Where)
+                    | TokenKind::Keyword(Kw::Impl)
+            )
     }
 
     /// Elaborate library `match(value) { pattern => body, ... }` into the
@@ -4091,10 +4118,6 @@ fn normalize_effect_surface(program: &mut Program) -> Vec<Diagnostic> {
             operations.remove(&(owner.clone(), binding.name.clone()));
         }
     }
-    if operations.is_empty() {
-        return Vec::new();
-    }
-
     fn variable(name: &str, span: Span) -> Expr {
         Expr {
             kind: ExprKind::Variable(Rc::from([Rc::<str>::from(name)])),
@@ -4358,6 +4381,17 @@ fn normalize_effect_surface(program: &mut Program) -> Vec<Diagnostic> {
                         errors,
                     );
                 }
+                if matches!(callee.kind, ExprKind::LabelReference(_)) && arguments.len() > 1 {
+                    errors.push(
+                        Diagnostic::error(
+                            "invalid label invocation",
+                            "a label is invoked with zero or one destination value",
+                            expression.span,
+                        )
+                        .with_code("G0143"),
+                    );
+                    return;
+                }
                 let path = match &callee.kind {
                     ExprKind::Variable(path) => Some(path.clone()),
                     _ => None,
@@ -4488,7 +4522,6 @@ fn normalize_effect_surface(program: &mut Program) -> Vec<Diagnostic> {
             }
             ExprKind::Move(value)
             | ExprKind::Field(value, _)
-            | ExprKind::Labeled { body: value, .. }
             | ExprKind::LabelDestination { body: value, .. }
             | ExprKind::Unary { operand: value, .. } => normalize(
                 Rc::make_mut(value),
@@ -4551,18 +4584,6 @@ fn normalize_effect_surface(program: &mut Program) -> Vec<Diagnostic> {
                     completion_sites,
                     errors,
                 );
-            }
-            ExprKind::Leave { value, .. } => {
-                if let Some(value) = value {
-                    normalize(
-                        Rc::make_mut(value),
-                        operations,
-                        resumptions,
-                        effect_paths,
-                        completion_sites,
-                        errors,
-                    );
-                }
             }
             ExprKind::Is { subject, .. } => normalize(
                 Rc::make_mut(subject),

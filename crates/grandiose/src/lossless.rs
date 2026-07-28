@@ -139,12 +139,21 @@ impl LosslessLexer<'_> {
     }
 
     fn identifier_tail(&mut self) {
-        while self
-            .bytes
-            .get(self.cursor)
-            .is_some_and(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-        {
-            self.cursor += 1;
+        while let Some(byte) = self.bytes.get(self.cursor).copied() {
+            if byte.is_ascii_alphanumeric() || byte == b'_' {
+                self.cursor += 1;
+                continue;
+            }
+            if byte == b'-'
+                && self
+                    .bytes
+                    .get(self.cursor + 1)
+                    .is_some_and(|next| next.is_ascii_alphanumeric() || *next == b'_')
+            {
+                self.cursor += 2;
+                continue;
+            }
+            break;
         }
     }
 

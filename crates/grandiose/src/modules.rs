@@ -721,7 +721,6 @@ impl AstRewriter<'_> {
             }
             ExprKind::Move(value)
             | ExprKind::Unary { operand: value, .. }
-            | ExprKind::Labeled { body: value, .. }
             | ExprKind::LabelDestination { body: value, .. }
             | ExprKind::Cancel { resumption: value }
             | ExprKind::Field(value, _) => self.rewrite_expression(Rc::make_mut(value), bound),
@@ -750,9 +749,7 @@ impl AstRewriter<'_> {
                 nested.extend(params.iter().map(|parameter| parameter.name.clone()));
                 self.rewrite_expression(Rc::make_mut(body), &nested);
             }
-            ExprKind::Leave { value, .. }
-            | ExprKind::Resume { value, .. }
-            | ExprKind::TailResume { value, .. } => {
+            ExprKind::Resume { value, .. } | ExprKind::TailResume { value, .. } => {
                 if let Some(value) = value {
                     self.rewrite_expression(Rc::make_mut(value), bound);
                 }
@@ -1086,7 +1083,9 @@ fn rewrite_program_ast(
             .resolution
             .owner(bundle, declaration.span)
             .unwrap_or(ModuleId(0));
+        rewrite.rewrite_where_clause(declaration.where_clause.as_mut());
         for operation in &mut declaration.operations {
+            rewrite.rewrite_where_clause(operation.where_clause.as_mut());
             for parameter in &mut operation.params {
                 rewrite.rewrite_type(&mut parameter.ty);
             }
@@ -1584,14 +1583,7 @@ fn parse_bundle_tokens(
     bundle: &SourceBundle,
     tokens: Vec<crate::lexer::Token>,
 ) -> Result<Program, Vec<Diagnostic>> {
-    let legacy_equality_range = bundle
-        .trusted_standard_global_range()
-        .map(|range| Span::new(range.start, range.end));
-    let (probe, diagnostics) = crate::parser::parse_recovering_with_regions_and_legacy_equality(
-        tokens.clone(),
-        Vec::new(),
-        legacy_equality_range,
-    );
+    let (probe, diagnostics) = crate::parser::parse_recovering(tokens.clone());
     if !diagnostics.is_empty() {
         return Err(diagnostics);
     }
@@ -1599,11 +1591,8 @@ fn parse_bundle_tokens(
         return Ok(probe);
     }
     let regions = fixity_regions(bundle, &probe)?;
-    let (program, diagnostics) = crate::parser::parse_recovering_with_regions_and_legacy_equality(
-        tokens,
-        regions,
-        legacy_equality_range,
-    );
+    let (program, diagnostics) =
+        crate::parser::parse_recovering_with_fixity_regions(tokens, regions);
     if diagnostics.is_empty() {
         Ok(program)
     } else {

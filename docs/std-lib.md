@@ -216,7 +216,9 @@ The standard library reconstructs conventional control exclusively from the
 language core:
 
 - matching uses a private label-indexed terminal case effect;
-- return uses `CallDestination` evidence and direct `leave`;
+- early return invokes the named callable's implicit `@function` label;
+- result propagation may use `try(value, @function)`, whose label-generic
+  specialization is control-inlined to a direct `LEAVE`;
 - loops use tail calls plus a fresh label-indexed loop-control effect;
 - breaking with a value may produce `Option<T>`/`Result<T,E>`, so a subsequent
   `else` supplies a lazy default;

@@ -1312,6 +1312,9 @@ fn semantic_tokens_distinguish_effect_operations_enum_variants_and_functions() {
         "        Stop::stop(value) => value\n",
         "    }\n",
         "}\n",
+        "early() -> i64 { @early(42) }\n",
+        "die() -> ! { abort() }\n",
+        "again() -> ! { die() }\n",
         "main() -> () { () }\n",
     );
     let main = project(&root, "app", source);
@@ -1320,6 +1323,10 @@ fn semantic_tokens_distinguish_effect_operations_enum_variants_and_functions() {
     assert_eq!(
         initialize["capabilities"]["semanticTokensProvider"]["legend"]["tokenTypes"][12],
         "enumMember"
+    );
+    assert_eq!(
+        initialize["capabilities"]["semanticTokensProvider"]["legend"]["tokenTypes"][13],
+        "label"
     );
     session.notify("initialized", json!({}));
     session.notify(
@@ -1365,4 +1372,12 @@ fn semantic_tokens_distinguish_effect_operations_enum_variants_and_functions() {
         "enum prefix: {tokens:?}"
     );
     assert!(tokens.contains(&(2, ok, 2, 12)), "enum variant: {tokens:?}");
+    assert!(
+        tokens.contains(&(9, 17, 6, 13)),
+        "diverging label call: {tokens:?}"
+    );
+    assert!(
+        tokens.contains(&(11, 15, 3, 13)),
+        "ordinary diverging call: {tokens:?}"
+    );
 }

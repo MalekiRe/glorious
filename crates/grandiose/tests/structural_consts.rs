@@ -36,12 +36,8 @@ fn intrinsic(id: u64, display_name: &str, role: IntrinsicRole) -> ManifestTrait 
             vec![item("After", AssociatedItemKind::Type)],
             TraitPolicy::CompilerSealed,
         ),
-        IntrinsicRole::Label | IntrinsicRole::Environment => {
-            (vec![Lifetime], vec![], TraitPolicy::CompilerSealed)
-        }
-        IntrinsicRole::Destination | IntrinsicRole::CallDestination => {
-            (vec![Lifetime, Type], vec![], TraitPolicy::CompilerSealed)
-        }
+        IntrinsicRole::Label => (vec![Type], vec![], TraitPolicy::CompilerSealed),
+        IntrinsicRole::Environment => (vec![Lifetime], vec![], TraitPolicy::CompilerSealed),
     };
     ManifestTrait {
         id,
@@ -72,8 +68,6 @@ fn manifest_with(entries: impl IntoIterator<Item = ManifestTrait>) -> TrustedTra
         intrinsic(4, "RunsIn", IntrinsicRole::RunsIn),
         intrinsic(5, "Label", IntrinsicRole::Label),
         intrinsic(6, "Environment", IntrinsicRole::Environment),
-        intrinsic(7, "Destination", IntrinsicRole::Destination),
-        intrinsic(8, "CallDestination", IntrinsicRole::CallDestination),
     ];
     declarations.extend(entries);
     TrustedTraitManifest::new(declarations).unwrap()

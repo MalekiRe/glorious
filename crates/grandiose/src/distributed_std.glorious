@@ -228,7 +228,13 @@ __g1_array_finish_drained<T>(value: Array<T>) { () }
 // this trusted source segment selects the primitive; copying one of these
 // spellings into user source creates only an ordinary function. Public source
 // calls go through the ordinary generic wrappers immediately below.
+__g1_int_checked_add<T>(left: T, right: T) -> T { () }
+
 __g1_int_equal<T>(left: T, right: T) -> u32 { () }
+
+__g1_int_less<T>(left: T, right: T) -> u32 { () }
+
+__g1_int_greater<T>(left: T, right: T) -> u32 { () }
 
 __g1_int_wrapping_add<T>(left: T, right: T) -> T { () }
 
@@ -638,6 +644,21 @@ __g1_bool_from_u32(value: u32) -> Bool {
     }
 }
 
+// Numeric infrastructure which deliberately carries an erased integer width
+// uses the trusted leaves directly. Ordinary source operators below still
+// select the public symbolic traits.
+__g1_integer_equal<T>(left: T, right: T) -> Bool {
+    __g1_bool_from_u32(__g1_int_equal(move left, move right))
+}
+
+__g1_integer_less<T>(left: T, right: T) -> Bool {
+    __g1_bool_from_u32(__g1_int_less(move left, move right))
+}
+
+__g1_integer_add<T>(left: T, right: T) -> T {
+    __g1_int_checked_add(move left, move right)
+}
+
 // Public IEEE arithmetic and comparison.  These wrappers retain ordinary
 // source identities; only their calls into the trusted declarations above
 // select frozen primitives.
@@ -949,15 +970,18 @@ checked_f64_to_isize(value: f64) -> Option<isize> {
 // only scalar-specific mechanism involved. The unrestricted-use bound is the
 // precise ownership contract for inspecting candidates and discarding the
 // values which are not selected.
-min<T>(left: T, right: T) -> T where T: Use<[0, *]> {
+min<T>(left: T, right: T) -> T where T: Use<[0, *]>,
+T: Less {
     handle left < right { Result::Ok(_) => left, Result::Err(_) => right }
 }
 
-max<T>(left: T, right: T) -> T where T: Use<[0, *]> {
+max<T>(left: T, right: T) -> T where T: Use<[0, *]>,
+T: Less {
     handle left < right { Result::Ok(_) => right, Result::Err(_) => left }
 }
 
-clamp<T>(value: T, lower: T, upper: T) -> T where T: Use<[0, *]> {
+clamp<T>(value: T, lower: T, upper: T) -> T where T: Use<[0, *]>,
+T: Less {
     handle value < lower {
         Result::Ok(_) => lower,
         Result::Err(_) => handle upper < value { Result::Ok(_) => upper, Result::Err(_) => value }
@@ -967,7 +991,10 @@ clamp<T>(value: T, lower: T, upper: T) -> T where T: Use<[0, *]> {
 __g1_checked_conversion_valid<T, U>(value: T, candidate: U, roundtrip: T) -> Bool where T: Use<
     [0, *]
 >,
-U: Use<[0, *]> {
+T: Equal,
+T: Less,
+U: Use<[0, *]>,
+U: Less {
     handle value == roundtrip {
         Result::Ok(_) => handle value < 0 {
             Result::Ok(_) => candidate < 0,
@@ -2344,7 +2371,7 @@ __g1_range_min(left: usize, right: usize) -> usize {
 __g1_range_intersection(left: &Range<usize>, right: &Range<usize>) -> Option<Range<usize>> {
     let start = __g1_range_max(left.start, right.start);
     let end = __g1_range_min(left.end, right.end);
-    handle start < end {
+    handle __g1_integer_less(start, end) {
         Result::Ok(_) => __g1_range_some(__g1_range_usize(move start, move end)),
         Result::Err(_) => __g1_range_none()
     }
@@ -2428,7 +2455,7 @@ __g1_bytes_eq_at(left: Bytes, right: Bytes, index: usize, length: usize) -> Bool
     handle __Branch::select(index == length) {
         __Branch::select(true) => true,
         __Branch::select(false) => handle __Branch::select(
-            __g1_bytes_get(left, index) == __g1_bytes_get(right, index)
+            __g1_integer_equal(__g1_bytes_get(left, index), __g1_bytes_get(right, index))
         ) {
             __Branch::select(true) => __g1_bytes_eq_at(
                 move left,
@@ -2446,7 +2473,7 @@ __g1_bytes_eq(left: &Bytes, right: &Bytes) -> Bool {
     let right_owned = *right;
     let left_length = __g1_bytes_len(left_owned);
     let right_length = __g1_bytes_len(right_owned);
-    handle __Branch::select(left_length == right_length) {
+    handle __Branch::select(__g1_integer_equal(left_length, right_length)) {
         __Branch::select(true) => __g1_bytes_eq_at(left_owned, right_owned, 0, left_length),
         __Branch::select(false) => false
     }
@@ -2493,7 +2520,7 @@ __g1_utf8_second(value: Bytes, sequence_start: usize, minimum: u8, maximum: u8, 
     handle __Branch::select(sequence_start < length) {
         __Branch::select(true) => {
             let second_index = __g1_usize_successor(sequence_start);
-            handle __Branch::select(second_index < length) {
+            handle __Branch::select(__g1_integer_less(second_index, length)) {
                 __Branch::select(true) => {
                     let second = __g1_bytes_get(value, second_index);
                     handle __Branch::select(minimum <= second) {
@@ -3436,13 +3463,13 @@ __g1_vec_swap_distinct<T>(value: &mut Vec<T>, left: usize, right: usize) -> Bool
 __g1_vec_swap_equal<T>(value: &mut Vec<T>, left: usize, right: usize) -> Bool {
     handle left == right {
         Result::Ok(_) => true,
-        Result::Err(_) => __g1_vec_swap_distinct(&mut * value, left, right)
+        Result::Err(_) => __g1_vec_swap_distinct(&mut *value, left, right)
     }
 }
 
 __g1_vec_swap_right<T>(value: &mut Vec<T>, left: usize, right: usize, length: usize) -> Bool {
     handle right < length {
-        Result::Ok(_) => __g1_vec_swap_equal(&mut * value, left, right),
+        Result::Ok(_) => __g1_vec_swap_equal(&mut *value, left, right),
         Result::Err(_) => false
     }
 }
@@ -3450,7 +3477,7 @@ __g1_vec_swap_right<T>(value: &mut Vec<T>, left: usize, right: usize, length: us
 __g1_vec_swap<T>(value: &mut Vec<T>, left: usize, right: usize) -> Bool {
     let length = __g1_array_len(&value.storage);
     handle left < length {
-        Result::Ok(_) => __g1_vec_swap_right(&mut * value, left, right, length),
+        Result::Ok(_) => __g1_vec_swap_right(&mut *value, left, right, length),
         Result::Err(_) => false
     }
 }
@@ -3458,7 +3485,7 @@ __g1_vec_swap<T>(value: &mut Vec<T>, left: usize, right: usize) -> Bool {
 __g1_vec_reverse_between<T>(value: &mut Vec<T>, left: usize, right: usize) {
     handle __Branch::select(left < right) {
         __Branch::select(true) => {
-            __g1_vec_swap(&mut * value, left, right);
+            __g1_vec_swap(&mut *value, left, right);
             __g1_vec_reverse_between(move value, left + 1, right - 1)
         },
         __Branch::select(false) => ()
@@ -3662,7 +3689,10 @@ __g1_vec_deque_grow_once<T>(value: VecDeque<T>) -> VecDeque<T> {
         Result::Ok(_) => __g1_vec_deque_grow(move value, 1),
         // Ordinary usize addition is checked; overflow terminates before any
         // owned state is lost rather than producing a wrapped capacity.
-        Result::Err(_) => __g1_vec_deque_grow(move value, capacity + capacity)
+        Result::Err(_) => __g1_vec_deque_grow(
+            move value,
+            __g1_integer_add(capacity, capacity)
+        )
     }
 }
 
@@ -3685,14 +3715,14 @@ __g1_vec_deque_finish_empty<T>(value: VecDeque<T>) {
 }
 
 __g1_vec_deque_reserve<T>(value: &mut VecDeque<T>, additional: usize) {
-    let old = replace(&mut * value, __g1_vec_deque_new());
+    let old = replace(&mut *value, __g1_vec_deque_new());
     let grown = __g1_vec_deque_reserve_owned(move old, additional);
-    let placeholder = replace(&mut * value, move grown);
+    let placeholder = replace(&mut *value, move grown);
     __g1_vec_deque_finish_empty(move placeholder)
 }
 
 __g1_vec_deque_push_back<T>(value: &mut VecDeque<T>, item: T) {
-    __g1_vec_deque_reserve(&mut * value, 1);
+    __g1_vec_deque_reserve(&mut *value, 1);
     let capacity = __g1_vec_deque_capacity(&*value);
     let index = __g1_vec_deque_wrap_add(value.head, value.length, capacity);
     __g1_vec_deque_place(&mut value.slots, index, capacity, move item);
@@ -3701,7 +3731,7 @@ __g1_vec_deque_push_back<T>(value: &mut VecDeque<T>, item: T) {
 }
 
 __g1_vec_deque_push_front<T>(value: &mut VecDeque<T>, item: T) {
-    __g1_vec_deque_reserve(&mut * value, 1);
+    __g1_vec_deque_reserve(&mut *value, 1);
     let capacity = __g1_vec_deque_capacity(&*value);
     let head = __g1_vec_deque_wrap_previous(value.head, capacity);
     __g1_vec_deque_place(&mut value.slots, head, capacity, move item);
@@ -3785,7 +3815,7 @@ __g1_vec_deque_clear<T>(value: &mut VecDeque<T>) where T: Use<[0, 0]> {
 __g1_vec_rotate_to_end<T>(value: &mut Vec<T>, cursor: usize, last: usize) {
     handle __Branch::select(cursor < last) {
         __Branch::select(true) => {
-            __g1_vec_swap(&mut * value, cursor, cursor + 1);
+            __g1_vec_swap(&mut *value, cursor, cursor + 1);
             __g1_vec_rotate_to_end(move value, cursor + 1, last)
         },
         __Branch::select(false) => ()
@@ -3796,7 +3826,7 @@ __g1_vec_remove<T>(value: &mut Vec<T>, index: usize) -> Option<T> {
     let length = __g1_array_len(&value.storage);
     handle index < length {
         Result::Ok(_) => {
-            __g1_vec_rotate_to_end(&mut * value, index, length - 1);
+            __g1_vec_rotate_to_end(&mut *value, index, length - 1);
             Option::Some(__g1_array_pop_move(&mut value.storage))
         },
         Result::Err(_) => None
@@ -3807,7 +3837,7 @@ __g1_vec_swap_remove<T>(value: &mut Vec<T>, index: usize) -> Option<T> {
     let length = __g1_array_len(&value.storage);
     handle index < length {
         Result::Ok(_) => {
-            __g1_vec_swap(&mut * value, index, length - 1);
+            __g1_vec_swap(&mut *value, index, length - 1);
             Option::Some(__g1_array_pop_move(&mut value.storage))
         },
         Result::Err(_) => None
@@ -3817,7 +3847,7 @@ __g1_vec_swap_remove<T>(value: &mut Vec<T>, index: usize) -> Option<T> {
 __g1_vec_rotate_inserted<T>(value: &mut Vec<T>, cursor: usize, destination: usize) {
     handle __Branch::select(destination < cursor) {
         __Branch::select(true) => {
-            __g1_vec_swap(&mut * value, cursor, cursor - 1);
+            __g1_vec_swap(&mut *value, cursor, cursor - 1);
             __g1_vec_rotate_inserted(move value, cursor - 1, destination)
         },
         __Branch::select(false) => ()
@@ -3830,7 +3860,7 @@ __g1_vec_insert<T>(value: &mut Vec<T>, index: usize, item: T) -> Result<(), T> {
     handle __Branch::select(index <= length) {
         __Branch::select(true) => {
             __g1_array_push_move(&mut value.storage, move item);
-            __g1_vec_rotate_inserted(&mut * value, length, index);
+            __g1_vec_rotate_inserted(&mut *value, length, index);
             Result::Ok(())
         },
         __Branch::select(false) => Result::Err(move item)
@@ -3863,7 +3893,7 @@ __g1_vec_split_pop<T>(value: &mut Vec<T>, output: &mut Vec<T>, remaining: usize)
     handle remaining == 0 {
         Result::Ok(_) => (),
         Result::Err(_) => {
-            Vec::push(&mut * output, __g1_array_pop_move(&mut value.storage));
+            Vec::push(&mut *output, __g1_array_pop_move(&mut value.storage));
             __g1_vec_split_pop(
                 move value,
                 move output,
@@ -3898,7 +3928,7 @@ __g1_vec_drain<T>(value: &mut Vec<T>, range: Range<usize>) -> Result<Vec<T>, ()>
         Result::Ok(_) => handle end <= length {
             Result::Err(_) => Result::Err(()),
             Result::Ok(_) => {
-                let drained_and_after = __g1_vec_split_off_unchecked(&mut * value, start);
+                let drained_and_after = __g1_vec_split_off_unchecked(&mut *value, start);
                 let after = __g1_vec_split_off_unchecked(&mut drained_and_after, end - start);
                 Vec::append(move value, move after);
                 Result::Ok(move drained_and_after)
@@ -4585,7 +4615,7 @@ __g1_string_builder_append_u64_digits(builder: &mut StringBuilder, value: u64) {
         Result::Err(_) => {
             let quotient = __g1_u64_div(value, 10);
             let remainder = __g1_u64_rem(value, 10);
-            __g1_string_builder_append_u64_digits(&mut * builder, move quotient);
+            __g1_string_builder_append_u64_digits(&mut *builder, move quotient);
             __g1_string_builder_push_digit(move builder, move remainder)
         }
     }
@@ -4604,7 +4634,7 @@ __g1_string_builder_append_u128_digits(builder: &mut StringBuilder, value: u128)
         Result::Err(_) => {
             let quotient = __g1_u128_div(value, 10);
             let remainder = __g1_u128_rem(value, 10);
-            __g1_string_builder_append_u128_digits(&mut * builder, move quotient);
+            __g1_string_builder_append_u128_digits(&mut *builder, move quotient);
             __g1_string_builder_push_digit(move builder, wrapping_convert_to_u64(move remainder))
         }
     }
@@ -4636,7 +4666,7 @@ __g1_string_builder_append_hex_u128_digits(value: &mut StringBuilder, integer: u
         Result::Err(_) => {
             let quotient = integer / 16;
             let remainder = integer % 16;
-            __g1_string_builder_append_hex_u128_digits(&mut * value, move quotient);
+            __g1_string_builder_append_hex_u128_digits(&mut *value, move quotient);
             __g1_string_builder_push_hex_digit(move value, wrapping_convert_to_u8(move remainder))
         }
     }
@@ -4663,14 +4693,14 @@ __g1_string_builder_append_negative_digits(builder: &mut StringBuilder, value: i
     handle quotient == 0 {
         Result::Ok(_) => __g1_string_builder_push_negative_digit(move builder, move remainder),
         Result::Err(_) => {
-            __g1_string_builder_append_negative_digits(&mut * builder, move quotient);
+            __g1_string_builder_append_negative_digits(&mut *builder, move quotient);
             __g1_string_builder_push_negative_digit(move builder, move remainder)
         }
     }
 }
 
 __g1_string_builder_append_i64_negative(value: &mut StringBuilder, integer: i64) {
-    __g1_string_builder_push_byte(&mut * value, 45);
+    __g1_string_builder_push_byte(&mut *value, 45);
     __g1_string_builder_append_negative_digits(move value, move integer)
 }
 
@@ -4694,7 +4724,7 @@ __g1_string_builder_append_negative_i128_digits(builder: &mut StringBuilder, val
     handle quotient == 0 {
         Result::Ok(_) => __g1_string_builder_push_negative_i128_digit(move builder, move remainder),
         Result::Err(_) => {
-            __g1_string_builder_append_negative_i128_digits(&mut * builder, move quotient);
+            __g1_string_builder_append_negative_i128_digits(&mut *builder, move quotient);
             __g1_string_builder_push_negative_i128_digit(move builder, move remainder)
         }
     }
@@ -4703,7 +4733,7 @@ __g1_string_builder_append_negative_i128_digits(builder: &mut StringBuilder, val
 __g1_string_builder_append_i128(value: &mut StringBuilder, integer: i128) {
     handle integer < 0 {
         Result::Ok(_) => {
-            __g1_string_builder_push_byte(&mut * value, 45);
+            __g1_string_builder_push_byte(&mut *value, 45);
             __g1_string_builder_append_negative_i128_digits(move value, move integer)
         },
         Result::Err(_) => __g1_string_builder_append_u128(
@@ -4721,7 +4751,7 @@ __g1_formatter_emit_spaces(builder: &mut StringBuilder, remaining: usize) {
     handle remaining == 0 {
         Result::Ok(_) => (),
         Result::Err(_) => {
-            __g1_string_builder_push_byte(&mut * builder, 32);
+            __g1_string_builder_push_byte(&mut *builder, 32);
             __g1_formatter_emit_spaces(move builder, __g1_vec_deque_usize_sub(remaining, 1))
         }
     }
@@ -4731,7 +4761,7 @@ __g1_formatter_emit_indent_levels(builder: &mut StringBuilder, remaining: usize)
     handle remaining == 0 {
         Result::Ok(_) => (),
         Result::Err(_) => {
-            __g1_formatter_emit_spaces(&mut * builder, 4);
+            __g1_formatter_emit_spaces(&mut *builder, 4);
             __g1_formatter_emit_indent_levels(move builder, __g1_vec_deque_usize_sub(remaining, 1))
         }
     }
@@ -4753,7 +4783,7 @@ __g1_formatter_prepare(value: &mut Formatter) {
 }
 
 __g1_formatter_literal_nonempty(value: &mut Formatter, text: String) {
-    __g1_formatter_prepare(&mut * value);
+    __g1_formatter_prepare(&mut *value);
     __g1_string_builder_append_string(&mut value.builder, &text)
 }
 
@@ -4767,37 +4797,37 @@ __g1_formatter_literal(value: &mut Formatter, text: &String) {
 }
 
 __g1_formatter_append_u64(value: &mut Formatter, integer: u64) {
-    __g1_formatter_prepare(&mut * value);
+    __g1_formatter_prepare(&mut *value);
     __g1_string_builder_append_u64(&mut value.builder, move integer)
 }
 
 __g1_formatter_append_i64(value: &mut Formatter, integer: i64) {
-    __g1_formatter_prepare(&mut * value);
+    __g1_formatter_prepare(&mut *value);
     __g1_string_builder_append_i64(&mut value.builder, move integer)
 }
 
 __g1_formatter_append_u128(value: &mut Formatter, integer: u128) {
-    __g1_formatter_prepare(&mut * value);
+    __g1_formatter_prepare(&mut *value);
     __g1_string_builder_append_u128(&mut value.builder, move integer)
 }
 
 __g1_formatter_append_i128(value: &mut Formatter, integer: i128) {
-    __g1_formatter_prepare(&mut * value);
+    __g1_formatter_prepare(&mut *value);
     __g1_string_builder_append_i128(&mut value.builder, move integer)
 }
 
 __g1_formatter_append_hex_u64(value: &mut Formatter, integer: u64) {
-    __g1_formatter_prepare(&mut * value);
+    __g1_formatter_prepare(&mut *value);
     __g1_string_builder_append_hex_u64(&mut value.builder, move integer)
 }
 
 __g1_formatter_append_hex_u128(value: &mut Formatter, integer: u128) {
-    __g1_formatter_prepare(&mut * value);
+    __g1_formatter_prepare(&mut *value);
     __g1_string_builder_append_hex_u128(&mut value.builder, move integer)
 }
 
 __g1_formatter_append_char(value: &mut Formatter, character: char) {
-    __g1_formatter_prepare(&mut * value);
+    __g1_formatter_prepare(&mut *value);
     __g1_string_builder_append_char(&mut value.builder, move character)
 }
 
@@ -4876,7 +4906,7 @@ __g1_byte_buf_resize_zeroed(value: &mut ByteBuf, length: usize) {
     let current = __g1_byte_buf_len(&*value);
     handle current < length {
         Result::Ok(_) => {
-            __g1_byte_buf_push(&mut * value, 0);
+            __g1_byte_buf_push(&mut *value, 0);
             __g1_byte_buf_resize_zeroed(move value, move length)
         },
         Result::Err(_) => __g1_byte_buf_resize_shrink(move value, move length, move current)
@@ -4887,7 +4917,7 @@ __g1_byte_buf_write_word_le(value: &mut ByteBuf, word: u128, remaining: usize) {
     handle remaining == 0 {
         Result::Ok(_) => (),
         Result::Err(_) => {
-            __g1_byte_buf_push(&mut * value, wrapping_convert_to_u8(word));
+            __g1_byte_buf_push(&mut *value, wrapping_convert_to_u8(word));
             __g1_byte_buf_write_word_le(
                 move value,
                 shift_right(word, 8),
@@ -5086,7 +5116,7 @@ __g1_float_decimal_from_u64_step(value: u64, digits: &mut Vec<u8>) {
     handle value == 0 {
         Result::Ok(_) => (),
         Result::Err(_) => {
-            Vec::push(&mut * digits, wrapping_convert_to_u8(value % 10));
+            Vec::push(&mut *digits, wrapping_convert_to_u8(value % 10));
             __g1_float_decimal_from_u64_step(value / 10, move digits)
         }
     }
@@ -5134,7 +5164,7 @@ __g1_float_decimal_multiply_power(digits: &mut Vec<u8>, factor: u64, remaining: 
         Result::Ok(_) => (),
         Result::Err(_) => {
             let length = Vec::len(&*digits);
-            __g1_float_decimal_multiply_at(&mut * digits, factor, 0, move length, 0);
+            __g1_float_decimal_multiply_at(&mut *digits, factor, 0, move length, 0);
             __g1_float_decimal_multiply_power(move digits, move factor, remaining - 1)
         }
     }
@@ -5152,7 +5182,7 @@ __g1_float_append_decimal_tail(formatter: &mut Formatter, digits: &Vec<u8>, rema
         Result::Ok(_) => (),
         Result::Err(_) => {
             __g1_float_append_decimal_digit(
-                &mut * formatter,
+                &mut *formatter,
                 __g1_array_get_copy(&digits.storage, remaining - 1)
             );
             __g1_float_append_decimal_tail(move formatter, digits, remaining - 1)
@@ -5187,17 +5217,17 @@ __g1_float_append_exact_decimal(formatter: &mut Formatter, significand: u64, bin
     __g1_float_decimal_multiply_power(&mut digits, move factor, move remaining);
     let length = Vec::len(&digits);
     __g1_float_append_decimal_digit(
-        &mut * formatter,
+        &mut *formatter,
         __g1_array_get_copy(&digits.storage, length - 1)
     );
     handle length == 1 {
-        Result::Ok(_) => __g1_float_literal(&mut * formatter, ".0"),
+        Result::Ok(_) => __g1_float_literal(&mut *formatter, ".0"),
         Result::Err(_) => {
-            __g1_float_literal(&mut * formatter, ".");
-            __g1_float_append_decimal_tail(&mut * formatter, &digits, length - 1)
+            __g1_float_literal(&mut *formatter, ".");
+            __g1_float_append_decimal_tail(&mut *formatter, &digits, length - 1)
         }
     };
-    __g1_float_literal(&mut * formatter, "e");
+    __g1_float_literal(&mut *formatter, "e");
     Formatter::append_i64(move formatter, wrapping_convert_to_i64(length - 1) - move decimal_shift)
 }
 
@@ -5207,16 +5237,16 @@ __g1_format_f32(formatter: &mut Formatter, value: f32) {
     let exponent = shift_right(bit_and(bits, 2139095040), 23);
     let fraction = bit_and(bits, 8388607);
     handle move negative {
-        Result::Ok(_) => __g1_float_literal(&mut * formatter, "-"),
+        Result::Ok(_) => __g1_float_literal(&mut *formatter, "-"),
         Result::Err(_) => ()
     };
-    handle exponent == 255 {
-        Result::Ok(_) => handle fraction == 0 {
+    handle __g1_integer_equal(exponent, 255) {
+        Result::Ok(_) => handle __g1_integer_equal(fraction, 0) {
             Result::Ok(_) => __g1_float_literal(move formatter, "inf"),
             Result::Err(_) => __g1_float_literal(move formatter, "NaN")
         },
-        Result::Err(_) => handle exponent == 0 {
-            Result::Ok(_) => handle fraction == 0 {
+        Result::Err(_) => handle __g1_integer_equal(exponent, 0) {
+            Result::Ok(_) => handle __g1_integer_equal(fraction, 0) {
                 Result::Ok(_) => __g1_float_literal(move formatter, "0.0"),
                 Result::Err(_) => __g1_float_append_exact_decimal(
                     move formatter,
@@ -5239,16 +5269,16 @@ __g1_format_f64(formatter: &mut Formatter, value: f64) {
     let exponent = shift_right(bit_and(bits, 9218868437227405312), 52);
     let fraction = bit_and(bits, 4503599627370495);
     handle move negative {
-        Result::Ok(_) => __g1_float_literal(&mut * formatter, "-"),
+        Result::Ok(_) => __g1_float_literal(&mut *formatter, "-"),
         Result::Err(_) => ()
     };
-    handle exponent == 2047 {
-        Result::Ok(_) => handle fraction == 0 {
+    handle __g1_integer_equal(exponent, 2047) {
+        Result::Ok(_) => handle __g1_integer_equal(fraction, 0) {
             Result::Ok(_) => __g1_float_literal(move formatter, "inf"),
             Result::Err(_) => __g1_float_literal(move formatter, "NaN")
         },
-        Result::Err(_) => handle exponent == 0 {
-            Result::Ok(_) => handle fraction == 0 {
+        Result::Err(_) => handle __g1_integer_equal(exponent, 0) {
+            Result::Ok(_) => handle __g1_integer_equal(fraction, 0) {
                 Result::Ok(_) => __g1_float_literal(move formatter, "0.0"),
                 Result::Err(_) => __g1_float_append_exact_decimal(
                     move formatter,
@@ -5342,7 +5372,7 @@ __g1_float_big_mul_small_step(
             let product = wrapping_convert_to_u64(__g1_float_big_word(&*value, cursor)) * wrapping_convert_to_u64(
                 multiplier
             ) + carry;
-            __g1_float_big_set(&mut * value, cursor, wrapping_convert_to_u32(product));
+            __g1_float_big_set(&mut *value, cursor, wrapping_convert_to_u32(product));
             __g1_float_big_mul_small_step(
                 move value,
                 multiplier,
@@ -5365,11 +5395,11 @@ __g1_float_big_mul_pow10(value: &mut __FloatBig, remaining: usize) {
         Result::Ok(_) => (),
         Result::Err(_) => handle 9 <= remaining {
             Result::Ok(_) => {
-                __g1_float_big_mul_small(&mut * value, 1000000000);
+                __g1_float_big_mul_small(&mut *value, 1000000000);
                 __g1_float_big_mul_pow10(move value, remaining - 9)
             },
             Result::Err(_) => {
-                __g1_float_big_mul_small(&mut * value, 10);
+                __g1_float_big_mul_small(&mut *value, 10);
                 __g1_float_big_mul_pow10(move value, remaining - 1)
             }
         }
@@ -5406,7 +5436,7 @@ __g1_float_big_shift_left(value: &mut __FloatBig, count: usize) {
     handle count == 0 {
         Result::Ok(_) => (),
         Result::Err(_) => {
-            __g1_float_big_shift_left_one(&mut * value);
+            __g1_float_big_shift_left_one(&mut *value);
             __g1_float_big_shift_left(move value, count - 1)
         }
     }
@@ -5437,9 +5467,9 @@ __g1_float_big_compare_words(left: &__FloatBig, right: &__FloatBig, remaining: u
             let index = remaining - 1;
             let a = __g1_float_big_word(left, index);
             let b = __g1_float_big_word(right, index);
-            handle a < b {
+            handle __g1_integer_less(a, b) {
                 Result::Ok(_) => -1,
-                Result::Err(_) => handle b < a {
+                Result::Err(_) => handle __g1_integer_less(b, a) {
                     Result::Ok(_) => 1,
                     Result::Err(_) => __g1_float_big_compare_words(left, right, index)
                 }
@@ -5451,9 +5481,9 @@ __g1_float_big_compare_words(left: &__FloatBig, right: &__FloatBig, remaining: u
 __g1_float_big_compare(left: &__FloatBig, right: &__FloatBig) -> i32 {
     let a = __g1_float_big_len(left);
     let b = __g1_float_big_len(right);
-    handle a < b {
+    handle __g1_integer_less(a, b) {
         Result::Ok(_) => -1,
-        Result::Err(_) => handle b < a {
+        Result::Err(_) => handle __g1_integer_less(b, a) {
             Result::Ok(_) => 1,
             Result::Err(_) => __g1_float_big_compare_words(left, right, a)
         }
@@ -5480,7 +5510,7 @@ __g1_float_big_sub_step(
                 Result::Err(_) => wrapping_convert_to_u64(0)
             };
             __g1_float_big_set(
-                &mut * left,
+                &mut *left,
                 cursor,
                 wrapping_convert_to_u32(wrapping_sub(a, subtrahend))
             );
@@ -5502,7 +5532,7 @@ __g1_float_big_shift_right_one_step(value: &mut __FloatBig, remaining: usize, ca
             let index = remaining - 1;
             let word = __g1_float_big_word(&*value, index);
             __g1_float_big_set(
-                &mut * value,
+                &mut *value,
                 index,
                 bit_or(shift_right(word, 1), shift_left(carry, 7))
             );
@@ -6237,7 +6267,7 @@ __g1_float_round_division(division: __FloatDivision, denominator: &__FloatBig) -
     handle comparison < 0 {
         Result::Ok(_) => move quotient,
         Result::Err(_) => handle comparison == 0 {
-            Result::Ok(_) => handle bit_and(quotient, 1) == 0 {
+            Result::Ok(_) => handle __g1_integer_equal(bit_and(quotient, 1), 0) {
                 Result::Ok(_) => move quotient,
                 Result::Err(_) => quotient + 1
             },
@@ -6266,11 +6296,11 @@ __g1_float_encode_nonzero(
     let(division, scaled_denominator) = move scaled;
     let significand = __g1_float_round_division(move division, &scaled_denominator);
     let carry = shift_left(wrapping_convert_to_u64(1), wrapping_convert_to_u32(precision));
-    let rounded_exponent = handle significand == carry {
+    let rounded_exponent = handle __g1_integer_equal(significand, carry) {
         Result::Ok(_) => target_exponent + 1,
         Result::Err(_) => move target_exponent
     };
-    let rounded_significand = handle significand == carry {
+    let rounded_significand = handle __g1_integer_equal(significand, carry) {
         Result::Ok(_) => shift_right(significand, 1),
         Result::Err(_) => move significand
     };
@@ -6278,7 +6308,7 @@ __g1_float_encode_nonzero(
         Result::Ok(_) => Result::Err(FloatParseError::Overflow(end - 1)),
         Result::Err(_) => {
             let hidden = shift_left(wrapping_convert_to_u64(1), fraction_bits);
-            let magnitude_bits = handle rounded_significand < hidden {
+            let magnitude_bits = handle __g1_integer_less(rounded_significand, hidden) {
                 Result::Ok(_) => move rounded_significand,
                 Result::Err(_) => {
                     let exponent_field = wrapping_convert_to_u64(rounded_exponent + bias);
@@ -6577,7 +6607,7 @@ __g1_hasher_write_word_bytes(value: &mut Hasher, word: u128, remaining: usize) {
     handle remaining == 0 {
         Result::Ok(_) => (),
         Result::Err(_) => {
-            __g1_hasher_write_u8(&mut * value, wrapping_convert_to_u8(word));
+            __g1_hasher_write_u8(&mut *value, wrapping_convert_to_u8(word));
             __g1_hasher_write_word_bytes(move value, shift_right(word, 8), remaining - 1)
         }
     }
@@ -6642,8 +6672,20 @@ trait Eq {
     eq(self: &Self, other: &Self) -> Bool;
 }
 
+trait Add {
+    +(self: Self, other: Self) -> Self;
+}
+
 trait Equal {
     ==(self: Self, other: Self) -> Bool;
+}
+
+trait Less {
+    <(self: Self, other: Self) -> Bool;
+}
+
+trait Greater {
+    >(self: Self, other: Self) -> Bool;
 }
 
 trait Ord {
@@ -6666,6 +6708,21 @@ trait Debug {
     fmt(self: &Self, formatter: &mut Formatter);
 }
 
+impl Add for u8 { +(self: u8, other: u8) -> u8 { __g1_int_checked_add(move self, move other) } }
+impl Add for u16 { +(self: u16, other: u16) -> u16 { __g1_int_checked_add(move self, move other) } }
+impl Add for u32 { +(self: u32, other: u32) -> u32 { __g1_int_checked_add(move self, move other) } }
+impl Add for u64 { +(self: u64, other: u64) -> u64 { __g1_int_checked_add(move self, move other) } }
+impl Add for u128 { +(self: u128, other: u128) -> u128 { __g1_int_checked_add(move self, move other) } }
+impl Add for usize { +(self: usize, other: usize) -> usize { __g1_int_checked_add(move self, move other) } }
+impl Add for i8 { +(self: i8, other: i8) -> i8 { __g1_int_checked_add(move self, move other) } }
+impl Add for i16 { +(self: i16, other: i16) -> i16 { __g1_int_checked_add(move self, move other) } }
+impl Add for i32 { +(self: i32, other: i32) -> i32 { __g1_int_checked_add(move self, move other) } }
+impl Add for i64 { +(self: i64, other: i64) -> i64 { __g1_int_checked_add(move self, move other) } }
+impl Add for i128 { +(self: i128, other: i128) -> i128 { __g1_int_checked_add(move self, move other) } }
+impl Add for isize { +(self: isize, other: isize) -> isize { __g1_int_checked_add(move self, move other) } }
+impl Add for f32 { +(self: f32, other: f32) -> f32 { f32_add(move self, move other) } }
+impl Add for f64 { +(self: f64, other: f64) -> f64 { f64_add(move self, move other) } }
+
 impl Equal for u8 { ==(self: u8, other: u8) -> Bool { __g1_bool_from_u32(__g1_int_equal(move self, move other)) } }
 impl Equal for u16 { ==(self: u16, other: u16) -> Bool { __g1_bool_from_u32(__g1_int_equal(move self, move other)) } }
 impl Equal for u32 { ==(self: u32, other: u32) -> Bool { __g1_bool_from_u32(__g1_int_equal(move self, move other)) } }
@@ -6678,6 +6735,38 @@ impl Equal for i32 { ==(self: i32, other: i32) -> Bool { __g1_bool_from_u32(__g1
 impl Equal for i64 { ==(self: i64, other: i64) -> Bool { __g1_bool_from_u32(__g1_int_equal(move self, move other)) } }
 impl Equal for i128 { ==(self: i128, other: i128) -> Bool { __g1_bool_from_u32(__g1_int_equal(move self, move other)) } }
 impl Equal for isize { ==(self: isize, other: isize) -> Bool { __g1_bool_from_u32(__g1_int_equal(move self, move other)) } }
+impl Equal for f32 { ==(self: f32, other: f32) -> Bool { f32_equal(move self, move other) } }
+impl Equal for f64 { ==(self: f64, other: f64) -> Bool { f64_equal(move self, move other) } }
+
+impl Less for u8 { <(self: u8, other: u8) -> Bool { __g1_bool_from_u32(__g1_int_less(move self, move other)) } }
+impl Less for u16 { <(self: u16, other: u16) -> Bool { __g1_bool_from_u32(__g1_int_less(move self, move other)) } }
+impl Less for u32 { <(self: u32, other: u32) -> Bool { __g1_bool_from_u32(__g1_int_less(move self, move other)) } }
+impl Less for u64 { <(self: u64, other: u64) -> Bool { __g1_bool_from_u32(__g1_int_less(move self, move other)) } }
+impl Less for u128 { <(self: u128, other: u128) -> Bool { __g1_bool_from_u32(__g1_int_less(move self, move other)) } }
+impl Less for usize { <(self: usize, other: usize) -> Bool { __g1_bool_from_u32(__g1_int_less(move self, move other)) } }
+impl Less for i8 { <(self: i8, other: i8) -> Bool { __g1_bool_from_u32(__g1_int_less(move self, move other)) } }
+impl Less for i16 { <(self: i16, other: i16) -> Bool { __g1_bool_from_u32(__g1_int_less(move self, move other)) } }
+impl Less for i32 { <(self: i32, other: i32) -> Bool { __g1_bool_from_u32(__g1_int_less(move self, move other)) } }
+impl Less for i64 { <(self: i64, other: i64) -> Bool { __g1_bool_from_u32(__g1_int_less(move self, move other)) } }
+impl Less for i128 { <(self: i128, other: i128) -> Bool { __g1_bool_from_u32(__g1_int_less(move self, move other)) } }
+impl Less for isize { <(self: isize, other: isize) -> Bool { __g1_bool_from_u32(__g1_int_less(move self, move other)) } }
+impl Less for f32 { <(self: f32, other: f32) -> Bool { f32_less(move self, move other) } }
+impl Less for f64 { <(self: f64, other: f64) -> Bool { f64_less(move self, move other) } }
+
+impl Greater for u8 { >(self: u8, other: u8) -> Bool { __g1_bool_from_u32(__g1_int_greater(move self, move other)) } }
+impl Greater for u16 { >(self: u16, other: u16) -> Bool { __g1_bool_from_u32(__g1_int_greater(move self, move other)) } }
+impl Greater for u32 { >(self: u32, other: u32) -> Bool { __g1_bool_from_u32(__g1_int_greater(move self, move other)) } }
+impl Greater for u64 { >(self: u64, other: u64) -> Bool { __g1_bool_from_u32(__g1_int_greater(move self, move other)) } }
+impl Greater for u128 { >(self: u128, other: u128) -> Bool { __g1_bool_from_u32(__g1_int_greater(move self, move other)) } }
+impl Greater for usize { >(self: usize, other: usize) -> Bool { __g1_bool_from_u32(__g1_int_greater(move self, move other)) } }
+impl Greater for i8 { >(self: i8, other: i8) -> Bool { __g1_bool_from_u32(__g1_int_greater(move self, move other)) } }
+impl Greater for i16 { >(self: i16, other: i16) -> Bool { __g1_bool_from_u32(__g1_int_greater(move self, move other)) } }
+impl Greater for i32 { >(self: i32, other: i32) -> Bool { __g1_bool_from_u32(__g1_int_greater(move self, move other)) } }
+impl Greater for i64 { >(self: i64, other: i64) -> Bool { __g1_bool_from_u32(__g1_int_greater(move self, move other)) } }
+impl Greater for i128 { >(self: i128, other: i128) -> Bool { __g1_bool_from_u32(__g1_int_greater(move self, move other)) } }
+impl Greater for isize { >(self: isize, other: isize) -> Bool { __g1_bool_from_u32(__g1_int_greater(move self, move other)) } }
+impl Greater for f32 { >(self: f32, other: f32) -> Bool { f32_greater(move self, move other) } }
+impl Greater for f64 { >(self: f64, other: f64) -> Bool { f64_greater(move self, move other) } }
 
 assert_eq<T>(left: &T, right: &T) where T: Eq { assert(Eq::eq(left, right)) }
 
@@ -6762,20 +6851,26 @@ __g1_bytes_cmp_at(left: &Bytes, right: &Bytes, index: usize, shared: usize) -> O
         Result::Ok(_) => {
             let left_byte = __g1_bytes_get(*left, index);
             let right_byte = __g1_bytes_get(*right, index);
-            handle left_byte == right_byte {
+            handle __g1_integer_equal(left_byte, right_byte) {
                 Result::Ok(_) => __g1_bytes_cmp_at(
                     left,
                     right,
                     __g1_usize_successor(move index),
                     move shared
                 ),
-                Result::Err(_) => __g1_ordering_from_flags(left_byte < right_byte, false)
+                Result::Err(_) => __g1_ordering_from_flags(
+                    __g1_integer_less(left_byte, right_byte),
+                    false
+                )
             }
         },
         Result::Err(_) => {
             let left_length = __g1_bytes_len(*left);
             let right_length = __g1_bytes_len(*right);
-            __g1_ordering_from_flags(left_length < right_length, left_length == right_length)
+            __g1_ordering_from_flags(
+                __g1_integer_less(left_length, right_length),
+                __g1_integer_equal(left_length, right_length)
+            )
         }
     }
 }
@@ -6783,7 +6878,7 @@ __g1_bytes_cmp_at(left: &Bytes, right: &Bytes, index: usize, shared: usize) -> O
 __g1_bytes_cmp(left: &Bytes, right: &Bytes) -> Ordering {
     let left_length = __g1_bytes_len(*left);
     let right_length = __g1_bytes_len(*right);
-    let shared = handle left_length < right_length {
+    let shared = handle __g1_integer_less(left_length, right_length) {
         Result::Ok(_) => move left_length,
         Result::Err(_) => move right_length
     };
@@ -6832,8 +6927,8 @@ __g1_debug_char_character(formatter: &mut Formatter, value: char) {
 }
 
 __g1_debug_char(formatter: &mut Formatter, value: char) {
-    __g1_debug_literal(&mut * formatter, "'");
-    __g1_debug_char_character(&mut * formatter, move value);
+    __g1_debug_literal(&mut *formatter, "'");
+    __g1_debug_char_character(&mut *formatter, move value);
     __g1_debug_literal(move formatter, "'")
 }
 
@@ -6842,7 +6937,7 @@ __g1_debug_string_at(formatter: &mut Formatter, bytes: &Bytes, index: usize, len
         Result::Ok(_) => handle char_decode_utf8(bytes, index) {
             Result::Ok(decoded) => {
                 let DecodedChar { value, next } = move decoded;
-                __g1_debug_string_character(&mut * formatter, move value);
+                __g1_debug_string_character(&mut *formatter, move value);
                 __g1_debug_string_at(move formatter, bytes, move next, move length)
             },
             Result::Err(error) => {
@@ -6855,10 +6950,10 @@ __g1_debug_string_at(formatter: &mut Formatter, bytes: &Bytes, index: usize, len
 }
 
 __g1_debug_string(formatter: &mut Formatter, value: &String) {
-    __g1_debug_literal(&mut * formatter, "\"");
+    __g1_debug_literal(&mut *formatter, "\"");
     let bytes = String::as_bytes(value);
     let length = Bytes::len(&bytes);
-    __g1_debug_string_at(&mut * formatter, &bytes, 0, move length);
+    __g1_debug_string_at(&mut *formatter, &bytes, 0, move length);
     __g1_debug_literal(move formatter, "\"")
 }
 
@@ -6867,10 +6962,10 @@ __g1_debug_bytes_at(formatter: &mut Formatter, value: &Bytes, index: usize, leng
         Result::Ok(_) => {
             handle index == 0 {
                 Result::Ok(_) => (),
-                Result::Err(_) => __g1_debug_literal(&mut * formatter, ", ")
+                Result::Err(_) => __g1_debug_literal(&mut *formatter, ", ")
             };
             Formatter::append_u64(
-                &mut * formatter,
+                &mut *formatter,
                 wrapping_convert_to_u64(__g1_bytes_get(*value, index))
             );
             __g1_debug_bytes_at(
@@ -6885,8 +6980,8 @@ __g1_debug_bytes_at(formatter: &mut Formatter, value: &Bytes, index: usize, leng
 }
 
 __g1_debug_bytes(formatter: &mut Formatter, value: &Bytes) {
-    __g1_debug_literal(&mut * formatter, "b[");
-    __g1_debug_bytes_at(&mut * formatter, value, 0, Bytes::len(value));
+    __g1_debug_literal(&mut *formatter, "b[");
+    __g1_debug_bytes_at(&mut *formatter, value, 0, Bytes::len(value));
     __g1_debug_literal(move formatter, "]")
 }
 
@@ -7101,33 +7196,33 @@ impl Hash for ByteView {
     }
 }
 
-impl Eq for u8 { eq(self: &u8, other: &u8) -> Bool { *self == * other } }
+impl Eq for u8 { eq(self: &u8, other: &u8) -> Bool { *self == *other } }
 
 impl Ord for u8 {
     cmp(self: &u8, other: &u8) -> Ordering {
-        __g1_ordering_from_flags(*self < * other, *self == * other)
+        __g1_ordering_from_flags(*self < *other, *self == *other)
     }
 }
 
 impl Hash for u8 { hash(self: &u8, state: &mut Hasher) { Hasher::write_u8(move state, *self) } }
 
-impl Eq for u16 { eq(self: &u16, other: &u16) -> Bool { *self == * other } }
+impl Eq for u16 { eq(self: &u16, other: &u16) -> Bool { *self == *other } }
 
 impl Ord for u16 {
     cmp(self: &u16, other: &u16) -> Ordering {
-        __g1_ordering_from_flags(*self < * other, *self == * other)
+        __g1_ordering_from_flags(*self < *other, *self == *other)
     }
 }
 
 impl Hash for u16 { hash(self: &u16, state: &mut Hasher) { Hasher::write_u16(move state, *self) } }
 
-impl Eq for u32 { eq(self: &u32, other: &u32) -> Bool { *self == * other } }
+impl Eq for u32 { eq(self: &u32, other: &u32) -> Bool { *self == *other } }
 
 impl Ord for u32 {
     cmp(self: &u32, other: &u32) -> Ordering {
-        handle * self < * other {
+        handle *self < *other {
             Result::Ok(_) => Ordering::Less,
-            Result::Err(_) => handle * self == * other {
+            Result::Err(_) => handle *self == *other {
                 Result::Ok(_) => Ordering::Equal,
                 Result::Err(_) => Ordering::Greater
             }
@@ -7137,13 +7232,13 @@ impl Ord for u32 {
 
 impl Hash for u32 { hash(self: &u32, state: &mut Hasher) { Hasher::write_u32(move state, *self) } }
 
-impl Eq for u64 { eq(self: &u64, other: &u64) -> Bool { *self == * other } }
+impl Eq for u64 { eq(self: &u64, other: &u64) -> Bool { *self == *other } }
 
 impl Ord for u64 {
     cmp(self: &u64, other: &u64) -> Ordering {
-        handle * self < * other {
+        handle *self < *other {
             Result::Ok(_) => Ordering::Less,
-            Result::Err(_) => handle * self == * other {
+            Result::Err(_) => handle *self == *other {
                 Result::Ok(_) => Ordering::Equal,
                 Result::Err(_) => Ordering::Greater
             }
@@ -7153,11 +7248,11 @@ impl Ord for u64 {
 
 impl Hash for u64 { hash(self: &u64, state: &mut Hasher) { Hasher::write_u64(move state, *self) } }
 
-impl Eq for u128 { eq(self: &u128, other: &u128) -> Bool { *self == * other } }
+impl Eq for u128 { eq(self: &u128, other: &u128) -> Bool { *self == *other } }
 
 impl Ord for u128 {
     cmp(self: &u128, other: &u128) -> Ordering {
-        __g1_ordering_from_flags(*self < * other, *self == * other)
+        __g1_ordering_from_flags(*self < *other, *self == *other)
     }
 }
 
@@ -7165,13 +7260,13 @@ impl Hash for u128 {
     hash(self: &u128, state: &mut Hasher) { Hasher::write_u128(move state, *self) }
 }
 
-impl Eq for usize { eq(self: &usize, other: &usize) -> Bool { *self == * other } }
+impl Eq for usize { eq(self: &usize, other: &usize) -> Bool { *self == *other } }
 
 impl Ord for usize {
     cmp(self: &usize, other: &usize) -> Ordering {
-        handle * self < * other {
+        handle *self < *other {
             Result::Ok(_) => Ordering::Less,
-            Result::Err(_) => handle * self == * other {
+            Result::Err(_) => handle *self == *other {
                 Result::Ok(_) => Ordering::Equal,
                 Result::Err(_) => Ordering::Greater
             }
@@ -7183,11 +7278,11 @@ impl Hash for usize {
     hash(self: &usize, state: &mut Hasher) { Hasher::write_usize(move state, *self) }
 }
 
-impl Eq for i8 { eq(self: &i8, other: &i8) -> Bool { *self == * other } }
+impl Eq for i8 { eq(self: &i8, other: &i8) -> Bool { *self == *other } }
 
 impl Ord for i8 {
     cmp(self: &i8, other: &i8) -> Ordering {
-        __g1_ordering_from_flags(*self < * other, *self == * other)
+        __g1_ordering_from_flags(*self < *other, *self == *other)
     }
 }
 
@@ -7197,11 +7292,11 @@ impl Hash for i8 {
     }
 }
 
-impl Eq for i16 { eq(self: &i16, other: &i16) -> Bool { *self == * other } }
+impl Eq for i16 { eq(self: &i16, other: &i16) -> Bool { *self == *other } }
 
 impl Ord for i16 {
     cmp(self: &i16, other: &i16) -> Ordering {
-        __g1_ordering_from_flags(*self < * other, *self == * other)
+        __g1_ordering_from_flags(*self < *other, *self == *other)
     }
 }
 
@@ -7211,11 +7306,11 @@ impl Hash for i16 {
     }
 }
 
-impl Eq for i32 { eq(self: &i32, other: &i32) -> Bool { *self == * other } }
+impl Eq for i32 { eq(self: &i32, other: &i32) -> Bool { *self == *other } }
 
 impl Ord for i32 {
     cmp(self: &i32, other: &i32) -> Ordering {
-        __g1_ordering_from_flags(*self < * other, *self == * other)
+        __g1_ordering_from_flags(*self < *other, *self == *other)
     }
 }
 
@@ -7225,13 +7320,13 @@ impl Hash for i32 {
     }
 }
 
-impl Eq for i64 { eq(self: &i64, other: &i64) -> Bool { *self == * other } }
+impl Eq for i64 { eq(self: &i64, other: &i64) -> Bool { *self == *other } }
 
 impl Ord for i64 {
     cmp(self: &i64, other: &i64) -> Ordering {
-        handle * self < * other {
+        handle *self < *other {
             Result::Ok(_) => Ordering::Less,
-            Result::Err(_) => handle * self == * other {
+            Result::Err(_) => handle *self == *other {
                 Result::Ok(_) => Ordering::Equal,
                 Result::Err(_) => Ordering::Greater
             }
@@ -7245,11 +7340,11 @@ impl Hash for i64 {
     }
 }
 
-impl Eq for i128 { eq(self: &i128, other: &i128) -> Bool { *self == * other } }
+impl Eq for i128 { eq(self: &i128, other: &i128) -> Bool { *self == *other } }
 
 impl Ord for i128 {
     cmp(self: &i128, other: &i128) -> Ordering {
-        __g1_ordering_from_flags(*self < * other, *self == * other)
+        __g1_ordering_from_flags(*self < *other, *self == *other)
     }
 }
 
@@ -7259,11 +7354,11 @@ impl Hash for i128 {
     }
 }
 
-impl Eq for isize { eq(self: &isize, other: &isize) -> Bool { *self == * other } }
+impl Eq for isize { eq(self: &isize, other: &isize) -> Bool { *self == *other } }
 
 impl Ord for isize {
     cmp(self: &isize, other: &isize) -> Ordering {
-        __g1_ordering_from_flags(*self < * other, *self == * other)
+        __g1_ordering_from_flags(*self < *other, *self == *other)
     }
 }
 
@@ -7278,7 +7373,7 @@ impl Hash for isize {
 // remain distinct and total ordering follows IEEE total-order key layout.
 __g1_f32_order_key(value: f32) -> u32 {
     let bits = f32_to_bits(move value);
-    handle bit_and(bits, 2147483648) == 0 {
+    handle __g1_integer_equal(bit_and(bits, 2147483648), 0) {
         Result::Ok(_) => bit_xor(move bits, 2147483648),
         Result::Err(_) => bit_not(move bits)
     }
@@ -7286,21 +7381,26 @@ __g1_f32_order_key(value: f32) -> u32 {
 
 __g1_f64_order_key(value: f64) -> u64 {
     let bits = f64_to_bits(move value);
-    handle bit_and(bits, 9223372036854775808) == 0 {
+    handle __g1_integer_equal(bit_and(bits, 9223372036854775808), 0) {
         Result::Ok(_) => bit_xor(move bits, 9223372036854775808),
         Result::Err(_) => bit_not(move bits)
     }
 }
 
 impl Eq for f32 {
-    eq(self: &f32, other: &f32) -> Bool { f32_to_bits(*self) == f32_to_bits(*other) }
+    eq(self: &f32, other: &f32) -> Bool {
+        __g1_integer_equal(f32_to_bits(*self), f32_to_bits(*other))
+    }
 }
 
 impl Ord for f32 {
     cmp(self: &f32, other: &f32) -> Ordering {
         let left = __g1_f32_order_key(*self);
         let right = __g1_f32_order_key(*other);
-        __g1_ordering_from_flags(left < right, left == right)
+        __g1_ordering_from_flags(
+            __g1_integer_less(left, right),
+            __g1_integer_equal(left, right)
+        )
     }
 }
 
@@ -7309,14 +7409,19 @@ impl Hash for f32 {
 }
 
 impl Eq for f64 {
-    eq(self: &f64, other: &f64) -> Bool { f64_to_bits(*self) == f64_to_bits(*other) }
+    eq(self: &f64, other: &f64) -> Bool {
+        __g1_integer_equal(f64_to_bits(*self), f64_to_bits(*other))
+    }
 }
 
 impl Ord for f64 {
     cmp(self: &f64, other: &f64) -> Ordering {
         let left = __g1_f64_order_key(*self);
         let right = __g1_f64_order_key(*other);
-        __g1_ordering_from_flags(left < right, left == right)
+        __g1_ordering_from_flags(
+            __g1_integer_less(left, right),
+            __g1_integer_equal(left, right)
+        )
     }
 }
 
@@ -7325,14 +7430,19 @@ impl Hash for f64 {
 }
 
 impl Eq for char {
-    eq(self: &char, other: &char) -> Bool { char_to_u32(*self) == char_to_u32(*other) }
+    eq(self: &char, other: &char) -> Bool {
+        __g1_integer_equal(char_to_u32(*self), char_to_u32(*other))
+    }
 }
 
 impl Ord for char {
     cmp(self: &char, other: &char) -> Ordering {
         let left = char_to_u32(*self);
         let right = char_to_u32(*other);
-        __g1_ordering_from_flags(left < right, left == right)
+        __g1_ordering_from_flags(
+            __g1_integer_less(left, right),
+            __g1_integer_equal(left, right)
+        )
     }
 }
 
@@ -7392,11 +7502,11 @@ E > Hash for Result<T, E> where T: Hash,
 E: Hash {
     hash(self: &Result<T, E>, state: &mut Hasher) {
         if(*self is Result::Ok(value)) {
-            Hasher::write_u8(&mut * state, 0);
+            Hasher::write_u8(&mut *state, 0);
             Hash::hash(&value, move state)
         } else {
             if(*self is Result::Err(value)) {
-                Hasher::write_u8(&mut * state, 1);
+                Hasher::write_u8(&mut *state, 1);
                 Hash::hash(&value, move state)
             } else {
                 state;
@@ -7411,14 +7521,14 @@ E > Display for Result<T, E> where T: Display,
 E: Display {
     fmt(self: &Result<T, E>, formatter: &mut Formatter) {
         if(*self is Result::Ok(value)) {
-            __g1_debug_literal(&mut * formatter, "Ok(");
-            Display::fmt(&value, &mut * formatter);
+            __g1_debug_literal(&mut *formatter, "Ok(");
+            Display::fmt(&value, &mut *formatter);
             move self;
             __g1_debug_literal(move formatter, ")")
         } else {
             if(*self is Result::Err(value)) {
-                __g1_debug_literal(&mut * formatter, "Err(");
-                Display::fmt(&value, &mut * formatter);
+                __g1_debug_literal(&mut *formatter, "Err(");
+                Display::fmt(&value, &mut *formatter);
                 move self;
                 __g1_debug_literal(move formatter, ")")
             } else {
@@ -7435,14 +7545,14 @@ E > Debug for Result<T, E> where T: Debug,
 E: Debug {
     fmt(self: &Result<T, E>, formatter: &mut Formatter) {
         if(*self is Result::Ok(value)) {
-            __g1_debug_literal(&mut * formatter, "Ok(");
-            Debug::fmt(&value, &mut * formatter);
+            __g1_debug_literal(&mut *formatter, "Ok(");
+            Debug::fmt(&value, &mut *formatter);
             move self;
             __g1_debug_literal(move formatter, ")")
         } else {
             if(*self is Result::Err(value)) {
-                __g1_debug_literal(&mut * formatter, "Err(");
-                Debug::fmt(&value, &mut * formatter);
+                __g1_debug_literal(&mut *formatter, "Err(");
+                Debug::fmt(&value, &mut *formatter);
                 move self;
                 __g1_debug_literal(move formatter, ")")
             } else {
@@ -7510,16 +7620,16 @@ impl < A > Hash for (A,) where A: Hash {
 
 impl < A > Display for (A,) where A: Display {
     fmt(self: & (A,), formatter: &mut Formatter) {
-        __g1_debug_literal(&mut * formatter, "(");
-        Display::fmt(&self.0, &mut * formatter);
+        __g1_debug_literal(&mut *formatter, "(");
+        Display::fmt(&self.0, &mut *formatter);
         __g1_debug_literal(move formatter, ",)")
     }
 }
 
 impl < A > Debug for (A,) where A: Debug {
     fmt(self: & (A,), formatter: &mut Formatter) {
-        __g1_debug_literal(&mut * formatter, "(");
-        Debug::fmt(&self.0, &mut * formatter);
+        __g1_debug_literal(&mut *formatter, "(");
+        Debug::fmt(&self.0, &mut *formatter);
         __g1_debug_literal(move formatter, ",)")
     }
 }
@@ -7556,7 +7666,7 @@ impl < A,
 B > Hash for (A, B) where A: Hash,
 B: Hash {
     hash(self: & (A, B), state: &mut Hasher) {
-        Hash::hash(&self.0, &mut * state);
+        Hash::hash(&self.0, &mut *state);
         Hash::hash(&self.1, move state)
     }
 }
@@ -7565,10 +7675,10 @@ impl < A,
 B > Display for (A, B) where A: Display,
 B: Display {
     fmt(self: & (A, B), formatter: &mut Formatter) {
-        __g1_debug_literal(&mut * formatter, "(");
-        Display::fmt(&self.0, &mut * formatter);
-        __g1_debug_literal(&mut * formatter, ", ");
-        Display::fmt(&self.1, &mut * formatter);
+        __g1_debug_literal(&mut *formatter, "(");
+        Display::fmt(&self.0, &mut *formatter);
+        __g1_debug_literal(&mut *formatter, ", ");
+        Display::fmt(&self.1, &mut *formatter);
         __g1_debug_literal(move formatter, ")")
     }
 }
@@ -7577,10 +7687,10 @@ impl < A,
 B > Debug for (A, B) where A: Debug,
 B: Debug {
     fmt(self: & (A, B), formatter: &mut Formatter) {
-        __g1_debug_literal(&mut * formatter, "(");
-        Debug::fmt(&self.0, &mut * formatter);
-        __g1_debug_literal(&mut * formatter, ", ");
-        Debug::fmt(&self.1, &mut * formatter);
+        __g1_debug_literal(&mut *formatter, "(");
+        Debug::fmt(&self.0, &mut *formatter);
+        __g1_debug_literal(&mut *formatter, ", ");
+        Debug::fmt(&self.1, &mut *formatter);
         __g1_debug_literal(move formatter, ")")
     }
 }
@@ -7633,8 +7743,8 @@ C > Hash for (A, B, C) where A: Hash,
 B: Hash,
 C: Hash {
     hash(self: & (A, B, C), state: &mut Hasher) {
-        Hash::hash(&self.0, &mut * state);
-        Hash::hash(&self.1, &mut * state);
+        Hash::hash(&self.0, &mut *state);
+        Hash::hash(&self.1, &mut *state);
         Hash::hash(&self.2, move state)
     }
 }
@@ -7645,12 +7755,12 @@ C > Display for (A, B, C) where A: Display,
 B: Display,
 C: Display {
     fmt(self: & (A, B, C), formatter: &mut Formatter) {
-        __g1_debug_literal(&mut * formatter, "(");
-        Display::fmt(&self.0, &mut * formatter);
-        __g1_debug_literal(&mut * formatter, ", ");
-        Display::fmt(&self.1, &mut * formatter);
-        __g1_debug_literal(&mut * formatter, ", ");
-        Display::fmt(&self.2, &mut * formatter);
+        __g1_debug_literal(&mut *formatter, "(");
+        Display::fmt(&self.0, &mut *formatter);
+        __g1_debug_literal(&mut *formatter, ", ");
+        Display::fmt(&self.1, &mut *formatter);
+        __g1_debug_literal(&mut *formatter, ", ");
+        Display::fmt(&self.2, &mut *formatter);
         __g1_debug_literal(move formatter, ")")
     }
 }
@@ -7661,12 +7771,12 @@ C > Debug for (A, B, C) where A: Debug,
 B: Debug,
 C: Debug {
     fmt(self: & (A, B, C), formatter: &mut Formatter) {
-        __g1_debug_literal(&mut * formatter, "(");
-        Debug::fmt(&self.0, &mut * formatter);
-        __g1_debug_literal(&mut * formatter, ", ");
-        Debug::fmt(&self.1, &mut * formatter);
-        __g1_debug_literal(&mut * formatter, ", ");
-        Debug::fmt(&self.2, &mut * formatter);
+        __g1_debug_literal(&mut *formatter, "(");
+        Debug::fmt(&self.0, &mut *formatter);
+        __g1_debug_literal(&mut *formatter, ", ");
+        Debug::fmt(&self.1, &mut *formatter);
+        __g1_debug_literal(&mut *formatter, ", ");
+        Debug::fmt(&self.2, &mut *formatter);
         __g1_debug_literal(move formatter, ")")
     }
 }
@@ -7735,9 +7845,9 @@ B: Hash,
 C: Hash,
 D: Hash {
     hash(self: & (A, B, C, D), state: &mut Hasher) {
-        Hash::hash(&self.0, &mut * state);
-        Hash::hash(&self.1, &mut * state);
-        Hash::hash(&self.2, &mut * state);
+        Hash::hash(&self.0, &mut *state);
+        Hash::hash(&self.1, &mut *state);
+        Hash::hash(&self.2, &mut *state);
         Hash::hash(&self.3, move state)
     }
 }
@@ -7750,14 +7860,14 @@ B: Display,
 C: Display,
 D: Display {
     fmt(self: & (A, B, C, D), formatter: &mut Formatter) {
-        __g1_debug_literal(&mut * formatter, "(");
-        Display::fmt(&self.0, &mut * formatter);
-        __g1_debug_literal(&mut * formatter, ", ");
-        Display::fmt(&self.1, &mut * formatter);
-        __g1_debug_literal(&mut * formatter, ", ");
-        Display::fmt(&self.2, &mut * formatter);
-        __g1_debug_literal(&mut * formatter, ", ");
-        Display::fmt(&self.3, &mut * formatter);
+        __g1_debug_literal(&mut *formatter, "(");
+        Display::fmt(&self.0, &mut *formatter);
+        __g1_debug_literal(&mut *formatter, ", ");
+        Display::fmt(&self.1, &mut *formatter);
+        __g1_debug_literal(&mut *formatter, ", ");
+        Display::fmt(&self.2, &mut *formatter);
+        __g1_debug_literal(&mut *formatter, ", ");
+        Display::fmt(&self.3, &mut *formatter);
         __g1_debug_literal(move formatter, ")")
     }
 }
@@ -7770,14 +7880,14 @@ B: Debug,
 C: Debug,
 D: Debug {
     fmt(self: & (A, B, C, D), formatter: &mut Formatter) {
-        __g1_debug_literal(&mut * formatter, "(");
-        Debug::fmt(&self.0, &mut * formatter);
-        __g1_debug_literal(&mut * formatter, ", ");
-        Debug::fmt(&self.1, &mut * formatter);
-        __g1_debug_literal(&mut * formatter, ", ");
-        Debug::fmt(&self.2, &mut * formatter);
-        __g1_debug_literal(&mut * formatter, ", ");
-        Debug::fmt(&self.3, &mut * formatter);
+        __g1_debug_literal(&mut *formatter, "(");
+        Debug::fmt(&self.0, &mut *formatter);
+        __g1_debug_literal(&mut *formatter, ", ");
+        Debug::fmt(&self.1, &mut *formatter);
+        __g1_debug_literal(&mut *formatter, ", ");
+        Debug::fmt(&self.2, &mut *formatter);
+        __g1_debug_literal(&mut *formatter, ", ");
+        Debug::fmt(&self.3, &mut *formatter);
         __g1_debug_literal(move formatter, ")")
     }
 }
@@ -7834,7 +7944,7 @@ __g1_vec_sift_down<T>(value: &mut Vec<T>, start: usize, length: usize, root: usi
             let largest = __g1_vec_largest_child(&*value, start, child, right, length);
             let order = __g1_vec_cmp_at(&*value, start + root, start + largest);
             if(order is Ordering::Less) {
-                __g1_vec_swap(&mut * value, start + root, start + largest);
+                __g1_vec_swap(&mut *value, start + root, start + largest);
                 __g1_vec_sift_down(move value, start, length, largest)
             } else {
                 value;
@@ -7852,7 +7962,7 @@ __g1_vec_heap_build<T>(value: &mut Vec<T>, start: usize, length: usize, node: us
         },
         Result::Err(_) => {
             let next = node - 1;
-            __g1_vec_sift_down(&mut * value, start, length, next);
+            __g1_vec_sift_down(&mut *value, start, length, next);
             __g1_vec_heap_build(move value, start, length, next)
         }
     }
@@ -7866,8 +7976,8 @@ __g1_vec_heap_extract<T>(value: &mut Vec<T>, start: usize, length: usize, remain
         },
         Result::Err(_) => {
             let next = remaining - 1;
-            __g1_vec_swap(&mut * value, start, start + next);
-            __g1_vec_sift_down(&mut * value, start, next, 0);
+            __g1_vec_swap(&mut *value, start, start + next);
+            __g1_vec_sift_down(&mut *value, start, next, 0);
             __g1_vec_heap_extract(move value, start, length, next)
         }
     }
@@ -7875,7 +7985,7 @@ __g1_vec_heap_extract<T>(value: &mut Vec<T>, start: usize, length: usize, remain
 
 __g1_vec_heap_sort_range<T>(value: &mut Vec<T>, start: usize, end: usize) where T: Ord {
     let length = end - start;
-    __g1_vec_heap_build(&mut * value, start, length, length / 2);
+    __g1_vec_heap_build(&mut *value, start, length, length / 2);
     __g1_vec_heap_extract(move value, start, length, length)
 }
 
@@ -7894,7 +8004,7 @@ __g1_vec_partition_pivot<T>(
         Result::Ok(_) => {
             let order = __g1_vec_cmp_at(&*value, cursor, pivot);
             if(order is Ordering::Less) {
-                __g1_vec_swap(&mut * value, cursor, store);
+                __g1_vec_swap(&mut *value, cursor, store);
                 __g1_vec_partition_pivot(move value, low, pivot, cursor + 1, store + 1)
             } else { __g1_vec_partition_pivot(move value, low, pivot, cursor + 1, store) }
         }
@@ -7912,10 +8022,10 @@ __g1_vec_intro_sort_range<T>(value: &mut Vec<T>, low: usize, high: usize, depth:
             Result::Ok(_) => __g1_vec_heap_sort_range(move value, low, high),
             Result::Err(_) => {
                 let pivot = high - 1;
-                __g1_vec_swap(&mut * value, low + length / 2, pivot);
-                let split = __g1_vec_partition_pivot(&mut * value, low, pivot, low, low);
+                __g1_vec_swap(&mut *value, low + length / 2, pivot);
+                let split = __g1_vec_partition_pivot(&mut *value, low, pivot, low, low);
                 let next_depth = depth - 1;
-                __g1_vec_intro_sort_range(&mut * value, low, split, next_depth);
+                __g1_vec_intro_sort_range(&mut *value, low, split, next_depth);
                 __g1_vec_intro_sort_range(move value, split + 1, high, next_depth)
             }
         }
@@ -7925,7 +8035,7 @@ __g1_vec_intro_sort_range<T>(value: &mut Vec<T>, low: usize, high: usize, depth:
 __g1_vec_sort<T>(value: &mut Vec<T>) where T: Ord {
     let length = Vec::len(&*value);
     let depth = __g1_algorithm_floor_log2(length, 0);
-    __g1_vec_intro_sort_range(move value, 0, length, depth + depth)
+    __g1_vec_intro_sort_range(move value, 0, length, __g1_integer_add(depth, depth))
 }
 
 // The merge pass is stable: an element from the right half moves only when it
@@ -7940,7 +8050,7 @@ __g1_vec_merge_rotate<T>(value: &mut Vec<T>, cursor: usize, destination: usize) 
             ()
         },
         Result::Ok(_) => {
-            __g1_vec_swap(&mut * value, cursor - 1, cursor);
+            __g1_vec_swap(&mut *value, cursor - 1, cursor);
             __g1_vec_merge_rotate(move value, cursor - 1, move destination)
         }
     }
@@ -7960,7 +8070,7 @@ __g1_vec_merge<T>(value: &mut Vec<T>, left: usize, middle: usize, right: usize, 
             Result::Ok(_) => {
                 let order = __g1_vec_cmp_at(&*value, middle, cursor);
                 if(order is Ordering::Less) {
-                    __g1_vec_merge_rotate(&mut * value, middle, cursor);
+                    __g1_vec_merge_rotate(&mut *value, middle, cursor);
                     __g1_vec_merge(move value, left, middle + 1, right, cursor + 1)
                 } else { __g1_vec_merge(move value, left, middle, right, cursor + 1) }
             }
@@ -7977,8 +8087,8 @@ __g1_vec_stable_sort_range<T>(value: &mut Vec<T>, low: usize, high: usize) where
         },
         Result::Err(_) => {
             let middle = low + length / 2;
-            __g1_vec_stable_sort_range(&mut * value, low, middle);
-            __g1_vec_stable_sort_range(&mut * value, middle, high);
+            __g1_vec_stable_sort_range(&mut *value, low, middle);
+            __g1_vec_stable_sort_range(&mut *value, middle, high);
             __g1_vec_merge(move value, low, middle, high, low)
         }
     }
@@ -8028,7 +8138,10 @@ __g1_vec_binary_search<T>(value: &Vec<T>, target: &T) -> Option<usize> where T: 
     let upper = __g1_vec_upper_bound(value, target);
     value;
     target;
-    handle lower < upper { Result::Ok(_) => Option::Some(lower), Result::Err(_) => None }
+    handle __g1_integer_less(lower, upper) {
+        Result::Ok(_) => Option::Some(lower),
+        Result::Err(_) => None
+    }
 }
 
 // Partition around a borrowed ordering key. Elements strictly below the key
@@ -8059,7 +8172,7 @@ __g1_vec_partition_at<T>(
         Result::Ok(_) => {
             let order = __g1_algorithm_cmp(__g1_vec_index(&*value, cursor), pivot);
             let selected = order is Ordering::Less;
-            let next = __g1_vec_partition_boundary(&mut * value, cursor, boundary, move selected);
+            let next = __g1_vec_partition_boundary(&mut *value, cursor, boundary, move selected);
             __g1_vec_partition_at(move value, move pivot, cursor + 1, move next, length)
         }
     }
@@ -8079,7 +8192,7 @@ T: Use<[0, 0]> {
             handle move duplicate {
                 Result::Ok(_) => __g1_vec_dedup_from(move value, cursor + 1, write, length),
                 Result::Err(_) => {
-                    __g1_vec_swap(&mut * value, cursor, write);
+                    __g1_vec_swap(&mut *value, cursor, write);
                     __g1_vec_dedup_from(move value, cursor + 1, write + 1, length)
                 }
             }
@@ -8120,10 +8233,14 @@ __g1_vec_lexicographic_at<T>(left: &Vec<T>, right: &Vec<T>, cursor: usize, commo
                 Ordering::Equal => __g1_vec_lexicographic_at(left, right, cursor + 1, common)
             }
         },
-        Result::Err(_) => __g1_ordering_from_flags(
-            Vec::len(left) < Vec::len(right),
-            Vec::len(left) == Vec::len(right)
-        )
+        Result::Err(_) => {
+            let left_length = Vec::len(left);
+            let right_length = Vec::len(right);
+            __g1_ordering_from_flags(
+                __g1_integer_less(left_length, right_length),
+                __g1_integer_equal(left_length, right_length)
+            )
+        }
     }
 }
 
@@ -8402,10 +8519,10 @@ V: Use<[0, 0]> {
     let should_grow = __g1_hash_map_should_grow(&*value);
     let grew = handle move should_grow {
         Result::Ok(_) => {
-            __g1_hash_map_grow(&mut * value);
-            true
+            __g1_hash_map_grow(&mut *value);
+            __g1_bool_from_u32(1)
         },
-        Result::Err(_) => false
+        Result::Err(_) => __g1_bool_from_u32(0)
     };
     grew;
     let probe = __g1_hash_map_find(&*value, &key);
@@ -8449,7 +8566,7 @@ V: Use<[0, 0]> {
         },
         Result::Err(_) => {
             __g1_hash_map_insert_at(
-                &mut * value,
+                &mut *value,
                 move key,
                 move item,
                 __HashProbe { index: index, found: false }
@@ -8476,7 +8593,7 @@ V: Use<[0, 0]> {
             handle move bucket {
                 Result::Ok(pair) => {
                     let(key, item) = move pair;
-                    __g1_hash_map_insert_without_growth(&mut * fresh, move key, move item)
+                    __g1_hash_map_insert_without_growth(&mut *fresh, move key, move item)
                 },
                 Result::Err(_) => None
             };
@@ -8536,10 +8653,10 @@ V: Use<[0, 0]> {
     let should_grow = __g1_hash_map_should_grow(&*value);
     let grew = handle move should_grow {
         Result::Ok(_) => {
-            __g1_hash_map_grow(&mut * value);
-            true
+            __g1_hash_map_grow(&mut *value);
+            __g1_bool_from_u32(1)
         },
-        Result::Err(_) => false
+        Result::Err(_) => __g1_bool_from_u32(0)
     };
     grew;
     __g1_hash_map_insert_without_growth(move value, move key, move item)
@@ -8566,7 +8683,7 @@ V: Use<[0, 0]> {
                     let(key, item) = move pair;
                     // The bucket was just removed from this table, so this
                     // insertion cannot replace a logically equal resident.
-                    __g1_hash_map_insert_without_growth(&mut * value, move key, move item);
+                    __g1_hash_map_insert_without_growth(&mut *value, move key, move item);
                     let capacity = Vec::len(&value.buckets);
                     __g1_hash_map_repair_after_remove(
                         move value,
@@ -8659,7 +8776,7 @@ V: Use<[0, 0]> {
     handle required <= threshold {
         Result::Ok(_) => true,
         Result::Err(_) => {
-            __g1_hash_map_grow(&mut * value);
+            __g1_hash_map_grow(&mut *value);
             __g1_hash_map_reserve_additional_to(move value, move required)
         }
     }
@@ -8702,7 +8819,7 @@ __g1_hash_map_next_occupied<K, V>(value: &HashMap<K, V>, index: usize, capacity:
         Result::Err(_) => move capacity,
         Result::Ok(_) => {
             let bucket = __g1_vec_index(&value.buckets, index);
-            handle * bucket is Result::Ok(_) {
+            handle *bucket is Result::Ok(_) {
                 Result::Ok(_) => move index,
                 Result::Err(_) => __g1_hash_map_next_occupied(value, index + 1, move capacity)
             }
@@ -8765,12 +8882,12 @@ __g1_hash_map_iter_next<'a, K, V>(iterator: &mut HashMapIter<'a, K, V>) -> Optio
     let index = iterator.index;
     let capacity = Vec::len(&value.buckets);
     let occupied = __g1_hash_map_next_occupied(value, index, capacity);
-    let selected = handle occupied < capacity {
+    let selected = handle __g1_integer_less(occupied, capacity) {
         Result::Ok(_) => __g1_hash_iter_selected(move occupied),
         Result::Err(_) => __g1_hash_iter_exhausted()
     };
     if(selected is Result::Ok(selected_index)) {
-        (*iterator).index = selected_index + 1;
+        (*iterator).index = __g1_integer_add(selected_index, 1);
         __g1_hash_map_iter_bucket(move value, move selected_index)
     } else { __g1_hash_map_iter_none(move value) }
 }
@@ -8780,12 +8897,12 @@ __g1_hash_map_keys_next<'a, K, V>(iterator: &mut HashMapKeys<'a, K, V>) -> Optio
     let index = iterator.index;
     let capacity = Vec::len(&value.buckets);
     let occupied = __g1_hash_map_next_occupied(value, index, capacity);
-    let selected = handle occupied < capacity {
+    let selected = handle __g1_integer_less(occupied, capacity) {
         Result::Ok(_) => __g1_hash_iter_selected(move occupied),
         Result::Err(_) => __g1_hash_iter_exhausted()
     };
     if(selected is Result::Ok(selected_index)) {
-        (*iterator).index = selected_index + 1;
+        (*iterator).index = __g1_integer_add(selected_index, 1);
         __g1_hash_map_keys_bucket(move value, move selected_index)
     } else { __g1_hash_map_keys_none(move value) }
 }
@@ -8795,12 +8912,12 @@ __g1_hash_map_values_next<'a, K, V>(iterator: &mut HashMapValues<'a, K, V>) -> O
     let index = iterator.index;
     let capacity = Vec::len(&value.buckets);
     let occupied = __g1_hash_map_next_occupied(value, index, capacity);
-    let selected = handle occupied < capacity {
+    let selected = handle __g1_integer_less(occupied, capacity) {
         Result::Ok(_) => __g1_hash_iter_selected(move occupied),
         Result::Err(_) => __g1_hash_iter_exhausted()
     };
     if(selected is Result::Ok(selected_index)) {
-        (*iterator).index = selected_index + 1;
+        (*iterator).index = __g1_integer_add(selected_index, 1);
         __g1_hash_map_values_bucket(move value, move selected_index)
     } else { __g1_hash_map_values_none(move value) }
 }
@@ -8895,7 +9012,7 @@ K: Use<[0, *]> {
             // The loop guard proves `index < capacity`, and `capacity` is the
             // exact backing length captured by union_with before recursion.
             let bucket = __g1_array_get_borrow_shared(&other.values.buckets.storage, index);
-            __g1_hash_set_union_bucket(&mut * value, bucket);
+            __g1_hash_set_union_bucket(&mut *value, bucket);
             __g1_hash_set_union_step(move value, other, index + 1, move capacity)
         }
     }
@@ -8905,8 +9022,8 @@ __g1_hash_set_union_bucket<K>(value: &mut HashSet<K>, bucket: &Result<(K, ()), (
 K: Hash,
 K: Use<[0, *]> {
     if(*bucket is Result::Ok(_)) {
-        let key = * (&bucket.0.0);
-        HashSet::insert(&mut * value, move key);
+        let key = *(&bucket.0.0);
+        HashSet::insert(&mut *value, move key);
         ()
     } else { () }
 }
@@ -8921,7 +9038,7 @@ K: Use<[0, *]> {
     let owned = *key;
     handle HashSet::contains(right, &owned) {
         Result::Ok(_) => {
-            HashSet::insert(&mut * fresh, move owned);
+            HashSet::insert(&mut *fresh, move owned);
             ()
         },
         Result::Err(_) => ()
@@ -8945,7 +9062,7 @@ K: Use<[0, *]> {
             // before the distinct result set is mutated.
             let bucket = __g1_array_get_borrow_shared(&left.values.buckets.storage, index);
             if(*bucket is Result::Ok(_)) {
-                __g1_hash_set_intersection_insert(&mut * fresh, right, &bucket.0.0)
+                __g1_hash_set_intersection_insert(&mut *fresh, right, &bucket.0.0)
             } else { () };
             __g1_hash_set_intersection_step(move fresh, left, right, index + 1, move capacity)
         }
@@ -8969,12 +9086,12 @@ __g1_hash_set_iter_next<'a, K>(iterator: &mut HashSetIter<'a, K>) -> Option<& 'a
     let index = iterator.index;
     let capacity = Vec::len(&value.values.buckets);
     let occupied = __g1_hash_map_next_occupied(&value.values, index, capacity);
-    let selected = handle occupied < capacity {
+    let selected = handle __g1_integer_less(occupied, capacity) {
         Result::Ok(_) => __g1_hash_iter_selected(move occupied),
         Result::Err(_) => __g1_hash_iter_exhausted()
     };
     if(selected is Result::Ok(selected_index)) {
-        (*iterator).index = selected_index + 1;
+        (*iterator).index = __g1_integer_add(selected_index, 1);
         __g1_hash_set_iter_bucket(move value, move selected_index)
     } else { __g1_hash_set_iter_none(move value) }
 }
@@ -9305,7 +9422,7 @@ __g1_bit_set_contains<I>(value: &BitSet<I>, id: Id<I>) -> Bool {
 __g1_bit_set_insert<I>(value: &mut BitSet<I>, id: Id<I>) -> Bool {
     let word = __g1_bit_set_word(id.raw);
     let mask = __g1_bit_set_mask(id.raw);
-    __g1_bit_set_ensure_word(&mut * value, word);
+    __g1_bit_set_ensure_word(&mut *value, word);
     let previous = __g1_toolkit_u64_at(&value.words, word);
     __g1_toolkit_u64_set(&mut value.words, word, __g1_toolkit_u64_or(previous, mask));
     not(__g1_toolkit_u64_has(previous, mask))
@@ -9339,7 +9456,7 @@ __g1_bit_set_union_step<I>(value: &mut BitSet<I>, other: &BitSet<I>, cursor: usi
     handle cursor < length {
         Result::Ok(_) => {
             let incoming = __g1_toolkit_u64_at(&other.words, cursor);
-            __g1_bit_set_ensure_word(&mut * value, cursor);
+            __g1_bit_set_ensure_word(&mut *value, cursor);
             let previous = __g1_toolkit_u64_at(&value.words, cursor);
             __g1_toolkit_u64_set(&mut value.words, cursor, __g1_toolkit_u64_or(previous, incoming));
             __g1_bit_set_union_step(move value, other, cursor + 1, length)
@@ -9453,9 +9570,9 @@ __g1_sparse_set_insert<I>(value: &mut SparseSet<I>, id: Id<I>) -> Bool {
         Result::Ok(_) => false,
         Result::Err(_) => {
             let raw = wrapping_convert_to_usize(id.raw);
-            __g1_sparse_set_ensure(&mut * value, raw);
+            __g1_sparse_set_ensure(&mut *value, raw);
             let dense_index = value.dense_length;
-            __g1_sparse_set_write_sparse(&mut * value, raw, dense_index);
+            __g1_sparse_set_write_sparse(&mut *value, raw, dense_index);
             Vec::push(&mut value.dense, move id);
             (*value).dense_length = dense_index + 1;
             true
@@ -9475,12 +9592,12 @@ __g1_sparse_set_remove_finish<I>(
         Result::Ok(_) => {
             let moved = __g1_sparse_set_dense_at(&*value, dense_index);
             let moved_raw = wrapping_convert_to_usize(moved.raw);
-            __g1_sparse_set_write_sparse(&mut * value, moved_raw, dense_index);
-            __g1_sparse_set_write_sparse(&mut * value, raw, 0);
+            __g1_sparse_set_write_sparse(&mut *value, moved_raw, dense_index);
+            __g1_sparse_set_write_sparse(&mut *value, raw, 0);
             true
         },
         Result::Err(_) => {
-            __g1_sparse_set_write_sparse(&mut * value, raw, 0);
+            __g1_sparse_set_write_sparse(&mut *value, raw, 0);
             true
         }
     }
@@ -10004,16 +10121,20 @@ __g1_source_diagnostic_location(formatter: &mut Formatter, sources: &SourceMap, 
                 sources,
                 wrapping_convert_to_usize(location.file.raw)
             );
-            Formatter::literal(&mut * formatter, &file.name);
-            __g1_debug_literal(&mut * formatter, ":");
+            Formatter::literal(&mut *formatter, &file.name);
+            __g1_debug_literal(&mut *formatter, ":");
             Formatter::append_u64(
-                &mut * formatter,
-                wrapping_convert_to_u64(location.line + wrapping_convert_to_usize(1))
+                &mut *formatter,
+                wrapping_convert_to_u64(
+                    __g1_integer_add(location.line, wrapping_convert_to_usize(1))
+                )
             );
-            __g1_debug_literal(&mut * formatter, ":");
+            __g1_debug_literal(&mut *formatter, ":");
             Formatter::append_u64(
                 move formatter,
-                wrapping_convert_to_u64(location.column + wrapping_convert_to_usize(1))
+                wrapping_convert_to_u64(
+                    __g1_integer_add(location.column, wrapping_convert_to_usize(1))
+                )
             )
         },
         Result::Err(_) => __g1_debug_literal(move formatter, "<unknown>:0:0")
@@ -10030,15 +10151,15 @@ __g1_source_diagnostic_labels(
         Result::Err(_) => (),
         Result::Ok(_) => {
             let annotation = Vec::index(labels, index);
-            Formatter::newline(&mut * formatter);
-            __g1_debug_literal(&mut * formatter, " --> ");
-            __g1_source_diagnostic_location(&mut * formatter, sources, annotation.span.start);
-            Formatter::newline(&mut * formatter);
+            Formatter::newline(&mut *formatter);
+            __g1_debug_literal(&mut *formatter, " --> ");
+            __g1_source_diagnostic_location(&mut *formatter, sources, annotation.span.start);
+            Formatter::newline(&mut *formatter);
             handle annotation.primary {
-                Result::Ok(_) => __g1_debug_literal(&mut * formatter, "  = primary: "),
-                Result::Err(_) => __g1_debug_literal(&mut * formatter, "  = label: ")
+                Result::Ok(_) => __g1_debug_literal(&mut *formatter, "  = primary: "),
+                Result::Err(_) => __g1_debug_literal(&mut *formatter, "  = label: ")
             };
-            Formatter::literal(&mut * formatter, &annotation.message);
+            Formatter::literal(&mut *formatter, &annotation.message);
             __g1_source_diagnostic_labels(move formatter, sources, labels, index + 1)
         }
     }
@@ -10048,9 +10169,9 @@ __g1_source_diagnostic_notes(formatter: &mut Formatter, notes: &Vec<String>, ind
     handle index < Vec::len(notes) {
         Result::Err(_) => (),
         Result::Ok(_) => {
-            Formatter::newline(&mut * formatter);
-            __g1_debug_literal(&mut * formatter, "  = note: ");
-            Formatter::literal(&mut * formatter, Vec::index(notes, index));
+            Formatter::newline(&mut *formatter);
+            __g1_debug_literal(&mut *formatter, "  = note: ");
+            Formatter::literal(&mut *formatter, Vec::index(notes, index));
             __g1_source_diagnostic_notes(move formatter, notes, index + 1)
         }
     }
@@ -10094,7 +10215,7 @@ __g1_interner_fill_buckets<T>(buckets: &mut Vec<Vec<Id<T>>>, capacity: usize) {
         Result::Err(_) => (),
         Result::Ok(_) => {
             let bucket = __g1_interner_empty_bucket(&*buckets);
-            Vec::push(&mut * buckets, move bucket);
+            Vec::push(&mut *buckets, move bucket);
             __g1_interner_fill_buckets(move buckets, move capacity)
         }
     }
@@ -10175,7 +10296,7 @@ __g1_interner_found<T>(id: Id<T>, candidate: T) -> Result<Id<T>, T> where T: Use
 __g1_interner_intern<T>(value: &mut Interner<T>, candidate: T) -> Result<Id<T>, T> where T: Eq,
 T: Hash,
 T: Use<[0, *]> {
-    __g1_interner_prepare(&mut * value);
+    __g1_interner_prepare(&mut *value);
     let bucket_index = __g1_interner_bucket(&*value, &candidate);
     let probe = __g1_interner_probe(&*value, &candidate, bucket_index);
     handle move probe {
@@ -10286,9 +10407,9 @@ Effects = { ProcessArgs, FileRead, FileWrite, Diagnostic } > {
 
 // Source-defined structured iteration. `Break` and `Continue` are ordinary
 // terminal effects; the nearest combinator handles its own control requests,
-// so nested loops compose without compiler-known loop nodes. A labeled
-// trailing block (`loop @name: { ... }`) retains the language's existing
-// generative lexical brand for APIs that need to name the loop region.
+// so nested loops compose without compiler-known loop nodes. An explicit
+// binder around the call (`@name: { loop { ... } }`) gives APIs a generative
+// lexical brand when they need to name the loop region.
 effect Break { stop() -> ! }
 
 effect Continue { next() -> ! }
@@ -10371,5 +10492,16 @@ Effects = {} > {
     match(VecIntoIter::next(iterator)) {
         Option::Some((item, remaining)) => fold(remaining, body(seed, item), body),
         None => seed
+    }
+}
+
+// Proof-only error propagation. `exit` is a statically branded destination;
+// every instantiated call is control-inlined and its error arm becomes a
+// direct LEAVE in the caller's frame.
+try<T, E, S, L>(value: Result<T, E>, exit: L) -> T where L: Label<Result<S, E>> {
+    if(value is Result::Err(error)) {
+        exit(Result::Err(error))
+    } else {
+        if(value is Result::Ok(inner)) { inner } else { unreachable() }
     }
 }

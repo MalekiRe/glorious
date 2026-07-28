@@ -32,8 +32,6 @@ fn keywords_are_classified_and_library_control_names_stay_identifiers() {
         ("resume", Kw::Resume),
         ("cancel", Kw::Cancel),
         ("tail", Kw::Tail),
-        ("label", Kw::Label),
-        ("leave", Kw::Leave),
         ("is", Kw::Is),
         ("type", Kw::Type),
     ] {
@@ -44,8 +42,9 @@ fn keywords_are_classified_and_library_control_names_stay_identifiers() {
         );
     }
     for word in [
-        "if", "match", "loop", "return", "yield", "await", "for", "with", "mut", "move", "cases",
-        "private", "const", "infinity", "infixl", "infixr", "infix", "prefix", "self",
+        "if", "match", "loop", "return", "yield", "await", "label", "leave", "for", "with", "mut",
+        "move", "cases", "private", "const", "infinity", "infixl", "infixr", "infix", "prefix",
+        "self",
     ] {
         assert_eq!(
             kinds(word),
@@ -56,17 +55,42 @@ fn keywords_are_classified_and_library_control_names_stay_identifiers() {
 }
 
 #[test]
+fn hyphenated_names_and_callable_reference_sigils_are_unambiguous() {
+    assert_eq!(
+        kinds("sum-three $sum-three value - other"),
+        vec![
+            TokenKind::Ident("sum-three".into()),
+            TokenKind::Dollar,
+            TokenKind::Ident("sum-three".into()),
+            TokenKind::Ident("value".into()),
+            TokenKind::Minus,
+            TokenKind::Ident("other".into()),
+            TokenKind::Eof,
+        ]
+    );
+    assert_eq!(
+        kinds("left-right left - right"),
+        vec![
+            TokenKind::Ident("left-right".into()),
+            TokenKind::Ident("left".into()),
+            TokenKind::Minus,
+            TokenKind::Ident("right".into()),
+            TokenKind::Eof,
+        ]
+    );
+}
+
+#[test]
 fn labels_tokenize_references_and_binders() {
     assert_eq!(
         kinds("@outer"),
         vec![TokenKind::Label("outer".into()), TokenKind::Eof]
     );
     assert_eq!(
-        kinds("@outer: leave@done(42)"),
+        kinds("@outer: @done(42)"),
         vec![
             TokenKind::Label("outer".into()),
             TokenKind::Colon,
-            TokenKind::Keyword(Kw::Leave),
             TokenKind::Label("done".into()),
             TokenKind::LParen,
             TokenKind::Number(match &kinds("42")[0] {

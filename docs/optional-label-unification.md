@@ -1,12 +1,11 @@
 # Optional: label unification — labels as the intrinsic `Label` trait
 
-Status: agreed design, **optional follow-on** to `effect-syntax-redesign.md`.
-Do not start until that redesign has landed through its Stage 2 (the unified
-handler-arm node and completion arms are prerequisites for the examples and
-lowerings below). Scope: the label surface, destination evidence, and the
-function-return boundary. The runtime transfer semantics (direct jump, cleanup
-on the way out, verified `LEAVE` boundaries) are unchanged; the VM gains no
-instruction and loses none.
+Status: implemented, following `effect-syntax-redesign.md`. The label surface,
+implicit function-return boundary, intrinsic `Label` evidence, mandatory
+control inlining, declaration- and operation-generic label effects, semantic
+tooling, and the speculative std `try` helper are implemented.
+The runtime transfer semantics (direct jump, cleanup on the way out, verified
+`LEAVE` boundaries) are unchanged; the VM gains no instruction and loses none.
 
 ## 0. Design summary (normative)
 
@@ -54,10 +53,10 @@ callable that diverges.**
   arguments but can never `impl` it. Only binders mint instances. There is no
   erased/dyn form of a label — this is what preserves the direct-jump
   guarantee (§0.5).
-- The old forms `label @done: T { ... }`, bare `@outer: { ... }` generative
-  scopes, `leave@done(v)`, and the labeled trailing application remain
-  parseable during migration and are formatter-rewritten; they are removed
-  from the grammar in the final stage.
+- The migration is complete: `label @done: T { ... }`, bare `@outer: { ... }`
+  generative scopes, `leave@done(v)`, and labeled trailing application are no
+  longer grammar forms. Parser diagnostics identify the old spellings and
+  show their canonical replacements.
 
 ### 0.2 Implicit function-body labels; `CallDestination` removed
 
@@ -321,11 +320,13 @@ sections.
 ## 4. Acceptance
 
 - Full `cargo test -p grandiose` green at every stage boundary.
-- §1's old/new examples compile to byte-identical bytecode (differential).
+- §1's canonical example retains the frozen direct-`LEAVE` bytecode shape from
+  the pre-migration implementation.
 - `try` and `first_match` compile, run correctly under the VM, and the
   invocation sites verifiably lower to direct `LEAVE` sequences (assert via
   bytecode inspection in the test, not just behavior).
 - After Stage 5, `grep -rn "\bleave@\|\blabel @" --include=*.glorious` over
   the repo is empty, and `CallDestination` appears nowhere in
   `crates/grandiose/src/`.
-- Formatter idempotent; old→new rewrites re-parse to identical ASTs.
+- Formatter idempotent on the canonical syntax; old spellings receive parser
+  migration diagnostics rather than entering the AST.

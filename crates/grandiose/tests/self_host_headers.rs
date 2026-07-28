@@ -41,7 +41,8 @@ fn self_host_bundle() -> SourceBundle {
         paths.into_iter().map(|path| {
             let source = fs::read_to_string(&path)
                 .unwrap()
-                .replace("pub mod bodies;\n", "");
+                .replace("pub mod bodies;\n", "")
+                .replace("pub mod resolution;\n", "");
             Segment::new(path.to_string_lossy(), source)
         }),
     )

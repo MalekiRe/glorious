@@ -200,7 +200,7 @@ pub(crate) fn infer_nominal_variance(program: &Program) -> BTreeMap<String, Vec<
                         }
                     }
                 } else {
-                    for argument in arguments {
+                    for argument in arguments.iter() {
                         for (name, index) in params {
                             if mentions(program, argument, name) {
                                 found[*index] = merge_variance(found[*index], Variance::Invariant);
@@ -857,14 +857,42 @@ pub(crate) struct LabelBrand {
     pub(crate) ordinal: u32,
 }
 
+pub(crate) const LABEL_TYPE_PREFIX: &str = "$label$";
+
+pub(crate) fn label_provisional_type(
+    owner: &DeclarationKey,
+    label: &crate::ast::LabelSyntax,
+    payload: ProvisionalType,
+) -> ProvisionalType {
+    let owner = match owner {
+        DeclarationKey::Function(name) => format!("f${name}"),
+        DeclarationKey::Global(name) => format!("g${name}"),
+    };
+    ProvisionalType::Nominal(NominalInstanceKey {
+        declaration: NominalKey(format!(
+            "{LABEL_TYPE_PREFIX}{owner}${}${}",
+            label.span.start, label.span.end
+        )),
+        arguments: vec![payload],
+    })
+}
+
+pub(crate) fn label_payload_type(ty: &ProvisionalType) -> Option<&ProvisionalType> {
+    let ProvisionalType::Nominal(instance) = ty else {
+        return None;
+    };
+    (instance.declaration.0.starts_with(LABEL_TYPE_PREFIX) && instance.arguments.len() == 1)
+        .then(|| &instance.arguments[0])
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct LabelEvidence {
     pub(crate) brand: LabelBrand,
     pub(crate) name: String,
     pub(crate) binder_span: Span,
-    /// `None` is a generative label brand without direct `Destination`
-    /// evidence. Direct labels always carry a result type (implicit Unit when
-    /// the source annotation is omitted).
+    /// Direct label binders always carry a result type (implicit Unit when the
+    /// source annotation is omitted). `None` remains only for obsolete
+    /// internal ASTs and is never produced by the source grammar.
     pub(crate) destination_result: Option<ProvisionalType>,
     pub(crate) result_contains_references: bool,
     pub(crate) references: Vec<Span>,
@@ -1663,7 +1691,6 @@ fn collect_label_evidence(owner: DeclarationKey, root: &Expr) -> Vec<LabelEviden
 
         fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<()> {
             match &expression.kind {
-                ExprKind::Labeled { label, body } => self.bind(label, None, body),
                 ExprKind::LabelDestination { label, ty, body } => self.bind(
                     label,
                     Some(provisional_label_type(ty.as_deref()).unwrap_or_else(|| predefined(UNIT))),
@@ -1674,18 +1701,22 @@ fn collect_label_evidence(owner: DeclarationKey, root: &Expr) -> Vec<LabelEviden
                         self.evidence[index].references.push(label.span);
                     }
                 }
-                ExprKind::Leave { label, value } => {
+                ExprKind::Call(callee, arguments)
+                    if let ExprKind::LabelReference(label) = &callee.kind =>
+                {
                     if let Some(index) = self.active.get(label.name.as_ref()).copied()
                         && let Some(result) = self.evidence[index].destination_result.clone()
                     {
                         self.evidence[index].leaves.push(LabelLeaveEvidence {
                             span: expression.span,
-                            value_span: value.as_deref().map(|value| value.span),
+                            value_span: arguments.first().map(|value| value.span),
                             result_contains_references: provisional_contains_references(&result),
                             result,
                         });
                     }
-                    walk_expr(self, expression)?;
+                    for argument in arguments.iter() {
+                        self.visit_expr(argument)?;
+                    }
                 }
                 _ => walk_expr(self, expression)?,
             }
@@ -1740,7 +1771,8 @@ pub(crate) fn type_program_incremental(
         })
         .chain(program.functions.iter().map(|function| {
             let owner = DeclarationKey::Function(function.name.clone());
-            (owner.clone(), collect_label_evidence(owner, &function.body))
+            let body = function.semantic_body();
+            (owner.clone(), collect_label_evidence(owner, &body))
         }))
         .collect::<BTreeMap<_, _>>();
     let mut assignment_reference_requirements = BTreeSet::new();
@@ -1778,6 +1810,7 @@ pub(crate) fn type_program_incremental(
         let Some(shape) = tables.functions.get(&function.name) else {
             continue;
         };
+        let labeled_body = function.semantic_body();
         let fingerprint = incremental
             .as_ref()
             .and_then(|(_, _, fingerprints)| fingerprints.get(&shape.declaration))
@@ -1798,12 +1831,12 @@ pub(crate) fn type_program_incremental(
             shape.declaration.clone(),
             &tables,
             constructions,
-            &function.body,
+            &labeled_body,
         );
         for (param, ty) in function.params.iter().zip(&shape.params) {
             typer.bind(param.name.clone(), ty.clone());
         }
-        let body = typer.expression(&function.body, Some(&shape.result));
+        let body = typer.expression(&labeled_body, Some(&shape.result));
         let body_refinements = std::mem::take(&mut typer.refinements);
         let body_requirements = typer.assignment_reference_requirements.clone();
         assignment_reference_requirements.extend(body_requirements.iter().cloned());
@@ -2281,6 +2314,17 @@ impl<'a> Typer<'a> {
                     },
                 )
             }
+            ExprKind::Call(callee, args) if let ExprKind::LabelReference(label) = &callee.kind => {
+                let destination = self
+                    .active_labels
+                    .get(label.name.as_ref())
+                    .and_then(Clone::clone);
+                let children = args
+                    .iter()
+                    .map(|value| self.expression(value, destination.as_ref()))
+                    .collect();
+                self.node(source, None, TypedExprKind::EffectBoundary(children))
+            }
             ExprKind::Call(callee, args) => self.call(source, callee, args, expected),
             ExprKind::Unary {
                 op: UnaryOp::Negate,
@@ -2462,20 +2506,6 @@ impl<'a> Typer<'a> {
                 self.node(source, ty, TypedExprKind::Tuple(values))
             }
             ExprKind::Variable(_) => self.node(source, None, TypedExprKind::Unsupported(vec![])),
-            ExprKind::Labeled { label, body } => {
-                let previous = self.active_labels.insert(label.name.to_string(), None);
-                let body = self.expression(body, expected);
-                if let Some(previous) = previous {
-                    self.active_labels.insert(label.name.to_string(), previous);
-                } else {
-                    self.active_labels.remove(label.name.as_ref());
-                }
-                self.node(
-                    source,
-                    body.ty.clone(),
-                    TypedExprKind::Unsupported(vec![body]),
-                )
-            }
             ExprKind::LabelDestination { label, ty, body } => {
                 let result =
                     provisional_label_type(ty.as_deref()).unwrap_or_else(|| predefined(UNIT));
@@ -2492,17 +2522,6 @@ impl<'a> Typer<'a> {
             }
             ExprKind::LabelReference(_) => {
                 self.node(source, None, TypedExprKind::Unsupported(vec![]))
-            }
-            ExprKind::Leave { label, value } => {
-                let destination = self
-                    .active_labels
-                    .get(label.name.as_ref())
-                    .and_then(Clone::clone);
-                let children = value
-                    .iter()
-                    .map(|value| self.expression(value, destination.as_ref()))
-                    .collect();
-                self.node(source, None, TypedExprKind::EffectBoundary(children))
             }
             ExprKind::Is { subject, pattern } => {
                 let subject = self.expression(subject, None);
@@ -2963,10 +2982,7 @@ impl<'a> Typer<'a> {
                 } => pending.push(subject),
                 ExprKind::Binary { lhs, rhs, .. } => pending.extend([lhs.as_ref(), rhs.as_ref()]),
                 ExprKind::Perform { args, .. } => pending.extend(args.iter()),
-                ExprKind::Labeled { body, .. } | ExprKind::LabelDestination { body, .. } => {
-                    pending.push(body)
-                }
-                ExprKind::Leave { value, .. } => pending.extend(value.iter().map(AsRef::as_ref)),
+                ExprKind::LabelDestination { body, .. } => pending.push(body),
                 ExprKind::Is { subject, .. } => pending.push(subject),
                 ExprKind::Resume { resumption, value }
                 | ExprKind::TailResume { resumption, value } => {
@@ -3278,7 +3294,7 @@ mod tests {
     fn label_evidence_uses_stable_generative_brands_and_reference_result_contracts() {
         let program = crate::parser::parse(
             crate::lexer::lex(
-                "select<'a>(value:&'a i64)->&'a i64{label @done:&'a i64{@scope:{@scope;leave@done(value)}}} main()->{()}",
+                "select<'a>(value:&'a i64)->&'a i64{@done:&'a i64{@scope:{@scope;@done(value)}}} main()->{()}",
             )
             .unwrap(),
         )
@@ -3300,7 +3316,10 @@ mod tests {
         assert!(labels[0].leaves[0].result_contains_references);
         assert_eq!(labels[1].name, "scope");
         assert_eq!(labels[1].references.len(), 1);
-        assert!(labels[1].destination_result.is_none());
+        assert_eq!(
+            labels[1].destination_result,
+            Some(ProvisionalType::Predefined("Unit".into()))
+        );
     }
 
     #[test]

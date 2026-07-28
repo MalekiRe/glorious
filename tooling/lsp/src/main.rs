@@ -325,7 +325,7 @@ impl Server {
                                     "tokenTypes": [
                                         "type", "enum", "interface", "struct", "variable",
                                         "event", "function", "keyword", "comment", "string",
-                                        "number", "operator", "enumMember"
+                                        "number", "operator", "enumMember", "label"
                                     ],
                                     "tokenModifiers": []
                                 },
@@ -1122,6 +1122,7 @@ fn semantic_tokens(analysis: &analysis::Analysis, path: &std::path::Path, text: 
                 | LosslessKind::ByteString
                 | LosslessKind::ByteCharacter => Some(9),
                 LosslessKind::Number => Some(10),
+                LosslessKind::Label => Some(13),
                 LosslessKind::Identifier if is_keyword(token.text(text)) => Some(7),
                 LosslessKind::Punctuation if is_operator(token.text(text)) => Some(11),
                 _ => None,
@@ -1152,6 +1153,14 @@ fn semantic_tokens(analysis: &analysis::Analysis, path: &std::path::Path, text: 
             continue;
         }
         let token_type = match declaration.kind {
+            DeclarationKind::Callable
+                if declaration
+                    .signature
+                    .as_deref()
+                    .is_some_and(|signature| signature.contains("-> !")) =>
+            {
+                13
+            }
             DeclarationKind::Callable => 6,
             DeclarationKind::Struct => 3,
             DeclarationKind::Enum => 1,
@@ -1176,6 +1185,18 @@ fn semantic_tokens(analysis: &analysis::Analysis, path: &std::path::Path, text: 
                 qualified_member_after(tokens, text, occurrence.end_byte)
         {
             spans.insert((member_start, member_end), 12);
+        }
+    }
+    for occurrence in analysis
+        .local_occurrences
+        .iter()
+        .filter(|occurrence| occurrence.file == path)
+    {
+        if analysis
+            .local(&occurrence.identity)
+            .is_some_and(|local| local.inferred_type.contains("$label$"))
+        {
+            spans.insert((occurrence.start_byte, occurrence.end_byte), 13);
         }
     }
 
@@ -1230,6 +1251,7 @@ fn semantic_tokens(analysis: &analysis::Analysis, path: &std::path::Path, text: 
             spans.insert((prefix.span.start, prefix.span.end), prefix_type);
             spans.insert((member.span.start, member.span.end), 12);
         }
+
     }
 
     let index = LineIndex::new(text);

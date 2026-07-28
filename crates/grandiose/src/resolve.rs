@@ -122,12 +122,18 @@ fn resolve_interfaces(program: &Program) -> Result<(), Vec<Diagnostic>> {
     for declaration in &program.effects {
         let scope = Scope::new(declaration.generics.as_ref());
         for operation in &declaration.operations {
+            let operation_scope = scope.extended(operation.generics.as_ref());
             for parameter in &operation.params {
-                context.ty(&parameter.ty, &scope, &mut errors);
+                context.ty(&parameter.ty, &operation_scope, &mut errors);
             }
             if let Some(result) = &operation.return_type {
-                context.ty(result, &scope, &mut errors);
+                context.ty(result, &operation_scope, &mut errors);
             }
+            context.where_clause(
+                operation.where_clause.as_ref(),
+                &operation_scope,
+                &mut errors,
+            );
         }
     }
     for function in &program.functions {
@@ -274,7 +280,6 @@ impl Context<'_> {
             ExprKind::Move(value)
             | ExprKind::Unary { operand: value, .. }
             | ExprKind::Field(value, _)
-            | ExprKind::Labeled { body: value, .. }
             | ExprKind::LabelDestination { body: value, .. }
             | ExprKind::Cancel { resumption: value } => self.expression(value, locals, errors),
             ExprKind::Closure { params, body } => {
@@ -302,11 +307,6 @@ impl Context<'_> {
                 let mut nested = locals.clone();
                 nested.extend(params.iter().map(|parameter| parameter.name.clone()));
                 self.expression(body, &mut nested, errors);
-            }
-            ExprKind::Leave { value, .. } => {
-                if let Some(value) = value {
-                    self.expression(value, locals, errors);
-                }
             }
             ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
                 self.expression(resumption, locals, errors);

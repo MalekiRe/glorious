@@ -2,6 +2,7 @@ pub mod lexer;
 pub mod scanner;
 pub mod headers;
 pub mod bodies;
+pub mod resolution;
 
 pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
     lexer::application()

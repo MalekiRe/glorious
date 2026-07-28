@@ -36,12 +36,8 @@ fn intrinsic(id: u64, display_name: &str, role: IntrinsicRole) -> ManifestTrait 
             vec![item("After", AssociatedItemKind::Type)],
             TraitPolicy::CompilerSealed,
         ),
-        IntrinsicRole::Label | IntrinsicRole::Environment => {
-            (vec![Lifetime], vec![], TraitPolicy::CompilerSealed)
-        }
-        IntrinsicRole::Destination | IntrinsicRole::CallDestination => {
-            (vec![Lifetime, Type], vec![], TraitPolicy::CompilerSealed)
-        }
+        IntrinsicRole::Label => (vec![Type], vec![], TraitPolicy::CompilerSealed),
+        IntrinsicRole::Environment => (vec![Lifetime], vec![], TraitPolicy::CompilerSealed),
     };
     ManifestTrait {
         id,
@@ -61,8 +57,6 @@ fn base_declarations() -> Vec<ManifestTrait> {
         intrinsic(4, "RunsIn", IntrinsicRole::RunsIn),
         intrinsic(5, "Label", IntrinsicRole::Label),
         intrinsic(6, "Environment", IntrinsicRole::Environment),
-        intrinsic(7, "Destination", IntrinsicRole::Destination),
-        intrinsic(8, "CallDestination", IntrinsicRole::CallDestination),
     ]
 }
 
@@ -521,14 +515,14 @@ fn malformed_manifests_report_canonical_structured_errors() {
 
     let mut duplicate_id = base_declarations();
     duplicate_id.push(external(
-        8,
+        6,
         "Foreign",
         vec![],
         vec![],
         TraitPolicy::ExternalOpen,
     ));
     assert!(
-        messages(duplicate_id).contains(&"trusted trait manifest contains duplicate id 8".into())
+        messages(duplicate_id).contains(&"trusted trait manifest contains duplicate id 6".into())
     );
 
     let mut duplicate_name = base_declarations();

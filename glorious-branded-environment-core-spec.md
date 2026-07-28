@@ -5,7 +5,7 @@
 **Status:** Normative generation-1 language core, derived from the earlier
 Glorious Minimal Language revision 0.15.
 
-**Intent:** Define the smallest coherent compiler core that preserves source-defined control flow, effect handlers, label-indexed routing, linear ownership, conditional refinements, Rust-style lifetime reasoning, and arbitrary higher-order selection abstractions.
+**Intent:** Define the smallest coherent compiler core that preserves source-defined control flow, effect handlers, label-generic routing through intrinsic `Label<T>` evidence, linear ownership, conditional refinements, Rust-style lifetime reasoning, and arbitrary higher-order selection abstractions.
 
 ---
 
@@ -171,37 +171,43 @@ grammar production or a compiler-known list of control-flow functions.
 
 ### 2.4 Labels
 
-A named generative identity is introduced with:
+A typed label destination is introduced with:
 
 ```rust
-@outer: {
+@done: i32 {
     body
 }
 ```
 
-The colon is the binder. `@outer` without a colon refers to the existing identity.
+The binder mints a fresh nominal type `L_done` with compiler-generated
+`L_done: Label<i32>` evidence. `@done` without a colon refers to that value;
+the sigil selects the lexical label namespace.
 
-A direct typed destination is:
+Transfer is ordinary diverging application:
 
 ```rust
-label @done: i32 {
-    body
+@done(42)
+```
+
+After a label is passed under an ordinary binding, that binding is called
+without `@`:
+
+```rust
+exit(42) // where L: Label<i32>
+```
+
+Every named function body has an implicit label bearing the function's simple
+name and result type:
+
+```rust
+parse(input: Bytes) -> Result<Program, ParseError> {
+    parse(rest)               // recursive function call
+    @parse(Result::Err(err))  // transfer from this activation
 }
 ```
 
-and direct transfer is:
-
-```rust
-leave@done(42)
-```
-
-A labeled trailing application remains available:
-
-```rust
-loop @outer: {
-    body
-}
-```
+Anonymous callables have no implicit label. There is no `label` or `leave`
+keyword and no labeled trailing-application form.
 
 ### 2.5 Effects and handlers
 
@@ -634,7 +640,7 @@ A custom `Drop` hook is assumed capable of observing every borrowed field, so no
 
 ```rust
 #[compiler_intrinsic]
-sealed trait Label<'scope> {}
+sealed trait Label<T>: Fn<(T), Output = !> {}
 ```
 
 Only the compiler creates implementations.
@@ -644,10 +650,12 @@ A label binder introduces:
 ```text
 fresh lifetime 'scope
 fresh opaque type L
-proof L: Label<'scope>
+proof L: Label<T>
 ```
 
-The type is zero-sized and has no runtime identity by itself.
+The type and its evidence are proof-only and have no runtime representation.
+Dependence on `L` is bounded by `'scope`; the lifetime is not an explicit
+`Label` argument.
 
 ### 6.2 Environment brands
 
@@ -1002,7 +1010,7 @@ This one generic witness replaces separate capture identities, armed closures, a
 Evaluating:
 
 ```rust
-@outer: {
+@outer: T {
     body
 }
 ```
@@ -1010,51 +1018,34 @@ Evaluating:
 introduces a fresh abstract label type `L_outer` and fresh lifetime `'outer`:
 
 ```text
-L_outer: Label<'outer>
+L_outer: Label<T>
+L_outer is bounded by 'outer
 ```
 
 The type and trait evidence are compile-time-only.
 
 ### 9.2 Runtime realization
 
-The compiler separately creates or receives a runtime realization:
-
-- a direct jump target and cleanup boundary;
-- an effect-handler frame;
-- a hidden handler-evidence pointer;
-- another backend-specific control object.
+The compiler separately creates a direct jump target and cleanup boundary.
 
 Typed IR records the association between the static brand and the runtime realization. The label type itself is never treated as a machine address.
 
-### 9.3 Destination traits
+### 9.3 Directness and control inlining
 
-```rust
-#[compiler_intrinsic]
-sealed trait Destination<'scope, T>: Label<'scope> {}
+Every `L: Label<T>` specialization resolves to one concrete generative brand.
+Invocation must lower to cleanup followed by direct `LEAVE`; dynamic label
+search and erased label targets do not exist.
 
-#[compiler_intrinsic]
-sealed trait CallDestination<'scope, T>:
-    Destination<'scope, T> {}
-```
-
-A direct typed label introduces `Destination` evidence. A named callable invocation additionally introduces `CallDestination` evidence.
-
-A standard return wrapper is ordinary source:
-
-```rust
-return<'scope, L, T>(value: T) -> !
-where
-    L: CallDestination<'scope, T>,
-{
-    leave@L(value)
-}
-```
-
-An ordinary inner typed label cannot intercept `return`, because it lacks `CallDestination` evidence.
+Monomorphization alone is insufficient when a label crosses a callable
+boundary. Generic helpers, closures, and handlers which may invoke a label are
+transitively control-inlined into the frame introducing the concrete brand.
+Failure to fuse through an unavailable body, recursive cycle, or indirect
+boundary is a compile error.
 
 ### 9.4 Label lifetimes
 
-Any closure, handler, environment, or effect row referring to `L: Label<'scope>` is bounded by `'scope`.
+Any closure, handler, environment, or effect row referring to `L: Label<T>` is
+bounded by the lifetime of the generative brand.
 
 Full lifetime checking therefore replaces a separate dead-label escape system. A value depending on `L` cannot outlive the scope.
 
@@ -1063,9 +1054,9 @@ Recursive invocations use distinct runtime frames and are modeled as introducing
 ### 9.5 Label-indexed effects
 
 ```rust
-effect LoopControl<'scope, L, B, S>
+effect LoopControl<L, B, S>
 where
-    L: Label<'scope>,
+    L: Label<B>,
 {
     break(value: B) -> !
     continue(state: S) -> !
@@ -1074,7 +1065,17 @@ where
 
 `LoopControl<L_outer,...>` and `LoopControl<L_inner,...>` are distinct protocol keys.
 
-The brand is erased after effect resolution. Generic code may receive hidden runtime handler evidence pointing to the correct active frame.
+Operations may also introduce their own inferred static label parameter:
+
+```rust
+effect Spawn {
+    task<L>(work: Work, done: L) -> ! where L: Label<Outcome>
+}
+```
+
+The brand is erased after effect resolution. A handler that invokes the label
+is control-fused into its destination frame; the label is never an effect
+payload at runtime.
 
 ---
 
@@ -1361,8 +1362,6 @@ Label
 Environment
 Fn
 RunsIn
-Destination
-CallDestination
 ```
 
 User-implementable intrinsic traits:
@@ -1418,12 +1417,12 @@ while both variants retain useful payloads in the general `Result<T, E>` case.
 
 ### 13.2 Matching
 
-A private label-indexed case effect may be:
+A private label-generic case effect may be:
 
 ```rust
-effect Case<'scope, L, T>
+effect Case<L, T>
 where
-    L: Label<'scope>,
+    L: Label<T>,
 {
     case(value: T) -> !
 }
@@ -1505,11 +1504,19 @@ These are ordinary source declarations governed by source-declared fixities. The
 
 ### 13.5 Return
 
-`return` is an ordinary wrapper constrained by `CallDestination` and implemented with direct `leave`.
+Early function exit invokes the named function's implicit label:
+
+```rust
+@parse(Result::Err(error))
+```
+
+There is no standard `return` wrapper. Error propagation may use the ordinary
+generic helper `try(value, @parse)`.
 
 ### 13.6 Loops
 
-A loop abstraction creates a fresh label brand, installs a label-indexed `LoopControl` handler, and uses proper tail recursion.
+A loop abstraction creates a fresh label brand, installs a label-generic
+`LoopControl` handler, and uses proper tail recursion.
 
 `break` and `continue` are ordinary functions performing terminal operations of that protocol.
 
@@ -1752,9 +1759,10 @@ A safe well-typed program cannot:
 12. resume a one-shot continuation twice;
 13. discard a must-move value through cancellation or any other cleanup edge;
 14. duplicate a multi-shot continuation with nonduplicable captures;
-15. intercept a label-indexed effect using the wrong label brand;
-16. treat a label brand as a runtime address;
-17. finish a closed executable with an unhandled effect.
+15. carry an active label across a multi-shot continuation capture;
+16. intercept a label-generic effect using the wrong label brand;
+17. treat a label brand as a runtime address;
+18. finish a closed executable with an unhandled effect.
 
 ---
 
@@ -1831,7 +1839,7 @@ A conforming implementation demonstrates:
 - no explicit receiver-mode enum;
 - one erased `Available<E>` mechanism for incremental alternatives;
 - label brands erased separately from runtime jump or handler targets;
-- label-indexed effect routing;
+- label-generic effect routing with proof-only static protocol arguments;
 - deep handlers, terminal `!` operations, resumption quantity checking, and cancellation;
 - contextual `is` lowering through the shared pattern compiler;
 - no compiler-known control names;
@@ -1854,7 +1862,7 @@ Dynamic control
     call + tail + effects + handlers + labels
 
 Static identity
-    Label<'a> + Environment<'a>
+    Label<T> + Environment<'a>
 
 Callable behavior
     Fn<Args> + RunsIn<Access,Args>

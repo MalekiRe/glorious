@@ -36,9 +36,9 @@ const SOURCE: &str = r#"
 
     left() -> () / {Diagnostic} {
         write_diagnostic("leave:before");
-        label @done: {
+        @done: {
             write_diagnostic("leave:inside");
-            leave@done()
+            @done()
         };
         write_diagnostic("leave:after")
     }

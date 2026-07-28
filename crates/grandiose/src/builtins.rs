@@ -364,8 +364,19 @@ impl IntegerLeafShape {
 
 pub(crate) const INTEGER_PRIMITIVE_LEAVES: &[(&str, Primitive, IntegerLeafShape)] = &[
     (
+        "__g1_int_checked_add",
+        Primitive::IntCheckedAdd,
+        IntegerLeafShape::Binary,
+    ),
+    (
         "__g1_int_equal",
         Primitive::IntEq,
+        IntegerLeafShape::Compare,
+    ),
+    ("__g1_int_less", Primitive::IntLt, IntegerLeafShape::Compare),
+    (
+        "__g1_int_greater",
+        Primitive::IntGt,
         IntegerLeafShape::Compare,
     ),
     (
@@ -519,7 +530,10 @@ mod tests {
                 .map(|(name, primitive, shape)| (*name, *primitive as u32, shape.diagnostic_name()))
                 .collect::<Vec<_>>(),
             vec![
+                ("__g1_int_checked_add", 0x0000, "binary"),
                 ("__g1_int_equal", 0x000e, "comparison"),
+                ("__g1_int_less", 0x0010, "comparison"),
+                ("__g1_int_greater", 0x0012, "comparison"),
                 ("__g1_int_wrapping_add", 0x0005, "binary"),
                 ("__g1_int_wrapping_sub", 0x0006, "binary"),
                 ("__g1_int_wrapping_mul", 0x0007, "binary"),

@@ -672,6 +672,7 @@ pub struct EffectDecl {
     pub name: String,
     pub generics: Option<GenericParams>,
     pub generic_span: Option<Span>,
+    pub where_clause: Option<WhereClause>,
     pub operations: Vec<EffectOperationDecl>,
     pub span: Span,
 }
@@ -679,6 +680,8 @@ pub struct EffectDecl {
 #[derive(Clone, Debug)]
 pub struct EffectOperationDecl {
     pub name: String,
+    pub generics: Option<GenericParams>,
+    pub where_clause: Option<WhereClause>,
     pub params: Vec<Param>,
     /// `None` is the source-level Unit result written as an empty type.
     pub return_type: Option<TypeSyntax>,
@@ -702,6 +705,63 @@ pub struct Function {
     pub where_clause: Option<WhereClause>,
     pub body: Expr,
     pub span: Span,
+}
+
+impl Function {
+    pub fn uses_implicit_label(&self) -> bool {
+        struct Finder<'a> {
+            name: &'a str,
+        }
+
+        impl<'ast> ExprVisitor<'ast> for Finder<'_> {
+            type Break = ();
+
+            fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<()> {
+                match &expression.kind {
+                    ExprKind::LabelReference(label) if label.name.as_ref() == self.name => {
+                        ControlFlow::Break(())
+                    }
+                    ExprKind::LabelDestination { label, .. }
+                        if label.name.as_ref() == self.name =>
+                    {
+                        ControlFlow::Continue(())
+                    }
+                    _ => walk_expr(self, expression),
+                }
+            }
+        }
+
+        Finder { name: &self.name }
+            .visit_expr(&self.body)
+            .is_break()
+    }
+
+    /// Structural view used by semantic lowering: every named callable owns
+    /// an implicit destination whose lexical name is the callable's name and
+    /// whose payload is its declared result (Unit when omitted).
+    pub fn body_with_implicit_label(&self) -> Expr {
+        let name_span = Span::new(self.span.start, self.span.start + self.name.len());
+        Expr {
+            kind: ExprKind::LabelDestination {
+                label: LabelSyntax {
+                    name: Rc::from(self.name.as_str()),
+                    span: name_span,
+                },
+                ty: self.return_type.clone().map(Rc::new),
+                body: Rc::new(self.body.clone()),
+            },
+            span: self.body.span,
+        }
+    }
+
+    /// Avoid materializing an unused proof-only destination downstream.
+    pub fn semantic_body(&self) -> Expr {
+        if self.uses_implicit_label() {
+            self.body_with_implicit_label()
+        } else {
+            self.body.clone()
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -751,24 +811,13 @@ pub enum ExprKind {
         outward_effects: Option<Rc<EffectRowSyntax>>,
         body: Rc<Expr>,
     },
-    /// `@outer: { body }` — a generative label binder over its body. Also
-    /// wraps the labeled trailing block of `loop @outer: { body }`.
-    Labeled {
-        label: LabelSyntax,
-        body: Rc<Expr>,
-    },
     /// `@outer` without a colon: a reference to an existing label identity.
     LabelReference(LabelSyntax),
-    /// `label @done: i32 { body }` — a direct typed destination.
+    /// `@done: i32 { body }` — a typed destination.
     LabelDestination {
         label: LabelSyntax,
         ty: Option<Rc<TypeSyntax>>,
         body: Rc<Expr>,
-    },
-    /// `leave@done(42)` — direct typed transfer to a label destination.
-    Leave {
-        label: LabelSyntax,
-        value: Option<Rc<Expr>>,
     },
     /// `resume(k, value)` — structural resumption invocation.
     Resume {
@@ -999,17 +1048,10 @@ where
         ExprKind::Move(value)
         | ExprKind::Field(value, _)
         | ExprKind::Unary { operand: value, .. }
-        | ExprKind::Labeled { body: value, .. }
         | ExprKind::LabelDestination { body: value, .. }
         | ExprKind::Cancel { resumption: value }
         | ExprKind::Is { subject: value, .. } => visit(value),
         ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => visit(body),
-        ExprKind::Leave { value, .. } => {
-            if let Some(value) = value {
-                visit(value)?;
-            }
-            ControlFlow::Continue(())
-        }
         ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
             visit(resumption)?;
             if let Some(value) = value {

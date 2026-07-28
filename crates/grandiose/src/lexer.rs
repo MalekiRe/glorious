@@ -17,8 +17,6 @@ pub enum Kw {
     Handle,
     Impl,
     Is,
-    Label,
-    Leave,
     Let,
     Perform,
     Resume,
@@ -38,8 +36,6 @@ impl Kw {
             Kw::Handle => "handle",
             Kw::Impl => "impl",
             Kw::Is => "is",
-            Kw::Label => "label",
-            Kw::Leave => "leave",
             Kw::Let => "let",
             Kw::Perform => "perform",
             Kw::Resume => "resume",
@@ -59,8 +55,6 @@ impl Kw {
             "handle" => Kw::Handle,
             "impl" => Kw::Impl,
             "is" => Kw::Is,
-            "label" => Kw::Label,
-            "leave" => Kw::Leave,
             "let" => Kw::Let,
             "perform" => Kw::Perform,
             "resume" => Kw::Resume,
@@ -278,6 +272,8 @@ pub enum TokenKind {
     GtEq,
     Amp,
     Bang,
+    /// `$` introduces an explicit reference to a callable path.
+    Dollar,
     Eof,
 }
 
@@ -287,7 +283,6 @@ fn is_operator_char(byte: u8) -> bool {
     matches!(
         byte,
         b'!' | b'#'
-            | b'$'
             | b'%'
             | b'&'
             | b'*'
@@ -370,6 +365,10 @@ impl<'src> Lexer<'src> {
                 b'0'..=b'9' => self.number()?,
                 b'"' => self.string()?,
                 b'@' => self.label()?,
+                b'$' => {
+                    self.cursor += 1;
+                    self.push(TokenKind::Dollar, start);
+                }
                 b':' => {
                     if self.peek_at(1) == Some(b':') {
                         self.cursor += 2;
@@ -457,10 +456,25 @@ impl<'src> Lexer<'src> {
     fn word(&mut self) {
         let start = self.cursor;
         self.cursor += 1;
-        while self.cursor < self.bytes.len()
-            && (self.bytes[self.cursor].is_ascii_alphanumeric() || self.bytes[self.cursor] == b'_')
-        {
-            self.cursor += 1;
+        while self.cursor < self.bytes.len() {
+            let byte = self.bytes[self.cursor];
+            if byte.is_ascii_alphanumeric() || byte == b'_' {
+                self.cursor += 1;
+                continue;
+            }
+            // A dash belongs to an identifier only when it joins two name
+            // segments without whitespace. A trailing or repeated dash stays
+            // punctuation, so `left - right` and malformed `name-` remain
+            // unambiguous.
+            if byte == b'-'
+                && self
+                    .peek_at(1)
+                    .is_some_and(|next| next.is_ascii_alphanumeric() || next == b'_')
+            {
+                self.cursor += 2;
+                continue;
+            }
+            break;
         }
         let word = &self.source[start..self.cursor];
         let kind = match Kw::from_str(word) {
