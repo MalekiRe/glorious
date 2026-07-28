@@ -8742,39 +8742,104 @@ impl<'a> Emitter<'a> {
         Ok(contains)
     }
 
+    fn type_needs_destroy(
+        &self,
+        ty: TypeId,
+        visiting: &mut BTreeSet<TypeId>,
+    ) -> Result<bool, Vec<Diagnostic>> {
+        if self
+            .phases
+            .artifact
+            .drop_glue
+            .iter()
+            .any(|glue| glue.ty == ty)
+        {
+            return Ok(true);
+        }
+        if !visiting.insert(ty) {
+            return Ok(false);
+        }
+        let needs_destroy = match self.runtime_type(ty)? {
+            Type::Text
+            | Type::Bytes
+            | Type::Callable { .. }
+            | Type::Handler { .. }
+            | Type::Resumption { .. }
+            | Type::Array { .. } => true,
+            Type::BindingPack { payload_type, .. } => {
+                self.type_needs_destroy(*payload_type, visiting)?
+            }
+            Type::Tuple { fields, .. } => fields.iter().try_fold(false, |needed, field| {
+                Ok::<bool, Vec<Diagnostic>>(needed || self.type_needs_destroy(*field, visiting)?)
+            })?,
+            Type::Struct { fields, .. } => fields.iter().try_fold(false, |needed, field| {
+                Ok::<bool, Vec<Diagnostic>>(needed || self.type_needs_destroy(field.ty, visiting)?)
+            })?,
+            Type::Enum { variants, .. } => variants
+                .iter()
+                .flat_map(|variant| &variant.fields)
+                .try_fold(false, |needed, field| {
+                    Ok::<bool, Vec<Diagnostic>>(
+                        needed || self.type_needs_destroy(field.ty, visiting)?,
+                    )
+                })?,
+            _ => false,
+        };
+        visiting.remove(&ty);
+        Ok(needs_destroy)
+    }
+
     fn ensure_plain_array_element(
         &self,
         ty: TypeId,
         function: &mir::Function,
     ) -> Result<(), Vec<Diagnostic>> {
+        self.ensure_plain_array_element_inner(ty, function, true)
+    }
+
+    fn ensure_plain_array_element_inner(
+        &self,
+        ty: TypeId,
+        function: &mir::Function,
+        root: bool,
+    ) -> Result<(), Vec<Diagnostic>> {
         match self.runtime_type(ty)? {
-            Type::Handler { .. } | Type::Available { .. } => {
+            Type::Handler { .. } => {
                 return Err(vec![unsupported(
                     function,
                     "Array elements with effect runtime state",
                 )]);
             }
+            Type::Available { .. } if root => {
+                return Err(vec![unsupported(
+                    function,
+                    "Array elements cannot be standalone erased evidence",
+                )]);
+            }
+            Type::Available { .. } => {}
             Type::Resumption { .. } => {}
             Type::Callable { capture_type, .. } => {
-                self.ensure_plain_array_element(*capture_type, function)?;
+                self.ensure_plain_array_element_inner(*capture_type, function, false)?;
             }
             Type::BindingPack { payload_type, .. } => {
-                self.ensure_plain_array_element(*payload_type, function)?;
+                self.ensure_plain_array_element_inner(*payload_type, function, false)?;
             }
-            Type::Array { element } => self.ensure_plain_array_element(*element, function)?,
+            Type::Array { element } => {
+                self.ensure_plain_array_element_inner(*element, function, true)?
+            }
             Type::Tuple { fields, .. } => {
                 for field in fields {
-                    self.ensure_plain_array_element(*field, function)?;
+                    self.ensure_plain_array_element_inner(*field, function, false)?;
                 }
             }
             Type::Struct { fields, .. } => {
                 for field in fields {
-                    self.ensure_plain_array_element(field.ty, function)?;
+                    self.ensure_plain_array_element_inner(field.ty, function, false)?;
                 }
             }
             Type::Enum { variants, .. } => {
                 for field in variants.iter().flat_map(|variant| &variant.fields) {
-                    self.ensure_plain_array_element(field.ty, function)?;
+                    self.ensure_plain_array_element_inner(field.ty, function, false)?;
                 }
             }
             _ => {}
@@ -10497,13 +10562,7 @@ impl<'a> Emitter<'a> {
                     .into_iter()
                     .rev()
                 {
-                    if self.type_contains_byte_object(field.runtime_type, &mut BTreeSet::new())?
-                        || self.type_contains_array(field.runtime_type, &mut BTreeSet::new())?
-                        || self.type_contains_callable(field.runtime_type, &mut BTreeSet::new())?
-                        || self.type_contains_handler(field.runtime_type, &mut BTreeSet::new())?
-                        || self
-                            .type_contains_resumption(field.runtime_type, &mut BTreeSet::new())?
-                    {
+                    if self.type_needs_destroy(field.runtime_type, &mut BTreeSet::new())? {
                         let extracted = self.temp();
                         self.line(&format!(
                             "  %{extracted} = extractvalue {aggregate_ty} {value}, {}",
@@ -10513,13 +10572,7 @@ impl<'a> Emitter<'a> {
                     }
                 }
             }
-            Type::Enum { .. }
-                if self.type_contains_byte_object(ty, &mut BTreeSet::new())?
-                    || self.type_contains_array(ty, &mut BTreeSet::new())?
-                    || self.type_contains_callable(ty, &mut BTreeSet::new())?
-                    || self.type_contains_handler(ty, &mut BTreeSet::new())?
-                    || self.type_contains_resumption(ty, &mut BTreeSet::new())? =>
-            {
+            Type::Enum { .. } if self.type_needs_destroy(ty, &mut BTreeSet::new())? => {
                 self.emit_visit_enum_payloads(ty, &value, false, function)?;
             }
             _ => {}
@@ -10725,11 +10778,15 @@ impl<'a> Emitter<'a> {
                 variant.fields.iter().enumerate().rev().collect::<Vec<_>>()
             };
             for (field_index, field) in fields {
-                let owned = self.type_contains_byte_object(field.ty, &mut BTreeSet::new())?
-                    || self.type_contains_array(field.ty, &mut BTreeSet::new())?
-                    || self.type_contains_callable(field.ty, &mut BTreeSet::new())?
-                    || self.type_contains_handler(field.ty, &mut BTreeSet::new())?
-                    || self.type_contains_resumption(field.ty, &mut BTreeSet::new())?;
+                let owned = if retain {
+                    self.type_contains_byte_object(field.ty, &mut BTreeSet::new())?
+                        || self.type_contains_array(field.ty, &mut BTreeSet::new())?
+                        || self.type_contains_callable(field.ty, &mut BTreeSet::new())?
+                        || self.type_contains_handler(field.ty, &mut BTreeSet::new())?
+                        || self.type_contains_resumption(field.ty, &mut BTreeSet::new())?
+                } else {
+                    self.type_needs_destroy(field.ty, &mut BTreeSet::new())?
+                };
                 if !owned {
                     continue;
                 }
@@ -11013,9 +11070,7 @@ impl<'a> Emitter<'a> {
         element: TypeId,
         function: &mir::Function,
     ) -> Result<(), Vec<Diagnostic>> {
-        if !self.type_contains_byte_object(element, &mut BTreeSet::new())?
-            && !self.type_contains_array(element, &mut BTreeSet::new())?
-        {
+        if !self.type_needs_destroy(element, &mut BTreeSet::new())? {
             return Ok(());
         }
         let usize_ty = format!("i{}", self.pointer_width());
@@ -11033,11 +11088,14 @@ impl<'a> Emitter<'a> {
         ));
         self.line(&format!("  %{empty} = icmp eq {usize_ty} %{length}, 0"));
         self.line(&format!("  %{index_address} = alloca {usize_ty}"));
-        self.line(&format!("  store {usize_ty} 0, ptr %{index_address}"));
+        self.line(&format!(
+            "  store {usize_ty} %{length}, ptr %{index_address}"
+        ));
         self.line(&format!(
             "  br i1 %{empty}, label %array.destroy.done{loop_id}, label %array.destroy.check{loop_id}"
         ));
         self.line(&format!("array.destroy.check{loop_id}:"));
+        let cursor = self.temp();
         let index = self.temp();
         let initialized_address = self.temp();
         let initialized = self.temp();
@@ -11047,8 +11105,9 @@ impl<'a> Emitter<'a> {
         let destroy_label = self.temp();
         let continue_label = self.temp();
         self.line(&format!(
-            "  %{index} = load {usize_ty}, ptr %{index_address}"
+            "  %{cursor} = load {usize_ty}, ptr %{index_address}"
         ));
+        self.line(&format!("  %{index} = sub {usize_ty} %{cursor}, 1"));
         self.line(&format!(
             "  %{initialized_address} = getelementptr inbounds %g1.array, ptr {array}, i32 0, i32 4"
         ));
@@ -11081,13 +11140,11 @@ impl<'a> Emitter<'a> {
             "  br label %array.destroy.continue{continue_label}"
         ));
         self.line(&format!("array.destroy.continue{continue_label}:"));
-        let next = self.temp();
         let more = self.temp();
-        self.line(&format!("  %{next} = add {usize_ty} %{index}, 1"));
-        self.line(&format!("  store {usize_ty} %{next}, ptr %{index_address}"));
         self.line(&format!(
-            "  %{more} = icmp ult {usize_ty} %{next}, %{length}"
+            "  store {usize_ty} %{index}, ptr %{index_address}"
         ));
+        self.line(&format!("  %{more} = icmp ne {usize_ty} %{index}, 0"));
         self.line(&format!(
             "  br i1 %{more}, label %array.destroy.check{loop_id}, label %array.destroy.done{loop_id}"
         ));

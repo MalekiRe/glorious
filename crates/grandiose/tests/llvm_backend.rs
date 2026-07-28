@@ -4152,3 +4152,127 @@ fn llvm_and_vm_backends_execute_the_same_vec_program() {
         String::from_utf8_lossy(&execution.stderr)
     );
 }
+
+#[test]
+fn llvm_arrays_destroy_owned_nested_aggregate_and_enum_elements() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-array-owned-nested.glorious",
+        r#"
+            struct Holder { text: String }
+            enum Item { Some(Holder), None }
+            new_items() -> Vec<Item> { Vec::new() }
+
+            nested_result() -> i64 {
+                let values = new_items();
+                Vec::push(
+                    &mut values,
+                    Item::Some(Holder {
+                        text: String::concat("nested ", "element")
+                    })
+                );
+                wrapping_convert_to_i64(Vec::len(&values))
+            }
+
+            selected() -> i64 {
+                nested_result() + 41
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    assert!(module.ir.contains("array.destroy.value"));
+    run_native_i64(module, llvm_function, 42, "array-owned-nested");
+}
+
+#[test]
+fn llvm_arrays_run_source_defined_drop_for_elements() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-array-custom-drop.glorious",
+        r#"
+            struct Token { marker: i64 }
+            impl Drop for Token {
+                drop(&mut self) -> {
+                    self.marker;
+                    ()
+                }
+            }
+            new_tokens() -> Vec<Token> { Vec::new() }
+            selected() -> i64 {
+                let values = new_tokens();
+                Vec::push(&mut values, Token { marker: 42 });
+                wrapping_convert_to_i64(Vec::len(&values)) + 41
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let drop_function = phases
+        .artifact
+        .drop_glue
+        .first()
+        .map(|glue| glue.function)
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    let hook_call = format!("call void @g1_f{drop_function}(ptr %");
+    assert!(
+        module
+            .ir
+            .match_indices("array.destroy.value")
+            .any(|(start, _)| {
+                let block = &module.ir[start..];
+                let end = block.find("array.destroy.continue").unwrap_or(block.len());
+                block[..end].contains(&hook_call)
+            })
+    );
+    assert!(module.ir.contains(" = sub i64 %"));
+    run_native_i64(module, llvm_function, 42, "array-custom-drop");
+}

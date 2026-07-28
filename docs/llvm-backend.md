@@ -62,8 +62,11 @@ The current vertical slice supports:
   conversion, plus checked canonical UTF-8 validation;
 - native arrays of supported scalar and owned aggregate values with capacity
   growth, initialization-state tracking, move/copy/borrow access, mutation,
-  reserve, push/pop, recursive cleanup, and zero-copy-shaped
-  `Vec<u8>`/`Bytes` bridge operations;
+  reserve, push/pop, and zero-copy-shaped `Vec<u8>`/`Bytes` bridge operations.
+  Destruction visits only initialized slots, in newest-to-oldest ownership
+  order, and applies the same type-directed cleanup as an ordinary local,
+  including nested arrays/aggregates, callables, resumptions, and source
+  `Drop` glue;
 - first-class callable environments, reference-counted callable copies,
   direct and indirect invocation, and shared, unique, and owned environment
   receivers;
@@ -125,8 +128,11 @@ effect-state array elements and unsupported deep mutable replay shapes produce
    partially implemented; typed host imports are lowered from ordinary and
    outward effect frames through an external C ABI, and executable emission
    bundles a native system host for arguments, binary filesystem I/O, and
-   diagnostics. Effect-state array elements and
-   richer allocator/host-fault reporting remain. Every primitive in the frozen
+   diagnostics. Handler/effect-state array elements remain explicitly
+   unsupported. The source specializer also does not yet materialize collection
+   intrinsics for compiler-generated closure and resumption element types, even
+   though their native element cleanup paths are present. Richer
+   allocator/host-fault reporting remains. Every primitive in the frozen
    bytecode primitive table has a native lowering.
 5. First-class callables: environments, indirect calls, receiver modes,
    callable ownership, binding-pack value lowering with erased tuple/struct
