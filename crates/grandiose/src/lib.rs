@@ -16,6 +16,7 @@ pub mod eval;
 pub mod frontend_cache;
 pub mod interface;
 pub mod lexer;
+pub mod llvm_backend;
 pub mod lossless;
 pub mod modules;
 pub mod parser;
@@ -47,6 +48,17 @@ pub use compiler_mir::{
     OptimizationLevel, OptimizationPass, OptimizationPassOutcome, OptimizationPassReport,
     OptimizationReport,
 };
+pub use llvm_backend::{
+    LlvmModule, LlvmOptions, default_target_data_layout, default_target_triple, emit_llvm_ir,
+};
+
+pub fn compile_source_to_llvm_ir(
+    source_name: &str,
+    source: &str,
+) -> Result<LlvmModule, Vec<Diagnostic>> {
+    let phases = compile_source_to_phases(source_name, source)?;
+    emit_llvm_ir(&phases, &LlvmOptions::default())
+}
 pub use compiler_traits::{
     AssociatedItemKind, GenericParameterKind, HostImportRole, IntrinsicRole, MachineTypeRole,
     ManifestAssociatedItem, ManifestHostImportLeaf, ManifestMachineType, ManifestPrimitiveLeaf,

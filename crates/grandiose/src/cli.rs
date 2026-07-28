@@ -3,20 +3,23 @@ use std::{
     ffi::OsString,
     io::{self, BufRead, Read, Write},
     path::{Path, PathBuf},
+    process::{Command as ProcessCommand, Stdio},
 };
 
 use grandiose::{
     CompileOptions, OptimizationLevel, compile_bundle_to_phases_with_options,
     compiler_session::CompilationDriver,
     diagnostic::{Diagnostic, Severity},
+    emit_llvm_ir,
     interface::{InterfaceSelection, scan_interfaces},
     lexer,
+    llvm_backend::LlvmOptions,
     source_bundle::{Segment, SourceBundle},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
-const USAGE: &str = "usage:\n  grc [OPTIONS] <primary.glorious> [additional.glorious ...]\n  grc --serve\n\ncompiler options:\n  -O1 | -O2 | -O3         optimization level (default: -O2)\n  -O0                     raw lowering mode for bytecode verification\n  --check                  compile and verify without writing output\n  --phase PHASE            stop after lex, scan, resolve, or check\n  --emit KIND              emit bytecode, MIR/Core/provisional, or interfaces JSON\n  --dependency NAME=PATH   add a named dependency package root (repeatable)\n  --diagnostics json       emit one machine-readable diagnostic per line\n  --capabilities           print the versioned machine-readable contract\n  --serve                  serve versioned JSON-line compile requests\n  -o <path>                output path (default: primary input + kind suffix)\n  -h, --help               show this help\n";
+const USAGE: &str = "usage:\n  grc [OPTIONS] <primary.glorious> [additional.glorious ...]\n  grc --serve\n\ncompiler options:\n  -O1 | -O2 | -O3         optimization level (default: -O2)\n  -O0                     raw lowering mode for backend verification\n  --check                  compile and verify without writing output\n  --phase PHASE            stop after lex, scan, resolve, or check\n  --emit KIND              emit bytecode, LLVM IR/object/executable, MIR/Core/provisional, or interfaces JSON\n  --dependency NAME=PATH   add a named dependency package root (repeatable)\n  --diagnostics json       emit one machine-readable diagnostic per line\n  --capabilities           print the versioned machine-readable contract\n  --serve                  serve versioned JSON-line compile requests\n  -o <path>                output path (default: primary input + kind suffix)\n  -h, --help               show this help\n";
 
 const SESSION_PROTOCOL: u32 = 1;
 const SESSION_MAX_LINE_BYTES: usize = 1024 * 1024;
@@ -49,6 +52,9 @@ impl StopPhase {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum EmitKind {
     Bytecode,
+    LlvmIr,
+    LlvmObject,
+    Executable,
     Mir,
     Core,
     Provisional,
@@ -60,13 +66,16 @@ impl EmitKind {
     fn parse(value: &str) -> Result<Self, String> {
         match value {
             "bytecode" | "grbc" => Ok(Self::Bytecode),
+            "llvm-ir" | "ll" => Ok(Self::LlvmIr),
+            "llvm-object" | "obj" => Ok(Self::LlvmObject),
+            "executable" | "exe" => Ok(Self::Executable),
             "mir" => Ok(Self::Mir),
             "core" => Ok(Self::Core),
             "provisional" => Ok(Self::Provisional),
             "interfaces-json" => Ok(Self::InterfacesJson),
             "std-interfaces-json" => Ok(Self::StandardInterfacesJson),
             _ => Err(format!(
-                "unsupported emission kind `{value}`; expected bytecode, grbc, mir, core, provisional, interfaces-json, or std-interfaces-json"
+                "unsupported emission kind `{value}`; expected bytecode, grbc, llvm-ir, ll, llvm-object, obj, executable, exe, mir, core, provisional, interfaces-json, or std-interfaces-json"
             )),
         }
     }
@@ -74,6 +83,9 @@ impl EmitKind {
     fn extension(self) -> &'static str {
         match self {
             Self::Bytecode => "grbc",
+            Self::LlvmIr => "ll",
+            Self::LlvmObject => "o",
+            Self::Executable => "out",
             Self::Mir => "mir",
             Self::Core => "core",
             Self::Provisional => "provisional",
@@ -597,8 +609,72 @@ fn compile_loaded(
     let output = command
         .output
         .unwrap_or_else(|| default_output(&command.inputs[0], kind));
+    if matches!(kind, EmitKind::LlvmObject | EmitKind::Executable) {
+        let module = match emit_llvm_ir(&phases, &LlvmOptions::default()) {
+            Ok(module) => module,
+            Err(diagnostics) => {
+                return report_diagnostics(&bundle, diagnostics, command.json_diagnostics, stderr);
+            }
+        };
+        let mut clang = ProcessCommand::new("clang");
+        clang
+            .arg("-x")
+            .arg("ir")
+            .arg("-")
+            .arg("-o")
+            .arg(&output)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped());
+        if kind == EmitKind::LlvmObject {
+            clang.arg("-c");
+        }
+        let mut child = match clang.spawn() {
+            Ok(child) => child,
+            Err(error) => {
+                let _ = writeln!(
+                    stderr,
+                    "grc: error: could not start `clang` for native LLVM output: {error}"
+                );
+                return 1;
+            }
+        };
+        if child
+            .stdin
+            .take()
+            .is_none_or(|mut input| input.write_all(module.ir.as_bytes()).is_err())
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = writeln!(stderr, "grc: error: could not stream LLVM IR to `clang`");
+            return 1;
+        }
+        let result = match child.wait_with_output() {
+            Ok(result) => result,
+            Err(error) => {
+                let _ = writeln!(stderr, "grc: error: `clang` failed: {error}");
+                return 1;
+            }
+        };
+        if !result.status.success() {
+            let _ = writeln!(
+                stderr,
+                "grc: error: native LLVM emission failed:\n{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+            return 1;
+        }
+        return 0;
+    }
     let bytes = match kind {
         EmitKind::Bytecode => phases.artifact.encode(),
+        EmitKind::LlvmIr => match emit_llvm_ir(&phases, &LlvmOptions::default()) {
+            Ok(module) => module.ir.into_bytes(),
+            Err(diagnostics) => {
+                return report_diagnostics(&bundle, diagnostics, command.json_diagnostics, stderr);
+            }
+        },
+        EmitKind::LlvmObject | EmitKind::Executable => unreachable!(),
         EmitKind::Mir => phases.mir.canonical_text().into_bytes(),
         EmitKind::Core => phases.core.canonical_text().into_bytes(),
         EmitKind::Provisional => phases.provisional_text().as_bytes().to_vec(),
@@ -1096,7 +1172,7 @@ pub(crate) fn execute(args: impl IntoIterator<Item = OsString>) -> u8 {
         }
         Ok(Command::Capabilities) => {
             println!(
-                "{{\"grc\":\"{}\",\"contract\":1,\"contract-min\":1,\"contract-max\":1,\"artifact-major\":1,\"artifact-minor\":0,\"seed-identity-version\":{},\"seed-identity\":\"{}\",\"multi-file\":true,\"modules\":true,\"phases\":[\"lex\",\"scan\",\"resolve\",\"check\"],\"emit\":[\"bytecode\",\"grbc\",\"mir\",\"core\",\"provisional\",\"interfaces-json\",\"std-interfaces-json\"],\"diagnostics-json\":true,\"serve\":{{\"protocol\":{},\"transport\":\"json-lines\",\"max-request-bytes\":{},\"max-arguments\":{},\"max-inputs\":{},\"max-source-bytes\":{}}}}}",
+                "{{\"grc\":\"{}\",\"contract\":1,\"contract-min\":1,\"contract-max\":1,\"artifact-major\":1,\"artifact-minor\":0,\"seed-identity-version\":{},\"seed-identity\":\"{}\",\"multi-file\":true,\"modules\":true,\"phases\":[\"lex\",\"scan\",\"resolve\",\"check\"],\"emit\":[\"bytecode\",\"grbc\",\"llvm-ir\",\"ll\",\"llvm-object\",\"obj\",\"executable\",\"exe\",\"mir\",\"core\",\"provisional\",\"interfaces-json\",\"std-interfaces-json\"],\"diagnostics-json\":true,\"serve\":{{\"protocol\":{},\"transport\":\"json-lines\",\"max-request-bytes\":{},\"max-arguments\":{},\"max-inputs\":{},\"max-source-bytes\":{}}}}}",
                 env!("CARGO_PKG_VERSION"),
                 grandiose_vm::SEED_IDENTITY_VERSION,
                 grandiose_vm::RELEASED_SEED_IDENTITY,
@@ -1223,6 +1299,8 @@ mod tests {
         for (spelling, expected) in [
             ("bytecode", EmitKind::Bytecode),
             ("grbc", EmitKind::Bytecode),
+            ("llvm-ir", EmitKind::LlvmIr),
+            ("ll", EmitKind::LlvmIr),
             ("mir", EmitKind::Mir),
             ("core", EmitKind::Core),
             ("provisional", EmitKind::Provisional),
