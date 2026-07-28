@@ -838,7 +838,7 @@ impl<'a> Emitter<'a> {
 
     fn emit_effect_runtime(&mut self) {
         let usize_ty = format!("i{}", self.pointer_width());
-        self.line("%g1.effect_frame = type { ptr, ptr, ptr, ptr, i32, ptr, ptr }");
+        self.line("%g1.effect_frame = type { ptr, ptr, ptr, ptr, i32, ptr, ptr, ptr }");
         self.line("%g1.effect_runtime = type { ptr, i32, i32, i32, ptr, ptr, ptr }");
         if !self.uses_byte_runtime
             && !self.uses_array_runtime
@@ -1455,9 +1455,12 @@ impl<'a> Emitter<'a> {
             .iter()
             .map(|ty| self.llvm_type(*ty))
             .collect::<Result<Vec<_>, _>>()?;
+        let mut frame_fields = vec!["%g1.effect_frame".to_owned()];
+        frame_fields.extend(register_types.iter().cloned());
+        frame_fields.push(format!("[{} x i8]", register_types.len()));
         self.line(&format!(
-            "{frame_ty} = type {{ %g1.effect_frame, {} }}",
-            register_types.join(", ")
+            "{frame_ty} = type {{ {} }}",
+            frame_fields.join(", ")
         ));
 
         let result = self.llvm_return_type(function.result)?;
@@ -1482,8 +1485,11 @@ impl<'a> Emitter<'a> {
         self.line("}");
         self.line("");
 
-        let mut constructor_params =
-            vec!["ptr %previous".to_owned(), "ptr %return_slot".to_owned()];
+        let mut constructor_params = vec![
+            "ptr %previous".to_owned(),
+            "ptr %return_slot".to_owned(),
+            "ptr %return_init".to_owned(),
+        ];
         if function.receiver_mode.is_some() {
             constructor_params.push(format!(
                 "{} %receiver",
@@ -1526,6 +1532,7 @@ impl<'a> Emitter<'a> {
             (4, "i32", function.entry.to_string()),
             (5, "ptr", "null".to_owned()),
             (6, "ptr", "null".to_owned()),
+            (7, "ptr", "%return_init".to_owned()),
         ] {
             let address = self.temp();
             self.line(&format!(
@@ -1533,7 +1540,6 @@ impl<'a> Emitter<'a> {
             ));
             self.line(&format!("  store {ty} {value}, ptr %{address}"));
         }
-        let mut input = 0usize;
         if function.receiver_mode.is_some() {
             let address = self.temp();
             self.line(&format!(
@@ -1543,17 +1549,29 @@ impl<'a> Emitter<'a> {
                 "  store {} %receiver, ptr %{address}",
                 register_types[0]
             ));
-            input = 1;
         }
         for (parameter, ty) in function.params.iter().enumerate() {
             let address = self.temp();
             self.line(&format!(
                 "  %{address} = getelementptr inbounds {frame_ty}, ptr %{frame}, i32 0, i32 {}",
-                parameter + input + 1
+                parameter + 2
             ));
             self.line(&format!(
                 "  store {} %arg{parameter}, ptr %{address}",
                 self.llvm_type(*ty)?
+            ));
+        }
+        let initialized_field = function.register_types.len() + 1;
+        for register in 0..function.register_types.len() {
+            let address = self.temp();
+            self.line(&format!(
+                "  %{address} = getelementptr inbounds {frame_ty}, ptr %{frame}, i32 0, i32 {initialized_field}, i32 {register}"
+            ));
+            let initialized = (function.receiver_mode.is_some() && register == 0)
+                || (1..=function.params.len()).contains(&register);
+            self.line(&format!(
+                "  store i8 {}, ptr %{address}",
+                u8::from(initialized)
             ));
         }
         self.line(&format!("  ret ptr %{frame}"));
@@ -1563,6 +1581,40 @@ impl<'a> Emitter<'a> {
         self.line(&format!(
             "define void @g1_effect_drop_f{index}(ptr %frame) {{"
         ));
+        for register in (0..function.register_types.len()).rev() {
+            let initialized_address = self.temp();
+            let initialized = self.temp();
+            let present = self.temp();
+            let drop_label = self.temp();
+            let done_label = self.temp();
+            self.line(&format!(
+                "  %{initialized_address} = getelementptr inbounds {frame_ty}, ptr %frame, i32 0, i32 {initialized_field}, i32 {register}"
+            ));
+            self.line(&format!(
+                "  %{initialized} = load i8, ptr %{initialized_address}"
+            ));
+            self.line(&format!("  %{present} = icmp ne i8 %{initialized}, 0"));
+            self.line(&format!(
+                "  br i1 %{present}, label %frame.drop{drop_label}, label %frame.drop.done{done_label}"
+            ));
+            self.line(&format!("frame.drop{drop_label}:"));
+            let value_address = self.temp();
+            let value = self.temp();
+            let ty = self.llvm_type(function.register_types[register])?;
+            self.line(&format!(
+                "  %{value_address} = getelementptr inbounds {frame_ty}, ptr %frame, i32 0, i32 {}",
+                register + 1
+            ));
+            self.line(&format!("  %{value} = load {ty}, ptr %{value_address}"));
+            self.line(&format!("  store i8 0, ptr %{initialized_address}"));
+            self.emit_destroy(
+                function.register_types[register],
+                &format!("%{value}"),
+                function,
+            )?;
+            self.line(&format!("  br label %frame.drop.done{done_label}"));
+            self.line(&format!("frame.drop.done{done_label}:"));
+        }
         self.line("  call void @free(ptr %frame)");
         self.line("  ret void");
         self.line("}");
@@ -1579,6 +1631,9 @@ impl<'a> Emitter<'a> {
             self.line(&format!(
                 "  %r{register} = getelementptr inbounds {frame_ty}, ptr %frame, i32 0, i32 {}",
                 register + 1
+            ));
+            self.line(&format!(
+                "  %init{register} = getelementptr inbounds {frame_ty}, ptr %frame, i32 0, i32 {initialized_field}, i32 {register}"
             ));
         }
         let state_address = self.temp();
@@ -1598,7 +1653,7 @@ impl<'a> Emitter<'a> {
         for block in &function.blocks {
             self.line(&format!("bb{}:", block.id));
             for instruction in &block.statements {
-                self.emit_instruction(function, &instruction.kind)?;
+                self.emit_effect_instruction(function, &instruction.kind)?;
             }
             self.emit_effect_terminator(index, function, &block.terminator)?;
         }
@@ -1614,7 +1669,7 @@ impl<'a> Emitter<'a> {
         terminator: &Terminator,
     ) -> Result<(), Vec<Diagnostic>> {
         match terminator {
-            Terminator::Goto(edge) => self.emit_edge(function, edge)?,
+            Terminator::Goto(edge) => self.emit_effect_edge(function, edge, BTreeSet::new())?,
             Terminator::Switch {
                 discr,
                 cases,
@@ -1622,6 +1677,9 @@ impl<'a> Emitter<'a> {
             } => {
                 let ty = self.register_type(function, discr.register)?;
                 let value = self.load_operand(function, discr)?;
+                if discr.mode == mir::UseMode::Move {
+                    self.emit_effect_set_initialized(discr.register, false);
+                }
                 let switch_id = self.temp();
                 let otherwise_label = self.temp();
                 let case_labels = cases.iter().map(|_| self.temp()).collect::<Vec<_>>();
@@ -1636,10 +1694,10 @@ impl<'a> Emitter<'a> {
                 }
                 self.line("  ]");
                 self.line(&format!("effect.switch{switch_id}.{otherwise_label}:"));
-                self.emit_edge(function, otherwise)?;
+                self.emit_effect_edge(function, otherwise, BTreeSet::new())?;
                 for ((_, edge), label) in cases.iter().zip(case_labels) {
                     self.line(&format!("effect.switch{switch_id}.{label}:"));
-                    self.emit_edge(function, edge)?;
+                    self.emit_effect_edge(function, edge, BTreeSet::new())?;
                 }
             }
             Terminator::Return { value } => {
@@ -1662,14 +1720,70 @@ impl<'a> Emitter<'a> {
                     if value.mode == mir::UseMode::Copy {
                         let runtime_ty = self.register_runtime_type(function, value.register)?;
                         self.emit_retain(runtime_ty, &loaded, function)?;
+                    } else {
+                        self.emit_effect_set_initialized(value.register, false);
                     }
                     self.line(&format!("  store {ty} {loaded}, ptr %{return_slot}"));
+                    let return_init_address = self.temp();
+                    let return_init = self.temp();
+                    self.line(&format!(
+                        "  %{return_init_address} = getelementptr inbounds %g1.effect_frame, ptr %{header}, i32 0, i32 7"
+                    ));
+                    self.line(&format!(
+                        "  %{return_init} = load ptr, ptr %{return_init_address}"
+                    ));
+                    let has_return_init = self.temp();
+                    let mark_label = self.temp();
+                    let marked_label = self.temp();
+                    self.line(&format!(
+                        "  %{has_return_init} = icmp ne ptr %{return_init}, null"
+                    ));
+                    self.line(&format!(
+                        "  br i1 %{has_return_init}, label %effect.return.mark{mark_label}, label %effect.return.marked{marked_label}"
+                    ));
+                    self.line(&format!("effect.return.mark{mark_label}:"));
+                    self.line(&format!("  store i8 1, ptr %{return_init}"));
+                    self.line(&format!("  br label %effect.return.marked{marked_label}"));
+                    self.line(&format!("effect.return.marked{marked_label}:"));
                 }
+                let previous_address = self.temp();
+                let previous = self.temp();
+                let root = self.temp();
+                let root_label = self.temp();
+                let caller_label = self.temp();
+                self.line(&format!(
+                    "  %{previous_address} = getelementptr inbounds %g1.effect_frame, ptr %{header}, i32 0, i32 0"
+                ));
+                self.line(&format!(
+                    "  %{previous} = load ptr, ptr %{previous_address}"
+                ));
+                self.line(&format!("  %{root} = icmp eq ptr %{previous}, null"));
+                self.line(&format!(
+                    "  br i1 %{root}, label %effect.return.root{root_label}, label %effect.return.caller{caller_label}"
+                ));
+                self.line(&format!("effect.return.caller{caller_label}:"));
+                self.emit_effect_runtime_store(0, "ptr", &format!("%{previous}"));
+                self.line(&format!(
+                    "  call void @g1_effect_drop_f{function_index}(ptr %frame)"
+                ));
+                self.line("  ret void");
+                self.line(&format!("effect.return.root{root_label}:"));
                 self.emit_effect_runtime_store(1, "i32", "0");
                 self.emit_effect_runtime_store(5, "ptr", "%frame");
                 self.emit_effect_runtime_store(0, "ptr", "null");
                 self.line("  ret void");
             }
+            Terminator::Call {
+                result,
+                function: callee,
+                args,
+                normal,
+            } => self.emit_effect_call(function, *result, *callee as usize, args, normal)?,
+            Terminator::CallSelf {
+                result,
+                args,
+                normal,
+            } => self.emit_effect_call(function, *result, function_index, args, normal)?,
             Terminator::Perform {
                 result,
                 protocol,
@@ -1708,6 +1822,8 @@ impl<'a> Emitter<'a> {
                     if operand.mode == mir::UseMode::Copy {
                         let runtime_ty = self.register_runtime_type(function, operand.register)?;
                         self.emit_retain(runtime_ty, &value, function)?;
+                    } else {
+                        self.emit_effect_set_initialized(operand.register, false);
                     }
                     let slot = self.temp();
                     self.line(&format!(
@@ -1715,13 +1831,7 @@ impl<'a> Emitter<'a> {
                     ));
                     self.line(&format!("  store {ty} {value}, ptr %{slot}"));
                 }
-                if result.is_none() {
-                    for register in capture.captured_owners.iter().rev() {
-                        let ty = self.register_runtime_type(function, *register)?;
-                        let value = self.load_register(function, *register)?;
-                        self.emit_destroy(ty, &value, function)?;
-                    }
-                }
+                let _ = capture;
                 self.emit_effect_runtime_store(1, "i32", "1");
                 self.emit_effect_runtime_store(2, "i32", &protocol.to_string());
                 self.emit_effect_runtime_store(3, "i32", &operation.to_string());
@@ -1742,6 +1852,118 @@ impl<'a> Emitter<'a> {
                 )]);
             }
         }
+        Ok(())
+    }
+
+    fn emit_effect_call(
+        &mut self,
+        caller: &mir::Function,
+        result: Option<u32>,
+        callee_index: usize,
+        args: &[mir::Operand],
+        normal: &mir::Edge,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let callee = self
+            .phases
+            .mir
+            .functions
+            .get(callee_index)
+            .cloned()
+            .ok_or_else(|| vec![unsupported(caller, "effect call target is missing")])?;
+        if callee.outward_protocols.is_empty() {
+            return self.emit_call(caller, result, callee_index, args, normal, false);
+        }
+        if callee.receiver_mode.is_some() || callee.params.len() != args.len() {
+            return Err(vec![unsupported(
+                caller,
+                "malformed direct outward-effect call",
+            )]);
+        }
+        if result.is_none() && self.llvm_return_type(callee.result)? != "void" {
+            return Err(vec![unsupported(
+                caller,
+                "discarded non-unit outward-effect result",
+            )]);
+        }
+        let state_address = self.temp();
+        self.line(&format!(
+            "  %{state_address} = getelementptr inbounds %g1.effect_frame, ptr %frame, i32 0, i32 4"
+        ));
+        self.line(&format!(
+            "  store i32 {}, ptr %{state_address}",
+            normal.target
+        ));
+        self.emit_edge_arguments(caller, normal, result.into_iter().collect())?;
+        let mut arguments = Vec::with_capacity(args.len());
+        for (operand, expected) in args.iter().zip(&callee.params) {
+            let actual = self.register_runtime_type(caller, operand.register)?;
+            if actual != *expected {
+                return Err(vec![unsupported(
+                    caller,
+                    "outward-effect call argument type mismatch",
+                )]);
+            }
+            let ty = self.register_type(caller, operand.register)?;
+            let value = self.load_operand(caller, operand)?;
+            if operand.mode == mir::UseMode::Copy {
+                self.emit_retain(actual, &value, caller)?;
+            } else {
+                self.emit_effect_set_initialized(operand.register, false);
+            }
+            arguments.push(format!("{ty} {value}"));
+        }
+        let return_slot = result.map_or_else(|| "null".to_owned(), |result| format!("%r{result}"));
+        let child = self.temp();
+        let suffix = if arguments.is_empty() {
+            String::new()
+        } else {
+            format!(", {}", arguments.join(", "))
+        };
+        self.line(&format!(
+            "  %{child} = call ptr @g1_effect_new_f{callee_index}(ptr %frame, ptr {return_slot}, ptr {}{suffix})",
+            result.map_or_else(|| "null".to_owned(), |result| format!("%init{result}"))
+        ));
+        self.emit_effect_runtime_store(0, "ptr", &format!("%{child}"));
+        self.line("  ret void");
+        Ok(())
+    }
+
+    fn emit_effect_instruction(
+        &mut self,
+        function: &mir::Function,
+        instruction: &InstructionKind,
+    ) -> Result<(), Vec<Diagnostic>> {
+        self.emit_instruction(function, instruction)?;
+        let mut consumed = BTreeSet::new();
+        instruction.for_each_register_use(|register, use_kind| {
+            if use_kind == mir::RegisterUseKind::Consume {
+                consumed.insert(register);
+            }
+        });
+        for register in consumed {
+            self.emit_effect_set_initialized(register, false);
+        }
+        if let Some(destination) = instruction.destination() {
+            self.emit_effect_set_initialized(destination, true);
+        }
+        Ok(())
+    }
+
+    fn emit_effect_set_initialized(&mut self, register: u32, initialized: bool) {
+        self.line(&format!(
+            "  store i8 {}, ptr %init{register}",
+            u8::from(initialized)
+        ));
+    }
+
+    fn emit_effect_edge(
+        &mut self,
+        function: &mir::Function,
+        edge: &mir::Edge,
+        preassigned: BTreeSet<u32>,
+    ) -> Result<(), Vec<Diagnostic>> {
+        self.emit_edge_arguments(function, edge, preassigned)?;
+        self.line(&format!("  br label %bb{}", edge.target));
         Ok(())
     }
 
@@ -1782,14 +2004,18 @@ impl<'a> Emitter<'a> {
                     let runtime_ty = self.register_runtime_type(function, operand.register)?;
                     self.emit_retain(runtime_ty, &value, function)?;
                 }
-                Ok((ty, value))
+                Ok((ty, value, operand.register, operand.mode))
             })
             .collect::<Result<Vec<_>, Vec<Diagnostic>>>()?;
-        for (parameter, (ty, value)) in parameters.into_iter().zip(values) {
+        for (parameter, (ty, value, source, mode)) in parameters.into_iter().zip(values) {
             self.line(&format!(
                 "  store {ty} {value}, ptr %r{}",
                 parameter.register
             ));
+            if mode == mir::UseMode::Move {
+                self.emit_effect_set_initialized(source, false);
+            }
+            self.emit_effect_set_initialized(parameter.register, true);
         }
         Ok(())
     }
@@ -3683,7 +3909,7 @@ impl<'a> Emitter<'a> {
             self.line(&format!("handle.target{label}:"));
             let frame = self.temp();
             self.line(&format!(
-                "  %{frame} = call ptr @g1_effect_new_f{candidate}(ptr null, ptr %r{result}, {capture_ty} %{receiver})"
+                "  %{frame} = call ptr @g1_effect_new_f{candidate}(ptr null, ptr %r{result}, ptr null, {capture_ty} %{receiver})"
             ));
             self.line(&format!("  br label %handle.join{join}"));
             frames.push((frame, label));
@@ -3762,7 +3988,7 @@ impl<'a> Emitter<'a> {
 
         self.line(&format!("handle.normal{normal_label}:"));
         self.emit_destroy_handler(&handler, clause_tuple, function)?;
-        self.line(&format!("  call void @free(ptr %{frame})"));
+        self.emit_drop_effect_frame(&format!("%{frame}"));
         self.emit_edge_with_preassigned(function, normal, [result].into_iter().collect())?;
 
         self.line(&format!("handle.perform{perform_label}:"));
@@ -3869,7 +4095,7 @@ impl<'a> Emitter<'a> {
             )?;
             self.line(&format!("  call void @free(ptr {payload})"));
             self.emit_destroy_handler(&handler, clause_tuple, function)?;
-            self.line(&format!("  call void @free(ptr {suspended})"));
+            self.emit_drop_effect_frame_chain(&suspended);
             let result_ty = self.llvm_return_type(definition.result_type)?;
             if let Some(returned) = returned {
                 self.line(&format!("  store {result_ty} {returned}, ptr %r{result}"));
@@ -3881,6 +4107,47 @@ impl<'a> Emitter<'a> {
         self.line("  call void @llvm.trap()");
         self.line("  unreachable");
         Ok(())
+    }
+
+    fn emit_drop_effect_frame(&mut self, frame: &str) {
+        let drop_address = self.temp();
+        let drop = self.temp();
+        self.line(&format!(
+            "  %{drop_address} = getelementptr inbounds %g1.effect_frame, ptr {frame}, i32 0, i32 2"
+        ));
+        self.line(&format!("  %{drop} = load ptr, ptr %{drop_address}"));
+        self.line(&format!("  call void %{drop}(ptr {frame})"));
+    }
+
+    fn emit_drop_effect_frame_chain(&mut self, top: &str) {
+        let current_slot = self.temp();
+        let loop_label = self.temp();
+        let drop_label = self.temp();
+        let done_label = self.temp();
+        self.line(&format!("  %{current_slot} = alloca ptr"));
+        self.line(&format!("  store ptr {top}, ptr %{current_slot}"));
+        self.line(&format!("  br label %frame.chain.loop{loop_label}"));
+        self.line(&format!("frame.chain.loop{loop_label}:"));
+        let current = self.temp();
+        let present = self.temp();
+        self.line(&format!("  %{current} = load ptr, ptr %{current_slot}"));
+        self.line(&format!("  %{present} = icmp ne ptr %{current}, null"));
+        self.line(&format!(
+            "  br i1 %{present}, label %frame.chain.drop{drop_label}, label %frame.chain.done{done_label}"
+        ));
+        self.line(&format!("frame.chain.drop{drop_label}:"));
+        let previous_address = self.temp();
+        let previous = self.temp();
+        self.line(&format!(
+            "  %{previous_address} = getelementptr inbounds %g1.effect_frame, ptr %{current}, i32 0, i32 0"
+        ));
+        self.line(&format!(
+            "  %{previous} = load ptr, ptr %{previous_address}"
+        ));
+        self.emit_drop_effect_frame(&format!("%{current}"));
+        self.line(&format!("  store ptr %{previous}, ptr %{current_slot}"));
+        self.line(&format!("  br label %frame.chain.loop{loop_label}"));
+        self.line(&format!("frame.chain.done{done_label}:"));
     }
 
     fn load_effect_runtime_field(&mut self, runtime: &str, field: u32, ty: &str) -> String {

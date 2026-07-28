@@ -578,7 +578,7 @@ fn llvm_and_vm_backends_execute_the_same_captured_callable_program() {
 fn llvm_handler_values_own_and_destroy_their_clause_callables() {
     let mut phases = grandiose::compile_source_to_phases_with_options(
         "llvm-handler-value.glorious",
-        "effect Stop { stop() -> ! }\nselected() -> i64 { handle perform Stop::stop() { Stop::stop() => 42 } }\nmain() -> () { selected(); () }",
+        "effect Stop { stop() -> ! }\nprepare() -> String / {Stop} { String::concat(\"le\", \"ak\") }\nrelay() -> ! / {Stop} { perform Stop::stop() }\nselected() -> i64 { handle { let retained = prepare(); relay() } { Stop::stop() => 42 } }\nmain() -> () { selected(); () }",
         grandiose::CompileOptions {
             optimization_level: grandiose::OptimizationLevel::O0,
         },

@@ -63,8 +63,10 @@ The current vertical slice supports:
   direct and indirect invocation, and shared, unique, and owned environment
   receivers;
 - first-class handler values and terminal handler dispatch; outward terminal
-  bodies run in typed heap frames with explicit program counters, parent/result
-  links, and effect-request records rather than relying on the native stack;
+  bodies and direct outward callees run in typed heap frames with explicit
+  program counters, parent/result links, initialization state, typed cleanup
+  callbacks, and effect-request records rather than relying on the native
+  stack;
 - binding-pack payload construction, erased-evidence layout, projection,
   copying, and cleanup;
 - typed native host-import calls for process arguments, filesystem read/write,
@@ -100,8 +102,9 @@ silently changing semantics.
    effect-bearing callable environments remain.
 6. Effects and control: static typed-label push/pop/leave lowering is
    implemented. Handler values and terminal `Handle`/`Perform` dispatch now
-   use the native heap-frame ABI; resumption, cancellation, multishot
-   continuation cloning, and effect propagation through nested outward calls
+   use the native heap-frame ABI, including direct outward call/return
+   propagation and typed terminal unwinding. Resumption, cancellation,
+   multishot continuation cloning, and indirect/tail outward-call propagation
    remain.
 7. Production output: object/executable emission through clang and initial
    bytecode/LLVM differential conformance tests are implemented, and `-O0`
