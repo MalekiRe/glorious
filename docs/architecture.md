@@ -390,6 +390,16 @@ Multi-shot resumption clones only through
 verified copy glue and may not contain a unique reference or nonduplicable
 dependency. Deep resume reinstalls the originating delimiter.
 
+The LLVM runtime represents a resumption as an append-only record containing
+the pristine frame-chain endpoints, resume slot and initialization flag,
+originating handler, and a reference count. Ordinary copies of a reusable
+resumption retain that record. A borrowed resume clones the pristine chain. A
+moved resume also clones when another alias exists and consumes only its
+reference; the last owner may instead detach the pristine chain and free the
+record. The final release drops the still-pristine chain and handler. One-shot
+resumptions remain noncopyable and are resumed, tail-resumed, or cancelled only
+by move.
+
 The proof is move-path-sensitive for partially moved aggregates. Capture and
 cleanup retain the aggregate shell plus only its initialized field slots;
 moved-out slots remain empty. Cancellation tests zero-use permission and

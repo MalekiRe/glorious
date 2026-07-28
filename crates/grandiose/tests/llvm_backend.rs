@@ -2281,6 +2281,103 @@ fn llvm_two_shot_resumption_clones_each_native_frame_snapshot() {
 }
 
 #[test]
+fn llvm_reusable_resumption_aliases_clone_then_steal_the_pristine_chain() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-reusable-resumption-alias.glorious",
+        r#"
+            effect Pick { [2,2] choose() -> i64 }
+            answer() -> i64 {
+                handle perform Pick::choose() {
+                    Pick::choose() with continuation => {
+                        let alias = continuation;
+                        let first = resume(move alias, 20);
+                        let second = resume(move continuation, 22);
+                        first + second
+                    }
+                }
+            }
+            main() -> () { answer(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let answer = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "answer")
+        .unwrap();
+    let vm_answer = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "answer")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_answer, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    assert!(module.ir.contains("resumption.prepare.shared"));
+    assert!(module.ir.contains("resumption.prepare.steal"));
+    run_native_i64(module, answer, 42, "reusable-resumption-alias");
+}
+
+#[test]
+fn llvm_reusable_resumptions_balance_generic_aggregate_owners() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-reusable-resumption-storage.glorious",
+        r#"
+            struct Box<T> { value: T }
+            effect Pick { [2,2] choose() -> i64 }
+            box_answer() -> i64 {
+                handle perform Pick::choose() {
+                    Pick::choose() with continuation => {
+                        let stored = Box { value: continuation };
+                        let Box { value: alias } = move stored;
+                        resume(move alias, 20) + resume(move continuation, 22)
+                    }
+                }
+            }
+            main() -> () { box_answer(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let artifact = verify(phases.artifact.clone()).unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    for name in ["box_answer"] {
+        let native = phases
+            .mir
+            .functions
+            .iter()
+            .position(|function| function.name == name)
+            .unwrap();
+        let vm = phases
+            .artifact
+            .functions
+            .iter()
+            .position(|function| function.name == name)
+            .unwrap() as u32;
+        assert_eq!(
+            Vm::new(artifact.clone()).run(vm, vec![]).unwrap(),
+            Value::I64(42)
+        );
+        let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+        run_native_i64(module, native, 42, name);
+    }
+}
+
+#[test]
 fn llvm_two_shot_clones_and_drops_only_live_residual_fields() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-two-shot-residual.glorious",
@@ -2785,7 +2882,8 @@ fn llvm_borrowed_replays_do_not_consume_shared_terminal_clause_callable() {
                     perform Choice::stop()
                 } {
                     Choice::first() with continuation => {
-                        let first = resume(continuation, 0);
+                        let alias = continuation;
+                        let first = resume(move alias, 0);
                         let second = resume(move continuation, 0);
                         first + second
                     },
@@ -2852,6 +2950,86 @@ fn llvm_borrowed_replays_do_not_consume_shared_terminal_clause_callable() {
         "{:?}\n{}",
         execution.status,
         String::from_utf8_lossy(&execution.stderr)
+    );
+}
+
+#[test]
+fn llvm_effect_framed_alias_replays_preserve_terminal_clause_callable() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-effect-framed-two-shot-terminal-replay.glorious",
+        r#"
+            effect Choice { [2,2] first() -> i64 }
+            effect Stop { stop() -> ! }
+            effect Log { [1,1] ping() -> i64 }
+            add(left: i64, right: i64) -> i64 { left + right }
+            selected() -> i64 {
+                handle {
+                    handle {
+                        handle {
+                            perform Choice::first();
+                            perform Stop::stop()
+                        } {
+                            Stop::stop() => 42
+                        }
+                    } {
+                        Choice::first() with continuation => {
+                            let alias = continuation;
+                            let input = perform Log::ping();
+                            let first = resume(move alias, input);
+                            let second = resume(move continuation, input);
+                            add(first, second)
+                        }
+                    }
+                } {
+                    Log::ping() with continuation =>
+                        resume(move continuation, 0)
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let vm_selected = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_selected, vec![])
+            .unwrap(),
+        Value::I64(84)
+    );
+    assert!(phases.mir.functions.iter().any(|function| {
+        function.name.contains("$handler$")
+            && !function.outward_protocols.is_empty()
+            && function.blocks.iter().any(|block| {
+                matches!(
+                    block.terminator,
+                    grandiose::compiler_mir::Terminator::Resume { .. }
+                )
+            })
+    }));
+
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    assert!(module.ir.contains("resumption.preserve.loop"));
+    run_native_i64(
+        module,
+        selected,
+        84,
+        "effect-framed-two-shot-terminal-replay",
     );
 }
 
@@ -2988,7 +3166,8 @@ fn llvm_multishot_cancel_drops_owned_suspended_graph() {
                     choice + 1
                 } {
                     Choose::choose() with continuation => {
-                        cancel(move continuation);
+                        let alias = continuation;
+                        cancel(move alias);
                         42
                     }
                 }
