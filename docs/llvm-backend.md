@@ -85,7 +85,8 @@ The current vertical slice supports:
   nested-resumption frame values. Mutable arrays are cloned as independent
   initialized-slot graphs rather than ordinarily copied: one temporary
   source-range map preserves internal shared aliases into cloned frames and
-  array storage, while unmatched external references remain external. The
+  array storage, callable shells, shared callable capture handles, and typed
+  capture storage, while unmatched external references remain external. The
   ownership checker grants this duplication only at reusable-continuation
   snapshot boundaries; `Array`/`Vec` remains affine under ordinary source
   copying. The
@@ -144,8 +145,10 @@ effect-state array elements and unsupported deep mutable replay shapes produce
    guard chains. Synchronous indirect calls and indirect tail calls from an
    effect frame use the same callable receiver and ownership rules as ordinary
    native calls. Replay-time effectful terminal clauses use the same guarded
-   takeover path under one-shot and multishot execution. Deep mutable
-   callable/handler environment cloning remains.
+   takeover path under one-shot and multishot execution. Callable capture
+   graphs participate in the same alias-preserving snapshot context as frames,
+   arrays, and nested resumptions. Deep mutable handler/activation graph
+   cloning remains.
 7. Production output: object/executable emission through clang, bundled system
    hosting for executables, and initial bytecode/LLVM differential conformance
    tests are implemented. `-O0` through `-O3` are forwarded to native code

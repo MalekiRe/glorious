@@ -87,6 +87,7 @@ struct Emitter<'a> {
     uses_handler_runtime: bool,
     uses_effect_runtime: bool,
     host_imports: BTreeSet<HostImportRole>,
+    snapshot_capture_fix_types: BTreeSet<TypeId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -117,6 +118,7 @@ impl<'a> Emitter<'a> {
             uses_handler_runtime: false,
             uses_effect_runtime: false,
             host_imports: BTreeSet::new(),
+            snapshot_capture_fix_types: BTreeSet::new(),
         }
     }
 
@@ -156,6 +158,9 @@ impl<'a> Emitter<'a> {
 
         for function in &reachable {
             self.emit_function(*function)?;
+        }
+        if self.uses_effect_runtime {
+            self.emit_snapshot_capture_fix_callbacks(&reachable)?;
         }
         if self.options.emit_entry_wrapper {
             self.emit_entry_wrapper(&reachable)?;
@@ -1016,6 +1021,34 @@ impl<'a> Emitter<'a> {
         }
         self.line("  store ptr %node, ptr %context");
         self.line("  ret void");
+        self.line("}");
+        self.line("define internal ptr @g1_snapshot_lookup_exact(ptr %context, ptr %source) {");
+        self.line("entry:");
+        self.line("  %head = load ptr, ptr %context");
+        self.line("  br label %walk");
+        self.line("walk:");
+        self.line("  %node = phi ptr [ %head, %entry ], [ %next, %advance ]");
+        self.line("  %done = icmp eq ptr %node, null");
+        self.line("  br i1 %done, label %missing, label %inspect");
+        self.line("inspect:");
+        self.line("  %record.source.address = getelementptr inbounds %g1.snapshot_range, ptr %node, i32 0, i32 1");
+        self.line("  %record.source = load ptr, ptr %record.source.address");
+        self.line("  %matches = icmp eq ptr %record.source, %source");
+        self.line("  br i1 %matches, label %found, label %advance");
+        self.line("found:");
+        self.line(
+            "  %clone.address = getelementptr inbounds %g1.snapshot_range, ptr %node, i32 0, i32 3",
+        );
+        self.line("  %clone = load ptr, ptr %clone.address");
+        self.line("  ret ptr %clone");
+        self.line("advance:");
+        self.line(
+            "  %next.address = getelementptr inbounds %g1.snapshot_range, ptr %node, i32 0, i32 0",
+        );
+        self.line("  %next = load ptr, ptr %next.address");
+        self.line("  br label %walk");
+        self.line("missing:");
+        self.line("  ret ptr null");
         self.line("}");
         self.line("define internal ptr @g1_snapshot_remap(ptr %context, ptr %value) {");
         self.line("entry:");
@@ -2557,12 +2590,14 @@ impl<'a> Emitter<'a> {
             self.line(&format!(
                 "  %{receiver} = load {capture_ty}, ptr %{capture_data}"
             ));
+            let receiver_slot = self.temp();
             let count_address = self.temp();
             let count = self.temp();
             let unique = self.temp();
             let move_label = self.temp();
             let copy_label = self.temp();
             let ready_label = self.temp();
+            self.line(&format!("  %{receiver_slot} = alloca {capture_ty}"));
             self.line(&format!(
                 "  %{count_address} = getelementptr inbounds %g1.callable, ptr %callable, i32 0, i32 0"
             ));
@@ -2572,7 +2607,28 @@ impl<'a> Emitter<'a> {
                 "  br i1 %{unique}, label %effect.start.receiver.move{move_label}, label %effect.start.receiver.copy{copy_label}"
             ));
             self.line(&format!("effect.start.receiver.copy{copy_label}:"));
-            self.emit_retain(capture_type, &format!("%{receiver}"), function)?;
+            let copied_receiver = if self.type_contains_array(capture_type, &mut BTreeSet::new())?
+                || self.type_contains_resumption(capture_type, &mut BTreeSet::new())?
+            {
+                let context = self.temp();
+                self.line(&format!("  %{context} = alloca ptr"));
+                self.line(&format!("  store ptr null, ptr %{context}"));
+                let cloned = self.emit_clone_effect_snapshot_value(
+                    capture_type,
+                    &format!("%{receiver}"),
+                    function,
+                    &format!("%{context}"),
+                )?;
+                self.line(&format!("  call void @g1_snapshot_fix_all(ptr %{context})"));
+                self.line(&format!("  call void @g1_snapshot_dispose(ptr %{context})"));
+                cloned
+            } else {
+                self.emit_retain(capture_type, &format!("%{receiver}"), function)?;
+                format!("%{receiver}")
+            };
+            self.line(&format!(
+                "  store {capture_ty} {copied_receiver}, ptr %{receiver_slot}"
+            ));
             self.emit_destroy_callable("%callable", capture_type, function)?;
             self.line(&format!(
                 "  br label %effect.start.receiver.ready{ready_label}"
@@ -2580,12 +2636,19 @@ impl<'a> Emitter<'a> {
             self.line(&format!("effect.start.receiver.move{move_label}:"));
             self.line(&format!("  store ptr null, ptr %{data_address}"));
             self.line(&format!("  call void @free(ptr %{capture_data})"));
+            self.line(&format!(
+                "  store {capture_ty} %{receiver}, ptr %{receiver_slot}"
+            ));
             self.emit_destroy_callable("%callable", capture_type, function)?;
             self.line(&format!(
                 "  br label %effect.start.receiver.ready{ready_label}"
             ));
             self.line(&format!("effect.start.receiver.ready{ready_label}:"));
-            constructor_arguments.push(format!("{capture_ty} %{receiver}"));
+            let final_receiver = self.temp();
+            self.line(&format!(
+                "  %{final_receiver} = load {capture_ty}, ptr %{receiver_slot}"
+            ));
+            constructor_arguments.push(format!("{capture_ty} %{final_receiver}"));
             final_guards = "%inherited_guards".to_owned();
         } else {
             let retain_label = self.temp();
@@ -8532,12 +8595,16 @@ impl<'a> Emitter<'a> {
     ) -> Result<String, Vec<Diagnostic>> {
         let contains_array = self.type_contains_array(ty, &mut BTreeSet::new())?;
         let contains_resumption = self.type_contains_resumption(ty, &mut BTreeSet::new())?;
-        if !contains_array && !contains_resumption {
+        let contains_callable = self.type_contains_callable(ty, &mut BTreeSet::new())?;
+        if !contains_array && !contains_resumption && !contains_callable {
             self.emit_retain(ty, value, function)?;
             return Ok(value.to_owned());
         }
         match self.runtime_type(ty)?.clone() {
             Type::Resumption { .. } => self.emit_clone_resumption_wrapper(value, context),
+            Type::Callable { capture_type, .. } => {
+                self.emit_clone_effect_snapshot_callable(ty, capture_type, value, function, context)
+            }
             Type::BindingPack { payload_type, .. } => {
                 self.emit_clone_effect_snapshot_value(payload_type, value, function, context)
             }
@@ -8567,10 +8634,9 @@ impl<'a> Emitter<'a> {
                 }
                 self.emit_clone_effect_snapshot_array(element, value, function, context)
             }
-            // These wrappers own their contents through reference-counted
-            // runtime objects. Retaining the wrapper creates one balanced
-            // owner without aliasing a raw resumption field in the frame.
-            Type::Callable { .. } | Type::Handler { .. } => {
+            // Handler graph cloning remains separate from callable capture
+            // cloning. Keep its existing balanced shared ownership.
+            Type::Handler { .. } => {
                 self.emit_retain(ty, value, function)?;
                 Ok(value.to_owned())
             }
@@ -8610,6 +8676,209 @@ impl<'a> Emitter<'a> {
             rebuilt = format!("%{inserted}");
         }
         Ok(rebuilt)
+    }
+
+    fn emit_clone_effect_snapshot_callable(
+        &mut self,
+        callable_type: TypeId,
+        capture_type: TypeId,
+        source: &str,
+        function: &mir::Function,
+        context: &str,
+    ) -> Result<String, Vec<Diagnostic>> {
+        let usize_ty = format!("i{}", self.pointer_width());
+        let result_slot = self.temp();
+        let existing = self.temp();
+        let found = self.temp();
+        let reuse_label = self.temp();
+        let clone_label = self.temp();
+        let done_label = self.temp();
+        self.line(&format!("  %{result_slot} = alloca ptr"));
+        self.line(&format!(
+            "  %{existing} = call ptr @g1_snapshot_lookup_exact(ptr {context}, ptr {source})"
+        ));
+        self.line(&format!("  %{found} = icmp ne ptr %{existing}, null"));
+        self.line(&format!(
+            "  br i1 %{found}, label %callable.snapshot.reuse{reuse_label}, label %callable.snapshot.clone{clone_label}"
+        ));
+        self.line(&format!("callable.snapshot.reuse{reuse_label}:"));
+        self.emit_retain(callable_type, &format!("%{existing}"), function)?;
+        self.line(&format!("  store ptr %{existing}, ptr %{result_slot}"));
+        self.line(&format!("  br label %callable.snapshot.done{done_label}"));
+
+        self.line(&format!("callable.snapshot.clone{clone_label}:"));
+        let shell_size = self.emit_array_element_size("%g1.callable");
+        let cloned = self.temp();
+        let failed = self.temp();
+        self.line(&format!(
+            "  %{cloned} = call ptr @malloc({usize_ty} {shell_size})"
+        ));
+        self.line(&format!("  %{failed} = icmp eq ptr %{cloned}, null"));
+        self.emit_trap_if(failed);
+        self.line(&format!(
+            "  call void @llvm.memcpy.p0.p0.{usize_ty}(ptr %{cloned}, ptr {source}, {usize_ty} {shell_size}, i1 false)"
+        ));
+        let count_address = self.temp();
+        self.line(&format!(
+            "  %{count_address} = getelementptr inbounds %g1.callable, ptr %{cloned}, i32 0, i32 0"
+        ));
+        self.line(&format!("  store i64 1, ptr %{count_address}"));
+        self.line(&format!(
+            "  call void @g1_snapshot_record(ptr {context}, ptr {source}, {usize_ty} {shell_size}, ptr %{cloned}, ptr null)"
+        ));
+        let source_capture_address = self.temp();
+        let source_capture = self.temp();
+        self.line(&format!(
+            "  %{source_capture_address} = getelementptr inbounds %g1.callable, ptr {source}, i32 0, i32 2"
+        ));
+        self.line(&format!(
+            "  %{source_capture} = load ptr, ptr %{source_capture_address}"
+        ));
+        let cloned_capture = self.emit_clone_effect_snapshot_capture(
+            capture_type,
+            &format!("%{source_capture}"),
+            function,
+            context,
+        )?;
+        let cloned_capture_address = self.temp();
+        self.line(&format!(
+            "  %{cloned_capture_address} = getelementptr inbounds %g1.callable, ptr %{cloned}, i32 0, i32 2"
+        ));
+        self.line(&format!(
+            "  store ptr {cloned_capture}, ptr %{cloned_capture_address}"
+        ));
+        self.line(&format!("  store ptr %{cloned}, ptr %{result_slot}"));
+        self.line(&format!("  br label %callable.snapshot.done{done_label}"));
+
+        self.line(&format!("callable.snapshot.done{done_label}:"));
+        let result = self.temp();
+        self.line(&format!("  %{result} = load ptr, ptr %{result_slot}"));
+        Ok(format!("%{result}"))
+    }
+
+    fn emit_clone_effect_snapshot_capture(
+        &mut self,
+        capture_type: TypeId,
+        source: &str,
+        function: &mir::Function,
+        context: &str,
+    ) -> Result<String, Vec<Diagnostic>> {
+        let usize_ty = format!("i{}", self.pointer_width());
+        let result_slot = self.temp();
+        let existing = self.temp();
+        let found = self.temp();
+        let reuse_label = self.temp();
+        let clone_label = self.temp();
+        let done_label = self.temp();
+        self.line(&format!("  %{result_slot} = alloca ptr"));
+        self.line(&format!(
+            "  %{existing} = call ptr @g1_snapshot_lookup_exact(ptr {context}, ptr {source})"
+        ));
+        self.line(&format!("  %{found} = icmp ne ptr %{existing}, null"));
+        self.line(&format!(
+            "  br i1 %{found}, label %capture.snapshot.reuse{reuse_label}, label %capture.snapshot.clone{clone_label}"
+        ));
+        self.line(&format!("capture.snapshot.reuse{reuse_label}:"));
+        self.emit_retain_capture(&format!("%{existing}"));
+        self.line(&format!("  store ptr %{existing}, ptr %{result_slot}"));
+        self.line(&format!("  br label %capture.snapshot.done{done_label}"));
+
+        self.line(&format!("capture.snapshot.clone{clone_label}:"));
+        let handle_size = self.emit_array_element_size("%g1.capture");
+        let cloned = self.temp();
+        let failed = self.temp();
+        self.line(&format!(
+            "  %{cloned} = call ptr @malloc({usize_ty} {handle_size})"
+        ));
+        self.line(&format!("  %{failed} = icmp eq ptr %{cloned}, null"));
+        self.emit_trap_if(failed);
+        let count_address = self.temp();
+        self.line(&format!(
+            "  %{count_address} = getelementptr inbounds %g1.capture, ptr %{cloned}, i32 0, i32 0"
+        ));
+        self.line(&format!("  store i64 1, ptr %{count_address}"));
+        let cloned_data_address = self.temp();
+        self.line(&format!(
+            "  %{cloned_data_address} = getelementptr inbounds %g1.capture, ptr %{cloned}, i32 0, i32 1"
+        ));
+        self.line(&format!("  store ptr null, ptr %{cloned_data_address}"));
+        self.line(&format!(
+            "  call void @g1_snapshot_record(ptr {context}, ptr {source}, {usize_ty} {handle_size}, ptr %{cloned}, ptr null)"
+        ));
+
+        let data_result_slot = self.temp();
+        let source_data_address = self.temp();
+        let source_data = self.temp();
+        let has_data = self.temp();
+        let data_label = self.temp();
+        let empty_label = self.temp();
+        let data_done_label = self.temp();
+        self.line(&format!("  %{data_result_slot} = alloca ptr"));
+        self.line(&format!(
+            "  %{source_data_address} = getelementptr inbounds %g1.capture, ptr {source}, i32 0, i32 1"
+        ));
+        self.line(&format!(
+            "  %{source_data} = load ptr, ptr %{source_data_address}"
+        ));
+        self.line(&format!("  %{has_data} = icmp ne ptr %{source_data}, null"));
+        self.line(&format!(
+            "  br i1 %{has_data}, label %capture.snapshot.data{data_label}, label %capture.snapshot.empty{empty_label}"
+        ));
+        self.line(&format!("capture.snapshot.data{data_label}:"));
+        let capture_ty = self.llvm_type(capture_type)?;
+        let data_size = self.emit_array_element_size(&capture_ty);
+        let cloned_data = self.temp();
+        let data_failed = self.temp();
+        self.line(&format!(
+            "  %{cloned_data} = call ptr @malloc({usize_ty} {data_size})"
+        ));
+        self.line(&format!(
+            "  %{data_failed} = icmp eq ptr %{cloned_data}, null"
+        ));
+        self.emit_trap_if(data_failed);
+        self.snapshot_capture_fix_types.insert(capture_type);
+        self.line(&format!(
+            "  call void @g1_snapshot_record(ptr {context}, ptr %{source_data}, {usize_ty} {data_size}, ptr %{cloned_data}, ptr @g1_snapshot_fix_capture_t{capture_type})"
+        ));
+        let source_value = self.temp();
+        self.line(&format!(
+            "  %{source_value} = load {capture_ty}, ptr %{source_data}"
+        ));
+        let cloned_value = self.emit_clone_effect_snapshot_value(
+            capture_type,
+            &format!("%{source_value}"),
+            function,
+            context,
+        )?;
+        self.line(&format!(
+            "  store {capture_ty} {cloned_value}, ptr %{cloned_data}"
+        ));
+        self.line(&format!(
+            "  store ptr %{cloned_data}, ptr %{data_result_slot}"
+        ));
+        self.line(&format!(
+            "  br label %capture.snapshot.data.done{data_done_label}"
+        ));
+        self.line(&format!("capture.snapshot.empty{empty_label}:"));
+        self.line(&format!("  store ptr null, ptr %{data_result_slot}"));
+        self.line(&format!(
+            "  br label %capture.snapshot.data.done{data_done_label}"
+        ));
+        self.line(&format!("capture.snapshot.data.done{data_done_label}:"));
+        let final_data = self.temp();
+        self.line(&format!(
+            "  %{final_data} = load ptr, ptr %{data_result_slot}"
+        ));
+        self.line(&format!(
+            "  store ptr %{final_data}, ptr %{cloned_data_address}"
+        ));
+        self.line(&format!("  store ptr %{cloned}, ptr %{result_slot}"));
+        self.line(&format!("  br label %capture.snapshot.done{done_label}"));
+
+        self.line(&format!("capture.snapshot.done{done_label}:"));
+        let result = self.temp();
+        self.line(&format!("  %{result} = load ptr, ptr %{result_slot}"));
+        Ok(format!("%{result}"))
     }
 
     fn emit_clone_effect_snapshot_array(
@@ -8783,6 +9052,39 @@ impl<'a> Emitter<'a> {
         source: &str,
         context: &str,
     ) -> Result<String, Vec<Diagnostic>> {
+        let result_slot = self.temp();
+        let existing = self.temp();
+        let found = self.temp();
+        let reuse_label = self.temp();
+        let clone_label = self.temp();
+        let done_label = self.temp();
+        self.line(&format!("  %{result_slot} = alloca ptr"));
+        self.line(&format!(
+            "  %{existing} = call ptr @g1_snapshot_lookup_exact(ptr {context}, ptr {source})"
+        ));
+        self.line(&format!("  %{found} = icmp ne ptr %{existing}, null"));
+        self.line(&format!(
+            "  br i1 %{found}, label %resumption.snapshot.reuse{reuse_label}, label %resumption.snapshot.clone{clone_label}"
+        ));
+        self.line(&format!("resumption.snapshot.reuse{reuse_label}:"));
+        self.emit_retain_resumption(&format!("%{existing}"));
+        self.line(&format!("  store ptr %{existing}, ptr %{result_slot}"));
+        self.line(&format!("  br label %resumption.snapshot.done{done_label}"));
+        self.line(&format!("resumption.snapshot.clone{clone_label}:"));
+        let cloned = self.emit_clone_resumption_wrapper_fresh(source, context)?;
+        self.line(&format!("  store ptr {cloned}, ptr %{result_slot}"));
+        self.line(&format!("  br label %resumption.snapshot.done{done_label}"));
+        self.line(&format!("resumption.snapshot.done{done_label}:"));
+        let result = self.temp();
+        self.line(&format!("  %{result} = load ptr, ptr %{result_slot}"));
+        Ok(format!("%{result}"))
+    }
+
+    fn emit_clone_resumption_wrapper_fresh(
+        &mut self,
+        source: &str,
+        context: &str,
+    ) -> Result<String, Vec<Diagnostic>> {
         let fields = (0..5)
             .map(|field| {
                 let address = self.temp();
@@ -8797,6 +9099,35 @@ impl<'a> Emitter<'a> {
         let [top, _, resume_slot, resume_init, handler] = fields.as_slice() else {
             unreachable!()
         };
+        let usize_ty = format!("i{}", self.pointer_width());
+        let size = self.emit_array_element_size("%g1.resumption");
+        let cloned = self.temp();
+        let failed = self.temp();
+        self.line(&format!(
+            "  %{cloned} = call ptr @malloc({usize_ty} {size})"
+        ));
+        self.line(&format!("  %{failed} = icmp eq ptr %{cloned}, null"));
+        self.emit_trap_if(failed);
+        for field in 0..5 {
+            let address = self.temp();
+            self.line(&format!(
+                "  %{address} = getelementptr inbounds %g1.resumption, ptr %{cloned}, i32 0, i32 {field}"
+            ));
+            self.line(&format!("  store ptr null, ptr %{address}"));
+        }
+        let references_address = self.temp();
+        self.line(&format!(
+            "  %{references_address} = getelementptr inbounds %g1.resumption, ptr %{cloned}, i32 0, i32 5"
+        ));
+        self.line(&format!("  store i64 1, ptr %{references_address}"));
+        let preserve_address = self.temp();
+        self.line(&format!(
+            "  %{preserve_address} = getelementptr inbounds %g1.resumption, ptr %{cloned}, i32 0, i32 6"
+        ));
+        self.line(&format!("  store i1 true, ptr %{preserve_address}"));
+        self.line(&format!(
+            "  call void @g1_snapshot_record(ptr {context}, ptr {source}, {usize_ty} {size}, ptr %{cloned}, ptr null)"
+        ));
         let cloned_top = self.temp();
         let cloned_bottom = self.temp();
         self.line(&format!(
@@ -8805,7 +9136,6 @@ impl<'a> Emitter<'a> {
         self.line(&format!(
             "  %{cloned_bottom} = call ptr @g1_effect_chain_bottom(ptr %{cloned_top})"
         ));
-        let usize_ty = format!("i{}", self.pointer_width());
         let mut rebased = Vec::with_capacity(2);
         for pointer in [resume_slot, resume_init] {
             let present = self.temp();
@@ -8844,14 +9174,6 @@ impl<'a> Emitter<'a> {
             rebased.push(format!("%{final_pointer}"));
         }
         self.emit_retain_handler(handler);
-        let size = self.emit_array_element_size("%g1.resumption");
-        let cloned = self.temp();
-        let failed = self.temp();
-        self.line(&format!(
-            "  %{cloned} = call ptr @malloc({usize_ty} {size})"
-        ));
-        self.line(&format!("  %{failed} = icmp eq ptr %{cloned}, null"));
-        self.emit_trap_if(failed);
         for (field, value) in [
             (0, format!("%{cloned_top}")),
             (1, format!("%{cloned_bottom}")),
@@ -8865,16 +9187,6 @@ impl<'a> Emitter<'a> {
             ));
             self.line(&format!("  store ptr {value}, ptr %{address}"));
         }
-        let references_address = self.temp();
-        self.line(&format!(
-            "  %{references_address} = getelementptr inbounds %g1.resumption, ptr %{cloned}, i32 0, i32 5"
-        ));
-        self.line(&format!("  store i64 1, ptr %{references_address}"));
-        let preserve_address = self.temp();
-        self.line(&format!(
-            "  %{preserve_address} = getelementptr inbounds %g1.resumption, ptr %{cloned}, i32 0, i32 6"
-        ));
-        self.line(&format!("  store i1 true, ptr %{preserve_address}"));
         Ok(format!("%{cloned}"))
     }
 
@@ -8919,6 +9231,41 @@ impl<'a> Emitter<'a> {
             }
             _ => Ok(value.to_owned()),
         }
+    }
+
+    fn emit_snapshot_capture_fix_callbacks(
+        &mut self,
+        reachable: &[usize],
+    ) -> Result<(), Vec<Diagnostic>> {
+        let Some(&function_index) = reachable.first() else {
+            return Ok(());
+        };
+        let function = self.phases.mir.functions[function_index].clone();
+        let capture_types = self
+            .snapshot_capture_fix_types
+            .iter()
+            .copied()
+            .collect::<Vec<_>>();
+        for capture_type in capture_types {
+            let capture_ty = self.llvm_type(capture_type)?;
+            self.line(&format!(
+                "define internal void @g1_snapshot_fix_capture_t{capture_type}(ptr %source, ptr %clone, ptr %context) {{"
+            ));
+            self.line("entry:");
+            let value = self.temp();
+            self.line(&format!("  %{value} = load {capture_ty}, ptr %clone"));
+            let fixed = self.emit_fix_effect_snapshot_value(
+                capture_type,
+                &format!("%{value}"),
+                &function,
+                "%context",
+            )?;
+            self.line(&format!("  store {capture_ty} {fixed}, ptr %clone"));
+            self.line("  ret void");
+            self.line("}");
+            self.line("");
+        }
+        Ok(())
     }
 
     fn emit_transform_effect_snapshot_enum(
@@ -9238,6 +9585,20 @@ impl<'a> Emitter<'a> {
         let next = self.temp();
         self.line(&format!(
             "  %{references_address} = getelementptr inbounds %g1.handler, ptr {handler}, i32 0, i32 0"
+        ));
+        self.line(&format!(
+            "  %{references} = load i64, ptr %{references_address}"
+        ));
+        self.line(&format!("  %{next} = add i64 %{references}, 1"));
+        self.line(&format!("  store i64 %{next}, ptr %{references_address}"));
+    }
+
+    fn emit_retain_capture(&mut self, capture: &str) {
+        let references_address = self.temp();
+        let references = self.temp();
+        let next = self.temp();
+        self.line(&format!(
+            "  %{references_address} = getelementptr inbounds %g1.capture, ptr {capture}, i32 0, i32 0"
         ));
         self.line(&format!(
             "  %{references} = load i64, ptr %{references_address}"

@@ -2981,6 +2981,8 @@ fn llvm_two_shot_retains_nested_aggregate_and_callable_captures() {
     let mut options = grandiose::LlvmOptions::default();
     options.emit_entry_wrapper = false;
     let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    assert!(module.ir.contains("callable.snapshot.clone"));
+    assert!(module.ir.contains("g1_snapshot_fix_capture_t"));
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("two-shot-nested-callable.ll");
     let harness = directory.path().join("harness.c");
