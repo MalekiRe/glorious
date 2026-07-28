@@ -379,6 +379,21 @@ fn resolve_is_between_interface_scan_and_body_ownership_with_localized_json() {
         "{}",
         String::from_utf8_lossy(&checked.stderr)
     );
+
+    write(
+        &library,
+        "relay<T, L>(value: T, destination: L) -> ! where L: Label<T> { destination(value) }",
+    );
+    let resolved_label = grc()
+        .args(["--phase", "resolve"])
+        .args([&primary, &library])
+        .output()
+        .unwrap();
+    assert!(
+        resolved_label.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resolved_label.stderr)
+    );
 }
 
 #[test]

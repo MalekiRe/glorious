@@ -591,7 +591,10 @@ impl Context<'_> {
     ) {
         if let Some(name) = reference.path.first()
             && !self.traits.contains(name.name.as_str())
-            && !matches!(name.name.as_str(), "Use" | "Drop" | "Fn")
+            && !matches!(
+                name.name.as_str(),
+                "Use" | "Drop" | "Fn" | "RunsIn" | "Label" | "Environment"
+            )
         {
             errors.push(unknown("trait", &name.name, name.span));
         }
