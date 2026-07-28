@@ -730,9 +730,9 @@ parse_chain(
     owner_plus_one: usize,
     minimum: u8,
     depth: u16,
-    operands: &mut Vec<u32>,
-    operators: &mut Vec<u32>
-) -> Result<(), BodyError> {
+    output: &mut Vec<u32>,
+    pending: &mut Vec<u32>
+) -> Result<ExprId, BodyError> {
     handle peek_operator(
         original,
         source,
@@ -744,13 +744,13 @@ parse_chain(
     ) {
         Result::Err(error) => Result::Err(move error),
         Result::Ok(found) => handle move found {
-            Result::Err(_) => Result::Ok(()),
+            Result::Err(_) => finish_chain(value, output, pending),
             Result::Ok(operator) => handle operator.precedence < minimum {
-                Result::Ok(_) => Result::Ok(()),
+                Result::Ok(_) => finish_chain(value, output, pending),
                 Result::Err(_) => {
-                    let left = last_expr(operands);
+                    let left = last_expr(output);
                     handle infix_separated(source, &*value, left, operator) {
-                        Result::Err(_) => Result::Ok(()),
+                        Result::Err(_) => finish_chain(value, output, pending),
                         Result::Ok(_) => {
                             value.cursor = operator.end;
                             handle parse_primary(
@@ -763,21 +763,35 @@ parse_chain(
                                 depth
                             ) {
                                 Result::Err(error) => Result::Err(move error),
-                                Result::Ok(operand) => {
-                                    operator_push(&mut *operators, operator);
-                                    push_word(&mut *operands, operand.index);
-                                    parse_chain(
-                                        original,
-                                        source,
-                                        declarations,
-                                        nominal,
-                                        value,
-                                        owner_plus_one,
-                                        minimum,
-                                        depth,
-                                        operands,
-                                        operators
-                                    )
+                                Result::Ok(operand) => handle prepare_operator(
+                                    &mut *value,
+                                    &mut *output,
+                                    &mut *pending,
+                                    operator
+                                ) {
+                                    Result::Err(error) => Result::Err(move error),
+                                    Result::Ok(_) => {
+                                        operator_push(
+                                            &mut *pending,
+                                            operator
+                                        );
+                                        push_word(
+                                            &mut *output,
+                                            operand.index
+                                        );
+                                        parse_chain(
+                                            original,
+                                            source,
+                                            declarations,
+                                            nominal,
+                                            value,
+                                            owner_plus_one,
+                                            minimum,
+                                            depth,
+                                            output,
+                                            pending
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -858,41 +872,7 @@ prepare_operator(
     }
 }
 
-group_step(
-    value: &mut BodyParser,
-    operands: &Vec<u32>,
-    operators: &Vec<u32>,
-    index: usize,
-    output: &mut Vec<u32>,
-    pending: &mut Vec<u32>
-) -> Result<ExprId, BodyError> {
-    handle index < word_count(operators) / usize_value(5) {
-        Result::Err(_) => group_finish(value, output, pending),
-        Result::Ok(_) => {
-            let operator = operator_at(operators, index);
-            handle prepare_operator(value, output, pending, operator) {
-                Result::Err(error) => Result::Err(move error),
-                Result::Ok(_) => {
-                    operator_push(&mut *pending, operator);
-                    push_word(
-                        &mut *output,
-                        expr_id_at(operands, index + usize_value(1)).index
-                    );
-                    group_step(
-                        value,
-                        operands,
-                        operators,
-                        index + usize_value(1),
-                        output,
-                        pending
-                    )
-                }
-            }
-        }
-    }
-}
-
-group_finish(
+finish_chain(
     value: &mut BodyParser,
     output: &mut Vec<u32>,
     pending: &mut Vec<u32>
@@ -903,20 +883,9 @@ group_finish(
         }),
         Result::Err(_) => {
             reduce_once(&mut *value, &mut *output, &mut *pending);
-            group_finish(value, output, pending)
+            finish_chain(value, output, pending)
         }
     }
-}
-
-group_chain(
-    value: &mut BodyParser,
-    operands: &Vec<u32>,
-    operators: &Vec<u32>
-) -> Result<ExprId, BodyError> {
-    let output = Vec::new();
-    let pending = Vec::new();
-    push_word(&mut output, expr_id_at(operands, 0).index);
-    group_step(value, operands, operators, 0, &mut output, &mut pending)
 }
 
 parse_expression(
@@ -940,10 +909,10 @@ parse_expression(
     ) {
         Result::Err(error) => Result::Err(move error),
         Result::Ok(first) => {
-            let operands = Vec::new();
-            let operators = Vec::new();
-            push_word(&mut operands, first.index);
-            handle parse_chain(
+            let output = Vec::new();
+            let pending = Vec::new();
+            push_word(&mut output, first.index);
+            parse_chain(
                 original,
                 source,
                 declarations,
@@ -952,12 +921,9 @@ parse_expression(
                 owner_plus_one,
                 minimum,
                 depth,
-                &mut operands,
-                &mut operators
-            ) {
-                Result::Err(error) => Result::Err(move error),
-                Result::Ok(_) => group_chain(value, &operands, &operators)
-            }
+                &mut output,
+                &mut pending
+            )
         }
     }
 }
