@@ -94,8 +94,10 @@ The current vertical slice supports:
   implementation also covers outward frame-chain cloning, parent/result-slot
   rebasing, partial aggregate field masks, repeated terminal-clause replay,
   and cancellation; unique references remain invalid snapshot state;
-- binding-pack payload construction, erased-evidence layout, projection,
-  copying, and cleanup;
+- binding-pack payload construction, projection, copying, and cleanup.
+  `Available` evidence is erased from tuple, struct, and binding-pack storage;
+  nominal source field indices, dense LLVM field indices, and effect-frame
+  ownership-mask indices remain distinct through partial moves and replay;
 - typed native host-import calls for process arguments, filesystem read/write,
   and diagnostic output through the explicit C ABI above;
 - custom `Drop::drop` hooks followed by exactly-once structural cleanup;
@@ -127,9 +129,11 @@ effect-state array elements and unsupported deep mutable replay shapes produce
    richer allocator/host-fault reporting remain. Every primitive in the frozen
    bytecode primitive table has a native lowering.
 5. First-class callables: environments, indirect calls, receiver modes,
-   callable ownership, binding-pack value lowering, and ordinary/effect-frame
-   indirect invocation are implemented. Mutable callable environments remain
-   subject to the multishot cloning limitations below.
+   callable ownership, binding-pack value lowering with erased tuple/struct
+   evidence fields, and ordinary/effect-frame indirect invocation are
+   implemented. Mutable callable environments remain subject to the multishot
+   cloning limitations below. Enum payloads containing `Available` retain the
+   legacy nominal-slot representation pending a separate enum-layout pass.
 6. Effects and control: static typed-label push/pop/leave lowering is
    implemented in both ordinary and outward effect frames. Handler values and
    terminal `Handle`/`Perform` dispatch now

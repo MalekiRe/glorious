@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use grandiose_vm::{Host, HostFault, Value, Vm, verify};
+use grandiose_vm::{Host, HostFault, Type, Value, Vm, verify};
 
 const SYNC_OWNED_INDIRECT_EFFECT_SOURCE: &str = r#"
     effect Ask { [1,1] ask() -> i64 }
@@ -2985,6 +2985,198 @@ fn llvm_two_shot_clones_and_drops_only_live_residual_fields() {
         execution.status,
         String::from_utf8_lossy(&execution.stderr)
     );
+}
+
+#[test]
+fn llvm_erases_available_evidence_fields_in_suspended_binding_packs() {
+    let mut phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-erased-binding-pack.glorious",
+        r#"
+            trait Inspect { inspect(self: &Self) -> i64; }
+            struct Payload { text: String, values: Vec<i64> }
+            add_i64(left: i64, right: i64) -> i64 { left + right }
+            add_usize(left: usize, right: usize) -> usize { left + right }
+            new_values() -> Vec<i64> { Vec::new() }
+            impl Inspect for i64 {
+                inspect(self: &i64) -> i64 { *self }
+            }
+            effect Choose { [2,2] choose() -> i64 }
+            inspect_after_choice<T>(value: T) -> i64 / {Choose}
+                where T: Inspect, T: Use<[0,infinity]> {
+                let values = new_values();
+                Vec::push(&mut values, 7);
+                let payload = Payload {
+                    text: String::concat("ev", "id"),
+                    values: move values
+                };
+                let choice = perform Choose::choose();
+                let payload_size = wrapping_convert_to_i64(add_usize(
+                    String::byte_len(&payload.text),
+                    Vec::len(&payload.values)
+                ));
+                add_i64(add_i64(value.inspect(), payload_size), choice)
+            }
+            selected() -> i64 {
+                handle inspect_after_choice(5) {
+                    Choose::choose() with continuation => {
+                        add_i64(
+                            resume(continuation, 20),
+                            resume(move continuation, 22)
+                        )
+                    }
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let vm_selected = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_selected, vec![])
+            .unwrap(),
+        Value::I64(62)
+    );
+
+    // Specialization normally consumes source evidence packs before backend
+    // selection. Reintroduce the equivalent finalized MIR carrier so this
+    // source-driven replay test also pins its erased physical layout.
+    let i64_type = phases
+        .artifact
+        .types
+        .iter()
+        .position(|ty| matches!(ty.representation(), Type::I64))
+        .unwrap() as u32;
+    let leading_available = phases.artifact.types.len() as u32;
+    phases.artifact.types.push(Type::Available {
+        identity_name: "LeadingEvidence".into(),
+    });
+    let interspersed_available = phases.artifact.types.len() as u32;
+    phases.artifact.types.push(Type::Available {
+        identity_name: "InterspersedEvidence".into(),
+    });
+    let payload_type = phases.artifact.types.len() as u32;
+    phases.artifact.types.push(Type::Tuple {
+        fields: vec![
+            leading_available,
+            i64_type,
+            interspersed_available,
+            i64_type,
+        ],
+        copy: true,
+    });
+    let binding_type = phases.artifact.types.len() as u32;
+    phases.artifact.types.push(Type::BindingPack {
+        payload_type,
+        identity_name: "SuspendedEvidence".into(),
+        copy: true,
+    });
+    let outward = phases
+        .mir
+        .functions
+        .iter_mut()
+        .find(|function| {
+            function.name.contains("inspect_after_choice") && !function.outward_protocols.is_empty()
+        })
+        .unwrap();
+    let binding = outward.register_types.len() as u32;
+    outward.register_types.push(binding_type);
+    let moved_before = outward.register_types.len() as u32;
+    outward.register_types.push(i64_type);
+    let moved_after = outward.register_types.len() as u32;
+    outward.register_types.push(i64_type);
+    let (perform_block, resume_block) = outward
+        .blocks
+        .iter()
+        .enumerate()
+        .find_map(|(block, candidate)| {
+            let grandiose::compiler_mir::Terminator::Perform {
+                resume: Some(resume),
+                ..
+            } = &candidate.terminator
+            else {
+                return None;
+            };
+            Some((block, resume.target))
+        })
+        .unwrap();
+    let evidence_value = 1;
+    outward.blocks[perform_block].statements.extend([
+        grandiose::compiler_mir::Instruction {
+            span: Default::default(),
+            kind: grandiose::compiler_mir::InstructionKind::MakeBindingPack {
+                dst: binding,
+                binding_type,
+                payloads: vec![
+                    grandiose::compiler_mir::Operand {
+                        register: evidence_value,
+                        mode: grandiose::compiler_mir::UseMode::Copy,
+                    },
+                    grandiose::compiler_mir::Operand {
+                        register: evidence_value,
+                        mode: grandiose::compiler_mir::UseMode::Copy,
+                    },
+                ],
+            },
+        },
+        grandiose::compiler_mir::Instruction {
+            span: Default::default(),
+            kind: grandiose::compiler_mir::InstructionKind::ProjectMove {
+                dst: moved_before,
+                src: grandiose::compiler_mir::Operand {
+                    register: binding,
+                    mode: grandiose::compiler_mir::UseMode::Move,
+                },
+                field: 3,
+            },
+        },
+    ]);
+    outward
+        .blocks
+        .iter_mut()
+        .find(|block| block.id == resume_block)
+        .unwrap()
+        .statements
+        .insert(
+            0,
+            grandiose::compiler_mir::Instruction {
+                span: Default::default(),
+                kind: grandiose::compiler_mir::InstructionKind::ProjectMove {
+                    dst: moved_after,
+                    src: grandiose::compiler_mir::Operand {
+                        register: binding,
+                        mode: grandiose::compiler_mir::UseMode::Move,
+                    },
+                    field: 1,
+                },
+            },
+        );
+    assert!(outward.register_types.contains(&binding_type));
+
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    assert!(
+        module
+            .ir
+            .contains("insertvalue { i64, i64 } zeroinitializer")
+    );
+    assert!(!module.ir.contains("{ i8, i64, i8, i64 }"));
+    run_native_i64(module, selected, 62, "erased-binding-pack");
 }
 
 #[test]

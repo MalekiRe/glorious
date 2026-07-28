@@ -98,6 +98,14 @@ enum EffectRoutingMode {
     ReplayConditional(String),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct AggregateFieldLayout {
+    nominal_index: usize,
+    physical_index: usize,
+    runtime_type: TypeId,
+    owned_mask_index: usize,
+}
+
 impl EffectRoutingMode {
     fn preserves_clauses(&self) -> bool {
         matches!(self, Self::ReplayBorrowed)
@@ -1348,18 +1356,11 @@ impl<'a> Emitter<'a> {
                 }
                 "0".to_owned()
             }
-            Type::Tuple { fields, .. } => {
+            Type::Tuple { .. } | Type::Struct { .. } => {
+                let fields = self.runtime_aggregate_fields(capture_type)?;
                 if fields.len() != captures.len() {
                     return Err(vec![unsupported(caller, "callable capture count mismatch")]);
                 }
-                let fields = fields.clone();
-                self.emit_capture_aggregate(caller, &capture_ty, &fields, captures)?
-            }
-            Type::Struct { fields, .. } => {
-                if fields.len() != captures.len() {
-                    return Err(vec![unsupported(caller, "callable capture count mismatch")]);
-                }
-                let fields = fields.iter().map(|field| field.ty).collect::<Vec<_>>();
                 self.emit_capture_aggregate(caller, &capture_ty, &fields, captures)?
             }
             other => {
@@ -1469,7 +1470,7 @@ impl<'a> Emitter<'a> {
         fields: &[TypeId],
         captures: &[mir::Operand],
     ) -> Result<String, Vec<Diagnostic>> {
-        let mut aggregate = "poison".to_owned();
+        let mut aggregate = "zeroinitializer".to_owned();
         for (index, (expected, capture)) in fields.iter().zip(captures).enumerate() {
             let actual = self.register_runtime_type(caller, capture.register)?;
             if actual != *expected {
@@ -1941,18 +1942,18 @@ impl<'a> Emitter<'a> {
     fn effect_field_layout(
         &self,
         function: &mir::Function,
-    ) -> Result<(Vec<(usize, usize)>, usize), Vec<Diagnostic>> {
+    ) -> Result<(Vec<Vec<AggregateFieldLayout>>, usize), Vec<Diagnostic>> {
         let mut total = 0usize;
         let mut layout = Vec::with_capacity(function.register_types.len());
         for ty in &function.register_types {
-            let count = match self.runtime_type(*ty)? {
+            let fields = match self.runtime_type(*ty)? {
                 Type::Tuple { .. } | Type::Struct { .. } | Type::BindingPack { .. } => {
-                    self.runtime_aggregate_fields(*ty)?.len()
+                    self.runtime_aggregate_field_layout(*ty, total)?
                 }
-                _ => 0,
+                _ => Vec::new(),
             };
-            layout.push((total, count));
-            total += count;
+            total += fields.len();
+            layout.push(fields);
         }
         Ok((layout, total))
     }
@@ -2119,14 +2120,14 @@ impl<'a> Emitter<'a> {
             ));
         }
         let field_initialized_field = function.register_types.len() + 2;
-        for (register, (offset, count)) in field_layout.iter().copied().enumerate() {
+        for (register, fields) in field_layout.iter().enumerate() {
             let initialized = (function.receiver_mode.is_some() && register == 0)
                 || (1..=function.params.len()).contains(&register);
-            for field in 0..count {
+            for field in fields {
                 let address = self.temp();
                 self.line(&format!(
                     "  %{address} = getelementptr inbounds {frame_ty}, ptr %{frame}, i32 0, i32 {field_initialized_field}, i32 {}",
-                    offset + field
+                    field.owned_mask_index
                 ));
                 self.line(&format!(
                     "  store i8 {}, ptr %{address}",
@@ -2261,7 +2262,7 @@ impl<'a> Emitter<'a> {
             self.line(&format!("  %{value} = load {ty}, ptr %{value_address}"));
             let full = self.temp();
             self.line(&format!("  %{full} = icmp eq i8 %{initialized}, 1"));
-            let (_, direct_fields) = field_layout[register];
+            let direct_fields = field_layout[register].len();
             let partial_label = self.temp();
             if direct_fields == 0 {
                 self.line(&format!(
@@ -2299,7 +2300,7 @@ impl<'a> Emitter<'a> {
                     &format!("%{clone}"),
                     &format!("%{value_address}"),
                     field_initialized_field,
-                    field_layout[register].0,
+                    &field_layout[register],
                     "%context",
                 )?;
                 self.line(&format!("  br label %frame.clone.done{done_label}"));
@@ -2368,7 +2369,7 @@ impl<'a> Emitter<'a> {
                 "  %{value_address} = getelementptr inbounds {frame_ty}, ptr %clone, i32 0, i32 {}",
                 register + 1
             ));
-            let (_, direct_fields) = field_layout[register];
+            let direct_fields = field_layout[register].len();
             if direct_fields == 0 {
                 self.line(&format!(
                     "  br i1 %{full}, label %frame.fix.value{fix_label}, label %frame.fix.done{done_label}"
@@ -2405,7 +2406,7 @@ impl<'a> Emitter<'a> {
                     "%clone",
                     &format!("%{value_address}"),
                     field_initialized_field,
-                    field_layout[register].0,
+                    &field_layout[register],
                     "%context",
                 )?;
                 self.line(&format!("  br label %frame.fix.done{done_label}"));
@@ -2440,7 +2441,7 @@ impl<'a> Emitter<'a> {
             self.line(&format!("  %{value} = load {ty}, ptr %{value_address}"));
             let full = self.temp();
             self.line(&format!("  %{full} = icmp eq i8 %{initialized}, 1"));
-            let (_, direct_fields) = field_layout[register];
+            let direct_fields = field_layout[register].len();
             let partial_label = self.temp();
             if direct_fields == 0 {
                 self.line(&format!(
@@ -2476,7 +2477,7 @@ impl<'a> Emitter<'a> {
                     &frame_ty,
                     "%frame",
                     field_initialized_field,
-                    field_layout[register].0,
+                    &field_layout[register],
                     false,
                 )?;
                 self.line(&format!("  br label %frame.drop.done{done_label}"));
@@ -2529,11 +2530,10 @@ impl<'a> Emitter<'a> {
             self.line(&format!(
                 "  %init{register} = getelementptr inbounds {frame_ty}, ptr %frame, i32 0, i32 {initialized_field}, i32 {register}"
             ));
-            let (offset, count) = field_layout[register];
-            for field in 0..count {
+            for (owned_field, field) in field_layout[register].iter().enumerate() {
                 self.line(&format!(
-                    "  %fieldinit{register}.{field} = getelementptr inbounds {frame_ty}, ptr %frame, i32 0, i32 {field_initialized_field}, i32 {}",
-                    offset + field
+                    "  %fieldinit{register}.{owned_field} = getelementptr inbounds {frame_ty}, ptr %frame, i32 0, i32 {field_initialized_field}, i32 {}",
+                    field.owned_mask_index
                 ));
             }
         }
@@ -4326,7 +4326,8 @@ impl<'a> Emitter<'a> {
                 self.runtime_type(source_type)?,
                 Type::Tuple { .. } | Type::Struct { .. } | Type::BindingPack { .. }
             ) {
-                let runtime_field = self.runtime_aggregate_field_index(source_type, *field)?;
+                let runtime_field =
+                    self.runtime_aggregate_owned_field_index(source_type, *field)?;
                 self.line(&format!("  store i8 2, ptr %init{}", src.register));
                 self.line(&format!(
                     "  store i8 0, ptr %fieldinit{}.{runtime_field}",
@@ -4365,15 +4366,16 @@ impl<'a> Emitter<'a> {
             "  br i1 %{partial}, label %effect.drop.fields{fields_label}, label %effect.drop.done{done_label}"
         ));
         self.line(&format!("effect.drop.fields{fields_label}:"));
-        let fields = self.runtime_aggregate_fields(aggregate_type)?;
+        let fields = self.runtime_aggregate_field_layout(aggregate_type, 0)?;
         let aggregate_ty = self.llvm_type(aggregate_type)?;
-        for index in (0..fields.len()).rev() {
+        for field in fields.iter().rev() {
             let flag = self.temp();
             let present = self.temp();
             let drop_label = self.temp();
             let field_done = self.temp();
             self.line(&format!(
-                "  %{flag} = load i8, ptr %fieldinit{register}.{index}"
+                "  %{flag} = load i8, ptr %fieldinit{register}.{}",
+                field.owned_mask_index
             ));
             self.line(&format!("  %{present} = icmp ne i8 %{flag}, 0"));
             self.line(&format!(
@@ -4382,9 +4384,10 @@ impl<'a> Emitter<'a> {
             self.line(&format!("effect.drop.field{drop_label}:"));
             let extracted = self.temp();
             self.line(&format!(
-                "  %{extracted} = extractvalue {aggregate_ty} {value}, {index}"
+                "  %{extracted} = extractvalue {aggregate_ty} {value}, {}",
+                field.physical_index
             ));
-            self.emit_destroy(fields[index], &format!("%{extracted}"), function)?;
+            self.emit_destroy(field.runtime_type, &format!("%{extracted}"), function)?;
             self.line(&format!("  br label %effect.drop.field.done{field_done}"));
             self.line(&format!("effect.drop.field.done{field_done}:"));
         }
@@ -4405,7 +4408,7 @@ impl<'a> Emitter<'a> {
         ));
         let count = match self.runtime_type(self.register_runtime_type(function, register)?)? {
             Type::Tuple { .. } | Type::Struct { .. } | Type::BindingPack { .. } => self
-                .runtime_aggregate_fields(self.register_runtime_type(function, register)?)?
+                .runtime_aggregate_field_layout(self.register_runtime_type(function, register)?, 0)?
                 .len(),
             _ => 0,
         };
@@ -4551,8 +4554,7 @@ impl<'a> Emitter<'a> {
                     self.enum_slot_words(aggregate, *field)?;
                     field + 1
                 } else {
-                    self.aggregate_field_type(aggregate, *field)?;
-                    *field
+                    self.runtime_aggregate_physical_field_index(aggregate, *field)? as u32
                 };
                 let address = self.temp();
                 self.line(&format!(
@@ -4592,9 +4594,20 @@ impl<'a> Emitter<'a> {
                 fields,
             } => {
                 let aggregate_ty = self.llvm_type(*ty)?;
-                let mut aggregate = "poison".to_owned();
+                let runtime_fields = self.runtime_aggregate_fields(*ty)?;
+                if runtime_fields.len() != fields.len() {
+                    return Err(vec![backend_error(format!(
+                        "aggregate t{ty} expects {} runtime fields, received {}",
+                        runtime_fields.len(),
+                        fields.len()
+                    ))]);
+                }
+                let mut aggregate = "zeroinitializer".to_owned();
                 for (index, field) in fields.iter().enumerate() {
-                    self.aggregate_field_type(*ty, index as u32)?;
+                    let actual = self.register_runtime_type(function, field.register)?;
+                    if actual != runtime_fields[index] {
+                        return Err(vec![unsupported(function, "aggregate field type mismatch")]);
+                    }
                     let field_ty = self.register_type(function, field.register)?;
                     let value = self.load_operand(function, field)?;
                     if field.mode == mir::UseMode::Copy {
@@ -4712,11 +4725,12 @@ impl<'a> Emitter<'a> {
                     ));
                     value
                 } else {
-                    self.aggregate_field_type(aggregate_id, *field)?;
+                    let physical_field =
+                        self.runtime_aggregate_physical_field_index(aggregate_id, *field)?;
                     if through_reference {
                         let address = self.temp();
                         self.line(&format!(
-                            "  %{address} = getelementptr inbounds {aggregate_ty}, ptr {aggregate}, i32 0, i32 {field}"
+                            "  %{address} = getelementptr inbounds {aggregate_ty}, ptr {aggregate}, i32 0, i32 {physical_field}"
                         ));
                         let value = self.temp();
                         self.line(&format!("  %{value} = load {field_ty}, ptr %{address}"));
@@ -4724,7 +4738,7 @@ impl<'a> Emitter<'a> {
                     } else {
                         let value = self.temp();
                         self.line(&format!(
-                            "  %{value} = extractvalue {aggregate_ty} {aggregate}, {field}"
+                            "  %{value} = extractvalue {aggregate_ty} {aggregate}, {physical_field}"
                         ));
                         value
                     }
@@ -4804,50 +4818,24 @@ impl<'a> Emitter<'a> {
                     )]);
                 };
                 let aggregate_ty = self.llvm_type(payload_type)?;
-                let fields = match self.runtime_type(payload_type)? {
-                    Type::Tuple { fields, .. } => fields.clone(),
-                    Type::Struct { fields, .. } => fields.iter().map(|field| field.ty).collect(),
-                    other => {
-                        return Err(vec![unsupported(
-                            function,
-                            format!("binding payload layout {other:?}"),
-                        )]);
-                    }
-                };
-                let runtime_fields = fields
-                    .iter()
-                    .filter(|field| {
-                        !matches!(self.runtime_type(**field), Ok(Type::Available { .. }))
-                    })
-                    .count();
-                if runtime_fields != payloads.len() {
+                let fields = self.runtime_aggregate_fields(payload_type)?;
+                if fields.len() != payloads.len() {
                     return Err(vec![unsupported(
                         function,
                         "binding payload count mismatch",
                     )]);
                 }
-                let mut value = "poison".to_owned();
-                let mut payloads = payloads.iter();
-                for (index, field) in fields.iter().enumerate() {
-                    let (field_ty, field_value) =
-                        if matches!(self.runtime_type(*field)?, Type::Available { .. }) {
-                            ("i8".to_owned(), "0".to_owned())
-                        } else {
-                            let payload = payloads.next().expect("validated payload count");
-                            let actual = self.register_runtime_type(function, payload.register)?;
-                            if actual != *field {
-                                return Err(vec![unsupported(
-                                    function,
-                                    "binding payload type mismatch",
-                                )]);
-                            }
-                            let field_ty = self.llvm_type(*field)?;
-                            let field_value = self.load_operand(function, payload)?;
-                            if payload.mode == mir::UseMode::Copy {
-                                self.emit_retain(*field, &field_value, function)?;
-                            }
-                            (field_ty, field_value)
-                        };
+                let mut value = "zeroinitializer".to_owned();
+                for (index, (field, payload)) in fields.iter().zip(payloads).enumerate() {
+                    let actual = self.register_runtime_type(function, payload.register)?;
+                    if actual != *field {
+                        return Err(vec![unsupported(function, "binding payload type mismatch")]);
+                    }
+                    let field_ty = self.llvm_type(*field)?;
+                    let field_value = self.load_operand(function, payload)?;
+                    if payload.mode == mir::UseMode::Copy {
+                        self.emit_retain(*field, &field_value, function)?;
+                    }
                     let inserted = self.temp();
                     self.line(&format!(
                         "  %{inserted} = insertvalue {aggregate_ty} {value}, {field_ty} {field_value}, {index}"
@@ -8819,35 +8807,21 @@ impl<'a> Emitter<'a> {
             Type::BindingPack { payload_type, .. } => {
                 self.emit_retain(payload_type, value, function)?;
             }
-            Type::Tuple { fields, .. } => {
+            Type::Tuple { .. } | Type::Struct { .. } => {
                 let aggregate_ty = self.llvm_type(ty)?;
-                for (index, field) in fields.into_iter().enumerate() {
-                    if self.type_contains_byte_object(field, &mut BTreeSet::new())?
-                        || self.type_contains_callable(field, &mut BTreeSet::new())?
-                        || self.type_contains_handler(field, &mut BTreeSet::new())?
-                        || self.type_contains_resumption(field, &mut BTreeSet::new())?
+                for field in self.runtime_aggregate_field_layout(ty, 0)? {
+                    if self.type_contains_byte_object(field.runtime_type, &mut BTreeSet::new())?
+                        || self.type_contains_callable(field.runtime_type, &mut BTreeSet::new())?
+                        || self.type_contains_handler(field.runtime_type, &mut BTreeSet::new())?
+                        || self
+                            .type_contains_resumption(field.runtime_type, &mut BTreeSet::new())?
                     {
                         let extracted = self.temp();
                         self.line(&format!(
-                            "  %{extracted} = extractvalue {aggregate_ty} {value}, {index}"
+                            "  %{extracted} = extractvalue {aggregate_ty} {value}, {}",
+                            field.physical_index
                         ));
-                        self.emit_retain(field, &format!("%{extracted}"), function)?;
-                    }
-                }
-            }
-            Type::Struct { fields, .. } => {
-                let aggregate_ty = self.llvm_type(ty)?;
-                for (index, field) in fields.into_iter().enumerate() {
-                    if self.type_contains_byte_object(field.ty, &mut BTreeSet::new())?
-                        || self.type_contains_callable(field.ty, &mut BTreeSet::new())?
-                        || self.type_contains_handler(field.ty, &mut BTreeSet::new())?
-                        || self.type_contains_resumption(field.ty, &mut BTreeSet::new())?
-                    {
-                        let extracted = self.temp();
-                        self.line(&format!(
-                            "  %{extracted} = extractvalue {aggregate_ty} {value}, {index}"
-                        ));
-                        self.emit_retain(field.ty, &format!("%{extracted}"), function)?;
+                        self.emit_retain(field.runtime_type, &format!("%{extracted}"), function)?;
                     }
                 }
             }
@@ -8911,11 +8885,8 @@ impl<'a> Emitter<'a> {
             Type::BindingPack { payload_type, .. } => {
                 self.emit_clone_effect_snapshot_value(payload_type, value, function, context)
             }
-            Type::Tuple { fields, .. } => {
-                self.emit_clone_effect_snapshot_aggregate(ty, value, &fields, function, context)
-            }
-            Type::Struct { fields, .. } => {
-                let fields = fields.into_iter().map(|field| field.ty).collect::<Vec<_>>();
+            Type::Tuple { .. } | Type::Struct { .. } => {
+                let fields = self.runtime_aggregate_fields(ty)?;
                 self.emit_clone_effect_snapshot_aggregate(ty, value, &fields, function, context)
             }
             Type::Enum { .. } => {
@@ -9998,11 +9969,8 @@ impl<'a> Emitter<'a> {
             Type::BindingPack { payload_type, .. } => {
                 self.emit_fix_effect_snapshot_value(payload_type, value, function, context)
             }
-            Type::Tuple { fields, .. } => {
-                self.emit_fix_effect_snapshot_aggregate(ty, value, &fields, function, context)
-            }
-            Type::Struct { fields, .. } => {
-                let fields = fields.into_iter().map(|field| field.ty).collect::<Vec<_>>();
+            Type::Tuple { .. } | Type::Struct { .. } => {
+                let fields = self.runtime_aggregate_fields(ty)?;
                 self.emit_fix_effect_snapshot_aggregate(ty, value, &fields, function, context)
             }
             Type::Array { element } => {
@@ -10256,12 +10224,11 @@ impl<'a> Emitter<'a> {
         frame: &str,
         aggregate_address: &str,
         flags_field: usize,
-        flags_offset: usize,
+        fields: &[AggregateFieldLayout],
         context: &str,
     ) -> Result<(), Vec<Diagnostic>> {
-        let fields = self.runtime_aggregate_fields(aggregate_type)?;
         let aggregate_ty = self.llvm_type(aggregate_type)?;
-        for (index, field_type) in fields.into_iter().enumerate() {
+        for field in fields {
             let flag_address = self.temp();
             let flag = self.temp();
             let present = self.temp();
@@ -10269,7 +10236,7 @@ impl<'a> Emitter<'a> {
             let done_label = self.temp();
             self.line(&format!(
                 "  %{flag_address} = getelementptr inbounds {frame_type}, ptr {frame}, i32 0, i32 {flags_field}, i32 {}",
-                flags_offset + index
+                field.owned_mask_index
             ));
             self.line(&format!("  %{flag} = load i8, ptr %{flag_address}"));
             self.line(&format!("  %{present} = icmp ne i8 %{flag}, 0"));
@@ -10283,18 +10250,20 @@ impl<'a> Emitter<'a> {
                 "  %{current} = load {aggregate_ty}, ptr {aggregate_address}"
             ));
             self.line(&format!(
-                "  %{extracted} = extractvalue {aggregate_ty} %{current}, {index}"
+                "  %{extracted} = extractvalue {aggregate_ty} %{current}, {}",
+                field.physical_index
             ));
             let cloned = self.emit_clone_effect_snapshot_value(
-                field_type,
+                field.runtime_type,
                 &format!("%{extracted}"),
                 function,
                 context,
             )?;
             let inserted = self.temp();
             self.line(&format!(
-                "  %{inserted} = insertvalue {aggregate_ty} %{current}, {} {cloned}, {index}",
-                self.llvm_type(field_type)?
+                "  %{inserted} = insertvalue {aggregate_ty} %{current}, {} {cloned}, {}",
+                self.llvm_type(field.runtime_type)?,
+                field.physical_index
             ));
             self.line(&format!(
                 "  store {aggregate_ty} %{inserted}, ptr {aggregate_address}"
@@ -10313,12 +10282,11 @@ impl<'a> Emitter<'a> {
         frame: &str,
         aggregate_address: &str,
         flags_field: usize,
-        flags_offset: usize,
+        fields: &[AggregateFieldLayout],
         context: &str,
     ) -> Result<(), Vec<Diagnostic>> {
-        let fields = self.runtime_aggregate_fields(aggregate_type)?;
         let aggregate_ty = self.llvm_type(aggregate_type)?;
-        for (index, field_type) in fields.into_iter().enumerate() {
+        for field in fields {
             let flag_address = self.temp();
             let flag = self.temp();
             let present = self.temp();
@@ -10326,7 +10294,7 @@ impl<'a> Emitter<'a> {
             let done_label = self.temp();
             self.line(&format!(
                 "  %{flag_address} = getelementptr inbounds {frame_type}, ptr {frame}, i32 0, i32 {flags_field}, i32 {}",
-                flags_offset + index
+                field.owned_mask_index
             ));
             self.line(&format!("  %{flag} = load i8, ptr %{flag_address}"));
             self.line(&format!("  %{present} = icmp ne i8 %{flag}, 0"));
@@ -10340,18 +10308,20 @@ impl<'a> Emitter<'a> {
                 "  %{current} = load {aggregate_ty}, ptr {aggregate_address}"
             ));
             self.line(&format!(
-                "  %{extracted} = extractvalue {aggregate_ty} %{current}, {index}"
+                "  %{extracted} = extractvalue {aggregate_ty} %{current}, {}",
+                field.physical_index
             ));
             let fixed = self.emit_fix_effect_snapshot_value(
-                field_type,
+                field.runtime_type,
                 &format!("%{extracted}"),
                 function,
                 context,
             )?;
             let inserted = self.temp();
             self.line(&format!(
-                "  %{inserted} = insertvalue {aggregate_ty} %{current}, {} {fixed}, {index}",
-                self.llvm_type(field_type)?
+                "  %{inserted} = insertvalue {aggregate_ty} %{current}, {} {fixed}, {}",
+                self.llvm_type(field.runtime_type)?,
+                field.physical_index
             ));
             self.line(&format!(
                 "  store {aggregate_ty} %{inserted}, ptr {aggregate_address}"
@@ -10415,10 +10385,9 @@ impl<'a> Emitter<'a> {
         frame_type: &str,
         frame: &str,
         flags_field: usize,
-        flags_offset: usize,
+        fields: &[AggregateFieldLayout],
         retain: bool,
     ) -> Result<(), Vec<Diagnostic>> {
-        let fields = self.runtime_aggregate_fields(aggregate_type)?;
         let aggregate_ty = self.llvm_type(aggregate_type)?;
         let indices = if retain {
             (0..fields.len()).collect::<Vec<_>>()
@@ -10426,6 +10395,7 @@ impl<'a> Emitter<'a> {
             (0..fields.len()).rev().collect::<Vec<_>>()
         };
         for index in indices {
+            let field = fields[index];
             let flag_address = self.temp();
             let flag = self.temp();
             let present = self.temp();
@@ -10433,7 +10403,7 @@ impl<'a> Emitter<'a> {
             let done_label = self.temp();
             self.line(&format!(
                 "  %{flag_address} = getelementptr inbounds {frame_type}, ptr {frame}, i32 0, i32 {flags_field}, i32 {}",
-                flags_offset + index
+                field.owned_mask_index
             ));
             self.line(&format!("  %{flag} = load i8, ptr %{flag_address}"));
             self.line(&format!("  %{present} = icmp ne i8 %{flag}, 0"));
@@ -10443,12 +10413,13 @@ impl<'a> Emitter<'a> {
             self.line(&format!("frame.field.visit{visit_label}:"));
             let extracted = self.temp();
             self.line(&format!(
-                "  %{extracted} = extractvalue {aggregate_ty} {aggregate}, {index}"
+                "  %{extracted} = extractvalue {aggregate_ty} {aggregate}, {}",
+                field.physical_index
             ));
             if retain {
-                self.emit_retain(fields[index], &format!("%{extracted}"), function)?;
+                self.emit_retain(field.runtime_type, &format!("%{extracted}"), function)?;
             } else {
-                self.emit_destroy(fields[index], &format!("%{extracted}"), function)?;
+                self.emit_destroy(field.runtime_type, &format!("%{extracted}"), function)?;
             }
             self.line(&format!("  br label %frame.field.done{done_label}"));
             self.line(&format!("frame.field.done{done_label}:"));
@@ -10519,37 +10490,26 @@ impl<'a> Emitter<'a> {
                 self.emit_destroy_array_elements(&value, element, function)?;
                 self.line(&format!("  call void @g1_array_free(ptr {value})"));
             }
-            Type::Tuple { fields, .. } => {
+            Type::Tuple { .. } | Type::Struct { .. } => {
                 let aggregate_ty = self.llvm_type(ty)?;
-                for (index, field) in fields.into_iter().enumerate().rev() {
-                    if self.type_contains_byte_object(field, &mut BTreeSet::new())?
-                        || self.type_contains_array(field, &mut BTreeSet::new())?
-                        || self.type_contains_callable(field, &mut BTreeSet::new())?
-                        || self.type_contains_handler(field, &mut BTreeSet::new())?
-                        || self.type_contains_resumption(field, &mut BTreeSet::new())?
+                for field in self
+                    .runtime_aggregate_field_layout(ty, 0)?
+                    .into_iter()
+                    .rev()
+                {
+                    if self.type_contains_byte_object(field.runtime_type, &mut BTreeSet::new())?
+                        || self.type_contains_array(field.runtime_type, &mut BTreeSet::new())?
+                        || self.type_contains_callable(field.runtime_type, &mut BTreeSet::new())?
+                        || self.type_contains_handler(field.runtime_type, &mut BTreeSet::new())?
+                        || self
+                            .type_contains_resumption(field.runtime_type, &mut BTreeSet::new())?
                     {
                         let extracted = self.temp();
                         self.line(&format!(
-                            "  %{extracted} = extractvalue {aggregate_ty} {value}, {index}"
+                            "  %{extracted} = extractvalue {aggregate_ty} {value}, {}",
+                            field.physical_index
                         ));
-                        self.emit_destroy(field, &format!("%{extracted}"), function)?;
-                    }
-                }
-            }
-            Type::Struct { fields, .. } => {
-                let aggregate_ty = self.llvm_type(ty)?;
-                for (index, field) in fields.into_iter().enumerate().rev() {
-                    if self.type_contains_byte_object(field.ty, &mut BTreeSet::new())?
-                        || self.type_contains_array(field.ty, &mut BTreeSet::new())?
-                        || self.type_contains_callable(field.ty, &mut BTreeSet::new())?
-                        || self.type_contains_handler(field.ty, &mut BTreeSet::new())?
-                        || self.type_contains_resumption(field.ty, &mut BTreeSet::new())?
-                    {
-                        let extracted = self.temp();
-                        self.line(&format!(
-                            "  %{extracted} = extractvalue {aggregate_ty} {value}, {index}"
-                        ));
-                        self.emit_destroy(field.ty, &format!("%{extracted}"), function)?;
+                        self.emit_destroy(field.runtime_type, &format!("%{extracted}"), function)?;
                     }
                 }
             }
@@ -11205,14 +11165,22 @@ impl<'a> Emitter<'a> {
             Type::Tuple { fields, .. } => {
                 let mut size = 0usize;
                 for field in fields {
-                    size += self.storage_size(*field, visiting)?.div_ceil(16) * 16;
+                    if matches!(self.runtime_type(*field)?, Type::Available { .. }) {
+                        continue;
+                    }
+                    let field_size = self.storage_size(*field, visiting)?;
+                    size += field_size.div_ceil(16) * 16;
                 }
                 size.max(1)
             }
             Type::Struct { fields, .. } => {
                 let mut size = 0usize;
                 for field in fields {
-                    size += self.storage_size(field.ty, visiting)?.div_ceil(16) * 16;
+                    if matches!(self.runtime_type(field.ty)?, Type::Available { .. }) {
+                        continue;
+                    }
+                    let field_size = self.storage_size(field.ty, visiting)?;
+                    size += field_size.div_ceil(16) * 16;
                 }
                 size.max(1)
             }
@@ -11244,36 +11212,6 @@ impl<'a> Emitter<'a> {
         Ok(size)
     }
 
-    fn aggregate_field_type(
-        &self,
-        aggregate: TypeId,
-        field: u32,
-    ) -> Result<TypeId, Vec<Diagnostic>> {
-        let ty = self
-            .phases
-            .artifact
-            .types
-            .get(aggregate as usize)
-            .ok_or_else(|| vec![backend_error(format!("missing runtime type t{aggregate}"))])?;
-        match ty.representation() {
-            Type::Tuple { fields, .. } => fields.get(field as usize).copied(),
-            Type::Struct { fields, .. } => fields.get(field as usize).map(|field| field.ty),
-            Type::BindingPack { payload_type, .. } => {
-                return self.aggregate_field_type(*payload_type, field);
-            }
-            other => {
-                return Err(vec![backend_error(format!(
-                    "LLVM projection requires a tuple or struct, found {other:?}"
-                ))]);
-            }
-        }
-        .ok_or_else(|| {
-            vec![backend_error(format!(
-                "aggregate t{aggregate} has no field {field}"
-            ))]
-        })
-    }
-
     fn runtime_aggregate_fields(&self, aggregate: TypeId) -> Result<Vec<TypeId>, Vec<Diagnostic>> {
         let fields = match self.runtime_type(aggregate)? {
             Type::Tuple { fields, .. } => fields.clone(),
@@ -11297,32 +11235,67 @@ impl<'a> Emitter<'a> {
             .collect()
     }
 
-    fn runtime_aggregate_field_index(
+    fn runtime_aggregate_field_layout(
+        &self,
+        aggregate: TypeId,
+        owned_mask_offset: usize,
+    ) -> Result<Vec<AggregateFieldLayout>, Vec<Diagnostic>> {
+        let fields = match self.runtime_type(aggregate)? {
+            Type::Tuple { fields, .. } => fields.clone(),
+            Type::Struct { fields, .. } => fields.iter().map(|field| field.ty).collect(),
+            Type::BindingPack { payload_type, .. } => {
+                return self.runtime_aggregate_field_layout(*payload_type, owned_mask_offset);
+            }
+            other => {
+                return Err(vec![backend_error(format!(
+                    "LLVM runtime field layout requires a tuple or struct, found {other:?}"
+                ))]);
+            }
+        };
+        let mut layout = Vec::with_capacity(fields.len());
+        for (nominal_index, runtime_type) in fields.into_iter().enumerate() {
+            if matches!(self.runtime_type(runtime_type)?, Type::Available { .. }) {
+                continue;
+            }
+            layout.push(AggregateFieldLayout {
+                nominal_index,
+                physical_index: layout.len(),
+                runtime_type,
+                owned_mask_index: owned_mask_offset + layout.len(),
+            });
+        }
+        Ok(layout)
+    }
+
+    fn runtime_aggregate_owned_field_index(
         &self,
         aggregate: TypeId,
         field: u32,
     ) -> Result<usize, Vec<Diagnostic>> {
-        let source_fields = match self.runtime_type(aggregate)? {
-            Type::Tuple { fields, .. } => fields.clone(),
-            Type::Struct { fields, .. } => fields.iter().map(|field| field.ty).collect(),
-            Type::BindingPack { payload_type, .. } => {
-                return self.runtime_aggregate_field_index(*payload_type, field);
-            }
-            other => {
-                return Err(vec![backend_error(format!(
-                    "LLVM runtime field index requires a tuple or struct, found {other:?}"
-                ))]);
-            }
-        };
-        if field as usize >= source_fields.len() {
-            return Err(vec![backend_error(format!(
-                "aggregate t{aggregate} has no field {field}"
-            ))]);
-        }
-        source_fields[..field as usize]
+        self.runtime_aggregate_field_layout(aggregate, 0)?
             .iter()
-            .try_fold(0usize, |index, ty| {
-                Ok(index + usize::from(!matches!(self.runtime_type(*ty)?, Type::Available { .. })))
+            .find(|layout| layout.nominal_index == field as usize)
+            .map(|layout| layout.owned_mask_index)
+            .ok_or_else(|| {
+                vec![backend_error(format!(
+                    "aggregate t{aggregate} has no runtime-owned field {field}"
+                ))]
+            })
+    }
+
+    fn runtime_aggregate_physical_field_index(
+        &self,
+        aggregate: TypeId,
+        field: u32,
+    ) -> Result<usize, Vec<Diagnostic>> {
+        self.runtime_aggregate_field_layout(aggregate, 0)?
+            .iter()
+            .find(|layout| layout.nominal_index == field as usize)
+            .map(|layout| layout.physical_index)
+            .ok_or_else(|| {
+                vec![backend_error(format!(
+                    "aggregate t{aggregate} has no runtime-owned field {field}"
+                ))]
             })
     }
 
@@ -11394,6 +11367,9 @@ impl<'a> Emitter<'a> {
         };
         Ok(match ty.representation() {
             Type::Unit => "i8".into(),
+            // Tuple, struct, and BindingPack layouts erase Available fields.
+            // Keep a concrete scalar only for the legacy nominal enum-slot
+            // representation; Available is otherwise never a value/register.
             Type::Available { .. } => "i8".into(),
             Type::Never => "void".into(),
             Type::U8 | Type::I8 => "i8".into(),
@@ -11413,22 +11389,18 @@ impl<'a> Emitter<'a> {
             | Type::RefShared { .. }
             | Type::RefUnique { .. } => "ptr".into(),
             Type::BindingPack { payload_type, .. } => self.llvm_type(*payload_type)?,
-            Type::Tuple { fields, .. } => format!(
-                "{{ {} }}",
-                fields
-                    .iter()
-                    .map(|field| self.llvm_type(*field))
-                    .collect::<Result<Vec<_>, _>>()?
-                    .join(", ")
-            ),
-            Type::Struct { fields, .. } => format!(
-                "{{ {} }}",
-                fields
-                    .iter()
-                    .map(|field| self.llvm_type(field.ty))
-                    .collect::<Result<Vec<_>, _>>()?
-                    .join(", ")
-            ),
+            Type::Tuple { .. } | Type::Struct { .. } => {
+                let fields = self
+                    .runtime_aggregate_fields(id)?
+                    .into_iter()
+                    .map(|field| self.llvm_type(field))
+                    .collect::<Result<Vec<_>, _>>()?;
+                if fields.is_empty() {
+                    "{ i8 }".into()
+                } else {
+                    format!("{{ {} }}", fields.join(", "))
+                }
+            }
             Type::Enum { variants, .. } => {
                 let fields = variants
                     .iter()
