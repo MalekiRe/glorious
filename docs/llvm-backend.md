@@ -43,14 +43,18 @@ The current vertical slice supports:
 - native arrays of supported scalar and owned aggregate values with capacity
   growth, initialization-state tracking, move/copy/borrow access, mutation,
   reserve, push/pop, recursive cleanup, and zero-copy-shaped
-  `Vec<u8>`/`Bytes` bridge operations.
+  `Vec<u8>`/`Bytes` bridge operations;
+- first-class callable environments, reference-counted callable copies,
+  direct and indirect invocation, and shared, unique, and owned environment
+  receivers;
+- binding-pack payload construction, projection, copying, and cleanup.
 
 It emits only functions reachable from `main`, uses register allocas as the
 first stable ABI, and validates generated IR in tests with `llvm-as`. Native
-scalar and `Text`/`Bytes` programs are also executed against C harnesses and
-compared with the VM result; the owned-buffer path runs under AddressSanitizer.
-Unsupported owned enum, callable, or effect-state array elements, escaping
-callable environments, host calls, and effect/resumption operations produce
+scalar, `Text`/`Bytes`, array, and callable programs are also executed against
+C harnesses and compared with the VM result; owned runtime paths run under
+AddressSanitizer. Unsupported owned enum, callable, or effect-state array
+elements, host calls, handlers, and effect/resumption operations produce
 `G1LLVM001` instead of silently changing semantics.
 
 ## Delivery chunks
@@ -66,8 +70,9 @@ callable environments, host calls, and effect/resumption operations produce
    partially implemented; owned enum/callable/effect-state elements, host
    imports, UTF-8 validation, and the remaining checked conversion helpers
    remain.
-5. First-class callables: environments, indirect calls, receiver modes, and
-   binding packs.
+5. First-class callables: environments, indirect calls, receiver modes,
+   callable ownership, and binding-pack value lowering are implemented;
+   effect-bearing callable environments remain.
 6. Effects and control: handlers, resumptions, labels, cancellation, and
    multishot continuation storage.
 7. Production output: object/executable emission through clang and initial

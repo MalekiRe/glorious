@@ -82,6 +82,7 @@ struct Emitter<'a> {
     byte_literals: BTreeMap<Vec<u8>, u32>,
     uses_byte_runtime: bool,
     uses_array_runtime: bool,
+    uses_callable_runtime: bool,
 }
 
 impl<'a> Emitter<'a> {
@@ -95,6 +96,7 @@ impl<'a> Emitter<'a> {
             byte_literals: BTreeMap::new(),
             uses_byte_runtime: false,
             uses_array_runtime: false,
+            uses_callable_runtime: false,
         }
     }
 
@@ -116,6 +118,9 @@ impl<'a> Emitter<'a> {
         }
         if self.uses_array_runtime {
             self.emit_array_runtime();
+        }
+        if self.uses_callable_runtime {
+            self.emit_callable_runtime();
         }
         self.line("");
 
@@ -170,6 +175,14 @@ impl<'a> Emitter<'a> {
                 ))]);
             };
             for block in &function.blocks {
+                for instruction in &block.statements {
+                    if let InstructionKind::MakeCallable {
+                        function: target, ..
+                    } = &instruction.kind
+                    {
+                        pending.push(*target as usize);
+                    }
+                }
                 match &block.terminator {
                     Terminator::Call {
                         function,
@@ -209,6 +222,8 @@ impl<'a> Emitter<'a> {
                 self.uses_byte_runtime |=
                     self.type_contains_byte_object(ty, &mut BTreeSet::new())?;
                 self.uses_array_runtime |= self.type_contains_array(ty, &mut BTreeSet::new())?;
+                self.uses_callable_runtime |=
+                    self.type_contains_callable(ty, &mut BTreeSet::new())?;
             }
             for block in &function.blocks {
                 for instruction in &block.statements {
@@ -538,26 +553,176 @@ impl<'a> Emitter<'a> {
         self.line("}");
     }
 
+    fn emit_callable_runtime(&mut self) {
+        let usize_ty = format!("i{}", self.pointer_width());
+        self.line("%g1.callable = type { i64, ptr, ptr }");
+        if !self.uses_byte_runtime && !self.uses_array_runtime {
+            self.line(&format!("declare ptr @malloc({usize_ty})"));
+            self.line("declare void @free(ptr)");
+        }
+    }
+
+    fn emit_make_callable(
+        &mut self,
+        caller: &mir::Function,
+        callable_type: TypeId,
+        target: usize,
+        captures: &[mir::Operand],
+    ) -> Result<String, Vec<Diagnostic>> {
+        let Type::Callable {
+            capture_type,
+            receiver_mode,
+            ..
+        } = self.runtime_type(callable_type)?.clone()
+        else {
+            return Err(vec![unsupported(
+                caller,
+                "MakeCallable with a non-callable runtime type",
+            )]);
+        };
+        let target_function = self
+            .phases
+            .mir
+            .functions
+            .get(target)
+            .ok_or_else(|| vec![unsupported(caller, "MakeCallable target is missing")])?;
+        if target_function.receiver_mode != Some(receiver_mode) {
+            return Err(vec![unsupported(
+                caller,
+                "MakeCallable receiver mode does not match its target",
+            )]);
+        }
+
+        let capture_ty = self.llvm_type(capture_type)?;
+        let capture_value = match self.runtime_type(capture_type)? {
+            Type::Unit => {
+                if !captures.is_empty() {
+                    return Err(vec![unsupported(
+                        caller,
+                        "captureless callable with capture operands",
+                    )]);
+                }
+                "0".to_owned()
+            }
+            Type::Tuple { fields, .. } => {
+                if fields.len() != captures.len() {
+                    return Err(vec![unsupported(caller, "callable capture count mismatch")]);
+                }
+                let fields = fields.clone();
+                self.emit_capture_aggregate(caller, &capture_ty, &fields, captures)?
+            }
+            Type::Struct { fields, .. } => {
+                if fields.len() != captures.len() {
+                    return Err(vec![unsupported(caller, "callable capture count mismatch")]);
+                }
+                let fields = fields.iter().map(|field| field.ty).collect::<Vec<_>>();
+                self.emit_capture_aggregate(caller, &capture_ty, &fields, captures)?
+            }
+            other => {
+                return Err(vec![unsupported(
+                    caller,
+                    format!("callable capture layout {other:?}"),
+                )]);
+            }
+        };
+
+        let usize_ty = format!("i{}", self.pointer_width());
+        let callable_end = self.temp();
+        self.line(&format!(
+            "  %{callable_end} = getelementptr %g1.callable, ptr null, {usize_ty} 1"
+        ));
+        let callable_size = self.temp();
+        self.line(&format!(
+            "  %{callable_size} = ptrtoint ptr %{callable_end} to {usize_ty}"
+        ));
+        let callable = self.temp();
+        self.line(&format!(
+            "  %{callable} = call ptr @malloc({usize_ty} %{callable_size})"
+        ));
+        let capture_size = self.emit_array_element_size(&capture_ty);
+        let capture = self.temp();
+        self.line(&format!(
+            "  %{capture} = call ptr @malloc({usize_ty} {capture_size})"
+        ));
+        self.line(&format!(
+            "  store {capture_ty} {capture_value}, ptr %{capture}"
+        ));
+        let count_address = self.temp();
+        self.line(&format!(
+            "  %{count_address} = getelementptr inbounds %g1.callable, ptr %{callable}, i32 0, i32 0"
+        ));
+        self.line(&format!("  store i64 1, ptr %{count_address}"));
+        let function_address = self.temp();
+        self.line(&format!(
+            "  %{function_address} = getelementptr inbounds %g1.callable, ptr %{callable}, i32 0, i32 1"
+        ));
+        self.line(&format!(
+            "  store ptr @g1_f{target}, ptr %{function_address}"
+        ));
+        let capture_address = self.temp();
+        self.line(&format!(
+            "  %{capture_address} = getelementptr inbounds %g1.callable, ptr %{callable}, i32 0, i32 2"
+        ));
+        self.line(&format!("  store ptr %{capture}, ptr %{capture_address}"));
+        Ok(format!("%{callable}"))
+    }
+
+    fn emit_capture_aggregate(
+        &mut self,
+        caller: &mir::Function,
+        aggregate_ty: &str,
+        fields: &[TypeId],
+        captures: &[mir::Operand],
+    ) -> Result<String, Vec<Diagnostic>> {
+        let mut aggregate = "poison".to_owned();
+        for (index, (expected, capture)) in fields.iter().zip(captures).enumerate() {
+            let actual = self.register_runtime_type(caller, capture.register)?;
+            if actual != *expected {
+                return Err(vec![unsupported(caller, "callable capture type mismatch")]);
+            }
+            let field_ty = self.llvm_type(*expected)?;
+            let value = self.load_operand(caller, capture)?;
+            if capture.mode == mir::UseMode::Copy {
+                self.emit_retain(*expected, &value, caller)?;
+            }
+            let inserted = self.temp();
+            self.line(&format!(
+                "  %{inserted} = insertvalue {aggregate_ty} {aggregate}, {field_ty} {value}, {index}"
+            ));
+            aggregate = format!("%{inserted}");
+        }
+        Ok(aggregate)
+    }
+
     fn emit_function(&mut self, index: usize) -> Result<(), Vec<Diagnostic>> {
         let function = &self.phases.mir.functions[index];
-        if function.receiver_mode.is_some() {
-            return Err(vec![unsupported(function, "callable receivers")]);
-        }
         if !function.outward_protocols.is_empty() {
             return Err(vec![unsupported(function, "outward effects")]);
         }
         let result = self.llvm_return_type(function.result)?;
-        let params = function
+        let mut params = function
             .params
             .iter()
             .enumerate()
             .map(|(index, ty)| Ok(format!("{} %arg{index}", self.llvm_type(*ty)?)))
-            .collect::<Result<Vec<_>, Vec<Diagnostic>>>()?
-            .join(", ");
+            .collect::<Result<Vec<_>, Vec<Diagnostic>>>()?;
+        if function.receiver_mode.is_some() {
+            params.insert(
+                0,
+                format!("{} %receiver", self.llvm_type(function.receiver_type)?),
+            );
+        }
+        let params = params.join(", ");
         self.line(&format!("define {} @g1_f{index}({params}) {{", result));
         self.line("entry.allocas:");
         for (register, ty) in function.register_types.iter().enumerate() {
             self.line(&format!("  %r{register} = alloca {}", self.llvm_type(*ty)?));
+        }
+        if function.receiver_mode.is_some() {
+            self.line(&format!(
+                "  store {} %receiver, ptr %r0",
+                self.llvm_type(function.receiver_type)?
+            ));
         }
         for (parameter, ty) in function.params.iter().enumerate() {
             self.line(&format!(
@@ -741,18 +906,36 @@ impl<'a> Emitter<'a> {
             }
             InstructionKind::ProjectCopy { dst, src, field }
             | InstructionKind::ProjectMove { dst, src, field } => {
-                let aggregate_id = self.register_runtime_type(function, src.register)?;
+                let source_id = self.register_runtime_type(function, src.register)?;
+                let (aggregate_id, through_reference) = match self.runtime_type(source_id)? {
+                    Type::RefShared { referent } | Type::RefUnique { referent } => {
+                        (*referent, true)
+                    }
+                    _ => (source_id, false),
+                };
                 let aggregate_ty = self.llvm_type(aggregate_id)?;
                 let aggregate = self.load_operand(function, src)?;
                 let field_ty = self.register_type(function, *dst)?;
                 let value = if matches!(self.runtime_type(aggregate_id)?, Type::Enum { .. }) {
                     let words = self.enum_slot_words(aggregate_id, *field)?;
                     let slot_ty = format!("[{words} x i128]");
-                    let packed = self.temp();
-                    self.line(&format!(
-                        "  %{packed} = extractvalue {aggregate_ty} {aggregate}, {}",
-                        field + 1
-                    ));
+                    let packed = if through_reference {
+                        let address = self.temp();
+                        self.line(&format!(
+                            "  %{address} = getelementptr inbounds {aggregate_ty}, ptr {aggregate}, i32 0, i32 {}",
+                            field + 1
+                        ));
+                        let packed = self.temp();
+                        self.line(&format!("  %{packed} = load {slot_ty}, ptr %{address}"));
+                        packed
+                    } else {
+                        let packed = self.temp();
+                        self.line(&format!(
+                            "  %{packed} = extractvalue {aggregate_ty} {aggregate}, {}",
+                            field + 1
+                        ));
+                        packed
+                    };
                     let slot = self.temp();
                     self.line(&format!("  %{slot} = alloca {slot_ty}"));
                     self.line(&format!(
@@ -765,11 +948,21 @@ impl<'a> Emitter<'a> {
                     value
                 } else {
                     self.aggregate_field_type(aggregate_id, *field)?;
-                    let value = self.temp();
-                    self.line(&format!(
-                        "  %{value} = extractvalue {aggregate_ty} {aggregate}, {field}"
-                    ));
-                    value
+                    if through_reference {
+                        let address = self.temp();
+                        self.line(&format!(
+                            "  %{address} = getelementptr inbounds {aggregate_ty}, ptr {aggregate}, i32 0, i32 {field}"
+                        ));
+                        let value = self.temp();
+                        self.line(&format!("  %{value} = load {field_ty}, ptr %{address}"));
+                        value
+                    } else {
+                        let value = self.temp();
+                        self.line(&format!(
+                            "  %{value} = extractvalue {aggregate_ty} {aggregate}, {field}"
+                        ));
+                        value
+                    }
                 };
                 if matches!(instruction, InstructionKind::ProjectCopy { .. }) {
                     let runtime_ty = self.register_runtime_type(function, *dst)?;
@@ -796,6 +989,50 @@ impl<'a> Emitter<'a> {
                 primitive,
                 args,
             } => self.emit_primitive(function, *dst, *primitive, args)?,
+            InstructionKind::MakeCallable {
+                dst,
+                callable_type,
+                function: target,
+                captures,
+            } => {
+                let callable =
+                    self.emit_make_callable(function, *callable_type, *target as usize, captures)?;
+                self.line(&format!("  store ptr {callable}, ptr %r{dst}"));
+            }
+            InstructionKind::MakeBindingPack {
+                dst,
+                binding_type,
+                payloads,
+            } => {
+                let Type::BindingPack { payload_type, .. } =
+                    self.runtime_type(*binding_type)?.clone()
+                else {
+                    return Err(vec![unsupported(
+                        function,
+                        "MakeBindingPack with a non-binding runtime type",
+                    )]);
+                };
+                let aggregate_ty = self.llvm_type(payload_type)?;
+                let fields = match self.runtime_type(payload_type)? {
+                    Type::Tuple { fields, .. } => fields.clone(),
+                    Type::Struct { fields, .. } => fields.iter().map(|field| field.ty).collect(),
+                    other => {
+                        return Err(vec![unsupported(
+                            function,
+                            format!("binding payload layout {other:?}"),
+                        )]);
+                    }
+                };
+                if fields.len() != payloads.len() {
+                    return Err(vec![unsupported(
+                        function,
+                        "binding payload count mismatch",
+                    )]);
+                }
+                let value =
+                    self.emit_capture_aggregate(function, &aggregate_ty, &fields, payloads)?;
+                self.line(&format!("  store {aggregate_ty} {value}, ptr %r{dst}"));
+            }
             InstructionKind::Drop { owner } => {
                 let ty = self.register_runtime_type(function, owner.register)?;
                 let value = self.load_operand(function, owner)?;
@@ -2041,6 +2278,39 @@ impl<'a> Emitter<'a> {
                 args,
                 normal,
             } => self.emit_call(function, *result, function_index, args, normal, false)?,
+            Terminator::CallKnownReceiver {
+                result,
+                function: callee,
+                receiver,
+                args,
+                normal,
+            } => self.emit_call_with_receiver(
+                function,
+                *result,
+                *callee as usize,
+                receiver,
+                args,
+                normal,
+                false,
+            )?,
+            Terminator::CallIndirect {
+                result,
+                callable,
+                known_function,
+                receiver_mode,
+                cleanup_callable,
+                args,
+                normal,
+            } => self.emit_indirect_call(
+                function,
+                *result,
+                callable,
+                *known_function,
+                *receiver_mode,
+                *cleanup_callable,
+                args,
+                Some(normal),
+            )?,
             Terminator::TailCall {
                 function: callee,
                 args,
@@ -2048,6 +2318,37 @@ impl<'a> Emitter<'a> {
             Terminator::TailCallSelf { args } => {
                 self.emit_tail_call(function, function_index, args)?
             }
+            Terminator::TailCallKnownReceiver {
+                function: callee,
+                receiver,
+                args,
+            } => self.emit_call_with_receiver(
+                function,
+                None,
+                *callee as usize,
+                receiver,
+                args,
+                &mir::Edge {
+                    target: u32::MAX,
+                    args: Vec::new(),
+                },
+                true,
+            )?,
+            Terminator::TailCallIndirect {
+                callable,
+                known_function,
+                receiver_mode,
+                args,
+            } => self.emit_indirect_call(
+                function,
+                None,
+                callable,
+                *known_function,
+                *receiver_mode,
+                false,
+                args,
+                None,
+            )?,
             Terminator::Switch {
                 discr,
                 cases,
@@ -2137,6 +2438,194 @@ impl<'a> Emitter<'a> {
             self.line(&format!("  store {result_ty} %{value}, ptr %r{dst}"));
         }
         self.emit_edge_with_preassigned(caller, normal, result.into_iter().collect())
+    }
+
+    fn emit_call_with_receiver(
+        &mut self,
+        caller: &mir::Function,
+        result: Option<u32>,
+        callee_index: usize,
+        receiver: &mir::Operand,
+        args: &[mir::Operand],
+        normal: &mir::Edge,
+        tail: bool,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let callee = self
+            .phases
+            .mir
+            .functions
+            .get(callee_index)
+            .ok_or_else(|| vec![unsupported(caller, "call to a missing receiver function")])?;
+        if callee.receiver_mode != Some(0) {
+            return Err(vec![unsupported(
+                caller,
+                "known-receiver calls whose target does not use a shared receiver",
+            )]);
+        }
+        let receiver_ty = self.register_type(caller, receiver.register)?;
+        let receiver_value = self.load_operand(caller, receiver)?;
+        let mut arguments = vec![format!("{receiver_ty} {receiver_value}")];
+        for operand in args {
+            let ty = self.register_type(caller, operand.register)?;
+            let value = self.load_operand(caller, operand)?;
+            if operand.mode == mir::UseMode::Copy {
+                let runtime_ty = self.register_runtime_type(caller, operand.register)?;
+                self.emit_retain(runtime_ty, &value, caller)?;
+            }
+            arguments.push(format!("{ty} {value}"));
+        }
+        let arguments = arguments.join(", ");
+        let result_ty = self.llvm_return_type(callee.result)?;
+        let call = if result_ty == "void" {
+            self.line(&format!(
+                "  {}call void @g1_f{callee_index}({arguments})",
+                if tail { "tail " } else { "" }
+            ));
+            None
+        } else {
+            let temporary = self.temp();
+            self.line(&format!(
+                "  %{temporary} = {}call {result_ty} @g1_f{callee_index}({arguments})",
+                if tail { "tail " } else { "" }
+            ));
+            Some(temporary)
+        };
+        if tail {
+            if let Some(value) = call {
+                self.line(&format!("  ret {result_ty} %{value}"));
+            } else {
+                self.line("  ret void");
+            }
+            return Ok(());
+        }
+        if let (Some(dst), Some(value)) = (result, call) {
+            self.line(&format!("  store {result_ty} %{value}, ptr %r{dst}"));
+        }
+        self.emit_edge_with_preassigned(caller, normal, result.into_iter().collect())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_indirect_call(
+        &mut self,
+        caller: &mir::Function,
+        result: Option<u32>,
+        callable_operand: &mir::Operand,
+        known_function: Option<u32>,
+        requested_mode: u32,
+        cleanup_callable: bool,
+        args: &[mir::Operand],
+        normal: Option<&mir::Edge>,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let callable_type = self.register_runtime_type(caller, callable_operand.register)?;
+        let Type::Callable {
+            signature,
+            capture_type,
+            receiver_mode,
+            ..
+        } = self.runtime_type(callable_type)?.clone()
+        else {
+            return Err(vec![unsupported(
+                caller,
+                "indirect call through a non-callable value",
+            )]);
+        };
+        if requested_mode > 2 || requested_mode < receiver_mode {
+            return Err(vec![unsupported(
+                caller,
+                "indirect call with an incompatible receiver mode",
+            )]);
+        }
+        if signature.params.len() != args.len() {
+            return Err(vec![unsupported(
+                caller,
+                "indirect call argument count mismatch",
+            )]);
+        }
+        if let Some(target) = known_function {
+            let target = self
+                .phases
+                .mir
+                .functions
+                .get(target as usize)
+                .ok_or_else(|| vec![unsupported(caller, "missing known indirect-call target")])?;
+            if target.receiver_mode != Some(receiver_mode) {
+                return Err(vec![unsupported(
+                    caller,
+                    "known indirect-call receiver mode mismatch",
+                )]);
+            }
+        }
+
+        let callable = self.load_operand(caller, callable_operand)?;
+        let function_address = self.temp();
+        self.line(&format!(
+            "  %{function_address} = getelementptr inbounds %g1.callable, ptr {callable}, i32 0, i32 1"
+        ));
+        let target = self.temp();
+        self.line(&format!("  %{target} = load ptr, ptr %{function_address}"));
+        let capture_address = self.temp();
+        self.line(&format!(
+            "  %{capture_address} = getelementptr inbounds %g1.callable, ptr {callable}, i32 0, i32 2"
+        ));
+        let capture = self.temp();
+        self.line(&format!("  %{capture} = load ptr, ptr %{capture_address}"));
+
+        let mut arguments = Vec::with_capacity(args.len() + 1);
+        if receiver_mode == 2 {
+            let capture_ty = self.llvm_type(capture_type)?;
+            let receiver = self.temp();
+            self.line(&format!(
+                "  %{receiver} = load {capture_ty}, ptr %{capture}"
+            ));
+            self.line(&format!("  call void @free(ptr %{capture})"));
+            self.line(&format!("  call void @free(ptr {callable})"));
+            arguments.push(format!("{capture_ty} %{receiver}"));
+        } else {
+            arguments.push(format!("ptr %{capture}"));
+        }
+        for (operand, expected) in args.iter().zip(&signature.params) {
+            let runtime_ty = self.register_runtime_type(caller, operand.register)?;
+            if runtime_ty != *expected {
+                return Err(vec![unsupported(
+                    caller,
+                    "indirect call argument type mismatch",
+                )]);
+            }
+            let ty = self.register_type(caller, operand.register)?;
+            let value = self.load_operand(caller, operand)?;
+            if operand.mode == mir::UseMode::Copy {
+                self.emit_retain(runtime_ty, &value, caller)?;
+            }
+            arguments.push(format!("{ty} {value}"));
+        }
+        let arguments = arguments.join(", ");
+        let result_ty = self.llvm_return_type(signature.result)?;
+        let call = if result_ty == "void" {
+            self.line(&format!("  call void %{target}({arguments})"));
+            None
+        } else {
+            let value = self.temp();
+            self.line(&format!(
+                "  %{value} = call {result_ty} %{target}({arguments})"
+            ));
+            Some(value)
+        };
+        if receiver_mode != 2 && (requested_mode == 2 || cleanup_callable) {
+            self.emit_destroy(callable_type, &callable, caller)?;
+        }
+        if let Some(normal) = normal {
+            if let (Some(dst), Some(value)) = (result, call) {
+                self.line(&format!("  store {result_ty} %{value}, ptr %r{dst}"));
+            }
+            self.emit_edge_with_preassigned(caller, normal, result.into_iter().collect())
+        } else {
+            if let Some(value) = call {
+                self.line(&format!("  ret {result_ty} %{value}"));
+            } else {
+                self.line("  ret void");
+            }
+            Ok(())
+        }
     }
 
     fn emit_tail_call(
@@ -2311,6 +2800,9 @@ impl<'a> Emitter<'a> {
                     self.type_contains_byte_object(field.ty, visiting)
                         .unwrap_or(true)
                 }),
+                Type::BindingPack { payload_type, .. } => self
+                    .type_contains_byte_object(*payload_type, visiting)
+                    .unwrap_or(true),
                 Type::Enum { variants, .. } => variants
                     .iter()
                     .flat_map(|variant| &variant.fields)
@@ -2340,12 +2832,50 @@ impl<'a> Emitter<'a> {
             Type::Struct { fields, .. } => fields
                 .iter()
                 .any(|field| self.type_contains_array(field.ty, visiting).unwrap_or(true)),
+            Type::BindingPack { payload_type, .. } => self
+                .type_contains_array(*payload_type, visiting)
+                .unwrap_or(true),
             Type::Enum { variants, .. } => variants
                 .iter()
                 .flat_map(|variant| &variant.fields)
                 .any(|field| self.type_contains_array(field.ty, visiting).unwrap_or(true)),
             _ => false,
         };
+        visiting.remove(&ty);
+        Ok(contains)
+    }
+
+    fn type_contains_callable(
+        &self,
+        ty: TypeId,
+        visiting: &mut BTreeSet<TypeId>,
+    ) -> Result<bool, Vec<Diagnostic>> {
+        if !visiting.insert(ty) {
+            return Ok(false);
+        }
+        let contains =
+            match self.runtime_type(ty)? {
+                Type::Callable { .. } => true,
+                Type::Tuple { fields, .. } => fields.iter().any(|field| {
+                    self.type_contains_callable(*field, visiting)
+                        .unwrap_or(true)
+                }),
+                Type::Struct { fields, .. } => fields.iter().any(|field| {
+                    self.type_contains_callable(field.ty, visiting)
+                        .unwrap_or(true)
+                }),
+                Type::BindingPack { payload_type, .. } => self
+                    .type_contains_callable(*payload_type, visiting)
+                    .unwrap_or(true),
+                Type::Enum { variants, .. } => variants
+                    .iter()
+                    .flat_map(|variant| &variant.fields)
+                    .any(|field| {
+                        self.type_contains_callable(field.ty, visiting)
+                            .unwrap_or(true)
+                    }),
+                _ => false,
+            };
         visiting.remove(&ty);
         Ok(contains)
     }
@@ -2402,10 +2932,26 @@ impl<'a> Emitter<'a> {
             Type::Text | Type::Bytes => {
                 self.line(&format!("  call void @g1_bytes_retain(ptr {value})"));
             }
+            Type::Callable { .. } => {
+                let count_address = self.temp();
+                self.line(&format!(
+                    "  %{count_address} = getelementptr inbounds %g1.callable, ptr {value}, i32 0, i32 0"
+                ));
+                let count = self.temp();
+                self.line(&format!("  %{count} = load i64, ptr %{count_address}"));
+                let next = self.temp();
+                self.line(&format!("  %{next} = add i64 %{count}, 1"));
+                self.line(&format!("  store i64 %{next}, ptr %{count_address}"));
+            }
+            Type::BindingPack { payload_type, .. } => {
+                self.emit_retain(payload_type, value, function)?;
+            }
             Type::Tuple { fields, .. } => {
                 let aggregate_ty = self.llvm_type(ty)?;
                 for (index, field) in fields.into_iter().enumerate() {
-                    if self.type_contains_byte_object(field, &mut BTreeSet::new())? {
+                    if self.type_contains_byte_object(field, &mut BTreeSet::new())?
+                        || self.type_contains_callable(field, &mut BTreeSet::new())?
+                    {
                         let extracted = self.temp();
                         self.line(&format!(
                             "  %{extracted} = extractvalue {aggregate_ty} {value}, {index}"
@@ -2417,7 +2963,9 @@ impl<'a> Emitter<'a> {
             Type::Struct { fields, .. } => {
                 let aggregate_ty = self.llvm_type(ty)?;
                 for (index, field) in fields.into_iter().enumerate() {
-                    if self.type_contains_byte_object(field.ty, &mut BTreeSet::new())? {
+                    if self.type_contains_byte_object(field.ty, &mut BTreeSet::new())?
+                        || self.type_contains_callable(field.ty, &mut BTreeSet::new())?
+                    {
                         let extracted = self.temp();
                         self.line(&format!(
                             "  %{extracted} = extractvalue {aggregate_ty} {value}, {index}"
@@ -2450,6 +2998,12 @@ impl<'a> Emitter<'a> {
             Type::Text | Type::Bytes => {
                 self.line(&format!("  call void @g1_bytes_release(ptr {value})"));
             }
+            Type::Callable { capture_type, .. } => {
+                self.emit_destroy_callable(value, capture_type, function)?;
+            }
+            Type::BindingPack { payload_type, .. } => {
+                self.emit_destroy(payload_type, value, function)?;
+            }
             Type::Array { element } => {
                 self.ensure_plain_array_element(element, function)?;
                 self.emit_destroy_array_elements(value, element, function)?;
@@ -2460,6 +3014,7 @@ impl<'a> Emitter<'a> {
                 for (index, field) in fields.into_iter().enumerate().rev() {
                     if self.type_contains_byte_object(field, &mut BTreeSet::new())?
                         || self.type_contains_array(field, &mut BTreeSet::new())?
+                        || self.type_contains_callable(field, &mut BTreeSet::new())?
                     {
                         let extracted = self.temp();
                         self.line(&format!(
@@ -2474,6 +3029,7 @@ impl<'a> Emitter<'a> {
                 for (index, field) in fields.into_iter().enumerate().rev() {
                     if self.type_contains_byte_object(field.ty, &mut BTreeSet::new())?
                         || self.type_contains_array(field.ty, &mut BTreeSet::new())?
+                        || self.type_contains_callable(field.ty, &mut BTreeSet::new())?
                     {
                         let extracted = self.temp();
                         self.line(&format!(
@@ -2494,6 +3050,51 @@ impl<'a> Emitter<'a> {
             }
             _ => {}
         }
+        Ok(())
+    }
+
+    fn emit_destroy_callable(
+        &mut self,
+        callable: &str,
+        capture_type: TypeId,
+        function: &mir::Function,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let count_address = self.temp();
+        self.line(&format!(
+            "  %{count_address} = getelementptr inbounds %g1.callable, ptr {callable}, i32 0, i32 0"
+        ));
+        let count = self.temp();
+        self.line(&format!("  %{count} = load i64, ptr %{count_address}"));
+        let last = self.temp();
+        self.line(&format!("  %{last} = icmp eq i64 %{count}, 1"));
+        let destroy_label = self.temp();
+        let decrement_label = self.temp();
+        let done_label = self.temp();
+        self.line(&format!(
+            "  br i1 %{last}, label %callable.destroy{destroy_label}, label %callable.decrement{decrement_label}"
+        ));
+        self.line(&format!("callable.decrement{decrement_label}:"));
+        let next = self.temp();
+        self.line(&format!("  %{next} = sub i64 %{count}, 1"));
+        self.line(&format!("  store i64 %{next}, ptr %{count_address}"));
+        self.line(&format!("  br label %callable.done{done_label}"));
+        self.line(&format!("callable.destroy{destroy_label}:"));
+        let capture_address = self.temp();
+        self.line(&format!(
+            "  %{capture_address} = getelementptr inbounds %g1.callable, ptr {callable}, i32 0, i32 2"
+        ));
+        let capture = self.temp();
+        self.line(&format!("  %{capture} = load ptr, ptr %{capture_address}"));
+        let capture_ty = self.llvm_type(capture_type)?;
+        let capture_value = self.temp();
+        self.line(&format!(
+            "  %{capture_value} = load {capture_ty}, ptr %{capture}"
+        ));
+        self.emit_destroy(capture_type, &format!("%{capture_value}"), function)?;
+        self.line(&format!("  call void @free(ptr %{capture})"));
+        self.line(&format!("  call void @free(ptr {callable})"));
+        self.line(&format!("  br label %callable.done{done_label}"));
+        self.line(&format!("callable.done{done_label}:"));
         Ok(())
     }
 
@@ -2877,8 +3478,10 @@ impl<'a> Emitter<'a> {
             Type::Text
             | Type::Bytes
             | Type::Array { .. }
+            | Type::Callable { .. }
             | Type::RefShared { .. }
             | Type::RefUnique { .. } => usize::from(self.pointer_width() / 8),
+            Type::BindingPack { payload_type, .. } => self.storage_size(*payload_type, visiting)?,
             Type::Tuple { fields, .. } => {
                 let mut size = 0usize;
                 for field in fields {
@@ -2935,6 +3538,9 @@ impl<'a> Emitter<'a> {
         match ty.representation() {
             Type::Tuple { fields, .. } => fields.get(field as usize).copied(),
             Type::Struct { fields, .. } => fields.get(field as usize).map(|field| field.ty),
+            Type::BindingPack { payload_type, .. } => {
+                return self.aggregate_field_type(*payload_type, field);
+            }
             other => {
                 return Err(vec![backend_error(format!(
                     "LLVM projection requires a tuple or struct, found {other:?}"
@@ -3028,8 +3634,10 @@ impl<'a> Emitter<'a> {
             Type::Text
             | Type::Bytes
             | Type::Array { .. }
+            | Type::Callable { .. }
             | Type::RefShared { .. }
             | Type::RefUnique { .. } => "ptr".into(),
+            Type::BindingPack { payload_type, .. } => self.llvm_type(*payload_type)?,
             Type::Tuple { fields, .. } => format!(
                 "{{ {} }}",
                 fields

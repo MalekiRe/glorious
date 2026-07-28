@@ -446,6 +446,75 @@ fn llvm_and_vm_backends_execute_the_same_scalar_program() {
 }
 
 #[test]
+fn llvm_and_vm_backends_execute_the_same_captured_callable_program() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-callable-differential.glorious",
+        "struct Ticket { value: i64 }\nimpl Use<[1,1]> for Ticket {}\nretain<F>(body: F) -> F where F: Fn<(), Output=i64> { body }\nunique_capture() -> i64 {\n  let state = 40;\n  let mutate = () -> i64 { state = state + 2; state };\n  mutate()\n}\nowned_capture() -> i64 {\n  let ticket = Ticket { value: 42 };\n  let consume = { => { let Ticket { value } = move ticket; value } };\n  consume()\n}\ntext_capture() -> usize {\n  let text = String::concat(\"forty\", \"two\");\n  let length = { => String::byte_len(&text) };\n  length()\n}\nretained_capture() -> i64 {\n  let base = 42;\n  let answer = retain({ => base });\n  answer()\n}\ncopied_capture() -> i64 {\n  let base = 42;\n  let answer = { => base };\n  let copied = retain(answer);\n  copied()\n}\nselected() -> i64 {\n  unique_capture();\n  owned_capture();\n  text_capture();\n  retained_capture();\n  copied_capture();\n  let base = 42;\n  let answer = { => base };\n  answer()\n}\nmain() -> () { selected(); () }",
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    assert!(module.ir.contains("%g1.callable = type"));
+    assert!(module.ir.contains("call i64 %"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("callable.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("callable");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\nextern int64_t g1_f{llvm_function}(void);\nint main(void) {{ return g1_f{llvm_function}() == 42 ? 0 : 1; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new("clang")
+        .arg("-fsanitize=address")
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable).output().unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
+    );
+}
+
+#[test]
 fn llvm_and_vm_backends_execute_the_same_vec_program() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-array-differential.glorious",
