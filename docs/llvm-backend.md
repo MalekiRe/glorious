@@ -39,7 +39,7 @@ The current vertical slice supports:
 - fixed-width signed and unsigned integers, `usize`/`isize`, `char`, `f32`,
   and `f64`;
 - native tuple, struct, and tagged-enum values, construction, field projection,
-  tag tests, and deconstruction;
+  tag tests, deconstruction, and variant-directed owned-payload copy/drop;
 - shared and unique references, borrow/reborrow, projection borrows, and
   dereference load/move/store;
 - direct calls, self calls, tail calls, block arguments, returns, switches,
@@ -70,9 +70,9 @@ It emits only functions reachable from `main`, uses register allocas as the
 first stable ABI, and validates generated IR in tests with `llvm-as`. Native
 scalar, `Text`/`Bytes`, array, and callable programs are also executed against
 C harnesses and compared with the VM result; owned runtime paths run under
-AddressSanitizer. Unsupported owned enum, callable, or effect-state array
-elements, handlers, and effect/resumption operations produce `G1LLVM001`
-instead of silently changing semantics.
+AddressSanitizer. Unsupported callable or effect-state array elements,
+handlers, and effect/resumption operations produce `G1LLVM001` instead of
+silently changing semantics.
 
 ## Delivery chunks
 
@@ -85,9 +85,9 @@ instead of silently changing semantics.
    aggregate cleanup and custom drop glue remain.
 4. Runtime ABI: `Text`, `Bytes`, and arrays of supported owned aggregates are
    partially implemented; typed host imports are lowered through an external
-   C ABI, while owned enum/callable/effect-state array elements, a bundled
-   native host implementation, UTF-8 validation, and the remaining checked
-   conversion helpers remain.
+   C ABI, while callable/effect-state array elements, a bundled native host
+   implementation, UTF-8 validation, and the remaining checked conversion
+   helpers remain.
 5. First-class callables: environments, indirect calls, receiver modes,
    callable ownership, and binding-pack value lowering are implemented;
    effect-bearing callable environments remain.

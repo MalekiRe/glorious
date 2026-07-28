@@ -3035,15 +3035,6 @@ impl<'a> Emitter<'a> {
                     "Array elements with callable or effect runtime state",
                 )]);
             }
-            Type::Enum { .. }
-                if self.type_contains_byte_object(ty, &mut BTreeSet::new())?
-                    || self.type_contains_array(ty, &mut BTreeSet::new())? =>
-            {
-                return Err(vec![unsupported(
-                    function,
-                    "Array enum elements with runtime-owned payloads",
-                )]);
-            }
             Type::Array { element } => self.ensure_plain_array_element(*element, function)?,
             Type::Tuple { fields, .. } => {
                 for field in fields {
@@ -3052,6 +3043,11 @@ impl<'a> Emitter<'a> {
             }
             Type::Struct { fields, .. } => {
                 for field in fields {
+                    self.ensure_plain_array_element(field.ty, function)?;
+                }
+            }
+            Type::Enum { variants, .. } => {
+                for field in variants.iter().flat_map(|variant| &variant.fields) {
                     self.ensure_plain_array_element(field.ty, function)?;
                 }
             }
@@ -3113,11 +3109,17 @@ impl<'a> Emitter<'a> {
                     }
                 }
             }
-            Type::Enum { .. } if self.type_contains_byte_object(ty, &mut BTreeSet::new())? => {
+            Type::Enum { .. } if self.type_contains_array(ty, &mut BTreeSet::new())? => {
                 return Err(vec![unsupported(
                     function,
-                    "copying enum values that contain Text or Bytes",
+                    "copying enum values that contain Array",
                 )]);
+            }
+            Type::Enum { .. }
+                if self.type_contains_byte_object(ty, &mut BTreeSet::new())?
+                    || self.type_contains_callable(ty, &mut BTreeSet::new())? =>
+            {
+                self.emit_visit_enum_payloads(ty, value, true, function)?;
             }
             Type::Array { .. } if self.type_contains_array(ty, &mut BTreeSet::new())? => {
                 return Err(vec![unsupported(function, "copying Array values")]);
@@ -3180,12 +3182,10 @@ impl<'a> Emitter<'a> {
             }
             Type::Enum { .. }
                 if self.type_contains_byte_object(ty, &mut BTreeSet::new())?
-                    || self.type_contains_array(ty, &mut BTreeSet::new())? =>
+                    || self.type_contains_array(ty, &mut BTreeSet::new())?
+                    || self.type_contains_callable(ty, &mut BTreeSet::new())? =>
             {
-                return Err(vec![unsupported(
-                    function,
-                    "dropping enum values with runtime-owned payloads",
-                )]);
+                self.emit_visit_enum_payloads(ty, value, false, function)?;
             }
             _ => {}
         }
@@ -3235,6 +3235,94 @@ impl<'a> Emitter<'a> {
         self.line(&format!("  br label %callable.done{done_label}"));
         self.line(&format!("callable.done{done_label}:"));
         Ok(())
+    }
+
+    fn emit_visit_enum_payloads(
+        &mut self,
+        ty: TypeId,
+        value: &str,
+        retain: bool,
+        function: &mir::Function,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let Type::Enum { variants, .. } = self.runtime_type(ty)?.clone() else {
+            return Err(vec![unsupported(
+                function,
+                "owned enum traversal on a non-enum value",
+            )]);
+        };
+        let enum_ty = self.llvm_type(ty)?;
+        let tag = self.temp();
+        self.line(&format!("  %{tag} = extractvalue {enum_ty} {value}, 0"));
+        let traversal = self.temp();
+        let trap = self.temp();
+        let done = self.temp();
+        let cases = (0..variants.len()).map(|_| self.temp()).collect::<Vec<_>>();
+        self.line(&format!(
+            "  switch i32 %{tag}, label %enum.owned.trap{trap} ["
+        ));
+        for (variant, label) in cases.iter().enumerate() {
+            self.line(&format!(
+                "    i32 {variant}, label %enum.owned.case{traversal}.{label}"
+            ));
+        }
+        self.line("  ]");
+        self.line(&format!("enum.owned.trap{trap}:"));
+        self.line("  call void @llvm.trap()");
+        self.line("  unreachable");
+        for (variant, label) in variants.iter().zip(cases) {
+            self.line(&format!("enum.owned.case{traversal}.{label}:"));
+            let fields = if retain {
+                variant.fields.iter().enumerate().collect::<Vec<_>>()
+            } else {
+                variant.fields.iter().enumerate().rev().collect::<Vec<_>>()
+            };
+            for (field_index, field) in fields {
+                let owned = self.type_contains_byte_object(field.ty, &mut BTreeSet::new())?
+                    || self.type_contains_array(field.ty, &mut BTreeSet::new())?
+                    || self.type_contains_callable(field.ty, &mut BTreeSet::new())?;
+                if !owned {
+                    continue;
+                }
+                let field_value =
+                    self.emit_unpack_enum_field(ty, value, field_index as u32, field.ty)?;
+                if retain {
+                    self.emit_retain(field.ty, &field_value, function)?;
+                } else {
+                    self.emit_destroy(field.ty, &field_value, function)?;
+                }
+            }
+            self.line(&format!("  br label %enum.owned.done{done}"));
+        }
+        self.line(&format!("enum.owned.done{done}:"));
+        Ok(())
+    }
+
+    fn emit_unpack_enum_field(
+        &mut self,
+        enum_type: TypeId,
+        value: &str,
+        field: u32,
+        field_type: TypeId,
+    ) -> Result<String, Vec<Diagnostic>> {
+        let enum_ty = self.llvm_type(enum_type)?;
+        let words = self.enum_slot_words(enum_type, field)?;
+        let slot_ty = format!("[{words} x i128]");
+        let packed = self.temp();
+        self.line(&format!(
+            "  %{packed} = extractvalue {enum_ty} {value}, {}",
+            field + 1
+        ));
+        let slot = self.temp();
+        self.line(&format!("  %{slot} = alloca {slot_ty}"));
+        self.line(&format!(
+            "  store {slot_ty} %{packed}, ptr %{slot}, align 1"
+        ));
+        let field_ty = self.llvm_type(field_type)?;
+        let unpacked = self.temp();
+        self.line(&format!(
+            "  %{unpacked} = load {field_ty}, ptr %{slot}, align 1"
+        ));
+        Ok(format!("%{unpacked}"))
     }
 
     fn release_byte_operands(
