@@ -665,7 +665,20 @@ pub(crate) fn validate_program(
                                 && (1..=function.params.len() as Register).contains(&place)
                                 && function.register_types[place as usize] == ty
                     );
+                    // Literal/refinement tests temporarily open aggregate
+                    // shells and reconstruct the root in place. The root can
+                    // be a call-derived temporary rather than an ABI
+                    // parameter; only treat that store as reinitialization
+                    // when this block has already physically consumed it.
+                    let reconstructs_consumed_place = matches!(
+                        statement.kind,
+                        InstructionKind::Construct { dst: place, ty, .. }
+                            if place == dst
+                                && physically_empty.remove(&place)
+                                && function.register_types[place as usize] == ty
+                    );
                     let exempt_definition = reconstructs_parameter_place
+                        || reconstructs_consumed_place
                         || lowered_backedge_assignments.is_some_and(|start| index >= start);
                     if !exempt_definition {
                         if expected_phase == MirPhase::Lowered
@@ -12152,6 +12165,62 @@ mod tests {
                 .message
                 .contains("carries result r0")
         );
+    }
+
+    #[test]
+    fn validator_allows_consumed_temporary_aggregate_reconstruction() {
+        let mut types = Type::predefined();
+        let tuple = types.len() as TypeId;
+        types.push(Type::Tuple {
+            fields: vec![I64],
+            copy: true,
+        });
+        let mut entry = block(
+            0,
+            Terminator::Goto(Edge {
+                target: 1,
+                args: vec![],
+            }),
+        );
+        entry.statements = vec![
+            instruction(InstructionKind::Const {
+                dst: 0,
+                value: Constant::I64(1),
+            }),
+            instruction(InstructionKind::Construct {
+                dst: 1,
+                ty: tuple,
+                variant: None,
+                fields: vec![Operand {
+                    register: 0,
+                    mode: UseMode::Move,
+                }],
+            }),
+        ];
+        let mut rebuild = block(1, Terminator::Return { value: None });
+        rebuild.statements = vec![
+            instruction(InstructionKind::ProjectMove {
+                dst: 2,
+                src: Operand {
+                    register: 1,
+                    mode: UseMode::Move,
+                },
+                field: 0,
+            }),
+            instruction(InstructionKind::Deconstruct { src: 1 }),
+            instruction(InstructionKind::Construct {
+                dst: 1,
+                ty: tuple,
+                variant: None,
+                fields: vec![Operand {
+                    register: 2,
+                    mode: UseMode::Move,
+                }],
+            }),
+        ];
+
+        let candidate = program(function(vec![entry, rebuild], vec![I64, tuple, I64]));
+        validate_program(&candidate, &types, MirPhase::Raw).unwrap();
     }
 
     #[test]
