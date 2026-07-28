@@ -4705,3 +4705,56 @@ fn llvm_arrays_run_source_defined_drop_for_elements() {
     assert!(module.ir.contains(" = sub i64 %"));
     run_native_i64(module, llvm_function, 42, "array-custom-drop");
 }
+
+#[test]
+fn llvm_effect_framed_terminal_clause_with_empty_outward_row_uses_starter_abi() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-internally-effect-framed-clause.glorious",
+        r#"
+            effect Outer { stop() -> ! }
+            effect Inner { stop() -> ! }
+            selected() -> i64 {
+                handle {
+                    perform Outer::stop()
+                } {
+                    Outer::stop() => handle {
+                        perform Inner::stop()
+                    } {
+                        Inner::stop() => 42
+                    }
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    run_native_i64(
+        grandiose::emit_llvm_ir(&phases, &options).unwrap(),
+        llvm_function,
+        42,
+        "internally-effect-framed-clause",
+    );
+}

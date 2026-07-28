@@ -7508,13 +7508,13 @@ impl<'a> Emitter<'a> {
                     self.line(&format!("  %{value} = load {llvm_ty}, ptr %{address}"));
                     arguments.push((*ty, format!("%{value}")));
                 }
-                let Type::Callable { signature, .. } = self.runtime_type(*clause_type)?.clone()
-                else {
+                let Type::Callable { .. } = self.runtime_type(*clause_type)? else {
                     return Err(vec![unsupported(
                         function,
                         "handler clause has a non-callable runtime type",
                     )]);
                 };
+                let routed_effect_framed: String;
                 if let Some(resumption_type) = clause.resumption_type {
                     self.line(&format!("  store ptr null, ptr %{previous_address}"));
                     let resumption_size = self.emit_array_element_size("%g1.resumption");
@@ -7554,22 +7554,43 @@ impl<'a> Emitter<'a> {
                     self.emit_retain_handler(&format!("%{handler}"));
                     arguments.push((resumption_type, format!("%{resumption}")));
                     self.emit_effect_runtime_store_for(runtime, 5, "ptr", "null");
-                    if signature.outward_protocols.is_empty() {
-                        let returned = self.emit_call_owned_callable_value(
-                            function,
-                            *clause_type,
-                            &format!("%{callable}"),
-                            &arguments,
-                            false,
-                        )?;
-                        self.emit_store_routed_handler_result(
-                            function,
-                            definition.result_type,
-                            returned.as_deref(),
-                            &format!("%{return_slot}"),
-                            &format!("%{return_init}"),
-                        )?;
-                    } else {
+                    let effect_framed_slot = self.temp();
+                    let starter_address = self.temp();
+                    let starter = self.temp();
+                    let direct_label = self.temp();
+                    let framed_label = self.temp();
+                    let routed_label = self.temp();
+                    self.line(&format!("  %{effect_framed_slot} = alloca i1"));
+                    self.line(&format!(
+                        "  %{starter_address} = getelementptr inbounds %g1.callable, ptr %{callable}, i32 0, i32 3"
+                    ));
+                    self.line(&format!("  %{starter} = load ptr, ptr %{starter_address}"));
+                    let has_starter = self.temp();
+                    self.line(&format!("  %{has_starter} = icmp ne ptr %{starter}, null"));
+                    self.line(&format!(
+                        "  br i1 %{has_starter}, label %handle.route.resumption.framed{framed_label}, label %handle.route.resumption.direct{direct_label}"
+                    ));
+                    self.line(&format!("handle.route.resumption.direct{direct_label}:"));
+                    let returned = self.emit_call_owned_callable_value(
+                        function,
+                        *clause_type,
+                        &format!("%{callable}"),
+                        &arguments,
+                        false,
+                    )?;
+                    self.emit_store_routed_handler_result(
+                        function,
+                        definition.result_type,
+                        returned.as_deref(),
+                        &format!("%{return_slot}"),
+                        &format!("%{return_init}"),
+                    )?;
+                    self.line(&format!("  store i1 false, ptr %{effect_framed_slot}"));
+                    self.line(&format!(
+                        "  br label %handle.route.resumption.routed{routed_label}"
+                    ));
+                    self.line(&format!("handle.route.resumption.framed{framed_label}:"));
+                    {
                         let guards_slot = self.temp();
                         let has_parent = self.temp();
                         let load_guards_label = self.temp();
@@ -7603,15 +7624,6 @@ impl<'a> Emitter<'a> {
                         ));
                         let outer_guards = self.temp();
                         self.line(&format!("  %{outer_guards} = load ptr, ptr %{guards_slot}"));
-                        let starter_address = self.temp();
-                        let starter = self.temp();
-                        let missing = self.temp();
-                        self.line(&format!(
-                            "  %{starter_address} = getelementptr inbounds %g1.callable, ptr %{callable}, i32 0, i32 3"
-                        ));
-                        self.line(&format!("  %{starter} = load ptr, ptr %{starter_address}"));
-                        self.line(&format!("  %{missing} = icmp eq ptr %{starter}, null"));
-                        self.emit_trap_if(missing);
                         let suffix = format!(
                             ", {}",
                             arguments
@@ -7636,7 +7648,17 @@ impl<'a> Emitter<'a> {
                             "ptr",
                             &format!("%{clause_frame}"),
                         );
+                        self.line(&format!("  store i1 true, ptr %{effect_framed_slot}"));
+                        self.line(&format!(
+                            "  br label %handle.route.resumption.routed{routed_label}"
+                        ));
                     }
+                    self.line(&format!("handle.route.resumption.routed{routed_label}:"));
+                    let effect_framed = self.temp();
+                    self.line(&format!(
+                        "  %{effect_framed} = load i1, ptr %{effect_framed_slot}"
+                    ));
+                    routed_effect_framed = format!("%{effect_framed}");
                 } else {
                     if let Some(condition) = match &mode {
                         EffectRoutingMode::ReplayConditional(_) | EffectRoutingMode::Initial => {
@@ -7666,25 +7688,44 @@ impl<'a> Emitter<'a> {
                     } else {
                         self.line(&format!("  store ptr null, ptr %{slot}"));
                     }
-                    if signature.outward_protocols.is_empty() {
-                        self.line(&format!("  store ptr null, ptr %{previous_address}"));
-                        let returned = self.emit_call_owned_callable_value(
-                            function,
-                            *clause_type,
-                            &format!("%{callable}"),
-                            &arguments,
-                            true,
-                        )?;
-                        self.emit_drop_effect_frame_chain(&suspended);
-                        self.emit_effect_runtime_store_for(runtime, 5, "ptr", "null");
-                        self.emit_store_routed_handler_result(
-                            function,
-                            definition.result_type,
-                            returned.as_deref(),
-                            &format!("%{return_slot}"),
-                            &format!("%{return_init}"),
-                        )?;
-                    } else {
+                    let effect_framed_slot = self.temp();
+                    let starter_address = self.temp();
+                    let starter = self.temp();
+                    let direct_label = self.temp();
+                    let framed_label = self.temp();
+                    let routed_label = self.temp();
+                    self.line(&format!("  %{effect_framed_slot} = alloca i1"));
+                    self.line(&format!(
+                        "  %{starter_address} = getelementptr inbounds %g1.callable, ptr %{callable}, i32 0, i32 3"
+                    ));
+                    self.line(&format!("  %{starter} = load ptr, ptr %{starter_address}"));
+                    let has_starter = self.temp();
+                    self.line(&format!("  %{has_starter} = icmp ne ptr %{starter}, null"));
+                    self.line(&format!(
+                        "  br i1 %{has_starter}, label %handle.route.framed{framed_label}, label %handle.route.direct{direct_label}"
+                    ));
+                    self.line(&format!("handle.route.direct{direct_label}:"));
+                    self.line(&format!("  store ptr null, ptr %{previous_address}"));
+                    let returned = self.emit_call_owned_callable_value(
+                        function,
+                        *clause_type,
+                        &format!("%{callable}"),
+                        &arguments,
+                        true,
+                    )?;
+                    self.emit_drop_effect_frame_chain(&suspended);
+                    self.emit_effect_runtime_store_for(runtime, 5, "ptr", "null");
+                    self.emit_store_routed_handler_result(
+                        function,
+                        definition.result_type,
+                        returned.as_deref(),
+                        &format!("%{return_slot}"),
+                        &format!("%{return_init}"),
+                    )?;
+                    self.line(&format!("  store i1 false, ptr %{effect_framed_slot}"));
+                    self.line(&format!("  br label %handle.route.routed{routed_label}"));
+                    self.line(&format!("handle.route.framed{framed_label}:"));
+                    {
                         let guards_slot = self.temp();
                         let has_parent = self.temp();
                         let load_guards_label = self.temp();
@@ -7720,15 +7761,6 @@ impl<'a> Emitter<'a> {
                             &format!("%{outer_guards}"),
                         );
                         self.emit_effect_runtime_store_for(runtime, 5, "ptr", "null");
-                        let starter_address = self.temp();
-                        let starter = self.temp();
-                        let missing = self.temp();
-                        self.line(&format!(
-                            "  %{starter_address} = getelementptr inbounds %g1.callable, ptr %{callable}, i32 0, i32 3"
-                        ));
-                        self.line(&format!("  %{starter} = load ptr, ptr %{starter_address}"));
-                        self.line(&format!("  %{missing} = icmp eq ptr %{starter}, null"));
-                        self.emit_trap_if(missing);
                         let suffix = if arguments.is_empty() {
                             String::new()
                         } else {
@@ -7757,26 +7789,38 @@ impl<'a> Emitter<'a> {
                             "ptr",
                             &format!("%{clause_frame}"),
                         );
+                        self.line(&format!("  store i1 true, ptr %{effect_framed_slot}"));
+                        self.line(&format!("  br label %handle.route.routed{routed_label}"));
                     }
+                    self.line(&format!("handle.route.routed{routed_label}:"));
+                    let effect_framed = self.temp();
+                    self.line(&format!(
+                        "  %{effect_framed} = load i1, ptr %{effect_framed_slot}"
+                    ));
+                    routed_effect_framed = format!("%{effect_framed}");
                 }
                 self.line(&format!("  call void @free(ptr {payload})"));
-                if signature.outward_protocols.is_empty() {
-                    self.emit_effect_runtime_store_for(runtime, 0, "ptr", &format!("%{parent}"));
-                    let has_parent = self.temp();
-                    let continue_label = self.temp();
-                    let finish_label = self.temp();
-                    self.line(&format!("  %{has_parent} = icmp ne ptr %{parent}, null"));
-                    self.line(&format!(
-                        "  br i1 %{has_parent}, label %handle.route.continue{continue_label}, label %handle.route.finish{finish_label}"
-                    ));
-                    self.line(&format!("handle.route.continue{continue_label}:"));
-                    self.line(&format!("  br label %{loop_target}"));
-                    self.line(&format!("handle.route.finish{finish_label}:"));
-                    self.emit_effect_runtime_store_for(runtime, 1, "i32", "0");
-                    self.line(&format!("  br label %{loop_target}"));
-                } else {
-                    self.line(&format!("  br label %{loop_target}"));
-                }
+                let direct_result_label = self.temp();
+                let framed_result_label = self.temp();
+                self.line(&format!(
+                    "  br i1 {routed_effect_framed}, label %handle.route.result.framed{framed_result_label}, label %handle.route.result.direct{direct_result_label}"
+                ));
+                self.line(&format!("handle.route.result.direct{direct_result_label}:"));
+                self.emit_effect_runtime_store_for(runtime, 0, "ptr", &format!("%{parent}"));
+                let has_parent = self.temp();
+                let continue_label = self.temp();
+                let finish_label = self.temp();
+                self.line(&format!("  %{has_parent} = icmp ne ptr %{parent}, null"));
+                self.line(&format!(
+                    "  br i1 %{has_parent}, label %handle.route.continue{continue_label}, label %handle.route.finish{finish_label}"
+                ));
+                self.line(&format!("handle.route.continue{continue_label}:"));
+                self.line(&format!("  br label %{loop_target}"));
+                self.line(&format!("handle.route.finish{finish_label}:"));
+                self.emit_effect_runtime_store_for(runtime, 1, "i32", "0");
+                self.line(&format!("  br label %{loop_target}"));
+                self.line(&format!("handle.route.result.framed{framed_result_label}:"));
+                self.line(&format!("  br label %{loop_target}"));
                 let _ = described_def;
             }
         }
