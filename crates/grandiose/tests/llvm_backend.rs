@@ -113,6 +113,62 @@ fn enum_tags_and_payloads_lower_to_native_llvm_values() {
 }
 
 #[test]
+fn custom_drop_hooks_run_before_native_structural_cleanup() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-custom-drop.glorious",
+        "struct Guard { text: String, marker: i64 }\nimpl Drop for Guard { drop(&mut self) -> { self.marker; () } }\nselected() -> () { let guard = Guard { text: String::concat(\"drop\", \" me\"), marker: 1 }; () }\nmain() -> () { selected(); () }",
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let glue = phases.artifact.drop_glue.first().unwrap().function;
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    assert!(module.ir.contains(&format!("call void @g1_f{glue}(ptr %")));
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("custom-drop.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("custom-drop");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "extern void g1_f{selected}(void);\nint main(void) {{ g1_f{selected}(); return 0; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new("clang")
+        .arg("-fsanitize=address")
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable).output().unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
+    );
+}
+
+#[test]
 fn cli_emits_an_llvm_module() {
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("main.glorious");

@@ -62,9 +62,10 @@ The current vertical slice supports:
 - first-class callable environments, reference-counted callable copies,
   direct and indirect invocation, and shared, unique, and owned environment
   receivers;
-- binding-pack payload construction, projection, copying, and cleanup.
+- binding-pack payload construction, projection, copying, and cleanup;
 - typed native host-import calls for process arguments, filesystem read/write,
-  and diagnostic output through the explicit C ABI above.
+  and diagnostic output through the explicit C ABI above;
+- custom `Drop::drop` hooks followed by exactly-once structural cleanup.
 
 It emits only functions reachable from `main`, uses register allocas as the
 first stable ABI, and validates generated IR in tests with `llvm-as`. Native
@@ -81,8 +82,8 @@ silently changing semantics.
    integers, tuples, structs, and tagged payload enums are implemented; richer
    target discovery remains.
 3. References and ownership: core borrow/reborrow and dereference operations
-   plus direct `Text`/`Bytes` retain/release are implemented; nested owned
-   aggregate cleanup and custom drop glue remain.
+   plus direct `Text`/`Bytes` retain/release, nested owned aggregate cleanup,
+   active-variant enum cleanup, and custom drop glue are implemented.
 4. Runtime ABI: `Text`, `Bytes`, and arrays of supported owned aggregates are
    partially implemented; typed host imports are lowered through an external
    C ABI, while callable/effect-state array elements, a bundled native host

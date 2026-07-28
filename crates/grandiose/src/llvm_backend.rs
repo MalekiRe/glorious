@@ -178,6 +178,14 @@ impl<'a> Emitter<'a> {
                     "MIR references missing function {index}"
                 ))]);
             };
+            for ty in function
+                .register_types
+                .iter()
+                .chain(function.params.iter())
+                .chain(std::iter::once(&function.result))
+            {
+                self.collect_drop_glue_functions(*ty, &mut BTreeSet::new(), &mut pending)?;
+            }
             for block in &function.blocks {
                 for instruction in &block.statements {
                     if let InstructionKind::MakeCallable {
@@ -211,6 +219,57 @@ impl<'a> Emitter<'a> {
             }
         }
         Ok(reachable.into_iter().collect())
+    }
+
+    fn collect_drop_glue_functions(
+        &self,
+        ty: TypeId,
+        visiting: &mut BTreeSet<TypeId>,
+        pending: &mut Vec<usize>,
+    ) -> Result<(), Vec<Diagnostic>> {
+        if !visiting.insert(ty) {
+            return Ok(());
+        }
+        if let Some(glue) = self
+            .phases
+            .artifact
+            .drop_glue
+            .iter()
+            .find(|glue| glue.ty == ty)
+        {
+            pending.push(glue.function as usize);
+        }
+        match self.runtime_type(ty)? {
+            Type::Array { element } => {
+                self.collect_drop_glue_functions(*element, visiting, pending)?;
+            }
+            Type::Callable { capture_type, .. }
+            | Type::Handler { capture_type, .. }
+            | Type::BindingPack {
+                payload_type: capture_type,
+                ..
+            } => {
+                self.collect_drop_glue_functions(*capture_type, visiting, pending)?;
+            }
+            Type::Tuple { fields, .. } => {
+                for field in fields {
+                    self.collect_drop_glue_functions(*field, visiting, pending)?;
+                }
+            }
+            Type::Struct { fields, .. } => {
+                for field in fields {
+                    self.collect_drop_glue_functions(field.ty, visiting, pending)?;
+                }
+            }
+            Type::Enum { variants, .. } => {
+                for field in variants.iter().flat_map(|variant| &variant.fields) {
+                    self.collect_drop_glue_functions(field.ty, visiting, pending)?;
+                }
+            }
+            _ => {}
+        }
+        visiting.remove(&ty);
+        Ok(())
     }
 
     fn prepare_runtime(&mut self, reachable: &[usize]) -> Result<(), Vec<Diagnostic>> {
@@ -3135,19 +3194,55 @@ impl<'a> Emitter<'a> {
         value: &str,
         function: &mir::Function,
     ) -> Result<(), Vec<Diagnostic>> {
+        let value = if let Some(glue) = self
+            .phases
+            .artifact
+            .drop_glue
+            .iter()
+            .find(|glue| glue.ty == ty)
+        {
+            let hook = self
+                .phases
+                .mir
+                .functions
+                .get(glue.function as usize)
+                .ok_or_else(|| vec![unsupported(function, "missing custom drop hook")])?;
+            if hook.params.len() != 1
+                || !matches!(
+                    self.runtime_type(hook.params[0])?,
+                    Type::RefUnique { referent } if *referent == ty
+                )
+                || !matches!(self.runtime_type(hook.result)?, Type::Unit)
+            {
+                return Err(vec![unsupported(
+                    function,
+                    "custom drop hook with an incompatible signature",
+                )]);
+            }
+            let llvm_ty = self.llvm_type(ty)?;
+            let slot = self.temp();
+            self.line(&format!("  %{slot} = alloca {llvm_ty}"));
+            self.line(&format!("  store {llvm_ty} {value}, ptr %{slot}"));
+            self.line(&format!("  call void @g1_f{}(ptr %{slot})", glue.function));
+            let reloaded = self.temp();
+            self.line(&format!("  %{reloaded} = load {llvm_ty}, ptr %{slot}"));
+            format!("%{reloaded}")
+        } else {
+            value.to_owned()
+        };
         match self.runtime_type(ty)?.clone() {
             Type::Text | Type::Bytes => {
                 self.line(&format!("  call void @g1_bytes_release(ptr {value})"));
             }
             Type::Callable { capture_type, .. } => {
-                self.emit_destroy_callable(value, capture_type, function)?;
+                self.emit_destroy_callable(&value, capture_type, function)?;
             }
             Type::BindingPack { payload_type, .. } => {
-                self.emit_destroy(payload_type, value, function)?;
+                self.emit_destroy(payload_type, &value, function)?;
             }
             Type::Array { element } => {
                 self.ensure_plain_array_element(element, function)?;
-                self.emit_destroy_array_elements(value, element, function)?;
+                self.emit_destroy_array_elements(&value, element, function)?;
                 self.line(&format!("  call void @g1_array_free(ptr {value})"));
             }
             Type::Tuple { fields, .. } => {
@@ -3185,7 +3280,7 @@ impl<'a> Emitter<'a> {
                     || self.type_contains_array(ty, &mut BTreeSet::new())?
                     || self.type_contains_callable(ty, &mut BTreeSet::new())? =>
             {
-                self.emit_visit_enum_payloads(ty, value, false, function)?;
+                self.emit_visit_enum_payloads(ty, &value, false, function)?;
             }
             _ => {}
         }
