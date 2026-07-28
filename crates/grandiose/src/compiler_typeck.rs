@@ -2742,6 +2742,30 @@ impl<'a> Typer<'a> {
                 }
             }
         }
+        // A structural `if(subject is Pattern, positive)` is consumed by its
+        // enclosing `else` and lowered as one refinement branch. Keep the
+        // ordinary allocation-independent typing behavior for both arguments,
+        // but reserve Core's successful-edge decision binders before walking
+        // the positive context block. Their names remain branch-local and are
+        // deliberately not installed in this shadow environment.
+        if path.len() == 1
+            && path[0].as_ref() == "if"
+            && let [condition, positive] = args
+            && matches!(condition.kind, ExprKind::Is { .. })
+        {
+            let condition = self.expression(condition, None);
+            self.next_local += self
+                .refinements
+                .last()
+                .map(|refinement| refinement.positive_bindings.len() as u32)
+                .unwrap_or(0);
+            let positive = self.expression(positive, None);
+            return self.node(
+                source,
+                None,
+                TypedExprKind::Unsupported(vec![condition, positive]),
+            );
+        }
         let children = args.iter().map(|arg| self.expression(arg, None)).collect();
         self.node(source, None, TypedExprKind::Unsupported(children))
     }

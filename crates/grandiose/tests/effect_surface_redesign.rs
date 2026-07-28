@@ -100,6 +100,31 @@ fn nested_completion_handles_preserve_following_local_identities() {
 }
 
 #[test]
+fn completion_pattern_binders_preserve_following_local_identities() {
+    let source = r#"
+        make() -> Result<i64, ()> { Result::Ok(1) }
+        answer() -> i64 {
+            let selected = handle make() {
+                Result::Ok(found) => handle found {
+                    1 => 42,
+                    _ => 41
+                },
+                Result::Err(_) => 40
+            };
+            let copied = selected;
+            copied
+        }
+        main() { () }
+    "#;
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || assert_eq!(run(source, "answer"), Value::I64(42)))
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn arrowless_unit_signatures_singleton_rows_and_terminal_calls_compile() {
     let source = r#"
         effect Out { write(value: i64) }
