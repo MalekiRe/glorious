@@ -2347,6 +2347,235 @@ fn llvm_two_shot_clones_and_drops_only_live_residual_fields() {
 }
 
 #[test]
+fn llvm_two_shot_deep_clones_vec_snapshots_with_vm_parity() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-two-shot-vec-snapshots.glorious",
+        r#"
+            struct Holder { values: Vec<i64> }
+            effect Choose { [2,2] choose() -> i64 }
+            new_i64_values() -> Vec<i64> { Vec::new() }
+            new_string_values() -> Vec<String> { Vec::new() }
+            new_nested_values() -> Vec<Vec<i64>> { Vec::new() }
+            deref_i64(value: &i64) -> i64 { *value }
+
+            direct_vec() -> i64 {
+                handle {
+                    let values = new_i64_values();
+                    Vec::push(&mut values, 40);
+                    let choice = perform Choose::choose();
+                    Vec::push(&mut values, choice);
+                    let first = deref_i64(Vec::index(&values, 0));
+                    let second = deref_i64(Vec::index(&values, 1));
+                    first + second
+                } {
+                    Choose::choose() with continuation => {
+                        let first = resume(continuation, 1);
+                        let second = resume(move continuation, 2);
+                        first + second
+                    }
+                }
+            }
+
+            nested_struct_vec() -> i64 {
+                handle {
+                    let holder = Holder { values: new_i64_values() };
+                    Vec::push(&mut holder.values, 30);
+                    let choice = perform Choose::choose();
+                    Vec::push(&mut holder.values, choice);
+                    let first = deref_i64(Vec::index(&holder.values, 0));
+                    let second = deref_i64(Vec::index(&holder.values, 1));
+                    first + second
+                } {
+                    Choose::choose() with continuation => {
+                        let first = resume(continuation, 1);
+                        let second = resume(move continuation, 2);
+                        first + second
+                    }
+                }
+            }
+
+            string_elements() -> i64 {
+                handle {
+                    let values = new_string_values();
+                    Vec::push(&mut values, String::concat("ba", "se"));
+                    let choice = perform Choose::choose();
+                    choice;
+                    Vec::push(&mut values, String::concat("x", "y"));
+                    wrapping_convert_to_i64(Vec::len(&values))
+                } {
+                    Choose::choose() with continuation => {
+                        let first = resume(continuation, 1);
+                        let second = resume(move continuation, 2);
+                        first + second
+                    }
+                }
+            }
+
+            nested_vec() -> i64 {
+                handle {
+                    let inner = new_i64_values();
+                    Vec::push(&mut inner, 10);
+                    let outer = new_nested_values();
+                    Vec::push(&mut outer, move inner);
+                    let choice = perform Choose::choose();
+                    let selected = Vec::index_mut(&mut outer, 0);
+                    Vec::push(selected, choice);
+                    let first = deref_i64(Vec::index(selected, 0));
+                    let second = deref_i64(Vec::index(selected, 1));
+                    first + second
+                } {
+                    Choose::choose() with continuation => {
+                        let first = resume(continuation, 1);
+                        let second = resume(move continuation, 2);
+                        first + second
+                    }
+                }
+            }
+
+            internal_element_alias() -> i64 {
+                handle {
+                    let values = new_i64_values();
+                    Vec::push(&mut values, 40);
+                    let reference = Vec::index(&values, 0);
+                    let choice = perform Choose::choose();
+                    let value = deref_i64(reference);
+                    value + choice
+                } {
+                    Choose::choose() with continuation => {
+                        let first = resume(continuation, 1);
+                        let second = resume(move continuation, 2);
+                        first + second
+                    }
+                }
+            }
+
+            replay_external(reference: &i64) -> i64 {
+                handle {
+                    let choice = perform Choose::choose();
+                    *reference + choice
+                } {
+                    Choose::choose() with continuation => {
+                        let first = resume(continuation, 1);
+                        let second = resume(move continuation, 2);
+                        first + second
+                    }
+                }
+            }
+
+            external_shared_reference() -> i64 {
+                let external = 40;
+                replay_external(&external)
+            }
+
+            main() -> () {
+                direct_vec();
+                nested_struct_vec();
+                string_elements();
+                nested_vec();
+                internal_element_alias();
+                external_shared_reference();
+                ()
+            }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let cases = [
+        ("direct_vec", 83),
+        ("nested_struct_vec", 63),
+        ("string_elements", 4),
+        ("nested_vec", 23),
+        ("internal_element_alias", 83),
+        ("external_shared_reference", 83),
+    ];
+    let artifact = verify(phases.artifact.clone()).unwrap();
+    for (name, expected) in cases {
+        let function = phases
+            .artifact
+            .functions
+            .iter()
+            .position(|function| function.name == name)
+            .unwrap() as u32;
+        assert_eq!(
+            Vm::new(artifact.clone()).run(function, vec![]).unwrap(),
+            Value::I64(expected),
+            "VM result for {name}"
+        );
+    }
+
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    let function = |name: &str| {
+        phases
+            .mir
+            .functions
+            .iter()
+            .position(|function| function.name == name)
+            .unwrap()
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("two-shot-vec-snapshots.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("two-shot-vec-snapshots");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\n\
+             extern int64_t g1_f{}(void);\n\
+             extern int64_t g1_f{}(void);\n\
+             extern int64_t g1_f{}(void);\n\
+             extern int64_t g1_f{}(void);\n\
+             extern int64_t g1_f{}(void);\n\
+             extern int64_t g1_f{}(void);\n\
+             int main(void) {{\n\
+               return g1_f{}() == 83 && g1_f{}() == 63 && g1_f{}() == 4 &&\n\
+                      g1_f{}() == 23 && g1_f{}() == 83 && g1_f{}() == 83 ? 0 : 1;\n\
+             }}\n",
+            function("direct_vec"),
+            function("nested_struct_vec"),
+            function("string_elements"),
+            function("nested_vec"),
+            function("internal_element_alias"),
+            function("external_shared_reference"),
+            function("direct_vec"),
+            function("nested_struct_vec"),
+            function("string_elements"),
+            function("nested_vec"),
+            function("internal_element_alias"),
+            function("external_shared_reference"),
+        ),
+    )
+    .unwrap();
+    let output = Command::new("clang")
+        .arg("-fsanitize=address")
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable)
+        .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
+        .output()
+        .unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
+    );
+}
+
+#[test]
 fn llvm_two_shot_preserves_internal_and_projected_shared_aliases() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-two-shot-shared-aliases.glorious",

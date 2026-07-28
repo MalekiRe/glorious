@@ -10467,3 +10467,44 @@ fn drop_rooted_observe_capture_is_a_nonescaping_hook_loan() {
     let artifact = compile_source_to_bytecode("drop-rooted-captureful.glorious", source).unwrap();
     verify(Artifact::decode(&artifact.encode()).unwrap()).unwrap();
 }
+
+#[test]
+fn borrowed_vec_does_not_grant_the_multishot_snapshot_owner_exemption() {
+    let source = r#"
+        struct TicketView { marker: i64, values: &Vec<i64> }
+        impl Use<[1,1]> for TicketView {}
+        effect Choose { [2,2] choose() -> i64 }
+        new_values() -> Vec<i64> { Vec::new() }
+        consume(value: TicketView) -> i64 {
+            let TicketView { marker, values } = move value;
+            values;
+            marker
+        }
+        selected() -> i64 {
+            let values = new_values();
+            let owner = TicketView { marker: 40, values: &values };
+            handle {
+                let choice = perform Choose::choose();
+                consume(move owner) + choice
+            } {
+                Choose::choose() with continuation => {
+                    let first = resume(continuation, 1);
+                    let second = resume(move continuation, 2);
+                    first + second
+                }
+            }
+        }
+        main() -> () { selected(); () }
+    "#;
+    let errors =
+        compile_source_to_phases("borrowed-vec-snapshot-owner.glorious", source).unwrap_err();
+    assert!(
+        errors.iter().any(|error| {
+            error.code.as_deref() == Some("G1BC001")
+                && error
+                    .message
+                    .contains("restricted-use value at multi-shot call")
+        }),
+        "{errors:#?}"
+    );
+}

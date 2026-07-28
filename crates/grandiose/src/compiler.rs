@@ -24949,6 +24949,92 @@ impl<'a> CoreLowerer<'a> {
         safe
     }
 
+    fn contains_snapshot_array(&self, ty: TypeId, visiting: &mut BTreeSet<TypeId>) -> bool {
+        if !visiting.insert(ty) {
+            return false;
+        }
+        let contains = match self.resolved_type(ty) {
+            ResolvedType::Array(_) => true,
+            // References are alias edges, not owned containment. An Array
+            // reachable only through a loan must not make the referring shell
+            // eligible for the deep-owner snapshot exemption.
+            ResolvedType::Shared(_) | ResolvedType::Unique(_) => false,
+            ResolvedType::Tuple(elements) => elements.into_iter().any(|element| {
+                self.contains_snapshot_array(self.structural_id(&element), visiting)
+            }),
+            ResolvedType::Concrete(_) => {
+                if let Some(late) = self.effects.late_nominals.get(&ty) {
+                    late.fields
+                        .iter()
+                        .any(|(_, field)| self.contains_snapshot_array(*field, visiting))
+                } else {
+                    self.nominals
+                        .values()
+                        .find(|info| info.id == ty)
+                        .is_some_and(|info| match &info.kind {
+                            NominalKind::Struct(fields) => fields
+                                .iter()
+                                .any(|(_, field)| self.contains_snapshot_array(*field, visiting)),
+                            NominalKind::Enum(variants) => variants.iter().any(|(_, fields)| {
+                                fields
+                                    .iter()
+                                    .any(|field| self.contains_snapshot_array(*field, visiting))
+                            }),
+                        })
+                }
+            }
+        };
+        visiting.remove(&ty);
+        contains
+    }
+
+    fn is_array_snapshot_owner(&self, ty: TypeId) -> bool {
+        self.contains_snapshot_array(ty, &mut BTreeSet::new())
+            && self.is_multishot_capture_safe(ty, &mut BTreeSet::new())
+            && self.is_acyclic_snapshot_shape(ty, &mut BTreeSet::new())
+    }
+
+    fn is_acyclic_snapshot_shape(&self, ty: TypeId, visiting: &mut BTreeSet<TypeId>) -> bool {
+        if !visiting.insert(ty) {
+            return false;
+        }
+        let acyclic = match self.resolved_type(ty) {
+            // References are remapped but their referents are not recursively
+            // cloned merely because the reference type names them.
+            ResolvedType::Shared(_) | ResolvedType::Unique(_) => true,
+            ResolvedType::Array(element) => {
+                self.is_acyclic_snapshot_shape(self.structural_id(&element), visiting)
+            }
+            ResolvedType::Tuple(elements) => elements.into_iter().all(|element| {
+                self.is_acyclic_snapshot_shape(self.structural_id(&element), visiting)
+            }),
+            ResolvedType::Concrete(_) if (ty as usize) < Type::predefined().len() => true,
+            ResolvedType::Concrete(_) => {
+                if let Some(late) = self.effects.late_nominals.get(&ty) {
+                    late.fields
+                        .iter()
+                        .all(|(_, field)| self.is_acyclic_snapshot_shape(*field, visiting))
+                } else {
+                    self.nominals
+                        .values()
+                        .find(|info| info.id == ty)
+                        .is_some_and(|info| match &info.kind {
+                            NominalKind::Struct(fields) => fields
+                                .iter()
+                                .all(|(_, field)| self.is_acyclic_snapshot_shape(*field, visiting)),
+                            NominalKind::Enum(variants) => variants.iter().all(|(_, fields)| {
+                                fields
+                                    .iter()
+                                    .all(|field| self.is_acyclic_snapshot_shape(*field, visiting))
+                            }),
+                        })
+                }
+            }
+        };
+        visiting.remove(&ty);
+        acyclic
+    }
+
     fn requires_positive_use(&self, ty: TypeId) -> bool {
         self.use_interval(ty).lower > 0
     }
@@ -25396,9 +25482,10 @@ impl<'a> CoreLowerer<'a> {
             let moved = &self.moved_paths[&local];
             let replay_safe = self.residual_remaining_subtrees_satisfy(ty, moved, &|remaining| {
                 let interval = self.use_interval(remaining);
-                interval
-                    .upper
-                    .is_none_or(|upper| u64::from(upper) >= multiplier_upper)
+                (self.is_array_snapshot_owner(remaining)
+                    || interval
+                        .upper
+                        .is_none_or(|upper| u64::from(upper) >= multiplier_upper))
                     && (multiplier_upper <= 1
                         || self.is_multishot_capture_safe(remaining, &mut BTreeSet::new()))
             });
@@ -25442,9 +25529,10 @@ impl<'a> CoreLowerer<'a> {
         });
         for (local, ty) in &live {
             let interval = self.use_interval(*ty);
-            if interval
-                .upper
-                .is_some_and(|upper| u64::from(upper) < multiplier_upper)
+            if !self.is_array_snapshot_owner(*ty)
+                && interval
+                    .upper
+                    .is_some_and(|upper| u64::from(upper) < multiplier_upper)
             {
                 errors.push(unsupported(
                     span,
@@ -25460,7 +25548,7 @@ impl<'a> CoreLowerer<'a> {
                 errors.push(unsupported(
                     span,
                     "non-snapshot-cloneable multi-shot owner",
-                    "multi-shot continuation capture requires structurally duplicable state with no references or custom Drop",
+                    "multi-shot continuation capture requires structurally duplicable state with no unique references or custom Drop",
                 ));
             } else if multiplier_upper > 1
                 && self
@@ -25491,7 +25579,10 @@ impl<'a> CoreLowerer<'a> {
         if !errors.is_empty() {
             return Err(errors);
         }
-        for (local, _) in live {
+        for (local, ty) in live {
+            if self.is_array_snapshot_owner(ty) {
+                continue;
+            }
             let (previous_lower, previous_upper) = self.resumption_use_weight_range(local);
             let Some(lower) = previous_lower.checked_mul(multiplier_lower) else {
                 return Err(vec![type_error(

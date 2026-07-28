@@ -75,11 +75,18 @@ The current vertical slice supports:
 - exact and optional one-shot resumptions, including multi-frame resume,
   repeated handler re-entry, tail-resume, cancellation cleanup, and frame
   splicing from effectful clauses back into the active scheduler;
-- initial exact multishot replay for scalar, immutable refcounted, nested
-  aggregate, callable-capture, and supported nested-resumption frame values,
-  including outward frame-chain cloning, parent/result-slot rebasing, partial
-  aggregate field masks, shared reference aliases, repeated terminal-clause
-  replay, and cancellation;
+- initial exact multishot replay for scalar, immutable refcounted, mutable
+  `Array`/`Vec`, nested aggregate, callable-capture, and supported
+  nested-resumption frame values. Mutable arrays are cloned as independent
+  initialized-slot graphs rather than ordinarily copied: one temporary
+  source-range map preserves internal shared aliases into cloned frames and
+  array storage, while unmatched external references remain external. The
+  ownership checker grants this duplication only at reusable-continuation
+  snapshot boundaries; `Array`/`Vec` remains affine under ordinary source
+  copying. The
+  implementation also covers outward frame-chain cloning, parent/result-slot
+  rebasing, partial aggregate field masks, repeated terminal-clause replay,
+  and cancellation; unique references remain invalid snapshot state;
 - binding-pack payload construction, erased-evidence layout, projection,
   copying, and cleanup;
 - typed native host-import calls for process arguments, filesystem read/write,
