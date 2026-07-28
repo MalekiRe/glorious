@@ -621,6 +621,7 @@ fn compile_loaded(
             .arg("-x")
             .arg("ir")
             .arg("-")
+            .arg(clang_optimization_flag(command.optimization_level))
             .arg("-o")
             .arg(&output)
             .stdin(Stdio::piped())
@@ -689,6 +690,15 @@ fn compile_loaded(
         return 1;
     }
     0
+}
+
+fn clang_optimization_flag(level: OptimizationLevel) -> &'static str {
+    match level {
+        OptimizationLevel::O0 => "-O0",
+        OptimizationLevel::O1 => "-O1",
+        OptimizationLevel::O2 => "-O2",
+        OptimizationLevel::O3 => "-O3",
+    }
 }
 
 #[derive(Deserialize)]
@@ -1401,5 +1411,13 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn native_codegen_preserves_the_requested_optimization_level() {
+        assert_eq!(clang_optimization_flag(OptimizationLevel::O0), "-O0");
+        assert_eq!(clang_optimization_flag(OptimizationLevel::O1), "-O1");
+        assert_eq!(clang_optimization_flag(OptimizationLevel::O2), "-O2");
+        assert_eq!(clang_optimization_flag(OptimizationLevel::O3), "-O3");
     }
 }

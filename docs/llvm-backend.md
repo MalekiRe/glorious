@@ -96,9 +96,9 @@ silently changing semantics.
    implemented; handlers, resumptions, cancellation, and multishot
    continuation storage remain.
 7. Production output: object/executable emission through clang and initial
-   bytecode/LLVM differential conformance tests are implemented; debug
-   information, LLVM optimization pipelines, and broad differential coverage
-   remain.
+   bytecode/LLVM differential conformance tests are implemented, and `-O0`
+   through `-O3` are forwarded to native code generation; debug information,
+   custom LLVM optimization pipelines, and broad differential coverage remain.
 
 Each chunk extends MIR lowering and its verifier-facing tests; the bytecode
 backend remains available throughout.
