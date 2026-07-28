@@ -2,6 +2,59 @@ use std::{fs, process::Command};
 
 use grandiose_vm::{Value, Vm, verify};
 
+const SYNC_OWNED_INDIRECT_EFFECT_SOURCE: &str = r#"
+    effect Ask { [1,1] ask() -> i64 }
+    tail_candidate() -> i64 / {Ask} {
+        perform Ask::ask();
+        let sync = { => 42 };
+        move sync()
+    }
+    selected() -> i64 {
+        handle tail_candidate() {
+            Ask::ask() with continuation => resume(move continuation, 0)
+        }
+    }
+    main() -> () { selected(); () }
+"#;
+
+fn run_native_i64(module: grandiose::LlvmModule, function: usize, expected: i64, stem: &str) {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join(format!("{stem}.ll"));
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join(stem);
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\nextern int64_t g1_f{function}(void);\nint main(void) {{ return g1_f{function}() == {expected} ? 0 : 1; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new("clang")
+        .arg("-fsanitize=address")
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable)
+        .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
+        .output()
+        .unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
+    );
+}
+
 #[test]
 fn scalar_main_emits_valid_llvm_ir() {
     let phases = grandiose::compile_source_to_phases_with_options(
@@ -159,7 +212,10 @@ fn custom_drop_hooks_run_before_native_structural_cleanup() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let execution = Command::new(executable).output().unwrap();
+    let execution = Command::new(executable)
+        .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
+        .output()
+        .unwrap();
     assert!(
         execution.status.success(),
         "{:?}\n{}",
@@ -369,13 +425,257 @@ fn outward_effects_propagate_through_indirect_callables() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let execution = Command::new(executable).output().unwrap();
+    let execution = Command::new(executable)
+        .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
+        .output()
+        .unwrap();
     assert!(
         execution.status.success(),
         "{:?}\n{}",
         execution.status,
         String::from_utf8_lossy(&execution.stderr)
     );
+}
+
+#[test]
+fn synchronous_borrowed_indirect_call_executes_inside_effect_frame() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-sync-borrowed-indirect-effect.glorious",
+        r#"
+            effect Ask { [1,1] ask() -> i64 }
+            add(left: i64, right: i64) -> i64 { left + right }
+            call_case() -> i64 / {Ask} {
+                let suffix = 1;
+                let sync = { => add(20, suffix) };
+                let first = sync();
+                let second = perform Ask::ask();
+                add(first, second)
+            }
+            selected() -> i64 {
+                handle call_case() {
+                    Ask::ask() with continuation => resume(move continuation, 21)
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let call_case = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "call_case")
+        .unwrap();
+    assert!(!phases.mir.functions[call_case].outward_protocols.is_empty());
+    assert!(phases.mir.functions[call_case].blocks.iter().any(|block| {
+        matches!(
+            block.terminator,
+            grandiose::compiler_mir::Terminator::CallIndirect {
+                callable: grandiose::compiler_mir::Operand {
+                    mode: grandiose::compiler_mir::UseMode::Copy,
+                    ..
+                },
+                known_function: None,
+                receiver_mode: 0,
+                cleanup_callable: false,
+                ..
+            }
+        )
+    }));
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let vm_selected = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_selected, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    run_native_i64(module, selected, 42, "sync-borrowed-indirect-effect");
+}
+
+#[test]
+fn synchronous_owned_indirect_call_executes_inside_effect_frame() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-sync-owned-indirect-effect.glorious",
+        SYNC_OWNED_INDIRECT_EFFECT_SOURCE,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let candidate = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "tail_candidate")
+        .unwrap();
+    assert!(!phases.mir.functions[candidate].outward_protocols.is_empty());
+    assert!(phases.mir.functions[candidate].blocks.iter().any(|block| {
+        matches!(
+            block.terminator,
+            grandiose::compiler_mir::Terminator::CallIndirect {
+                callable: grandiose::compiler_mir::Operand {
+                    mode: grandiose::compiler_mir::UseMode::Move,
+                    ..
+                },
+                known_function: None,
+                receiver_mode: 2,
+                cleanup_callable: false,
+                ..
+            }
+        )
+    }));
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let vm_selected = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_selected, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    run_native_i64(module, selected, 42, "sync-owned-indirect-effect");
+}
+
+#[test]
+fn synchronous_indirect_tail_call_executes_inside_effect_frame() {
+    let mut phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-sync-tail-indirect-effect.glorious",
+        SYNC_OWNED_INDIRECT_EFFECT_SOURCE,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let vm_selected = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_selected, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+
+    let candidate = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "tail_candidate")
+        .unwrap();
+    let call_block = phases.mir.functions[candidate]
+        .blocks
+        .iter()
+        .position(|block| {
+            matches!(
+                block.terminator,
+                grandiose::compiler_mir::Terminator::CallIndirect {
+                    callable: grandiose::compiler_mir::Operand {
+                        mode: grandiose::compiler_mir::UseMode::Move,
+                        ..
+                    },
+                    receiver_mode: 2,
+                    cleanup_callable: false,
+                    ..
+                }
+            )
+        })
+        .unwrap();
+    let (result, callable, known_function, receiver_mode, args, normal) =
+        match phases.mir.functions[candidate].blocks[call_block]
+            .terminator
+            .clone()
+        {
+            grandiose::compiler_mir::Terminator::CallIndirect {
+                result: Some(result),
+                callable,
+                known_function,
+                receiver_mode,
+                cleanup_callable: false,
+                args,
+                normal,
+            } => (
+                result,
+                callable,
+                known_function,
+                receiver_mode,
+                args,
+                normal,
+            ),
+            other => panic!("expected owned indirect call, found {other:?}"),
+        };
+    let return_block = phases.mir.functions[candidate]
+        .blocks
+        .iter()
+        .find(|block| block.id == normal.target)
+        .unwrap();
+    assert_eq!(return_block.params.len(), 1);
+    assert_eq!(return_block.params[0].register, result);
+    assert!(matches!(
+        return_block.terminator,
+        grandiose::compiler_mir::Terminator::Return {
+            value: Some(grandiose::compiler_mir::Operand {
+                register,
+                mode: grandiose::compiler_mir::UseMode::Move,
+            })
+        } if register == result
+    ));
+    phases.mir.functions[candidate].blocks[call_block].terminator =
+        grandiose::compiler_mir::Terminator::TailCallIndirect {
+            callable,
+            known_function,
+            receiver_mode,
+            args,
+        };
+    assert!(matches!(
+        phases.mir.functions[candidate].blocks[call_block].terminator,
+        grandiose::compiler_mir::Terminator::TailCallIndirect {
+            receiver_mode: 2,
+            ..
+        }
+    ));
+
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    run_native_i64(module, selected, 42, "sync-tail-indirect-effect");
 }
 
 #[test]
@@ -407,6 +707,92 @@ fn scalar_numeric_conversions_emit_native_llvm_casts() {
         output.status.success(),
         "{}",
         String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn owned_captured_outward_callable_returns_directly_from_wrapper() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-owned-tail-indirect-outward.glorious",
+        r#"
+            effect Ask { [1,1] ask() -> i64 }
+            tail_owned() -> i64 / {Ask} {
+                let text = String::concat("owned ", "capture");
+                let body = { => {
+                    let answer = perform Ask::ask();
+                    String::byte_len(&text);
+                    answer
+                } };
+                move body()
+            }
+            selected() -> i64 {
+                handle tail_owned() {
+                    Ask::ask() with continuation => resume(move continuation, 42)
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let vm_selected = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_selected, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("owned-tail-indirect-outward.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("owned-tail-indirect-outward");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\nextern int64_t g1_f{selected}(void);\nint main(void) {{ return g1_f{selected}() == 42 ? 0 : 1; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new("clang")
+        .arg("-fsanitize=address")
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable)
+        .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
+        .output()
+        .unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
     );
 }
 
@@ -531,7 +917,10 @@ fn text_and_bytes_use_the_native_reference_counted_runtime() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let execution = Command::new(executable).output().unwrap();
+    let execution = Command::new(executable)
+        .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
+        .output()
+        .unwrap();
     assert!(
         execution.status.success(),
         "{:?}\n{}",
@@ -658,7 +1047,10 @@ fn llvm_and_vm_backends_execute_the_same_captured_callable_program() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
-    let execution = Command::new(executable).output().unwrap();
+    let execution = Command::new(executable)
+        .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
+        .output()
+        .unwrap();
     assert!(
         execution.status.success(),
         "{:?}\n{}",
@@ -830,6 +1222,543 @@ fn llvm_and_vm_backends_execute_the_same_terminal_handler() {
         "{:?}\n{}",
         execution.status,
         String::from_utf8_lossy(&execution.stderr)
+    );
+}
+
+#[test]
+fn llvm_terminal_clause_keeps_reference_payload_origin_live_until_dereference() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-terminal-reference-payload.glorious",
+        r#"
+            effect Stop { stop(value: &i64) -> ! }
+            selected() -> i64 {
+                handle {
+                    let value = 42;
+                    perform Stop::stop(&value)
+                } {
+                    Stop::stop(reference) => *reference
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("terminal-reference-payload.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("terminal-reference-payload");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\nextern int64_t g1_f{llvm_function}(void);\nint main(void) {{ return g1_f{llvm_function}() == 42 ? 0 : 1; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new("clang")
+        .arg("-fsanitize=address")
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable)
+        .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
+        .output()
+        .unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
+    );
+}
+
+#[test]
+fn llvm_effectful_terminal_clause_keeps_reference_payload_origin_live_across_routing() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-effectful-terminal-reference-payload.glorious",
+        r#"
+            effect Stop { stop(value: &i64) -> ! }
+            effect Ask { [1,1] ask() -> i64 }
+            add(left: i64, right: i64) -> i64 { left + right }
+            selected() -> i64 {
+                handle {
+                    handle {
+                        let value = 2;
+                        perform Stop::stop(&value)
+                    } {
+                        Stop::stop(reference) =>
+                            add(*reference, perform Ask::ask())
+                    }
+                } {
+                    Ask::ask() with continuation =>
+                        resume(move continuation, 40),
+                    Stop::stop(reference) => *reference
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory
+        .path()
+        .join("effectful-terminal-reference-payload.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory
+        .path()
+        .join("effectful-terminal-reference-payload");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\nextern int64_t g1_f{llvm_function}(void);\nint main(void) {{ return g1_f{llvm_function}() == 42 ? 0 : 1; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new("clang")
+        .arg("-fsanitize=address")
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable)
+        .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
+        .output()
+        .unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
+    );
+}
+
+#[test]
+fn llvm_terminal_clause_routes_outward_effect_to_outer_handler() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-terminal-clause-outward.glorious",
+        r#"
+            effect Ask { [1,1] ask() -> i64 }
+            effect Stop { stop() -> ! }
+            stop() -> i64 / {Stop} { perform Stop::stop() }
+            selected() -> i64 {
+                handle {
+                    handle stop() {
+                        Stop::stop() => perform Ask::ask()
+                    }
+                } {
+                    Ask::ask() with continuation => resume(move continuation, 42)
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("terminal-clause-outward.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("terminal-clause-outward");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\nextern int64_t g1_f{llvm_function}(void);\nint main(void) {{ return g1_f{llvm_function}() == 42 ? 0 : 1; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new("clang")
+        .arg("-fsanitize=address")
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable)
+        .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
+        .output()
+        .unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
+    );
+}
+
+#[test]
+fn llvm_nested_same_protocol_handler_keeps_inner_activation_on_replay() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-nested-handler-replay.glorious",
+        r#"
+            effect Ask { [2,2] ask() -> i64 }
+            selected() -> i64 {
+                handle {
+                    handle perform Ask::ask() {
+                        Ask::ask() with continuation => {
+                            let left = resume(continuation, 21);
+                            let right = resume(move continuation, 21);
+                            left + right
+                        }
+                    }
+                } {
+                    Ask::ask() with continuation => {
+                        let first = resume(continuation, 50);
+                        let second = resume(move continuation, 50);
+                        first;
+                        second;
+                        100
+                    }
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("nested-handler-replay.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("nested-handler-replay");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\nextern int64_t g1_f{llvm_function}(void);\nint main(void) {{ return g1_f{llvm_function}() == 42 ? 0 : 1; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new("clang")
+        .arg("-fsanitize=address")
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable)
+        .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
+        .output()
+        .unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
+    );
+}
+
+#[test]
+fn llvm_effectful_terminal_clause_drops_abandoned_body_and_keeps_capture() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-effectful-terminal-clause-ownership.glorious",
+        r#"
+            struct Resource { text: String }
+            impl Use<[0,1]> for Resource {}
+            effect Stop { stop() -> ! }
+            effect Log { write(value: i64) -> ! }
+            selected() -> i64 {
+                let suffix = 2;
+                handle {
+                    handle {
+                        let abandoned = Resource {
+                            text: String::concat("drop", " me")
+                        };
+                        perform Stop::stop()
+                    } {
+                        Stop::stop() => perform Log::write(40 + suffix)
+                    }
+                } {
+                    Log::write(value) => value
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory
+        .path()
+        .join("effectful-terminal-clause-ownership.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("effectful-terminal-clause-ownership");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\nextern int64_t g1_f{llvm_function}(void);\nint main(void) {{ return g1_f{llvm_function}() == 42 ? 0 : 1; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new("clang")
+        .arg("-fsanitize=address")
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable)
+        .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
+        .output()
+        .unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
+    );
+}
+
+#[test]
+fn llvm_rejects_effect_framed_resumptive_clause_with_backend_diagnostic() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-effect-framed-resumptive-clause.glorious",
+        r#"
+            effect Ask { [1,1] ask() -> i64 }
+            effect Log { [1,1] log() -> i64 }
+            add(left: i64, right: i64) -> i64 { left + right }
+            both() -> i64 / {Ask, Log} {
+                add(perform Ask::ask(), perform Log::log())
+            }
+            forward_log() -> i64 / {Log} {
+                handle both() {
+                    Ask::ask() with continuation => resume(move continuation, 2)
+                }
+            }
+            selected() -> i64 {
+                handle forward_log() {
+                    Log::log() with continuation => resume(move continuation, 40)
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+
+    let errors = match grandiose::emit_llvm_ir(&phases, &grandiose::LlvmOptions::default()) {
+        Ok(_) => panic!("effect-framed resumptive clause unexpectedly emitted LLVM IR"),
+        Err(errors) => errors,
+    };
+    assert_eq!(errors.len(), 1, "{errors:#?}");
+    assert_eq!(errors[0].code.as_deref(), Some("G1LLVM001"));
+    assert_eq!(
+        errors[0].message,
+        "LLVM backend does not yet support effect-framed resumptive handler clauses in `selected`"
+    );
+}
+
+#[test]
+fn llvm_rejects_effect_framed_terminal_clause_reached_during_replay() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-replayed-effect-framed-terminal-clause.glorious",
+        r#"
+            effect Choice {
+                [1,1] choose() -> i64
+                stop() -> !
+            }
+            effect Ask { [1,1] ask() -> i64 }
+            selected() -> i64 {
+                handle {
+                    handle {
+                        perform Choice::choose();
+                        perform Choice::stop()
+                    } {
+                        Choice::choose() with continuation =>
+                            resume(move continuation, 0),
+                        Choice::stop() => perform Ask::ask()
+                    }
+                } {
+                    Ask::ask() with continuation =>
+                        resume(move continuation, 42)
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+
+    let errors = match grandiose::emit_llvm_ir(&phases, &grandiose::LlvmOptions::default()) {
+        Ok(_) => panic!("replayed effect-framed terminal clause unexpectedly emitted LLVM IR"),
+        Err(errors) => errors,
+    };
+    assert_eq!(errors.len(), 1, "{errors:#?}");
+    assert_eq!(errors[0].code.as_deref(), Some("G1LLVM001"));
+    assert_eq!(
+        errors[0].message,
+        "LLVM backend does not yet support replay-time effect-framed terminal handler clauses in `selected`"
     );
 }
 
@@ -1396,6 +2325,84 @@ fn llvm_borrowed_replays_do_not_consume_shared_terminal_clause_callable() {
         String::from_utf8_lossy(&output.stderr)
     );
     let execution = Command::new(executable).output().unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
+    );
+}
+
+#[test]
+fn llvm_replayed_terminal_clause_keeps_borrowed_payload_origin_live() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-replayed-terminal-reference.glorious",
+        r#"
+            effect Choice {
+                [2,2] choose() -> i64
+                stop(value: &i64) -> !
+            }
+            selected() -> i64 {
+                handle {
+                    let choice = perform Choice::choose();
+                    let value = 42;
+                    choice;
+                    perform Choice::stop(&value)
+                } {
+                    Choice::choose() with continuation => {
+                        let first = resume(continuation, 0);
+                        let second = resume(move continuation, 0);
+                        first + second
+                    },
+                    Choice::stop(reference) => *reference
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("replayed-terminal-reference.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("replayed-terminal-reference");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\nextern int64_t g1_f{selected}(void);\nint main(void) {{ return g1_f{selected}() == 84 ? 0 : 1; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new("clang")
+        .arg("-fsanitize=address")
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable)
+        .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
+        .output()
+        .unwrap();
     assert!(
         execution.status.success(),
         "{:?}\n{}",

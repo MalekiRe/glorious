@@ -64,17 +64,20 @@ The current vertical slice supports:
   receivers;
 - reference-counted first-class handler values and terminal handler dispatch;
   captured resumptions retain their handler until resume or cancellation;
-  outward terminal
-  bodies and direct outward callees run in typed heap frames, including
-  indirect outward callables and synchronous/outward tail replacement, with
-  explicit program counters, parent/result links, initialization state, typed
-  cleanup callbacks, and effect-request records rather than relying on the
-  native stack;
+  activation delimiters route requests to the nearest matching handler,
+  forward partial misses outward, and support `Handle` plus effectful terminal
+  clauses inside typed heap frames; outward terminal bodies and direct outward
+  callees also run in those frames, including
+  synchronous and outward indirect callables plus direct and indirect
+  synchronous/outward tail replacement, with explicit program counters,
+  parent/result links, initialization state, typed cleanup callbacks, and
+  effect-request records rather than relying on the native stack;
 - exact and optional one-shot resumptions, including multi-frame resume,
   repeated handler re-entry, tail-resume, and cancellation cleanup;
-- initial exact multishot replay for scalar and immutable refcounted frame
-  values, including outward frame-chain cloning, parent/result-slot rebasing,
-  and partial aggregate field masks;
+- initial exact multishot replay for scalar, immutable refcounted, nested
+  aggregate, and callable-capture frame values, including outward frame-chain
+  cloning, parent/result-slot rebasing, partial aggregate field masks, shared
+  reference aliases, repeated terminal-clause replay, and cancellation;
 - binding-pack payload construction, erased-evidence layout, projection,
   copying, and cleanup;
 - typed native host-import calls for process arguments, filesystem read/write,
@@ -85,11 +88,12 @@ The current vertical slice supports:
 
 It emits only functions reachable from `main`, uses register allocas as the
 first stable ABI, and validates generated IR in tests with `llvm-as`. Native
-scalar, `Text`/`Bytes`, array, and callable programs are also executed against
-C harnesses and compared with the VM result; owned runtime paths run under
-AddressSanitizer. Unsupported effect-state array elements and resumptive,
-cancellation, or multishot effect paths produce `G1LLVM001` instead of
-silently changing semantics.
+scalar, `Text`/`Bytes`, array, callable, handler, activation, one-shot, and
+multishot programs are also executed against C harnesses and usually compared
+with the VM result; owned runtime paths run under AddressSanitizer. Unsupported
+effect-state array elements, effect-framed resumptive clauses, and unsupported
+deep mutable replay shapes produce `G1LLVM001` instead of silently changing
+semantics.
 
 ## Delivery chunks
 
@@ -106,19 +110,25 @@ silently changing semantics.
    implementation, and richer allocator/host-fault reporting remain. Every
    primitive in the frozen bytecode primitive table has a native lowering.
 5. First-class callables: environments, indirect calls, receiver modes,
-   callable ownership, and binding-pack value lowering are implemented;
-   effect-bearing callable environments remain.
+   callable ownership, binding-pack value lowering, and ordinary/effect-frame
+   indirect invocation are implemented. Mutable callable environments remain
+   subject to the multishot cloning limitations below.
 6. Effects and control: static typed-label push/pop/leave lowering is
    implemented. Handler values and terminal `Handle`/`Perform` dispatch now
    use the native heap-frame ABI, including direct outward call/return
-   propagation, static tail-call replacement, and typed terminal unwinding.
+   propagation, static tail-call replacement, typed terminal unwinding,
+   nested activation routing, partial forwarding, and effectful terminal
+   clause takeover.
    Exact and optional one-shot resume, tail-resume, and cancellation are also
    implemented, with resumptions owning a reference to their handler value.
-   Initial multishot frame cloning covers scalar, immutable
-   refcounted, and direct residual-field state. Indirect outward-call
+   Initial multishot frame cloning covers scalar, immutable refcounted, nested
+   aggregate/callable captures, shared-reference aliases, cancellation, and
+   direct residual-field state. Indirect outward-call
    propagation is implemented with callable starter thunks and refcounted
-   guard chains. Deep mutable graph/handler cloning and synchronous indirect
-   calls from an effect frame remain.
+   guard chains. Synchronous indirect calls and indirect tail calls from an
+   effect frame use the same callable receiver and ownership rules as ordinary
+   native calls. Effect-framed resumptive clauses and deep mutable
+   graph/handler cloning remain.
 7. Production output: object/executable emission through clang and initial
    bytecode/LLVM differential conformance tests are implemented, and `-O0`
    through `-O3` are forwarded to native code generation; debug information,
