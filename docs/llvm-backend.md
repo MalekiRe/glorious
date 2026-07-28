@@ -19,13 +19,20 @@ grc --emit llvm-object program.glorious
 grc --emit executable program.glorious -o program
 ```
 
-Native host calls use four C-linkage symbols:
+Native host calls use five C-linkage symbols:
 
 ```c
+enum {
+    G1_HOST_FAULT_PROCESS_ARGS = 1,
+    G1_HOST_FAULT_FS_READ = 2,
+    G1_HOST_FAULT_FS_WRITE = 3,
+    G1_HOST_FAULT_DIAGNOSTIC_WRITE = 4,
+};
+_Noreturn void g1_host_fault(int32_t operation);
 G1Array *g1_host_process_args_get(void);
 G1Bytes *g1_host_fs_read(G1Bytes *path);
-void g1_host_fs_write(G1Bytes *path, G1Bytes *bytes);
-void g1_host_diagnostic_write(G1Bytes *text);
+int32_t g1_host_fs_write(G1Bytes *path, G1Bytes *bytes);
+int32_t g1_host_diagnostic_write(G1Bytes *text);
 ```
 
 Arguments are borrowed for the duration of the call and consumed by the
@@ -37,7 +44,13 @@ filesystem, and diagnostic-stream access. The process-argument array excludes
 the executable name, matching the VM invocation contract. LLVM IR and object
 emission deliberately leave the symbols unresolved: embedding those artifacts
 still requires an explicit host implementation and does not silently grant
-capabilities.
+capabilities. A null result from `process.args` or `fs.read`, or a nonzero
+status from `fs.write` or `diagnostic.write`, calls the noreturn fault entry
+point. The bundled host makes a best-effort attempt to print a stable
+operation-level diagnostic and exits unsuccessfully for invalid paths,
+allocation failures, and filesystem open/read/write/close failures. Native
+host faults therefore remain terminal like VM `HostFault` values rather than
+becoming language-visible `Result` values.
 
 The current vertical slice supports:
 

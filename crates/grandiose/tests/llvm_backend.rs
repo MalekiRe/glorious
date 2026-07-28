@@ -59,6 +59,30 @@ fn run_native_i64(module: grandiose::LlvmModule, function: usize, expected: i64,
     );
 }
 
+fn compile_cli_executable(
+    directory: &std::path::Path,
+    stem: &str,
+    source_text: &str,
+) -> std::path::PathBuf {
+    let source = directory.join(format!("{stem}.glorious"));
+    let executable = directory.join(stem);
+    fs::write(&source, source_text).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_grc"))
+        .arg("--emit")
+        .arg("executable")
+        .arg("-o")
+        .arg(&executable)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    executable
+}
+
 #[test]
 fn scalar_main_emits_valid_llvm_ir() {
     let phases = grandiose::compile_source_to_phases_with_options(
@@ -331,6 +355,137 @@ fn cli_executable_bundles_the_native_system_host() {
     );
     assert_eq!(execution.stderr, b"bundledlast");
     assert_eq!(fs::read(written).unwrap(), b"native-host");
+}
+
+#[test]
+fn cli_native_host_preserves_empty_and_binary_files() {
+    let directory = tempfile::tempdir().unwrap();
+    let binary_input = directory.path().join("binary-input");
+    let binary_output = directory.path().join("binary-output");
+    let empty_input = directory.path().join("empty-input");
+    let empty_output = directory.path().join("empty-output");
+    let binary = [0, 1, 0x7f, 0x80, 0xff, b'\n'];
+    fs::write(&binary_input, binary).unwrap();
+    fs::write(&empty_input, []).unwrap();
+    let executable = compile_cli_executable(
+        directory.path(),
+        "native-host-binary",
+        &format!(
+            r#"
+                main() -> () {{
+                    let binary = __g1_fs_read({});
+                    __g1_fs_write({}, binary);
+                    let empty = __g1_fs_read({});
+                    __g1_fs_write({}, empty);
+                    ()
+                }}
+            "#,
+            serde_json::to_string(binary_input.to_str().unwrap()).unwrap(),
+            serde_json::to_string(binary_output.to_str().unwrap()).unwrap(),
+            serde_json::to_string(empty_input.to_str().unwrap()).unwrap(),
+            serde_json::to_string(empty_output.to_str().unwrap()).unwrap(),
+        ),
+    );
+
+    let execution = Command::new(executable).output().unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
+    );
+    assert_eq!(fs::read(binary_output).unwrap(), binary);
+    assert_eq!(fs::read(empty_output).unwrap(), b"");
+}
+
+#[test]
+fn cli_native_host_reports_fs_read_failures() {
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("does-not-exist");
+    let executable = compile_cli_executable(
+        directory.path(),
+        "native-host-read-fault",
+        &format!(
+            "main() -> () {{ __g1_fs_read({}); () }}",
+            serde_json::to_string(missing.to_str().unwrap()).unwrap(),
+        ),
+    );
+
+    let execution = Command::new(executable).output().unwrap();
+    assert!(!execution.status.success(), "{:?}", execution.status);
+    assert_eq!(execution.stderr, b"grandiose: native host fs.read failed\n");
+}
+
+#[test]
+fn cli_native_host_reports_fs_write_failures() {
+    let directory = tempfile::tempdir().unwrap();
+    let invalid = directory.path().join("missing-parent").join("output");
+    let executable = compile_cli_executable(
+        directory.path(),
+        "native-host-write-fault",
+        &format!(
+            r#"
+                main() -> () {{
+                    let contents = "not-written";
+                    __g1_fs_write({}, String::as_bytes(&contents));
+                    ()
+                }}
+            "#,
+            serde_json::to_string(invalid.to_str().unwrap()).unwrap(),
+        ),
+    );
+
+    let execution = Command::new(executable).output().unwrap();
+    assert!(!execution.status.success(), "{:?}", execution.status);
+    assert_eq!(
+        execution.stderr,
+        b"grandiose: native host fs.write failed\n"
+    );
+    assert!(!invalid.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn cli_native_host_reports_invalid_process_arguments() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let directory = tempfile::tempdir().unwrap();
+    let executable = compile_cli_executable(
+        directory.path(),
+        "native-host-process-args-fault",
+        "main() -> () { __g1_process_args_get(); () }",
+    );
+
+    let execution = Command::new(executable)
+        .arg(std::ffi::OsString::from_vec(vec![0xff]))
+        .output()
+        .unwrap();
+    assert!(!execution.status.success(), "{:?}", execution.status);
+    assert_eq!(
+        execution.stderr,
+        b"grandiose: native host process.args failed\n"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn cli_native_host_reports_diagnostic_stream_failures_by_status() {
+    let directory = tempfile::tempdir().unwrap();
+    let executable = compile_cli_executable(
+        directory.path(),
+        "native-host-diagnostic-fault",
+        r#"main() -> () { __g1_diagnostic_write("cannot-write"); () }"#,
+    );
+    let full = fs::OpenOptions::new()
+        .write(true)
+        .open("/dev/full")
+        .unwrap();
+
+    let status = Command::new(executable)
+        .stderr(std::process::Stdio::from(full))
+        .status()
+        .unwrap();
+    assert!(!status.success(), "{status:?}");
 }
 
 #[test]
@@ -731,7 +886,7 @@ fn host_calls_execute_and_consume_arguments_inside_effect_frames() {
     fs::write(
         &harness,
         format!(
-            "#include <stdint.h>\n#include <stddef.h>\ntypedef struct {{ int64_t count; uintptr_t length; unsigned char data[]; }} G1Bytes;\nstatic int observed;\nvoid g1_host_diagnostic_write(G1Bytes *text) {{ observed = text->length == 6 && text->data[0] == 'b' && text->data[1] == 'e' && text->data[2] == 'f' && text->data[3] == 'o' && text->data[4] == 'r' && text->data[5] == 'e'; }}\nextern int64_t g1_f{selected}(void);\nint main(void) {{ return g1_f{selected}() == 42 && observed ? 0 : 1; }}\n"
+            "#include <stdint.h>\n#include <stddef.h>\ntypedef struct {{ int64_t count; uintptr_t length; unsigned char data[]; }} G1Bytes;\nstatic int observed;\nint32_t g1_host_diagnostic_write(G1Bytes *text) {{ observed = text->length == 6 && text->data[0] == 'b' && text->data[1] == 'e' && text->data[2] == 'f' && text->data[3] == 'o' && text->data[4] == 'r' && text->data[5] == 'e'; return 0; }}\nvoid g1_host_fault(int32_t operation) {{ (void)operation; __builtin_trap(); }}\nextern int64_t g1_f{selected}(void);\nint main(void) {{ return g1_f{selected}() == 42 && observed ? 0 : 1; }}\n"
         ),
     )
     .unwrap();
@@ -4047,7 +4202,7 @@ fn llvm_backend_invokes_the_native_host_abi_and_consumes_arguments() {
     assert!(
         module
             .ir
-            .contains("declare void @g1_host_diagnostic_write(ptr)")
+            .contains("declare i32 @g1_host_diagnostic_write(ptr)")
     );
 
     let directory = tempfile::tempdir().unwrap();
@@ -4058,7 +4213,7 @@ fn llvm_backend_invokes_the_native_host_abi_and_consumes_arguments() {
     fs::write(
         &harness,
         format!(
-            "#include <stdint.h>\n#include <stddef.h>\ntypedef struct {{ int64_t count; uintptr_t length; unsigned char data[]; }} G1Bytes;\nstatic int observed;\nvoid g1_host_diagnostic_write(G1Bytes *text) {{ observed = text->length == 2 && text->data[0] == 'o' && text->data[1] == 'k'; }}\nextern void g1_f{llvm_function}(void);\nint main(void) {{ g1_f{llvm_function}(); return observed ? 0 : 1; }}\n"
+            "#include <stdint.h>\n#include <stddef.h>\ntypedef struct {{ int64_t count; uintptr_t length; unsigned char data[]; }} G1Bytes;\nstatic int observed;\nint32_t g1_host_diagnostic_write(G1Bytes *text) {{ observed = text->length == 2 && text->data[0] == 'o' && text->data[1] == 'k'; return 0; }}\nvoid g1_host_fault(int32_t operation) {{ (void)operation; __builtin_trap(); }}\nextern void g1_f{llvm_function}(void);\nint main(void) {{ g1_f{llvm_function}(); return observed ? 0 : 1; }}\n"
         ),
     )
     .unwrap();

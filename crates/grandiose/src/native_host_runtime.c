@@ -20,6 +20,37 @@ typedef struct {
 static int g1_process_argc;
 static char **g1_process_argv;
 
+enum {
+    G1_HOST_FAULT_PROCESS_ARGS = 1,
+    G1_HOST_FAULT_FS_READ = 2,
+    G1_HOST_FAULT_FS_WRITE = 3,
+    G1_HOST_FAULT_DIAGNOSTIC_WRITE = 4,
+};
+
+_Noreturn void g1_host_fault(int32_t operation) {
+    const char *message;
+    switch (operation) {
+    case G1_HOST_FAULT_PROCESS_ARGS:
+        message = "grandiose: native host process.args failed\n";
+        break;
+    case G1_HOST_FAULT_FS_READ:
+        message = "grandiose: native host fs.read failed\n";
+        break;
+    case G1_HOST_FAULT_FS_WRITE:
+        message = "grandiose: native host fs.write failed\n";
+        break;
+    case G1_HOST_FAULT_DIAGNOSTIC_WRITE:
+        message = "grandiose: native host diagnostic.write failed\n";
+        break;
+    default:
+        message = "grandiose: native host operation failed\n";
+        break;
+    }
+    (void)fputs(message, stderr);
+    (void)fflush(stderr);
+    exit(EXIT_FAILURE);
+}
+
 static int g1_host_utf8_valid(const unsigned char *data, size_t length) {
     size_t index = 0;
     while (index < length) {
@@ -200,29 +231,35 @@ G1Bytes *g1_host_fs_read(G1Bytes *path) {
     return bytes;
 }
 
-void g1_host_fs_write(G1Bytes *path, G1Bytes *bytes) {
+int32_t g1_host_fs_write(G1Bytes *path, G1Bytes *bytes) {
     char *terminated = g1_host_path(path);
     if (terminated == NULL || bytes == NULL) {
         free(terminated);
-        return;
+        return -1;
     }
     FILE *file = fopen(terminated, "wb");
     free(terminated);
     if (file == NULL) {
-        return;
+        return -1;
     }
-    if (bytes->length != 0) {
-        (void)fwrite(bytes->data, 1, bytes->length, file);
+    int32_t failed = 0;
+    if (bytes->length != 0 &&
+        fwrite(bytes->data, 1, bytes->length, file) != bytes->length) {
+        failed = -1;
     }
-    (void)fclose(file);
+    if (fclose(file) != 0) {
+        failed = -1;
+    }
+    return failed;
 }
 
-void g1_host_diagnostic_write(G1Bytes *text) {
+int32_t g1_host_diagnostic_write(G1Bytes *text) {
     if (text == NULL) {
-        return;
+        return -1;
     }
-    if (text->length != 0) {
-        (void)fwrite(text->data, 1, text->length, stderr);
+    if (text->length != 0 &&
+        fwrite(text->data, 1, text->length, stderr) != text->length) {
+        return -1;
     }
-    (void)fflush(stderr);
+    return fflush(stderr) == 0 ? 0 : -1;
 }

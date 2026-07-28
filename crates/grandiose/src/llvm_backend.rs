@@ -377,6 +377,9 @@ impl<'a> Emitter<'a> {
 
     fn emit_host_import_declarations(&mut self) {
         let imports = self.host_imports.iter().copied().collect::<Vec<_>>();
+        if !imports.is_empty() {
+            self.line("declare void @g1_host_fault(i32) cold noreturn");
+        }
         for import in imports {
             match import {
                 HostImportRole::ProcessArgsGet => {
@@ -387,10 +390,10 @@ impl<'a> Emitter<'a> {
                     self.line("declare ptr @g1_host_fs_read(ptr)");
                 }
                 HostImportRole::FsWrite => {
-                    self.line("declare void @g1_host_fs_write(ptr, ptr)");
+                    self.line("declare i32 @g1_host_fs_write(ptr, ptr)");
                 }
                 HostImportRole::DiagnosticWrite => {
-                    self.line("declare void @g1_host_diagnostic_write(ptr)");
+                    self.line("declare i32 @g1_host_diagnostic_write(ptr)");
                 }
             }
         }
@@ -8213,7 +8216,7 @@ impl<'a> Emitter<'a> {
                 ));
                 let failed = self.temp();
                 self.line(&format!("  %{failed} = icmp eq ptr %{value}, null"));
-                self.emit_trap_if(failed);
+                self.emit_host_fault_if(failed, 1);
                 Some(value)
             }
             HostImportRole::FsRead => {
@@ -8233,17 +8236,27 @@ impl<'a> Emitter<'a> {
                 ));
                 let failed = self.temp();
                 self.line(&format!("  %{failed} = icmp eq ptr %{value}, null"));
-                self.emit_trap_if(failed);
+                self.emit_host_fault_if(failed, 2);
                 Some(value)
             }
             HostImportRole::FsWrite => {
-                self.line(&format!("  call void @g1_host_fs_write({arguments})"));
+                let status = self.temp();
+                self.line(&format!(
+                    "  %{status} = call i32 @g1_host_fs_write({arguments})"
+                ));
+                let failed = self.temp();
+                self.line(&format!("  %{failed} = icmp ne i32 %{status}, 0"));
+                self.emit_host_fault_if(failed, 3);
                 None
             }
             HostImportRole::DiagnosticWrite => {
+                let status = self.temp();
                 self.line(&format!(
-                    "  call void @g1_host_diagnostic_write({arguments})"
+                    "  %{status} = call i32 @g1_host_diagnostic_write({arguments})"
                 ));
+                let failed = self.temp();
+                self.line(&format!("  %{failed} = icmp ne i32 %{status}, 0"));
+                self.emit_host_fault_if(failed, 4);
                 None
             }
         };
@@ -11516,6 +11529,18 @@ impl<'a> Emitter<'a> {
         self.line("  call void @llvm.trap()");
         self.line("  unreachable");
         self.line(&format!("cont{continuation}:"));
+    }
+
+    fn emit_host_fault_if(&mut self, condition: u32, operation: u32) {
+        let fault = self.temp();
+        let continuation = self.temp();
+        self.line(&format!(
+            "  br i1 %{condition}, label %host.fault{fault}, label %host.cont{continuation}"
+        ));
+        self.line(&format!("host.fault{fault}:"));
+        self.line(&format!("  call void @g1_host_fault(i32 {operation})"));
+        self.line("  unreachable");
+        self.line(&format!("host.cont{continuation}:"));
     }
 
     fn pointer_width(&self) -> u16 {
