@@ -1582,6 +1582,54 @@ fn region_source_reference_paths(
         Some(ty)
     }
 
+    fn owned_projection_paths(
+        artifact: &Artifact,
+        ty: TypeId,
+        target: TypeId,
+        visiting: &mut BTreeSet<TypeId>,
+        path: &mut Vec<u32>,
+        result: &mut Vec<Vec<u32>>,
+    ) {
+        if ty == target {
+            result.push(path.clone());
+            return;
+        }
+        if !visiting.insert(ty) {
+            return;
+        }
+        match artifact.types.get(ty as usize).map(Type::representation) {
+            Some(Type::Array { element }) => {
+                owned_projection_paths(artifact, *element, target, visiting, path, result);
+            }
+            Some(Type::Tuple { fields, .. }) => {
+                for (field, ty) in fields.iter().enumerate() {
+                    path.push(field as u32);
+                    owned_projection_paths(artifact, *ty, target, visiting, path, result);
+                    path.pop();
+                }
+            }
+            Some(Type::Struct { fields, .. }) => {
+                for (field, ty) in fields.iter().enumerate() {
+                    path.push(field as u32);
+                    owned_projection_paths(artifact, ty.ty, target, visiting, path, result);
+                    path.pop();
+                }
+            }
+            Some(Type::Enum { variants, .. }) => {
+                for (variant, fields) in variants.iter().enumerate() {
+                    for (field, ty) in fields.fields.iter().enumerate() {
+                        path.extend([u32::MAX - variant as u32, field as u32]);
+                        owned_projection_paths(artifact, ty.ty, target, visiting, path, result);
+                        path.pop();
+                        path.pop();
+                    }
+                }
+            }
+            _ => {}
+        }
+        visiting.remove(&ty);
+    }
+
     let outer = artifact_reference_paths(artifact, parameter);
     let Some(
         Type::RefShared {
@@ -1606,6 +1654,22 @@ fn region_source_reference_paths(
         });
     if result_referent == Some(*outer_referent) {
         return outer;
+    }
+    if let Some(result_referent) = result_referent {
+        let mut projections = Vec::new();
+        owned_projection_paths(
+            artifact,
+            *outer_referent,
+            result_referent,
+            &mut BTreeSet::new(),
+            &mut Vec::new(),
+            &mut projections,
+        );
+        projections.sort();
+        projections.dedup();
+        if projections.len() == 1 {
+            return projections;
+        }
     }
     let nested = artifact_reference_paths(artifact, *outer_referent);
     if nested.len() == 1 { nested } else { outer }

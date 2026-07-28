@@ -52,6 +52,38 @@ fn projected_shared_return_outlives_the_parent_reference_handle() {
 }
 
 #[test]
+fn aggregate_reference_return_tracks_owned_projection_paths() {
+    let source = r#"
+        struct Lexed { lexemes: Interner<String> }
+
+        lookup<'a>(value: &'a Lexed, id: Id<String>) -> Option<&'a String> {
+            Interner::get(&value.lexemes, move id)
+        }
+
+        main() -> { () }
+    "#;
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            for optimization_level in [
+                OptimizationLevel::O1,
+                OptimizationLevel::O2,
+                OptimizationLevel::O3,
+            ] {
+                compile_source_to_phases_with_options(
+                    "owned-projection-reference-return.glorious",
+                    source,
+                    CompileOptions { optimization_level },
+                )
+                .unwrap_or_else(|errors| panic!("{optimization_level:?}: {errors:#?}"));
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn shared_borrow_of_a_temporary_owner_agrees_with_core_lowering() {
     let source = r#"
         effect TemporaryOwnerCase { inspect() -> !; }
