@@ -7,7 +7,7 @@ use std::{
 
 use grandiose::{
     CompileOptions, LlvmOptions, OptimizationLevel,
-    ast::{BinaryOp, Expr, ExprKind, Program, Stmt, UnaryOp},
+    ast::{BinaryOp, Expr, ExprKind, FixityKind, Program, Stmt, UnaryOp},
     source_bundle::{Segment, SourceBundle},
 };
 use grandiose_vm::{SystemHost, Value, Vm, verify};
@@ -81,25 +81,69 @@ fn unary_spelling(operator: UnaryOp) -> &'static str {
     }
 }
 
-fn call_operator<'a>(callee: &'a Expr, arity: usize) -> Option<&'a str> {
+fn call_operator<'a>(
+    program: &'a Program,
+    source: &str,
+    expression: &Expr,
+    callee: &'a Expr,
+    arity: usize,
+) -> Option<&'a str> {
     let ExprKind::Variable(path) = &callee.kind else {
         return None;
     };
-    match (path.as_ref(), arity) {
-        ([operator], 1 | 2) => Some(operator),
-        ([trait_name, operator], 2)
-            if matches!(
-                (trait_name.as_ref(), operator.as_ref()),
-                ("Add", "+") | ("Equal", "==") | ("Less", "<") | ("Greater", ">")
-            ) =>
-        {
-            Some(operator)
+    if let ([trait_name, operator], 2) = (path.as_ref(), arity)
+        && matches!(
+            (trait_name.as_ref(), operator.as_ref()),
+            ("Add", "+") | ("Equal", "==") | ("Less", "<") | ("Greater", ">")
+        )
+    {
+        return Some(operator);
+    }
+    let [operator] = path.as_ref() else {
+        return None;
+    };
+    let fixity = program
+        .fixities
+        .iter()
+        .find(|fixity| fixity.name == operator.as_ref())?;
+    match (fixity.kind, arity) {
+        (FixityKind::Infix(_), 2) if expression.span.start < callee.span.start => Some(operator),
+        (FixityKind::Prefix, 1) => {
+            let followed_by_call = source
+                .get(callee.span.end..expression.span.end)
+                .is_some_and(|tail| tail.trim_start().starts_with('('));
+            (!followed_by_call).then_some(operator.as_ref())
         }
         _ => None,
     }
 }
 
-fn encode_expression(output: &mut Vec<u8>, program: &Program, expression: &Expr) -> Result<(), ()> {
+fn encode_statement(
+    output: &mut Vec<u8>,
+    program: &Program,
+    source: &str,
+    statement: &Stmt,
+) -> Result<(), ()> {
+    match statement {
+        Stmt::Let { name, value, .. } => {
+            output.push(1);
+            push_string(output, name);
+            encode_expression(output, program, source, value)
+        }
+        Stmt::Expr(expression) => {
+            output.push(2);
+            encode_expression(output, program, source, expression)
+        }
+        Stmt::Deconstruct { .. } | Stmt::Assign { .. } => Err(()),
+    }
+}
+
+fn encode_expression(
+    output: &mut Vec<u8>,
+    program: &Program,
+    source: &str,
+    expression: &Expr,
+) -> Result<(), ()> {
     match &expression.kind {
         ExprKind::Variable(path) if path.len() == 1 => {
             output.push(1);
@@ -112,19 +156,22 @@ fn encode_expression(output: &mut Vec<u8>, program: &Program, expression: &Expr)
             push_u64(output, value);
         }
         ExprKind::Unit => output.push(3),
-        ExprKind::Call(callee, arguments) if matches!(arguments.len(), 1 | 2) => {
-            let operator = call_operator(callee, arguments.len()).ok_or(())?;
+        ExprKind::Call(callee, arguments)
+            if call_operator(program, source, expression, callee, arguments.len()).is_some() =>
+        {
+            let operator =
+                call_operator(program, source, expression, callee, arguments.len()).unwrap();
             match arguments.len() {
                 1 => {
                     output.push(5);
                     push_string(output, operator);
-                    encode_expression(output, program, &arguments[0])?;
+                    encode_expression(output, program, source, &arguments[0])?;
                 }
                 2 => {
                     output.push(6);
                     push_string(output, operator);
-                    encode_expression(output, program, &arguments[0])?;
-                    encode_expression(output, program, &arguments[1])?;
+                    encode_expression(output, program, source, &arguments[0])?;
+                    encode_expression(output, program, source, &arguments[1])?;
                 }
                 _ => unreachable!(),
             }
@@ -132,27 +179,32 @@ fn encode_expression(output: &mut Vec<u8>, program: &Program, expression: &Expr)
         ExprKind::Binary { op, lhs, rhs } => {
             output.push(6);
             push_string(output, binary_spelling(*op));
-            encode_expression(output, program, lhs)?;
-            encode_expression(output, program, rhs)?;
+            encode_expression(output, program, source, lhs)?;
+            encode_expression(output, program, source, rhs)?;
         }
         ExprKind::Unary { op, operand } => {
             output.push(5);
             push_string(output, unary_spelling(*op));
-            encode_expression(output, program, operand)?;
+            encode_expression(output, program, source, operand)?;
+        }
+        ExprKind::Call(callee, arguments) => {
+            output.push(7);
+            encode_expression(output, program, source, callee)?;
+            push_u32(output, arguments.len().try_into().map_err(|_| ())?);
+            for argument in arguments.iter() {
+                encode_expression(output, program, source, argument)?;
+            }
+        }
+        ExprKind::Block(statements) => {
+            output.push(8);
+            push_u32(output, statements.len().try_into().map_err(|_| ())?);
+            for statement in statements.iter() {
+                encode_statement(output, program, source, statement)?;
+            }
         }
         _ => return Err(()),
     }
     Ok(())
-}
-
-fn final_expression(function: &grandiose::ast::Function) -> Option<&Expr> {
-    let ExprKind::Block(statements) = &function.body.kind else {
-        return None;
-    };
-    let Stmt::Expr(expression) = statements.last()? else {
-        return None;
-    };
-    Some(expression)
 }
 
 fn raw_source_bundle(source: &str) -> SourceBundle {
@@ -179,11 +231,7 @@ fn encode_rust_grouping(output: &mut Vec<u8>, source: &str) {
     push_u32(&mut encoded, functions.len().try_into().unwrap());
     for function in functions {
         push_string(&mut encoded, &function.name);
-        let Some(expression) = final_expression(function) else {
-            output.push(3);
-            return;
-        };
-        if encode_expression(&mut encoded, &program, expression).is_err() {
+        if encode_expression(&mut encoded, &program, source, &function.body).is_err() {
             output.push(3);
             return;
         }
@@ -210,6 +258,17 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
          probe_root() { a join b join c } \
          mod local { infixr 10 join; probe_local() { a join b join c } } \
          mod fallback { probe_fallback() { a join b join c } }",
+        "probe_empty() {}",
+        "probe_zero_call() { ping() }",
+        "probe_args() { send(alpha, 42, ()) }",
+        "probe_nested_call() { outer(inner(1), leaf()) }",
+        "infixl 10 op; probe_operator_arg() { combine(a op b, c) }",
+        "infixl 10 op; probe_postfix_binds() { left() op right(2) }",
+        "probe_let() { let x = 1; x }",
+        "probe_lets() { let x = make(); let y = combine(x, 2); finish(y) }",
+        "probe_statements() { prepare(); work(1); done }",
+        "probe_nested_block() { let x = { let y = 1; y }; x }",
+        "probe_block_argument() { consume({ let x = 1; x }) }",
     ];
     let malformed = [
         "infixl 10 op; probe_missing_operand() { a op }",
@@ -218,6 +277,10 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "infixl 10 leftish; infixr 10 rightish; \
          probe_mixed() { a leftish b rightish c }",
         "infix 10 eqish; probe_nonassoc() { a eqish b eqish c }",
+        "probe_bad_call() { f(, a) }",
+        "probe_bad_call_separator() { f(a; b) }",
+        "probe_bad_let_name() { let = 1; () }",
+        "probe_bad_let_value() { let x = ; x }",
     ];
 
     let mut paths = Vec::new();

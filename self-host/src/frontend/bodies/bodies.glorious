@@ -1,8 +1,9 @@
 // One-body-at-a-time expression parsing and source-fixity grouping.
-// This first slice intentionally supports only identifiers, integer/float
-// number tokens, unit, grouping, and declared prefix/infix operators.
+// This slice supports eager blocks, simple local bindings, explicit calls,
+// identifiers, integer/float number tokens, unit, grouping, and declared
+// prefix/infix operators.
 
-use super::lexer::TokenKind;
+use super::lexer::{Keyword, TokenKind};
 
 pub struct ExprId { index: u32 }
 
@@ -10,7 +11,7 @@ impl Use<[0, *]> for ExprId {}
 
 pub struct ExprRange { start: u32, count: u32 }
 
-pub struct ExprEdge { value: ExprId, position: u8 }
+pub struct ExprEdge { value: ExprId, position: u8, metadata: u32 }
 
 pub struct BodyTokenRange { start: usize, end: usize }
 
@@ -236,7 +237,7 @@ push_unary(
     let edge_start = Vec::len(&value.edges);
     Vec::push(
         &mut value.edges,
-        ExprEdge { value: child, position: 0 }
+        ExprEdge { value: child, position: 0, metadata: 0 }
     );
     push_node(
         value,
@@ -259,11 +260,11 @@ push_binary(
     let edge_start = Vec::len(&value.edges);
     Vec::push(
         &mut value.edges,
-        ExprEdge { value: left, position: 0 }
+        ExprEdge { value: left, position: 0, metadata: 0 }
     );
     Vec::push(
         &mut value.edges,
-        ExprEdge { value: right, position: 1 }
+        ExprEdge { value: right, position: 1, metadata: 0 }
     );
     push_node(
         value,
@@ -271,6 +272,111 @@ push_binary(
         token_range(start, end),
         token_range(operator.start, operator.end),
         operator.fixity + u32_value(1),
+        edge_start
+    )
+}
+
+push_argument_edges(
+    value: &mut BodyParser,
+    arguments: &Vec<u32>,
+    index: usize
+) {
+    handle index < word_count(arguments) {
+        Result::Err(_) => (),
+        Result::Ok(_) => {
+            Vec::push(
+                &mut value.edges,
+                ExprEdge {
+                    value: expr_id_at(arguments, index),
+                    position: 1,
+                    metadata: 0
+                }
+            );
+            push_argument_edges(value, arguments, index + usize_value(1))
+        }
+    }
+}
+
+push_call(
+    value: &mut BodyParser,
+    callee: ExprId,
+    arguments: &Vec<u32>,
+    start: usize,
+    end: usize
+) -> ExprId {
+    let edge_start = Vec::len(&value.edges);
+    Vec::push(
+        &mut value.edges,
+        ExprEdge { value: callee, position: 0, metadata: 0 }
+    );
+    push_argument_edges(value, arguments, 0);
+    push_node(
+        value,
+        7,
+        token_range(start, end),
+        empty_tokens(start),
+        0,
+        edge_start
+    )
+}
+
+statement_count(value: &Vec<u32>) -> usize {
+    word_count(value) / usize_value(3)
+}
+
+push_statement(
+    value: &mut Vec<u32>,
+    kind: u8,
+    name_token_plus_one: u32,
+    expression: ExprId
+) {
+    push_word(&mut *value, u32_from_u8(kind));
+    push_word(&mut *value, name_token_plus_one);
+    push_word(&mut *value, expression.index)
+}
+
+push_statement_edges(
+    value: &mut BodyParser,
+    statements: &Vec<u32>,
+    index: usize
+) {
+    handle index < statement_count(statements) {
+        Result::Err(_) => (),
+        Result::Ok(_) => {
+            let base = index * usize_value(3);
+            Vec::push(
+                &mut value.edges,
+                ExprEdge {
+                    value: ExprId { index: word_at(
+                        statements,
+                        base + usize_value(2)
+                    ) },
+                    position: u8_from_u32(word_at(statements, base)),
+                    metadata: word_at(
+                        statements,
+                        base + usize_value(1)
+                    )
+                }
+            );
+            push_statement_edges(value, statements, index + usize_value(1))
+        }
+    }
+}
+
+push_block(
+    value: &mut BodyParser,
+    statements: &Vec<u32>,
+    start: usize,
+    end: usize
+) -> ExprId {
+    let edge_start = Vec::len(&value.edges);
+    push_statement_edges(value, statements, 0);
+    push_node(
+        value,
+        8,
+        token_range(start, end),
+        empty_tokens(start),
+        0,
         edge_start
     )
 }
@@ -590,7 +696,7 @@ parse_primary(
                         }
                     }
                 },
-                Result::Err(_) => parse_atom(
+                Result::Err(_) => handle parse_atom(
                     original,
                     source,
                     declarations,
@@ -598,7 +704,19 @@ parse_primary(
                     value,
                     owner_plus_one,
                     depth
-                )
+                ) {
+                    Result::Err(error) => Result::Err(move error),
+                    Result::Ok(atom) => parse_postfix(
+                        original,
+                        source,
+                        declarations,
+                        nominal,
+                        value,
+                        owner_plus_one,
+                        depth,
+                        atom
+                    )
+                }
             }
         }
     }
@@ -684,7 +802,155 @@ parse_atom(
                     }
                 }
             },
+            13 => {
+                value.cursor = start + usize_value(1);
+                let statements = Vec::new();
+                parse_block_contents(
+                    original,
+                    source,
+                    declarations,
+                    nominal,
+                    value,
+                    owner_plus_one,
+                    depth + u16_value(1),
+                    start,
+                    u16_value(14),
+                    &mut statements
+                )
+            },
             _ => Result::Err(body_error(1, start, start))
+        }
+    }
+}
+
+parse_call_arguments(
+    original: &String,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    nominal: &super::headers::NominalIndex,
+    value: &mut BodyParser,
+    owner_plus_one: usize,
+    depth: u16,
+    arguments: &mut Vec<u32>,
+    open: usize
+) -> Result<(), BodyError> {
+    handle value.cursor < value.limit {
+        Result::Err(_) => Result::Err(body_error(10, value.cursor, open)),
+        Result::Ok(_) => handle super::lexer::token_code_at(
+            source,
+            value.cursor
+        ) == u16_value(12) {
+            Result::Ok(_) => {
+                value.cursor = value.cursor + usize_value(1);
+                Result::Ok(())
+            },
+            Result::Err(_) => handle parse_expression(
+                original,
+                source,
+                declarations,
+                nominal,
+                value,
+                owner_plus_one,
+                0,
+                depth
+            ) {
+                Result::Err(error) => Result::Err(move error),
+                Result::Ok(argument) => {
+                    push_word(&mut *arguments, argument.index);
+                    handle value.cursor < value.limit {
+                        Result::Err(_) => Result::Err(
+                            body_error(10, value.cursor, open)
+                        ),
+                        Result::Ok(_) => handle
+                            super::lexer::token_code_at(source, value.cursor) {
+                            12 => {
+                                value.cursor = value.cursor + usize_value(1);
+                                Result::Ok(())
+                            },
+                            17 => {
+                                value.cursor = value.cursor + usize_value(1);
+                                parse_call_arguments(
+                                    original,
+                                    source,
+                                    declarations,
+                                    nominal,
+                                    value,
+                                    owner_plus_one,
+                                    depth,
+                                    arguments,
+                                    open
+                                )
+                            },
+                            _ => Result::Err(
+                                body_error(10, value.cursor, open)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+parse_postfix(
+    original: &String,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    nominal: &super::headers::NominalIndex,
+    value: &mut BodyParser,
+    owner_plus_one: usize,
+    depth: u16,
+    callee: ExprId
+) -> Result<ExprId, BodyError> {
+    handle value.cursor < value.limit {
+        Result::Err(_) => Result::Ok(callee),
+        Result::Ok(_) => handle
+            super::lexer::token_code_at(source, value.cursor) == u16_value(11) {
+            Result::Err(_) => Result::Ok(callee),
+            Result::Ok(_) => handle depth < u16_value(128) {
+                Result::Err(_) => Result::Err(
+                    body_error(6, value.cursor, value.cursor)
+                ),
+                Result::Ok(_) => {
+                    let start = node_tokens(&*value, callee).start;
+                    let open = value.cursor;
+                    let arguments = Vec::new();
+                    value.cursor = open + usize_value(1);
+                    handle parse_call_arguments(
+                        original,
+                        source,
+                        declarations,
+                        nominal,
+                        value,
+                        owner_plus_one,
+                        depth + u16_value(1),
+                        &mut arguments,
+                        open
+                    ) {
+                        Result::Err(error) => Result::Err(move error),
+                        Result::Ok(_) => {
+                            let end = value.cursor;
+                            let call = push_call(
+                                value,
+                                callee,
+                                &arguments,
+                                start,
+                                end
+                            );
+                            parse_postfix(
+                                original,
+                                source,
+                                declarations,
+                                nominal,
+                                value,
+                                owner_plus_one,
+                                depth + u16_value(1),
+                                call
+                            )
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -928,6 +1194,247 @@ parse_expression(
     }
 }
 
+parse_block_statement(
+    original: &String,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    nominal: &super::headers::NominalIndex,
+    value: &mut BodyParser,
+    owner_plus_one: usize,
+    depth: u16,
+    statements: &mut Vec<u32>
+) -> Result<(), BodyError> {
+    let start = value.cursor;
+    handle super::lexer::token_kind_at(source, start) {
+        TokenKind::Keyword(Keyword::Let) => {
+            let name_token = start + usize_value(1);
+            handle name_token < value.limit {
+                Result::Err(_) => Result::Err(body_error(11, name_token, start)),
+                Result::Ok(_) => handle super::lexer::token_code_at(
+                    source,
+                    name_token
+                ) == u16_value(1) {
+                    Result::Err(_) => Result::Err(
+                        body_error(11, name_token, start)
+                    ),
+                    Result::Ok(_) => {
+                        let equals = name_token + usize_value(1);
+                        handle equals < value.limit {
+                            Result::Err(_) => Result::Err(
+                                body_error(11, equals, start)
+                            ),
+                            Result::Ok(_) => handle
+                                super::lexer::token_code_at(source, equals)
+                                    == u16_value(31) {
+                                Result::Err(_) => Result::Err(
+                                    body_error(11, equals, start)
+                                ),
+                                Result::Ok(_) => {
+                                    value.cursor = equals + usize_value(1);
+                                    handle parse_expression(
+                                        original,
+                                        source,
+                                        declarations,
+                                        nominal,
+                                        value,
+                                        owner_plus_one,
+                                        0,
+                                        depth
+                                    ) {
+                                        Result::Err(error) => Result::Err(
+                                            move error
+                                        ),
+                                        Result::Ok(initializer) => {
+                                            push_statement(
+                                                &mut *statements,
+                                                1,
+                                                u32_from_usize(name_token)
+                                                    + u32_value(1),
+                                                initializer
+                                            );
+                                            Result::Ok(())
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        },
+        _ => handle parse_expression(
+            original,
+            source,
+            declarations,
+            nominal,
+            value,
+            owner_plus_one,
+            0,
+            depth
+        ) {
+            Result::Err(error) => Result::Err(move error),
+            Result::Ok(expression) => {
+                push_statement(&mut *statements, 2, 0, expression);
+                Result::Ok(())
+            }
+        }
+    }
+}
+
+parse_block_after_statement(
+    original: &String,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    nominal: &super::headers::NominalIndex,
+    value: &mut BodyParser,
+    owner_plus_one: usize,
+    depth: u16,
+    start: usize,
+    close_code: u16,
+    statements: &mut Vec<u32>
+) -> Result<ExprId, BodyError> {
+    handle value.cursor < value.limit {
+        Result::Err(_) => parse_block_contents(
+            original,
+            source,
+            declarations,
+            nominal,
+            value,
+            owner_plus_one,
+            depth,
+            start,
+            close_code,
+            statements
+        ),
+        Result::Ok(_) => handle super::lexer::token_code_at(
+            source,
+            value.cursor
+        ) {
+            22 => {
+                value.cursor = value.cursor + usize_value(1);
+                parse_block_contents(
+                    original,
+                    source,
+                    declarations,
+                    nominal,
+                    value,
+                    owner_plus_one,
+                    depth,
+                    start,
+                    close_code,
+                    statements
+                )
+            },
+            14 => handle close_code == u16_value(14) {
+                Result::Err(_) => Result::Err(
+                    body_error(12, value.cursor, start)
+                ),
+                Result::Ok(_) => parse_block_contents(
+                    original,
+                    source,
+                    declarations,
+                    nominal,
+                    value,
+                    owner_plus_one,
+                    depth,
+                    start,
+                    close_code,
+                    statements
+                )
+            },
+            _ => Result::Err(body_error(12, value.cursor, start))
+        }
+    }
+}
+
+parse_block_contents(
+    original: &String,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    nominal: &super::headers::NominalIndex,
+    value: &mut BodyParser,
+    owner_plus_one: usize,
+    depth: u16,
+    start: usize,
+    close_code: u16,
+    statements: &mut Vec<u32>
+) -> Result<ExprId, BodyError> {
+    handle value.cursor < value.limit {
+        Result::Err(_) => handle close_code == u16_value(0) {
+            Result::Err(_) => Result::Err(
+                body_error(12, value.cursor, start)
+            ),
+            Result::Ok(_) => Result::Ok(
+                push_block(value, statements, start, value.cursor)
+            )
+        },
+        Result::Ok(_) => handle close_code == u16_value(14) {
+            Result::Ok(_) => handle super::lexer::token_code_at(
+                source,
+                value.cursor
+            ) == u16_value(14) {
+                Result::Ok(_) => {
+                    value.cursor = value.cursor + usize_value(1);
+                    Result::Ok(push_block(
+                        value,
+                        statements,
+                        start,
+                        value.cursor
+                    ))
+                },
+                Result::Err(_) => handle parse_block_statement(
+                    original,
+                    source,
+                    declarations,
+                    nominal,
+                    value,
+                    owner_plus_one,
+                    depth,
+                    statements
+                ) {
+                    Result::Err(error) => Result::Err(move error),
+                    Result::Ok(_) => parse_block_after_statement(
+                        original,
+                        source,
+                        declarations,
+                        nominal,
+                        value,
+                        owner_plus_one,
+                        depth,
+                        start,
+                        close_code,
+                        statements
+                    )
+                }
+            },
+            Result::Err(_) => handle parse_block_statement(
+                original,
+                source,
+                declarations,
+                nominal,
+                value,
+                owner_plus_one,
+                depth,
+                statements
+            ) {
+                Result::Err(error) => Result::Err(move error),
+                Result::Ok(_) => parse_block_after_statement(
+                    original,
+                    source,
+                    declarations,
+                    nominal,
+                    value,
+                    owner_plus_one,
+                    depth,
+                    start,
+                    close_code,
+                    statements
+                )
+            }
+        }
+    }
+}
+
 pub parse_function_body(
     original: &String,
     headers: &super::headers::ParsedHeaders,
@@ -953,7 +1460,8 @@ pub parse_function_body(
                     };
                     let source = super::headers::parsed_source(headers);
                     let nominal = super::headers::nominal_index(headers);
-                    handle parse_expression(
+                    let statements = Vec::new();
+                    handle parse_block_contents(
                         original,
                         source,
                         declarations,
@@ -961,20 +1469,17 @@ pub parse_function_body(
                         &mut parser,
                         shell_owner_plus_one(declarations, shell),
                         0,
-                        0
+                        start,
+                        0,
+                        &mut statements
                     ) {
                         Result::Err(error) => Result::Err(move error),
-                        Result::Ok(root) => handle parser.cursor == end {
-                            Result::Err(_) => Result::Err(
-                                body_error(8, parser.cursor, start)
-                            ),
-                            Result::Ok(_) => Result::Ok(ParsedBody {
-                                shell: u32_from_usize(shell),
-                                root: root,
-                                nodes: move parser.nodes,
-                                edges: move parser.edges
-                            })
-                        }
+                        Result::Ok(root) => Result::Ok(ParsedBody {
+                            shell: u32_from_usize(shell),
+                            root: root,
+                            nodes: move parser.nodes,
+                            edges: move parser.edges
+                        })
                     }
                 }
             }
@@ -997,6 +1502,135 @@ edge_at(value: &ParsedBody, node: &ExprNode, index: u32) -> ExprId {
         usize_from_u32(node.children.start + index)
     );
     edge.value
+}
+
+edge_position_at(value: &ParsedBody, node: &ExprNode, index: u32) -> u8 {
+    let edge = Vec::index(
+        &value.edges,
+        usize_from_u32(node.children.start + index)
+    );
+    edge.position
+}
+
+edge_metadata_at(value: &ParsedBody, node: &ExprNode, index: u32) -> u32 {
+    let edge = Vec::index(
+        &value.edges,
+        usize_from_u32(node.children.start + index)
+    );
+    edge.metadata
+}
+
+write_name_token(
+    output: &mut ByteBuf,
+    source: &super::lexer::LexedSource,
+    token: usize
+) -> Result<(), BodyError> {
+    handle super::lexer::token_kind_at(source, token) {
+        TokenKind::Ident(name) => handle super::lexer::lexeme(source, name) {
+            Result::Err(_) => Result::Err(body_error(11, token, token)),
+            Result::Ok(text) => {
+                write_string(move output, text);
+                Result::Ok(())
+            }
+        },
+        _ => Result::Err(body_error(11, token, token))
+    }
+}
+
+write_call_arguments(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &super::lexer::LexedSource,
+    value: &ParsedBody,
+    node: &ExprNode,
+    index: u32
+) -> Result<(), BodyError> {
+    handle index < node.children.count {
+        Result::Err(_) => Result::Ok(()),
+        Result::Ok(_) => handle write_expression(
+            &mut *output,
+            original,
+            source,
+            value,
+            edge_at(value, node, index)
+        ) {
+            Result::Err(error) => Result::Err(move error),
+            Result::Ok(_) => write_call_arguments(
+                move output,
+                original,
+                source,
+                value,
+                node,
+                index + u32_value(1)
+            )
+        }
+    }
+}
+
+write_block_statements(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &super::lexer::LexedSource,
+    value: &ParsedBody,
+    node: &ExprNode,
+    index: u32
+) -> Result<(), BodyError> {
+    handle index < node.children.count {
+        Result::Err(_) => Result::Ok(()),
+        Result::Ok(_) => {
+            let statement = edge_position_at(value, node, index);
+            handle statement {
+                1 => {
+                    ByteBuf::push(&mut *output, 1);
+                    let metadata = edge_metadata_at(value, node, index);
+                    handle write_name_token(
+                        &mut *output,
+                        source,
+                        usize_from_u32(metadata - u32_value(1))
+                    ) {
+                        Result::Err(error) => Result::Err(move error),
+                        Result::Ok(_) => handle write_expression(
+                            &mut *output,
+                            original,
+                            source,
+                            value,
+                            edge_at(value, node, index)
+                        ) {
+                            Result::Err(error) => Result::Err(move error),
+                            Result::Ok(_) => write_block_statements(
+                                move output,
+                                original,
+                                source,
+                                value,
+                                node,
+                                index + u32_value(1)
+                            )
+                        }
+                    }
+                },
+                _ => {
+                    ByteBuf::push(&mut *output, 2);
+                    handle write_expression(
+                        &mut *output,
+                        original,
+                        source,
+                        value,
+                        edge_at(value, node, index)
+                    ) {
+                        Result::Err(error) => Result::Err(move error),
+                        Result::Ok(_) => write_block_statements(
+                            move output,
+                            original,
+                            source,
+                            value,
+                            node,
+                            index + u32_value(1)
+                        )
+                    }
+                }
+            }
+        }
+    }
 }
 
 write_expression(
@@ -1071,7 +1705,7 @@ write_expression(
                 edge_at(value, node, 0)
             )
         },
-        _ => {
+        6 => {
             ByteBuf::push(&mut *output, 6);
             let spelling = range_text(
                 original,
@@ -1096,7 +1730,50 @@ write_expression(
                     edge_at(value, node, 1)
                 )
             }
-        }
+        },
+        7 => {
+            ByteBuf::push(&mut *output, 7);
+            handle write_expression(
+                &mut *output,
+                original,
+                source,
+                value,
+                edge_at(value, node, 0)
+            ) {
+                Result::Err(error) => Result::Err(move error),
+                Result::Ok(_) => {
+                    ByteBuf::write_u32_le(
+                        &mut *output,
+                        node.children.count - u32_value(1)
+                    );
+                    write_call_arguments(
+                        move output,
+                        original,
+                        source,
+                        value,
+                        node,
+                        1
+                    )
+                }
+            }
+        },
+        8 => {
+            ByteBuf::push(&mut *output, 8);
+            ByteBuf::write_u32_le(&mut *output, node.children.count);
+            write_block_statements(
+                move output,
+                original,
+                source,
+                value,
+                node,
+                0
+            )
+        },
+        _ => Result::Err(body_error(
+            9,
+            node.tokens.start,
+            node.tokens.start
+        ))
     }
 }
 
