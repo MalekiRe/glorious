@@ -1584,7 +1584,14 @@ fn parse_bundle_tokens(
     bundle: &SourceBundle,
     tokens: Vec<crate::lexer::Token>,
 ) -> Result<Program, Vec<Diagnostic>> {
-    let (probe, diagnostics) = crate::parser::parse_recovering(tokens.clone());
+    let legacy_equality_range = bundle
+        .trusted_standard_global_range()
+        .map(|range| Span::new(range.start, range.end));
+    let (probe, diagnostics) = crate::parser::parse_recovering_with_regions_and_legacy_equality(
+        tokens.clone(),
+        Vec::new(),
+        legacy_equality_range,
+    );
     if !diagnostics.is_empty() {
         return Err(diagnostics);
     }
@@ -1592,8 +1599,11 @@ fn parse_bundle_tokens(
         return Ok(probe);
     }
     let regions = fixity_regions(bundle, &probe)?;
-    let (program, diagnostics) =
-        crate::parser::parse_recovering_with_fixity_regions(tokens, regions);
+    let (program, diagnostics) = crate::parser::parse_recovering_with_regions_and_legacy_equality(
+        tokens,
+        regions,
+        legacy_equality_range,
+    );
     if diagnostics.is_empty() {
         Ok(program)
     } else {

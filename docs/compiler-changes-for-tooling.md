@@ -19,7 +19,7 @@ $ grc --capabilities
 {"grc":"0.1.0","contract":1,"multi-file":true,"modules":true,
  "artifact-major":1,"artifact-minor":0,
  "seed-identity-version":1,
- "seed-identity":"grandiose-seed-v1;grc-contract=1;grvm-contract=1;artifact=1.0;features=00000000000000ff",
+ "seed-identity":"grandiose-seed-v1;grc-contract=1;grvm-contract=1;artifact=1.0;features=00000000000001ff",
  "phases":["lex","scan","resolve","check"],
  "emit":["bytecode","grbc","mir","core","provisional",
          "interfaces-json","std-interfaces-json"],"diagnostics-json":true,
@@ -33,7 +33,8 @@ $ grvm --capabilities
 {"grvm":"0.1.0","contract":1,"contract-min":1,"contract-max":1,
  "artifact-major":1,"artifact-minor-min":0,"artifact-minor-max":0,
  "seed-identity-version":1,
- "accepted-seed-identities":["grandiose-seed-v1;grc-contract=1;grvm-contract=1;artifact=1.0;features=00000000000000ff"]}
+ "accepted-seed-identities":["grandiose-seed-v1;grc-contract=1;grvm-contract=1;artifact=1.0;features=00000000000000ff",
+                             "grandiose-seed-v1;grc-contract=1;grvm-contract=1;artifact=1.0;features=00000000000001ff"]}
 ```
 
 `grc --serve` reads one JSON request per line. A compile request is

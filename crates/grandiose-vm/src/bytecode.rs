@@ -103,6 +103,7 @@ const MULTISHOT_G1: u64 = 1 << 4;
 const HOST_ABI_G1: u64 = 1 << 5;
 const ARRAY_RESERVE_G1: u64 = 1 << 6;
 const ARRAY_FINISH_DRAINED_G1: u64 = 1 << 7;
+const BYTES_UTF8_VALID_UP_TO_G1: u64 = 1 << 8;
 const EXECUTABLE: u32 = 1;
 pub const EXPORTED: u32 = 1;
 pub const DROP_HOOK: u32 = 1 << 1;
@@ -435,6 +436,7 @@ pub enum Primitive {
     BytesSlice = 0x0053,
     BytesFromArrayMove = 0x0054,
     BytesToArray = 0x0055,
+    BytesUtf8ValidUpTo = 0x0056,
     ArrayNew = 0x0060,
     ArrayLen = 0x0061,
     ArrayGetCopy = 0x0062,
@@ -506,6 +508,7 @@ impl Primitive {
             0x0053 => Self::BytesSlice,
             0x0054 => Self::BytesFromArrayMove,
             0x0055 => Self::BytesToArray,
+            0x0056 => Self::BytesUtf8ValidUpTo,
             0x0060 => Self::ArrayNew,
             0x0061 => Self::ArrayLen,
             0x0062 => Self::ArrayGetCopy,
@@ -589,6 +592,7 @@ pub(crate) fn primitive_result_type(op: Primitive, args: &[TypeId]) -> Option<Ty
         BytesConcat => (args == [BYTES, BYTES]).then_some(BYTES),
         BytesGet => (args == [BYTES, USIZE]).then_some(U8),
         BytesSlice => (args == [BYTES, USIZE, USIZE]).then_some(BYTES),
+        BytesUtf8ValidUpTo => (args == [BYTES]).then_some(USIZE),
         BytesFromArrayMove | BytesToArray | ArrayNew | ArrayLen | ArrayGetCopy | ArrayGetMove
         | ArrayGetBorrowShared | ArrayGetBorrowUnique | ArraySetMove | ArrayEmpty
         | ArrayPushMove | ArrayPopMove | ArrayCapacity | ArrayReserve | ArrayFinishDrained => None,
@@ -1182,7 +1186,8 @@ impl Artifact {
         | MULTISHOT_G1
         | HOST_ABI_G1
         | ARRAY_RESERVE_G1
-        | ARRAY_FINISH_DRAINED_G1;
+        | ARRAY_FINISH_DRAINED_G1
+        | BYTES_UTF8_VALID_UP_TO_G1;
     pub fn encode(&self) -> Vec<u8> {
         #[cfg(test)]
         if self.cleanups.is_empty() && !self.functions.is_empty() {
@@ -1905,6 +1910,17 @@ pub(crate) fn used_features(
         )
     }) {
         features |= ARRAY_FINISH_DRAINED_G1;
+    }
+    if code.iter().any(|instruction| {
+        matches!(
+            instruction,
+            Instruction::Primitive {
+                op: Primitive::BytesUtf8ValidUpTo,
+                ..
+            }
+        )
+    }) {
+        features |= BYTES_UTF8_VALID_UP_TO_G1;
     }
     if code.iter().any(|instruction| {
         matches!(
@@ -6654,6 +6670,62 @@ mod tests {
     }
 
     #[test]
+    fn bytes_utf8_valid_up_to_has_permanent_id_signature_and_exact_feature() {
+        assert_eq!(Primitive::BytesUtf8ValidUpTo as u32, 0x0056);
+        assert_eq!(
+            Primitive::from_u32(0x0056),
+            Some(Primitive::BytesUtf8ValidUpTo)
+        );
+        assert_eq!(
+            primitive_result_type(Primitive::BytesUtf8ValidUpTo, &[BYTES]),
+            Some(USIZE)
+        );
+
+        let artifact = Artifact {
+            required_features: CORE_G1 | BYTES_UTF8_VALID_UP_TO_G1,
+            functions: vec![Function {
+                flags: 0,
+                name: "valid_up_to".into(),
+                params: vec![BYTES],
+                return_type: USIZE,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, BYTES, USIZE],
+                code_start: 0,
+                code_len: 2,
+                label_slot_count: 0,
+            }],
+            code: vec![
+                Instruction::Primitive {
+                    dst: 2,
+                    op: Primitive::BytesUtf8ValidUpTo,
+                    args: vec![1],
+                },
+                Instruction::Return { src: Some(2) },
+            ],
+            ..Artifact::default()
+        };
+        let encoded = artifact.encode();
+        assert_eq!(Artifact::decode(&encoded).unwrap(), canonical(artifact));
+
+        let mut missing = encoded.clone();
+        missing[33] &= !((BYTES_UTF8_VALID_UP_TO_G1 >> 8) as u8);
+        assert!(matches!(
+            Artifact::decode(&missing),
+            Err(DecodeError::NonCanonical(message))
+                if message == "required feature bits do not exactly describe the artifact"
+        ));
+
+        let mut spurious = Artifact::default().encode();
+        spurious[33] |= (BYTES_UTF8_VALID_UP_TO_G1 >> 8) as u8;
+        assert!(matches!(
+            Artifact::decode(&spurious),
+            Err(DecodeError::NonCanonical(message))
+                if message == "required feature bits do not exactly describe the artifact"
+        ));
+    }
+
+    #[test]
     fn restricted_use_capabilities_roundtrip_without_changing_layout() {
         let mut a = artifact();
         a.types[I64 as usize] = Type::I64.restricted(false, false);
@@ -7064,7 +7136,7 @@ mod tests {
     #[test]
     fn rejects_new_required_feature() {
         let mut b = artifact().encode();
-        b[33] |= 0x01;
+        b[33] |= 0x02;
         assert!(matches!(
             Artifact::decode(&b),
             Err(DecodeError::UnsupportedFeatures { .. })

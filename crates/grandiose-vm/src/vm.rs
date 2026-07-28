@@ -3403,6 +3403,13 @@ fn primitive_typed(
             [Value::Bytes(x)] => Ok(Value::U64(x.len() as u64)),
             _ => Err(RuntimeError::TypeConfusion),
         },
+        Primitive::BytesUtf8ValidUpTo => match v {
+            [Value::Bytes(bytes)] => Ok(Value::U64(
+                std::str::from_utf8(bytes).map_or_else(|error| error.valid_up_to(), |_| bytes.len())
+                    as u64,
+            )),
+            _ => Err(RuntimeError::TypeConfusion),
+        },
         Primitive::BytesConcat => match v {
             [Value::Bytes(a), Value::Bytes(b)] => {
                 let length = checked_output_len(a.len(), b.len())?;
@@ -5341,6 +5348,32 @@ mod tests {
                 &[Value::Bytes(vec![0xff].into())]
             ),
             Err(RuntimeError::InvalidUtf8)
+        );
+        assert_eq!(
+            prim(
+                USIZE,
+                Primitive::BytesUtf8ValidUpTo,
+                &[Value::Bytes(
+                    b"a\xc2\xa2\xe2\x82\xac\xf0\x9f\x92\xa9".to_vec().into()
+                )]
+            ),
+            Ok(Value::U64(10))
+        );
+        assert_eq!(
+            prim(
+                USIZE,
+                Primitive::BytesUtf8ValidUpTo,
+                &[Value::Bytes(b"ab\xed\xa0\x80".to_vec().into())]
+            ),
+            Ok(Value::U64(2))
+        );
+        assert_eq!(
+            prim(
+                USIZE,
+                Primitive::BytesUtf8ValidUpTo,
+                &[Value::Bytes(b"ab\xf0\x9f\x92".to_vec().into())]
+            ),
+            Ok(Value::U64(2))
         );
         assert_eq!(
             prim(

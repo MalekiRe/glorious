@@ -1661,7 +1661,7 @@ fn distributed_safe_bytes_predicates_access_and_slices_run_at_every_optimization
 }
 
 #[test]
-fn distributed_utf8_validation_and_text_slicing_are_safe_and_tail_recursive() {
+fn distributed_utf8_validation_and_text_slicing_use_the_iterative_primitive() {
     let source = r#"
         parse(value: Bytes) -> Result<String, Utf8Error> {
             String::from_utf8(move value)
@@ -1693,7 +1693,8 @@ fn distributed_utf8_validation_and_text_slicing_are_safe_and_tail_recursive() {
                 .functions
                 .iter()
                 .position(|function| function.name == name)
-                .unwrap() as u32
+                .unwrap_or_else(|| panic!("missing `{name}` at {optimization_level:?}"))
+                as u32
         };
         let parse = function("parse");
         let slice = function("slice_text");
@@ -1809,49 +1810,32 @@ fn distributed_utf8_validation_and_text_slicing_are_safe_and_tail_recursive() {
         assert_eq!(run_slice(2, 3), slice_err(2));
         assert_eq!(run_slice(1, 2), slice_err(2));
 
-        let validator = function("__g1_utf8_validate_at");
-        let continuations = function("__g1_utf8_continuations");
-        let mut ordinary_recursive_edges = 0;
-        let mut tail_recursive_edges = 0;
-        for generated in artifact
-            .functions
-            .iter()
-            .filter(|generated| generated.name.starts_with("$handler$"))
-        {
-            for instruction in &artifact.code[generated.code_start as usize
-                ..(generated.code_start + generated.code_len) as usize]
-            {
-                match instruction {
-                    grandiose_vm::Instruction::Call { function, .. }
-                        if *function == validator || *function == continuations =>
-                    {
-                        ordinary_recursive_edges += 1;
-                    }
-                    grandiose_vm::Instruction::TailCall { function, .. }
-                        if *function == validator || *function == continuations =>
-                    {
-                        tail_recursive_edges += 1;
-                    }
-                    _ => {}
+        assert!(
+            artifact.code.iter().any(|instruction| matches!(
+                instruction,
+                grandiose_vm::Instruction::Primitive {
+                    op: grandiose_vm::Primitive::BytesUtf8ValidUpTo,
+                    ..
                 }
-            }
-        }
-        assert!(
-            ordinary_recursive_edges <= 1,
-            "UTF-8 recursion retained an ordinary Call at {optimization_level:?}"
-        );
-        assert!(
-            tail_recursive_edges >= 2,
-            "UTF-8 recursion must lower to tail calls at {optimization_level:?}"
+            )),
+            "String::from_utf8 must lower through the iterative primitive at {optimization_level:?}"
         );
 
         if optimization_level == OptimizationLevel::O1 {
-            let large = vec![b'a'; 32 * 1024];
+            let mut large = vec![b'a'; 64 * 1024];
+            large.extend_from_slice("💩".as_bytes());
             let expected = std::str::from_utf8(&large).unwrap().to_owned();
             assert_eq!(
                 vm.run(parse, vec![VmValue::Bytes(large.into())]).unwrap(),
                 parse_ok(&expected),
                 "large UTF-8 input must execute in constant call-frame space"
+            );
+            let mut invalid = vec![b'a'; 64 * 1024];
+            invalid.push(0xff);
+            assert_eq!(
+                vm.run(parse, vec![VmValue::Bytes(invalid.into())]).unwrap(),
+                parse_err(64 * 1024),
+                "a large invalid input must report its exact valid prefix"
             );
         }
     }

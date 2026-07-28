@@ -322,11 +322,16 @@ fn trailing_args(mut args: Vec<OsString>) -> Result<Vec<OsString>, String> {
 fn dispatch(command: Cli) -> u8 {
     match command {
         Cli::Capabilities => {
+            let accepted_seed_identities = grandiose_vm::ACCEPTED_SEED_IDENTITIES
+                .iter()
+                .map(|identity| format!("\"{identity}\""))
+                .collect::<Vec<_>>()
+                .join(",");
             println!(
-                "{{\"grvm\":\"{}\",\"contract\":1,\"contract-min\":1,\"contract-max\":1,\"artifact-major\":1,\"artifact-minor-min\":0,\"artifact-minor-max\":0,\"seed-identity-version\":{},\"accepted-seed-identities\":[\"{}\"]}}",
+                "{{\"grvm\":\"{}\",\"contract\":1,\"contract-min\":1,\"contract-max\":1,\"artifact-major\":1,\"artifact-minor-min\":0,\"artifact-minor-max\":0,\"seed-identity-version\":{},\"accepted-seed-identities\":[{}]}}",
                 env!("CARGO_PKG_VERSION"),
                 grandiose_vm::SEED_IDENTITY_VERSION,
-                grandiose_vm::RELEASED_SEED_IDENTITY,
+                accepted_seed_identities,
             );
             0
         }
@@ -340,7 +345,7 @@ fn dispatch(command: Cli) -> u8 {
             seed_identity,
         } => {
             if let Some(identity) = seed_identity
-                && identity != grandiose_vm::RELEASED_SEED_IDENTITY
+                && !grandiose_vm::ACCEPTED_SEED_IDENTITIES.contains(&identity.as_str())
             {
                 eprintln!("grvm: seed-identity: incompatible released-seed identity `{identity}`");
                 return 1;

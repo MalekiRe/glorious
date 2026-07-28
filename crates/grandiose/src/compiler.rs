@@ -62,6 +62,7 @@ const MULTISHOT_G1: u64 = 1 << 4;
 const HOST_ABI_G1: u64 = 1 << 5;
 const ARRAY_RESERVE_G1: u64 = 1 << 6;
 const ARRAY_FINISH_DRAINED_G1: u64 = 1 << 7;
+const BYTES_UTF8_VALID_UP_TO_G1: u64 = 1 << 8;
 
 #[derive(Clone, Debug)]
 struct PrivacyDomains {
@@ -4218,6 +4219,8 @@ fn bind_runtime_manifest(
         let exact_params = match shape {
             crate::builtins::IntegerLeafShape::Binary => matches!(params.as_slice(), [left, right]
                 if path_is(left, "T") && path_is(right, "T")),
+            crate::builtins::IntegerLeafShape::Compare => matches!(params.as_slice(), [left, right]
+                if path_is(left, "T") && path_is(right, "T")),
             crate::builtins::IntegerLeafShape::Unary => {
                 matches!(params.as_slice(), [value] if path_is(value, "T"))
             }
@@ -4227,10 +4230,13 @@ fn bind_runtime_manifest(
         let exact = authorized
             && generic_t
             && exact_params
-            && function
-                .return_type
-                .as_ref()
-                .is_some_and(|result| path_is(result, "T"))
+            && function.return_type.as_ref().is_some_and(|result| {
+                if shape == crate::builtins::IntegerLeafShape::Compare {
+                    path_is(result, "u32")
+                } else {
+                    path_is(result, "T")
+                }
+            })
             && function.where_clause.is_none()
             && function.outward_effects.is_none()
             && !function.effectful;
@@ -7767,6 +7773,17 @@ fn compile_program_with_phases(
     }) {
         artifact.required_features |= ARRAY_FINISH_DRAINED_G1;
     }
+    if artifact.code.iter().any(|instruction| {
+        matches!(
+            instruction,
+            Instruction::Primitive {
+                op: Primitive::BytesUtf8ValidUpTo,
+                ..
+            }
+        )
+    }) {
+        artifact.required_features |= BYTES_UTF8_VALID_UP_TO_G1;
+    }
 
     artifact.cleanups = serialize_mir_cleanup_plans(&artifact, &mir_program, &peephole_pc_maps)
         .map_err(|error| {
@@ -9712,6 +9729,56 @@ pub(crate) fn normalize_ground_trait_methods(
         return Ok(normalized);
     }
 
+    fn concrete_call_result(program: &Program, expression: &Expr) -> Option<ReceiverType> {
+        fn mentions_any(ty: &ReceiverType, names: &BTreeSet<String>) -> bool {
+            match ty {
+                ReceiverType::Name(name) | ReceiverType::Const(name) => names.contains(name),
+                ReceiverType::Application(constructor, arguments) => {
+                    mentions_any(constructor, names)
+                        || arguments
+                            .iter()
+                            .any(|argument| mentions_any(argument, names))
+                }
+                ReceiverType::Tuple(fields) => {
+                    fields.iter().any(|field| mentions_any(field, names))
+                }
+                ReceiverType::Shared(inner) | ReceiverType::Unique(inner) => {
+                    mentions_any(inner, names)
+                }
+                ReceiverType::Never => false,
+            }
+        }
+
+        match &expression.kind {
+            ExprKind::Move(value) => concrete_call_result(program, value),
+            ExprKind::Call(callee, _) => {
+                let ExprKind::Variable(path) = &callee.kind else {
+                    return None;
+                };
+                let [name] = path.as_ref() else {
+                    return None;
+                };
+                let function = program
+                    .functions
+                    .iter()
+                    .find(|function| function.name == name.as_ref())?;
+                let result = function
+                    .return_type
+                    .as_ref()
+                    .and_then(|result| source_receiver_type(program, result))
+                    .or_else(|| Some(ReceiverType::Name("Unit".into())))?;
+                let binders = function
+                    .generics
+                    .iter()
+                    .flat_map(|generics| generics.params.iter())
+                    .map(|parameter| parameter.name.to_string())
+                    .collect();
+                (!mentions_any(&result, &binders)).then_some(result)
+            }
+            _ => None,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn rewrite(
         expression: &mut Expr,
@@ -10075,8 +10142,13 @@ pub(crate) fn normalize_ground_trait_methods(
                                     && candidate.method.as_str() == method.as_str()
                             })
                     });
+                let equality_trait_call =
+                    qualified.as_ref().is_some_and(|(name, _)| name == "Equal");
                 if let Some((trait_name, method)) = qualified.filter(|_| qualified_trait_call) {
-                    let receiver = argument_types.first().cloned().flatten();
+                    let receiver = argument_types.iter().enumerate().find_map(|(index, ty)| {
+                        ty.clone()
+                            .or_else(|| concrete_call_result(program, &args[index]))
+                    });
                     let deferred_receiver = receiver
                         .as_ref()
                         .map(receiver_subject_type)
@@ -10210,7 +10282,11 @@ pub(crate) fn normalize_ground_trait_methods(
                         errors,
                     );
                 }
-                qualified_trait_call.then(|| expected.cloned()).flatten()
+                if equality_trait_call {
+                    Some(ReceiverType::Name("Bool".into()))
+                } else {
+                    qualified_trait_call.then(|| expected.cloned()).flatten()
+                }
             }
             ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
                 let saved = locals.clone();
@@ -28031,6 +28107,16 @@ impl<'a> CoreLowerer<'a> {
     }
 
     fn expression(
+        &mut self,
+        expression: &Expr,
+        expected: Option<TypeId>,
+    ) -> Result<core::Expr, Vec<Diagnostic>> {
+        stacker::maybe_grow(768 * 1024, 16 * 1024 * 1024, || {
+            self.expression_inner(expression, expected)
+        })
+    }
+
+    fn expression_inner(
         &mut self,
         expression: &Expr,
         expected: Option<TypeId>,

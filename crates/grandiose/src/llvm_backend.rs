@@ -675,7 +675,9 @@ impl<'a> Emitter<'a> {
     fn emit_utf8_runtime(&mut self) {
         let usize_ty = format!("i{}", self.pointer_width());
         self.line("");
-        self.line("define internal i1 @g1_utf8_validate(ptr %object) {");
+        self.line(&format!(
+            "define internal {usize_ty} @g1_utf8_valid_up_to(ptr %object) {{"
+        ));
         self.line("entry:");
         self.line(
             "  %length.address = getelementptr inbounds %g1.bytes, ptr %object, i32 0, i32 1",
@@ -794,9 +796,24 @@ impl<'a> Emitter<'a> {
             self.line("  br label %loop");
         }
         self.line("valid:");
-        self.line("  ret i1 true");
+        self.line(&format!("  ret {usize_ty} %length"));
         self.line("invalid:");
-        self.line("  ret i1 false");
+        self.line(&format!("  ret {usize_ty} %index"));
+        self.line("}");
+        self.line("");
+        self.line("define internal i1 @g1_utf8_validate(ptr %object) {");
+        self.line("entry:");
+        self.line(
+            "  %length.address = getelementptr inbounds %g1.bytes, ptr %object, i32 0, i32 1",
+        );
+        self.line(&format!("  %length = load {usize_ty}, ptr %length.address"));
+        self.line(&format!(
+            "  %valid.up.to = call {usize_ty} @g1_utf8_valid_up_to(ptr %object)"
+        ));
+        self.line(&format!(
+            "  %valid = icmp eq {usize_ty} %valid.up.to, %length"
+        ));
+        self.line("  ret i1 %valid");
         self.line("}");
     }
 
@@ -6525,6 +6542,17 @@ impl<'a> Emitter<'a> {
                 self.line(&format!("  %{invalid} = xor i1 %{valid}, true"));
                 self.emit_runtime_fault_if(invalid, RUNTIME_FAULT_INVALID_UTF8);
                 object.clone()
+            }
+            Primitive::BytesUtf8ValidUpTo => {
+                let Some((_, object)) = loaded.first() else {
+                    return Err(vec![unsupported(function, "malformed UTF-8 prefix query")]);
+                };
+                let valid_up_to = self.temp();
+                self.line(&format!(
+                    "  %{valid_up_to} = call {dst_ty} @g1_utf8_valid_up_to(ptr {object})"
+                ));
+                self.release_byte_operands(function, args, &loaded)?;
+                format!("%{valid_up_to}")
             }
             Primitive::TextAsBytes => {
                 let Some((_, object)) = loaded.first() else {

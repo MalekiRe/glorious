@@ -306,6 +306,7 @@ their call sites require the trusted standard-library source domain:
 | `0x0053` | `__g1_bytes_slice` | `BytesSlice` |
 | `0x0054` | `__g1_bytes_from_array_move` | `BytesFromArrayMove` |
 | `0x0055` | `__g1_bytes_to_array` | `BytesToArray` |
+| `0x0056` | `__g1_bytes_utf8_valid_up_to` | `BytesUtf8ValidUpTo` |
 | `0x0060` | `__g1_array_new` | `ArrayNew` |
 | `0x0061` | `__g1_array_len` | `ArrayLen` |
 | `0x0062` | `__g1_array_get_copy` | `ArrayGetCopy` |
@@ -495,8 +496,9 @@ boundaries. The public supporting types are the nominal definitions
 `Range<T> { start: T, end: T }`, `Utf8Error { valid_up_to: usize }`, and
 `TextRangeError { Reversed, OutOfBounds, NotCharBoundary }`. Range errors are
 selected in that order: reversal precedes bounds, which precede boundary
-validation. `String::from_utf8` validates the complete RFC 3629 scalar range in
-ordinary source—including overlong encodings, surrogates, and values above
+validation. `String::from_utf8` uses the trusted nontrapping valid-prefix
+primitive to validate the complete RFC 3629 scalar range—including overlong
+encodings, surrogates, and values above
 `U+10FFFF`—before invoking the private trapping conversion leaf. Invalid input
 therefore returns the lead byte's `valid_up_to` offset and never catches or
 translates a VM fault. `TextView` stores a duplicable `String` handle plus a validated byte

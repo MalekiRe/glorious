@@ -15,8 +15,12 @@ pub mod vm;
 /// is intentionally derived from the frozen compiler/VM contract and exact G1
 /// artifact feature set rather than mutable executable paths or timestamps.
 pub const SEED_IDENTITY_VERSION: u32 = 1;
-pub const RELEASED_SEED_IDENTITY: &str =
+pub const PREVIOUS_RELEASED_SEED_IDENTITY: &str =
     "grandiose-seed-v1;grc-contract=1;grvm-contract=1;artifact=1.0;features=00000000000000ff";
+pub const RELEASED_SEED_IDENTITY: &str =
+    "grandiose-seed-v1;grc-contract=1;grvm-contract=1;artifact=1.0;features=00000000000001ff";
+pub const ACCEPTED_SEED_IDENTITIES: &[&str] =
+    &[PREVIOUS_RELEASED_SEED_IDENTITY, RELEASED_SEED_IDENTITY];
 
 pub use bytecode::{
     Artifact, BYTES, CHAR, Constant, DROP_HOOK, DecodeError, DropGlue, EXPORTED, F32, F64,
@@ -34,7 +38,9 @@ mod released_seed_tests {
 
     #[test]
     fn released_identity_tracks_the_frozen_artifact_feature_contract() {
-        assert_eq!(Artifact::SUPPORTED_FEATURES, 0xff);
-        assert!(RELEASED_SEED_IDENTITY.ends_with("features=00000000000000ff"));
+        assert_eq!(Artifact::SUPPORTED_FEATURES, 0x1ff);
+        assert!(RELEASED_SEED_IDENTITY.ends_with("features=00000000000001ff"));
+        assert!(ACCEPTED_SEED_IDENTITIES.contains(&PREVIOUS_RELEASED_SEED_IDENTITY));
+        assert!(ACCEPTED_SEED_IDENTITIES.contains(&RELEASED_SEED_IDENTITY));
     }
 }

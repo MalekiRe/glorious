@@ -103,6 +103,12 @@ pub(crate) const FIXED_RUNTIME_PRIMITIVE_LEAVES: &[(
         Primitive::BytesToArray,
         ARRAY,
     ),
+    (
+        0x0056,
+        "__g1_bytes_utf8_valid_up_to",
+        Primitive::BytesUtf8ValidUpTo,
+        SCALAR,
+    ),
     (0x0060, "__g1_array_new", Primitive::ArrayNew, ARRAY),
     (0x0061, "__g1_array_len", Primitive::ArrayLen, ARRAY),
     (
@@ -215,6 +221,7 @@ pub(crate) fn runtime_leaf_signature<'a>(
         Primitive::TextFromUtf8Checked => unary("Bytes", "Text"),
         Primitive::TextAsBytes => unary("Text", "Bytes"),
         Primitive::BytesLen => unary("Bytes", "usize"),
+        Primitive::BytesUtf8ValidUpTo => unary("Bytes", "usize"),
         Primitive::BytesConcat => binary("Bytes", "Bytes", "Bytes"),
         Primitive::BytesGet => binary("Bytes", "usize", "u8"),
         Primitive::BytesSlice => ternary("Bytes", "usize", "usize", "Bytes"),
@@ -340,6 +347,7 @@ pub(crate) fn distributed_runtime_primitive_leaves() -> Vec<(u64, String, Primit
 pub(crate) enum IntegerLeafShape {
     Unary,
     Binary,
+    Compare,
     Shift,
 }
 
@@ -348,12 +356,18 @@ impl IntegerLeafShape {
         match self {
             Self::Unary => "unary",
             Self::Binary => "binary",
+            Self::Compare => "comparison",
             Self::Shift => "shift",
         }
     }
 }
 
 pub(crate) const INTEGER_PRIMITIVE_LEAVES: &[(&str, Primitive, IntegerLeafShape)] = &[
+    (
+        "__g1_int_equal",
+        Primitive::IntEq,
+        IntegerLeafShape::Compare,
+    ),
     (
         "__g1_int_wrapping_add",
         Primitive::IntWrappingAdd,
@@ -431,8 +445,8 @@ mod tests {
     #[test]
     fn distributed_runtime_leaf_table_is_frozen_and_classified() {
         let leaves = distributed_runtime_primitive_leaves();
-        assert_eq!(FIXED_RUNTIME_PRIMITIVE_LEAVES.len(), 26);
-        assert_eq!(leaves.len(), 104);
+        assert_eq!(FIXED_RUNTIME_PRIMITIVE_LEAVES.len(), 27);
+        assert_eq!(leaves.len(), 105);
         assert_eq!(
             leaves.first(),
             Some(&(
@@ -442,37 +456,43 @@ mod tests {
             ))
         );
         assert_eq!(
-            leaves.get(26),
+            leaves.get(27),
             Some(&(0x0200, "__g1_f32_add".into(), Primitive::FloatAdd))
         );
         for (index, id, name, primitive) in [
             (
-                25,
+                13,
+                0x0056,
+                "__g1_bytes_utf8_valid_up_to",
+                Primitive::BytesUtf8ValidUpTo,
+            ),
+            (
+                26,
                 0x006c,
                 "__g1_array_finish_drained",
                 Primitive::ArrayFinishDrained,
             ),
-            (37, 0x020b, "__g1_f32_ge", Primitive::FloatGe),
-            (38, 0x020c, "__g1_f64_add", Primitive::FloatAdd),
-            (49, 0x0217, "__g1_f64_ge", Primitive::FloatGe),
-            (50, 0x0218, "__g1_f32_to_f64", Primitive::FloatConvert),
-            (51, 0x0219, "__g1_f64_to_f32", Primitive::FloatConvert),
-            (52, 0x021a, "__g1_u8_to_f32", Primitive::IntToFloat),
-            (75, 0x0231, "__g1_isize_to_f64", Primitive::IntToFloat),
+            (38, 0x020b, "__g1_f32_ge", Primitive::FloatGe),
+            (39, 0x020c, "__g1_f64_add", Primitive::FloatAdd),
+            (50, 0x0217, "__g1_f64_ge", Primitive::FloatGe),
+            (51, 0x0218, "__g1_f32_to_f64", Primitive::FloatConvert),
+            (52, 0x0219, "__g1_f64_to_f32", Primitive::FloatConvert),
+            (53, 0x021a, "__g1_u8_to_f32", Primitive::IntToFloat),
+            (76, 0x0231, "__g1_isize_to_f64", Primitive::IntToFloat),
             (
-                76,
+                77,
                 0x0232,
                 "__g1_f32_to_u8_checked",
                 Primitive::FloatToIntChecked,
             ),
             (
-                99,
+                100,
                 0x0249,
                 "__g1_f64_to_isize_checked",
                 Primitive::FloatToIntChecked,
             ),
-            (100, 0x024a, "__g1_f32_to_bits", Primitive::FloatToBits),
-            (103, 0x024d, "__g1_f64_from_bits", Primitive::FloatFromBits),
+            (101, 0x024a, "__g1_f32_to_bits", Primitive::FloatToBits),
+            (104, 0x024d, "__g1_f64_from_bits", Primitive::FloatFromBits),
         ] {
             assert_eq!(leaves.get(index), Some(&(id, name.into(), primitive)));
         }
@@ -499,6 +519,7 @@ mod tests {
                 .map(|(name, primitive, shape)| (*name, *primitive as u32, shape.diagnostic_name()))
                 .collect::<Vec<_>>(),
             vec![
+                ("__g1_int_equal", 0x000e, "comparison"),
                 ("__g1_int_wrapping_add", 0x0005, "binary"),
                 ("__g1_int_wrapping_sub", 0x0006, "binary"),
                 ("__g1_int_wrapping_mul", 0x0007, "binary"),

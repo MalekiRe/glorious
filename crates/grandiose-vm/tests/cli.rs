@@ -1,8 +1,8 @@
 use std::{fs, path::PathBuf, process::Command};
 
 use grandiose_vm::{
-    Artifact, Constant, Function, Instruction, RELEASED_SEED_IDENTITY, SEED_IDENTITY_VERSION, TEXT,
-    Type, UNIT,
+    ACCEPTED_SEED_IDENTITIES, Artifact, Constant, Function, Instruction, RELEASED_SEED_IDENTITY,
+    SEED_IDENTITY_VERSION, TEXT, Type, UNIT,
     bytecode::{Import, Signature},
     verify::with_generated_cleanup_plans,
 };
@@ -200,12 +200,9 @@ fn reports_the_versioned_vm_and_artifact_compatibility_contract() {
         )),
         "{capabilities}"
     );
-    assert!(
-        capabilities.contains(&format!(
-            r#""accepted-seed-identities":["{RELEASED_SEED_IDENTITY}"]"#
-        )),
-        "{capabilities}"
-    );
+    for identity in ACCEPTED_SEED_IDENTITIES {
+        assert!(capabilities.contains(identity), "{capabilities}");
+    }
 
     assert!(
         !Command::new(env!("CARGO_BIN_EXE_grvm"))
@@ -245,6 +242,16 @@ fn released_seed_identity_is_checked_before_loading_or_execution() {
             .unwrap()
             .success()
     );
+    for identity in ACCEPTED_SEED_IDENTITIES {
+        assert!(
+            Command::new(grvm)
+                .args(["run", "--seed-identity", identity])
+                .arg(&artifact.0)
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
 }
 
 #[test]

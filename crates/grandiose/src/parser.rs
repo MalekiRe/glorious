@@ -48,6 +48,7 @@ pub fn parse_recovering(tokens: Vec<Token>) -> (Program, Vec<Diagnostic>) {
         cursor: 0,
         fixities,
         fixity_regions: Vec::new(),
+        legacy_equality_range: None,
         effect_paths: Vec::new(),
         type_const_arguments: Vec::new(),
         fixed_array_types: Vec::new(),
@@ -74,6 +75,14 @@ pub fn parse_recovering_with_fixity_regions(
     tokens: Vec<Token>,
     fixity_regions: Vec<FixityRegion>,
 ) -> (Program, Vec<Diagnostic>) {
+    parse_recovering_with_regions_and_legacy_equality(tokens, fixity_regions, None)
+}
+
+pub(crate) fn parse_recovering_with_regions_and_legacy_equality(
+    tokens: Vec<Token>,
+    fixity_regions: Vec<FixityRegion>,
+    legacy_equality_range: Option<Span>,
+) -> (Program, Vec<Diagnostic>) {
     let mut diagnostics = Vec::new();
     let fixities = collect_fixities(&tokens, &mut diagnostics);
     Parser {
@@ -81,6 +90,7 @@ pub fn parse_recovering_with_fixity_regions(
         cursor: 0,
         fixities,
         fixity_regions,
+        legacy_equality_range,
         effect_paths: Vec::new(),
         type_const_arguments: Vec::new(),
         fixed_array_types: Vec::new(),
@@ -218,6 +228,7 @@ struct Parser {
     cursor: usize,
     fixities: HashMap<String, FixityEntry>,
     fixity_regions: Vec<FixityRegion>,
+    legacy_equality_range: Option<Span>,
     effect_paths: Vec<EffectPathSyntax>,
     type_const_arguments: Vec<crate::ast::TypeConstApplicationSyntax>,
     fixed_array_types: Vec<crate::ast::FixedArrayTypeSyntax>,
@@ -729,7 +740,7 @@ impl Parser {
     }
 
     fn trait_method(&mut self, with_body: bool) -> Result<TraitMethod, Diagnostic> {
-        let (name, start) = self.ident("expected a trait method name")?;
+        let (name, start) = self.method_name("expected a trait method name")?;
         let generics = self.generic_params()?;
         self.expect(TokenKind::LParen, "expected `(` after the method name")?;
         let (params, _) = self.collect_comma_delimited(
@@ -1888,7 +1899,8 @@ impl Parser {
             operands.push(self.operand()?);
             operators.push(operator);
         }
-        let mut expression = Self::group_operator_sequence(operands, operators)?;
+        let mut expression =
+            Self::group_operator_sequence(operands, operators, self.legacy_equality_range)?;
         if min_precedence == 0 && self.at_kw(Kw::Is) {
             self.bump();
             let pattern = self.pattern()?;
@@ -1987,8 +1999,13 @@ impl Parser {
     fn group_operator_sequence(
         operands: Vec<Expr>,
         operators: Vec<InfixOccurrence>,
+        legacy_equality_range: Option<Span>,
     ) -> Result<Expr, Diagnostic> {
-        fn reduce(output: &mut Vec<Expr>, operator: &InfixOccurrence) {
+        fn reduce(
+            output: &mut Vec<Expr>,
+            operator: &InfixOccurrence,
+            legacy_equality_range: Option<Span>,
+        ) {
             let rhs = output
                 .pop()
                 .expect("grouping keeps one operand per operator");
@@ -1996,19 +2013,34 @@ impl Parser {
                 .pop()
                 .expect("grouping keeps one operand per operator");
             let span = lhs.span.join(rhs.span);
-            let kind = match lowered_binary(&operator.spelling) {
-                Some(op) if !operator.is_word => ExprKind::Binary {
-                    op,
-                    lhs: Rc::new(lhs),
-                    rhs: Rc::new(rhs),
-                },
-                _ => ExprKind::Call(
+            let legacy_equality = legacy_equality_range.is_some_and(|range| {
+                operator.span.start >= range.start && operator.span.end <= range.end
+            });
+            let kind = if operator.spelling == "==" && !legacy_equality {
+                ExprKind::Call(
                     Rc::new(Expr {
-                        kind: ExprKind::Variable(Rc::from([Rc::from(operator.spelling.as_str())])),
+                        kind: ExprKind::Variable(Rc::from([Rc::from("Equal"), Rc::from("==")])),
                         span: operator.span,
                     }),
                     Rc::new(vec![lhs, rhs]),
-                ),
+                )
+            } else {
+                match lowered_binary(&operator.spelling) {
+                    Some(op) if !operator.is_word => ExprKind::Binary {
+                        op,
+                        lhs: Rc::new(lhs),
+                        rhs: Rc::new(rhs),
+                    },
+                    _ => ExprKind::Call(
+                        Rc::new(Expr {
+                            kind: ExprKind::Variable(Rc::from([Rc::from(
+                                operator.spelling.as_str(),
+                            )])),
+                            span: operator.span,
+                        }),
+                        Rc::new(vec![lhs, rhs]),
+                    ),
+                }
             };
             output.push(Expr { kind, span });
         }
@@ -2041,7 +2073,7 @@ impl Parser {
             let operand = operands.next().expect("one operand per operator");
             while let Some(top) = pending.last() {
                 if top.precedence > operator.precedence {
-                    reduce(&mut output, top);
+                    reduce(&mut output, top, legacy_equality_range);
                     pending.pop();
                     continue;
                 }
@@ -2059,7 +2091,7 @@ impl Parser {
                     }
                     match operator.associativity {
                         Associativity::Left => {
-                            reduce(&mut output, top);
+                            reduce(&mut output, top, legacy_equality_range);
                             pending.pop();
                             continue;
                         }
@@ -2083,7 +2115,7 @@ impl Parser {
             output.push(operand);
         }
         while let Some(top) = pending.pop() {
-            reduce(&mut output, &top);
+            reduce(&mut output, &top, legacy_equality_range);
         }
         let expression = output.pop().expect("grouping yields one expression");
         debug_assert!(output.is_empty());
@@ -3911,6 +3943,23 @@ impl Parser {
             )),
             _ => Err(Diagnostic::error("expected a name", message, token.span)),
         }
+    }
+
+    fn method_name(&mut self, message: &str) -> Result<(String, Span), Diagnostic> {
+        if matches!(self.peek().kind, TokenKind::Ident(_)) {
+            return self.ident(message);
+        }
+        let Some((name, span, count)) = joined_operator_name(&self.tokens, self.cursor) else {
+            return Err(Diagnostic::error(
+                "expected a name",
+                message,
+                self.peek().span,
+            ));
+        };
+        for _ in 0..count {
+            self.bump();
+        }
+        Ok((name, span))
     }
 
     /// Collect a comma-separated sequence after its opening delimiter and

@@ -1041,6 +1041,12 @@ pub(crate) struct RuntimeLeafAuthority {
     trusted_call_range: Option<Range<usize>>,
 }
 
+impl RuntimeLeafAuthority {
+    pub(crate) fn trusted_call_range(&self) -> Option<Range<usize>> {
+        self.trusted_call_range.clone()
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum RuntimeLeaf {
     Primitive(Primitive),
@@ -5270,7 +5276,8 @@ fn eval_runtime_primitive(
 ) -> Result<Value, Diagnostic> {
     if matches!(
         primitive,
-        Primitive::IntWrappingAdd
+        Primitive::IntEq
+            | Primitive::IntWrappingAdd
             | Primitive::IntWrappingSub
             | Primitive::IntWrappingMul
             | Primitive::IntBitAnd
@@ -5329,6 +5336,10 @@ fn eval_runtime_primitive(
             Ok(Value::Bytes(bytes.into()))
         }
         (Primitive::BytesLen, [Value::Bytes(bytes)]) => array_length_value(bytes.len(), span),
+        (Primitive::BytesUtf8ValidUpTo, [Value::Bytes(bytes)]) => array_length_value(
+            std::str::from_utf8(bytes).map_or_else(|error| error.valid_up_to(), |_| bytes.len()),
+            span,
+        ),
         (Primitive::BytesConcat, [Value::Bytes(left), Value::Bytes(right)]) => {
             let length = checked_primitive_output_len(left.len(), right.len(), span)?;
             let mut bytes = Vec::new();
@@ -5398,6 +5409,7 @@ fn eval_runtime_primitive(
             | Primitive::TextFromUtf8Checked
             | Primitive::TextAsBytes
             | Primitive::BytesLen
+            | Primitive::BytesUtf8ValidUpTo
             | Primitive::BytesConcat
             | Primitive::BytesGet
             | Primitive::BytesSlice
@@ -5440,6 +5452,19 @@ fn eval_runtime_integer_primitive(
         raw: raw & integer_mask(kind.bits),
     };
     let first = raw(value)?;
+    if primitive == Primitive::IntEq {
+        let [_, right] = args else {
+            return Err(runtime(
+                span,
+                "integer equality primitive expects two operands",
+            ));
+        };
+        return Ok(Value::Integer {
+            signed: false,
+            bits: 32,
+            raw: u128::from(first == raw(right)?),
+        });
+    }
     let result = match primitive {
         Primitive::IntBitNot => {
             if args.len() != 1 {
@@ -7429,6 +7454,22 @@ mod array_runtime_tests {
             .unwrap_err()
             .message
             .contains("UTF-8")
+        );
+        assert_eq!(
+            call(
+                Primitive::BytesUtf8ValidUpTo,
+                &[Value::Bytes(Rc::from(&b"a\xc2\xa2\xe2\x82\xac"[..]))]
+            )
+            .unwrap(),
+            Value::Int(6)
+        );
+        assert_eq!(
+            call(
+                Primitive::BytesUtf8ValidUpTo,
+                &[Value::Bytes(Rc::from(&b"ab\xf0\x9f\x92"[..]))]
+            )
+            .unwrap(),
+            Value::Int(2)
         );
 
         assert_eq!(

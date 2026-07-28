@@ -31,6 +31,7 @@ use std::path::Path;
 use diagnostic::Diagnostic;
 use eval::{Host, Value};
 use source_bundle::{Segment, SourceBundle};
+use span::Span;
 
 pub use ast::ConstKind;
 pub use compiler::{
@@ -82,7 +83,14 @@ fn run_source_entry_stream(
     runtime_leaves: eval::RuntimeLeafAuthority,
 ) -> Result<Value, Vec<Diagnostic>> {
     let tokens = lexer::lex(source).map_err(|error| vec![error])?;
-    let (program, parse_diagnostics) = parser::parse_recovering(tokens);
+    let legacy_equality_range = runtime_leaves
+        .trusted_call_range()
+        .map(|range| Span::new(range.start, range.end));
+    let (program, parse_diagnostics) = parser::parse_recovering_with_regions_and_legacy_equality(
+        tokens,
+        Vec::new(),
+        legacy_equality_range,
+    );
     if !parse_diagnostics.is_empty() {
         return Err(parse_diagnostics);
     }

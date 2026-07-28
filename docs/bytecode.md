@@ -77,8 +77,9 @@ Feature IDs are permanent:
 | 5 | `HOST_ABI_G1` | the import table is nonempty |
 | 6 | `ARRAY_RESERVE_G1` | `array.capacity` or `array.reserve` occurs |
 | 7 | `ARRAY_FINISH_DRAINED_G1` | `array.finish_drained` occurs |
+| 8 | `BYTES_UTF8_VALID_UP_TO_G1` | `bytes.utf8_valid_up_to` occurs |
 
-Bits 8 through 127 are unassigned and therefore unknown. Features beyond 127
+Bits 9 through 127 are unassigned and therefore unknown. Features beyond 127
 MUST be introduced by a new critical `FEATURES` section; section ID 14 is
 reserved for that future definition. G1 artifacts MUST NOT contain it.
 
@@ -748,6 +749,7 @@ Arguments and result types are checked from the primitive ID.
 | `0x0053` | `bytes.slice` |
 | `0x0054` | `bytes.from_array_move` |
 | `0x0055` | `bytes.to_array` |
+| `0x0056` | `bytes.utf8_valid_up_to` |
 | `0x0060` | `array.new` |
 | `0x0061` | `array.len` |
 | `0x0062` | `array.get_copy` |
@@ -761,6 +763,10 @@ Arguments and result types are checked from the primitive ID.
 | `0x006a` | `array.capacity` |
 | `0x006b` | `array.reserve` |
 | `0x006c` | `array.finish_drained` |
+
+`bytes.utf8_valid_up_to(Bytes) -> usize` returns the byte length when the input
+is valid UTF-8. Otherwise it returns the byte offset of the invalid sequence's
+lead byte, which is strictly less than the byte length.
 
 Binary integer arithmetic/bit operations have `(T,T)->T`; shifts have
 `(T,u32)->T`; integer negation has `(T)->T`; integer conversions have `(T)->U`.

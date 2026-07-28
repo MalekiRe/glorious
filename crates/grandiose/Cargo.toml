@@ -11,6 +11,7 @@ grandiose-vm = { path = "../grandiose-vm" }
 blake3 = "1"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
+stacker = "0.1"
 
 [dev-dependencies]
 tempfile = "3"

@@ -1860,6 +1860,108 @@ fn text_and_bytes_use_the_native_reference_counted_runtime() {
 }
 
 #[test]
+fn native_string_from_utf8_uses_constant_stack_for_large_inputs() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-large-utf8.glorious",
+        r#"
+            selected(value: Bytes) -> usize {
+                handle String::from_utf8(move value) {
+                    Result::Ok(text) => String::byte_len(&text),
+                    Result::Err(_) => String::byte_len(&"")
+                }
+            }
+            main() -> () { selected(b""); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    assert!(
+        module.ir.contains("call i64 @g1_utf8_valid_up_to"),
+        "{}",
+        module
+            .ir
+            .lines()
+            .filter(|line| line.contains("utf8"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("large-utf8.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("large-utf8");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            r#"#include <stdint.h>
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+typedef struct {{ int64_t count; uintptr_t length; unsigned char data[]; }} G1Bytes;
+extern uint64_t g1_f{llvm_function}(G1Bytes *);
+static G1Bytes *bytes(size_t length) {{
+  G1Bytes *value = malloc(sizeof(G1Bytes) + length);
+  if (!value) abort();
+  value->count = 1;
+  value->length = length;
+  memset(value->data, 'a', length);
+  return value;
+}}
+int main(void) {{
+  const size_t prefix = 64 * 1024;
+  G1Bytes *valid = bytes(prefix + 4);
+  valid->data[prefix] = 0xf0;
+  valid->data[prefix + 1] = 0x9f;
+  valid->data[prefix + 2] = 0x92;
+  valid->data[prefix + 3] = 0xa9;
+  if (g1_f{llvm_function}(valid) != prefix + 4) return 1;
+  G1Bytes *invalid = bytes(prefix + 1);
+  invalid->data[prefix] = 0xff;
+  if (g1_f{llvm_function}(invalid) != 0) return 2;
+  return 0;
+}}
+"#
+        ),
+    )
+    .unwrap();
+    let output = clang_with_native_runtime()
+        .arg("-fsanitize=address")
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable)
+        .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
+        .output()
+        .unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
+    );
+}
+
+#[test]
 fn llvm_and_vm_backends_execute_the_same_scalar_program() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-vm-differential.glorious",

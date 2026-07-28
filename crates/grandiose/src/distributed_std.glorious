@@ -1,8 +1,8 @@
 // Layer 1: manifest-bound immutable Text/Bytes leaves. Their bodies are never
 // executed by a compiled program; exact declaration identity lowers each call
-// to its frozen bytecode primitive. Checked UTF-8 remains internal until an
-// ordinary source validator can prove validity; indexed access and slicing are
-// exposed only through the bounds-checking wrappers below.
+// to its frozen bytecode primitive. Checked UTF-8 remains internal until the
+// nontrapping valid-prefix primitive proves validity; indexed access and
+// slicing are exposed only through the bounds-checking wrappers below.
 __g1_text_byte_len(value: Text) -> usize { () }
 
 __g1_text_concat(left: Text, right: Text) -> Text { () }
@@ -24,6 +24,8 @@ __g1_bytes_slice(value: Bytes, start: usize, end: usize) -> Bytes { () }
 __g1_bytes_from_array_move(value: Array<u8>) -> Bytes { () }
 
 __g1_bytes_to_array(value: Bytes) -> Array<u8> { () }
+
+__g1_bytes_utf8_valid_up_to(value: Bytes) -> usize { () }
 
 __g1_char_from_u32_checked(value: u32) -> char { () }
 
@@ -226,6 +228,8 @@ __g1_array_finish_drained<T>(value: Array<T>) { () }
 // this trusted source segment selects the primitive; copying one of these
 // spellings into user source creates only an ordinary function. Public source
 // calls go through the ordinary generic wrappers immediately below.
+__g1_int_equal<T>(left: T, right: T) -> u32 { () }
+
 __g1_int_wrapping_add<T>(left: T, right: T) -> T { () }
 
 __g1_int_wrapping_sub<T>(left: T, right: T) -> T { () }
@@ -2623,9 +2627,10 @@ __g1_utf8_validate_four(value: Bytes, index: usize, lead: u8) -> Result<(), Utf8
 }
 
 __g1_string_from_utf8(value: Bytes) -> Result<String, Utf8Error> {
-    handle __g1_utf8_validate_at(value, 0) {
+    let valid_up_to = __g1_bytes_utf8_valid_up_to(value);
+    handle valid_up_to == __g1_bytes_len(value) {
         Result::Ok(_) => __g1_utf8_string_ok(__g1_text_from_utf8_checked(move value)),
-        Result::Err(error) => __g1_utf8_string_err(move error)
+        Result::Err(_) => __g1_utf8_string_err(Utf8Error { valid_up_to: move valid_up_to })
     }
 }
 
@@ -6637,6 +6642,10 @@ trait Eq {
     eq(self: &Self, other: &Self) -> Bool;
 }
 
+trait Equal {
+    ==(self: Self, other: Self) -> Bool;
+}
+
 trait Ord {
     cmp(self: &Self, other: &Self) -> Ordering;
 }
@@ -6656,6 +6665,19 @@ trait Display {
 trait Debug {
     fmt(self: &Self, formatter: &mut Formatter);
 }
+
+impl Equal for u8 { ==(self: u8, other: u8) -> Bool { __g1_bool_from_u32(__g1_int_equal(move self, move other)) } }
+impl Equal for u16 { ==(self: u16, other: u16) -> Bool { __g1_bool_from_u32(__g1_int_equal(move self, move other)) } }
+impl Equal for u32 { ==(self: u32, other: u32) -> Bool { __g1_bool_from_u32(__g1_int_equal(move self, move other)) } }
+impl Equal for u64 { ==(self: u64, other: u64) -> Bool { __g1_bool_from_u32(__g1_int_equal(move self, move other)) } }
+impl Equal for u128 { ==(self: u128, other: u128) -> Bool { __g1_bool_from_u32(__g1_int_equal(move self, move other)) } }
+impl Equal for usize { ==(self: usize, other: usize) -> Bool { __g1_bool_from_u32(__g1_int_equal(move self, move other)) } }
+impl Equal for i8 { ==(self: i8, other: i8) -> Bool { __g1_bool_from_u32(__g1_int_equal(move self, move other)) } }
+impl Equal for i16 { ==(self: i16, other: i16) -> Bool { __g1_bool_from_u32(__g1_int_equal(move self, move other)) } }
+impl Equal for i32 { ==(self: i32, other: i32) -> Bool { __g1_bool_from_u32(__g1_int_equal(move self, move other)) } }
+impl Equal for i64 { ==(self: i64, other: i64) -> Bool { __g1_bool_from_u32(__g1_int_equal(move self, move other)) } }
+impl Equal for i128 { ==(self: i128, other: i128) -> Bool { __g1_bool_from_u32(__g1_int_equal(move self, move other)) } }
+impl Equal for isize { ==(self: isize, other: isize) -> Bool { __g1_bool_from_u32(__g1_int_equal(move self, move other)) } }
 
 assert_eq<T>(left: &T, right: &T) where T: Eq { assert(Eq::eq(left, right)) }
 
