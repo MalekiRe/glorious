@@ -8898,14 +8898,17 @@ fn aggregate_reference_return_origins_inner(
                 );
                 state[*dst as usize] = if through_reference {
                     let result_paths = reference_leaves(a, f.register_types[*dst as usize]);
+                    let projection_prefix = enum_variants[pc as usize][*src as usize]
+                        .map_or_else(|| vec![*field], |variant| vec![u32::MAX - variant, *field]);
                     state[*src as usize]
                         .iter()
                         .flat_map(|(_, origin)| {
+                            let projection_prefix = &projection_prefix;
                             result_paths.iter().map(move |(result_path, _)| {
                                 let origin = match origin {
                                     CarrierOrigin::Parameter { parameter, path } => {
                                         let mut path = path.clone();
-                                        path.push(*field);
+                                        path.extend(projection_prefix.iter().copied());
                                         path.extend(result_path.iter().copied());
                                         CarrierOrigin::Parameter {
                                             parameter: *parameter,
@@ -8914,7 +8917,7 @@ fn aggregate_reference_return_origins_inner(
                                     }
                                     CarrierOrigin::Receiver { path } => {
                                         let mut path = path.clone();
-                                        path.push(*field);
+                                        path.extend(projection_prefix.iter().copied());
                                         path.extend(result_path.iter().copied());
                                         CarrierOrigin::Receiver { path }
                                     }

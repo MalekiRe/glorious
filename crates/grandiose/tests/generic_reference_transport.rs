@@ -84,6 +84,36 @@ fn aggregate_reference_return_tracks_owned_projection_paths() {
 }
 
 #[test]
+fn option_as_ref_tracks_the_active_enum_variant() {
+    let source = r#"
+        lookup<'a>(value: &'a Option<i64>) -> Option<&'a i64> {
+            Option::as_ref(value)
+        }
+
+        main() -> { () }
+    "#;
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || {
+            for optimization_level in [
+                OptimizationLevel::O1,
+                OptimizationLevel::O2,
+                OptimizationLevel::O3,
+            ] {
+                compile_source_to_phases_with_options(
+                    "option-as-ref-enum-origin.glorious",
+                    source,
+                    CompileOptions { optimization_level },
+                )
+                .unwrap_or_else(|errors| panic!("{optimization_level:?}: {errors:#?}"));
+            }
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn shared_borrow_of_a_temporary_owner_agrees_with_core_lowering() {
     let source = r#"
         effect TemporaryOwnerCase { inspect() -> !; }
