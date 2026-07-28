@@ -515,6 +515,65 @@ fn llvm_and_vm_backends_execute_the_same_captured_callable_program() {
 }
 
 #[test]
+fn llvm_backend_invokes_the_native_host_abi_and_consumes_arguments() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-host-call.glorious",
+        "selected() -> () { __g1_diagnostic_write(String::concat(\"o\", \"k\")) }\nmain() -> () { selected(); () }",
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    assert!(
+        module
+            .ir
+            .contains("declare void @g1_host_diagnostic_write(ptr)")
+    );
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("host.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("host");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\n#include <stddef.h>\ntypedef struct {{ int64_t count; uintptr_t length; unsigned char data[]; }} G1Bytes;\nstatic int observed;\nvoid g1_host_diagnostic_write(G1Bytes *text) {{ observed = text->length == 2 && text->data[0] == 'o' && text->data[1] == 'k'; }}\nextern void g1_f{llvm_function}(void);\nint main(void) {{ g1_f{llvm_function}(); return observed ? 0 : 1; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new("clang")
+        .arg("-fsanitize=address")
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable).output().unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
+    );
+}
+
+#[test]
 fn llvm_and_vm_backends_execute_the_same_vec_program() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-array-differential.glorious",

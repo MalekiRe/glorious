@@ -19,6 +19,21 @@ grc --emit llvm-object program.glorious
 grc --emit executable program.glorious -o program
 ```
 
+Native host calls use four C-linkage symbols:
+
+```c
+G1Array *g1_host_process_args_get(void);
+G1Bytes *g1_host_fs_read(G1Bytes *path);
+void g1_host_fs_write(G1Bytes *path, G1Bytes *bytes);
+void g1_host_diagnostic_write(G1Bytes *text);
+```
+
+Arguments are borrowed for the duration of the call and consumed by the
+generated caller immediately afterward. Returned arrays/byte objects transfer
+one owned reference to Grandiose. A program using these imports must link a
+host implementation of the corresponding symbols; object and IR emission do
+not silently grant host capabilities.
+
 The current vertical slice supports:
 
 - fixed-width signed and unsigned integers, `usize`/`isize`, `char`, `f32`,
@@ -28,7 +43,7 @@ The current vertical slice supports:
 - shared and unique references, borrow/reborrow, projection borrows, and
   dereference load/move/store;
 - direct calls, self calls, tail calls, block arguments, returns, switches,
-  and traps;
+  statically resolved typed-label leaves, and traps;
 - checked integer add/subtract/multiply through LLVM overflow intrinsics;
 - checked division, remainder, negation, and shift bounds without relying on
   LLVM poison behavior;
@@ -48,14 +63,16 @@ The current vertical slice supports:
   direct and indirect invocation, and shared, unique, and owned environment
   receivers;
 - binding-pack payload construction, projection, copying, and cleanup.
+- typed native host-import calls for process arguments, filesystem read/write,
+  and diagnostic output through the explicit C ABI above.
 
 It emits only functions reachable from `main`, uses register allocas as the
 first stable ABI, and validates generated IR in tests with `llvm-as`. Native
 scalar, `Text`/`Bytes`, array, and callable programs are also executed against
 C harnesses and compared with the VM result; owned runtime paths run under
 AddressSanitizer. Unsupported owned enum, callable, or effect-state array
-elements, host calls, handlers, and effect/resumption operations produce
-`G1LLVM001` instead of silently changing semantics.
+elements, handlers, and effect/resumption operations produce `G1LLVM001`
+instead of silently changing semantics.
 
 ## Delivery chunks
 
@@ -67,14 +84,16 @@ elements, host calls, handlers, and effect/resumption operations produce
    plus direct `Text`/`Bytes` retain/release are implemented; nested owned
    aggregate cleanup and custom drop glue remain.
 4. Runtime ABI: `Text`, `Bytes`, and arrays of supported owned aggregates are
-   partially implemented; owned enum/callable/effect-state elements, host
-   imports, UTF-8 validation, and the remaining checked conversion helpers
-   remain.
+   partially implemented; typed host imports are lowered through an external
+   C ABI, while owned enum/callable/effect-state array elements, a bundled
+   native host implementation, UTF-8 validation, and the remaining checked
+   conversion helpers remain.
 5. First-class callables: environments, indirect calls, receiver modes,
    callable ownership, and binding-pack value lowering are implemented;
    effect-bearing callable environments remain.
-6. Effects and control: handlers, resumptions, labels, cancellation, and
-   multishot continuation storage.
+6. Effects and control: static typed-label push/pop/leave lowering is
+   implemented; handlers, resumptions, cancellation, and multishot
+   continuation storage remain.
 7. Production output: object/executable emission through clang and initial
    bytecode/LLVM differential conformance tests are implemented; debug
    information, LLVM optimization pipelines, and broad differential coverage

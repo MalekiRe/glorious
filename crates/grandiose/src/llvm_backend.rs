@@ -11,6 +11,7 @@ use grandiose_vm::{Constant, Primitive, Type, TypeId};
 use crate::{
     CompiledPhases,
     compiler_mir::{self as mir, InstructionKind, Terminator},
+    compiler_traits::HostImportRole,
     diagnostic::Diagnostic,
 };
 
@@ -83,6 +84,7 @@ struct Emitter<'a> {
     uses_byte_runtime: bool,
     uses_array_runtime: bool,
     uses_callable_runtime: bool,
+    host_imports: BTreeSet<HostImportRole>,
 }
 
 impl<'a> Emitter<'a> {
@@ -97,6 +99,7 @@ impl<'a> Emitter<'a> {
             uses_byte_runtime: false,
             uses_array_runtime: false,
             uses_callable_runtime: false,
+            host_imports: BTreeSet::new(),
         }
     }
 
@@ -122,6 +125,7 @@ impl<'a> Emitter<'a> {
         if self.uses_callable_runtime {
             self.emit_callable_runtime();
         }
+        self.emit_host_import_declarations();
         self.line("");
 
         for function in &reachable {
@@ -226,6 +230,9 @@ impl<'a> Emitter<'a> {
                     self.type_contains_callable(ty, &mut BTreeSet::new())?;
             }
             for block in &function.blocks {
+                if let Terminator::HostCall { import, .. } = &block.terminator {
+                    self.host_imports.insert(*import);
+                }
                 for instruction in &block.statements {
                     if let InstructionKind::Const { value, .. } = &instruction.kind {
                         match value {
@@ -247,6 +254,26 @@ impl<'a> Emitter<'a> {
             .map(|(index, bytes)| (bytes, index as u32))
             .collect();
         Ok(())
+    }
+
+    fn emit_host_import_declarations(&mut self) {
+        let imports = self.host_imports.iter().copied().collect::<Vec<_>>();
+        for import in imports {
+            match import {
+                HostImportRole::ProcessArgsGet => {
+                    self.line("declare ptr @g1_host_process_args_get()");
+                }
+                HostImportRole::FsRead => {
+                    self.line("declare ptr @g1_host_fs_read(ptr)");
+                }
+                HostImportRole::FsWrite => {
+                    self.line("declare void @g1_host_fs_write(ptr, ptr)");
+                }
+                HostImportRole::DiagnosticWrite => {
+                    self.line("declare void @g1_host_diagnostic_write(ptr)");
+                }
+            }
+        }
     }
 
     fn emit_byte_runtime(&mut self) {
@@ -1038,7 +1065,10 @@ impl<'a> Emitter<'a> {
                 let value = self.load_operand(function, owner)?;
                 self.emit_destroy(ty, &value, function)?;
             }
-            InstructionKind::EndBorrow { .. } | InstructionKind::Deconstruct { .. } => {}
+            InstructionKind::EndBorrow { .. }
+            | InstructionKind::Deconstruct { .. }
+            | InstructionKind::LabelPush { .. }
+            | InstructionKind::LabelPop { .. } => {}
             other => {
                 return Err(vec![unsupported(
                     function,
@@ -2293,6 +2323,12 @@ impl<'a> Emitter<'a> {
                 normal,
                 false,
             )?,
+            Terminator::HostCall {
+                result,
+                import,
+                args,
+                normal,
+            } => self.emit_host_call(function, *result, *import, args, normal)?,
             Terminator::CallIndirect {
                 result,
                 callable,
@@ -2376,6 +2412,7 @@ impl<'a> Emitter<'a> {
                 }
                 self.line("  ]");
             }
+            Terminator::Leave { target, .. } => self.emit_edge(function, target)?,
             Terminator::Abort { .. } => {
                 self.line("  call void @llvm.trap()");
                 self.line("  unreachable");
@@ -2500,6 +2537,108 @@ impl<'a> Emitter<'a> {
         }
         if let (Some(dst), Some(value)) = (result, call) {
             self.line(&format!("  store {result_ty} %{value}, ptr %r{dst}"));
+        }
+        self.emit_edge_with_preassigned(caller, normal, result.into_iter().collect())
+    }
+
+    fn emit_host_call(
+        &mut self,
+        caller: &mir::Function,
+        result: Option<u32>,
+        import: HostImportRole,
+        args: &[mir::Operand],
+        normal: &mir::Edge,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let expected_args = match import {
+            HostImportRole::ProcessArgsGet => Vec::new(),
+            HostImportRole::FsRead | HostImportRole::DiagnosticWrite => vec![Type::Text],
+            HostImportRole::FsWrite => vec![Type::Text, Type::Bytes],
+        };
+        if args.len() != expected_args.len() {
+            return Err(vec![unsupported(
+                caller,
+                "host call argument count mismatch",
+            )]);
+        }
+        let mut arguments = Vec::with_capacity(args.len());
+        let mut loaded = Vec::with_capacity(args.len());
+        for (operand, expected) in args.iter().zip(&expected_args) {
+            let runtime_ty = self.register_runtime_type(caller, operand.register)?;
+            if self.runtime_type(runtime_ty)? != expected {
+                return Err(vec![unsupported(
+                    caller,
+                    "host call argument type mismatch",
+                )]);
+            }
+            let ty = self.register_type(caller, operand.register)?;
+            let value = self.load_operand(caller, operand)?;
+            if operand.mode == mir::UseMode::Copy {
+                self.emit_retain(runtime_ty, &value, caller)?;
+            }
+            arguments.push(format!("{ty} {value}"));
+            loaded.push((runtime_ty, value));
+        }
+        let arguments = arguments.join(", ");
+        let returned = match import {
+            HostImportRole::ProcessArgsGet => {
+                let dst = result.ok_or_else(|| {
+                    vec![unsupported(
+                        caller,
+                        "process-args host call without a result",
+                    )]
+                })?;
+                let result_ty = self.register_runtime_type(caller, dst)?;
+                let Type::Array { element } = self.runtime_type(result_ty)? else {
+                    return Err(vec![unsupported(
+                        caller,
+                        "process-args host result is not an Array",
+                    )]);
+                };
+                if !matches!(self.runtime_type(*element)?, Type::Text) {
+                    return Err(vec![unsupported(
+                        caller,
+                        "process-args host result is not Array<Text>",
+                    )]);
+                }
+                let value = self.temp();
+                self.line(&format!(
+                    "  %{value} = call ptr @g1_host_process_args_get()"
+                ));
+                Some(value)
+            }
+            HostImportRole::FsRead => {
+                let dst = result.ok_or_else(|| {
+                    vec![unsupported(caller, "fs-read host call without a result")]
+                })?;
+                let result_ty = self.register_runtime_type(caller, dst)?;
+                if !matches!(self.runtime_type(result_ty)?, Type::Bytes) {
+                    return Err(vec![unsupported(
+                        caller,
+                        "fs-read host result is not Bytes",
+                    )]);
+                }
+                let value = self.temp();
+                self.line(&format!(
+                    "  %{value} = call ptr @g1_host_fs_read({arguments})"
+                ));
+                Some(value)
+            }
+            HostImportRole::FsWrite => {
+                self.line(&format!("  call void @g1_host_fs_write({arguments})"));
+                None
+            }
+            HostImportRole::DiagnosticWrite => {
+                self.line(&format!(
+                    "  call void @g1_host_diagnostic_write({arguments})"
+                ));
+                None
+            }
+        };
+        for (runtime_ty, value) in loaded {
+            self.emit_destroy(runtime_ty, &value, caller)?;
+        }
+        if let (Some(dst), Some(value)) = (result, returned) {
+            self.line(&format!("  store ptr %{value}, ptr %r{dst}"));
         }
         self.emit_edge_with_preassigned(caller, normal, result.into_iter().collect())
     }
