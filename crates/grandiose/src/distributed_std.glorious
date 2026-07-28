@@ -7034,6 +7034,10 @@ impl Debug for usize {
 
 impl Eq for String { eq(self: &String, other: &String) -> Bool { String::eq(self, other) } }
 
+impl Equal for String {
+    ==(self: String, other: String) -> Bool { String::eq(&self, &other) }
+}
+
 impl Ord for String {
     cmp(self: &String, other: &String) -> Ordering {
         let left = String::as_bytes(self);
