@@ -303,6 +303,8 @@ impl<'a> Emitter<'a> {
                     self.type_contains_callable(ty, &mut BTreeSet::new())?;
                 self.uses_handler_runtime |=
                     self.type_contains_handler(ty, &mut BTreeSet::new())?;
+                self.uses_effect_runtime |=
+                    self.type_contains_resumption(ty, &mut BTreeSet::new())?;
             }
             self.uses_effect_runtime |= !function.outward_protocols.is_empty();
             for block in &function.blocks {
@@ -840,6 +842,7 @@ impl<'a> Emitter<'a> {
         let usize_ty = format!("i{}", self.pointer_width());
         self.line("%g1.effect_frame = type { ptr, ptr, ptr, ptr, i32, ptr, ptr, ptr }");
         self.line("%g1.effect_runtime = type { ptr, i32, i32, i32, ptr, ptr, ptr, ptr }");
+        self.line("%g1.resumption = type { ptr, ptr, ptr, ptr, ptr }");
         if !self.uses_byte_runtime
             && !self.uses_array_runtime
             && !self.uses_callable_runtime
@@ -4052,6 +4055,30 @@ impl<'a> Emitter<'a> {
                 body,
                 normal,
             } => self.emit_terminal_handle(function, *result, handler, body, normal)?,
+            Terminator::Resume {
+                result,
+                resumption,
+                receiver_mode,
+                value,
+                normal,
+            } => self.emit_one_shot_resume(
+                function,
+                *result,
+                resumption,
+                *receiver_mode,
+                value,
+                normal,
+            )?,
+            Terminator::TailResume {
+                resumption,
+                receiver_mode,
+                value,
+            } => self.emit_one_shot_tail_resume(function, resumption, *receiver_mode, value)?,
+            Terminator::Cancel {
+                result,
+                resumption,
+                normal,
+            } => self.emit_one_shot_cancel(function, *result, resumption, normal)?,
             Terminator::TailCall {
                 function: callee,
                 args,
@@ -4133,6 +4160,431 @@ impl<'a> Emitter<'a> {
         Ok(())
     }
 
+    fn one_shot_resumption_types(
+        &self,
+        function: &mir::Function,
+        resumption: &mir::Operand,
+    ) -> Result<(TypeId, TypeId, TypeId, u32), Vec<Diagnostic>> {
+        let resumption_type = self.register_runtime_type(function, resumption.register)?;
+        let Type::Resumption {
+            input_type,
+            output_type,
+            lower_uses,
+            upper_uses,
+            copy,
+            ..
+        } = self.runtime_type(resumption_type)?
+        else {
+            return Err(vec![unsupported(
+                function,
+                "resumption terminator with a non-resumption operand",
+            )]);
+        };
+        if *copy || *upper_uses != Some(1) {
+            return Err(vec![unsupported(function, "multishot native resumptions")]);
+        }
+        Ok((resumption_type, *input_type, *output_type, *lower_uses))
+    }
+
+    fn emit_one_shot_resume(
+        &mut self,
+        function: &mir::Function,
+        result: u32,
+        resumption: &mir::Operand,
+        receiver_mode: u32,
+        value: &mir::Operand,
+        normal: &mir::Edge,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let (resumption_type, input_type, output_type, _) =
+            self.one_shot_resumption_types(function, resumption)?;
+        if receiver_mode != 2
+            || resumption.mode != mir::UseMode::Move
+            || value.mode != mir::UseMode::Move
+            || self.register_runtime_type(function, value.register)? != input_type
+            || self.register_runtime_type(function, result)? != output_type
+        {
+            return Err(vec![unsupported(
+                function,
+                "malformed one-shot Resume terminator",
+            )]);
+        }
+        let resumption_value = self.load_operand(function, resumption)?;
+        let input = self.load_operand(function, value)?;
+        self.emit_run_one_shot_resumption(
+            function,
+            &resumption_value,
+            resumption_type,
+            input_type,
+            &input,
+            &format!("%r{result}"),
+        )?;
+        self.emit_edge_with_preassigned(function, normal, [result].into_iter().collect())
+    }
+
+    fn emit_one_shot_tail_resume(
+        &mut self,
+        function: &mir::Function,
+        resumption: &mir::Operand,
+        receiver_mode: u32,
+        value: &mir::Operand,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let (resumption_type, input_type, output_type, _) =
+            self.one_shot_resumption_types(function, resumption)?;
+        if receiver_mode != 2
+            || resumption.mode != mir::UseMode::Move
+            || value.mode != mir::UseMode::Move
+            || self.register_runtime_type(function, value.register)? != input_type
+            || function.result != output_type
+        {
+            return Err(vec![unsupported(
+                function,
+                "malformed one-shot TailResume terminator",
+            )]);
+        }
+        let output_ty = self.llvm_type(output_type)?;
+        let output = self.temp();
+        self.line(&format!("  %{output} = alloca {output_ty}"));
+        let resumption_value = self.load_operand(function, resumption)?;
+        let input = self.load_operand(function, value)?;
+        self.emit_run_one_shot_resumption(
+            function,
+            &resumption_value,
+            resumption_type,
+            input_type,
+            &input,
+            &format!("%{output}"),
+        )?;
+        if matches!(self.runtime_type(output_type)?, Type::Unit) {
+            self.line("  ret void");
+        } else {
+            let returned = self.temp();
+            self.line(&format!("  %{returned} = load {output_ty}, ptr %{output}"));
+            self.line(&format!("  ret {output_ty} %{returned}"));
+        }
+        Ok(())
+    }
+
+    fn emit_one_shot_cancel(
+        &mut self,
+        function: &mir::Function,
+        result: u32,
+        resumption: &mir::Operand,
+        normal: &mir::Edge,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let (_, _, _, lower_uses) = self.one_shot_resumption_types(function, resumption)?;
+        if lower_uses != 0
+            || resumption.mode != mir::UseMode::Move
+            || !matches!(
+                self.runtime_type(self.register_runtime_type(function, result)?)?,
+                Type::Unit
+            )
+        {
+            return Err(vec![unsupported(
+                function,
+                "malformed one-shot Cancel terminator",
+            )]);
+        }
+        let resumption_value = self.load_operand(function, resumption)?;
+        self.emit_destroy_one_shot_resumption(&resumption_value);
+        self.line(&format!("  store i8 0, ptr %r{result}"));
+        self.emit_edge_with_preassigned(function, normal, [result].into_iter().collect())
+    }
+
+    fn emit_run_one_shot_resumption(
+        &mut self,
+        function: &mir::Function,
+        resumption: &str,
+        resumption_type: TypeId,
+        input_type: TypeId,
+        input: &str,
+        return_slot: &str,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let matching_handlers = self
+            .phases
+            .artifact
+            .handler_defs
+            .iter()
+            .enumerate()
+            .filter(|(_, definition)| {
+                definition
+                    .clauses
+                    .iter()
+                    .any(|clause| clause.resumption_type == Some(resumption_type))
+            })
+            .map(|(index, definition)| (index as u32, definition.clone()))
+            .collect::<Vec<_>>();
+        let [(handler_def, definition)] = matching_handlers.as_slice() else {
+            return Err(vec![unsupported(
+                function,
+                "one-shot resumption does not identify exactly one handler",
+            )]);
+        };
+        let clause_tuple = self
+            .phases
+            .artifact
+            .types
+            .iter()
+            .find_map(|ty| match ty.representation() {
+                Type::Handler {
+                    handler_def: described,
+                    capture_type,
+                    ..
+                } if described == handler_def => Some(*capture_type),
+                _ => None,
+            })
+            .ok_or_else(|| vec![unsupported(function, "resumption handler type is missing")])?;
+        let clause_types = self.runtime_aggregate_fields(clause_tuple)?;
+        if clause_types.len() != definition.clauses.len() {
+            return Err(vec![unsupported(
+                function,
+                "resumption handler clause layout mismatch",
+            )]);
+        }
+        let fields = (0..5)
+            .map(|field| {
+                let address = self.temp();
+                let value = self.temp();
+                self.line(&format!(
+                    "  %{address} = getelementptr inbounds %g1.resumption, ptr {resumption}, i32 0, i32 {field}"
+                ));
+                self.line(&format!("  %{value} = load ptr, ptr %{address}"));
+                format!("%{value}")
+            })
+            .collect::<Vec<_>>();
+        let [top, bottom, resume_slot, resume_init, handler] = fields.as_slice() else {
+            unreachable!()
+        };
+        let input_ty = self.llvm_type(input_type)?;
+        self.line(&format!("  store {input_ty} {input}, ptr {resume_slot}"));
+        let has_init = self.temp();
+        let mark_label = self.temp();
+        let marked_label = self.temp();
+        self.line(&format!("  %{has_init} = icmp ne ptr {resume_init}, null"));
+        self.line(&format!(
+            "  br i1 %{has_init}, label %resume.mark{mark_label}, label %resume.marked{marked_label}"
+        ));
+        self.line(&format!("resume.mark{mark_label}:"));
+        self.line(&format!("  store i8 1, ptr {resume_init}"));
+        self.line(&format!("  br label %resume.marked{marked_label}"));
+        self.line(&format!("resume.marked{marked_label}:"));
+
+        let return_address = self.temp();
+        let return_init_address = self.temp();
+        self.line(&format!(
+            "  %{return_address} = getelementptr inbounds %g1.effect_frame, ptr {bottom}, i32 0, i32 3"
+        ));
+        self.line(&format!("  store ptr {return_slot}, ptr %{return_address}"));
+        self.line(&format!(
+            "  %{return_init_address} = getelementptr inbounds %g1.effect_frame, ptr {bottom}, i32 0, i32 7"
+        ));
+        self.line(&format!("  store ptr null, ptr %{return_init_address}"));
+
+        let runtime = self.temp();
+        self.line(&format!("  %{runtime} = alloca %g1.effect_runtime"));
+        for (field, ty, value) in [
+            (0, "ptr", top.clone()),
+            (1, "i32", "-1".to_owned()),
+            (2, "i32", "0".to_owned()),
+            (3, "i32", "0".to_owned()),
+            (4, "ptr", "null".to_owned()),
+            (5, "ptr", "null".to_owned()),
+            (6, "ptr", "null".to_owned()),
+            (7, "ptr", "null".to_owned()),
+        ] {
+            let address = self.temp();
+            self.line(&format!(
+                "  %{address} = getelementptr inbounds %g1.effect_runtime, ptr %{runtime}, i32 0, i32 {field}"
+            ));
+            self.line(&format!("  store {ty} {value}, ptr %{address}"));
+        }
+        let loop_label = self.temp();
+        let step_label = self.temp();
+        let stopped_label = self.temp();
+        self.line(&format!("  br label %resume.loop{loop_label}"));
+        self.line(&format!("resume.loop{loop_label}:"));
+        let current = self.load_effect_runtime_field(&format!("%{runtime}"), 0, "ptr");
+        let running = self.temp();
+        self.line(&format!("  %{running} = icmp ne ptr {current}, null"));
+        self.line(&format!(
+            "  br i1 %{running}, label %resume.step{step_label}, label %resume.stopped{stopped_label}"
+        ));
+        self.line(&format!("resume.step{step_label}:"));
+        let step_address = self.temp();
+        let step = self.temp();
+        self.line(&format!(
+            "  %{step_address} = getelementptr inbounds %g1.effect_frame, ptr {current}, i32 0, i32 1"
+        ));
+        self.line(&format!("  %{step} = load ptr, ptr %{step_address}"));
+        self.line(&format!(
+            "  call void %{step}(ptr {current}, ptr %{runtime})"
+        ));
+        self.line(&format!("  br label %resume.loop{loop_label}"));
+        self.line(&format!("resume.stopped{stopped_label}:"));
+        let status = self.load_effect_runtime_field(&format!("%{runtime}"), 1, "i32");
+        let normal_label = self.temp();
+        let perform_label = self.temp();
+        let invalid = self.temp();
+        self.line(&format!(
+            "  switch i32 {status}, label %resume.invalid{invalid} [ i32 0, label %resume.normal{normal_label} i32 1, label %resume.perform{perform_label} ]"
+        ));
+        self.line(&format!("resume.invalid{invalid}:"));
+        self.line("  call void @llvm.trap()");
+        self.line("  unreachable");
+        let done_label = self.temp();
+        self.line(&format!("resume.normal{normal_label}:"));
+        let completed = self.load_effect_runtime_field(&format!("%{runtime}"), 5, "ptr");
+        self.emit_drop_effect_frame(&completed);
+        self.line(&format!("  call void @free(ptr {resumption})"));
+        self.line(&format!("  br label %resume.done{done_label}"));
+
+        self.line(&format!("resume.perform{perform_label}:"));
+        let protocol = self.load_effect_runtime_field(&format!("%{runtime}"), 2, "i32");
+        let operation = self.load_effect_runtime_field(&format!("%{runtime}"), 3, "i32");
+        let payload = self.load_effect_runtime_field(&format!("%{runtime}"), 4, "ptr");
+        let suspended = self.load_effect_runtime_field(&format!("%{runtime}"), 5, "ptr");
+        let nested_resume_slot = self.load_effect_runtime_field(&format!("%{runtime}"), 6, "ptr");
+        let nested_resume_init = self.load_effect_runtime_field(&format!("%{runtime}"), 7, "ptr");
+        let clause_labels = definition
+            .clauses
+            .iter()
+            .map(|_| self.temp())
+            .collect::<Vec<_>>();
+        let clause_checks = definition
+            .clauses
+            .iter()
+            .map(|_| self.temp())
+            .collect::<Vec<_>>();
+        for (index, ((clause, clause_label), check_label)) in definition
+            .clauses
+            .iter()
+            .zip(&clause_labels)
+            .zip(&clause_checks)
+            .enumerate()
+        {
+            if index != 0 {
+                self.line(&format!("resume.clause.check{check_label}:"));
+            }
+            let protocol_matches = self.temp();
+            let operation_matches = self.temp();
+            let matches = self.temp();
+            self.line(&format!(
+                "  %{protocol_matches} = icmp eq i32 {protocol}, {}",
+                clause.protocol
+            ));
+            self.line(&format!(
+                "  %{operation_matches} = icmp eq i32 {operation}, {}",
+                clause.operation
+            ));
+            self.line(&format!(
+                "  %{matches} = and i1 %{protocol_matches}, %{operation_matches}"
+            ));
+            let otherwise = clause_checks.get(index + 1).map_or_else(
+                || format!("resume.invalid{invalid}"),
+                |label| format!("resume.clause.check{label}"),
+            );
+            self.line(&format!(
+                "  br i1 %{matches}, label %resume.clause{clause_label}, label %{otherwise}"
+            ));
+        }
+        for (index, ((clause, clause_type), label)) in definition
+            .clauses
+            .iter()
+            .zip(&clause_types)
+            .zip(&clause_labels)
+            .enumerate()
+        {
+            self.line(&format!("resume.clause{label}:"));
+            let usize_ty = format!("i{}", self.pointer_width());
+            let clauses_address = self.temp();
+            let clauses = self.temp();
+            let slot = self.temp();
+            let callable = self.temp();
+            self.line(&format!(
+                "  %{clauses_address} = getelementptr inbounds %g1.handler, ptr {handler}, i32 0, i32 2"
+            ));
+            self.line(&format!("  %{clauses} = load ptr, ptr %{clauses_address}"));
+            self.line(&format!(
+                "  %{slot} = getelementptr inbounds ptr, ptr %{clauses}, {usize_ty} {index}"
+            ));
+            self.line(&format!("  %{callable} = load ptr, ptr %{slot}"));
+            let operation_descriptor = self
+                .phases
+                .artifact
+                .protocols
+                .get(clause.protocol as usize)
+                .and_then(|protocol| protocol.operations.get(clause.operation as usize))
+                .ok_or_else(|| vec![unsupported(function, "resumed operation is missing")])?;
+            let argument_types = operation_descriptor.payload_signature.params.clone();
+            let payload_ty = format!(
+                "{{ {} }}",
+                argument_types
+                    .iter()
+                    .map(|ty| self.llvm_type(*ty))
+                    .collect::<Result<Vec<_>, _>>()?
+                    .join(", ")
+            );
+            let mut arguments = Vec::with_capacity(
+                argument_types.len() + usize::from(clause.resumption_type.is_some()),
+            );
+            for (field, ty) in argument_types.iter().enumerate() {
+                let llvm_ty = self.llvm_type(*ty)?;
+                let address = self.temp();
+                let value = self.temp();
+                self.line(&format!(
+                    "  %{address} = getelementptr inbounds {payload_ty}, ptr {payload}, i32 0, i32 {field}"
+                ));
+                self.line(&format!("  %{value} = load {llvm_ty}, ptr %{address}"));
+                arguments.push((*ty, format!("%{value}")));
+            }
+            if let Some(nested_type) = clause.resumption_type {
+                let nested_size = self.emit_array_element_size("%g1.resumption");
+                let nested = self.temp();
+                self.line(&format!(
+                    "  %{nested} = call ptr @malloc({usize_ty} {nested_size})"
+                ));
+                let failed = self.temp();
+                self.line(&format!("  %{failed} = icmp eq ptr %{nested}, null"));
+                self.emit_trap_if(failed);
+                for (field, value) in [
+                    (0, suspended.clone()),
+                    (1, bottom.clone()),
+                    (2, nested_resume_slot.clone()),
+                    (3, nested_resume_init.clone()),
+                    (4, handler.clone()),
+                ] {
+                    let address = self.temp();
+                    self.line(&format!(
+                        "  %{address} = getelementptr inbounds %g1.resumption, ptr %{nested}, i32 0, i32 {field}"
+                    ));
+                    self.line(&format!("  store ptr {value}, ptr %{address}"));
+                }
+                arguments.push((nested_type, format!("%{nested}")));
+            } else {
+                self.emit_drop_effect_frame_chain(&suspended);
+            }
+            let returned = self.emit_call_owned_callable_value(
+                function,
+                *clause_type,
+                &format!("%{callable}"),
+                &arguments,
+                false,
+            )?;
+            self.line(&format!("  call void @free(ptr {payload})"));
+            let result_ty = self.llvm_return_type(definition.result_type)?;
+            if let Some(returned) = returned {
+                self.line(&format!(
+                    "  store {result_ty} {returned}, ptr {return_slot}"
+                ));
+            } else if result_ty == "void" {
+                self.line(&format!("  store i8 0, ptr {return_slot}"));
+            }
+            self.line(&format!("  call void @free(ptr {resumption})"));
+            self.line(&format!("  br label %resume.done{done_label}"));
+        }
+        self.line(&format!("resume.done{done_label}:"));
+        Ok(())
+    }
+
     fn emit_terminal_handle(
         &mut self,
         function: &mir::Function,
@@ -4166,12 +4618,23 @@ impl<'a> Emitter<'a> {
             .get(handler_def as usize)
             .cloned()
             .ok_or_else(|| vec![unsupported(function, "Handle descriptor is missing")])?;
-        if definition
+        for resumption_type in definition
             .clauses
             .iter()
-            .any(|clause| clause.resumption_type.is_some())
+            .filter_map(|clause| clause.resumption_type)
         {
-            return Err(vec![unsupported(function, "resumptive native handlers")]);
+            let Type::Resumption {
+                upper_uses, copy, ..
+            } = self.runtime_type(resumption_type)?
+            else {
+                return Err(vec![unsupported(
+                    function,
+                    "handler clause has a non-resumption continuation type",
+                )]);
+            };
+            if *copy || *upper_uses != Some(1) {
+                return Err(vec![unsupported(function, "multishot native handlers")]);
+            }
         }
         let clause_types = self.runtime_aggregate_fields(clause_tuple)?;
         if clause_types.len() != definition.clauses.len() {
@@ -4449,7 +4912,9 @@ impl<'a> Emitter<'a> {
                 "  %{slot} = getelementptr inbounds ptr, ptr %{clauses}, {usize_ty} {index}"
             ));
             self.line(&format!("  %{callable} = load ptr, ptr %{slot}"));
-            self.line(&format!("  store ptr null, ptr %{slot}"));
+            if clause.resumption_type.is_none() {
+                self.line(&format!("  store ptr null, ptr %{slot}"));
+            }
             let operation_descriptor = self
                 .phases
                 .artifact
@@ -4466,7 +4931,9 @@ impl<'a> Emitter<'a> {
                     .collect::<Result<Vec<_>, _>>()?
                     .join(", ")
             );
-            let mut arguments = Vec::with_capacity(argument_types.len());
+            let mut arguments = Vec::with_capacity(
+                argument_types.len() + usize::from(clause.resumption_type.is_some()),
+            );
             for (field, ty) in argument_types.iter().enumerate() {
                 let llvm_ty = self.llvm_type(*ty)?;
                 let address = self.temp();
@@ -4477,14 +4944,45 @@ impl<'a> Emitter<'a> {
                 self.line(&format!("  %{value} = load {llvm_ty}, ptr %{address}"));
                 arguments.push((*ty, format!("%{value}")));
             }
-            self.emit_destroy_handler(&handler, clause_tuple, function)?;
-            self.emit_drop_effect_frame_chain(&suspended);
+            if let Some(resumption_type) = clause.resumption_type {
+                let resume_slot = self.load_effect_runtime_field(&format!("%{runtime}"), 6, "ptr");
+                let resume_init = self.load_effect_runtime_field(&format!("%{runtime}"), 7, "ptr");
+                let resumption_size = self.emit_array_element_size("%g1.resumption");
+                let resumption = self.temp();
+                self.line(&format!(
+                    "  %{resumption} = call ptr @malloc({usize_ty} {resumption_size})"
+                ));
+                let failed = self.temp();
+                self.line(&format!("  %{failed} = icmp eq ptr %{resumption}, null"));
+                self.emit_trap_if(failed);
+                for (field, value) in [
+                    (0, suspended.clone()),
+                    (1, format!("%{frame}")),
+                    (2, resume_slot),
+                    (3, resume_init),
+                    (4, handler.clone()),
+                ] {
+                    let address = self.temp();
+                    self.line(&format!(
+                        "  %{address} = getelementptr inbounds %g1.resumption, ptr %{resumption}, i32 0, i32 {field}"
+                    ));
+                    self.line(&format!("  store ptr {value}, ptr %{address}"));
+                }
+                arguments.push((resumption_type, format!("%{resumption}")));
+            } else {
+                self.emit_destroy_handler(&handler, clause_tuple, function)?;
+                self.emit_drop_effect_frame_chain(&suspended);
+            }
             let returned = self.emit_call_owned_callable_value(
                 function,
                 *clause_type,
                 &format!("%{callable}"),
                 &arguments,
+                clause.resumption_type.is_none(),
             )?;
+            if clause.resumption_type.is_some() {
+                self.emit_destroy_handler(&handler, clause_tuple, function)?;
+            }
             self.line(&format!("  call void @free(ptr {payload})"));
             let result_ty = self.llvm_return_type(definition.result_type)?;
             if let Some(returned) = returned {
@@ -4542,6 +5040,17 @@ impl<'a> Emitter<'a> {
         self.line(&format!("frame.chain.done{done_label}:"));
     }
 
+    fn emit_destroy_one_shot_resumption(&mut self, resumption: &str) {
+        let top_address = self.temp();
+        let top = self.temp();
+        self.line(&format!(
+            "  %{top_address} = getelementptr inbounds %g1.resumption, ptr {resumption}, i32 0, i32 0"
+        ));
+        self.line(&format!("  %{top} = load ptr, ptr %{top_address}"));
+        self.emit_drop_effect_frame_chain(&format!("%{top}"));
+        self.line(&format!("  call void @free(ptr {resumption})"));
+    }
+
     fn load_effect_runtime_field(&mut self, runtime: &str, field: u32, ty: &str) -> String {
         let address = self.temp();
         let value = self.temp();
@@ -4558,6 +5067,7 @@ impl<'a> Emitter<'a> {
         callable_type: TypeId,
         callable: &str,
         arguments: &[(TypeId, String)],
+        consume_callable: bool,
     ) -> Result<Option<String>, Vec<Diagnostic>> {
         let Type::Callable {
             signature,
@@ -4571,13 +5081,13 @@ impl<'a> Emitter<'a> {
                 "handler clause has a non-callable runtime type",
             )]);
         };
-        if receiver_mode != 2
-            || signature.params.as_slice()
-                != arguments.iter().map(|(ty, _)| *ty).collect::<Vec<_>>()
+        if signature.params.as_slice() != arguments.iter().map(|(ty, _)| *ty).collect::<Vec<_>>()
+            || receiver_mode > 2
+            || !consume_callable && receiver_mode == 2
         {
             return Err(vec![unsupported(
                 function,
-                "terminal handler clause must consume an exact owned callable",
+                "handler clause must have an exact callable signature",
             )]);
         }
         let function_address = self.temp();
@@ -4600,14 +5110,18 @@ impl<'a> Emitter<'a> {
             "  %{data_address} = getelementptr inbounds %g1.capture, ptr %{capture_handle}, i32 0, i32 1"
         ));
         self.line(&format!("  %{data} = load ptr, ptr %{data_address}"));
-        let capture_ty = self.llvm_type(capture_type)?;
-        let receiver = self.temp();
-        self.line(&format!("  %{receiver} = load {capture_ty}, ptr %{data}"));
-        self.line(&format!("  store ptr null, ptr %{data_address}"));
-        self.line(&format!("  call void @free(ptr %{data})"));
-        self.emit_release_capture(&format!("%{capture_handle}"), capture_type, function)?;
-        self.line(&format!("  call void @free(ptr {callable})"));
-        let mut call_arguments = vec![format!("{capture_ty} %{receiver}")];
+        let mut call_arguments = if receiver_mode == 2 {
+            let capture_ty = self.llvm_type(capture_type)?;
+            let receiver = self.temp();
+            self.line(&format!("  %{receiver} = load {capture_ty}, ptr %{data}"));
+            self.line(&format!("  store ptr null, ptr %{data_address}"));
+            self.line(&format!("  call void @free(ptr %{data})"));
+            self.emit_release_capture(&format!("%{capture_handle}"), capture_type, function)?;
+            self.line(&format!("  call void @free(ptr {callable})"));
+            vec![format!("{capture_ty} %{receiver}")]
+        } else {
+            vec![format!("ptr %{data}")]
+        };
         call_arguments.extend(
             arguments
                 .iter()
@@ -4615,20 +5129,24 @@ impl<'a> Emitter<'a> {
                 .collect::<Result<Vec<_>, _>>()?,
         );
         let result_ty = self.llvm_return_type(signature.result)?;
-        if result_ty == "void" {
+        let returned = if result_ty == "void" {
             self.line(&format!(
                 "  call void %{target}({})",
                 call_arguments.join(", ")
             ));
-            Ok(None)
+            None
         } else {
             let returned = self.temp();
             self.line(&format!(
                 "  %{returned} = call {result_ty} %{target}({})",
                 call_arguments.join(", ")
             ));
-            Ok(Some(format!("%{returned}")))
+            Some(format!("%{returned}"))
+        };
+        if consume_callable && receiver_mode != 2 {
+            self.emit_destroy_callable(callable, capture_type, function)?;
         }
+        Ok(returned)
     }
 
     fn emit_call(
@@ -5292,6 +5810,50 @@ impl<'a> Emitter<'a> {
         Ok(contains)
     }
 
+    fn type_contains_resumption(
+        &self,
+        ty: TypeId,
+        visiting: &mut BTreeSet<TypeId>,
+    ) -> Result<bool, Vec<Diagnostic>> {
+        if !visiting.insert(ty) {
+            return Ok(false);
+        }
+        let contains =
+            match self.runtime_type(ty)? {
+                Type::Resumption { .. } => true,
+                Type::Array { element } => self
+                    .type_contains_resumption(*element, visiting)
+                    .unwrap_or(true),
+                Type::Callable { capture_type, .. } => self
+                    .type_contains_resumption(*capture_type, visiting)
+                    .unwrap_or(true),
+                Type::Handler { capture_type, .. } => self
+                    .type_contains_resumption(*capture_type, visiting)
+                    .unwrap_or(true),
+                Type::BindingPack { payload_type, .. } => self
+                    .type_contains_resumption(*payload_type, visiting)
+                    .unwrap_or(true),
+                Type::Tuple { fields, .. } => fields.iter().any(|field| {
+                    self.type_contains_resumption(*field, visiting)
+                        .unwrap_or(true)
+                }),
+                Type::Struct { fields, .. } => fields.iter().any(|field| {
+                    self.type_contains_resumption(field.ty, visiting)
+                        .unwrap_or(true)
+                }),
+                Type::Enum { variants, .. } => variants
+                    .iter()
+                    .flat_map(|variant| &variant.fields)
+                    .any(|field| {
+                        self.type_contains_resumption(field.ty, visiting)
+                            .unwrap_or(true)
+                    }),
+                _ => false,
+            };
+        visiting.remove(&ty);
+        Ok(contains)
+    }
+
     fn ensure_plain_array_element(
         &self,
         ty: TypeId,
@@ -5362,6 +5924,7 @@ impl<'a> Emitter<'a> {
                     if self.type_contains_byte_object(field, &mut BTreeSet::new())?
                         || self.type_contains_callable(field, &mut BTreeSet::new())?
                         || self.type_contains_handler(field, &mut BTreeSet::new())?
+                        || self.type_contains_resumption(field, &mut BTreeSet::new())?
                     {
                         let extracted = self.temp();
                         self.line(&format!(
@@ -5377,6 +5940,7 @@ impl<'a> Emitter<'a> {
                     if self.type_contains_byte_object(field.ty, &mut BTreeSet::new())?
                         || self.type_contains_callable(field.ty, &mut BTreeSet::new())?
                         || self.type_contains_handler(field.ty, &mut BTreeSet::new())?
+                        || self.type_contains_resumption(field.ty, &mut BTreeSet::new())?
                     {
                         let extracted = self.temp();
                         self.line(&format!(
@@ -5395,7 +5959,8 @@ impl<'a> Emitter<'a> {
             Type::Enum { .. }
                 if self.type_contains_byte_object(ty, &mut BTreeSet::new())?
                     || self.type_contains_callable(ty, &mut BTreeSet::new())?
-                    || self.type_contains_handler(ty, &mut BTreeSet::new())? =>
+                    || self.type_contains_handler(ty, &mut BTreeSet::new())?
+                    || self.type_contains_resumption(ty, &mut BTreeSet::new())? =>
             {
                 self.emit_visit_enum_payloads(ty, value, true, function)?;
             }
@@ -5404,6 +5969,20 @@ impl<'a> Emitter<'a> {
             }
             Type::Handler { .. } => {
                 return Err(vec![unsupported(function, "copying Handler values")]);
+            }
+            Type::Resumption {
+                upper_uses, copy, ..
+            } => {
+                if copy || upper_uses.is_none_or(|upper| upper > 1) {
+                    return Err(vec![unsupported(
+                        function,
+                        "copying multishot Resumption values",
+                    )]);
+                }
+                return Err(vec![unsupported(
+                    function,
+                    "copying one-shot Resumption values",
+                )]);
             }
             _ => {}
         }
@@ -5462,6 +6041,17 @@ impl<'a> Emitter<'a> {
             Type::Handler { capture_type, .. } => {
                 self.emit_destroy_handler(&value, capture_type, function)?;
             }
+            Type::Resumption {
+                upper_uses, copy, ..
+            } => {
+                if copy || upper_uses != Some(1) {
+                    return Err(vec![unsupported(
+                        function,
+                        "destroying multishot Resumption values",
+                    )]);
+                }
+                self.emit_destroy_one_shot_resumption(&value);
+            }
             Type::BindingPack { payload_type, .. } => {
                 self.emit_destroy(payload_type, &value, function)?;
             }
@@ -5477,6 +6067,7 @@ impl<'a> Emitter<'a> {
                         || self.type_contains_array(field, &mut BTreeSet::new())?
                         || self.type_contains_callable(field, &mut BTreeSet::new())?
                         || self.type_contains_handler(field, &mut BTreeSet::new())?
+                        || self.type_contains_resumption(field, &mut BTreeSet::new())?
                     {
                         let extracted = self.temp();
                         self.line(&format!(
@@ -5493,6 +6084,7 @@ impl<'a> Emitter<'a> {
                         || self.type_contains_array(field.ty, &mut BTreeSet::new())?
                         || self.type_contains_callable(field.ty, &mut BTreeSet::new())?
                         || self.type_contains_handler(field.ty, &mut BTreeSet::new())?
+                        || self.type_contains_resumption(field.ty, &mut BTreeSet::new())?
                     {
                         let extracted = self.temp();
                         self.line(&format!(
@@ -5506,7 +6098,8 @@ impl<'a> Emitter<'a> {
                 if self.type_contains_byte_object(ty, &mut BTreeSet::new())?
                     || self.type_contains_array(ty, &mut BTreeSet::new())?
                     || self.type_contains_callable(ty, &mut BTreeSet::new())?
-                    || self.type_contains_handler(ty, &mut BTreeSet::new())? =>
+                    || self.type_contains_handler(ty, &mut BTreeSet::new())?
+                    || self.type_contains_resumption(ty, &mut BTreeSet::new())? =>
             {
                 self.emit_visit_enum_payloads(ty, &value, false, function)?;
             }
@@ -5692,7 +6285,8 @@ impl<'a> Emitter<'a> {
                 let owned = self.type_contains_byte_object(field.ty, &mut BTreeSet::new())?
                     || self.type_contains_array(field.ty, &mut BTreeSet::new())?
                     || self.type_contains_callable(field.ty, &mut BTreeSet::new())?
-                    || self.type_contains_handler(field.ty, &mut BTreeSet::new())?;
+                    || self.type_contains_handler(field.ty, &mut BTreeSet::new())?
+                    || self.type_contains_resumption(field.ty, &mut BTreeSet::new())?;
                 if !owned {
                     continue;
                 }
@@ -6121,6 +6715,7 @@ impl<'a> Emitter<'a> {
             | Type::Array { .. }
             | Type::Callable { .. }
             | Type::Handler { .. }
+            | Type::Resumption { .. }
             | Type::RefShared { .. }
             | Type::RefUnique { .. } => usize::from(self.pointer_width() / 8),
             Type::BindingPack { payload_type, .. } => self.storage_size(*payload_type, visiting)?,
@@ -6302,6 +6897,7 @@ impl<'a> Emitter<'a> {
             | Type::Array { .. }
             | Type::Callable { .. }
             | Type::Handler { .. }
+            | Type::Resumption { .. }
             | Type::RefShared { .. }
             | Type::RefUnique { .. } => "ptr".into(),
             Type::BindingPack { payload_type, .. } => self.llvm_type(*payload_type)?,

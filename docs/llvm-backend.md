@@ -67,6 +67,8 @@ The current vertical slice supports:
   synchronous and outward tail replacement, with explicit program counters,
   parent/result links, initialization state, typed cleanup callbacks, and
   effect-request records rather than relying on the native stack;
+- exact and optional one-shot resumptions, including multi-frame resume,
+  repeated handler re-entry, tail-resume, and cancellation cleanup;
 - binding-pack payload construction, erased-evidence layout, projection,
   copying, and cleanup;
 - typed native host-import calls for process arguments, filesystem read/write,
@@ -104,8 +106,9 @@ silently changing semantics.
    implemented. Handler values and terminal `Handle`/`Perform` dispatch now
    use the native heap-frame ABI, including direct outward call/return
    propagation, static tail-call replacement, and typed terminal unwinding.
-   Resumption, cancellation, multishot continuation cloning, and indirect
-   outward-call propagation remain.
+   Exact and optional one-shot resume, tail-resume, and cancellation are also
+   implemented. Multishot continuation cloning and indirect outward-call
+   propagation remain.
 7. Production output: object/executable emission through clang and initial
    bytecode/LLVM differential conformance tests are implemented, and `-O0`
    through `-O3` are forwarded to native code generation; debug information,
