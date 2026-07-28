@@ -76,6 +76,30 @@ fn completion_only_handle_replaces_inspection_effects() {
 }
 
 #[test]
+fn nested_completion_handles_preserve_following_local_identities() {
+    let source = r#"
+        answer() -> i64 {
+            let code = handle 0 {
+                0 => handle 1 {
+                    1 => 42,
+                    _ => 41
+                },
+                _ => 40
+            };
+            let copied = code;
+            copied
+        }
+        main() { () }
+    "#;
+    std::thread::Builder::new()
+        .stack_size(16 * 1024 * 1024)
+        .spawn(move || assert_eq!(run(source, "answer"), Value::I64(42)))
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
 fn arrowless_unit_signatures_singleton_rows_and_terminal_calls_compile() {
     let source = r#"
         effect Out { write(value: i64) }

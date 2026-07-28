@@ -2535,10 +2535,19 @@ impl<'a> Typer<'a> {
             }
             // Grammar-complete forms rejected by `validate` before typing; if
             // one reaches this shadow typer it is deliberately untyped.
-            ExprKind::Resume { .. }
-            | ExprKind::Cancel { .. }
-            | ExprKind::TailResume { .. }
-            | ExprKind::ContextBlock(_) => {
+            ExprKind::ContextBlock(statements) => {
+                // Context blocks are structurally lowered by their enclosing
+                // control-flow primitive, but their source lets still consume
+                // identities in Core's function-local arena. Walk the block so
+                // later provisional locals retain those same identities.
+                let block = self.block(source, statements, expected);
+                self.node(
+                    source,
+                    block.ty.clone(),
+                    TypedExprKind::Unsupported(vec![block]),
+                )
+            }
+            ExprKind::Resume { .. } | ExprKind::Cancel { .. } | ExprKind::TailResume { .. } => {
                 self.node(source, None, TypedExprKind::Unsupported(vec![]))
             }
         }
