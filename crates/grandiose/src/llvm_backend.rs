@@ -1280,14 +1280,46 @@ impl<'a> Emitter<'a> {
                         )]);
                     }
                 };
-                if fields.len() != payloads.len() {
+                let runtime_fields = fields
+                    .iter()
+                    .filter(|field| {
+                        !matches!(self.runtime_type(**field), Ok(Type::Available { .. }))
+                    })
+                    .count();
+                if runtime_fields != payloads.len() {
                     return Err(vec![unsupported(
                         function,
                         "binding payload count mismatch",
                     )]);
                 }
-                let value =
-                    self.emit_capture_aggregate(function, &aggregate_ty, &fields, payloads)?;
+                let mut value = "poison".to_owned();
+                let mut payloads = payloads.iter();
+                for (index, field) in fields.iter().enumerate() {
+                    let (field_ty, field_value) =
+                        if matches!(self.runtime_type(*field)?, Type::Available { .. }) {
+                            ("i8".to_owned(), "0".to_owned())
+                        } else {
+                            let payload = payloads.next().expect("validated payload count");
+                            let actual = self.register_runtime_type(function, payload.register)?;
+                            if actual != *field {
+                                return Err(vec![unsupported(
+                                    function,
+                                    "binding payload type mismatch",
+                                )]);
+                            }
+                            let field_ty = self.llvm_type(*field)?;
+                            let field_value = self.load_operand(function, payload)?;
+                            if payload.mode == mir::UseMode::Copy {
+                                self.emit_retain(*field, &field_value, function)?;
+                            }
+                            (field_ty, field_value)
+                        };
+                    let inserted = self.temp();
+                    self.line(&format!(
+                        "  %{inserted} = insertvalue {aggregate_ty} {value}, {field_ty} {field_value}, {index}"
+                    ));
+                    value = format!("%{inserted}");
+                }
                 self.line(&format!("  store {aggregate_ty} {value}, ptr %r{dst}"));
             }
             InstructionKind::Drop { owner } => {
@@ -2630,27 +2662,27 @@ impl<'a> Emitter<'a> {
                 cases,
                 otherwise,
             } => {
-                if !otherwise.args.is_empty() || cases.iter().any(|(_, edge)| !edge.args.is_empty())
-                {
-                    return Err(vec![unsupported(
-                        function,
-                        "switch edges carrying block arguments",
-                    )]);
-                }
                 let ty = self.register_type(function, discr.register)?;
                 let value = self.load_operand(function, discr)?;
+                let switch_id = self.temp();
+                let otherwise_label = self.temp();
+                let case_labels = cases.iter().map(|_| self.temp()).collect::<Vec<_>>();
                 self.line(&format!(
-                    "  switch {ty} {value}, label %bb{} [",
-                    otherwise.target
+                    "  switch {ty} {value}, label %switch.edge{switch_id}.{otherwise_label} ["
                 ));
-                for (constant, edge) in cases {
+                for ((constant, _), label) in cases.iter().zip(&case_labels) {
                     self.line(&format!(
-                        "    {ty} {}, label %bb{}",
+                        "    {ty} {}, label %switch.edge{switch_id}.{label}",
                         llvm_scalar_constant(constant)?,
-                        edge.target
                     ));
                 }
                 self.line("  ]");
+                self.line(&format!("switch.edge{switch_id}.{otherwise_label}:"));
+                self.emit_edge(function, otherwise)?;
+                for ((_, edge), label) in cases.iter().zip(case_labels) {
+                    self.line(&format!("switch.edge{switch_id}.{label}:"));
+                    self.emit_edge(function, edge)?;
+                }
             }
             Terminator::Leave { target, .. } => self.emit_edge(function, target)?,
             Terminator::Abort { .. } => {
@@ -3185,6 +3217,12 @@ impl<'a> Emitter<'a> {
                     self.type_contains_byte_object(field.ty, visiting)
                         .unwrap_or(true)
                 }),
+                Type::Array { element } => self
+                    .type_contains_byte_object(*element, visiting)
+                    .unwrap_or(true),
+                Type::Callable { capture_type, .. } => self
+                    .type_contains_byte_object(*capture_type, visiting)
+                    .unwrap_or(true),
                 Type::BindingPack { payload_type, .. } => self
                     .type_contains_byte_object(*payload_type, visiting)
                     .unwrap_or(true),
@@ -3217,6 +3255,9 @@ impl<'a> Emitter<'a> {
             Type::Struct { fields, .. } => fields
                 .iter()
                 .any(|field| self.type_contains_array(field.ty, visiting).unwrap_or(true)),
+            Type::Callable { capture_type, .. } => self
+                .type_contains_array(*capture_type, visiting)
+                .unwrap_or(true),
             Type::BindingPack { payload_type, .. } => self
                 .type_contains_array(*payload_type, visiting)
                 .unwrap_or(true),
@@ -3249,6 +3290,9 @@ impl<'a> Emitter<'a> {
                     self.type_contains_callable(field.ty, visiting)
                         .unwrap_or(true)
                 }),
+                Type::Array { element } => self
+                    .type_contains_callable(*element, visiting)
+                    .unwrap_or(true),
                 Type::BindingPack { payload_type, .. } => self
                     .type_contains_callable(*payload_type, visiting)
                     .unwrap_or(true),
@@ -3271,15 +3315,17 @@ impl<'a> Emitter<'a> {
         function: &mir::Function,
     ) -> Result<(), Vec<Diagnostic>> {
         match self.runtime_type(ty)? {
-            Type::Callable { .. }
-            | Type::Handler { .. }
-            | Type::Resumption { .. }
-            | Type::BindingPack { .. }
-            | Type::Available { .. } => {
+            Type::Handler { .. } | Type::Resumption { .. } | Type::Available { .. } => {
                 return Err(vec![unsupported(
                     function,
-                    "Array elements with callable or effect runtime state",
+                    "Array elements with effect runtime state",
                 )]);
+            }
+            Type::Callable { capture_type, .. } => {
+                self.ensure_plain_array_element(*capture_type, function)?;
+            }
+            Type::BindingPack { payload_type, .. } => {
+                self.ensure_plain_array_element(*payload_type, function)?;
             }
             Type::Array { element } => self.ensure_plain_array_element(*element, function)?,
             Type::Tuple { fields, .. } => {
@@ -3977,6 +4023,7 @@ impl<'a> Emitter<'a> {
         }
         let size = match self.runtime_type(ty)? {
             Type::Unit => 1,
+            Type::Available { .. } => 1,
             Type::Never => 0,
             Type::U8 | Type::I8 => 1,
             Type::U16 | Type::I16 => 2,
@@ -4131,6 +4178,7 @@ impl<'a> Emitter<'a> {
         };
         Ok(match ty.representation() {
             Type::Unit => "i8".into(),
+            Type::Available { .. } => "i8".into(),
             Type::Never => "void".into(),
             Type::U8 | Type::I8 => "i8".into(),
             Type::U16 | Type::I16 => "i16".into(),
