@@ -1302,6 +1302,50 @@ fn synchronous_known_receiver_calls_execute_inside_effect_frames() {
 }
 
 #[test]
+fn receiverless_internal_handlers_tail_recurse_in_constant_native_stack_space() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-receiverless-internal-handler-tail-recursion.glorious",
+        r#"
+            effect RecurCase { select(value: i64) -> ! }
+            walk(remaining: i64) -> i64 {
+                handle perform RecurCase::select(remaining) {
+                    RecurCase::select(0) => 42,
+                    RecurCase::select(value) => walk(value - 1)
+                }
+            }
+            selected() -> i64 { walk(100000) }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let walk = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "walk")
+        .unwrap();
+    assert!(phases.mir.functions[walk].outward_protocols.is_empty());
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    run_native_i64(
+        module,
+        selected,
+        42,
+        "receiverless-internal-handler-tail-recursion",
+    );
+}
+
+#[test]
 fn outward_known_receiver_calls_suspend_inside_effect_frames() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-outward-known-receiver-effect-frame.glorious",

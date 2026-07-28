@@ -30,6 +30,18 @@ const RUNTIME_FAULT_UNHANDLED_EFFECT: u32 = 12;
 const RUNTIME_FAULT_EXPLICIT_ABORT: u32 = 13;
 const NATIVE_PRIMITIVE_OUTPUT_LIMIT: u64 = 64 * 1024 * 1024;
 
+fn effect_frame_tail_target(terminator: &Terminator) -> Option<u32> {
+    match terminator {
+        Terminator::TailCall { function, .. }
+        | Terminator::TailCallKnownReceiver { function, .. } => Some(*function),
+        Terminator::TailCallIndirect {
+            known_function: Some(function),
+            ..
+        } => Some(*function),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LlvmModule {
     pub ir: String,
@@ -407,12 +419,40 @@ impl<'a> Emitter<'a> {
     }
 
     fn function_needs_effect_frame(&self, function: &mir::Function) -> bool {
-        !function.outward_protocols.is_empty()
-            || function.receiver_mode.is_some()
-                && function
+        let is_seed = |function: &mir::Function| {
+            !function.outward_protocols.is_empty()
+                || function
                     .blocks
                     .iter()
                     .any(|block| matches!(block.terminator, Terminator::Handle { .. }))
+        };
+        if is_seed(function) {
+            return true;
+        }
+        let mut pending = function
+            .blocks
+            .iter()
+            .filter_map(|block| effect_frame_tail_target(&block.terminator))
+            .collect::<Vec<_>>();
+        let mut visited = BTreeSet::new();
+        while let Some(target) = pending.pop() {
+            if !visited.insert(target) {
+                continue;
+            }
+            let Some(target) = self.phases.mir.functions.get(target as usize) else {
+                continue;
+            };
+            if is_seed(target) {
+                return true;
+            }
+            pending.extend(
+                target
+                    .blocks
+                    .iter()
+                    .filter_map(|block| effect_frame_tail_target(&block.terminator)),
+            );
+        }
+        false
     }
 
     fn emit_host_import_declarations(&mut self) {
@@ -2034,8 +2074,7 @@ impl<'a> Emitter<'a> {
             self.line(&format!("bb{}:", block.id));
             for instruction in &block.statements {
                 if let InstructionKind::Drop { owner } = &instruction.kind {
-                    let owner_type =
-                        self.register_runtime_type(function, owner.register)?;
+                    let owner_type = self.register_runtime_type(function, owner.register)?;
                     if !self
                         .ordinary_aggregate_field_layout(function, owner.register)?
                         .is_empty()
@@ -2069,32 +2108,19 @@ impl<'a> Emitter<'a> {
                 }
                 match &instruction.kind {
                     InstructionKind::Copy { dst, src } | InstructionKind::Move { dst, src } => {
-                        self.emit_copy_ordinary_aggregate_fields(
-                            function,
-                            src.register,
-                            *dst,
-                        )?;
+                        self.emit_copy_ordinary_aggregate_fields(function, src.register, *dst)?;
                         if matches!(&instruction.kind, InstructionKind::Move { .. }) {
-                            self.emit_set_ordinary_aggregate_fields(
-                                function,
-                                src.register,
-                                false,
-                            )?;
+                            self.emit_set_ordinary_aggregate_fields(function, src.register, false)?;
                         }
                     }
                     _ => {
                         if let Some(destination) = instruction.kind.destination() {
-                            self.emit_set_ordinary_aggregate_fields(
-                                function,
-                                destination,
-                                true,
-                            )?;
+                            self.emit_set_ordinary_aggregate_fields(function, destination, true)?;
                         }
                     }
                 }
                 if let InstructionKind::ProjectMove { src, field, .. } = &instruction.kind {
-                    let source_type =
-                        self.register_runtime_type(function, src.register)?;
+                    let source_type = self.register_runtime_type(function, src.register)?;
                     if !self
                         .ordinary_aggregate_field_layout(function, src.register)?
                         .is_empty()
@@ -2156,8 +2182,7 @@ impl<'a> Emitter<'a> {
         destination: u32,
     ) -> Result<(), Vec<Diagnostic>> {
         let source_fields = self.ordinary_aggregate_field_layout(function, source)?;
-        let destination_fields =
-            self.ordinary_aggregate_field_layout(function, destination)?;
+        let destination_fields = self.ordinary_aggregate_field_layout(function, destination)?;
         if source_fields.len() != destination_fields.len() {
             return Err(vec![unsupported(
                 function,
@@ -2238,8 +2263,129 @@ impl<'a> Emitter<'a> {
             "define {result} @g1_f{index}({}) {{",
             direct_params.join(", ")
         ));
-        self.line("  call void @llvm.trap()");
-        self.line("  unreachable");
+        if function.outward_protocols.is_empty() {
+            let return_slot = self.temp();
+            let return_init = self.temp();
+            self.line(&format!(
+                "  %{return_slot} = alloca {}",
+                if result == "void" { "i8" } else { &result }
+            ));
+            self.line(&format!("  %{return_init} = alloca i8"));
+            self.line(&format!("  store i8 0, ptr %{return_init}"));
+            let mut arguments = vec![
+                "ptr null".to_owned(),
+                format!("ptr %{return_slot}"),
+                format!("ptr %{return_init}"),
+            ];
+            if function.receiver_mode.is_some() {
+                arguments.push(format!(
+                    "{} %receiver",
+                    self.llvm_type(function.receiver_type)?
+                ));
+            }
+            arguments.extend(
+                function
+                    .params
+                    .iter()
+                    .enumerate()
+                    .map(|(parameter, ty)| {
+                        self.llvm_type(*ty)
+                            .map(|ty| format!("{ty} %arg{parameter}"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            let frame = self.temp();
+            self.line(&format!(
+                "  %{frame} = call ptr @g1_effect_new_f{index}({})",
+                arguments.join(", ")
+            ));
+            let runtime = self.temp();
+            self.line(&format!("  %{runtime} = alloca %g1.effect_runtime"));
+            for (field, ty, value) in [
+                (0, "ptr", format!("%{frame}")),
+                (1, "i32", "-1".to_owned()),
+                (2, "i32", "0".to_owned()),
+                (3, "i32", "0".to_owned()),
+                (4, "ptr", "null".to_owned()),
+                (5, "ptr", "null".to_owned()),
+                (6, "ptr", "null".to_owned()),
+                (7, "ptr", "null".to_owned()),
+                (8, "i1", "false".to_owned()),
+            ] {
+                let address = self.temp();
+                self.line(&format!(
+                    "  %{address} = getelementptr inbounds %g1.effect_runtime, ptr %{runtime}, i32 0, i32 {field}"
+                ));
+                self.line(&format!("  store {ty} {value}, ptr %{address}"));
+            }
+            let loop_label = self.temp();
+            let step_label = self.temp();
+            let stopped_label = self.temp();
+            self.line(&format!("  br label %effect.wrapper.loop{loop_label}"));
+            self.line(&format!("effect.wrapper.loop{loop_label}:"));
+            let current = self.load_effect_runtime_field(&format!("%{runtime}"), 0, "ptr");
+            let running = self.temp();
+            self.line(&format!("  %{running} = icmp ne ptr {current}, null"));
+            self.line(&format!(
+                "  br i1 %{running}, label %effect.wrapper.step{step_label}, label %effect.wrapper.stopped{stopped_label}"
+            ));
+            self.line(&format!("effect.wrapper.step{step_label}:"));
+            let step_address = self.temp();
+            let step = self.temp();
+            self.line(&format!(
+                "  %{step_address} = getelementptr inbounds %g1.effect_frame, ptr {current}, i32 0, i32 1"
+            ));
+            self.line(&format!("  %{step} = load ptr, ptr %{step_address}"));
+            self.line(&format!(
+                "  call void %{step}(ptr {current}, ptr %{runtime})"
+            ));
+            self.line(&format!("  br label %effect.wrapper.loop{loop_label}"));
+            self.line(&format!("effect.wrapper.stopped{stopped_label}:"));
+            let status = self.load_effect_runtime_field(&format!("%{runtime}"), 1, "i32");
+            let normal_label = self.temp();
+            let perform_label = self.temp();
+            let invalid_label = self.temp();
+            self.line(&format!(
+                "  switch i32 {status}, label %effect.wrapper.invalid{invalid_label} [ i32 0, label %effect.wrapper.normal{normal_label} i32 1, label %effect.wrapper.perform{perform_label} ]"
+            ));
+            self.line(&format!("effect.wrapper.normal{normal_label}:"));
+            let completed = self.load_effect_runtime_field(&format!("%{runtime}"), 5, "ptr");
+            self.emit_drop_optional_effect_frame(&completed);
+            if result == "void" {
+                self.line("  ret void");
+            } else {
+                let returned = self.temp();
+                self.line(&format!(
+                    "  %{returned} = load {result}, ptr %{return_slot}"
+                ));
+                self.line(&format!("  ret {result} %{returned}"));
+            }
+            self.line(&format!("effect.wrapper.perform{perform_label}:"));
+            let unhandled = self.temp();
+            self.emit_effect_request_router(
+                function,
+                &format!("%{runtime}"),
+                &format!("effect.wrapper.loop{loop_label}"),
+                &format!("effect.wrapper.unhandled{unhandled}"),
+                EffectRoutingMode::Initial,
+            )?;
+            self.line(&format!("effect.wrapper.unhandled{unhandled}:"));
+            let protocol = self.load_effect_runtime_field(&format!("%{runtime}"), 2, "i32");
+            let operation = self.load_effect_runtime_field(&format!("%{runtime}"), 3, "i32");
+            self.emit_runtime_fault(
+                RUNTIME_FAULT_UNHANDLED_EFFECT,
+                &protocol,
+                &operation,
+                "null",
+                "0",
+            );
+            self.line(&format!("effect.wrapper.invalid{invalid_label}:"));
+            self.line("  call void @llvm.trap()");
+            self.line("  unreachable");
+        } else {
+            self.line("  call void @llvm.trap()");
+            self.line("  unreachable");
+        }
         self.line("}");
         self.line("");
 
@@ -3421,7 +3567,6 @@ impl<'a> Emitter<'a> {
         };
         if receiver_mode != 2
             || !signature.params.is_empty()
-            || signature.outward_protocols.is_empty()
             || signature.result != definition.result_type
             || self.register_runtime_type(function, result)? != definition.result_type
         {
@@ -3496,7 +3641,7 @@ impl<'a> Emitter<'a> {
             .get(callee_index)
             .cloned()
             .ok_or_else(|| vec![unsupported(caller, "effect tail-call target is missing")])?;
-        if callee.outward_protocols.is_empty() {
+        if !self.function_needs_effect_frame(&callee) {
             return self.emit_effect_sync_tail_call(
                 caller,
                 caller_index,
@@ -4252,7 +4397,7 @@ impl<'a> Emitter<'a> {
             .get(callee_index)
             .cloned()
             .ok_or_else(|| vec![unsupported(caller, "effect call target is missing")])?;
-        if callee.outward_protocols.is_empty() {
+        if !self.function_needs_effect_frame(&callee) {
             return self.emit_effect_sync_call(caller, result, callee_index, &callee, args, normal);
         }
         if callee.receiver_mode.is_some() || callee.params.len() != args.len() {
@@ -4363,7 +4508,7 @@ impl<'a> Emitter<'a> {
 
         let receiver_ty = self.register_type(caller, receiver.register)?;
         let receiver_value = self.load_operand(caller, receiver)?;
-        if callee.outward_protocols.is_empty() {
+        if !self.function_needs_effect_frame(&callee) {
             return self.emit_effect_sync_known_receiver_call(
                 caller,
                 result,
@@ -4663,9 +4808,7 @@ impl<'a> Emitter<'a> {
                 all_present = format!("%{present}");
             } else {
                 let combined = self.temp();
-                self.line(&format!(
-                    "  %{combined} = and i1 {all_present}, %{present}"
-                ));
+                self.line(&format!("  %{combined} = and i1 {all_present}, %{present}"));
                 all_present = format!("%{combined}");
             }
         }
@@ -8905,8 +9048,7 @@ impl<'a> Emitter<'a> {
                         .ordinary_aggregate_field_layout(function, operand.register)?
                         .is_empty()
                     {
-                        let runtime_ty =
-                            self.register_runtime_type(function, operand.register)?;
+                        let runtime_ty = self.register_runtime_type(function, operand.register)?;
                         self.emit_retain(runtime_ty, &value, function)?;
                     } else {
                         self.emit_retain_ordinary_aggregate_register(
@@ -8936,7 +9078,8 @@ impl<'a> Emitter<'a> {
             .map(|parameter| parameter.register)
             .collect::<BTreeSet<_>>();
         let mut moved_sources = BTreeSet::new();
-        for (parameter, (ty, value, source, mode, field_flags)) in parameters.into_iter().zip(values)
+        for (parameter, (ty, value, source, mode, field_flags)) in
+            parameters.into_iter().zip(values)
         {
             self.line(&format!(
                 "  store {ty} {value}, ptr %r{}",
