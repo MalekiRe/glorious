@@ -147,6 +147,10 @@ pub token_kind_at(value: &LexedSource, index: usize) -> TokenKind {
 
 pub token_code(value: &Token) -> u16 { value.code }
 
+pub token_code_at(value: &LexedSource, index: usize) -> u16 {
+    token_code(Vec::index(&value.tokens, move index))
+}
+
 pub token_span(value: &Token) -> Span {
     Span { start: value.span.start, end: value.span.end }
 }

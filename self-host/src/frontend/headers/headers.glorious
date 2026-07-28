@@ -1,0 +1,1297 @@
+// Flat declaration interfaces parsed from scanner-owned token ranges.
+// Ordinary callables and type aliases are the first consumers of the shared
+// generic/type arenas. Bodies remain unparsed.
+
+use super::lexer::TokenKind;
+
+pub struct HeaderRange { start: u32, count: u32 }
+
+pub struct HeaderTokenRange { start: usize, end: usize }
+
+pub struct TypeId { index: u32 }
+
+impl Use<[0, *]> for TypeId {}
+
+pub struct NameUse { name: Id<String>, token: usize }
+
+pub struct TypeEdge { value: TypeId, position: u32 }
+
+// kind_code:
+// 1 path, 2 shared reference, 3 unique reference, 4 tuple,
+// 5 application, 6 never.
+pub struct TypeNode {
+    kind_code: u8,
+    tokens: HeaderTokenRange,
+    names: HeaderRange,
+    children: HeaderRange,
+    constructor: Option<TypeId>,
+    lifetime: Option<NameUse>
+}
+
+// kind_code: 1 type, 2 lifetime, 3 effect row.
+pub struct GenericParam {
+    name: Id<String>,
+    kind_code: u8,
+    tokens: HeaderTokenRange
+}
+
+pub struct Parameter {
+    name: Id<String>,
+    name_token: usize,
+    ty: TypeId
+}
+
+pub struct EffectRow {
+    effects: HeaderRange,
+    row_tail: Option<NameUse>,
+    tokens: HeaderTokenRange
+}
+
+pub struct CallableHeader {
+    shell: u32,
+    name: Id<String>,
+    public: Bool,
+    generics: HeaderRange,
+    parameters: HeaderRange,
+    result: Option<TypeId>,
+    effects: Option<EffectRow>,
+    tokens: HeaderTokenRange
+}
+
+pub struct HeaderIndex {
+    callables: Vec<CallableHeader>,
+    generic_params: Vec<GenericParam>,
+    parameters: Vec<Parameter>,
+    types: Vec<TypeNode>,
+    names: Vec<NameUse>,
+    type_edges: Vec<TypeEdge>
+}
+
+pub struct ParsedHeaders {
+    source: super::lexer::LexedSource,
+    index: HeaderIndex
+}
+
+pub struct HeaderError { code: u8, token: usize, related: usize }
+
+struct HeaderBounds { start: usize, end: usize }
+
+struct Parser {
+    source: super::lexer::LexedSource,
+    cursor: usize,
+    limit: usize,
+    output: HeaderIndex
+}
+
+pub range_start(value: &HeaderRange) -> u32 { value.start }
+
+pub range_count(value: &HeaderRange) -> u32 { value.count }
+
+pub type_index(value: &TypeId) -> u32 { value.index }
+
+pub callable_count(value: &HeaderIndex) -> usize { Vec::len(&value.callables) }
+
+pub type_count(value: &HeaderIndex) -> usize { Vec::len(&value.types) }
+
+pub parameter_count(value: &HeaderIndex) -> usize { Vec::len(&value.parameters) }
+
+pub generic_param_count(value: &HeaderIndex) -> usize {
+    Vec::len(&value.generic_params)
+}
+
+pub callable_at<'a>(
+    value: &'a HeaderIndex,
+    index: usize
+) -> Option<&'a CallableHeader> {
+    Vec::get(&value.callables, index)
+}
+
+pub type_at<'a>(value: &'a HeaderIndex, index: usize) -> Option<&'a TypeNode> {
+    Vec::get(&value.types, index)
+}
+
+pub error_code(value: &HeaderError) -> u8 { value.code }
+
+pub error_token(value: &HeaderError) -> usize { value.token }
+
+pub error_related(value: &HeaderError) -> usize { value.related }
+
+header_range(start: usize, end: usize) -> HeaderRange {
+    HeaderRange {
+        start: wrapping_convert_to_u32(start),
+        count: wrapping_convert_to_u32(end - start)
+    }
+}
+
+empty_range(value: &Vec<TypeEdge>) -> HeaderRange {
+    let start = Vec::len(value);
+    header_range(start, start)
+}
+
+token_range(start: usize, end: usize) -> HeaderTokenRange {
+    HeaderTokenRange { start: move start, end: move end }
+}
+
+header_error(code: u8, token: usize, related: usize) -> HeaderError {
+    HeaderError { code: code, token: move token, related: related }
+}
+
+header_bounds(value: &super::scanner::DeclarationShell) -> HeaderBounds {
+    let range = super::scanner::shell_header(value);
+    HeaderBounds {
+        start: super::scanner::range_start(range),
+        end: super::scanner::range_end(range)
+    }
+}
+
+token_code(value: &Parser, index: usize) -> u16 {
+    super::lexer::token_code_at(&value.source, move index)
+}
+
+at_code(value: &Parser, code: u16) -> Bool {
+    handle value.cursor < value.limit {
+        Result::Err(_) => false,
+        Result::Ok(_) => token_code(value, value.cursor) == code
+    }
+}
+
+eat_code(value: &mut Parser, code: u16) -> Bool {
+    handle at_code(&*value, code) {
+        Result::Err(_) => false,
+        Result::Ok(_) => {
+            value.cursor = value.cursor + usize_value(1);
+            true
+        }
+    }
+}
+
+expect_code(
+    value: &mut Parser,
+    code: u16,
+    error_code: u8,
+    related: usize
+) -> Result<(), HeaderError> {
+    let token = value.cursor;
+    handle eat_code(value, code) {
+        Result::Err(_) => Result::Err(
+            header_error(error_code, token, related)
+        ),
+        Result::Ok(_) => Result::Ok(())
+    }
+}
+
+ident(value: &mut Parser, related: usize) -> Result<NameUse, HeaderError> {
+    let token = value.cursor;
+    handle value.cursor < value.limit {
+        Result::Err(_) => Result::Err(header_error(1, token, related)),
+        Result::Ok(_) => handle super::lexer::token_kind_at(&value.source, token) {
+            TokenKind::Ident(name) => {
+                value.cursor = token + usize_value(1);
+                Result::Ok(NameUse { name: move name, token: token })
+            },
+            _ => Result::Err(header_error(1, token, related))
+        }
+    }
+}
+
+at_ident(value: &Parser, expected: &String) -> Bool {
+    handle value.cursor < value.limit {
+        Result::Err(_) => false,
+        Result::Ok(_) => handle super::lexer::token_kind_at(
+            &value.source,
+            value.cursor
+        ) {
+            TokenKind::Ident(name) => handle super::lexer::lexeme(
+                &value.source,
+                move name
+            ) {
+                Result::Err(_) => false,
+                Result::Ok(found) => *found == *expected
+            },
+            _ => false
+        }
+    }
+}
+
+push_type(
+    value: &mut Parser,
+    kind_code: u8,
+    start: usize,
+    names: HeaderRange,
+    children: HeaderRange,
+    constructor: Option<TypeId>,
+    lifetime: Option<NameUse>
+) -> TypeId {
+    let index = Vec::len(&value.output.types);
+    let end = value.cursor;
+    Vec::push(
+        &mut value.output.types,
+        TypeNode {
+            kind_code: kind_code,
+            tokens: token_range(start, end),
+            names: move names,
+            children: move children,
+            constructor: move constructor,
+            lifetime: move lifetime
+        }
+    );
+    TypeId { index: wrapping_convert_to_u32(index) }
+}
+
+append_edges(
+    output: &mut Vec<TypeEdge>,
+    values: &Vec<TypeId>,
+    index: usize,
+    position: u32
+) {
+    handle index < Vec::len(values) {
+        Result::Err(_) => (),
+        Result::Ok(_) => {
+            Vec::push(
+                &mut *output,
+                TypeEdge {
+                    value: *Vec::index(values, index),
+                    position: position
+                }
+            );
+            append_edges(
+                move output,
+                values,
+                index + usize_value(1),
+                position + wrapping_convert_to_u32(1)
+            )
+        }
+    }
+}
+
+parse_type_values(
+    value: &mut Parser,
+    closing_code: u16,
+    related: usize,
+    values: &mut Vec<TypeId>
+) -> Result<(), HeaderError> {
+    handle at_code(&*value, closing_code) {
+        Result::Ok(_) => Result::Ok(()),
+        Result::Err(_) => handle parse_type(value, related) {
+            Result::Err(error) => Result::Err(move error),
+            Result::Ok(ty) => {
+                Vec::push(&mut *values, move ty);
+                handle eat_code(value, 17) {
+                    Result::Err(_) => Result::Ok(()),
+                    Result::Ok(_) => handle at_code(&*value, closing_code) {
+                        Result::Ok(_) => Result::Ok(()),
+                        Result::Err(_) => parse_type_values(
+                            value,
+                            closing_code,
+                            related,
+                            move values
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+parse_path(value: &mut Parser, related: usize) -> Result<TypeId, HeaderError> {
+    let start = value.cursor;
+    let name_start = Vec::len(&value.output.names);
+    handle ident(value, related) {
+        Result::Err(error) => Result::Err(move error),
+        Result::Ok(name) => {
+            Vec::push(&mut value.output.names, move name);
+            parse_path_tail(value, related, start, name_start)
+        }
+    }
+}
+
+parse_path_tail(
+    value: &mut Parser,
+    related: usize,
+    start: usize,
+    name_start: usize
+) -> Result<TypeId, HeaderError> {
+    handle eat_code(value, 19) {
+        Result::Ok(_) => handle ident(value, related) {
+            Result::Err(error) => Result::Err(move error),
+            Result::Ok(name) => {
+                Vec::push(&mut value.output.names, move name);
+                parse_path_tail(value, related, start, name_start)
+            }
+        },
+        Result::Err(_) => {
+            let name_end = Vec::len(&value.output.names);
+            let edge_position = Vec::len(&value.output.type_edges);
+            let path = push_type(
+                value,
+                1,
+                start,
+                header_range(name_start, name_end),
+                header_range(edge_position, edge_position),
+                Result::Err(()),
+                Result::Err(())
+            );
+            parse_application(value, related, start, move path)
+        }
+    }
+}
+
+parse_application(
+    value: &mut Parser,
+    related: usize,
+    start: usize,
+    constructor: TypeId
+) -> Result<TypeId, HeaderError> {
+    handle eat_code(value, 34) {
+        Result::Err(_) => Result::Ok(move constructor),
+        Result::Ok(_) => handle at_code(&*value, 36) {
+            Result::Ok(_) => Result::Err(
+                header_error(5, value.cursor, related)
+            ),
+            Result::Err(_) => {
+            let arguments = Vec::new();
+            handle parse_type_values(value, 36, related, &mut arguments) {
+                Result::Err(error) => Result::Err(move error),
+                Result::Ok(_) => handle expect_code(value, 36, 4, related) {
+                    Result::Err(error) => Result::Err(move error),
+                    Result::Ok(_) => {
+                        let edge_start = Vec::len(&value.output.type_edges);
+                        append_edges(
+                            &mut value.output.type_edges,
+                            &arguments,
+                            0,
+                            0
+                        );
+                        Result::Ok(push_type(
+                            value,
+                            5,
+                            start,
+                            header_range(0, 0),
+                            header_range(
+                                edge_start,
+                                Vec::len(&value.output.type_edges)
+                            ),
+                            Result::Ok(move constructor),
+                            Result::Err(())
+                        ))
+                    }
+                }
+            }
+            }
+        }
+    }
+}
+
+parse_reference(
+    value: &mut Parser,
+    related: usize,
+    start: usize
+) -> Result<TypeId, HeaderError> {
+    let lifetime = take_lifetime(value);
+    parse_reference_referent(value, related, start, move lifetime)
+}
+
+take_lifetime(value: &mut Parser) -> Option<NameUse> {
+    let cursor = value.cursor;
+    let limit = value.limit;
+    let kind = handle cursor < limit {
+        Result::Err(_) => TokenKind::Eof,
+        Result::Ok(_) => super::lexer::token_kind_at(&value.source, cursor)
+    };
+    handle cursor < limit {
+        Result::Err(_) => Result::Err(()),
+        Result::Ok(_) => handle move kind {
+            TokenKind::Lifetime(name) => {
+                let token = cursor;
+                value.cursor = token + usize_value(1);
+                Result::Ok(NameUse { name: move name, token: token })
+            },
+            _ => Result::Err(())
+        }
+    }
+}
+
+parse_reference_referent(
+    value: &mut Parser,
+    related: usize,
+    start: usize,
+    lifetime: Option<NameUse>
+) -> Result<TypeId, HeaderError> {
+    handle at_ident(&*value, &"mut") {
+        Result::Ok(_) => {
+            value.cursor = value.cursor + usize_value(1);
+            parse_reference_kind(
+                value,
+                related,
+                start,
+                move lifetime,
+                3
+            )
+        },
+        Result::Err(_) => parse_reference_kind(
+            value,
+            related,
+            start,
+            move lifetime,
+            2
+        )
+    }
+}
+
+parse_reference_kind(
+    value: &mut Parser,
+    related: usize,
+    start: usize,
+    lifetime: Option<NameUse>,
+    kind_code: u8
+) -> Result<TypeId, HeaderError> {
+    handle parse_type(value, related) {
+        Result::Err(error) => Result::Err(move error),
+        Result::Ok(referent) => {
+            let edge_start = Vec::len(&value.output.type_edges);
+            Vec::push(
+                &mut value.output.type_edges,
+                TypeEdge { value: move referent, position: 0 }
+            );
+            Result::Ok(push_type(
+                value,
+                kind_code,
+                start,
+                header_range(0, 0),
+                header_range(edge_start, edge_start + usize_value(1)),
+                Result::Err(()),
+                move lifetime
+            ))
+        }
+    }
+}
+
+parse_tuple(
+    value: &mut Parser,
+    related: usize,
+    start: usize
+) -> Result<TypeId, HeaderError> {
+    let elements = Vec::new();
+    handle parse_type_values(value, 12, related, &mut elements) {
+        Result::Err(error) => Result::Err(move error),
+        Result::Ok(_) => handle expect_code(value, 12, 3, related) {
+            Result::Err(error) => Result::Err(move error),
+            Result::Ok(_) => {
+                let edge_start = Vec::len(&value.output.type_edges);
+                append_edges(
+                    &mut value.output.type_edges,
+                    &elements,
+                    0,
+                    0
+                );
+                Result::Ok(push_type(
+                    value,
+                    4,
+                    start,
+                    header_range(0, 0),
+                    header_range(
+                        edge_start,
+                        Vec::len(&value.output.type_edges)
+                    ),
+                    Result::Err(()),
+                    Result::Err(())
+                ))
+            }
+        }
+    }
+}
+
+parse_type(value: &mut Parser, related: usize) -> Result<TypeId, HeaderError> {
+    let start = value.cursor;
+    handle eat_code(value, 38) {
+        Result::Ok(_) => parse_reference(value, related, start),
+        Result::Err(_) => handle eat_code(value, 11) {
+            Result::Ok(_) => parse_tuple(value, related, start),
+            Result::Err(_) => handle eat_code(value, 39) {
+                Result::Ok(_) => Result::Ok(push_type(
+                    value,
+                    6,
+                    start,
+                    header_range(0, 0),
+                    empty_range(&value.output.type_edges),
+                    Result::Err(()),
+                    Result::Err(())
+                )),
+                Result::Err(_) => parse_path(value, related)
+            }
+        }
+    }
+}
+
+parse_generics(value: &mut Parser, related: usize) -> Result<HeaderRange, HeaderError> {
+    let start = Vec::len(&value.output.generic_params);
+    handle eat_code(value, 34) {
+        Result::Err(_) => Result::Ok(header_range(start, start)),
+        Result::Ok(_) => parse_generic_items(value, related, start)
+    }
+}
+
+parse_generic_items(
+    value: &mut Parser,
+    related: usize,
+    start: usize
+) -> Result<HeaderRange, HeaderError> {
+    handle at_code(&*value, 36) {
+        Result::Ok(_) => Result::Err(header_error(5, value.cursor, related)),
+        Result::Err(_) => handle parse_one_generic(value, related) {
+                Result::Err(error) => Result::Err(move error),
+                Result::Ok(found) => {
+                    Vec::push(&mut value.output.generic_params, move found);
+                    handle eat_code(value, 17) {
+                        Result::Ok(_) => handle at_code(&*value, 36) {
+                            Result::Ok(_) => finish_generics(value, related, start),
+                            Result::Err(_) => parse_generic_items(
+                                value,
+                                related,
+                                start
+                            )
+                        },
+                        Result::Err(_) => finish_generics(value, related, start)
+                    }
+                }
+        }
+    }
+}
+
+parse_one_generic(
+    value: &mut Parser,
+    related: usize
+) -> Result<GenericParam, HeaderError> {
+    let token = value.cursor;
+    handle super::lexer::token_kind_at(&value.source, token) {
+        TokenKind::Lifetime(name) => {
+            value.cursor = token + usize_value(1);
+            Result::Ok(GenericParam {
+                name: move name,
+                kind_code: 2,
+                tokens: token_range(token, value.cursor)
+            })
+        },
+        _ => handle ident(value, related) {
+            Result::Err(error) => Result::Err(move error),
+            Result::Ok(name) => {
+                let kind = handle eat_code(value, 18) {
+                    Result::Err(_) => u8_value(1),
+                    Result::Ok(_) => handle at_ident(&*value, &"EffectRow") {
+                        Result::Err(_) => u8_value(0),
+                        Result::Ok(_) => {
+                            value.cursor = value.cursor + usize_value(1);
+                            u8_value(3)
+                        }
+                    }
+                };
+                handle kind == u8_value(0) {
+                    Result::Ok(_) => Result::Err(
+                        header_error(6, value.cursor, related)
+                    ),
+                    Result::Err(_) => Result::Ok(GenericParam {
+                        name: name.name,
+                        kind_code: kind,
+                        tokens: token_range(token, value.cursor)
+                    })
+                }
+            }
+        }
+    }
+}
+
+finish_generics(
+    value: &mut Parser,
+    related: usize,
+    start: usize
+) -> Result<HeaderRange, HeaderError> {
+    handle expect_code(value, 36, 4, related) {
+        Result::Err(error) => Result::Err(move error),
+        Result::Ok(_) => Result::Ok(
+            header_range(start, Vec::len(&value.output.generic_params))
+        )
+    }
+}
+
+parse_parameters(
+    value: &mut Parser,
+    related: usize
+) -> Result<HeaderRange, HeaderError> {
+    let start = Vec::len(&value.output.parameters);
+    handle at_code(&*value, 12) {
+        Result::Ok(_) => Result::Ok(header_range(start, start)),
+        Result::Err(_) => parse_parameter_items(value, related, start)
+    }
+}
+
+parse_parameter_items(
+    value: &mut Parser,
+    related: usize,
+    start: usize
+) -> Result<HeaderRange, HeaderError> {
+    handle ident(value, related) {
+        Result::Err(error) => Result::Err(move error),
+        Result::Ok(name) => handle expect_code(value, 18, 7, related) {
+            Result::Err(error) => Result::Err(move error),
+            Result::Ok(_) => handle parse_type(value, related) {
+                Result::Err(error) => Result::Err(move error),
+                Result::Ok(ty) => {
+                    Vec::push(
+                        &mut value.output.parameters,
+                        Parameter {
+                            name: name.name,
+                            name_token: name.token,
+                            ty: move ty
+                        }
+                    );
+                    handle eat_code(value, 17) {
+                        Result::Ok(_) => handle at_code(&*value, 12) {
+                            Result::Ok(_) => Result::Ok(header_range(
+                                start,
+                                Vec::len(&value.output.parameters)
+                            )),
+                            Result::Err(_) => parse_parameter_items(
+                                value,
+                                related,
+                                start
+                            )
+                        },
+                        Result::Err(_) => Result::Ok(header_range(
+                            start,
+                            Vec::len(&value.output.parameters)
+                        ))
+                    }
+                }
+            }
+        }
+    }
+}
+
+parse_effect_row(value: &mut Parser, related: usize) -> Result<EffectRow, HeaderError> {
+    let start = value.cursor;
+    let effects = Vec::new();
+    handle eat_code(value, 13) {
+        Result::Err(_) => handle parse_type(value, related) {
+            Result::Err(error) => Result::Err(move error),
+            Result::Ok(found_effect) => {
+                Vec::push(&mut effects, move found_effect);
+                finish_effects(
+                    value,
+                    start,
+                    move effects,
+                    Result::Err(())
+                )
+            }
+        },
+        Result::Ok(_) => parse_effect_items(value, related, start, move effects)
+    }
+}
+
+parse_effect_items(
+    value: &mut Parser,
+    related: usize,
+    start: usize,
+    effects: Vec<TypeId>
+) -> Result<EffectRow, HeaderError> {
+    handle eat_code(value, 30) {
+        Result::Ok(_) => handle ident(value, related) {
+            Result::Err(error) => Result::Err(move error),
+            Result::Ok(row_tail) => handle expect_code(value, 14, 8, related) {
+                Result::Err(error) => Result::Err(move error),
+                Result::Ok(_) => finish_effects(
+                    value,
+                    start,
+                    move effects,
+                    Result::Ok(move row_tail)
+                )
+            }
+        },
+        Result::Err(_) => handle eat_code(value, 14) {
+            Result::Ok(_) => finish_effects(
+                value,
+                start,
+                move effects,
+                Result::Err(())
+            ),
+            Result::Err(_) => handle parse_type(value, related) {
+                Result::Err(error) => Result::Err(move error),
+                Result::Ok(found_effect) => {
+                    let next = move effects;
+                    Vec::push(&mut next, move found_effect);
+                    handle eat_code(value, 17) {
+                        Result::Ok(_) => parse_effect_items(
+                            value,
+                            related,
+                            start,
+                            move next
+                        ),
+                        Result::Err(_) => parse_effect_items(
+                            value,
+                            related,
+                            start,
+                            move next
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+finish_effects(
+    value: &mut Parser,
+    start: usize,
+    effects: Vec<TypeId>,
+    row_tail: Option<NameUse>
+) -> Result<EffectRow, HeaderError> {
+    let edge_start = Vec::len(&value.output.type_edges);
+    append_edges(
+        &mut value.output.type_edges,
+        &effects,
+        0,
+        0
+    );
+    Result::Ok(EffectRow {
+        effects: header_range(edge_start, Vec::len(&value.output.type_edges)),
+        row_tail: move row_tail,
+        tokens: token_range(start, value.cursor)
+    })
+}
+
+parse_callable(
+    value: &mut Parser,
+    shell: u32,
+    public: Bool,
+    start: usize
+) -> Result<(), HeaderError> {
+    value.cursor = start;
+    handle public {
+        Result::Ok(_) => { value.cursor = value.cursor + usize_value(1); },
+        Result::Err(_) => ()
+    };
+    handle ident(value, start) {
+        Result::Err(error) => Result::Err(move error),
+        Result::Ok(name) => handle parse_generics(value, start) {
+            Result::Err(error) => Result::Err(move error),
+            Result::Ok(generics) => handle expect_code(value, 11, 2, start) {
+                Result::Err(error) => Result::Err(move error),
+                Result::Ok(_) => handle parse_parameters(value, start) {
+                    Result::Err(error) => Result::Err(move error),
+                    Result::Ok(parameters) => handle expect_code(
+                        value,
+                        12,
+                        3,
+                        start
+                    ) {
+                        Result::Err(error) => Result::Err(move error),
+                        Result::Ok(_) => parse_callable_suffix(
+                            value,
+                            shell,
+                            move public,
+                            start,
+                            move name,
+                            move generics,
+                            move parameters
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+parse_callable_suffix(
+    value: &mut Parser,
+    shell: u32,
+    public: Bool,
+    start: usize,
+    name: NameUse,
+    generics: HeaderRange,
+    parameters: HeaderRange
+) -> Result<(), HeaderError> {
+    handle eat_code(value, 23) {
+        Result::Err(_) => parse_callable_effects(
+            value,
+            shell,
+            move public,
+            start,
+            move name,
+            move generics,
+            move parameters,
+            Result::Err(())
+        ),
+        Result::Ok(_) => handle at_code(&*value, 25) {
+            Result::Ok(_) => parse_callable_effects(
+                value,
+                shell,
+                move public,
+                start,
+                move name,
+                move generics,
+                move parameters,
+                Result::Err(())
+            ),
+            Result::Err(_) => handle parse_type(value, start) {
+                Result::Err(error) => Result::Err(move error),
+                Result::Ok(parsed_result) => parse_callable_effects(
+                    value,
+                    shell,
+                    move public,
+                    start,
+                    move name,
+                    move generics,
+                    move parameters,
+                    Result::Ok(move parsed_result)
+                )
+            }
+        }
+    }
+}
+
+parse_callable_effects(
+    value: &mut Parser,
+    shell: u32,
+    public: Bool,
+    start: usize,
+    name: NameUse,
+    generics: HeaderRange,
+    parameters: HeaderRange,
+    result: Option<TypeId>
+) -> Result<(), HeaderError> {
+    handle eat_code(value, 25) {
+        Result::Err(_) => finish_callable(
+            value,
+            shell,
+            move public,
+            start,
+            move name,
+            move generics,
+            move parameters,
+            move result,
+            Result::Err(())
+        ),
+        Result::Ok(_) => handle parse_effect_row(value, start) {
+            Result::Err(error) => Result::Err(move error),
+            Result::Ok(parsed_effects) => finish_callable(
+                value,
+                shell,
+                move public,
+                start,
+                move name,
+                move generics,
+                move parameters,
+                move result,
+                Result::Ok(move parsed_effects)
+            )
+        }
+    }
+}
+
+finish_callable(
+    value: &mut Parser,
+    shell: u32,
+    public: Bool,
+    start: usize,
+    name: NameUse,
+    generics: HeaderRange,
+    parameters: HeaderRange,
+    result: Option<TypeId>,
+    effects: Option<EffectRow>
+) -> Result<(), HeaderError> {
+    handle value.cursor == value.limit {
+        Result::Err(_) => Result::Err(
+            header_error(9, value.cursor, start)
+        ),
+        Result::Ok(_) => {
+            let limit = value.limit;
+            Vec::push(
+                &mut value.output.callables,
+                CallableHeader {
+                    shell: shell,
+                    name: name.name,
+                    public: move public,
+                    generics: move generics,
+                    parameters: move parameters,
+                    result: move result,
+                    effects: move effects,
+                    tokens: token_range(start, limit)
+                }
+            );
+            Result::Ok(())
+        }
+    }
+}
+
+parse_shells(
+    declarations: &super::scanner::DeclarationIndex,
+    index: usize,
+    parser: Parser
+) -> Result<ParsedHeaders, HeaderError> {
+    handle index < super::scanner::shell_count(declarations) {
+        Result::Err(_) => Result::Ok(finish_parser(move parser)),
+        Result::Ok(_) => handle super::scanner::shell_at(declarations, index) {
+            Result::Err(_) => Result::Ok(finish_parser(move parser)),
+            Result::Ok(shell) => {
+                let bounds = header_bounds(shell);
+                let start = bounds.start;
+                let limit = bounds.end;
+                let next = Parser {
+                    source: move parser.source,
+                    cursor: start,
+                    limit: limit,
+                    output: move parser.output
+                };
+                handle super::scanner::shell_kind_code(shell) == u8_value(12) {
+                    Result::Ok(_) => handle parse_callable(
+                        &mut next,
+                        wrapping_convert_to_u32(index),
+                        super::scanner::shell_is_public(shell),
+                        start
+                    ) {
+                        Result::Err(error) => Result::Err(move error),
+                        Result::Ok(_) => parse_shells(
+                            declarations,
+                            index + usize_value(1),
+                            move next
+                        )
+                    },
+                    Result::Err(_) => parse_shells(
+                        declarations,
+                        index + usize_value(1),
+                        move next
+                    )
+                }
+            }
+        }
+    }
+}
+
+finish_parser(value: Parser) -> ParsedHeaders {
+    ParsedHeaders { source: move value.source, index: move value.output }
+}
+
+pub parse(
+    source: super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex
+) -> Result<ParsedHeaders, HeaderError> {
+    parse_shells(
+        declarations,
+        0,
+        Parser {
+            source: move source,
+            cursor: 0,
+            limit: 0,
+            output: HeaderIndex {
+                callables: Vec::new(),
+                generic_params: Vec::new(),
+                parameters: Vec::new(),
+                types: Vec::new(),
+                names: Vec::new(),
+                type_edges: Vec::new()
+            }
+        }
+    )
+}
+
+write_string(output: &mut ByteBuf, value: &String) {
+    let bytes = String::as_bytes(value);
+    ByteBuf::write_u32_le(
+        &mut *output,
+        wrapping_convert_to_u32(Bytes::len(&bytes))
+    );
+    ByteBuf::append_bytes(move output, &bytes)
+}
+
+write_name(
+    output: &mut ByteBuf,
+    source: &super::lexer::LexedSource,
+    name: Id<String>
+) {
+    handle super::lexer::lexeme(source, move name) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(text) => write_string(move output, text)
+    }
+}
+
+write_optional_name(
+    output: &mut ByteBuf,
+    source: &super::lexer::LexedSource,
+    value: &Option<NameUse>
+) {
+    handle Option::as_ref(value) {
+        Result::Err(_) => ByteBuf::push(move output, 0),
+        Result::Ok(name) => {
+            ByteBuf::push(&mut *output, 1);
+            write_name(move output, source, name.name)
+        }
+    }
+}
+
+write_type_edges(
+    output: &mut ByteBuf,
+    parsed: &ParsedHeaders,
+    range: &HeaderRange,
+    index: u32
+) {
+    handle index < range.count {
+        Result::Err(_) => (),
+        Result::Ok(_) => {
+            let edge = Vec::index(
+                &parsed.index.type_edges,
+                wrapping_convert_to_usize(range.start + index)
+            );
+            write_type(output, parsed, &edge.value);
+            write_type_edges(
+                move output,
+                parsed,
+                range,
+                index + wrapping_convert_to_u32(1)
+            )
+        }
+    }
+}
+
+write_path_names(
+    output: &mut ByteBuf,
+    parsed: &ParsedHeaders,
+    range: &HeaderRange,
+    index: u32
+) {
+    handle index < range.count {
+        Result::Err(_) => (),
+        Result::Ok(_) => {
+            let name = Vec::index(
+                &parsed.index.names,
+                wrapping_convert_to_usize(range.start + index)
+            );
+            write_name(&mut *output, &parsed.source, name.name);
+            write_path_names(
+                move output,
+                parsed,
+                range,
+                index + wrapping_convert_to_u32(1)
+            )
+        }
+    }
+}
+
+write_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: &TypeId) {
+    let node = Vec::index(
+        &parsed.index.types,
+        wrapping_convert_to_usize(id.index)
+    );
+    ByteBuf::push(&mut *output, node.kind_code);
+    handle node.kind_code {
+        1 => {
+            ByteBuf::write_u32_le(&mut *output, node.names.count);
+            write_path_names(move output, parsed, &node.names, 0)
+        },
+        2 => {
+            write_optional_name(&mut *output, &parsed.source, &node.lifetime);
+            write_type_edges(move output, parsed, &node.children, 0)
+        },
+        3 => {
+            write_optional_name(&mut *output, &parsed.source, &node.lifetime);
+            write_type_edges(move output, parsed, &node.children, 0)
+        },
+        4 => {
+            ByteBuf::write_u32_le(&mut *output, node.children.count);
+            write_type_edges(move output, parsed, &node.children, 0)
+        },
+        5 => {
+            handle Option::as_ref(&node.constructor) {
+                Result::Err(_) => (),
+                Result::Ok(constructor) => write_type(
+                    &mut *output,
+                    parsed,
+                    constructor
+                )
+            };
+            ByteBuf::write_u32_le(&mut *output, node.children.count);
+            write_type_edges(move output, parsed, &node.children, 0)
+        },
+        _ => ()
+    }
+}
+
+write_generics(
+    output: &mut ByteBuf,
+    parsed: &ParsedHeaders,
+    range: &HeaderRange,
+    index: u32
+) {
+    handle index < range.count {
+        Result::Err(_) => (),
+        Result::Ok(_) => {
+            let parameter = Vec::index(
+                &parsed.index.generic_params,
+                wrapping_convert_to_usize(range.start + index)
+            );
+            ByteBuf::push(&mut *output, parameter.kind_code);
+            write_name(&mut *output, &parsed.source, parameter.name);
+            write_generics(
+                move output,
+                parsed,
+                range,
+                index + wrapping_convert_to_u32(1)
+            )
+        }
+    }
+}
+
+write_parameters(
+    output: &mut ByteBuf,
+    parsed: &ParsedHeaders,
+    range: &HeaderRange,
+    index: u32
+) {
+    handle index < range.count {
+        Result::Err(_) => (),
+        Result::Ok(_) => {
+            let parameter = Vec::index(
+                &parsed.index.parameters,
+                wrapping_convert_to_usize(range.start + index)
+            );
+            write_name(&mut *output, &parsed.source, parameter.name);
+            write_type(&mut *output, parsed, &parameter.ty);
+            write_parameters(
+                move output,
+                parsed,
+                range,
+                index + wrapping_convert_to_u32(1)
+            )
+        }
+    }
+}
+
+write_callable(
+    output: &mut ByteBuf,
+    parsed: &ParsedHeaders,
+    value: &CallableHeader
+) {
+    ByteBuf::push(&mut *output, bool_code(value.public));
+    write_name(&mut *output, &parsed.source, value.name);
+    ByteBuf::write_u32_le(&mut *output, value.generics.count);
+    write_generics(&mut *output, parsed, &value.generics, 0);
+    ByteBuf::write_u32_le(&mut *output, value.parameters.count);
+    write_parameters(&mut *output, parsed, &value.parameters, 0);
+    handle Option::as_ref(&value.result) {
+        Result::Err(_) => ByteBuf::push(&mut *output, 0),
+        Result::Ok(result) => {
+            ByteBuf::push(&mut *output, 1);
+            write_type(&mut *output, parsed, result)
+        }
+    };
+    handle Option::as_ref(&value.effects) {
+        Result::Err(_) => ByteBuf::push(move output, 0),
+        Result::Ok(row) => {
+            ByteBuf::push(&mut *output, 1);
+            write_effect_row(move output, parsed, row)
+        }
+    }
+}
+
+write_effect_row(
+    output: &mut ByteBuf,
+    parsed: &ParsedHeaders,
+    row: &EffectRow
+) {
+    ByteBuf::write_u32_le(&mut *output, row.effects.count);
+    write_type_edges(&mut *output, parsed, &row.effects, 0);
+    write_optional_name(move output, &parsed.source, &row.row_tail)
+}
+
+write_callables(
+    output: &mut ByteBuf,
+    parsed: &ParsedHeaders,
+    index: usize
+) {
+    handle index < Vec::len(&parsed.index.callables) {
+        Result::Err(_) => (),
+        Result::Ok(_) => {
+            write_callable(
+                &mut *output,
+                parsed,
+                Vec::index(&parsed.index.callables, index)
+            );
+            write_callables(
+                move output,
+                parsed,
+                index + usize_value(1)
+            )
+        }
+    }
+}
+
+encode_source(output: &mut ByteBuf, source: String) {
+    handle super::lexer::lex(&source) {
+        Result::Err(_) => ByteBuf::push(move output, 1),
+        Result::Ok(lexed) => handle super::scanner::scan(&lexed) {
+            Result::Err(_) => ByteBuf::push(move output, 2),
+            Result::Ok(declarations) => handle parse(move lexed, &declarations) {
+                Result::Err(_) => ByteBuf::push(move output, 3),
+                Result::Ok(parsed) => {
+                    ByteBuf::push(&mut *output, 0);
+                    ByteBuf::write_u32_le(
+                        &mut *output,
+                        wrapping_convert_to_u32(
+                            Vec::len(&parsed.index.callables)
+                        )
+                    );
+                    write_callables(move output, &parsed, 0)
+                }
+            }
+        }
+    }
+}
+
+process_inputs(
+    arguments: &Vec<String>,
+    index: usize,
+    output: &mut ByteBuf
+) / FileRead {
+    handle index < Vec::len(arguments) {
+        Result::Err(_) => (),
+        Result::Ok(_) => {
+            let path = *Vec::index(arguments, index);
+            let bytes = read_file(move path);
+            handle String::from_utf8(move bytes) {
+                Result::Err(_) => ByteBuf::push(&mut *output, 1),
+                Result::Ok(source) => encode_source(&mut *output, move source)
+            };
+            process_inputs(
+                arguments,
+                index + usize_value(1),
+                move output
+            )
+        }
+    }
+}
+
+pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
+    let arguments = process_args();
+    let count = Vec::len(&arguments);
+    handle count < usize_value(2) {
+        Result::Ok(_) => write_diagnostic(
+            "usage: grandiose-self-host-headers <output> <input>..."
+        ),
+        Result::Err(_) => {
+            let output_path = *Vec::index(&arguments, 0);
+            let encoded = ByteBuf::new();
+            ByteBuf::write_u32_le(
+                &mut encoded,
+                wrapping_convert_to_u32(count - usize_value(1))
+            );
+            process_inputs(&arguments, 1, &mut encoded);
+            write_file(move output_path, ByteBuf::finish(move encoded))
+        }
+    }
+}
+
+bool_code(value: Bool) -> u8 {
+    handle move value { Result::Ok(_) => 1, Result::Err(_) => 0 }
+}
+
+usize_value(value: usize) -> usize { move value }
+
+u8_value(value: u8) -> u8 { move value }
