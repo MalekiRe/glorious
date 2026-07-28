@@ -2,7 +2,7 @@ use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     error::Error,
     fmt,
-    ops::Range,
+    ops::{Deref, DerefMut, Range},
     sync::{Arc, OnceLock},
 };
 
@@ -8047,7 +8047,68 @@ enum CarrierOrigin {
     Local,
 }
 
-type CarrierOrigins = Vec<(Vec<u32>, CarrierOrigin)>;
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct CarrierOrigins(Arc<Vec<(Vec<u32>, CarrierOrigin)>>);
+
+impl CarrierOrigins {
+    fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl Deref for CarrierOrigins {
+    type Target = Vec<(Vec<u32>, CarrierOrigin)>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for CarrierOrigins {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        Arc::make_mut(&mut self.0)
+    }
+}
+
+impl FromIterator<(Vec<u32>, CarrierOrigin)> for CarrierOrigins {
+    fn from_iter<T: IntoIterator<Item = (Vec<u32>, CarrierOrigin)>>(iter: T) -> Self {
+        Self(Arc::new(iter.into_iter().collect()))
+    }
+}
+
+impl From<Vec<(Vec<u32>, CarrierOrigin)>> for CarrierOrigins {
+    fn from(origins: Vec<(Vec<u32>, CarrierOrigin)>) -> Self {
+        Self(Arc::new(origins))
+    }
+}
+
+impl PartialEq<Vec<(Vec<u32>, CarrierOrigin)>> for CarrierOrigins {
+    fn eq(&self, other: &Vec<(Vec<u32>, CarrierOrigin)>) -> bool {
+        self.as_slice() == other
+    }
+}
+
+impl IntoIterator for CarrierOrigins {
+    type Item = (Vec<u32>, CarrierOrigin);
+    type IntoIter = std::vec::IntoIter<Self::Item>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        match Arc::try_unwrap(self.0) {
+            Ok(origins) => origins,
+            Err(origins) => (*origins).clone(),
+        }
+        .into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a CarrierOrigins {
+    type Item = &'a (Vec<u32>, CarrierOrigin);
+    type IntoIter = std::slice::Iter<'a, (Vec<u32>, CarrierOrigin)>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
 
 /// A small finite set of function ids propagated through verifier dataflow.
 ///
@@ -8266,18 +8327,24 @@ impl ForwardRegisterAnalysis<'_> {
                 | Instruction::Abort { .. } => vec![],
                 _ => vec![pc + 1],
             };
-            for successor in successors {
+            let mut successors = successors.into_iter().peekable();
+            let mut outgoing = Some(state);
+            while let Some(successor) = successors.next() {
                 let slot = entries
                     .get_mut(successor as usize)
                     .ok_or(VerifyError::InvalidFunction(self.function_id))?;
                 match slot {
                     None => {
-                        *slot = Some(state.clone());
+                        *slot = Some(if successors.peek().is_none() {
+                            outgoing.take().unwrap()
+                        } else {
+                            outgoing.as_ref().unwrap().clone()
+                        });
                         work.push_back(successor);
                     }
                     Some(existing) => {
                         let mut changed = false;
-                        for (old, incoming) in existing.iter_mut().zip(&state) {
+                        for (old, incoming) in existing.iter_mut().zip(outgoing.as_ref().unwrap()) {
                             changed |= join(old, incoming);
                         }
                         if changed {
@@ -8450,7 +8517,7 @@ fn carrier_return_contract_with(
         }
         ReferenceOrigin::Local => return Err(VerifyError::InvalidFunction(fid)),
     };
-    Ok(vec![(result_path, source)])
+    Ok(vec![(result_path, source)].into())
 }
 
 fn canonical_callable_reference_contract(
@@ -8793,7 +8860,7 @@ fn aggregate_reference_return_origins_inner(
                     ));
                 }
                 origins.sort_by(|left, right| left.0.cmp(&right.0));
-                state[*dst as usize] = origins;
+                state[*dst as usize] = origins.into();
             }
             Instruction::MakeCallable { dst, captures, .. }
             | Instruction::MakeHandlerShared { dst, captures, .. } => {
@@ -8830,7 +8897,7 @@ fn aggregate_reference_return_origins_inner(
                         true
                     }
                 });
-                state[*dst as usize] = projected;
+                state[*dst as usize] = projected.into();
             }
             Instruction::ProjectCopy { dst, src, field } => {
                 let prefix = enum_variants[pc as usize][*src as usize]
@@ -8885,7 +8952,7 @@ fn aggregate_reference_return_origins_inner(
                 state[*dst as usize] = projected;
             }
             Instruction::BorrowShared { dst, .. } | Instruction::BorrowUnique { dst, .. } => {
-                state[*dst as usize] = vec![(vec![], CarrierOrigin::Local)];
+                state[*dst as usize] = vec![(vec![], CarrierOrigin::Local)].into();
             }
             Instruction::ReborrowShared { dst, src } | Instruction::ReborrowUnique { dst, src } => {
                 state[*dst as usize] = state[*src as usize].clone();
@@ -9142,14 +9209,14 @@ fn aggregate_reference_return_origins_inner(
                 let contract = carrier_return_contract_with(a, *function, visiting, provisional)?;
                 let origins =
                     instantiate_carrier_contract(&contract, None, args, &state, *function)?;
-                record_carrier_return(fid, origins, &mut returned)?;
+                record_carrier_return(fid, origins.into(), &mut returned)?;
             }
             Instruction::TailCallSelf { args }
                 if !reference_leaves(a, f.return_type).is_empty() =>
             {
                 let contract = carrier_return_contract_with(a, fid, visiting, provisional)?;
                 let origins = instantiate_carrier_contract(&contract, Some(0), args, &state, fid)?;
-                record_carrier_return(fid, origins, &mut returned)?;
+                record_carrier_return(fid, origins.into(), &mut returned)?;
             }
             Instruction::TailCallKnownReceiver {
                 function,
@@ -9178,7 +9245,7 @@ fn aggregate_reference_return_origins_inner(
                     .ok_or(VerifyError::InvalidFunction(*function))?;
                     origins.push((result_path, source));
                 }
-                record_carrier_return(fid, origins, &mut returned)?;
+                record_carrier_return(fid, origins.into(), &mut returned)?;
             }
             Instruction::TailCallIndirect { callable, args, .. }
                 if !reference_leaves(a, f.return_type).is_empty() =>
@@ -9189,7 +9256,7 @@ fn aggregate_reference_return_origins_inner(
                         .map_err(|_| VerifyError::InvalidFunction(fid))?;
                 let origins =
                     instantiate_carrier_contract(&contract, Some(*callable), args, &state, fid)?;
-                record_carrier_return(fid, origins, &mut returned)?;
+                record_carrier_return(fid, origins.into(), &mut returned)?;
             }
             Instruction::Return { src: Some(src) } => {
                 let remapped = remap_carrier_origins_with_expected(
@@ -9200,7 +9267,7 @@ fn aggregate_reference_return_origins_inner(
                     fid,
                 );
                 let origins = remapped?;
-                record_carrier_return(fid, origins, &mut returned)?;
+                record_carrier_return(fid, origins.into(), &mut returned)?;
             }
             Instruction::Leave { slot, value } => {
                 let entry = label_states[pc as usize]
@@ -9486,7 +9553,7 @@ fn array_write_effects_with(
                         ));
                     }
                     carried.sort_by(|left, right| left.0.cmp(&right.0));
-                    origins[*dst as usize] = carried;
+                    origins[*dst as usize] = carried.into();
                 }
                 Instruction::ProjectMove { dst, src, field } => {
                     let mut projected = Vec::new();
@@ -9498,7 +9565,7 @@ fn array_write_effects_with(
                             true
                         }
                     });
-                    origins[*dst as usize] = projected;
+                    origins[*dst as usize] = projected.into();
                 }
                 Instruction::ProjectCopy { dst, src, field } => {
                     origins[*dst as usize] = origins[*src as usize]
@@ -15908,6 +15975,20 @@ fn constant_type(a: &Artifact, c: &Constant) -> Result<TypeId, VerifyError> {
 mod tests {
     use super::*;
     use crate::bytecode::*;
+
+    #[test]
+    fn carrier_origin_facts_clone_only_when_mutated() {
+        let original = [(vec![0], CarrierOrigin::Receiver { path: vec![1] })]
+            .into_iter()
+            .collect::<CarrierOrigins>();
+        let mut changed = original.clone();
+        assert!(Arc::ptr_eq(&original.0, &changed.0));
+
+        changed.push((vec![2], CarrierOrigin::Local));
+        assert!(!Arc::ptr_eq(&original.0, &changed.0));
+        assert_eq!(original.len(), 1);
+        assert_eq!(changed.len(), 2);
+    }
 
     #[test]
     fn continuation_register_sets_roundtrip_sparse_large_frame_indices_compactly() {
