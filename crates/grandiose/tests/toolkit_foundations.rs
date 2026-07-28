@@ -468,6 +468,37 @@ fn generic_eq_and_hash_evidence_dispatches_for_string() {
 }
 
 #[test]
+fn symbolic_equal_dispatches_for_owned_strings() {
+    let source = r#"
+        effect BoolCase { inspect(value: Bool) -> !; }
+        score(value: Bool) -> usize {
+            handle perform BoolCase::inspect(move value) {
+                BoolCase::inspect(Result::Ok(_)) => 1,
+                BoolCase::inspect(Result::Err(_)) => 0
+            }
+        }
+        selected() -> usize {
+            let equal_left = "alpha";
+            let equal_right = "alpha";
+            let different_left = "alpha";
+            let different_right = "beta";
+            let equal = score(equal_left == equal_right);
+            let different = score(different_left == different_right);
+            equal * 10 + different
+        }
+        main() -> () { () }
+    "#;
+    let artifact = compile_source_to_bytecode("string-symbolic-equal.glorious", source).unwrap();
+    let verified = verify(artifact.clone()).unwrap();
+    assert_eq!(
+        Vm::new(verified)
+            .run(function_id(&artifact, "selected"), vec![])
+            .unwrap(),
+        Value::U64(10)
+    );
+}
+
+#[test]
 fn generic_interner_is_canonical_under_hash_bucket_collisions() {
     fn bucket(value: u64) -> u64 {
         value
