@@ -2905,6 +2905,36 @@ impl<'a> Emitter<'a> {
                 args,
                 normal,
             } => self.emit_effect_call(function, *result, function_index, args, normal)?,
+            Terminator::HostCall {
+                result,
+                import,
+                args,
+                normal,
+            } => {
+                let returned = self.emit_host_invocation(function, *result, *import, args)?;
+                for operand in args {
+                    if operand.mode == mir::UseMode::Move {
+                        self.emit_effect_set_initialized(function, operand.register, false)?;
+                    }
+                }
+                if let Some(dst) = result {
+                    if let Some(value) = returned {
+                        self.line(&format!("  store ptr %{value}, ptr %r{dst}"));
+                    } else if matches!(
+                        self.runtime_type(self.register_runtime_type(function, *dst)?)?,
+                        Type::Unit
+                    ) {
+                        self.line(&format!("  store i8 0, ptr %r{dst}"));
+                    } else {
+                        return Err(vec![unsupported(
+                            function,
+                            "host call returned no value for a non-Unit result",
+                        )]);
+                    }
+                    self.emit_effect_set_initialized(function, *dst, true)?;
+                }
+                self.emit_effect_edge(function, normal, result.iter().copied().collect())?;
+            }
             Terminator::CallIndirect {
                 result,
                 callable,
@@ -7943,6 +7973,32 @@ impl<'a> Emitter<'a> {
         args: &[mir::Operand],
         normal: &mir::Edge,
     ) -> Result<(), Vec<Diagnostic>> {
+        let returned = self.emit_host_invocation(caller, result, import, args)?;
+        if let Some(dst) = result {
+            if let Some(value) = returned {
+                self.line(&format!("  store ptr %{value}, ptr %r{dst}"));
+            } else if matches!(
+                self.runtime_type(self.register_runtime_type(caller, dst)?)?,
+                Type::Unit
+            ) {
+                self.line(&format!("  store i8 0, ptr %r{dst}"));
+            } else {
+                return Err(vec![unsupported(
+                    caller,
+                    "host call returned no value for a non-Unit result",
+                )]);
+            }
+        }
+        self.emit_edge_with_preassigned(caller, normal, result.into_iter().collect())
+    }
+
+    fn emit_host_invocation(
+        &mut self,
+        caller: &mir::Function,
+        result: Option<u32>,
+        import: HostImportRole,
+        args: &[mir::Operand],
+    ) -> Result<Option<u32>, Vec<Diagnostic>> {
         let expected_args = match import {
             HostImportRole::ProcessArgsGet => Vec::new(),
             HostImportRole::FsRead | HostImportRole::DiagnosticWrite => vec![Type::Text],
@@ -8037,10 +8093,7 @@ impl<'a> Emitter<'a> {
         for (runtime_ty, value) in loaded {
             self.emit_destroy(runtime_ty, &value, caller)?;
         }
-        if let (Some(dst), Some(value)) = (result, returned) {
-            self.line(&format!("  store ptr %{value}, ptr %r{dst}"));
-        }
-        self.emit_edge_with_preassigned(caller, normal, result.into_iter().collect())
+        Ok(returned)
     }
 
     #[allow(clippy::too_many_arguments)]

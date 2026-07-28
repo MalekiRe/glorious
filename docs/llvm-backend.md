@@ -120,9 +120,10 @@ effect-state array elements and unsupported deep mutable replay shapes produce
    plus direct `Text`/`Bytes` retain/release, nested owned aggregate cleanup,
    active-variant enum cleanup, and custom drop glue are implemented.
 4. Runtime ABI: `Text`, `Bytes`, and arrays of supported owned aggregates are
-   partially implemented; typed host imports are lowered through an external
-   C ABI, and executable emission bundles a native system host for arguments,
-   binary filesystem I/O, and diagnostics. Effect-state array elements and
+   partially implemented; typed host imports are lowered from ordinary and
+   outward effect frames through an external C ABI, and executable emission
+   bundles a native system host for arguments, binary filesystem I/O, and
+   diagnostics. Effect-state array elements and
    richer allocator/host-fault reporting remain. Every primitive in the frozen
    bytecode primitive table has a native lowering.
 5. First-class callables: environments, indirect calls, receiver modes,

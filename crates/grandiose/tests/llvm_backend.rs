@@ -1,6 +1,10 @@
-use std::{fs, process::Command};
+use std::{
+    fs,
+    process::Command,
+    sync::{Arc, Mutex},
+};
 
-use grandiose_vm::{Value, Vm, verify};
+use grandiose_vm::{Host, HostFault, Value, Vm, verify};
 
 const SYNC_OWNED_INDIRECT_EFFECT_SOURCE: &str = r#"
     effect Ask { [1,1] ask() -> i64 }
@@ -631,6 +635,129 @@ fn label_leave_executes_and_cleans_owned_values_inside_effect_frame() {
     options.emit_entry_wrapper = false;
     let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
     run_native_i64(module, selected, 42, "effect-frame-leave");
+}
+
+#[test]
+fn host_calls_execute_and_consume_arguments_inside_effect_frames() {
+    #[derive(Clone)]
+    struct RecordingHost(Arc<Mutex<Vec<String>>>);
+
+    impl Host for RecordingHost {
+        fn process_args(&self) -> Result<Vec<String>, HostFault> {
+            Ok(Vec::new())
+        }
+
+        fn fs_read(&self, _path: String) -> Result<Vec<u8>, HostFault> {
+            Ok(Vec::new())
+        }
+
+        fn fs_write(&self, _path: String, _contents: Vec<u8>) -> Result<(), HostFault> {
+            Ok(())
+        }
+
+        fn diagnostic_write(&self, message: String) -> Result<(), HostFault> {
+            self.0.lock().unwrap().push(message);
+            Ok(())
+        }
+    }
+
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-effect-frame-host-call.glorious",
+        r#"
+            effect Ask { [1,1] ask() -> i64 }
+            outward() -> i64 / {Ask} {
+                __g1_diagnostic_write(String::concat("be", "fore"));
+                perform Ask::ask()
+            }
+            selected() -> i64 {
+                handle outward() {
+                    Ask::ask() with continuation => resume(move continuation, 42)
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let outward = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "outward")
+        .unwrap();
+    assert!(!phases.mir.functions[outward].outward_protocols.is_empty());
+    assert!(phases.mir.functions[outward].blocks.iter().any(|block| {
+        matches!(
+            block.terminator,
+            grandiose::compiler_mir::Terminator::HostCall { .. }
+        )
+    }));
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let vm_selected = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    let diagnostics = Arc::new(Mutex::new(Vec::new()));
+    assert_eq!(
+        Vm::with_host(
+            verify(phases.artifact.clone()).unwrap(),
+            ["diagnostic"],
+            RecordingHost(Arc::clone(&diagnostics)),
+        )
+        .unwrap()
+        .run(vm_selected, vec![])
+        .unwrap(),
+        Value::I64(42)
+    );
+    assert_eq!(*diagnostics.lock().unwrap(), ["before"]);
+
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("effect-frame-host-call.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("effect-frame-host-call");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\n#include <stddef.h>\ntypedef struct {{ int64_t count; uintptr_t length; unsigned char data[]; }} G1Bytes;\nstatic int observed;\nvoid g1_host_diagnostic_write(G1Bytes *text) {{ observed = text->length == 6 && text->data[0] == 'b' && text->data[1] == 'e' && text->data[2] == 'f' && text->data[3] == 'o' && text->data[4] == 'r' && text->data[5] == 'e'; }}\nextern int64_t g1_f{selected}(void);\nint main(void) {{ return g1_f{selected}() == 42 && observed ? 0 : 1; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new("clang")
+        .arg("-fsanitize=address")
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable)
+        .env("ASAN_OPTIONS", "detect_leaks=1:halt_on_error=1")
+        .output()
+        .unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
+    );
 }
 
 #[test]
