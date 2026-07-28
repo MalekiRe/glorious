@@ -105,9 +105,8 @@ first stable ABI, and validates generated IR in tests with `llvm-as`. Native
 scalar, `Text`/`Bytes`, array, callable, handler, activation, one-shot, and
 multishot programs are also executed against C harnesses and usually compared
 with the VM result; owned runtime paths run under AddressSanitizer. Unsupported
-effect-state array elements, replay-time effectful terminal clauses, and
-unsupported deep mutable replay shapes produce `G1LLVM001` instead of silently
-changing semantics.
+effect-state array elements and unsupported deep mutable replay shapes produce
+`G1LLVM001` instead of silently changing semantics.
 
 ## Delivery chunks
 
@@ -144,8 +143,9 @@ changing semantics.
    propagation is implemented with callable starter thunks and refcounted
    guard chains. Synchronous indirect calls and indirect tail calls from an
    effect frame use the same callable receiver and ownership rules as ordinary
-   native calls. Deep mutable graph/handler cloning and replay-time effectful
-   terminal clauses remain.
+   native calls. Replay-time effectful terminal clauses use the same guarded
+   takeover path under one-shot and multishot execution. Deep mutable
+   callable/handler environment cloning remains.
 7. Production output: object/executable emission through clang, bundled system
    hosting for executables, and initial bytecode/LLVM differential conformance
    tests are implemented. `-O0` through `-O3` are forwarded to native code

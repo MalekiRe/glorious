@@ -2072,7 +2072,7 @@ fn effect_framed_cancel_drops_the_suspended_chain_and_continues() {
 }
 
 #[test]
-fn llvm_rejects_effect_framed_terminal_clause_reached_during_replay() {
+fn llvm_replays_effect_framed_terminal_clauses_with_vm_parity() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-replayed-effect-framed-terminal-clause.glorious",
         r#"
@@ -2104,15 +2104,99 @@ fn llvm_rejects_effect_framed_terminal_clause_reached_during_replay() {
     )
     .unwrap();
 
-    let errors = match grandiose::emit_llvm_ir(&phases, &grandiose::LlvmOptions::default()) {
-        Ok(_) => panic!("replayed effect-framed terminal clause unexpectedly emitted LLVM IR"),
-        Err(errors) => errors,
-    };
-    assert_eq!(errors.len(), 1, "{errors:#?}");
-    assert_eq!(errors[0].code.as_deref(), Some("G1LLVM001"));
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let vm_selected = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
     assert_eq!(
-        errors[0].message,
-        "LLVM backend does not yet support replay-time effect-framed terminal handler clauses in `selected`"
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_selected, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    run_native_i64(
+        module,
+        selected,
+        42,
+        "replayed-effect-framed-terminal-clause",
+    );
+}
+
+#[test]
+fn llvm_multishot_replays_effectful_terminal_takeover_twice() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-multishot-effect-framed-terminal-clause.glorious",
+        r#"
+            effect Choice {
+                [2,2] choose() -> i64
+                stop() -> !
+            }
+            effect Ask { [1,1] ask() -> i64 }
+            selected() -> i64 {
+                handle {
+                    handle {
+                        perform Choice::choose();
+                        perform Choice::stop()
+                    } {
+                        Choice::choose() with continuation => {
+                            let first = resume(continuation, 0);
+                            let second = resume(move continuation, 0);
+                            first + second
+                        },
+                        Choice::stop() => perform Ask::ask()
+                    }
+                } {
+                    Ask::ask() with continuation =>
+                        resume(move continuation, 42)
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let vm_selected = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_selected, vec![])
+            .unwrap(),
+        Value::I64(84)
+    );
+
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    run_native_i64(
+        module,
+        selected,
+        84,
+        "multishot-effect-framed-terminal-clause",
     );
 }
 

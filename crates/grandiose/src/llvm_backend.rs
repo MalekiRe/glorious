@@ -6889,30 +6889,6 @@ impl<'a> Emitter<'a> {
                 ))
             })
             .collect::<Result<Vec<_>, Vec<Diagnostic>>>()?;
-        for (_, definition, _, clause_types) in &definitions {
-            if !definition
-                .clauses
-                .iter()
-                .any(|clause| clause.resumption_type.is_some())
-            {
-                continue;
-            }
-            for (clause, clause_type) in definition.clauses.iter().zip(clause_types) {
-                let Type::Callable { signature, .. } = self.runtime_type(*clause_type)?.clone()
-                else {
-                    return Err(vec![unsupported(
-                        function,
-                        "handler clause has a non-callable runtime type",
-                    )]);
-                };
-                if clause.resumption_type.is_none() && !signature.outward_protocols.is_empty() {
-                    return Err(vec![unsupported(
-                        function,
-                        "replay-time effect-framed terminal handler clauses",
-                    )]);
-                }
-            }
-        }
         let clause_labels = definitions
             .iter()
             .map(|(_, definition, _, _)| {
