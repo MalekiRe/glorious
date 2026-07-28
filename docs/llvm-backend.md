@@ -69,6 +69,9 @@ The current vertical slice supports:
   effect-request records rather than relying on the native stack;
 - exact and optional one-shot resumptions, including multi-frame resume,
   repeated handler re-entry, tail-resume, and cancellation cleanup;
+- initial exact multishot replay for scalar and immutable refcounted frame
+  values, including outward frame-chain cloning, parent/result-slot rebasing,
+  and partial aggregate field masks;
 - binding-pack payload construction, erased-evidence layout, projection,
   copying, and cleanup;
 - typed native host-import calls for process arguments, filesystem read/write,
@@ -107,8 +110,9 @@ silently changing semantics.
    use the native heap-frame ABI, including direct outward call/return
    propagation, static tail-call replacement, and typed terminal unwinding.
    Exact and optional one-shot resume, tail-resume, and cancellation are also
-   implemented. Multishot continuation cloning and indirect outward-call
-   propagation remain.
+   implemented. Initial multishot frame cloning covers scalar, immutable
+   refcounted, and direct residual-field state. Deep mutable graph/handler
+   cloning and indirect outward-call propagation remain.
 7. Production output: object/executable emission through clang and initial
    bytecode/LLVM differential conformance tests are implemented, and `-O0`
    through `-O3` are forwarded to native code generation; debug information,

@@ -888,6 +888,140 @@ fn llvm_one_shot_tail_resume_and_cancel_match_the_vm() {
 }
 
 #[test]
+fn llvm_two_shot_resumption_clones_each_native_frame_snapshot() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-two-shot-resumption.glorious",
+        "effect Choose { [2,2] choose() -> i64 }\nleaf() -> i64 / {Choose} { perform Choose::choose() }\nselected() -> i64 { handle { let retained = String::concat(\"snap\", \"shot\"); let choice = leaf(); choice + 1 } { Choose::choose() with continuation => { let ignored = resume(continuation, 19); resume(move continuation, 41) } } }\nmain() -> () { selected(); () }",
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let vm_selected = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_selected, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    assert!(module.ir.contains("@g1_effect_clone_chain"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("two-shot-resumption.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("two-shot-resumption");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\nextern int64_t g1_f{selected}(void);\nint main(void) {{ return g1_f{selected}() == 42 ? 0 : 1; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new("clang")
+        .arg("-fsanitize=address")
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable).output().unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
+    );
+}
+
+#[test]
+fn llvm_two_shot_clones_and_drops_only_live_residual_fields() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-two-shot-residual.glorious",
+        "struct Resource { text: String }\nimpl Use<[0,1]> for Resource {}\nconsume(value: Resource) -> () { () }\nconsume_text(value: String) -> () { () }\neffect Choose { [2,2] choose() -> i64 }\nselected() -> i64 { handle { let pair = (Resource { text: String::concat(\"mo\", \"ved\") }, String::concat(\"ke\", \"pt\")); let moved = pair.0; consume(move moved); let choice = perform Choose::choose(); let retained = pair.1; consume_text(move retained); choice } { Choose::choose() with continuation => { let first = resume(continuation, 20); let second = resume(move continuation, 22); first + second } } }\nmain() -> () { selected(); () }",
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let vm_selected = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_selected, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("two-shot-residual.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("two-shot-residual");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\nextern int64_t g1_f{selected}(void);\nint main(void) {{ return g1_f{selected}() == 42 ? 0 : 1; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new("clang")
+        .arg("-fsanitize=address")
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable).output().unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
+    );
+}
+
+#[test]
 fn llvm_backend_invokes_the_native_host_abi_and_consumes_arguments() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-host-call.glorious",

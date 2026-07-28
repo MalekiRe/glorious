@@ -840,7 +840,7 @@ impl<'a> Emitter<'a> {
 
     fn emit_effect_runtime(&mut self) {
         let usize_ty = format!("i{}", self.pointer_width());
-        self.line("%g1.effect_frame = type { ptr, ptr, ptr, ptr, i32, ptr, ptr, ptr }");
+        self.line("%g1.effect_frame = type { ptr, ptr, ptr, ptr, i32, ptr, ptr, ptr, ptr }");
         self.line("%g1.effect_runtime = type { ptr, i32, i32, i32, ptr, ptr, ptr, ptr }");
         self.line("%g1.resumption = type { ptr, ptr, ptr, ptr, ptr }");
         if !self.uses_byte_runtime
@@ -851,6 +851,40 @@ impl<'a> Emitter<'a> {
             self.line(&format!("declare ptr @malloc({usize_ty})"));
             self.line("declare void @free(ptr)");
         }
+        if !self.uses_byte_runtime && !self.uses_array_runtime {
+            self.line(&format!(
+                "declare void @llvm.memcpy.p0.p0.{usize_ty}(ptr nocapture writeonly, ptr nocapture readonly, {usize_ty}, i1 immarg)"
+            ));
+        }
+        self.line("define internal ptr @g1_effect_clone_chain(ptr %source) {");
+        self.line("entry:");
+        self.line("  %empty = icmp eq ptr %source, null");
+        self.line("  br i1 %empty, label %done.empty, label %clone");
+        self.line("clone:");
+        self.line("  %previous.address = getelementptr inbounds %g1.effect_frame, ptr %source, i32 0, i32 0");
+        self.line("  %previous = load ptr, ptr %previous.address");
+        self.line("  %cloned.previous = call ptr @g1_effect_clone_chain(ptr %previous)");
+        self.line("  %callback.address = getelementptr inbounds %g1.effect_frame, ptr %source, i32 0, i32 8");
+        self.line("  %callback = load ptr, ptr %callback.address");
+        self.line("  %cloned = call ptr %callback(ptr %source, ptr %cloned.previous)");
+        self.line("  ret ptr %cloned");
+        self.line("done.empty:");
+        self.line("  ret ptr null");
+        self.line("}");
+        self.line("define internal ptr @g1_effect_chain_bottom(ptr %top) {");
+        self.line("entry:");
+        self.line("  br label %walk");
+        self.line("walk:");
+        self.line("  %current = phi ptr [ %top, %entry ], [ %previous, %advance ]");
+        self.line("  %previous.address = getelementptr inbounds %g1.effect_frame, ptr %current, i32 0, i32 0");
+        self.line("  %previous = load ptr, ptr %previous.address");
+        self.line("  %bottom = icmp eq ptr %previous, null");
+        self.line("  br i1 %bottom, label %done, label %advance");
+        self.line("advance:");
+        self.line("  br label %walk");
+        self.line("done:");
+        self.line("  ret ptr %current");
+        self.line("}");
     }
 
     fn emit_make_callable(
@@ -1450,9 +1484,29 @@ impl<'a> Emitter<'a> {
         format!("%g1.effect_frame.f{function_index}")
     }
 
+    fn effect_field_layout(
+        &self,
+        function: &mir::Function,
+    ) -> Result<(Vec<(usize, usize)>, usize), Vec<Diagnostic>> {
+        let mut total = 0usize;
+        let mut layout = Vec::with_capacity(function.register_types.len());
+        for ty in &function.register_types {
+            let count = match self.runtime_type(*ty)? {
+                Type::Tuple { .. } | Type::Struct { .. } | Type::BindingPack { .. } => {
+                    self.runtime_aggregate_fields(*ty)?.len()
+                }
+                _ => 0,
+            };
+            layout.push((total, count));
+            total += count;
+        }
+        Ok((layout, total))
+    }
+
     fn emit_effect_function(&mut self, index: usize) -> Result<(), Vec<Diagnostic>> {
         let function = &self.phases.mir.functions[index];
         let frame_ty = self.effect_frame_type(index);
+        let (field_layout, field_count) = self.effect_field_layout(function)?;
         let register_types = function
             .register_types
             .iter()
@@ -1461,6 +1515,7 @@ impl<'a> Emitter<'a> {
         let mut frame_fields = vec!["%g1.effect_frame".to_owned()];
         frame_fields.extend(register_types.iter().cloned());
         frame_fields.push(format!("[{} x i8]", register_types.len()));
+        frame_fields.push(format!("[{field_count} x i8]"));
         self.line(&format!(
             "{frame_ty} = type {{ {} }}",
             frame_fields.join(", ")
@@ -1536,6 +1591,7 @@ impl<'a> Emitter<'a> {
             (5, "ptr", "null".to_owned()),
             (6, "ptr", "null".to_owned()),
             (7, "ptr", "%return_init".to_owned()),
+            (8, "ptr", format!("@g1_effect_clone_f{index}")),
         ] {
             let address = self.temp();
             self.line(&format!(
@@ -1577,7 +1633,186 @@ impl<'a> Emitter<'a> {
                 u8::from(initialized)
             ));
         }
+        let field_initialized_field = function.register_types.len() + 2;
+        for (register, (offset, count)) in field_layout.iter().copied().enumerate() {
+            let initialized = (function.receiver_mode.is_some() && register == 0)
+                || (1..=function.params.len()).contains(&register);
+            for field in 0..count {
+                let address = self.temp();
+                self.line(&format!(
+                    "  %{address} = getelementptr inbounds {frame_ty}, ptr %{frame}, i32 0, i32 {field_initialized_field}, i32 {}",
+                    offset + field
+                ));
+                self.line(&format!(
+                    "  store i8 {}, ptr %{address}",
+                    u8::from(initialized)
+                ));
+            }
+        }
         self.line(&format!("  ret ptr %{frame}"));
+        self.line("}");
+        self.line("");
+
+        self.line(&format!(
+            "define ptr @g1_effect_clone_f{index}(ptr %source, ptr %previous) {{"
+        ));
+        let clone_size = self.emit_array_element_size(&frame_ty);
+        let clone = self.temp();
+        self.line(&format!(
+            "  %{clone} = call ptr @malloc({usize_ty} {clone_size})"
+        ));
+        let clone_failed = self.temp();
+        self.line(&format!("  %{clone_failed} = icmp eq ptr %{clone}, null"));
+        self.emit_trap_if(clone_failed);
+        self.line(&format!(
+            "  call void @llvm.memcpy.p0.p0.{usize_ty}(ptr %{clone}, ptr %source, {usize_ty} {clone_size}, i1 false)"
+        ));
+        let cloned_header = self.temp();
+        self.line(&format!(
+            "  %{cloned_header} = getelementptr inbounds {frame_ty}, ptr %{clone}, i32 0, i32 0"
+        ));
+        let cloned_previous_address = self.temp();
+        self.line(&format!(
+            "  %{cloned_previous_address} = getelementptr inbounds %g1.effect_frame, ptr %{cloned_header}, i32 0, i32 0"
+        ));
+        self.line(&format!(
+            "  store ptr %previous, ptr %{cloned_previous_address}"
+        ));
+        for field in [3, 7] {
+            let source_header = self.temp();
+            let source_previous_address = self.temp();
+            let source_previous = self.temp();
+            let source_pointer_address = self.temp();
+            let source_pointer = self.temp();
+            let has_previous = self.temp();
+            let has_pointer = self.temp();
+            let should_rebase = self.temp();
+            let rebase_label = self.temp();
+            let keep_label = self.temp();
+            let join_label = self.temp();
+            self.line(&format!(
+                "  %{source_header} = getelementptr inbounds {frame_ty}, ptr %source, i32 0, i32 0"
+            ));
+            self.line(&format!(
+                "  %{source_previous_address} = getelementptr inbounds %g1.effect_frame, ptr %{source_header}, i32 0, i32 0"
+            ));
+            self.line(&format!(
+                "  %{source_previous} = load ptr, ptr %{source_previous_address}"
+            ));
+            self.line(&format!(
+                "  %{source_pointer_address} = getelementptr inbounds %g1.effect_frame, ptr %{source_header}, i32 0, i32 {field}"
+            ));
+            self.line(&format!(
+                "  %{source_pointer} = load ptr, ptr %{source_pointer_address}"
+            ));
+            self.line(&format!(
+                "  %{has_previous} = icmp ne ptr %{source_previous}, null"
+            ));
+            self.line(&format!(
+                "  %{has_pointer} = icmp ne ptr %{source_pointer}, null"
+            ));
+            self.line(&format!(
+                "  %{should_rebase} = and i1 %{has_previous}, %{has_pointer}"
+            ));
+            self.line(&format!(
+                "  br i1 %{should_rebase}, label %frame.clone.rebase{rebase_label}, label %frame.clone.keep{keep_label}"
+            ));
+            self.line(&format!("frame.clone.rebase{rebase_label}:"));
+            let source_integer = self.temp();
+            let previous_integer = self.temp();
+            let offset = self.temp();
+            let rebased = self.temp();
+            self.line(&format!(
+                "  %{source_integer} = ptrtoint ptr %{source_pointer} to {usize_ty}"
+            ));
+            self.line(&format!(
+                "  %{previous_integer} = ptrtoint ptr %{source_previous} to {usize_ty}"
+            ));
+            self.line(&format!(
+                "  %{offset} = sub {usize_ty} %{source_integer}, %{previous_integer}"
+            ));
+            self.line(&format!(
+                "  %{rebased} = getelementptr inbounds i8, ptr %previous, {usize_ty} %{offset}"
+            ));
+            self.line(&format!("  br label %frame.clone.join{join_label}"));
+            self.line(&format!("frame.clone.keep{keep_label}:"));
+            self.line(&format!("  br label %frame.clone.join{join_label}"));
+            self.line(&format!("frame.clone.join{join_label}:"));
+            let final_pointer = self.temp();
+            self.line(&format!(
+                "  %{final_pointer} = phi ptr [ %{rebased}, %frame.clone.rebase{rebase_label} ], [ %{source_pointer}, %frame.clone.keep{keep_label} ]"
+            ));
+            let cloned_pointer_address = self.temp();
+            self.line(&format!(
+                "  %{cloned_pointer_address} = getelementptr inbounds %g1.effect_frame, ptr %{cloned_header}, i32 0, i32 {field}"
+            ));
+            self.line(&format!(
+                "  store ptr %{final_pointer}, ptr %{cloned_pointer_address}"
+            ));
+        }
+        for register in 0..function.register_types.len() {
+            let initialized_address = self.temp();
+            let initialized = self.temp();
+            let full_label = self.temp();
+            let done_label = self.temp();
+            self.line(&format!(
+                "  %{initialized_address} = getelementptr inbounds {frame_ty}, ptr %{clone}, i32 0, i32 {initialized_field}, i32 {register}"
+            ));
+            self.line(&format!(
+                "  %{initialized} = load i8, ptr %{initialized_address}"
+            ));
+            let value_address = self.temp();
+            let value = self.temp();
+            let ty = self.llvm_type(function.register_types[register])?;
+            self.line(&format!(
+                "  %{value_address} = getelementptr inbounds {frame_ty}, ptr %{clone}, i32 0, i32 {}",
+                register + 1
+            ));
+            self.line(&format!("  %{value} = load {ty}, ptr %{value_address}"));
+            let full = self.temp();
+            self.line(&format!("  %{full} = icmp eq i8 %{initialized}, 1"));
+            let (_, direct_fields) = field_layout[register];
+            let partial_label = self.temp();
+            if direct_fields == 0 {
+                self.line(&format!(
+                    "  br i1 %{full}, label %frame.clone.retain{full_label}, label %frame.clone.done{done_label}"
+                ));
+            } else {
+                self.line(&format!(
+                    "  br i1 %{full}, label %frame.clone.retain{full_label}, label %frame.clone.partial{partial_label}"
+                ));
+            }
+            self.line(&format!("frame.clone.retain{full_label}:"));
+            self.emit_retain(
+                function.register_types[register],
+                &format!("%{value}"),
+                function,
+            )?;
+            self.line(&format!("  br label %frame.clone.done{done_label}"));
+            if direct_fields != 0 {
+                self.line(&format!("frame.clone.partial{partial_label}:"));
+                let partial = self.temp();
+                let partial_fields_label = self.temp();
+                self.line(&format!("  %{partial} = icmp eq i8 %{initialized}, 2"));
+                self.line(&format!(
+                    "  br i1 %{partial}, label %frame.clone.fields{partial_fields_label}, label %frame.clone.done{done_label}"
+                ));
+                self.line(&format!("frame.clone.fields{partial_fields_label}:"));
+                self.emit_masked_aggregate_fields(
+                    function,
+                    function.register_types[register],
+                    &format!("%{value}"),
+                    &frame_ty,
+                    &format!("%{clone}"),
+                    field_initialized_field,
+                    field_layout[register].0,
+                    true,
+                )?;
+                self.line(&format!("  br label %frame.clone.done{done_label}"));
+            }
+            self.line(&format!("frame.clone.done{done_label}:"));
+        }
+        self.line(&format!("  ret ptr %{clone}"));
         self.line("}");
         self.line("");
 
@@ -1587,8 +1822,7 @@ impl<'a> Emitter<'a> {
         for register in (0..function.register_types.len()).rev() {
             let initialized_address = self.temp();
             let initialized = self.temp();
-            let present = self.temp();
-            let drop_label = self.temp();
+            let full_label = self.temp();
             let done_label = self.temp();
             self.line(&format!(
                 "  %{initialized_address} = getelementptr inbounds {frame_ty}, ptr %frame, i32 0, i32 {initialized_field}, i32 {register}"
@@ -1596,11 +1830,6 @@ impl<'a> Emitter<'a> {
             self.line(&format!(
                 "  %{initialized} = load i8, ptr %{initialized_address}"
             ));
-            self.line(&format!("  %{present} = icmp ne i8 %{initialized}, 0"));
-            self.line(&format!(
-                "  br i1 %{present}, label %frame.drop{drop_label}, label %frame.drop.done{done_label}"
-            ));
-            self.line(&format!("frame.drop{drop_label}:"));
             let value_address = self.temp();
             let value = self.temp();
             let ty = self.llvm_type(function.register_types[register])?;
@@ -1609,6 +1838,20 @@ impl<'a> Emitter<'a> {
                 register + 1
             ));
             self.line(&format!("  %{value} = load {ty}, ptr %{value_address}"));
+            let full = self.temp();
+            self.line(&format!("  %{full} = icmp eq i8 %{initialized}, 1"));
+            let (_, direct_fields) = field_layout[register];
+            let partial_label = self.temp();
+            if direct_fields == 0 {
+                self.line(&format!(
+                    "  br i1 %{full}, label %frame.drop{full_label}, label %frame.drop.done{done_label}"
+                ));
+            } else {
+                self.line(&format!(
+                    "  br i1 %{full}, label %frame.drop{full_label}, label %frame.drop.partial{partial_label}"
+                ));
+            }
+            self.line(&format!("frame.drop{full_label}:"));
             self.line(&format!("  store i8 0, ptr %{initialized_address}"));
             self.emit_destroy(
                 function.register_types[register],
@@ -1616,6 +1859,28 @@ impl<'a> Emitter<'a> {
                 function,
             )?;
             self.line(&format!("  br label %frame.drop.done{done_label}"));
+            if direct_fields != 0 {
+                self.line(&format!("frame.drop.partial{partial_label}:"));
+                let partial = self.temp();
+                let partial_fields_label = self.temp();
+                self.line(&format!("  %{partial} = icmp eq i8 %{initialized}, 2"));
+                self.line(&format!(
+                    "  br i1 %{partial}, label %frame.drop.fields{partial_fields_label}, label %frame.drop.done{done_label}"
+                ));
+                self.line(&format!("frame.drop.fields{partial_fields_label}:"));
+                self.line(&format!("  store i8 0, ptr %{initialized_address}"));
+                self.emit_masked_aggregate_fields(
+                    function,
+                    function.register_types[register],
+                    &format!("%{value}"),
+                    &frame_ty,
+                    "%frame",
+                    field_initialized_field,
+                    field_layout[register].0,
+                    false,
+                )?;
+                self.line(&format!("  br label %frame.drop.done{done_label}"));
+            }
             self.line(&format!("frame.drop.done{done_label}:"));
         }
         self.line("  call void @free(ptr %frame)");
@@ -1638,6 +1903,13 @@ impl<'a> Emitter<'a> {
             self.line(&format!(
                 "  %init{register} = getelementptr inbounds {frame_ty}, ptr %frame, i32 0, i32 {initialized_field}, i32 {register}"
             ));
+            let (offset, count) = field_layout[register];
+            for field in 0..count {
+                self.line(&format!(
+                    "  %fieldinit{register}.{field} = getelementptr inbounds {frame_ty}, ptr %frame, i32 0, i32 {field_initialized_field}, i32 {}",
+                    offset + field
+                ));
+            }
         }
         let state_address = self.temp();
         let state = self.temp();
@@ -1681,7 +1953,7 @@ impl<'a> Emitter<'a> {
                 let ty = self.register_type(function, discr.register)?;
                 let value = self.load_operand(function, discr)?;
                 if discr.mode == mir::UseMode::Move {
-                    self.emit_effect_set_initialized(discr.register, false);
+                    self.emit_effect_set_initialized(function, discr.register, false)?;
                 }
                 let switch_id = self.temp();
                 let otherwise_label = self.temp();
@@ -1724,7 +1996,7 @@ impl<'a> Emitter<'a> {
                         let runtime_ty = self.register_runtime_type(function, value.register)?;
                         self.emit_retain(runtime_ty, &loaded, function)?;
                     } else {
-                        self.emit_effect_set_initialized(value.register, false);
+                        self.emit_effect_set_initialized(function, value.register, false)?;
                     }
                     self.line(&format!("  store {ty} {loaded}, ptr %{return_slot}"));
                     let return_init_address = self.temp();
@@ -1861,7 +2133,7 @@ impl<'a> Emitter<'a> {
                         let runtime_ty = self.register_runtime_type(function, operand.register)?;
                         self.emit_retain(runtime_ty, &value, function)?;
                     } else {
-                        self.emit_effect_set_initialized(operand.register, false);
+                        self.emit_effect_set_initialized(function, operand.register, false)?;
                     }
                     let slot = self.temp();
                     self.line(&format!(
@@ -1967,7 +2239,7 @@ impl<'a> Emitter<'a> {
             if receiver.mode == mir::UseMode::Copy {
                 self.emit_retain(actual, &value, caller)?;
             } else {
-                self.emit_effect_set_initialized(receiver.register, false);
+                self.emit_effect_set_initialized(caller, receiver.register, false)?;
             }
             arguments.push(format!("{ty} {value}"));
         }
@@ -1984,7 +2256,7 @@ impl<'a> Emitter<'a> {
             if operand.mode == mir::UseMode::Copy {
                 self.emit_retain(actual, &value, caller)?;
             } else {
-                self.emit_effect_set_initialized(operand.register, false);
+                self.emit_effect_set_initialized(caller, operand.register, false)?;
             }
             arguments.push(format!("{ty} {value}"));
         }
@@ -2050,7 +2322,7 @@ impl<'a> Emitter<'a> {
             if receiver.mode == mir::UseMode::Copy {
                 self.emit_retain(actual, &value, caller)?;
             } else {
-                self.emit_effect_set_initialized(receiver.register, false);
+                self.emit_effect_set_initialized(caller, receiver.register, false)?;
             }
             arguments.push(format!("{ty} {value}"));
         }
@@ -2067,7 +2339,7 @@ impl<'a> Emitter<'a> {
             if operand.mode == mir::UseMode::Copy {
                 self.emit_retain(actual, &value, caller)?;
             } else {
-                self.emit_effect_set_initialized(operand.register, false);
+                self.emit_effect_set_initialized(caller, operand.register, false)?;
             }
             arguments.push(format!("{ty} {value}"));
         }
@@ -2209,7 +2481,7 @@ impl<'a> Emitter<'a> {
             if operand.mode == mir::UseMode::Copy {
                 self.emit_retain(actual, &value, caller)?;
             } else {
-                self.emit_effect_set_initialized(operand.register, false);
+                self.emit_effect_set_initialized(caller, operand.register, false)?;
             }
             arguments.push(format!("{ty} {value}"));
         }
@@ -2265,7 +2537,7 @@ impl<'a> Emitter<'a> {
             if operand.mode == mir::UseMode::Copy {
                 self.emit_retain(actual, &value, caller)?;
             } else {
-                self.emit_effect_set_initialized(operand.register, false);
+                self.emit_effect_set_initialized(caller, operand.register, false)?;
             }
             arguments.push(format!("{ty} {value}"));
         }
@@ -2276,7 +2548,7 @@ impl<'a> Emitter<'a> {
             ));
             if let Some(result) = result {
                 self.line(&format!("  store i8 0, ptr %r{result}"));
-                self.emit_effect_set_initialized(result, true);
+                self.emit_effect_set_initialized(caller, result, true)?;
             }
         } else {
             let returned = self.temp();
@@ -2286,7 +2558,7 @@ impl<'a> Emitter<'a> {
             ));
             if let Some(result) = result {
                 self.line(&format!("  store {result_ty} %{returned}, ptr %r{result}"));
-                self.emit_effect_set_initialized(result, true);
+                self.emit_effect_set_initialized(caller, result, true)?;
             }
         }
         self.emit_effect_edge(caller, normal, result.into_iter().collect())
@@ -2297,6 +2569,19 @@ impl<'a> Emitter<'a> {
         function: &mir::Function,
         instruction: &InstructionKind,
     ) -> Result<(), Vec<Diagnostic>> {
+        if let InstructionKind::Drop { owner } = instruction {
+            let owner_type = self.register_runtime_type(function, owner.register)?;
+            if matches!(
+                self.runtime_type(owner_type)?,
+                Type::Tuple { .. } | Type::Struct { .. } | Type::BindingPack { .. }
+            ) {
+                return self.emit_effect_drop_aggregate_register(
+                    function,
+                    owner.register,
+                    owner_type,
+                );
+            }
+        }
         self.emit_instruction(function, instruction)?;
         let mut consumed = BTreeSet::new();
         instruction.for_each_register_use(|register, use_kind| {
@@ -2305,19 +2590,107 @@ impl<'a> Emitter<'a> {
             }
         });
         for register in consumed {
-            self.emit_effect_set_initialized(register, false);
+            self.emit_effect_set_initialized(function, register, false)?;
         }
         if let Some(destination) = instruction.destination() {
-            self.emit_effect_set_initialized(destination, true);
+            self.emit_effect_set_initialized(function, destination, true)?;
+        }
+        if let InstructionKind::ProjectMove { src, field, .. } = instruction {
+            let source_type = self.register_runtime_type(function, src.register)?;
+            if matches!(
+                self.runtime_type(source_type)?,
+                Type::Tuple { .. } | Type::Struct { .. } | Type::BindingPack { .. }
+            ) {
+                let runtime_field = self.runtime_aggregate_field_index(source_type, *field)?;
+                self.line(&format!("  store i8 2, ptr %init{}", src.register));
+                self.line(&format!(
+                    "  store i8 0, ptr %fieldinit{}.{runtime_field}",
+                    src.register
+                ));
+            }
         }
         Ok(())
     }
 
-    fn emit_effect_set_initialized(&mut self, register: u32, initialized: bool) {
+    fn emit_effect_drop_aggregate_register(
+        &mut self,
+        function: &mir::Function,
+        register: u32,
+        aggregate_type: TypeId,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let full_label = self.temp();
+        let partial_label = self.temp();
+        let done_label = self.temp();
+        let value = self.load_register(function, register)?;
+        let state = self.temp();
+        let full = self.temp();
+        self.line(&format!("  %{state} = load i8, ptr %init{register}"));
+        self.line(&format!("  %{full} = icmp eq i8 %{state}, 1"));
+        self.line(&format!(
+            "  br i1 %{full}, label %effect.drop.full{full_label}, label %effect.drop.partial{partial_label}"
+        ));
+        self.line(&format!("effect.drop.full{full_label}:"));
+        self.emit_destroy(aggregate_type, &value, function)?;
+        self.line(&format!("  br label %effect.drop.done{done_label}"));
+        self.line(&format!("effect.drop.partial{partial_label}:"));
+        let partial = self.temp();
+        let fields_label = self.temp();
+        self.line(&format!("  %{partial} = icmp eq i8 %{state}, 2"));
+        self.line(&format!(
+            "  br i1 %{partial}, label %effect.drop.fields{fields_label}, label %effect.drop.done{done_label}"
+        ));
+        self.line(&format!("effect.drop.fields{fields_label}:"));
+        let fields = self.runtime_aggregate_fields(aggregate_type)?;
+        let aggregate_ty = self.llvm_type(aggregate_type)?;
+        for index in (0..fields.len()).rev() {
+            let flag = self.temp();
+            let present = self.temp();
+            let drop_label = self.temp();
+            let field_done = self.temp();
+            self.line(&format!(
+                "  %{flag} = load i8, ptr %fieldinit{register}.{index}"
+            ));
+            self.line(&format!("  %{present} = icmp ne i8 %{flag}, 0"));
+            self.line(&format!(
+                "  br i1 %{present}, label %effect.drop.field{drop_label}, label %effect.drop.field.done{field_done}"
+            ));
+            self.line(&format!("effect.drop.field{drop_label}:"));
+            let extracted = self.temp();
+            self.line(&format!(
+                "  %{extracted} = extractvalue {aggregate_ty} {value}, {index}"
+            ));
+            self.emit_destroy(fields[index], &format!("%{extracted}"), function)?;
+            self.line(&format!("  br label %effect.drop.field.done{field_done}"));
+            self.line(&format!("effect.drop.field.done{field_done}:"));
+        }
+        self.line(&format!("  br label %effect.drop.done{done_label}"));
+        self.line(&format!("effect.drop.done{done_label}:"));
+        self.emit_effect_set_initialized(function, register, false)
+    }
+
+    fn emit_effect_set_initialized(
+        &mut self,
+        function: &mir::Function,
+        register: u32,
+        initialized: bool,
+    ) -> Result<(), Vec<Diagnostic>> {
         self.line(&format!(
             "  store i8 {}, ptr %init{register}",
             u8::from(initialized)
         ));
+        let count = match self.runtime_type(self.register_runtime_type(function, register)?)? {
+            Type::Tuple { .. } | Type::Struct { .. } | Type::BindingPack { .. } => self
+                .runtime_aggregate_fields(self.register_runtime_type(function, register)?)?
+                .len(),
+            _ => 0,
+        };
+        for field in 0..count {
+            self.line(&format!(
+                "  store i8 {}, ptr %fieldinit{register}.{field}",
+                u8::from(initialized)
+            ));
+        }
+        Ok(())
     }
 
     fn emit_effect_edge(
@@ -2405,9 +2778,9 @@ impl<'a> Emitter<'a> {
                 parameter.register
             ));
             if mode == mir::UseMode::Move {
-                self.emit_effect_set_initialized(source, false);
+                self.emit_effect_set_initialized(function, source, false)?;
             }
-            self.emit_effect_set_initialized(parameter.register, true);
+            self.emit_effect_set_initialized(function, parameter.register, true)?;
         }
         Ok(())
     }
@@ -4160,11 +4533,11 @@ impl<'a> Emitter<'a> {
         Ok(())
     }
 
-    fn one_shot_resumption_types(
+    fn native_resumption_types(
         &self,
         function: &mir::Function,
         resumption: &mir::Operand,
-    ) -> Result<(TypeId, TypeId, TypeId, u32), Vec<Diagnostic>> {
+    ) -> Result<(TypeId, TypeId, TypeId, u32, Option<u32>, bool), Vec<Diagnostic>> {
         let resumption_type = self.register_runtime_type(function, resumption.register)?;
         let Type::Resumption {
             input_type,
@@ -4180,10 +4553,14 @@ impl<'a> Emitter<'a> {
                 "resumption terminator with a non-resumption operand",
             )]);
         };
-        if *copy || *upper_uses != Some(1) {
-            return Err(vec![unsupported(function, "multishot native resumptions")]);
-        }
-        Ok((resumption_type, *input_type, *output_type, *lower_uses))
+        Ok((
+            resumption_type,
+            *input_type,
+            *output_type,
+            *lower_uses,
+            *upper_uses,
+            *copy,
+        ))
     }
 
     fn emit_one_shot_resume(
@@ -4195,10 +4572,12 @@ impl<'a> Emitter<'a> {
         value: &mir::Operand,
         normal: &mir::Edge,
     ) -> Result<(), Vec<Diagnostic>> {
-        let (resumption_type, input_type, output_type, _) =
-            self.one_shot_resumption_types(function, resumption)?;
-        if receiver_mode != 2
-            || resumption.mode != mir::UseMode::Move
+        let (resumption_type, input_type, output_type, _, upper_uses, copy) =
+            self.native_resumption_types(function, resumption)?;
+        let reusable = copy || upper_uses.is_none_or(|upper| upper > 1);
+        if receiver_mode > 2
+            || receiver_mode < 2 && !reusable
+            || receiver_mode == 2 && resumption.mode != mir::UseMode::Move
             || value.mode != mir::UseMode::Move
             || self.register_runtime_type(function, value.register)? != input_type
             || self.register_runtime_type(function, result)? != output_type
@@ -4217,6 +4596,7 @@ impl<'a> Emitter<'a> {
             input_type,
             &input,
             &format!("%r{result}"),
+            receiver_mode < 2,
         )?;
         self.emit_edge_with_preassigned(function, normal, [result].into_iter().collect())
     }
@@ -4228,9 +4608,10 @@ impl<'a> Emitter<'a> {
         receiver_mode: u32,
         value: &mir::Operand,
     ) -> Result<(), Vec<Diagnostic>> {
-        let (resumption_type, input_type, output_type, _) =
-            self.one_shot_resumption_types(function, resumption)?;
+        let (resumption_type, input_type, output_type, _, upper_uses, _) =
+            self.native_resumption_types(function, resumption)?;
         if receiver_mode != 2
+            || upper_uses != Some(1)
             || resumption.mode != mir::UseMode::Move
             || value.mode != mir::UseMode::Move
             || self.register_runtime_type(function, value.register)? != input_type
@@ -4253,6 +4634,7 @@ impl<'a> Emitter<'a> {
             input_type,
             &input,
             &format!("%{output}"),
+            false,
         )?;
         if matches!(self.runtime_type(output_type)?, Type::Unit) {
             self.line("  ret void");
@@ -4271,9 +4653,8 @@ impl<'a> Emitter<'a> {
         resumption: &mir::Operand,
         normal: &mir::Edge,
     ) -> Result<(), Vec<Diagnostic>> {
-        let (_, _, _, lower_uses) = self.one_shot_resumption_types(function, resumption)?;
-        if lower_uses != 0
-            || resumption.mode != mir::UseMode::Move
+        let _ = self.native_resumption_types(function, resumption)?;
+        if resumption.mode != mir::UseMode::Move
             || !matches!(
                 self.runtime_type(self.register_runtime_type(function, result)?)?,
                 Type::Unit
@@ -4298,6 +4679,7 @@ impl<'a> Emitter<'a> {
         input_type: TypeId,
         input: &str,
         return_slot: &str,
+        clone_snapshot: bool,
     ) -> Result<(), Vec<Diagnostic>> {
         let matching_handlers = self
             .phases
@@ -4353,6 +4735,50 @@ impl<'a> Emitter<'a> {
             .collect::<Vec<_>>();
         let [top, bottom, resume_slot, resume_init, handler] = fields.as_slice() else {
             unreachable!()
+        };
+        let (top, bottom, resume_slot, resume_init) = if clone_snapshot {
+            let cloned_top = self.temp();
+            let cloned_bottom = self.temp();
+            self.line(&format!(
+                "  %{cloned_top} = call ptr @g1_effect_clone_chain(ptr {top})"
+            ));
+            self.line(&format!(
+                "  %{cloned_bottom} = call ptr @g1_effect_chain_bottom(ptr %{cloned_top})"
+            ));
+            let usize_ty = format!("i{}", self.pointer_width());
+            let mut rebased = Vec::with_capacity(2);
+            for pointer in [resume_slot, resume_init] {
+                let pointer_integer = self.temp();
+                let top_integer = self.temp();
+                let offset = self.temp();
+                let cloned_pointer = self.temp();
+                self.line(&format!(
+                    "  %{pointer_integer} = ptrtoint ptr {pointer} to {usize_ty}"
+                ));
+                self.line(&format!(
+                    "  %{top_integer} = ptrtoint ptr {top} to {usize_ty}"
+                ));
+                self.line(&format!(
+                    "  %{offset} = sub {usize_ty} %{pointer_integer}, %{top_integer}"
+                ));
+                self.line(&format!(
+                    "  %{cloned_pointer} = getelementptr inbounds i8, ptr %{cloned_top}, {usize_ty} %{offset}"
+                ));
+                rebased.push(format!("%{cloned_pointer}"));
+            }
+            (
+                format!("%{cloned_top}"),
+                format!("%{cloned_bottom}"),
+                rebased[0].clone(),
+                rebased[1].clone(),
+            )
+        } else {
+            (
+                top.clone(),
+                bottom.clone(),
+                resume_slot.clone(),
+                resume_init.clone(),
+            )
         };
         let input_ty = self.llvm_type(input_type)?;
         self.line(&format!("  store {input_ty} {input}, ptr {resume_slot}"));
@@ -4434,7 +4860,9 @@ impl<'a> Emitter<'a> {
         self.line(&format!("resume.normal{normal_label}:"));
         let completed = self.load_effect_runtime_field(&format!("%{runtime}"), 5, "ptr");
         self.emit_drop_effect_frame(&completed);
-        self.line(&format!("  call void @free(ptr {resumption})"));
+        if !clone_snapshot {
+            self.line(&format!("  call void @free(ptr {resumption})"));
+        }
         self.line(&format!("  br label %resume.done{done_label}"));
 
         self.line(&format!("resume.perform{perform_label}:"));
@@ -4560,6 +4988,7 @@ impl<'a> Emitter<'a> {
                 }
                 arguments.push((nested_type, format!("%{nested}")));
             } else {
+                self.line(&format!("  store ptr null, ptr %{slot}"));
                 self.emit_drop_effect_frame_chain(&suspended);
             }
             let returned = self.emit_call_owned_callable_value(
@@ -4567,7 +4996,7 @@ impl<'a> Emitter<'a> {
                 *clause_type,
                 &format!("%{callable}"),
                 &arguments,
-                false,
+                clause.resumption_type.is_none(),
             )?;
             self.line(&format!("  call void @free(ptr {payload})"));
             let result_ty = self.llvm_return_type(definition.result_type)?;
@@ -4578,7 +5007,9 @@ impl<'a> Emitter<'a> {
             } else if result_ty == "void" {
                 self.line(&format!("  store i8 0, ptr {return_slot}"));
             }
-            self.line(&format!("  call void @free(ptr {resumption})"));
+            if !clone_snapshot {
+                self.line(&format!("  call void @free(ptr {resumption})"));
+            }
             self.line(&format!("  br label %resume.done{done_label}"));
         }
         self.line(&format!("resume.done{done_label}:"));
@@ -4623,18 +5054,12 @@ impl<'a> Emitter<'a> {
             .iter()
             .filter_map(|clause| clause.resumption_type)
         {
-            let Type::Resumption {
-                upper_uses, copy, ..
-            } = self.runtime_type(resumption_type)?
-            else {
+            let Type::Resumption { .. } = self.runtime_type(resumption_type)? else {
                 return Err(vec![unsupported(
                     function,
                     "handler clause has a non-resumption continuation type",
                 )]);
             };
-            if *copy || *upper_uses != Some(1) {
-                return Err(vec![unsupported(function, "multishot native handlers")]);
-            }
         }
         let clause_types = self.runtime_aggregate_fields(clause_tuple)?;
         if clause_types.len() != definition.clauses.len() {
@@ -5989,6 +6414,55 @@ impl<'a> Emitter<'a> {
         Ok(())
     }
 
+    fn emit_masked_aggregate_fields(
+        &mut self,
+        function: &mir::Function,
+        aggregate_type: TypeId,
+        aggregate: &str,
+        frame_type: &str,
+        frame: &str,
+        flags_field: usize,
+        flags_offset: usize,
+        retain: bool,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let fields = self.runtime_aggregate_fields(aggregate_type)?;
+        let aggregate_ty = self.llvm_type(aggregate_type)?;
+        let indices = if retain {
+            (0..fields.len()).collect::<Vec<_>>()
+        } else {
+            (0..fields.len()).rev().collect::<Vec<_>>()
+        };
+        for index in indices {
+            let flag_address = self.temp();
+            let flag = self.temp();
+            let present = self.temp();
+            let visit_label = self.temp();
+            let done_label = self.temp();
+            self.line(&format!(
+                "  %{flag_address} = getelementptr inbounds {frame_type}, ptr {frame}, i32 0, i32 {flags_field}, i32 {}",
+                flags_offset + index
+            ));
+            self.line(&format!("  %{flag} = load i8, ptr %{flag_address}"));
+            self.line(&format!("  %{present} = icmp ne i8 %{flag}, 0"));
+            self.line(&format!(
+                "  br i1 %{present}, label %frame.field.visit{visit_label}, label %frame.field.done{done_label}"
+            ));
+            self.line(&format!("frame.field.visit{visit_label}:"));
+            let extracted = self.temp();
+            self.line(&format!(
+                "  %{extracted} = extractvalue {aggregate_ty} {aggregate}, {index}"
+            ));
+            if retain {
+                self.emit_retain(fields[index], &format!("%{extracted}"), function)?;
+            } else {
+                self.emit_destroy(fields[index], &format!("%{extracted}"), function)?;
+            }
+            self.line(&format!("  br label %frame.field.done{done_label}"));
+            self.line(&format!("frame.field.done{done_label}:"));
+        }
+        Ok(())
+    }
+
     fn emit_destroy(
         &mut self,
         ty: TypeId,
@@ -6812,6 +7286,35 @@ impl<'a> Emitter<'a> {
                 Err(error) => Some(Err(error)),
             })
             .collect()
+    }
+
+    fn runtime_aggregate_field_index(
+        &self,
+        aggregate: TypeId,
+        field: u32,
+    ) -> Result<usize, Vec<Diagnostic>> {
+        let source_fields = match self.runtime_type(aggregate)? {
+            Type::Tuple { fields, .. } => fields.clone(),
+            Type::Struct { fields, .. } => fields.iter().map(|field| field.ty).collect(),
+            Type::BindingPack { payload_type, .. } => {
+                return self.runtime_aggregate_field_index(*payload_type, field);
+            }
+            other => {
+                return Err(vec![backend_error(format!(
+                    "LLVM runtime field index requires a tuple or struct, found {other:?}"
+                ))]);
+            }
+        };
+        if field as usize >= source_fields.len() {
+            return Err(vec![backend_error(format!(
+                "aggregate t{aggregate} has no field {field}"
+            ))]);
+        }
+        source_fields[..field as usize]
+            .iter()
+            .try_fold(0usize, |index, ty| {
+                Ok(index + usize::from(!matches!(self.runtime_type(*ty)?, Type::Available { .. })))
+            })
     }
 
     fn register_is_signed(
