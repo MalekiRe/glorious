@@ -5232,24 +5232,32 @@ impl<'a> Walker<'a> {
         args: &[Expr],
         expected: Option<&ProvisionalType>,
     ) -> Option<ProvisionalType> {
-        let template = self.nominal_templates.get(head)?.clone();
-        let fields = template.variants.get(variant)?;
+        // Recursive expression discovery needs `&mut self`, so retain only the
+        // selected constructor shape across it instead of cloning every
+        // variant in the nominal template.
+        let (params, fields) = {
+            let template = self.nominal_templates.get(head)?;
+            (
+                template.params.clone(),
+                template.variants.get(variant)?.clone(),
+            )
+        };
         if fields.len() != args.len() {
             args.iter().for_each(|argument| {
                 self.expression(argument, None);
             });
             return None;
         }
-        if template.params.is_empty() {
-            for (argument, field) in args.iter().zip(fields) {
+        if params.is_empty() {
+            for (argument, field) in args.iter().zip(&fields) {
                 self.expression(argument, Some(field));
             }
             return Some(ProvisionalType::Nominal(NominalInstanceKey::monomorphic(
                 head.to_owned(),
             )));
         }
-        let values = args.iter().zip(fields).collect::<Vec<_>>();
-        self.infer_nominal_construction(source, head, &template.params, &values, expected)
+        let values = args.iter().zip(&fields).collect::<Vec<_>>();
+        self.infer_nominal_construction(source, head, &params, &values, expected)
     }
 
     fn direct_call(
@@ -6962,32 +6970,39 @@ impl<'a> Walker<'a> {
                 Some(ty)
             }
             ExprKind::Struct { name, fields } => {
-                if let Some(template) = self.nominal_templates.get(name.as_ref()).cloned() {
-                    if template.params.is_empty() {
-                        for (field, value) in fields.iter() {
-                            self.expression(value, template.fields.get(field));
+                if let Some(template) = self.nominal_templates.get(name.as_ref()) {
+                    // Keep only the supplied field shapes across recursive
+                    // discovery. Large declarations should not be copied for
+                    // every construction expression.
+                    let params = template.params.clone();
+                    if params.is_empty() {
+                        let expected_fields = fields
+                            .iter()
+                            .map(|(field, _)| template.fields.get(field).cloned())
+                            .collect::<Vec<_>>();
+                        for ((_, value), expected_field) in fields.iter().zip(&expected_fields) {
+                            self.expression(value, expected_field.as_ref());
                         }
                         return Some(ProvisionalType::Nominal(NominalInstanceKey::monomorphic(
                             name.to_string(),
                         )));
                     }
-                    let values = template
+                    let selected_fields = template
                         .fields
                         .iter()
                         .filter_map(|(field, formal)| {
                             fields
                                 .iter()
                                 .find(|(supplied, _)| supplied == field)
-                                .map(|(_, value)| (value, formal))
+                                .map(|(_, value)| (value, formal.clone()))
                         })
                         .collect::<Vec<_>>();
-                    return self.infer_nominal_construction(
-                        source,
-                        name,
-                        &template.params,
-                        &values,
-                        expected,
-                    );
+                    let values = selected_fields
+                        .iter()
+                        .map(|(value, formal)| (*value, formal))
+                        .collect::<Vec<_>>();
+                    return self
+                        .infer_nominal_construction(source, name, &params, &values, expected);
                 }
                 let declared_fields = self.struct_fields.get(name.as_ref()).cloned();
                 fields.iter().for_each(|(field, value)| {
