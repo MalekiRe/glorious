@@ -3599,9 +3599,18 @@ fn terminator_transfer(
                     if context.refine_enum_switches {
                         continue;
                     }
-                    // Serialization must retain the physical state on an
-                    // encoded but semantically impossible arm.
+                    // Serialization must retain every encoded arm. Force its
+                    // structural tag proof after restoring the physical
+                    // state: retaining a contradictory proof can poison a
+                    // later fixed-point join before this switch is revisited
+                    // with its converged entry state.
                     interpreter.state = after.clone();
+                    if context
+                        .enum_variant_count(context.register_type(source))
+                        .is_some_and(|count| *variant < count)
+                    {
+                        interpreter.state.active_variants[source as usize] = Some(*variant);
+                    }
                 }
                 let state = apply_edge(interpreter, edge, params_of(edge.target), None)?;
                 successors.push((edge.target, state));
@@ -3628,6 +3637,7 @@ fn terminator_transfer(
                     return Ok(successors);
                 }
                 interpreter.state = after.clone();
+                interpreter.state.active_variants[source as usize] = Some(variant);
             }
             let state = apply_edge(interpreter, otherwise, params_of(otherwise.target), None)?;
             successors.push((otherwise.target, state));
@@ -5159,6 +5169,103 @@ mod ownership_engine_tests {
             &types,
         );
         solve_function(&function, &types).expect("tag edges prove active payload variants");
+    }
+
+    #[test]
+    fn serialization_forces_encoded_variant_proofs_on_impossible_edges() {
+        let mut types = Type::predefined();
+        let choice = types.len() as grandiose_vm::TypeId;
+        types.push(Type::Enum {
+            name: "KnownChoice".into(),
+            variants: vec![
+                EnumVariant {
+                    name: "First".into(),
+                    fields: vec![Field {
+                        name: "value".into(),
+                        ty: I64,
+                    }],
+                },
+                EnumVariant {
+                    name: "Second".into(),
+                    fields: vec![Field {
+                        name: "value".into(),
+                        ty: I64,
+                    }],
+                },
+            ],
+            copy: false,
+        });
+        let arm = |id| {
+            block(
+                id,
+                vec![
+                    statement(InstructionKind::Drop {
+                        owner: move_operand(3),
+                    }),
+                    statement(InstructionKind::ProjectMove {
+                        dst: 4,
+                        src: move_operand(2),
+                        field: 0,
+                    }),
+                    statement(InstructionKind::Drop {
+                        owner: move_operand(4),
+                    }),
+                    statement(InstructionKind::Deconstruct { src: 2 }),
+                ],
+                Terminator::Return { value: None },
+            )
+        };
+        let function = exported_function(
+            vec![UNIT, I64, choice, grandiose_vm::U32, I64],
+            1,
+            vec![
+                block(
+                    0,
+                    vec![
+                        statement(InstructionKind::Construct {
+                            dst: 2,
+                            ty: choice,
+                            variant: Some(1),
+                            fields: vec![move_operand(1)],
+                        }),
+                        statement(InstructionKind::EnumTag { dst: 3, src: 2 }),
+                    ],
+                    Terminator::Switch {
+                        discr: Operand {
+                            register: 3,
+                            mode: UseMode::Copy,
+                        },
+                        cases: vec![(
+                            grandiose_vm::Constant::U32(0),
+                            Edge {
+                                target: 1,
+                                args: vec![],
+                            },
+                        )],
+                        otherwise: Edge {
+                            target: 2,
+                            args: vec![],
+                        },
+                    },
+                ),
+                arm(1),
+                arm(2),
+            ],
+            &types,
+        );
+        let solution = solve(&FlowContext {
+            function: &function,
+            types: &types,
+            locals: &function.flow.locals,
+            loans: loan_table(&function, &types),
+            array_calls: &BTreeMap::new(),
+            strict: true,
+            refine_enum_switches: false,
+        })
+        .expect("serialization follows every encoded enum edge");
+
+        assert_eq!(solution.entries[&1].active_variants[2], Some(0));
+        assert_eq!(solution.entries[&2].active_variants[2], Some(1));
     }
 
     #[test]
