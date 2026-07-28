@@ -436,6 +436,13 @@ impl<'a> Emitter<'a> {
             .collect::<Vec<_>>();
         let mut visited = BTreeSet::new();
         while let Some(target) = pending.pop() {
+            if target == function.declaration {
+                // A direct tail-call cycle is a stackless source loop even
+                // when it performs no effects. Route the SCC through the same
+                // heap-frame scheduler used by effects so native stack safety
+                // does not depend on target-specific tail-call eligibility.
+                return true;
+            }
             if !visited.insert(target) {
                 continue;
             }

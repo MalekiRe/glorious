@@ -5340,13 +5340,41 @@ fn simple_block_exit_states(function: &Function) -> Option<BTreeMap<u32, Vec<boo
 /// initialized receiver, local, capture, or other owner may remain in the
 /// caller frame. This prevents custom destruction from moving from after the
 /// callee to before it.
-fn discover_tail_calls(function: &mut Function, budget: u64) -> (PassOutcome, u64) {
+fn discover_tail_calls(
+    function: &mut Function,
+    types: &[Type],
+    direct_custom_drop_types: &BTreeSet<TypeId>,
+    budget: u64,
+) -> (PassOutcome, u64) {
     let work = body_size(function)
         .saturating_add(function.blocks.len() as u64 * function.register_types.len() as u64);
     if work > budget {
         return (PassOutcome::BudgetExhausted, work);
     }
-    let Some(exit_states) = simple_block_exit_states(function) else {
+    let exit_states = simple_block_exit_states(function).or_else(|| {
+        // Complex valid joins may carry different cleanup-free temporaries and
+        // exceed the deliberately exact compact analysis above. Fall back to
+        // the normative ownership interpreter's per-terminator live-owner
+        // lists rather than weakening initialization rules.
+        let analysis =
+            derive_cleanup_state_analysis_with_array_calls(function, types, &BTreeMap::new())
+                .ok()?;
+        Some(
+            analysis
+                .lists
+                .into_iter()
+                .filter_map(|(block, points)| {
+                    let live = points.last()?;
+                    let mut state = vec![false; function.register_types.len()];
+                    for register in live {
+                        *state.get_mut(*register as usize)? = true;
+                    }
+                    Some((block, state))
+                })
+                .collect::<BTreeMap<_, _>>(),
+        )
+    });
+    let Some(exit_states) = exit_states else {
         return (PassOutcome::Unchanged, work);
     };
 
@@ -5357,107 +5385,262 @@ fn discover_tail_calls(function: &mut Function, budget: u64) -> (PassOutcome, u6
         });
     }
 
-    let exact_return_continuation =
-        |normal: &Edge, result: Option<Register>, role: BlockParamRole| -> bool {
-            let Some(mut result) = result else {
-                return false;
+    let cleanup_free_drop = |register: Register| {
+        function
+            .flow
+            .locals
+            .get(register as usize)
+            .is_some_and(|fact| {
+                fact.drop_glue != DropGlueKind::Custom
+                    && structurally_empty_drop_type(types, direct_custom_drop_types, fact.ty)
+            })
+    };
+    let tail_discardable = |register: Register| {
+        function
+            .flow
+            .locals
+            .get(register as usize)
+            .is_some_and(|fact| {
+                fact.use_interval.admits_zero_use()
+                    && types
+                        .get(fact.ty as usize)
+                        .is_some_and(Type::claimed_zero_use_allowed)
+                    && cleanup_free_drop(register)
+            })
+    };
+
+    let exact_return_continuation = |normal: &Edge,
+                                     result: Option<Register>,
+                                     role: BlockParamRole|
+     -> Option<Vec<Instruction>> {
+        let Some(mut result) = result else {
+            return None;
+        };
+        if !normal.args.is_empty()
+            || normal.target == function.entry
+            || incoming.get(&normal.target) != Some(&1)
+        {
+            return None;
+        }
+        let mut target = normal.target;
+        let mut expected_role = role;
+        let mut visited = BTreeSet::new();
+        let mut origins = BTreeMap::<Register, Register>::new();
+        let mut passthrough = BTreeSet::new();
+        let mut dropped = BTreeSet::new();
+        let mut cleanup = Vec::new();
+        loop {
+            if !visited.insert(target) {
+                return None;
+            }
+            let Some(continuation) = function.blocks.iter().find(|block| block.id == target) else {
+                return None;
             };
-            if !normal.args.is_empty()
-                || normal.target == function.entry
-                || incoming.get(&normal.target) != Some(&1)
+            let Some(result_parameter) = continuation
+                .params
+                .iter()
+                .find(|parameter| parameter.register == result)
+            else {
+                return None;
+            };
+            if result_parameter.ty != function.register_types[result as usize]
+                || result_parameter.role != expected_role
             {
+                return None;
+            }
+            for parameter in &continuation.params {
+                if parameter.register != result {
+                    passthrough.insert(
+                        origins
+                            .get(&parameter.register)
+                            .copied()
+                            .unwrap_or(parameter.register),
+                    );
+                }
+            }
+            for statement in &continuation.statements {
+                let InstructionKind::Drop { owner } = statement.kind else {
+                    return None;
+                };
+                let origin = origins
+                    .get(&owner.register)
+                    .copied()
+                    .unwrap_or(owner.register);
+                if owner.mode != UseMode::Move
+                    || owner.register == result
+                    || !cleanup_free_drop(owner.register)
+                    || !dropped.insert(origin)
+                {
+                    return None;
+                }
+                cleanup.push(Instruction {
+                    span: statement.span,
+                    kind: InstructionKind::Drop {
+                        owner: Operand {
+                            register: origin,
+                            mode: UseMode::Move,
+                        },
+                    },
+                });
+            }
+            match &continuation.terminator {
+                Terminator::Return {
+                    value:
+                        Some(Operand {
+                            register,
+                            mode: UseMode::Move,
+                        }),
+                } if *register == result => {
+                    return passthrough
+                        .iter()
+                        .all(|register| dropped.contains(register) || tail_discardable(*register))
+                        .then_some(cleanup);
+                }
+                Terminator::Goto(edge) if edge.target != function.entry => {
+                    let Some(next_block) =
+                        function.blocks.iter().find(|block| block.id == edge.target)
+                    else {
+                        return None;
+                    };
+                    if edge.args.len() != next_block.params.len() {
+                        return None;
+                    }
+                    let mut result_positions =
+                        edge.args
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(position, argument)| {
+                                (argument.register == result && argument.mode == UseMode::Move)
+                                    .then_some(position)
+                            });
+                    let Some(result_position) = result_positions.next() else {
+                        return None;
+                    };
+                    if result_positions.next().is_some() {
+                        return None;
+                    }
+                    let mut next_origins = BTreeMap::new();
+                    let mut edge_origins = BTreeSet::new();
+                    for (position, (argument, parameter)) in
+                        edge.args.iter().zip(&next_block.params).enumerate()
+                    {
+                        let origin = origins
+                            .get(&argument.register)
+                            .copied()
+                            .unwrap_or(argument.register);
+                        if argument.mode != UseMode::Move
+                            || function.register_types.get(argument.register as usize)
+                                != Some(&parameter.ty)
+                            || !edge_origins.insert(origin)
+                        {
+                            return None;
+                        }
+                        next_origins.insert(parameter.register, origin);
+                        if position != result_position {
+                            passthrough.insert(origin);
+                        }
+                    }
+                    let next = &next_block.params[result_position];
+                    if incoming.get(&edge.target) != Some(&1)
+                        && !matches!(
+                            &next_block.terminator,
+                            Terminator::Return {
+                                value:
+                                    Some(Operand {
+                                        register,
+                                        mode: UseMode::Move,
+                                    }),
+                            } if *register == next.register
+                        )
+                    {
+                        return None;
+                    }
+                    origins = next_origins;
+                    result = next.register;
+                    expected_role = next.role;
+                    if !matches!(
+                        expected_role,
+                        BlockParamRole::Ordinary | BlockParamRole::ProtectedExitValue
+                    ) {
+                        return None;
+                    }
+                    target = edge.target;
+                }
+                _ => return None,
+            }
+        }
+    };
+
+    let consumes_complete_frame =
+        |state: &[bool], operands: &[Operand], cleanup: &[Instruction]| -> bool {
+            if !function.flow.loans.is_empty()
+                && operands.iter().any(|operand| {
+                    function
+                        .register_types
+                        .get(operand.register as usize)
+                        .is_none_or(|ty| type_carries_reference(types, *ty))
+                })
+            {
+                // A reference formed in this frame may point into a caller-owned
+                // stack slot. PlaceFlow does not yet attach the exact surviving
+                // loan to aggregate tail operands, so retain the caller frame
+                // unless no local loans exist.
                 return false;
             }
-            let mut target = normal.target;
-            let mut expected_role = role;
-            let mut visited = BTreeSet::new();
-            loop {
-                if !visited.insert(target) {
-                    return false;
-                }
-                let Some(continuation) = function.blocks.iter().find(|block| block.id == target)
-                else {
-                    return false;
-                };
-                if continuation.params.len() != 1
-                    || continuation.params[0].register != result
-                    || continuation.params[0].ty != function.register_types[result as usize]
-                    || continuation.params[0].role != expected_role
-                    || !continuation.statements.is_empty()
+            let mut state = state.to_vec();
+            let mut moved = BTreeSet::new();
+            for operand in operands {
+                if operand.mode != UseMode::Move
+                    || !moved.insert(operand.register)
+                    || !state
+                        .get(operand.register as usize)
+                        .copied()
+                        .unwrap_or(false)
                 {
                     return false;
                 }
-                match &continuation.terminator {
-                    Terminator::Return {
-                        value:
-                            Some(Operand {
-                                register,
-                                mode: UseMode::Move,
-                            }),
-                    } => return *register == result,
-                    Terminator::Goto(edge)
-                        if edge.target != function.entry
-                            && incoming.get(&edge.target) == Some(&1)
-                            && matches!(
-                                edge.args.as_slice(),
-                                [Operand {
-                                    register,
-                                    mode: UseMode::Move,
-                                }] if *register == result
-                            ) =>
-                    {
-                        let Some(next) = function
-                            .blocks
-                            .iter()
-                            .find(|block| block.id == edge.target)
-                            .and_then(|block| block.params.first())
-                        else {
-                            return false;
-                        };
-                        result = next.register;
-                        expected_role = next.role;
-                        if !matches!(
-                            expected_role,
-                            BlockParamRole::Ordinary | BlockParamRole::ProtectedExitValue
-                        ) {
-                            return false;
-                        }
-                        target = edge.target;
-                    }
-                    _ => return false,
+                state[operand.register as usize] = false;
+            }
+            for statement in cleanup {
+                let InstructionKind::Drop { owner } = statement.kind else {
+                    return false;
+                };
+                if owner.mode != UseMode::Move
+                    || !moved.insert(owner.register)
+                    || !state.get(owner.register as usize).copied().unwrap_or(false)
+                {
+                    return false;
                 }
+                state[owner.register as usize] = false;
             }
+            state.iter().enumerate().all(|(register, initialized)| {
+                !*initialized
+                    || tail_discardable(register as Register)
+                    || (register == 0
+                        && function.receiver_mode == Some(2)
+                        && function.receiver_type == UNIT)
+            })
         };
-
-    let consumes_complete_frame = |state: &[bool], operands: &[Operand]| -> bool {
-        let mut state = state.to_vec();
-        let mut moved = BTreeSet::new();
-        for operand in operands {
-            if operand.mode != UseMode::Move
-                || !moved.insert(operand.register)
-                || !state
-                    .get(operand.register as usize)
-                    .copied()
-                    .unwrap_or(false)
-            {
-                return false;
-            }
-            state[operand.register as usize] = false;
-        }
-        state.iter().enumerate().all(|(register, initialized)| {
-            !*initialized
-                || (register == 0
-                    && function.receiver_mode == Some(2)
-                    && function.receiver_type == UNIT)
-        })
-    };
 
     // A self call borrows the already-installed receiver rather than taking it
     // as an explicit operand.  Tail replacement keeps that receiver installed
     // for the replacement frame, so require every other live register to be
     // transferred exactly once while deliberately retaining register zero.
-    let consumes_complete_self_frame = |state: &[bool], operands: &[Operand]| -> bool {
+    let consumes_complete_self_frame = |state: &[bool],
+                                        operands: &[Operand],
+                                        cleanup: &[Instruction]|
+     -> bool {
         if function.receiver_mode.is_none() || !state.first().copied().unwrap_or(false) {
+            return false;
+        }
+        if !function.flow.loans.is_empty()
+            && operands.iter().any(|operand| {
+                function
+                    .register_types
+                    .get(operand.register as usize)
+                    .is_none_or(|ty| type_carries_reference(types, *ty))
+            })
+        {
             return false;
         }
         let mut state = state.to_vec();
@@ -5476,7 +5659,23 @@ fn discover_tail_calls(function: &mut Function, budget: u64) -> (PassOutcome, u6
             }
             state[operand.register as usize] = false;
         }
-        state.into_iter().all(|initialized| !initialized)
+        for statement in cleanup {
+            let InstructionKind::Drop { owner } = statement.kind else {
+                return false;
+            };
+            if owner.mode != UseMode::Move
+                || owner.register == 0
+                || !moved.insert(owner.register)
+                || !state.get(owner.register as usize).copied().unwrap_or(false)
+            {
+                return false;
+            }
+            state[owner.register as usize] = false;
+        }
+        state
+            .into_iter()
+            .enumerate()
+            .all(|(register, initialized)| !initialized || tail_discardable(register as Register))
     };
 
     let mut scratch = function.clone();
@@ -5491,23 +5690,29 @@ fn discover_tail_calls(function: &mut Function, budget: u64) -> (PassOutcome, u6
                 function: target,
                 args,
                 normal,
-            } if exact_return_continuation(&normal, result, BlockParamRole::CallResult)
-                && consumes_complete_frame(state, &args) =>
-            {
-                Some(Terminator::TailCall {
-                    function: target,
-                    args,
+            } => {
+                let continuation =
+                    exact_return_continuation(&normal, result, BlockParamRole::CallResult);
+                continuation.and_then(|cleanup| {
+                    consumes_complete_frame(state, &args, &cleanup).then_some((
+                        Terminator::TailCall {
+                            function: target,
+                            args,
+                        },
+                        cleanup,
+                    ))
                 })
             }
             Terminator::CallSelf {
                 result,
                 args,
                 normal,
-            } if exact_return_continuation(&normal, result, BlockParamRole::CallResult)
-                && consumes_complete_self_frame(state, &args) =>
-            {
-                Some(Terminator::TailCallSelf { args })
-            }
+            } => exact_return_continuation(&normal, result, BlockParamRole::CallResult).and_then(
+                |cleanup| {
+                    consumes_complete_self_frame(state, &args, &cleanup)
+                        .then_some((Terminator::TailCallSelf { args }, cleanup))
+                },
+            ),
             Terminator::CallIndirect {
                 result,
                 callable,
@@ -5516,18 +5721,23 @@ fn discover_tail_calls(function: &mut Function, budget: u64) -> (PassOutcome, u6
                 cleanup_callable: false,
                 args,
                 normal,
-            } if callable.mode == UseMode::Move
-                && exact_return_continuation(&normal, result, BlockParamRole::CallResult) =>
-            {
-                let mut operands = Vec::with_capacity(args.len() + 1);
-                operands.push(callable);
-                operands.extend(args.iter().copied());
-                consumes_complete_frame(state, &operands).then_some(Terminator::TailCallIndirect {
-                    callable,
-                    known_function,
-                    receiver_mode: 2,
-                    args,
-                })
+            } if callable.mode == UseMode::Move => {
+                exact_return_continuation(&normal, result, BlockParamRole::CallResult).and_then(
+                    |cleanup| {
+                        let mut operands = Vec::with_capacity(args.len() + 1);
+                        operands.push(callable);
+                        operands.extend(args.iter().copied());
+                        consumes_complete_frame(state, &operands, &cleanup).then_some((
+                            Terminator::TailCallIndirect {
+                                callable,
+                                known_function,
+                                receiver_mode: 2,
+                                args,
+                            },
+                            cleanup,
+                        ))
+                    },
+                )
             }
             Terminator::Resume {
                 result,
@@ -5535,24 +5745,23 @@ fn discover_tail_calls(function: &mut Function, budget: u64) -> (PassOutcome, u6
                 receiver_mode: 2,
                 value,
                 normal,
-            } if resumption.mode == UseMode::Move
-                && exact_return_continuation(
-                    &normal,
-                    Some(result),
-                    BlockParamRole::ResumeResult,
-                ) =>
-            {
-                consumes_complete_frame(state, &[resumption, value]).then_some(
-                    Terminator::TailResume {
-                        resumption,
-                        receiver_mode: 2,
-                        value,
-                    },
-                )
+            } if resumption.mode == UseMode::Move => {
+                exact_return_continuation(&normal, Some(result), BlockParamRole::ResumeResult)
+                    .and_then(|cleanup| {
+                        consumes_complete_frame(state, &[resumption, value], &cleanup).then_some((
+                            Terminator::TailResume {
+                                resumption,
+                                receiver_mode: 2,
+                                value,
+                            },
+                            cleanup,
+                        ))
+                    })
             }
             _ => None,
         };
-        if let Some(replacement) = replacement {
+        if let Some((replacement, cleanup)) = replacement {
+            block.statements.extend(cleanup);
             block.terminator = replacement;
             changed = true;
         }
@@ -5937,9 +6146,15 @@ fn hoist_loop_invariant_primitives(function: &mut Function, budget: u64) -> (Pas
     }
 }
 
-fn form_tail_calls_and_hoist(function: &mut Function, budget: u64) -> (PassOutcome, u64) {
+fn form_tail_calls_and_hoist(
+    function: &mut Function,
+    types: &[Type],
+    direct_custom_drop_types: &BTreeSet<TypeId>,
+    budget: u64,
+) -> (PassOutcome, u64) {
     let mut scratch = function.clone();
-    let (discovery, discovery_work) = discover_tail_calls(&mut scratch, budget);
+    let (discovery, discovery_work) =
+        discover_tail_calls(&mut scratch, types, direct_custom_drop_types, budget);
     if discovery == PassOutcome::BudgetExhausted {
         return (discovery, discovery_work);
     }
@@ -10107,10 +10322,18 @@ fn run_transactional_pass(
         .collect::<BTreeSet<_>>();
     let mut outcome = PassOutcome::Unchanged;
     let mut total_work = 0_u64;
+    // Tail formation is the final stack-safety opportunity after proof
+    // erasure. Give every body its deterministic local cap instead of letting
+    // earlier declarations consume a shared FIFO budget and make recursion
+    // safety depend on declaration order.
+    let fair_per_function_budget = pass == PassId::FormTailCallsAndHoist;
     for function in &mut program.functions {
-        let limit = (100_000_u64)
-            .max(32 * body_size(function))
-            .min(*global_remaining);
+        let local_limit = (100_000_u64).max(32 * body_size(function));
+        let limit = if fair_per_function_budget {
+            local_limit
+        } else {
+            local_limit.min(*global_remaining)
+        };
         let invalidated_before = function.invalid_analyses;
         let (body_outcome, work) = match pass {
             PassId::NormalizeCfg => normalize_cfg(function, limit),
@@ -10122,7 +10345,9 @@ fn run_transactional_pass(
             PassId::GlobalSimplify => global_simplify_exact_callables(function, types, limit),
             PassId::SpecializeCleanup => specialize_cleanup(function, types, limit),
             PassId::EraseLoanProofsAndScalarizedReferences => erase_loan_proofs(function, limit),
-            PassId::FormTailCallsAndHoist => form_tail_calls_and_hoist(function, limit),
+            PassId::FormTailCallsAndHoist => {
+                form_tail_calls_and_hoist(function, types, &direct_custom_drop_types, limit)
+            }
             _ => (PassOutcome::SkippedUnavailable, 0),
         };
         if body_outcome == PassOutcome::Changed {
@@ -10133,7 +10358,9 @@ fn run_transactional_pass(
             }
         }
         total_work = total_work.saturating_add(work);
-        *global_remaining = global_remaining.saturating_sub(work.min(*global_remaining));
+        if !fair_per_function_budget {
+            *global_remaining = global_remaining.saturating_sub(work.min(*global_remaining));
+        }
         outcome = match (outcome, body_outcome) {
             (_, PassOutcome::BudgetExhausted) => PassOutcome::BudgetExhausted,
             (PassOutcome::BudgetExhausted, _) => PassOutcome::BudgetExhausted,
@@ -10142,7 +10369,7 @@ fn run_transactional_pass(
             (_, PassOutcome::SkippedUnavailable) => PassOutcome::SkippedUnavailable,
             (current, PassOutcome::Unchanged) => current,
         };
-        if *global_remaining == 0 {
+        if !fair_per_function_budget && *global_remaining == 0 {
             outcome = PassOutcome::BudgetExhausted;
             break;
         }
@@ -11820,7 +12047,7 @@ pub(crate) fn optimize_program_with_control_tables(
     // optimization level, not an optional O2 profitability transform.
     let erasure = run_mandatory_loan_erasure(program);
     push_checked(&mut passes, erasure, program, types)?;
-    if level.at_least(OptimizationLevel::O2) && global_remaining != 0 {
+    if level.at_least(OptimizationLevel::O2) {
         let report = run_transactional_pass(
             program,
             PassId::FormTailCallsAndHoist,
@@ -14537,7 +14764,8 @@ mod tests {
     #[test]
     fn o2_discovers_exact_direct_tail_continuations_and_keeps_nonself_calls() {
         let mut body = direct_tail_discovery_fixture();
-        let (outcome, _) = form_tail_calls_and_hoist(&mut body, u64::MAX);
+        let (outcome, _) =
+            form_tail_calls_and_hoist(&mut body, &Type::predefined(), &BTreeSet::new(), u64::MAX);
         assert_eq!(outcome, PassOutcome::Changed);
         assert!(matches!(
             body.blocks[0].terminator,
@@ -14581,7 +14809,7 @@ mod tests {
         body.features = infer_feature_bits(&body);
 
         assert_eq!(
-            discover_tail_calls(&mut body, u64::MAX).0,
+            discover_tail_calls(&mut body, &Type::predefined(), &BTreeSet::new(), u64::MAX,).0,
             PassOutcome::Changed
         );
         assert!(matches!(
@@ -14612,7 +14840,7 @@ mod tests {
         });
 
         assert_eq!(
-            discover_tail_calls(&mut body, u64::MAX).0,
+            discover_tail_calls(&mut body, &Type::predefined(), &BTreeSet::new(), u64::MAX,).0,
             PassOutcome::Changed
         );
         assert!(matches!(
@@ -14646,10 +14874,110 @@ mod tests {
             }),
         ));
         assert_eq!(
-            discover_tail_calls(&mut shared_join, u64::MAX).0,
-            PassOutcome::Unchanged,
-            "a forwarding join with another predecessor is not a tail continuation"
+            discover_tail_calls(
+                &mut shared_join,
+                &Type::predefined(),
+                &BTreeSet::new(),
+                u64::MAX,
+            )
+            .0,
+            PassOutcome::Changed,
+            "a shared terminal return does not keep the caller frame alive"
         );
+    }
+
+    #[test]
+    fn tail_discovery_discards_cleanup_free_values_through_a_shared_return() {
+        let types = Type::predefined();
+        let mut body = direct_tail_discovery_fixture();
+        body.register_types.extend([I64, U32, I64, I64, U32]);
+        body.blocks[0]
+            .statements
+            .push(instruction(InstructionKind::Const {
+                dst: 3,
+                value: Constant::I64(9),
+            }));
+        body.blocks[0]
+            .statements
+            .push(instruction(InstructionKind::Const {
+                dst: 4,
+                value: Constant::U32(7),
+            }));
+        body.blocks[1].terminator = Terminator::Goto(Edge {
+            target: 2,
+            args: vec![move_operand(2), move_operand(3), move_operand(4)],
+        });
+        body.blocks.push(BasicBlock {
+            id: 2,
+            params: vec![
+                BlockParam {
+                    register: 5,
+                    ty: I64,
+                    role: BlockParamRole::ProtectedExitValue,
+                },
+                BlockParam {
+                    register: 6,
+                    ty: I64,
+                    role: BlockParamRole::Ordinary,
+                },
+                BlockParam {
+                    register: 7,
+                    ty: U32,
+                    role: BlockParamRole::Ordinary,
+                },
+            ],
+            statements: vec![
+                instruction(InstructionKind::Drop {
+                    owner: move_operand(7),
+                }),
+                instruction(InstructionKind::Drop {
+                    owner: move_operand(6),
+                }),
+            ],
+            terminator: Terminator::Return {
+                value: Some(move_operand(5)),
+            },
+        });
+        body.blocks.push(block(
+            3,
+            Terminator::Goto(Edge {
+                target: 2,
+                args: vec![move_operand(1), move_operand(3), move_operand(4)],
+            }),
+        ));
+        body.flow.locals = body
+            .register_types
+            .iter()
+            .map(|ty| crate::compiler_mir::LocalFact::conservative(*ty, &types[*ty as usize]))
+            .collect();
+
+        assert_eq!(
+            discover_tail_calls(&mut body, &types, &BTreeSet::new(), u64::MAX).0,
+            PassOutcome::Changed
+        );
+        assert!(matches!(
+            body.blocks[0].terminator,
+            Terminator::TailCall { function: 1, .. }
+        ));
+        assert!(matches!(
+            body.blocks[0].statements.as_slice(),
+            [
+                _,
+                _,
+                Instruction {
+                    kind: InstructionKind::Drop {
+                        owner: Operand { register: 4, .. },
+                    },
+                    ..
+                },
+                Instruction {
+                    kind: InstructionKind::Drop {
+                        owner: Operand { register: 3, .. },
+                    },
+                    ..
+                },
+            ]
+        ));
     }
 
     #[test]
@@ -14700,7 +15028,8 @@ mod tests {
         body.params = vec![U32, I64];
         body.features = infer_feature_bits(&body);
 
-        let (outcome, _) = form_tail_calls_and_hoist(&mut body, u64::MAX);
+        let (outcome, _) =
+            form_tail_calls_and_hoist(&mut body, &Type::predefined(), &BTreeSet::new(), u64::MAX);
 
         assert_eq!(outcome, PassOutcome::Changed);
         assert!(matches!(
@@ -14893,7 +15222,7 @@ mod tests {
                 value: Constant::I64(9),
             }));
         assert_eq!(
-            discover_tail_calls(&mut live, u64::MAX).0,
+            discover_tail_calls(&mut live, &Type::predefined(), &BTreeSet::new(), u64::MAX,).0,
             PassOutcome::Unchanged
         );
 
@@ -14904,7 +15233,13 @@ mod tests {
                 owner: move_operand(0),
             }));
         assert_eq!(
-            discover_tail_calls(&mut cleanup, u64::MAX).0,
+            discover_tail_calls(
+                &mut cleanup,
+                &Type::predefined(),
+                &BTreeSet::new(),
+                u64::MAX,
+            )
+            .0,
             PassOutcome::Unchanged
         );
 
@@ -14917,7 +15252,13 @@ mod tests {
             }),
         ));
         assert_eq!(
-            discover_tail_calls(&mut multi_pred, u64::MAX).0,
+            discover_tail_calls(
+                &mut multi_pred,
+                &Type::predefined(),
+                &BTreeSet::new(),
+                u64::MAX,
+            )
+            .0,
             PassOutcome::Unchanged
         );
 
@@ -14933,7 +15274,13 @@ mod tests {
             role: BlockParamRole::Ordinary,
         });
         assert_eq!(
-            discover_tail_calls(&mut explicit, u64::MAX).0,
+            discover_tail_calls(
+                &mut explicit,
+                &Type::predefined(),
+                &BTreeSet::new(),
+                u64::MAX,
+            )
+            .0,
             PassOutcome::Unchanged
         );
     }
@@ -14980,7 +15327,7 @@ mod tests {
 
         let mut owned = fixture(2, UseMode::Move, false);
         assert_eq!(
-            discover_tail_calls(&mut owned, u64::MAX).0,
+            discover_tail_calls(&mut owned, &Type::predefined(), &BTreeSet::new(), u64::MAX,).0,
             PassOutcome::Changed
         );
         assert!(matches!(
@@ -15001,7 +15348,13 @@ mod tests {
             fixture(2, UseMode::Move, true),
         ] {
             assert_eq!(
-                discover_tail_calls(&mut barrier, u64::MAX).0,
+                discover_tail_calls(
+                    &mut barrier,
+                    &Type::predefined(),
+                    &BTreeSet::new(),
+                    u64::MAX,
+                )
+                .0,
                 PassOutcome::Unchanged
             );
         }
@@ -15042,7 +15395,7 @@ mod tests {
         body.features = infer_feature_bits(&body);
 
         assert_eq!(
-            discover_tail_calls(&mut body, u64::MAX).0,
+            discover_tail_calls(&mut body, &Type::predefined(), &BTreeSet::new(), u64::MAX,).0,
             PassOutcome::Changed
         );
         assert!(matches!(
@@ -15079,7 +15432,13 @@ mod tests {
                 value: Constant::I64(9),
             }));
         assert_eq!(
-            discover_tail_calls(&mut with_live_owner, u64::MAX).0,
+            discover_tail_calls(
+                &mut with_live_owner,
+                &Type::predefined(),
+                &BTreeSet::new(),
+                u64::MAX,
+            )
+            .0,
             PassOutcome::Unchanged
         );
     }
@@ -16498,7 +16857,7 @@ mod tests {
         body.result = I64;
 
         assert_eq!(
-            discover_tail_calls(&mut body, u64::MAX).0,
+            discover_tail_calls(&mut body, &Type::predefined(), &BTreeSet::new(), u64::MAX,).0,
             PassOutcome::Changed
         );
         assert!(matches!(
