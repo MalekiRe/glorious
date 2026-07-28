@@ -151,6 +151,43 @@ pub token_code_at(value: &LexedSource, index: usize) -> u16 {
     token_code(Vec::index(&value.tokens, move index))
 }
 
+pub operator_symbol_at(value: &LexedSource, index: usize) -> Bool {
+    let code = token_code_at(value, index);
+    handle code == u16_value(10) {
+        Result::Ok(_) => true,
+        Result::Err(_) => handle u16_value(25) <= code {
+            Result::Err(_) => false,
+            Result::Ok(_) => code <= u16_value(39)
+        }
+    }
+}
+
+pub operator_end(
+    value: &LexedSource,
+    cursor: usize,
+    limit: usize,
+    previous_end: usize
+) -> usize {
+    handle cursor < limit {
+        Result::Err(_) => cursor,
+        Result::Ok(_) => handle operator_symbol_at(value, cursor) {
+            Result::Err(_) => cursor,
+            Result::Ok(_) => {
+                let token = Vec::index(&value.tokens, cursor);
+                handle previous_end == token.span.start {
+                    Result::Err(_) => cursor,
+                    Result::Ok(_) => operator_end(
+                        value,
+                        cursor + usize_value(1),
+                        limit,
+                        token.span.end
+                    )
+                }
+            }
+        }
+    }
+}
+
 pub token_span(value: &Token) -> Span {
     Span { start: value.span.start, end: value.span.end }
 }

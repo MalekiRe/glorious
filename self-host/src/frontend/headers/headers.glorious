@@ -240,6 +240,43 @@ pub fixity_at<'a>(
     Vec::get(&value.fixities.values, index)
 }
 
+pub fixity_form_at(value: &NominalIndex, index: usize) -> u8 {
+    let found = Vec::index(&value.fixities.values, index);
+    found.form
+}
+
+pub fixity_precedence_at(value: &NominalIndex, index: usize) -> u8 {
+    let found = Vec::index(&value.fixities.values, index);
+    found.precedence
+}
+
+pub fixity_operator_start_at(value: &NominalIndex, index: usize) -> usize {
+    let found = Vec::index(&value.fixities.values, index);
+    found.operator.start
+}
+
+pub parsed_source(value: &ParsedHeaders) -> &super::lexer::LexedSource {
+    &value.source
+}
+
+pub nominal_index(value: &ParsedHeaders) -> &NominalIndex { &value.nominal }
+
+pub token_range_start(value: &HeaderTokenRange) -> usize { value.start }
+
+pub token_range_end(value: &HeaderTokenRange) -> usize { value.end }
+
+pub fixity_shell(value: &FixityHeader) -> u32 { value.shell }
+
+pub fixity_form_code(value: &FixityHeader) -> u8 { value.form }
+
+pub fixity_precedence(value: &FixityHeader) -> u8 { value.precedence }
+
+pub fixity_operator_start(value: &FixityHeader) -> usize {
+    value.operator.start
+}
+
+pub fixity_operator_end(value: &FixityHeader) -> usize { value.operator.end }
+
 pub type_at<'a>(value: &'a HeaderIndex, index: usize) -> Option<&'a TypeNode> {
     Vec::get(&value.types, index)
 }
@@ -1196,39 +1233,16 @@ parse_precedence(
 }
 
 operator_symbol(value: &Parser, index: usize) -> Bool {
-    // The lexer reserves 10 for arbitrary operator runs and the contiguous
-    // range 25..39 for structural operator tokens. Codes 20..24 are the
-    // deliberately excluded `.`, `..`, `->`, `=>`, and `::` punctuation.
-    let code = token_code(value, index);
-    handle code == u16_value(10) {
-        Result::Ok(_) => true,
-        Result::Err(_) => handle u16_value(25) <= code {
-            Result::Err(_) => false,
-            Result::Ok(_) => code <= u16_value(39)
-        }
-    }
+    super::lexer::operator_symbol_at(&value.source, index)
 }
 
 operator_tail(value: &Parser, cursor: usize, previous_end: usize) -> usize {
-    handle cursor < value.limit {
-        Result::Err(_) => cursor,
-        Result::Ok(_) => {
-            handle operator_symbol(value, cursor) {
-                Result::Err(_) => cursor,
-                Result::Ok(_) => {
-                    let found = token_span_at(value, cursor);
-                    handle previous_end == super::lexer::span_start(&found) {
-                        Result::Err(_) => cursor,
-                        Result::Ok(_) => operator_tail(
-                            value,
-                            cursor + usize_value(1),
-                            super::lexer::span_end(&found)
-                        )
-                    }
-                }
-            }
-        }
-    }
+    super::lexer::operator_end(
+        &value.source,
+        cursor,
+        value.limit,
+        previous_end
+    )
 }
 
 take_operator(
