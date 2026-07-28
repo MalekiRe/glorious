@@ -62,11 +62,14 @@ The current vertical slice supports:
 - first-class callable environments, reference-counted callable copies,
   direct and indirect invocation, and shared, unique, and owned environment
   receivers;
-- first-class handler values and terminal handler dispatch; outward terminal
+- reference-counted first-class handler values and terminal handler dispatch;
+  captured resumptions retain their handler until resume or cancellation;
+  outward terminal
   bodies and direct outward callees run in typed heap frames, including
-  synchronous and outward tail replacement, with explicit program counters,
-  parent/result links, initialization state, typed cleanup callbacks, and
-  effect-request records rather than relying on the native stack;
+  indirect outward callables and synchronous/outward tail replacement, with
+  explicit program counters, parent/result links, initialization state, typed
+  cleanup callbacks, and effect-request records rather than relying on the
+  native stack;
 - exact and optional one-shot resumptions, including multi-frame resume,
   repeated handler re-entry, tail-resume, and cancellation cleanup;
 - initial exact multishot replay for scalar and immutable refcounted frame
@@ -110,9 +113,12 @@ silently changing semantics.
    use the native heap-frame ABI, including direct outward call/return
    propagation, static tail-call replacement, and typed terminal unwinding.
    Exact and optional one-shot resume, tail-resume, and cancellation are also
-   implemented. Initial multishot frame cloning covers scalar, immutable
-   refcounted, and direct residual-field state. Deep mutable graph/handler
-   cloning and indirect outward-call propagation remain.
+   implemented, with resumptions owning a reference to their handler value.
+   Initial multishot frame cloning covers scalar, immutable
+   refcounted, and direct residual-field state. Indirect outward-call
+   propagation is implemented with callable starter thunks and refcounted
+   guard chains. Deep mutable graph/handler cloning and synchronous indirect
+   calls from an effect frame remain.
 7. Production output: object/executable emission through clang and initial
    bytecode/LLVM differential conformance tests are implemented, and `-O0`
    through `-O3` are forwarded to native code generation; debug information,

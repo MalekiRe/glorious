@@ -1,6 +1,6 @@
 use std::{fs, process::Command};
 
-use grandiose_vm::{verify, Value, Vm};
+use grandiose_vm::{Value, Vm, verify};
 
 #[test]
 fn scalar_main_emits_valid_llvm_ir() {
@@ -286,6 +286,99 @@ fn nonescaping_closures_use_the_specialized_direct_call_path() {
 }
 
 #[test]
+fn outward_effects_propagate_through_indirect_callables() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-indirect-outward-effect.glorious",
+        r#"
+            effect Ask { [1,1] ask() -> i64 }
+            call_body() -> i64 / {Ask} {
+                let text = String::concat("ke", "pt");
+                let ask = { => {
+                    let answer = perform Ask::ask();
+                    String::byte_len(&text);
+                    answer
+                } };
+                ask() + 0
+            }
+            tail_body() -> i64 / {Ask} {
+                let text = String::concat("st", "ill kept");
+                let ask = { => {
+                    let answer = perform Ask::ask();
+                    String::byte_len(&text);
+                    answer
+                } };
+                move ask()
+            }
+            selected() -> i64 {
+                handle call_body() {
+                    Ask::ask() with continuation => resume(move continuation, 20)
+                };
+                handle tail_body() {
+                    Ask::ask() with continuation => resume(move continuation, 42)
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    assert!(phases.mir.functions.iter().any(|function| {
+        function.blocks.iter().any(|block| {
+            matches!(
+                block.terminator,
+                grandiose::compiler_mir::Terminator::CallIndirect { .. }
+            )
+        })
+    }));
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    assert!(module.ir.contains("%g1.effect_guard = type"));
+    assert!(module.ir.contains("call ptr %"));
+
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("indirect-outward-effect.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("indirect-outward-effect");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\nextern int64_t g1_f{selected}(void);\nint main(void) {{ return g1_f{selected}() == 42 ? 0 : 1; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new("clang")
+        .arg("-fsanitize=address")
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable).output().unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
+    );
+}
+
+#[test]
 fn scalar_numeric_conversions_emit_native_llvm_casts() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-numeric-conversions.glorious",
@@ -337,9 +430,11 @@ fn target_options_control_pointer_sized_integer_layout() {
         },
     )
     .unwrap();
-    assert!(module
-        .ir
-        .contains("target triple = \"i686-unknown-linux-gnu\""));
+    assert!(
+        module
+            .ir
+            .contains("target triple = \"i686-unknown-linux-gnu\"")
+    );
     assert!(module.ir.contains("target datalayout = \"e-m:e-p:32:32"));
     assert!(module.ir.contains("define i32 @g1_f"));
 
@@ -810,7 +905,7 @@ fn llvm_and_vm_backends_execute_the_same_one_shot_resumption() {
 fn llvm_one_shot_tail_resume_and_cancel_match_the_vm() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-one-shot-tail-cancel.glorious",
-        "struct Resource { text: String }\nimpl Use<[0,1]> for Resource {}\nconsume(value: Resource) -> () { () }\neffect Ask { [1,1] ask() -> i64 }\neffect Maybe { [0,1] ask() -> i64 }\ntail_selected() -> i64 { handle { let answer = perform Ask::ask(); answer + 1 } { Ask::ask() with continuation => tail(continuation, 41) } }\ncancel_selected() -> i64 { handle { let retained = Resource { text: String::concat(\"can\", \"cel\") }; let answer = perform Maybe::ask(); consume(move retained); answer } { Maybe::ask() with continuation => { cancel(continuation); 42 } } }\nmain() -> () { tail_selected(); cancel_selected(); () }",
+        "struct Resource { text: String }\nimpl Use<[0,1]> for Resource {}\nconsume(value: Resource) -> () { () }\neffect Ask { [1,1] ask() -> i64 }\neffect Maybe { [0,1] ask() -> i64 }\neffect Choice { [1,1] first() -> i64 stop() -> ! }\ntail_selected() -> i64 { handle { let answer = perform Ask::ask(); answer + 1 } { Ask::ask() with continuation => tail(continuation, 41) } }\ncancel_selected() -> i64 { handle { let retained = Resource { text: String::concat(\"can\", \"cel\") }; let answer = perform Maybe::ask(); consume(move retained); answer } { Maybe::ask() with continuation => { cancel(continuation); 42 } } }\nmixed_selected() -> i64 { handle { perform Choice::first(); perform Choice::stop() } { Choice::first() with continuation => resume(move continuation, 0), Choice::stop() => 42 } }\nmain() -> () { tail_selected(); cancel_selected(); mixed_selected(); () }",
         grandiose::CompileOptions {
             optimization_level: grandiose::OptimizationLevel::O0,
         },
@@ -840,8 +935,14 @@ fn llvm_one_shot_tail_resume_and_cancel_match_the_vm() {
         Value::I64(42)
     );
     assert_eq!(
-        Vm::new(artifact)
+        Vm::new(artifact.clone())
             .run(vm_function("cancel_selected"), vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+    assert_eq!(
+        Vm::new(artifact)
+            .run(vm_function("mixed_selected"), vec![])
             .unwrap(),
         Value::I64(42)
     );
@@ -857,11 +958,13 @@ fn llvm_one_shot_tail_resume_and_cancel_match_the_vm() {
     fs::write(
         &harness,
         format!(
-            "#include <stdint.h>\nextern int64_t g1_f{}(void);\nextern int64_t g1_f{}(void);\nint main(void) {{ return g1_f{}() == 42 && g1_f{}() == 42 ? 0 : 1; }}\n",
+            "#include <stdint.h>\nextern int64_t g1_f{}(void);\nextern int64_t g1_f{}(void);\nextern int64_t g1_f{}(void);\nint main(void) {{ return g1_f{}() == 42 && g1_f{}() == 42 && g1_f{}() == 42 ? 0 : 1; }}\n",
             function("tail_selected"),
             function("cancel_selected"),
+            function("mixed_selected"),
             function("tail_selected"),
             function("cancel_selected"),
+            function("mixed_selected"),
         ),
     )
     .unwrap();
@@ -1022,6 +1125,368 @@ fn llvm_two_shot_clones_and_drops_only_live_residual_fields() {
 }
 
 #[test]
+fn llvm_two_shot_preserves_internal_and_projected_shared_aliases() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-two-shot-shared-aliases.glorious",
+        r#"
+            struct Pair { left: i64, right: i64 }
+            effect Choose { [2,2] choose() -> i64 }
+            whole() -> i64 {
+                handle {
+                    let value = 40;
+                    let reference = &value;
+                    let selected = perform Choose::choose();
+                    *reference + selected
+                } {
+                    Choose::choose() with continuation => {
+                        let ignored = resume(continuation, 1);
+                        resume(move continuation, 2)
+                    }
+                }
+            }
+            projected() -> i64 {
+                handle {
+                    let pair = Pair { left: 40, right: 0 };
+                    let reference = &pair.left;
+                    let selected = perform Choose::choose();
+                    *reference + selected
+                } {
+                    Choose::choose() with continuation => {
+                        let ignored = resume(continuation, 1);
+                        resume(move continuation, 2)
+                    }
+                }
+            }
+            main() -> () { whole(); projected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let function = |name: &str| {
+        phases
+            .mir
+            .functions
+            .iter()
+            .position(|function| function.name == name)
+            .unwrap()
+    };
+    let vm_function = |name: &str| {
+        phases
+            .artifact
+            .functions
+            .iter()
+            .position(|function| function.name == name)
+            .unwrap() as u32
+    };
+    let artifact = verify(phases.artifact.clone()).unwrap();
+    for name in ["whole", "projected"] {
+        assert_eq!(
+            Vm::new(artifact.clone())
+                .run(vm_function(name), vec![])
+                .unwrap(),
+            Value::I64(42)
+        );
+    }
+
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("two-shot-shared-aliases.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("two-shot-shared-aliases");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\nextern int64_t g1_f{}(void);\nextern int64_t g1_f{}(void);\nint main(void) {{ return g1_f{}() == 42 && g1_f{}() == 42 ? 0 : 1; }}\n",
+            function("whole"),
+            function("projected"),
+            function("whole"),
+            function("projected"),
+        ),
+    )
+    .unwrap();
+    let output = Command::new("clang")
+        .arg("-fsanitize=address")
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable).output().unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
+    );
+}
+
+#[test]
+fn llvm_two_shot_retains_nested_aggregate_and_callable_captures() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-two-shot-nested-callable.glorious",
+        r#"
+            effect Choose { [2,2] choose() -> i64 }
+            selected() -> i64 {
+                handle {
+                    let base = 40;
+                    let borrowed = &base;
+                    let nested = (
+                        (() -> i64 { *borrowed },),
+                        String::concat("ne", "sted")
+                    );
+                    let choice = perform Choose::choose();
+                    let callable_tuple = nested.0;
+                    let callable = callable_tuple.0;
+                    let text = nested.1;
+                    move text;
+                    move callable;
+                    choice + 40
+                } {
+                    Choose::choose() with continuation => {
+                        let ignored = resume(continuation, 1);
+                        resume(move continuation, 2)
+                    }
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let vm_selected = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_selected, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("two-shot-nested-callable.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("two-shot-nested-callable");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\nextern int64_t g1_f{selected}(void);\nint main(void) {{ return g1_f{selected}() == 42 ? 0 : 1; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new("clang")
+        .arg("-fsanitize=address")
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable).output().unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
+    );
+}
+
+#[test]
+fn llvm_borrowed_replays_do_not_consume_shared_terminal_clause_callable() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-two-shot-terminal-replay.glorious",
+        r#"
+            effect Choice { [2,2] first() -> i64 stop() -> ! }
+            selected() -> i64 {
+                handle {
+                    perform Choice::first();
+                    perform Choice::stop()
+                } {
+                    Choice::first() with continuation => {
+                        let first = resume(continuation, 0);
+                        let second = resume(move continuation, 0);
+                        first + second
+                    },
+                    Choice::stop() => 42
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let vm_selected = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_selected, vec![])
+            .unwrap(),
+        Value::I64(84)
+    );
+
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("two-shot-terminal-replay.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("two-shot-terminal-replay");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\nextern int64_t g1_f{selected}(void);\nint main(void) {{ return g1_f{selected}() == 84 ? 0 : 1; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new("clang")
+        .arg("-fsanitize=address")
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable).output().unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
+    );
+}
+
+#[test]
+fn llvm_multishot_cancel_drops_owned_suspended_graph() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-multishot-cancel.glorious",
+        r#"
+            effect Choose { [0,2] choose() -> i64 }
+            selected() -> i64 {
+                handle {
+                    let retained = String::concat("can", "cel");
+                    let choice = perform Choose::choose();
+                    move retained;
+                    choice + 1
+                } {
+                    Choose::choose() with continuation => {
+                        cancel(move continuation);
+                        42
+                    }
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let vm_selected = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_selected, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("multishot-cancel.ll");
+    let harness = directory.path().join("harness.c");
+    let executable = directory.path().join("multishot-cancel");
+    fs::write(&source, module.ir).unwrap();
+    fs::write(
+        &harness,
+        format!(
+            "#include <stdint.h>\nextern int64_t g1_f{selected}(void);\nint main(void) {{ return g1_f{selected}() == 42 ? 0 : 1; }}\n"
+        ),
+    )
+    .unwrap();
+    let output = Command::new("clang")
+        .arg("-fsanitize=address")
+        .arg(&source)
+        .arg(&harness)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let execution = Command::new(executable).output().unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
+    );
+}
+
+#[test]
 fn llvm_backend_invokes_the_native_host_abi_and_consumes_arguments() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-host-call.glorious",
@@ -1040,9 +1505,11 @@ fn llvm_backend_invokes_the_native_host_abi_and_consumes_arguments() {
     let mut options = grandiose::LlvmOptions::default();
     options.emit_entry_wrapper = false;
     let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
-    assert!(module
-        .ir
-        .contains("declare void @g1_host_diagnostic_write(ptr)"));
+    assert!(
+        module
+            .ir
+            .contains("declare void @g1_host_diagnostic_write(ptr)")
+    );
 
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("host.ll");
