@@ -11318,28 +11318,23 @@ fn verify_loans(
                 end_reference(&mut loans, *reference)?;
             }
             Instruction::Move { dst, src } => {
-                let dependents = loans
+                let borrowed_place_dependents = loans
                     .iter()
                     .enumerate()
-                    .filter(|(_, carried)| {
-                        carried.iter().any(|loan| {
-                            loan.loan.place.owner == *src
-                                || loan.loan.suspended_parent == Some(*src)
-                        })
-                    })
+                    .filter(|(_, carried)| carried.iter().any(|loan| loan.loan.place.owner == *src))
                     .map(|(carrier, _)| carrier as u32)
                     .collect::<BTreeSet<_>>();
-                let relocates_borrowed_owner = !dependents.is_empty();
+                let relocates_borrowed_owner = !borrowed_place_dependents.is_empty();
                 let authenticated_relocation = parallel_move_members[pc as usize]
                     .as_ref()
                     .is_some_and(|members| {
                         members.contains(src)
                             && members.contains(dst)
-                            && dependents.iter().all(|carrier| members.contains(carrier))
+                            && borrowed_place_dependents
+                                .iter()
+                                .all(|carrier| members.contains(carrier))
                     });
-                if (conflicts(&whole(*src), true, Some(*src), &loans) || is_suspended(*src, &loans))
-                    && !authenticated_relocation
-                {
+                if conflicts(&whole(*src), true, Some(*src), &loans) && !authenticated_relocation {
                     return Err(conflict(*src));
                 }
                 loans[*dst as usize] = std::mem::take(&mut loans[*src as usize]);
@@ -11349,9 +11344,14 @@ fn verify_loans(
                         if loan.loan.place.owner == *src {
                             loan.loan.place.owner = *dst;
                         }
-                        if loan.loan.suspended_parent == Some(*src) {
-                            loan.loan.suspended_parent = Some(*dst);
-                        }
+                    }
+                }
+                // A suspended reference handle remains the same handle after
+                // an ordinary MOVE. Child reborrows stay in their carriers;
+                // only their parent register identity follows the rename.
+                for loan in loans.iter_mut().flatten() {
+                    if loan.loan.suspended_parent == Some(*src) {
+                        loan.loan.suspended_parent = Some(*dst);
                     }
                 }
             }
@@ -17134,6 +17134,75 @@ mod tests {
                 function: 0,
                 instruction: 2,
                 ty: 19,
+            })
+        ));
+    }
+
+    #[test]
+    fn cfg_edge_move_rebases_suspended_reference_handle_without_moving_child() {
+        let mut artifact = base(
+            vec![
+                Instruction::Const {
+                    dst: 1,
+                    constant: 0,
+                },
+                Instruction::BorrowUnique { dst: 2, src: 1 },
+                Instruction::ReborrowUnique { dst: 3, src: 2 },
+                Instruction::Const {
+                    dst: 4,
+                    constant: 0,
+                },
+                Instruction::Switch {
+                    discr: 4,
+                    cases: vec![(0, 5)],
+                    otherwise: 7,
+                },
+                Instruction::Move { dst: 5, src: 2 },
+                Instruction::Jump { target: 9 },
+                Instruction::Move { dst: 5, src: 2 },
+                Instruction::Jump { target: 9 },
+                Instruction::DerefCopy { dst: 6, src: 3 },
+                Instruction::EndBorrow { reference: 3 },
+                Instruction::EndBorrow { reference: 5 },
+                Instruction::Drop { register: 4 },
+                Instruction::Drop { register: 1 },
+                Instruction::Return { src: Some(6) },
+            ],
+            vec![UNIT, I64, 19, 19, I64, 19, I64],
+        );
+        artifact.types.push(Type::RefUnique { referent: I64 });
+        artifact.required_features |= 1 << 1;
+
+        let verified = verify(artifact).expect(
+            "moving a suspended reference handle across an edge must rebase its live child",
+        );
+        assert_eq!(
+            crate::Vm::new(verified).run(0, vec![]).unwrap(),
+            crate::Value::I64(2)
+        );
+
+        let mut forged_owner_move = base(
+            vec![
+                Instruction::Const {
+                    dst: 1,
+                    constant: 0,
+                },
+                Instruction::BorrowUnique { dst: 2, src: 1 },
+                Instruction::Move { dst: 3, src: 1 },
+                Instruction::Abort { message: None },
+            ],
+            vec![UNIT, I64, 19, I64],
+        );
+        forged_owner_move
+            .types
+            .push(Type::RefUnique { referent: I64 });
+        forged_owner_move.required_features |= 1 << 1;
+        assert!(matches!(
+            verify(forged_owner_move),
+            Err(VerifyError::BorrowConflict {
+                function: 0,
+                instruction: 2,
+                register: 1,
             })
         ));
     }
