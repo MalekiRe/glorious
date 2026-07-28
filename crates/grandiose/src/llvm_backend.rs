@@ -5037,22 +5037,86 @@ impl<'a> Emitter<'a> {
             .map(|operand| {
                 let ty = self.register_type(function, operand.register)?;
                 let value = self.load_operand(function, operand)?;
+                let fields = self.ordinary_aggregate_field_layout(function, operand.register)?;
                 if operand.mode == mir::UseMode::Copy {
-                    let runtime_ty = self.register_runtime_type(function, operand.register)?;
-                    self.emit_retain(runtime_ty, &value, function)?;
+                    if fields.is_empty() {
+                        let runtime_ty = self.register_runtime_type(function, operand.register)?;
+                        self.emit_retain(runtime_ty, &value, function)?;
+                    } else {
+                        self.emit_retain_ordinary_aggregate_register(
+                            function,
+                            operand.register,
+                            &value,
+                        )?;
+                    }
                 }
-                Ok((ty, value, operand.register, operand.mode))
+                let state = if fields.is_empty() {
+                    None
+                } else {
+                    let state = self.temp();
+                    self.line(&format!(
+                        "  %{state} = load i8, ptr %init{}",
+                        operand.register
+                    ));
+                    Some(format!("%{state}"))
+                };
+                let field_flags = fields
+                    .iter()
+                    .map(|field| {
+                        let flag = self.temp();
+                        self.line(&format!(
+                            "  %{flag} = load i8, ptr %fieldinit{}.{}",
+                            operand.register, field.owned_mask_index
+                        ));
+                        format!("%{flag}")
+                    })
+                    .collect::<Vec<_>>();
+                Ok((
+                    ty,
+                    value,
+                    operand.register,
+                    operand.mode,
+                    state,
+                    field_flags,
+                ))
             })
             .collect::<Result<Vec<_>, Vec<Diagnostic>>>()?;
-        for (parameter, (ty, value, source, mode)) in parameters.into_iter().zip(values) {
+        for (parameter, (ty, value, source, mode, state, field_flags)) in
+            parameters.into_iter().zip(values)
+        {
             self.line(&format!(
                 "  store {ty} {value}, ptr %r{}",
                 parameter.register
             ));
+            let target_fields =
+                self.ordinary_aggregate_field_layout(function, parameter.register)?;
+            if target_fields.len() != field_flags.len() {
+                return Err(vec![unsupported(
+                    function,
+                    "effect edge aggregate field-state layout mismatch",
+                )]);
+            }
+            if field_flags.is_empty() {
+                if mode == mir::UseMode::Move {
+                    self.emit_effect_set_initialized(function, source, false)?;
+                }
+                self.emit_effect_set_initialized(function, parameter.register, true)?;
+                continue;
+            }
             if mode == mir::UseMode::Move {
                 self.emit_effect_set_initialized(function, source, false)?;
             }
-            self.emit_effect_set_initialized(function, parameter.register, true)?;
+            for (field, flag) in target_fields.iter().zip(field_flags) {
+                self.line(&format!(
+                    "  store i8 {flag}, ptr %fieldinit{}.{}",
+                    parameter.register, field.owned_mask_index
+                ));
+            }
+            self.line(&format!(
+                "  store i8 {}, ptr %init{}",
+                state.expect("aggregate edge arguments have an initialization state"),
+                parameter.register
+            ));
         }
         Ok(())
     }

@@ -4872,3 +4872,65 @@ fn llvm_ordinary_partial_aggregate_move_drops_only_residual_fields() {
         "ordinary-partial-aggregate-move",
     );
 }
+
+#[test]
+fn llvm_effect_edge_preserves_partial_aggregate_ownership() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-effect-edge-partial-aggregate.glorious",
+        r#"
+            struct Pair { selected: String, residual: String }
+            effect Ask { ask() -> () }
+            extract_selected(value: Pair, first: Bool) -> String / {Ask} {
+                let selected = move value.selected;
+                handle move first {
+                    Result::Ok(_) => perform Ask::ask(),
+                    Result::Err(_) => ()
+                };
+                move selected
+            }
+            selected() -> i64 {
+                let text = handle extract_selected(
+                    Pair {
+                        selected: String::concat("forty", "two"),
+                        residual: String::concat("drop", "me")
+                    },
+                    true
+                ) {
+                    Ask::ask() => ()
+                };
+                wrapping_convert_to_i64(String::byte_len(&text))
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let vm_function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_function, vec![])
+            .unwrap(),
+        Value::I64(8)
+    );
+    let llvm_function = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    run_native_i64(
+        grandiose::emit_llvm_ir(&phases, &options).unwrap(),
+        llvm_function,
+        8,
+        "effect-edge-partial-aggregate",
+    );
+}
