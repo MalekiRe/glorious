@@ -89,6 +89,19 @@ struct Emitter<'a> {
     host_imports: BTreeSet<HostImportRole>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum EffectRoutingMode {
+    Initial,
+    ReplayOwned,
+    ReplayBorrowed,
+}
+
+impl EffectRoutingMode {
+    fn preserves_clauses(self) -> bool {
+        matches!(self, Self::ReplayBorrowed)
+    }
+}
+
 impl<'a> Emitter<'a> {
     fn new(phases: &'a CompiledPhases, options: &'a LlvmOptions) -> Self {
         Self {
@@ -2000,11 +2013,14 @@ impl<'a> Emitter<'a> {
                 ));
             }
             self.line(&format!("frame.clone.retain{full_label}:"));
-            self.emit_retain(
+            let cloned_value = self.emit_clone_effect_snapshot_value(
                 function.register_types[register],
                 &format!("%{value}"),
                 function,
             )?;
+            self.line(&format!(
+                "  store {ty} {cloned_value}, ptr %{value_address}"
+            ));
             self.line(&format!("  br label %frame.clone.done{done_label}"));
             if direct_fields != 0 {
                 self.line(&format!("frame.clone.partial{partial_label}:"));
@@ -2015,15 +2031,14 @@ impl<'a> Emitter<'a> {
                     "  br i1 %{partial}, label %frame.clone.fields{partial_fields_label}, label %frame.clone.done{done_label}"
                 ));
                 self.line(&format!("frame.clone.fields{partial_fields_label}:"));
-                self.emit_masked_aggregate_fields(
+                self.emit_clone_masked_effect_snapshot_fields(
                     function,
                     function.register_types[register],
-                    &format!("%{value}"),
                     &frame_ty,
                     &format!("%{clone}"),
+                    &format!("%{value_address}"),
                     field_initialized_field,
                     field_layout[register].0,
-                    true,
                 )?;
                 self.line(&format!("  br label %frame.clone.done{done_label}"));
             }
@@ -2534,6 +2549,36 @@ impl<'a> Emitter<'a> {
             } => {
                 self.emit_effect_handle(function_index, function, *result, handler, body, normal)?
             }
+            Terminator::Resume {
+                result,
+                resumption,
+                receiver_mode,
+                value,
+                normal,
+            } => self.emit_effect_resume(
+                function,
+                *result,
+                resumption,
+                *receiver_mode,
+                value,
+                normal,
+            )?,
+            Terminator::TailResume {
+                resumption,
+                receiver_mode,
+                value,
+            } => self.emit_effect_tail_resume(
+                function_index,
+                function,
+                resumption,
+                *receiver_mode,
+                value,
+            )?,
+            Terminator::Cancel {
+                result,
+                resumption,
+                normal,
+            } => self.emit_effect_cancel(function, *result, resumption, normal)?,
             Terminator::Perform {
                 result,
                 protocol,
@@ -5616,6 +5661,264 @@ impl<'a> Emitter<'a> {
         ))
     }
 
+    fn emit_effect_resume(
+        &mut self,
+        function: &mir::Function,
+        result: u32,
+        resumption: &mir::Operand,
+        receiver_mode: u32,
+        value: &mir::Operand,
+        normal: &mir::Edge,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let (resumption_type, input_type, output_type, _, upper_uses, copy) =
+            self.native_resumption_types(function, resumption)?;
+        let reusable = copy || upper_uses.is_none_or(|upper| upper > 1);
+        if receiver_mode > 2
+            || receiver_mode < 2 && !reusable
+            || receiver_mode == 2 && resumption.mode != mir::UseMode::Move
+            || value.mode != mir::UseMode::Move
+            || self.register_runtime_type(function, value.register)? != input_type
+            || self.register_runtime_type(function, result)? != output_type
+        {
+            return Err(vec![unsupported(
+                function,
+                "malformed effect-frame Resume terminator",
+            )]);
+        }
+
+        let resumption_value = self.load_operand(function, resumption)?;
+        let input = self.load_operand(function, value)?;
+        if receiver_mode == 2 {
+            self.emit_effect_set_initialized(function, resumption.register, false)?;
+        }
+        self.emit_effect_set_initialized(function, value.register, false)?;
+        self.emit_effect_set_initialized(function, result, false)?;
+        self.emit_edge_arguments(function, normal, [result].into_iter().collect())?;
+        let state_address = self.temp();
+        self.line(&format!(
+            "  %{state_address} = getelementptr inbounds %g1.effect_frame, ptr %frame, i32 0, i32 4"
+        ));
+        self.line(&format!(
+            "  store i32 {}, ptr %{state_address}",
+            normal.target
+        ));
+
+        let (top, bottom) = self.emit_prepare_effect_resumption(
+            function,
+            &resumption_value,
+            resumption_type,
+            input_type,
+            &input,
+            receiver_mode < 2,
+        )?;
+        self.emit_splice_effect_resumption(
+            &bottom,
+            "%frame",
+            &format!("%r{result}"),
+            &format!("%init{result}"),
+        );
+        self.emit_effect_runtime_store(0, "ptr", &top);
+        self.line("  ret void");
+        Ok(())
+    }
+
+    fn emit_effect_tail_resume(
+        &mut self,
+        function_index: usize,
+        function: &mir::Function,
+        resumption: &mir::Operand,
+        receiver_mode: u32,
+        value: &mir::Operand,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let (resumption_type, input_type, output_type, _, upper_uses, _) =
+            self.native_resumption_types(function, resumption)?;
+        if receiver_mode != 2
+            || upper_uses != Some(1)
+            || resumption.mode != mir::UseMode::Move
+            || value.mode != mir::UseMode::Move
+            || self.register_runtime_type(function, value.register)? != input_type
+            || function.result != output_type
+        {
+            return Err(vec![unsupported(
+                function,
+                "malformed effect-frame TailResume terminator",
+            )]);
+        }
+
+        let resumption_value = self.load_operand(function, resumption)?;
+        let input = self.load_operand(function, value)?;
+        self.emit_effect_set_initialized(function, resumption.register, false)?;
+        self.emit_effect_set_initialized(function, value.register, false)?;
+
+        let header = self.temp();
+        self.line(&format!(
+            "  %{header} = getelementptr inbounds {}, ptr %frame, i32 0, i32 0",
+            self.effect_frame_type(function_index)
+        ));
+        let mut continuation = Vec::with_capacity(3);
+        for field in [0, 3, 7] {
+            let address = self.temp();
+            let loaded = self.temp();
+            self.line(&format!(
+                "  %{address} = getelementptr inbounds %g1.effect_frame, ptr %{header}, i32 0, i32 {field}"
+            ));
+            self.line(&format!("  %{loaded} = load ptr, ptr %{address}"));
+            continuation.push(format!("%{loaded}"));
+        }
+        let [previous, return_slot, return_init] = continuation.as_slice() else {
+            unreachable!()
+        };
+
+        let (top, bottom) = self.emit_prepare_effect_resumption(
+            function,
+            &resumption_value,
+            resumption_type,
+            input_type,
+            &input,
+            false,
+        )?;
+        self.emit_splice_effect_resumption(&bottom, previous, return_slot, return_init);
+        self.emit_effect_runtime_store(0, "ptr", &top);
+        self.line(&format!(
+            "  call void @g1_effect_drop_f{function_index}(ptr %frame)"
+        ));
+        self.line("  ret void");
+        Ok(())
+    }
+
+    fn emit_effect_cancel(
+        &mut self,
+        function: &mir::Function,
+        result: u32,
+        resumption: &mir::Operand,
+        normal: &mir::Edge,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let (resumption_type, ..) = self.native_resumption_types(function, resumption)?;
+        if resumption.mode != mir::UseMode::Move
+            || !matches!(
+                self.runtime_type(self.register_runtime_type(function, result)?)?,
+                Type::Unit
+            )
+        {
+            return Err(vec![unsupported(
+                function,
+                "malformed effect-frame Cancel terminator",
+            )]);
+        }
+        let resumption_value = self.load_operand(function, resumption)?;
+        self.emit_effect_set_initialized(function, resumption.register, false)?;
+        self.emit_destroy_one_shot_resumption(&resumption_value, resumption_type, function)?;
+        self.line(&format!("  store i8 0, ptr %r{result}"));
+        self.emit_effect_set_initialized(function, result, true)?;
+        self.emit_effect_edge(function, normal, [result].into_iter().collect())
+    }
+
+    fn emit_prepare_effect_resumption(
+        &mut self,
+        function: &mir::Function,
+        resumption: &str,
+        resumption_type: TypeId,
+        input_type: TypeId,
+        input: &str,
+        clone_snapshot: bool,
+    ) -> Result<(String, String), Vec<Diagnostic>> {
+        let fields = (0..5)
+            .map(|field| {
+                let address = self.temp();
+                let value = self.temp();
+                self.line(&format!(
+                    "  %{address} = getelementptr inbounds %g1.resumption, ptr {resumption}, i32 0, i32 {field}"
+                ));
+                self.line(&format!("  %{value} = load ptr, ptr %{address}"));
+                format!("%{value}")
+            })
+            .collect::<Vec<_>>();
+        let [top, bottom, resume_slot, resume_init, handler] = fields.as_slice() else {
+            unreachable!()
+        };
+        let (top, bottom, resume_slot, resume_init) = if clone_snapshot {
+            let cloned_top = self.temp();
+            let cloned_bottom = self.temp();
+            self.line(&format!(
+                "  %{cloned_top} = call ptr @g1_effect_clone_chain(ptr {top})"
+            ));
+            self.line(&format!(
+                "  %{cloned_bottom} = call ptr @g1_effect_chain_bottom(ptr %{cloned_top})"
+            ));
+            let usize_ty = format!("i{}", self.pointer_width());
+            let mut rebased = Vec::with_capacity(2);
+            for pointer in [resume_slot, resume_init] {
+                let pointer_integer = self.temp();
+                let top_integer = self.temp();
+                let offset = self.temp();
+                let cloned_pointer = self.temp();
+                self.line(&format!(
+                    "  %{pointer_integer} = ptrtoint ptr {pointer} to {usize_ty}"
+                ));
+                self.line(&format!(
+                    "  %{top_integer} = ptrtoint ptr {top} to {usize_ty}"
+                ));
+                self.line(&format!(
+                    "  %{offset} = sub {usize_ty} %{pointer_integer}, %{top_integer}"
+                ));
+                self.line(&format!(
+                    "  %{cloned_pointer} = getelementptr inbounds i8, ptr %{cloned_top}, {usize_ty} %{offset}"
+                ));
+                rebased.push(format!("%{cloned_pointer}"));
+            }
+            (
+                format!("%{cloned_top}"),
+                format!("%{cloned_bottom}"),
+                rebased[0].clone(),
+                rebased[1].clone(),
+            )
+        } else {
+            (
+                top.clone(),
+                bottom.clone(),
+                resume_slot.clone(),
+                resume_init.clone(),
+            )
+        };
+
+        let input_ty = self.llvm_type(input_type)?;
+        self.line(&format!("  store {input_ty} {input}, ptr {resume_slot}"));
+        let has_init = self.temp();
+        let mark_label = self.temp();
+        let marked_label = self.temp();
+        self.line(&format!("  %{has_init} = icmp ne ptr {resume_init}, null"));
+        self.line(&format!(
+            "  br i1 %{has_init}, label %effect.resume.mark{mark_label}, label %effect.resume.marked{marked_label}"
+        ));
+        self.line(&format!("effect.resume.mark{mark_label}:"));
+        self.line(&format!("  store i8 1, ptr {resume_init}"));
+        self.line(&format!("  br label %effect.resume.marked{marked_label}"));
+        self.line(&format!("effect.resume.marked{marked_label}:"));
+
+        if !clone_snapshot {
+            let clause_tuple = self.resumption_handler_capture_type(function, resumption_type)?;
+            self.emit_destroy_handler(handler, clause_tuple, function)?;
+            self.line(&format!("  call void @free(ptr {resumption})"));
+        }
+        Ok((top, bottom))
+    }
+
+    fn emit_splice_effect_resumption(
+        &mut self,
+        bottom: &str,
+        previous: &str,
+        return_slot: &str,
+        return_init: &str,
+    ) {
+        for (field, value) in [(0, previous), (3, return_slot), (7, return_init)] {
+            let address = self.temp();
+            self.line(&format!(
+                "  %{address} = getelementptr inbounds %g1.effect_frame, ptr {bottom}, i32 0, i32 {field}"
+            ));
+            self.line(&format!("  store ptr {value}, ptr %{address}"));
+        }
+    }
+
     fn emit_one_shot_resume(
         &mut self,
         function: &mir::Function,
@@ -5912,181 +6215,26 @@ impl<'a> Emitter<'a> {
         let done_label = self.temp();
         self.line(&format!("resume.normal{normal_label}:"));
         let completed = self.load_effect_runtime_field(&format!("%{runtime}"), 5, "ptr");
-        self.emit_drop_effect_frame(&completed);
+        self.emit_drop_optional_effect_frame(&completed);
+        self.line(&format!("  br label %resume.done{done_label}"));
+
+        self.line(&format!("resume.perform{perform_label}:"));
+        self.emit_effect_request_router(
+            function,
+            &format!("%{runtime}"),
+            &format!("resume.loop{loop_label}"),
+            &format!("resume.invalid{invalid}"),
+            if clone_snapshot {
+                EffectRoutingMode::ReplayBorrowed
+            } else {
+                EffectRoutingMode::ReplayOwned
+            },
+        )?;
+        self.line(&format!("resume.done{done_label}:"));
         if !clone_snapshot {
             self.emit_destroy_handler(handler, clause_tuple, function)?;
             self.line(&format!("  call void @free(ptr {resumption})"));
         }
-        self.line(&format!("  br label %resume.done{done_label}"));
-
-        self.line(&format!("resume.perform{perform_label}:"));
-        let protocol = self.load_effect_runtime_field(&format!("%{runtime}"), 2, "i32");
-        let operation = self.load_effect_runtime_field(&format!("%{runtime}"), 3, "i32");
-        let payload = self.load_effect_runtime_field(&format!("%{runtime}"), 4, "ptr");
-        let suspended = self.load_effect_runtime_field(&format!("%{runtime}"), 5, "ptr");
-        let nested_resume_slot = self.load_effect_runtime_field(&format!("%{runtime}"), 6, "ptr");
-        let nested_resume_init = self.load_effect_runtime_field(&format!("%{runtime}"), 7, "ptr");
-        let clause_labels = definition
-            .clauses
-            .iter()
-            .map(|_| self.temp())
-            .collect::<Vec<_>>();
-        let clause_checks = definition
-            .clauses
-            .iter()
-            .map(|_| self.temp())
-            .collect::<Vec<_>>();
-        for (index, ((clause, clause_label), check_label)) in definition
-            .clauses
-            .iter()
-            .zip(&clause_labels)
-            .zip(&clause_checks)
-            .enumerate()
-        {
-            if index != 0 {
-                self.line(&format!("resume.clause.check{check_label}:"));
-            }
-            let protocol_matches = self.temp();
-            let operation_matches = self.temp();
-            let matches = self.temp();
-            self.line(&format!(
-                "  %{protocol_matches} = icmp eq i32 {protocol}, {}",
-                clause.protocol
-            ));
-            self.line(&format!(
-                "  %{operation_matches} = icmp eq i32 {operation}, {}",
-                clause.operation
-            ));
-            self.line(&format!(
-                "  %{matches} = and i1 %{protocol_matches}, %{operation_matches}"
-            ));
-            let otherwise = clause_checks.get(index + 1).map_or_else(
-                || format!("resume.invalid{invalid}"),
-                |label| format!("resume.clause.check{label}"),
-            );
-            self.line(&format!(
-                "  br i1 %{matches}, label %resume.clause{clause_label}, label %{otherwise}"
-            ));
-        }
-        for (index, ((clause, clause_type), label)) in definition
-            .clauses
-            .iter()
-            .zip(&clause_types)
-            .zip(&clause_labels)
-            .enumerate()
-        {
-            self.line(&format!("resume.clause{label}:"));
-            let usize_ty = format!("i{}", self.pointer_width());
-            let clauses_address = self.temp();
-            let clauses = self.temp();
-            let slot = self.temp();
-            let callable = self.temp();
-            self.line(&format!(
-                "  %{clauses_address} = getelementptr inbounds %g1.handler, ptr {handler}, i32 0, i32 3"
-            ));
-            self.line(&format!("  %{clauses} = load ptr, ptr %{clauses_address}"));
-            self.line(&format!(
-                "  %{slot} = getelementptr inbounds ptr, ptr %{clauses}, {usize_ty} {index}"
-            ));
-            self.line(&format!("  %{callable} = load ptr, ptr %{slot}"));
-            let operation_descriptor = self
-                .phases
-                .artifact
-                .protocols
-                .get(clause.protocol as usize)
-                .and_then(|protocol| protocol.operations.get(clause.operation as usize))
-                .ok_or_else(|| vec![unsupported(function, "resumed operation is missing")])?;
-            let argument_types = operation_descriptor.payload_signature.params.clone();
-            let payload_ty = format!(
-                "{{ {} }}",
-                argument_types
-                    .iter()
-                    .map(|ty| self.llvm_type(*ty))
-                    .collect::<Result<Vec<_>, _>>()?
-                    .join(", ")
-            );
-            let mut arguments = Vec::with_capacity(
-                argument_types.len() + usize::from(clause.resumption_type.is_some()),
-            );
-            for (field, ty) in argument_types.iter().enumerate() {
-                let llvm_ty = self.llvm_type(*ty)?;
-                let address = self.temp();
-                let value = self.temp();
-                self.line(&format!(
-                    "  %{address} = getelementptr inbounds {payload_ty}, ptr {payload}, i32 0, i32 {field}"
-                ));
-                self.line(&format!("  %{value} = load {llvm_ty}, ptr %{address}"));
-                arguments.push((*ty, format!("%{value}")));
-            }
-            let Type::Callable { signature, .. } = self.runtime_type(*clause_type)?.clone() else {
-                return Err(vec![unsupported(
-                    function,
-                    "replayed handler clause has a non-callable runtime type",
-                )]);
-            };
-            if clause.resumption_type.is_none() && !signature.outward_protocols.is_empty() {
-                return Err(vec![unsupported(
-                    function,
-                    "replay-time effect-framed terminal handler clauses",
-                )]);
-            }
-            if let Some(nested_type) = clause.resumption_type {
-                let nested_size = self.emit_array_element_size("%g1.resumption");
-                let nested = self.temp();
-                self.line(&format!(
-                    "  %{nested} = call ptr @malloc({usize_ty} {nested_size})"
-                ));
-                let failed = self.temp();
-                self.line(&format!("  %{failed} = icmp eq ptr %{nested}, null"));
-                self.emit_trap_if(failed);
-                for (field, value) in [
-                    (0, suspended.clone()),
-                    (1, bottom.clone()),
-                    (2, nested_resume_slot.clone()),
-                    (3, nested_resume_init.clone()),
-                    (4, handler.clone()),
-                ] {
-                    let address = self.temp();
-                    self.line(&format!(
-                        "  %{address} = getelementptr inbounds %g1.resumption, ptr %{nested}, i32 0, i32 {field}"
-                    ));
-                    self.line(&format!("  store ptr {value}, ptr %{address}"));
-                }
-                self.emit_retain_handler(handler);
-                arguments.push((nested_type, format!("%{nested}")));
-            } else {
-                if clone_snapshot {
-                    self.emit_retain(*clause_type, &format!("%{callable}"), function)?;
-                } else {
-                    self.line(&format!("  store ptr null, ptr %{slot}"));
-                }
-            }
-            let returned = self.emit_call_owned_callable_value(
-                function,
-                *clause_type,
-                &format!("%{callable}"),
-                &arguments,
-                clause.resumption_type.is_none(),
-            )?;
-            if clause.resumption_type.is_none() {
-                self.emit_drop_effect_frame_chain(&suspended);
-            }
-            self.line(&format!("  call void @free(ptr {payload})"));
-            let result_ty = self.llvm_return_type(definition.result_type)?;
-            if let Some(returned) = returned {
-                self.line(&format!(
-                    "  store {result_ty} {returned}, ptr {return_slot}"
-                ));
-            } else if result_ty == "void" {
-                self.line(&format!("  store i8 0, ptr {return_slot}"));
-            }
-            if !clone_snapshot {
-                self.emit_destroy_handler(handler, clause_tuple, function)?;
-                self.line(&format!("  call void @free(ptr {resumption})"));
-            }
-            self.line(&format!("  br label %resume.done{done_label}"));
-        }
-        self.line(&format!("resume.done{done_label}:"));
         Ok(())
     }
 
@@ -6248,7 +6396,13 @@ impl<'a> Emitter<'a> {
         self.emit_edge_with_preassigned(function, normal, [result].into_iter().collect())?;
 
         self.line(&format!("handle.perform{perform_label}:"));
-        self.emit_effect_request_router(function, &format!("%{runtime}"), loop_label, miss)?;
+        self.emit_effect_request_router(
+            function,
+            &format!("%{runtime}"),
+            &format!("handle.loop{loop_label}"),
+            &format!("handle.invalid{miss}"),
+            EffectRoutingMode::Initial,
+        )?;
 
         self.line(&format!("handle.invalid{miss}:"));
         self.line("  call void @llvm.trap()");
@@ -6260,8 +6414,9 @@ impl<'a> Emitter<'a> {
         &mut self,
         function: &mir::Function,
         runtime: &str,
-        loop_label: u32,
-        invalid_label: u32,
+        loop_target: &str,
+        invalid_target: &str,
+        mode: EffectRoutingMode,
     ) -> Result<(), Vec<Diagnostic>> {
         let protocol = self.load_effect_runtime_field(runtime, 2, "i32");
         let operation = self.load_effect_runtime_field(runtime, 3, "i32");
@@ -6341,7 +6496,7 @@ impl<'a> Emitter<'a> {
         self.line(&format!("  %{current} = load ptr, ptr %{cursor}"));
         self.line(&format!("  %{present} = icmp ne ptr %{current}, null"));
         self.line(&format!(
-            "  br i1 %{present}, label %handle.route.inspect{inspect_label}, label %handle.invalid{invalid_label}"
+            "  br i1 %{present}, label %handle.route.inspect{inspect_label}, label %{invalid_target}"
         ));
         self.line(&format!("handle.route.inspect{inspect_label}:"));
         let delimiter_address = self.temp();
@@ -6515,12 +6670,6 @@ impl<'a> Emitter<'a> {
                     )]);
                 };
                 if let Some(resumption_type) = clause.resumption_type {
-                    if !signature.outward_protocols.is_empty() {
-                        return Err(vec![unsupported(
-                            function,
-                            "effect-framed resumptive handler clauses",
-                        )]);
-                    }
                     self.line(&format!("  store ptr null, ptr %{previous_address}"));
                     let resumption_size = self.emit_array_element_size("%g1.resumption");
                     let resumption = self.temp();
@@ -6545,23 +6694,92 @@ impl<'a> Emitter<'a> {
                     }
                     self.emit_retain_handler(&format!("%{handler}"));
                     arguments.push((resumption_type, format!("%{resumption}")));
-                    let returned = self.emit_call_owned_callable_value(
-                        function,
-                        *clause_type,
-                        &format!("%{callable}"),
-                        &arguments,
-                        false,
-                    )?;
-                    self.emit_store_routed_handler_result(
-                        function,
-                        definition.result_type,
-                        returned.as_deref(),
-                        &format!("%{return_slot}"),
-                        &format!("%{return_init}"),
-                    )?;
                     self.emit_effect_runtime_store_for(runtime, 5, "ptr", "null");
+                    if signature.outward_protocols.is_empty() {
+                        let returned = self.emit_call_owned_callable_value(
+                            function,
+                            *clause_type,
+                            &format!("%{callable}"),
+                            &arguments,
+                            false,
+                        )?;
+                        self.emit_store_routed_handler_result(
+                            function,
+                            definition.result_type,
+                            returned.as_deref(),
+                            &format!("%{return_slot}"),
+                            &format!("%{return_init}"),
+                        )?;
+                    } else {
+                        let guards_slot = self.temp();
+                        let has_parent = self.temp();
+                        let load_guards_label = self.temp();
+                        let guards_ready_label = self.temp();
+                        self.line(&format!("  %{guards_slot} = alloca ptr"));
+                        self.line(&format!("  store ptr null, ptr %{guards_slot}"));
+                        self.line(&format!("  %{has_parent} = icmp ne ptr %{parent}, null"));
+                        self.line(&format!(
+                            "  br i1 %{has_parent}, label %handle.route.resumption.guards{load_guards_label}, label %handle.route.resumption.guards.ready{guards_ready_label}"
+                        ));
+                        self.line(&format!(
+                            "handle.route.resumption.guards{load_guards_label}:"
+                        ));
+                        let parent_guards_address = self.temp();
+                        let parent_guards = self.temp();
+                        self.line(&format!(
+                            "  %{parent_guards_address} = getelementptr inbounds %g1.effect_frame, ptr %{parent}, i32 0, i32 6"
+                        ));
+                        self.line(&format!(
+                            "  %{parent_guards} = load ptr, ptr %{parent_guards_address}"
+                        ));
+                        self.line(&format!(
+                            "  call void @g1_effect_guard_retain(ptr %{parent_guards})"
+                        ));
+                        self.line(&format!("  store ptr %{parent_guards}, ptr %{guards_slot}"));
+                        self.line(&format!(
+                            "  br label %handle.route.resumption.guards.ready{guards_ready_label}"
+                        ));
+                        self.line(&format!(
+                            "handle.route.resumption.guards.ready{guards_ready_label}:"
+                        ));
+                        let outer_guards = self.temp();
+                        self.line(&format!("  %{outer_guards} = load ptr, ptr %{guards_slot}"));
+                        let starter_address = self.temp();
+                        let starter = self.temp();
+                        let missing = self.temp();
+                        self.line(&format!(
+                            "  %{starter_address} = getelementptr inbounds %g1.callable, ptr %{callable}, i32 0, i32 3"
+                        ));
+                        self.line(&format!("  %{starter} = load ptr, ptr %{starter_address}"));
+                        self.line(&format!("  %{missing} = icmp eq ptr %{starter}, null"));
+                        self.emit_trap_if(missing);
+                        let suffix = format!(
+                            ", {}",
+                            arguments
+                                .iter()
+                                .map(|(ty, value)| {
+                                    self.llvm_type(*ty).map(|ty| format!("{ty} {value}"))
+                                })
+                                .collect::<Result<Vec<_>, _>>()?
+                                .join(", ")
+                        );
+                        let clause_frame = self.temp();
+                        self.line(&format!(
+                            "  %{clause_frame} = call ptr %{starter}(ptr %{callable}, i1 false, ptr %{parent}, ptr %{return_slot}, ptr %{return_init}, ptr null, ptr %{outer_guards}{suffix})"
+                        ));
+                        self.emit_effect_runtime_store_for(
+                            runtime,
+                            0,
+                            "ptr",
+                            &format!("%{clause_frame}"),
+                        );
+                    }
                 } else {
-                    self.line(&format!("  store ptr null, ptr %{slot}"));
+                    if mode.preserves_clauses() {
+                        self.emit_retain(*clause_type, &format!("%{callable}"), function)?;
+                    } else {
+                        self.line(&format!("  store ptr null, ptr %{slot}"));
+                    }
                     if signature.outward_protocols.is_empty() {
                         self.line(&format!("  store ptr null, ptr %{previous_address}"));
                         let returned = self.emit_call_owned_callable_value(
@@ -6652,7 +6870,7 @@ impl<'a> Emitter<'a> {
                     }
                 }
                 self.line(&format!("  call void @free(ptr {payload})"));
-                if clause.resumption_type.is_some() || signature.outward_protocols.is_empty() {
+                if signature.outward_protocols.is_empty() {
                     self.emit_effect_runtime_store_for(runtime, 0, "ptr", &format!("%{parent}"));
                     let has_parent = self.temp();
                     let continue_label = self.temp();
@@ -6662,12 +6880,12 @@ impl<'a> Emitter<'a> {
                         "  br i1 %{has_parent}, label %handle.route.continue{continue_label}, label %handle.route.finish{finish_label}"
                     ));
                     self.line(&format!("handle.route.continue{continue_label}:"));
-                    self.line(&format!("  br label %handle.loop{loop_label}"));
+                    self.line(&format!("  br label %{loop_target}"));
                     self.line(&format!("handle.route.finish{finish_label}:"));
                     self.emit_effect_runtime_store_for(runtime, 1, "i32", "0");
-                    self.line(&format!("  br label %handle.loop{loop_label}"));
+                    self.line(&format!("  br label %{loop_target}"));
                 } else {
-                    self.line(&format!("  br label %handle.loop{loop_label}"));
+                    self.line(&format!("  br label %{loop_target}"));
                 }
                 let _ = described_def;
             }
@@ -7795,6 +8013,220 @@ impl<'a> Emitter<'a> {
         Ok(())
     }
 
+    fn emit_clone_effect_snapshot_value(
+        &mut self,
+        ty: TypeId,
+        value: &str,
+        function: &mir::Function,
+    ) -> Result<String, Vec<Diagnostic>> {
+        if !self.type_contains_resumption(ty, &mut BTreeSet::new())? {
+            self.emit_retain(ty, value, function)?;
+            return Ok(value.to_owned());
+        }
+        match self.runtime_type(ty)?.clone() {
+            Type::Resumption { .. } => self.emit_clone_resumption_wrapper(value),
+            Type::BindingPack { payload_type, .. } => {
+                self.emit_clone_effect_snapshot_value(payload_type, value, function)
+            }
+            Type::Tuple { fields, .. } => {
+                self.emit_clone_effect_snapshot_aggregate(ty, value, &fields, function)
+            }
+            Type::Struct { fields, .. } => {
+                let fields = fields.into_iter().map(|field| field.ty).collect::<Vec<_>>();
+                self.emit_clone_effect_snapshot_aggregate(ty, value, &fields, function)
+            }
+            Type::Enum { .. } => Err(vec![unsupported(
+                function,
+                "cloning effect-frame enum values that contain Resumption",
+            )]),
+            Type::Array { .. } => Err(vec![unsupported(
+                function,
+                "cloning effect-frame Array values that contain Resumption",
+            )]),
+            // These wrappers own their contents through reference-counted
+            // runtime objects. Retaining the wrapper creates one balanced
+            // owner without aliasing a raw resumption field in the frame.
+            Type::Callable { .. } | Type::Handler { .. } => {
+                self.emit_retain(ty, value, function)?;
+                Ok(value.to_owned())
+            }
+            _ => Err(vec![unsupported(
+                function,
+                "cloning an unsupported effect-frame Resumption carrier",
+            )]),
+        }
+    }
+
+    fn emit_clone_effect_snapshot_aggregate(
+        &mut self,
+        aggregate_type: TypeId,
+        aggregate: &str,
+        fields: &[TypeId],
+        function: &mir::Function,
+    ) -> Result<String, Vec<Diagnostic>> {
+        let aggregate_ty = self.llvm_type(aggregate_type)?;
+        let mut rebuilt = aggregate.to_owned();
+        for (index, field_type) in fields.iter().copied().enumerate() {
+            let extracted = self.temp();
+            self.line(&format!(
+                "  %{extracted} = extractvalue {aggregate_ty} {aggregate}, {index}"
+            ));
+            let cloned = self.emit_clone_effect_snapshot_value(
+                field_type,
+                &format!("%{extracted}"),
+                function,
+            )?;
+            let inserted = self.temp();
+            self.line(&format!(
+                "  %{inserted} = insertvalue {aggregate_ty} {rebuilt}, {} {cloned}, {index}",
+                self.llvm_type(field_type)?
+            ));
+            rebuilt = format!("%{inserted}");
+        }
+        Ok(rebuilt)
+    }
+
+    fn emit_clone_resumption_wrapper(&mut self, source: &str) -> Result<String, Vec<Diagnostic>> {
+        let fields = (0..5)
+            .map(|field| {
+                let address = self.temp();
+                let value = self.temp();
+                self.line(&format!(
+                    "  %{address} = getelementptr inbounds %g1.resumption, ptr {source}, i32 0, i32 {field}"
+                ));
+                self.line(&format!("  %{value} = load ptr, ptr %{address}"));
+                format!("%{value}")
+            })
+            .collect::<Vec<_>>();
+        let [top, _, resume_slot, resume_init, handler] = fields.as_slice() else {
+            unreachable!()
+        };
+        let cloned_top = self.temp();
+        let cloned_bottom = self.temp();
+        self.line(&format!(
+            "  %{cloned_top} = call ptr @g1_effect_clone_chain(ptr {top})"
+        ));
+        self.line(&format!(
+            "  %{cloned_bottom} = call ptr @g1_effect_chain_bottom(ptr %{cloned_top})"
+        ));
+        let usize_ty = format!("i{}", self.pointer_width());
+        let mut rebased = Vec::with_capacity(2);
+        for pointer in [resume_slot, resume_init] {
+            let present = self.temp();
+            let rebase_label = self.temp();
+            let null_label = self.temp();
+            let done_label = self.temp();
+            self.line(&format!("  %{present} = icmp ne ptr {pointer}, null"));
+            self.line(&format!(
+                "  br i1 %{present}, label %resumption.clone.rebase{rebase_label}, label %resumption.clone.null{null_label}"
+            ));
+            self.line(&format!("resumption.clone.rebase{rebase_label}:"));
+            let pointer_integer = self.temp();
+            let top_integer = self.temp();
+            let offset = self.temp();
+            let cloned_pointer = self.temp();
+            self.line(&format!(
+                "  %{pointer_integer} = ptrtoint ptr {pointer} to {usize_ty}"
+            ));
+            self.line(&format!(
+                "  %{top_integer} = ptrtoint ptr {top} to {usize_ty}"
+            ));
+            self.line(&format!(
+                "  %{offset} = sub {usize_ty} %{pointer_integer}, %{top_integer}"
+            ));
+            self.line(&format!(
+                "  %{cloned_pointer} = getelementptr inbounds i8, ptr %{cloned_top}, {usize_ty} %{offset}"
+            ));
+            self.line(&format!("  br label %resumption.clone.done{done_label}"));
+            self.line(&format!("resumption.clone.null{null_label}:"));
+            self.line(&format!("  br label %resumption.clone.done{done_label}"));
+            self.line(&format!("resumption.clone.done{done_label}:"));
+            let final_pointer = self.temp();
+            self.line(&format!(
+                "  %{final_pointer} = phi ptr [ %{cloned_pointer}, %resumption.clone.rebase{rebase_label} ], [ null, %resumption.clone.null{null_label} ]"
+            ));
+            rebased.push(format!("%{final_pointer}"));
+        }
+        self.emit_retain_handler(handler);
+        let size = self.emit_array_element_size("%g1.resumption");
+        let cloned = self.temp();
+        let failed = self.temp();
+        self.line(&format!(
+            "  %{cloned} = call ptr @malloc({usize_ty} {size})"
+        ));
+        self.line(&format!("  %{failed} = icmp eq ptr %{cloned}, null"));
+        self.emit_trap_if(failed);
+        for (field, value) in [
+            (0, format!("%{cloned_top}")),
+            (1, format!("%{cloned_bottom}")),
+            (2, rebased[0].clone()),
+            (3, rebased[1].clone()),
+            (4, handler.clone()),
+        ] {
+            let address = self.temp();
+            self.line(&format!(
+                "  %{address} = getelementptr inbounds %g1.resumption, ptr %{cloned}, i32 0, i32 {field}"
+            ));
+            self.line(&format!("  store ptr {value}, ptr %{address}"));
+        }
+        Ok(format!("%{cloned}"))
+    }
+
+    fn emit_clone_masked_effect_snapshot_fields(
+        &mut self,
+        function: &mir::Function,
+        aggregate_type: TypeId,
+        frame_type: &str,
+        frame: &str,
+        aggregate_address: &str,
+        flags_field: usize,
+        flags_offset: usize,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let fields = self.runtime_aggregate_fields(aggregate_type)?;
+        let aggregate_ty = self.llvm_type(aggregate_type)?;
+        for (index, field_type) in fields.into_iter().enumerate() {
+            let flag_address = self.temp();
+            let flag = self.temp();
+            let present = self.temp();
+            let visit_label = self.temp();
+            let done_label = self.temp();
+            self.line(&format!(
+                "  %{flag_address} = getelementptr inbounds {frame_type}, ptr {frame}, i32 0, i32 {flags_field}, i32 {}",
+                flags_offset + index
+            ));
+            self.line(&format!("  %{flag} = load i8, ptr %{flag_address}"));
+            self.line(&format!("  %{present} = icmp ne i8 %{flag}, 0"));
+            self.line(&format!(
+                "  br i1 %{present}, label %frame.field.clone{visit_label}, label %frame.field.cloned{done_label}"
+            ));
+            self.line(&format!("frame.field.clone{visit_label}:"));
+            let current = self.temp();
+            let extracted = self.temp();
+            self.line(&format!(
+                "  %{current} = load {aggregate_ty}, ptr {aggregate_address}"
+            ));
+            self.line(&format!(
+                "  %{extracted} = extractvalue {aggregate_ty} %{current}, {index}"
+            ));
+            let cloned = self.emit_clone_effect_snapshot_value(
+                field_type,
+                &format!("%{extracted}"),
+                function,
+            )?;
+            let inserted = self.temp();
+            self.line(&format!(
+                "  %{inserted} = insertvalue {aggregate_ty} %{current}, {} {cloned}, {index}",
+                self.llvm_type(field_type)?
+            ));
+            self.line(&format!(
+                "  store {aggregate_ty} %{inserted}, ptr {aggregate_address}"
+            ));
+            self.line(&format!("  br label %frame.field.cloned{done_label}"));
+            self.line(&format!("frame.field.cloned{done_label}:"));
+        }
+        Ok(())
+    }
+
     fn emit_retain_handler(&mut self, handler: &str) {
         let references_address = self.temp();
         let references = self.temp();
@@ -7910,15 +8342,10 @@ impl<'a> Emitter<'a> {
             Type::Handler { capture_type, .. } => {
                 self.emit_destroy_handler(&value, capture_type, function)?;
             }
-            Type::Resumption {
-                upper_uses, copy, ..
-            } => {
-                if copy || upper_uses != Some(1) {
-                    return Err(vec![unsupported(
-                        function,
-                        "destroying multishot Resumption values",
-                    )]);
-                }
+            // Every LLVM resumption value owns its wrapper, chain, and handler
+            // reference. Borrowed multishot resumes clone that whole ownership
+            // unit rather than reference-counting or aliasing the wrapper.
+            Type::Resumption { .. } => {
                 self.emit_destroy_one_shot_resumption(&value, ty, function)?;
             }
             Type::BindingPack { payload_type, .. } => {

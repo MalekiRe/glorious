@@ -1573,6 +1573,147 @@ fn llvm_nested_same_protocol_handler_keeps_inner_activation_on_replay() {
 }
 
 #[test]
+fn llvm_replay_routes_to_the_nearest_preserved_inner_activation() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-replay-nearest-inner-activation.glorious",
+        r#"
+            effect Choice {
+                [2,2] choose() -> i64
+                [1,1] ask() -> i64
+            }
+            add(left: i64, right: i64) -> i64 { left + right }
+            inner() -> i64 / {Choice} {
+                handle {
+                    let choice = perform Choice::choose();
+                    add(choice, perform Choice::ask())
+                } {
+                    Choice::ask() with continuation =>
+                        resume(move continuation, 40)
+                }
+            }
+            selected() -> i64 {
+                handle {
+                    inner()
+                } {
+                    Choice::choose() with continuation => {
+                        let first = resume(continuation, 1);
+                        let second = resume(move continuation, 1);
+                        add(first, second)
+                    },
+                    Choice::ask() with continuation =>
+                        resume(move continuation, 100)
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let vm_selected = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_selected, vec![])
+            .unwrap(),
+        Value::I64(82)
+    );
+
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    let clone_start = module
+        .ir
+        .find("call ptr @g1_effect_clone_chain")
+        .expect("nested resumption snapshot clone should clone its effect-frame chain");
+    let clone_ir = &module.ir[clone_start..];
+    assert!(clone_ir.contains("call ptr @g1_effect_chain_bottom"));
+    assert!(clone_ir.contains("resumption.clone.rebase"));
+    assert!(clone_ir.contains("getelementptr inbounds %g1.handler"));
+    assert!(clone_ir.contains("call ptr @malloc"));
+    assert!(clone_ir.contains("getelementptr inbounds %g1.resumption"));
+    run_native_i64(module, selected, 82, "replay-nearest-inner-activation");
+}
+
+#[test]
+fn llvm_replay_forwards_past_a_preserved_partial_activation() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-replay-partial-forwarding.glorious",
+        r#"
+            effect Choice {
+                [2,2] choose() -> i64
+                [1,1] ask() -> i64
+            }
+            effect Ping { [1,1] ping() -> i64 }
+            add(left: i64, right: i64) -> i64 { left + right }
+            inner() -> i64 / {Choice} {
+                handle {
+                    let choice = perform Choice::choose();
+                    add(choice, perform Choice::ask())
+                } {
+                    Ping::ping() with continuation =>
+                        resume(move continuation, 0)
+                }
+            }
+            selected() -> i64 {
+                handle {
+                    inner()
+                } {
+                    Choice::choose() with continuation => {
+                        let first = resume(continuation, 1);
+                        let second = resume(move continuation, 1);
+                        add(first, second)
+                    },
+                    Choice::ask() with continuation =>
+                        resume(move continuation, 40),
+                    Ping::ping() with continuation =>
+                        resume(move continuation, 0)
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let vm_selected = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_selected, vec![])
+            .unwrap(),
+        Value::I64(82)
+    );
+
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    run_native_i64(module, selected, 82, "replay-partial-forwarding");
+}
+
+#[test]
 fn llvm_effectful_terminal_clause_drops_abandoned_body_and_keeps_capture() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-effectful-terminal-clause-ownership.glorious",
@@ -1665,7 +1806,7 @@ fn llvm_effectful_terminal_clause_drops_abandoned_body_and_keeps_capture() {
 }
 
 #[test]
-fn llvm_rejects_effect_framed_resumptive_clause_with_backend_diagnostic() {
+fn llvm_emits_effect_framed_resumptive_handler_clauses() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-effect-framed-resumptive-clause.glorious",
         r#"
@@ -1692,29 +1833,181 @@ fn llvm_rejects_effect_framed_resumptive_clause_with_backend_diagnostic() {
         },
     )
     .unwrap();
-    let vm_function = phases
+    let selected = phases
         .artifact
         .functions
         .iter()
         .position(|function| function.name == "selected")
-        .unwrap() as u32;
+        .unwrap();
     assert_eq!(
         Vm::new(verify(phases.artifact.clone()).unwrap())
-            .run(vm_function, vec![])
+            .run(selected as u32, vec![])
             .unwrap(),
         Value::I64(42)
     );
+    assert!(phases.mir.functions.iter().any(|function| {
+        function.name.contains("$handler$")
+            && function.receiver_mode.is_some()
+            && !function.outward_protocols.is_empty()
+            && function.blocks.iter().any(|block| {
+                matches!(
+                    &block.terminator,
+                    grandiose::compiler_mir::Terminator::Resume {
+                        resumption: grandiose::compiler_mir::Operand {
+                            mode: grandiose::compiler_mir::UseMode::Move,
+                            ..
+                        },
+                        receiver_mode: 2,
+                        value: grandiose::compiler_mir::Operand {
+                            mode: grandiose::compiler_mir::UseMode::Move,
+                            ..
+                        },
+                        ..
+                    }
+                )
+            })
+    }));
 
-    let errors = match grandiose::emit_llvm_ir(&phases, &grandiose::LlvmOptions::default()) {
-        Ok(_) => panic!("effect-framed resumptive clause unexpectedly emitted LLVM IR"),
-        Err(errors) => errors,
-    };
-    assert_eq!(errors.len(), 1, "{errors:#?}");
-    assert_eq!(errors[0].code.as_deref(), Some("G1LLVM001"));
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    assert!(module.ir.contains("@g1_effect_start_f"));
+    run_native_i64(module, selected, 42, "effect-frame-resume-splice");
+}
+
+#[test]
+fn effect_framed_tail_resume_splices_into_the_active_scheduler() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-effect-framed-tail-resume.glorious",
+        r#"
+            effect Ask { [1,1] ask() -> i64 }
+            effect Log { [1,1] log() -> i64 }
+            add(left: i64, right: i64) -> i64 { left + right }
+            asked() -> i64 / {Ask} { add(perform Ask::ask(), 1) }
+            forward() -> i64 / {Log} {
+                handle asked() {
+                    Ask::ask() with continuation => {
+                        perform Log::log();
+                        tail(move continuation, 41)
+                    }
+                }
+            }
+            selected() -> i64 {
+                handle forward() {
+                    Log::log() with continuation => resume(move continuation, 0)
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let selected = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
     assert_eq!(
-        errors[0].message,
-        "LLVM backend does not yet support effect-framed resumptive handler clauses in `selected`"
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(selected as u32, vec![])
+            .unwrap(),
+        Value::I64(42)
     );
+    assert!(phases.mir.functions.iter().any(|function| {
+        function.name.contains("$handler$")
+            && function.receiver_mode.is_some()
+            && !function.outward_protocols.is_empty()
+            && function.blocks.iter().any(|block| {
+                matches!(
+                    &block.terminator,
+                    grandiose::compiler_mir::Terminator::TailResume {
+                        resumption: grandiose::compiler_mir::Operand {
+                            mode: grandiose::compiler_mir::UseMode::Move,
+                            ..
+                        },
+                        receiver_mode: 2,
+                        value: grandiose::compiler_mir::Operand {
+                            mode: grandiose::compiler_mir::UseMode::Move,
+                            ..
+                        },
+                    }
+                )
+            })
+    }));
+
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    run_native_i64(module, selected, 42, "effect-frame-tail-resume-splice");
+}
+
+#[test]
+fn effect_framed_cancel_drops_the_suspended_chain_and_continues() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-effect-framed-cancel.glorious",
+        r#"
+            effect Ask { [0,1] ask() -> i64 }
+            effect Log { [1,1] log() -> i64 }
+            add(left: i64, right: i64) -> i64 { left + right }
+            asked() -> i64 / {Ask} { perform Ask::ask() }
+            forward() -> i64 / {Log} {
+                handle asked() {
+                    Ask::ask() with continuation => {
+                        let logged = perform Log::log();
+                        cancel(move continuation);
+                        add(logged, 2)
+                    }
+                }
+            }
+            selected() -> i64 {
+                handle forward() {
+                    Log::log() with continuation => resume(move continuation, 40)
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let selected = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(selected as u32, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+    assert!(phases.mir.functions.iter().any(|function| {
+        function.name.contains("$handler$")
+            && function.receiver_mode.is_some()
+            && !function.outward_protocols.is_empty()
+            && function.blocks.iter().any(|block| {
+                matches!(
+                    &block.terminator,
+                    grandiose::compiler_mir::Terminator::Cancel {
+                        resumption: grandiose::compiler_mir::Operand {
+                            mode: grandiose::compiler_mir::UseMode::Move,
+                            ..
+                        },
+                        ..
+                    }
+                )
+            })
+    }));
+
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    run_native_i64(module, selected, 42, "effect-frame-cancel");
 }
 
 #[test]
@@ -2331,6 +2624,47 @@ fn llvm_borrowed_replays_do_not_consume_shared_terminal_clause_callable() {
         execution.status,
         String::from_utf8_lossy(&execution.stderr)
     );
+}
+
+#[test]
+fn frontend_rejects_reusable_resumption_inside_a_multishot_snapshot() {
+    let errors = grandiose::compile_source_to_phases_with_options(
+        "nested-reusable-resumption-snapshot.glorious",
+        r#"
+            effect Outer { [2,2] outer() -> i64 }
+            effect Replay { [2,2] replay() -> i64 }
+            add(left: i64, right: i64) -> i64 { left + right }
+            selected() -> i64 {
+                handle {
+                    handle perform Outer::outer() {
+                        Outer::outer() with outer_continuation => {
+                            let selected = perform Replay::replay();
+                            let first = resume(outer_continuation, selected);
+                            let second = resume(move outer_continuation, selected);
+                            add(first, second)
+                        }
+                    }
+                } {
+                    Replay::replay() with replay_continuation => {
+                        let first = resume(replay_continuation, 20);
+                        let second = resume(move replay_continuation, 22);
+                        add(first, second)
+                    }
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .expect_err("frontend unexpectedly accepted a reusable resumption in cloned state");
+    assert!(errors.iter().any(|error| {
+        error.code.as_deref() == Some("G1BC001")
+            && error
+                .message
+                .contains("non-snapshot-cloneable multi-shot owner")
+    }));
 }
 
 #[test]

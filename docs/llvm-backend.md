@@ -73,11 +73,13 @@ The current vertical slice supports:
   parent/result links, initialization state, typed cleanup callbacks, and
   effect-request records rather than relying on the native stack;
 - exact and optional one-shot resumptions, including multi-frame resume,
-  repeated handler re-entry, tail-resume, and cancellation cleanup;
+  repeated handler re-entry, tail-resume, cancellation cleanup, and frame
+  splicing from effectful clauses back into the active scheduler;
 - initial exact multishot replay for scalar, immutable refcounted, nested
-  aggregate, and callable-capture frame values, including outward frame-chain
-  cloning, parent/result-slot rebasing, partial aggregate field masks, shared
-  reference aliases, repeated terminal-clause replay, and cancellation;
+  aggregate, callable-capture, and supported nested-resumption frame values,
+  including outward frame-chain cloning, parent/result-slot rebasing, partial
+  aggregate field masks, shared reference aliases, repeated terminal-clause
+  replay, and cancellation;
 - binding-pack payload construction, erased-evidence layout, projection,
   copying, and cleanup;
 - typed native host-import calls for process arguments, filesystem read/write,
@@ -91,9 +93,9 @@ first stable ABI, and validates generated IR in tests with `llvm-as`. Native
 scalar, `Text`/`Bytes`, array, callable, handler, activation, one-shot, and
 multishot programs are also executed against C harnesses and usually compared
 with the VM result; owned runtime paths run under AddressSanitizer. Unsupported
-effect-state array elements, effect-framed resumptive clauses, and unsupported
-deep mutable replay shapes produce `G1LLVM001` instead of silently changing
-semantics.
+effect-state array elements, replay-time effectful terminal clauses, and
+unsupported deep mutable replay shapes produce `G1LLVM001` instead of silently
+changing semantics.
 
 ## Delivery chunks
 
@@ -120,15 +122,17 @@ semantics.
    nested activation routing, partial forwarding, and effectful terminal
    clause takeover.
    Exact and optional one-shot resume, tail-resume, and cancellation are also
-   implemented, with resumptions owning a reference to their handler value.
+   implemented in ordinary and effect frames, with resumed chains spliced
+   into the active scheduler and resumptions owning a reference to their
+   handler value.
    Initial multishot frame cloning covers scalar, immutable refcounted, nested
    aggregate/callable captures, shared-reference aliases, cancellation, and
    direct residual-field state. Indirect outward-call
    propagation is implemented with callable starter thunks and refcounted
    guard chains. Synchronous indirect calls and indirect tail calls from an
    effect frame use the same callable receiver and ownership rules as ordinary
-   native calls. Effect-framed resumptive clauses and deep mutable
-   graph/handler cloning remain.
+   native calls. Deep mutable graph/handler cloning and replay-time effectful
+   terminal clauses remain.
 7. Production output: object/executable emission through clang and initial
    bytecode/LLVM differential conformance tests are implemented, and `-O0`
    through `-O3` are forwarded to native code generation; debug information,
