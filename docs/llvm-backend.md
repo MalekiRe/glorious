@@ -30,9 +30,14 @@ void g1_host_diagnostic_write(G1Bytes *text);
 
 Arguments are borrowed for the duration of the call and consumed by the
 generated caller immediately afterward. Returned arrays/byte objects transfer
-one owned reference to Grandiose. A program using these imports must link a
-host implementation of the corresponding symbols; object and IR emission do
-not silently grant host capabilities.
+one owned reference to Grandiose. `grc --emit executable` links the compiler's
+bundled system-host implementation, initializes it from `argc`/`argv`, and
+therefore produces a standalone executable with process-argument, binary
+filesystem, and diagnostic-stream access. The process-argument array excludes
+the executable name, matching the VM invocation contract. LLVM IR and object
+emission deliberately leave the symbols unresolved: embedding those artifacts
+still requires an explicit host implementation and does not silently grant
+capabilities.
 
 The current vertical slice supports:
 
@@ -115,9 +120,10 @@ changing semantics.
    active-variant enum cleanup, and custom drop glue are implemented.
 4. Runtime ABI: `Text`, `Bytes`, and arrays of supported owned aggregates are
    partially implemented; typed host imports are lowered through an external
-   C ABI, while effect-state array elements, a bundled native host
-   implementation, and richer allocator/host-fault reporting remain. Every
-   primitive in the frozen bytecode primitive table has a native lowering.
+   C ABI, and executable emission bundles a native system host for arguments,
+   binary filesystem I/O, and diagnostics. Effect-state array elements and
+   richer allocator/host-fault reporting remain. Every primitive in the frozen
+   bytecode primitive table has a native lowering.
 5. First-class callables: environments, indirect calls, receiver modes,
    callable ownership, binding-pack value lowering, and ordinary/effect-frame
    indirect invocation are implemented. Mutable callable environments remain
@@ -140,10 +146,11 @@ changing semantics.
    effect frame use the same callable receiver and ownership rules as ordinary
    native calls. Deep mutable graph/handler cloning and replay-time effectful
    terminal clauses remain.
-7. Production output: object/executable emission through clang and initial
-   bytecode/LLVM differential conformance tests are implemented, and `-O0`
-   through `-O3` are forwarded to native code generation; debug information,
-   custom LLVM optimization pipelines, and broad differential coverage remain.
+7. Production output: object/executable emission through clang, bundled system
+   hosting for executables, and initial bytecode/LLVM differential conformance
+   tests are implemented. `-O0` through `-O3` are forwarded to native code
+   generation; debug information, custom LLVM optimization pipelines, and
+   broad differential coverage remain.
 
 Each chunk extends MIR lowering and its verifier-facing tests; the bytecode
 backend remains available throughout.

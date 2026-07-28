@@ -364,6 +364,7 @@ impl<'a> Emitter<'a> {
         for import in imports {
             match import {
                 HostImportRole::ProcessArgsGet => {
+                    self.line("declare void @g1_host_process_init(i32, ptr)");
                     self.line("declare ptr @g1_host_process_args_get()");
                 }
                 HostImportRole::FsRead => {
@@ -8164,7 +8165,12 @@ impl<'a> Emitter<'a> {
             )]);
         }
         let result = self.llvm_return_type(function.result)?;
-        self.line("define i32 @main() {");
+        if self.host_imports.contains(&HostImportRole::ProcessArgsGet) {
+            self.line("define i32 @main(i32 %argc, ptr %argv) {");
+            self.line("  call void @g1_host_process_init(i32 %argc, ptr %argv)");
+        } else {
+            self.line("define i32 @main() {");
+        }
         if result == "void" {
             self.line(&format!("  call void @g1_f{entry}()"));
         } else {

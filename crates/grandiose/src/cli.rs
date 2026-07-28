@@ -1,6 +1,7 @@
 use std::{
     collections::{BTreeMap, BTreeSet, VecDeque},
     ffi::OsString,
+    fs::OpenOptions,
     io::{self, BufRead, Read, Write},
     path::{Path, PathBuf},
     process::{Command as ProcessCommand, Stdio},
@@ -26,6 +27,46 @@ const SESSION_MAX_LINE_BYTES: usize = 1024 * 1024;
 const SESSION_MAX_ARGUMENTS: usize = 128;
 const SESSION_MAX_INPUTS: usize = 64;
 const SESSION_MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
+const NATIVE_HOST_RUNTIME: &[u8] = include_bytes!("native_host_runtime.c");
+
+struct TemporaryNativeHost {
+    path: PathBuf,
+}
+
+impl TemporaryNativeHost {
+    fn create(output: &Path) -> io::Result<Self> {
+        let directory = output
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        let process = std::process::id();
+        for attempt in 0..128u32 {
+            let path = directory.join(format!(".grc-native-host-{process}-{attempt}.c"));
+            match OpenOptions::new().write(true).create_new(true).open(&path) {
+                Ok(mut file) => {
+                    if let Err(error) = file.write_all(NATIVE_HOST_RUNTIME) {
+                        drop(file);
+                        let _ = std::fs::remove_file(&path);
+                        return Err(error);
+                    }
+                    return Ok(Self { path });
+                }
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Err(io::Error::new(
+            io::ErrorKind::AlreadyExists,
+            "could not reserve a temporary native host source path",
+        ))
+    }
+}
+
+impl Drop for TemporaryNativeHost {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum StopPhase {
@@ -616,11 +657,26 @@ fn compile_loaded(
                 return report_diagnostics(&bundle, diagnostics, command.json_diagnostics, stderr);
             }
         };
+        let native_host = if kind == EmitKind::Executable {
+            match TemporaryNativeHost::create(&output) {
+                Ok(host) => Some(host),
+                Err(error) => {
+                    let _ = writeln!(
+                        stderr,
+                        "grc: error: could not prepare the bundled native host runtime: {error}"
+                    );
+                    return 1;
+                }
+            }
+        } else {
+            None
+        };
         let mut clang = ProcessCommand::new("clang");
+        clang.arg("-x").arg("ir").arg("-");
+        if let Some(native_host) = &native_host {
+            clang.arg("-x").arg("c").arg(&native_host.path);
+        }
         clang
-            .arg("-x")
-            .arg("ir")
-            .arg("-")
             .arg(clang_optimization_flag(command.optimization_level))
             .arg("-o")
             .arg(&output)

@@ -269,6 +269,67 @@ fn cli_emits_native_objects_and_executables() {
 }
 
 #[test]
+fn cli_executable_bundles_the_native_system_host() {
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("native-host.glorious");
+    let executable = directory.path().join("native-host");
+    let written = directory.path().join("written.bin");
+    let path = serde_json::to_string(written.to_str().unwrap()).unwrap();
+    fs::write(
+        &source,
+        format!(
+            r#"
+                main() -> () {{
+                    let contents = "native-host";
+                    __g1_fs_write({path}, String::as_bytes(&contents));
+                    __g1_fs_read({path});
+                    __g1_diagnostic_write("bundled");
+                    let arguments = __g1_vec_from_array(__g1_process_args_get());
+                    __g1_diagnostic_write(*__g1_vec_index(&arguments, 1));
+                    ()
+                }}
+            "#
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_grc"))
+        .arg("--emit")
+        .arg("executable")
+        .arg("-o")
+        .arg(&executable)
+        .arg(&source)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(directory.path().read_dir().unwrap().all(|entry| {
+        !entry
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with(".grc-native-host-")
+    }));
+
+    let execution = Command::new(&executable)
+        .arg("first")
+        .arg("last")
+        .output()
+        .unwrap();
+    assert!(
+        execution.status.success(),
+        "{:?}\n{}",
+        execution.status,
+        String::from_utf8_lossy(&execution.stderr)
+    );
+    assert_eq!(execution.stderr, b"bundledlast");
+    assert_eq!(fs::read(written).unwrap(), b"native-host");
+}
+
+#[test]
 fn checked_integer_and_shift_primitives_emit_valid_guarded_ir() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-integer-primitives.glorious",
