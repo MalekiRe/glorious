@@ -571,6 +571,69 @@ fn synchronous_borrowed_indirect_call_executes_inside_effect_frame() {
 }
 
 #[test]
+fn label_leave_executes_and_cleans_owned_values_inside_effect_frame() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-effect-frame-leave.glorious",
+        r#"
+            effect Ask { [1,1] ask() -> i64 }
+            outward() -> i64 / {Ask} {
+                @done: i64 {
+                    let retained = String::concat("drop ", "me");
+                    let answer = perform Ask::ask();
+                    String::byte_len(&retained);
+                    @done(answer)
+                }
+            }
+            selected() -> i64 {
+                handle outward() {
+                    Ask::ask() with continuation => resume(move continuation, 42)
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let outward = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "outward")
+        .unwrap();
+    assert!(!phases.mir.functions[outward].outward_protocols.is_empty());
+    assert!(phases.mir.functions[outward].blocks.iter().any(|block| {
+        matches!(
+            block.terminator,
+            grandiose::compiler_mir::Terminator::Leave { .. }
+        )
+    }));
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let vm_selected = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_selected, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    run_native_i64(module, selected, 42, "effect-frame-leave");
+}
+
+#[test]
 fn synchronous_owned_indirect_call_executes_inside_effect_frame() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-sync-owned-indirect-effect.glorious",

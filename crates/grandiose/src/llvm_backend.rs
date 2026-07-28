@@ -3070,6 +3070,9 @@ impl<'a> Emitter<'a> {
                 self.emit_effect_runtime_store(0, "ptr", "null");
                 self.line("  ret void");
             }
+            Terminator::Leave { target, .. } => {
+                self.emit_effect_edge(function, target, BTreeSet::new())?
+            }
             Terminator::Abort { .. } => {
                 self.line("  call void @llvm.trap()");
                 self.line("  unreachable");

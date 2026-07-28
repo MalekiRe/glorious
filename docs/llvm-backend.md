@@ -130,7 +130,8 @@ effect-state array elements and unsupported deep mutable replay shapes produce
    indirect invocation are implemented. Mutable callable environments remain
    subject to the multishot cloning limitations below.
 6. Effects and control: static typed-label push/pop/leave lowering is
-   implemented. Handler values and terminal `Handle`/`Perform` dispatch now
+   implemented in both ordinary and outward effect frames. Handler values and
+   terminal `Handle`/`Perform` dispatch now
    use the native heap-frame ABI, including direct outward call/return
    propagation, static tail-call replacement, typed terminal unwinding,
    nested activation routing, partial forwarding, and effectful terminal
