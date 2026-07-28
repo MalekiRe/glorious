@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use grandiose_vm::{Type, TypeId};
+use grandiose_vm::{Primitive, Type, TypeId};
 
 use crate::compiler_core::PointId;
 use crate::compiler_mir::{
@@ -338,6 +338,11 @@ pub(crate) fn loan_table(function: &Function, types: &[Type]) -> LoanTable {
                 InstructionKind::Borrow { .. }
                     | InstructionKind::ProjectBorrow { .. }
                     | InstructionKind::Reborrow { .. }
+                    | InstructionKind::Primitive {
+                        primitive: Primitive::ArrayGetBorrowShared
+                            | Primitive::ArrayGetBorrowUnique,
+                        ..
+                    }
             ) {
                 table.issued.insert((block.id, index), table.count);
                 table.count += 1;
@@ -3024,10 +3029,51 @@ impl Interpreter<'_> {
                 args,
             } => {
                 let array_result = self.array_primitive(*primitive, args)?;
+                let projected_loan = if matches!(
+                    primitive,
+                    Primitive::ArrayGetBorrowShared | Primitive::ArrayGetBorrowUnique
+                ) {
+                    let Some(source) = args.first().map(|argument| argument.register) else {
+                        return Err(self.error("array borrow primitive has no source argument"));
+                    };
+                    let Some(parent) = self.state.loans.get(&source).cloned() else {
+                        return Err(self.error(format!(
+                            "array borrow primitive reads through r{source}, which holds no live loan"
+                        )));
+                    };
+                    if self.state.holes.contains(&source) {
+                        return Err(self.error(format!(
+                            "array borrow primitive reads through r{source} while its referent is moved out"
+                        )));
+                    }
+                    let mut borrowed = parent.borrowed.clone();
+                    borrowed.projection.push(Projection::DynamicIndex);
+                    let unique = *primitive == Primitive::ArrayGetBorrowUnique;
+                    self.check_loan_conflict(&borrowed, unique, Some(source))?;
+                    Some((source, parent.external, borrowed, unique))
+                } else {
+                    None
+                };
                 for argument in args {
                     self.operand(argument, "Primitive")?;
                 }
                 self.define(*dst, "Primitive")?;
+                if let Some((parent, external, borrowed, unique)) = projected_loan {
+                    if let Some(loan) = self.state.loans.get_mut(&parent) {
+                        loan.suspended += 1;
+                    }
+                    self.state.loans.insert(
+                        *dst,
+                        LiveLoan {
+                            id: self.issued_loan_id(),
+                            unique,
+                            external,
+                            borrowed,
+                            parent: Some(parent),
+                            suspended: 0,
+                        },
+                    );
+                }
                 if let Some(slots) = array_result {
                     self.state.array_slots.insert(*dst, slots);
                 }

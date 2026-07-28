@@ -281,12 +281,52 @@ append_words(output: &mut Vec<u32>, source: &Vec<u32>, index: usize) {
     }
 }
 
-seed_scalar_types(value: &mut Vec<u32>, scalar: u32) {
-    handle scalar <= u32_value(12) {
+type_to_scalar_kind(type_id: u32) -> u8 {
+    handle type_id {
+        2 => 1,
+        3 => 2,
+        4 => 3,
+        5 => 4,
+        6 => 5,
+        7 => 7,
+        8 => 8,
+        9 => 9,
+        10 => 10,
+        11 => 11,
+        12 => 6,
+        _ => 12
+    }
+}
+
+scalar_kind_to_type(kind: u8) -> u32 {
+    handle kind {
+        1 => 2,
+        2 => 3,
+        3 => 4,
+        4 => 5,
+        5 => 6,
+        6 => 12,
+        7 => 7,
+        8 => 8,
+        9 => 9,
+        10 => 10,
+        11 => 11,
+        _ => 13
+    }
+}
+
+seed_scalar_types(value: &mut Vec<u32>, type_id: u32) {
+    handle type_id <= u32_value(13) {
         Result::Err(_) => (),
         Result::Ok(_) => {
-            push_words4(&mut *value, 3, scalar, 0, 0);
-            seed_scalar_types(move value, scalar + u32_value(1))
+            push_words4(
+                &mut *value,
+                3,
+                u32_from_u8(type_to_scalar_kind(type_id)),
+                0,
+                0
+            );
+            seed_scalar_types(move value, type_id + u32_value(1))
         }
     }
 }
@@ -295,7 +335,7 @@ seed_types() -> Vec<u32> {
     let types = Vec::new();
     push_words4(&mut types, 1, 0, 0, 0);
     push_words4(&mut types, 2, 0, 0, 0);
-    seed_scalar_types(&mut types, 1);
+    seed_scalar_types(&mut types, 2);
     move types
 }
 
@@ -392,7 +432,7 @@ resolve_signature_type(
                             Result::Err(_) =>
                                 Result::Err(error(1, token, token, 0, 0)),
                             Result::Ok(kind) => Result::Ok(
-                                u32_from_u8(kind) + u32_value(1)
+                            scalar_kind_to_type(kind)
                             )
                         }
                     }
@@ -861,14 +901,14 @@ elaborate_integer(
             Result::Ok(_) => Result::Err(error(2, token, token, 0, 0)),
             Result::Err(_) => {
                 let ty = handle expected_plus_one == u32_value(0) {
-                    Result::Ok(_) => u32_value(11),
+                    Result::Ok(_) => u32_value(10),
                     Result::Err(_) => expected_plus_one - u32_value(1)
                 };
                 handle bool_and(
                     u32_value(2) <= ty,
                     ty <= u32_value(13)
                 ) {
-                    Result::Err(_) => Result::Err(error(3, token, token, ty, 11)),
+                    Result::Err(_) => Result::Err(error(3, token, token, ty, 10)),
                     Result::Ok(_) => {
                         let digits = super::lexer::number_digits(&number);
                         handle parse_digits(
@@ -886,7 +926,7 @@ elaborate_integer(
                                 ty
                             )),
                             Result::Ok(magnitude) => {
-                                let kind = u8_from_u32(ty - u32_value(1));
+                                let kind = type_to_scalar_kind(ty);
                                 handle magnitude <= scalar_max(kind) {
                                     Result::Err(_) => Result::Err(error(
                                         5,
@@ -1574,6 +1614,874 @@ pub elaborate_function_body(
                     }
                 }
             }
+        }
+    }
+}
+
+write_string(output: &mut ByteBuf, value: &String) {
+    let bytes = String::as_bytes(value);
+    ByteBuf::write_u32_le(&mut *output, u32_from_usize(Bytes::len(&bytes)));
+    ByteBuf::append_bytes(move output, &bytes)
+}
+
+write_name_id(
+    output: &mut ByteBuf,
+    source: &super::lexer::LexedSource,
+    name: Id<String>
+) {
+    handle super::lexer::lexeme(source, move name) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(text) => write_string(move output, text)
+    }
+}
+
+write_name_token(
+    output: &mut ByteBuf,
+    source: &super::lexer::LexedSource,
+    token: usize
+) {
+    handle super::lexer::token_kind_at(source, token) {
+        TokenKind::Ident(name) => write_name_id(move output, source, move name),
+        _ => unreachable()
+    }
+}
+
+shell_name_id(shell: &super::scanner::DeclarationShell) -> Id<String> {
+    handle Option::as_ref(super::scanner::shell_name(shell)) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(name) => *name
+    }
+}
+
+module_depth(
+    declarations: &super::scanner::DeclarationIndex,
+    module_plus_one: usize
+) -> usize {
+    handle module_plus_one == usize_value(0) {
+        Result::Ok(_) => 0,
+        Result::Err(_) => handle super::scanner::shell_at(
+            declarations,
+            module_plus_one - usize_value(1)
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(shell) => usize_value(1) + module_depth(
+                declarations,
+                super::scanner::shell_parent_plus_one(shell)
+            )
+        }
+    }
+}
+
+write_module_components(
+    output: &mut ByteBuf,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    module_plus_one: usize
+) {
+    handle module_plus_one == usize_value(0) {
+        Result::Ok(_) => (),
+        Result::Err(_) => handle super::scanner::shell_at(
+            declarations,
+            module_plus_one - usize_value(1)
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(shell) => {
+                write_module_components(
+                    &mut *output,
+                    source,
+                    declarations,
+                    super::scanner::shell_parent_plus_one(shell)
+                );
+                write_name_id(move output, source, shell_name_id(shell))
+            }
+        }
+    }
+}
+
+write_function_identity(
+    output: &mut ByteBuf,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    shell_index: usize
+) {
+    handle super::scanner::shell_at(declarations, shell_index) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(shell) => {
+            let parent = super::scanner::shell_parent_plus_one(shell);
+            ByteBuf::write_u32_le(
+                &mut *output,
+                u32_from_usize(module_depth(declarations, parent))
+            );
+            write_module_components(
+                &mut *output,
+                source,
+                declarations,
+                parent
+            );
+            write_name_id(move output, source, shell_name_id(shell))
+        }
+    }
+}
+
+find_callable<'a>(
+    headers: &'a super::headers::HeaderIndex,
+    shell: u32,
+    index: usize
+) -> Option<&'a super::headers::CallableHeader> {
+    handle index < super::headers::callable_count(headers) {
+        Result::Err(_) => Result::Err(()),
+        Result::Ok(_) => handle super::headers::callable_at(headers, index) {
+            Result::Err(_) => Result::Err(()),
+            Result::Ok(callable) => handle
+                super::headers::callable_shell(callable) == shell {
+                Result::Ok(_) => Result::Ok(callable),
+                Result::Err(_) => find_callable(
+                    headers,
+                    shell,
+                    index + usize_value(1)
+                )
+            }
+        }
+    }
+}
+
+value_uses_local(body: &TypedBody, value: u32, local: u32) -> Bool {
+    let base = usize_from_u32(value) * usize_value(4);
+    handle *Vec::index(&body.values, base) == u32_value(3) {
+        Result::Err(_) => false,
+        Result::Ok(_) =>
+            *Vec::index(&body.values, base + usize_value(2)) == local
+    }
+}
+
+operands_use_local(
+    body: &TypedBody,
+    start: u32,
+    count: u32,
+    ordinal: u32,
+    local: u32
+) -> Bool {
+    handle ordinal < count {
+        Result::Err(_) => false,
+        Result::Ok(_) => handle value_uses_local(
+            body,
+            *Vec::index(
+                &body.operands,
+                usize_from_u32(start + ordinal)
+            ),
+            local
+        ) {
+            Result::Ok(_) => true,
+            Result::Err(_) => operands_use_local(
+                body,
+                start,
+                count,
+                ordinal + u32_value(1),
+                local
+            )
+        }
+    }
+}
+
+computation_uses_local(
+    body: &TypedBody,
+    computation: u32,
+    local: u32
+) -> Bool {
+    let base = usize_from_u32(computation) * usize_value(5);
+    handle *Vec::index(&body.computations, base) {
+        1 => value_uses_local(
+            body,
+            *Vec::index(&body.computations, base + usize_value(2)),
+            local
+        ),
+        2 => handle computation_uses_local(
+            body,
+            *Vec::index(&body.computations, base + usize_value(3)),
+            local
+        ) {
+            Result::Ok(_) => true,
+            Result::Err(_) => computation_uses_local(
+                body,
+                *Vec::index(&body.computations, base + usize_value(4)),
+                local
+            )
+        },
+        3 => operands_use_local(
+            body,
+            *Vec::index(&body.computations, base + usize_value(3)),
+            *Vec::index(&body.computations, base + usize_value(4)),
+            0,
+            local
+        ),
+        _ => false
+    }
+}
+
+write_value_expression(
+    output: &mut ByteBuf,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    body: &TypedBody,
+    value: u32,
+    source_local_limit: u32
+) -> Result<(), ElaborationError> {
+    let base = usize_from_u32(value) * usize_value(4);
+    let tag = *Vec::index(&body.values, base);
+    let ty = *Vec::index(&body.values, base + usize_value(1));
+    handle tag {
+        1 => {
+            ByteBuf::push(&mut *output, 0);
+            ByteBuf::write_u32_le(move output, ty);
+            Result::Ok(())
+        },
+        2 => {
+            let constant = *Vec::index(
+                &body.values,
+                base + usize_value(2)
+            );
+            let at = usize_from_u32(constant) * usize_value(4);
+            let high2 = *Vec::index(
+                &body.integer_constants,
+                at + usize_value(2)
+            );
+            let high3 = *Vec::index(
+                &body.integer_constants,
+                at + usize_value(3)
+            );
+            handle bool_or(
+                high2 != u32_value(0),
+                high3 != u32_value(0)
+            ) {
+                Result::Ok(_) => Result::Err(error(7, at, at, 0, ty)),
+                Result::Err(_) => {
+                    let low = *Vec::index(&body.integer_constants, at);
+                    let high = *Vec::index(
+                        &body.integer_constants,
+                        at + usize_value(1)
+                    );
+                    ByteBuf::push(&mut *output, 1);
+                    ByteBuf::write_u32_le(&mut *output, ty);
+                    ByteBuf::write_u64_le(
+                        move output,
+                        wrapping_convert_to_u64(low)
+                            + shift_left(
+                                wrapping_convert_to_u64(high),
+                                u32_value(32)
+                            )
+                    );
+                    Result::Ok(())
+                }
+            }
+        },
+        3 => {
+            let local = *Vec::index(&body.values, base + usize_value(2));
+            handle local < source_local_limit {
+                Result::Err(_) => Result::Err(error(
+                    7,
+                    usize_from_u32(local),
+                    usize_from_u32(local),
+                    source_local_limit,
+                    local
+                )),
+                Result::Ok(_) => {
+                    ByteBuf::push(&mut *output, 2);
+                    ByteBuf::write_u32_le(&mut *output, ty);
+                    ByteBuf::write_u32_le(&mut *output, local);
+                    ByteBuf::push(move output, 1);
+                    Result::Ok(())
+                }
+            }
+        },
+        _ => Result::Err(error(7, base, base, 0, tag))
+    }
+}
+
+write_call_operands(
+    output: &mut ByteBuf,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    body: &TypedBody,
+    source_local_limit: u32,
+    start: u32,
+    count: u32,
+    ordinal: u32
+) -> Result<(), ElaborationError> {
+    handle ordinal < count {
+        Result::Err(_) => Result::Ok(()),
+        Result::Ok(_) => handle write_value_expression(
+            output,
+            source,
+            declarations,
+            body,
+            *Vec::index(
+                &body.operands,
+                usize_from_u32(start + ordinal)
+            ),
+            source_local_limit
+        ) {
+            Result::Err(found) => Result::Err(move found),
+            Result::Ok(_) => write_call_operands(
+                output,
+                source,
+                declarations,
+                body,
+                source_local_limit,
+                start,
+                count,
+                ordinal + u32_value(1)
+            )
+        }
+    }
+}
+
+leading_let_count(
+    body: &TypedBody,
+    computation: u32,
+    count: u32
+) -> u32 {
+    let base = usize_from_u32(computation) * usize_value(5);
+    handle *Vec::index(&body.computations, base) == u32_value(2) {
+        Result::Err(_) => count,
+        Result::Ok(_) => leading_let_count(
+            body,
+            *Vec::index(&body.computations, base + usize_value(4)),
+            count + u32_value(1)
+        )
+    }
+}
+
+write_computation_expression(
+    output: &mut ByteBuf,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    resolved: &super::resolution::ResolvedBody,
+    body: &TypedBody,
+    computation: u32,
+    source_local_limit: u32,
+    tail_position: Bool
+) -> Result<(), ElaborationError> {
+    let base = usize_from_u32(computation) * usize_value(5);
+    let tag = *Vec::index(&body.computations, base);
+    handle tag {
+        1 => write_value_expression(
+            output,
+            source,
+            declarations,
+            body,
+            *Vec::index(&body.computations, base + usize_value(2)),
+            source_local_limit
+        ),
+        2 => write_block_expression(
+            output,
+            source,
+            declarations,
+            resolved,
+            body,
+            computation,
+            source_local_limit,
+            tail_position
+        ),
+        3 => {
+            let ty = *Vec::index(
+                &body.computations,
+                base + usize_value(1)
+            );
+            let shell = *Vec::index(
+                &body.computations,
+                base + usize_value(2)
+            );
+            let start = *Vec::index(
+                &body.computations,
+                base + usize_value(3)
+            );
+            let count = *Vec::index(
+                &body.computations,
+                base + usize_value(4)
+            );
+            ByteBuf::push(
+                &mut *output,
+                handle tail_position {
+                    Result::Ok(_) => 4,
+                    Result::Err(_) => 3
+                }
+            );
+            ByteBuf::write_u32_le(&mut *output, ty);
+            write_function_identity(
+                &mut *output,
+                source,
+                declarations,
+                usize_from_u32(shell)
+            );
+            ByteBuf::write_u32_le(&mut *output, count);
+            write_call_operands(
+                output,
+                source,
+                declarations,
+                body,
+                source_local_limit,
+                start,
+                count,
+                0
+            )
+        },
+        _ => Result::Err(error(7, base, base, 0, tag))
+    }
+}
+
+write_block_statements(
+    output: &mut ByteBuf,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    resolved: &super::resolution::ResolvedBody,
+    body: &TypedBody,
+    computation: u32,
+    source_local_limit: u32,
+    tail_position: Bool
+) -> Result<(), ElaborationError> {
+    let base = usize_from_u32(computation) * usize_value(5);
+    handle *Vec::index(&body.computations, base) == u32_value(2) {
+        Result::Err(_) => write_computation_expression(
+            output,
+            source,
+            declarations,
+            resolved,
+            body,
+            computation,
+            source_local_limit,
+            tail_position
+        ),
+        Result::Ok(_) => {
+            let local = *Vec::index(
+                &body.computations,
+                base + usize_value(2)
+            );
+            let initializer = *Vec::index(
+                &body.computations,
+                base + usize_value(3)
+            );
+            let remainder = *Vec::index(
+                &body.computations,
+                base + usize_value(4)
+            );
+            handle local < source_local_limit {
+                Result::Ok(_) => {
+                    ByteBuf::push(&mut *output, 1);
+                    ByteBuf::write_u32_le(&mut *output, local);
+                    write_name_token(
+                        &mut *output,
+                        source,
+                        super::resolution::local_name_token_at(
+                            resolved,
+                            usize_from_u32(
+                                local - (
+                                    source_local_limit - u32_from_usize(
+                                        super::resolution::local_count(resolved)
+                                    )
+                                )
+                            )
+                        )
+                    );
+                    ByteBuf::write_u32_le(
+                        &mut *output,
+                        *Vec::index(
+                            &body.local_types,
+                            usize_from_u32(local)
+                        )
+                    );
+                    handle write_computation_expression(
+                        output,
+                        source,
+                        declarations,
+                        resolved,
+                        body,
+                        initializer,
+                        source_local_limit,
+                        false
+                    ) {
+                        Result::Err(found) => Result::Err(move found),
+                        Result::Ok(_) => write_block_statements(
+                            output,
+                            source,
+                            declarations,
+                            resolved,
+                            body,
+                            remainder,
+                            source_local_limit,
+                            tail_position
+                        )
+                    }
+                },
+                Result::Err(_) => handle computation_uses_local(
+                    body,
+                    remainder,
+                    local
+                ) {
+                    Result::Ok(_) => Result::Err(error(
+                        7,
+                        usize_from_u32(local),
+                        usize_from_u32(local),
+                        source_local_limit,
+                        local
+                    )),
+                    Result::Err(_) => {
+                        ByteBuf::push(&mut *output, 2);
+                        handle write_computation_expression(
+                            output,
+                            source,
+                            declarations,
+                            resolved,
+                            body,
+                            initializer,
+                            source_local_limit,
+                            false
+                        ) {
+                            Result::Err(found) => Result::Err(move found),
+                            Result::Ok(_) => write_block_statements(
+                                output,
+                                source,
+                                declarations,
+                                resolved,
+                                body,
+                                remainder,
+                                source_local_limit,
+                                tail_position
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+write_block_expression(
+    output: &mut ByteBuf,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    resolved: &super::resolution::ResolvedBody,
+    body: &TypedBody,
+    computation: u32,
+    source_local_limit: u32,
+    tail_position: Bool
+) -> Result<(), ElaborationError> {
+    let base = usize_from_u32(computation) * usize_value(5);
+    ByteBuf::push(&mut *output, 5);
+    ByteBuf::write_u32_le(
+        &mut *output,
+        *Vec::index(&body.computations, base + usize_value(1))
+    );
+    ByteBuf::write_u32_le(
+        &mut *output,
+        leading_let_count(body, computation, 0)
+    );
+    write_block_statements(
+        output,
+        source,
+        declarations,
+        resolved,
+        body,
+        computation,
+        source_local_limit,
+        tail_position
+    )
+}
+
+write_parameters(
+    output: &mut ByteBuf,
+    source: &super::lexer::LexedSource,
+    headers: &super::headers::HeaderIndex,
+    interfaces: &TypedInterfaces,
+    callable: &super::headers::CallableHeader,
+    interface_callable: usize,
+    ordinal: u32
+) {
+    let parameters = super::headers::callable_parameters(callable);
+    handle ordinal < super::headers::range_count(parameters) {
+        Result::Err(_) => (),
+        Result::Ok(_) => {
+            let at = super::headers::range_start(parameters) + ordinal;
+            handle super::headers::parameter_at(headers, usize_from_u32(at)) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(parameter) => {
+                    ByteBuf::write_u32_le(&mut *output, ordinal);
+                    write_name_token(
+                        &mut *output,
+                        source,
+                        super::headers::parameter_name_token(parameter)
+                    );
+                    ByteBuf::write_u32_le(
+                        &mut *output,
+                        interface_callable_parameter_at(
+                            interfaces,
+                            usize_from_u32(
+                                interface_callable_parameter_start_at(
+                                    interfaces,
+                                    interface_callable
+                                ) + ordinal
+                            )
+                        )
+                    );
+                    write_parameters(
+                        output,
+                        source,
+                        headers,
+                        interfaces,
+                        callable,
+                        interface_callable,
+                        ordinal + u32_value(1)
+                    )
+                }
+            }
+        }
+    }
+}
+
+write_function(
+    output: &mut ByteBuf,
+    original: &String,
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    interfaces: &TypedInterfaces,
+    shell: usize
+) -> Result<(), u8> {
+    let index = super::headers::parsed_index(headers);
+    handle find_callable(index, u32_from_usize(shell), 0) {
+        Result::Err(_) => Result::Err(3),
+        Result::Ok(callable) => handle super::bodies::parse_function_body(
+            original,
+            headers,
+            declarations,
+            shell
+        ) {
+            Result::Err(_) => Result::Err(3),
+            Result::Ok(parsed) => handle
+                super::resolution::resolve_function_body(
+                    headers,
+                    declarations,
+                    &parsed
+                ) {
+                Result::Err(_) => Result::Err(3),
+                Result::Ok(resolved) => handle elaborate_function_body(
+                    original,
+                    headers,
+                    interfaces,
+                    &parsed,
+                    &resolved
+                ) {
+                    Result::Err(_) => Result::Err(4),
+                    Result::Ok(typed) => handle
+                        interface_callable_for_shell(
+                            interfaces,
+                            u32_from_usize(shell)
+                        ) {
+                        Result::Err(_) => Result::Err(4),
+                        Result::Ok(interface_callable) => {
+                            let source = super::headers::parsed_source(headers);
+                            write_function_identity(
+                                &mut *output,
+                                source,
+                                declarations,
+                                shell
+                            );
+                            let parameter_count =
+                                super::headers::range_count(
+                                    super::headers::callable_parameters(callable)
+                                );
+                            ByteBuf::write_u32_le(
+                                &mut *output,
+                                parameter_count
+                            );
+                            write_parameters(
+                                &mut *output,
+                                source,
+                                index,
+                                interfaces,
+                                callable,
+                                usize_from_u32(interface_callable),
+                                0
+                            );
+                            ByteBuf::write_u32_le(
+                                &mut *output,
+                                typed.result_type
+                            );
+                            let source_local_limit = parameter_count
+                                + u32_from_usize(
+                                    super::resolution::local_count(&resolved)
+                                );
+                            handle write_block_expression(
+                                output,
+                                source,
+                                declarations,
+                                &resolved,
+                                &typed,
+                                typed.root,
+                                source_local_limit,
+                                true
+                            ) {
+                                Result::Err(_) => Result::Err(4),
+                                Result::Ok(_) => Result::Ok(())
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+function_count(
+    declarations: &super::scanner::DeclarationIndex,
+    index: usize,
+    count: usize
+) -> usize {
+    handle index < super::scanner::shell_count(declarations) {
+        Result::Err(_) => count,
+        Result::Ok(_) => handle super::scanner::shell_at(declarations, index) {
+            Result::Err(_) => count,
+            Result::Ok(shell) => function_count(
+                declarations,
+                index + usize_value(1),
+                handle super::scanner::shell_kind_code(shell) == u8_value(12) {
+                    Result::Ok(_) => count + usize_value(1),
+                    Result::Err(_) => count
+                }
+            )
+        }
+    }
+}
+
+write_functions(
+    output: &mut ByteBuf,
+    original: &String,
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    interfaces: &TypedInterfaces,
+    index: usize
+) -> Result<(), u8> {
+    handle index < super::scanner::shell_count(declarations) {
+        Result::Err(_) => Result::Ok(()),
+        Result::Ok(_) => handle super::scanner::shell_at(declarations, index) {
+            Result::Err(_) => Result::Err(3),
+            Result::Ok(shell) => handle
+                super::scanner::shell_kind_code(shell) == u8_value(12) {
+                Result::Err(_) => write_functions(
+                    output,
+                    original,
+                    headers,
+                    declarations,
+                    interfaces,
+                    index + usize_value(1)
+                ),
+                Result::Ok(_) => handle write_function(
+                    output,
+                    original,
+                    headers,
+                    declarations,
+                    interfaces,
+                    index
+                ) {
+                    Result::Err(status) => Result::Err(move status),
+                    Result::Ok(_) => write_functions(
+                        output,
+                        original,
+                        headers,
+                        declarations,
+                        interfaces,
+                        index + usize_value(1)
+                    )
+                }
+            }
+        }
+    }
+}
+
+encode_source(output: &mut ByteBuf, original: String) {
+    handle super::lexer::lex(&original) {
+        Result::Err(_) => ByteBuf::push(move output, 1),
+        Result::Ok(source) => handle super::scanner::scan(&source) {
+            Result::Err(_) => ByteBuf::push(move output, 2),
+            Result::Ok(declarations) => handle super::headers::parse(
+                &original,
+                move source,
+                &declarations
+            ) {
+                Result::Err(_) => ByteBuf::push(move output, 3),
+                Result::Ok(headers) => handle collect_interfaces(
+                    &headers,
+                    &declarations
+                ) {
+                    Result::Err(_) => ByteBuf::push(move output, 4),
+                    Result::Ok(interfaces) => {
+                        let encoded = ByteBuf::new();
+                        ByteBuf::write_u32_le(
+                            &mut encoded,
+                            u32_from_usize(function_count(&declarations, 0, 0))
+                        );
+                        handle write_functions(
+                            &mut encoded,
+                            &original,
+                            &headers,
+                            &declarations,
+                            &interfaces,
+                            0
+                        ) {
+                            Result::Err(status) =>
+                                ByteBuf::push(move output, move status),
+                            Result::Ok(_) => {
+                                ByteBuf::push(&mut *output, 0);
+                                ByteBuf::append_bytes(
+                                    move output,
+                                    &ByteBuf::finish(move encoded)
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+process_inputs(
+    arguments: &Vec<String>,
+    index: usize,
+    output: &mut ByteBuf
+) / FileRead {
+    handle index < Vec::len(arguments) {
+        Result::Err(_) => (),
+        Result::Ok(_) => {
+            let path = *Vec::index(arguments, index);
+            let bytes = read_file(move path);
+            handle String::from_utf8(move bytes) {
+                Result::Err(_) => ByteBuf::push(&mut *output, 1),
+                Result::Ok(source) => encode_source(&mut *output, move source)
+            };
+            process_inputs(
+                arguments,
+                index + usize_value(1),
+                move output
+            )
+        }
+    }
+}
+
+pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
+    let arguments = process_args();
+    let count = Vec::len(&arguments);
+    handle count < usize_value(2) {
+        Result::Ok(_) => write_diagnostic(
+            "usage: grandiose-self-host-elaboration <output> <input>..."
+        ),
+        Result::Err(_) => {
+            let output_path = *Vec::index(&arguments, 0);
+            let encoded = ByteBuf::new();
+            ByteBuf::write_u32_le(
+                &mut encoded,
+                u32_from_usize(count - usize_value(1))
+            );
+            process_inputs(&arguments, 1, &mut encoded);
+            write_file(move output_path, ByteBuf::finish(move encoded))
         }
     }
 }

@@ -24637,6 +24637,25 @@ impl<'a> CoreLowerer<'a> {
         result
     }
 
+    fn late_manifest_types(&mut self, name: &str) -> Option<(Vec<Option<TypeId>>, Option<TypeId>)> {
+        let function = self
+            .function_templates
+            .iter()
+            .find(|function| function.name == name)?
+            .clone();
+        let params = function
+            .params
+            .iter()
+            .map(|param| self.monomorphic_source_type(&param.ty))
+            .collect();
+        let result = function
+            .return_type
+            .as_ref()
+            .and_then(|result| self.monomorphic_source_type(result))
+            .or(Some(UNIT).filter(|_| function.return_type.is_none()));
+        Some((params, result))
+    }
+
     fn planned_closure_value(&self, expression: &Expr) -> Option<specialization::ClosureRequest> {
         let body = self.body_instance.clone()?;
         let expression_ordinal = self.expression_ordinal(expression)?;
@@ -32350,9 +32369,16 @@ impl<'a> CoreLowerer<'a> {
                             format!("`{name}` expects 2 arguments, got {}", arguments.len()),
                         )]);
                     }
+                    let (parameter_types, declared_result) = self
+                        .late_manifest_types(name)
+                        .unwrap_or_else(|| (vec![None; arguments.len()], None));
+                    if let Some(declared_result) = declared_result {
+                        self.check(span, Some(result), declared_result)?;
+                    }
                     let mut args = Vec::with_capacity(arguments.len());
-                    for argument in arguments.iter() {
-                        let argument = self.expression(argument, None)?;
+                    for (index, argument) in arguments.iter().enumerate() {
+                        let argument = self
+                            .expression(argument, parameter_types.get(index).copied().flatten())?;
                         self.validate_anonymous_use(
                             &argument,
                             1,
@@ -32394,9 +32420,25 @@ impl<'a> CoreLowerer<'a> {
                             "manifest-bound primitive leaves may be called only from their trusted standard-library source segment",
                         )]);
                     }
+                    let (parameter_types, declared_result) = self
+                        .late_manifest_types(name)
+                        .unwrap_or_else(|| (vec![None; arguments.len()], None));
+                    if parameter_types.len() != arguments.len() {
+                        return Err(vec![type_error(
+                            span,
+                            format!(
+                                "`{name}` expects {} arguments, got {}",
+                                parameter_types.len(),
+                                arguments.len()
+                            ),
+                        )]);
+                    }
+                    if let Some(declared_result) = declared_result {
+                        self.check(span, Some(result), declared_result)?;
+                    }
                     let mut args = Vec::with_capacity(arguments.len());
-                    for argument in arguments.iter() {
-                        let argument = self.expression(argument, None)?;
+                    for (argument, parameter_type) in arguments.iter().zip(parameter_types) {
+                        let argument = self.expression(argument, parameter_type)?;
                         self.validate_anonymous_use(
                             &argument,
                             1,
@@ -36686,6 +36728,53 @@ impl MirLowerer {
         }
     }
 
+    fn cleanup_refinement_borrows(
+        &mut self,
+        entry_borrowed: &BTreeSet<u32>,
+        survivors: &BTreeSet<u32>,
+        value: u32,
+        span: Span,
+    ) {
+        let mut protected = survivors.clone();
+        protected.insert(value);
+        for mut register in protected.clone() {
+            let mut seen = BTreeSet::new();
+            while let Some(parent) = self.tracked_borrow_parent(register) {
+                if !seen.insert(parent) {
+                    break;
+                }
+                protected.insert(parent);
+                register = parent;
+            }
+        }
+        let mut candidates = self
+            .borrowed
+            .difference(entry_borrowed)
+            .filter(|reference| !protected.contains(reference))
+            .copied()
+            .collect::<Vec<_>>();
+        let depth = |reference| {
+            let mut depth = 0usize;
+            let mut register = reference;
+            let mut seen = BTreeSet::new();
+            while let Some(parent) = self.tracked_borrow_parent(register) {
+                if !seen.insert(parent) {
+                    break;
+                }
+                depth += 1;
+                register = parent;
+            }
+            depth
+        };
+        candidates.sort_by_key(|reference| std::cmp::Reverse(depth(*reference)));
+        for reference in candidates {
+            if self.borrowed.contains(&reference) {
+                self.destroy(reference, span);
+                self.transfer_owner(reference);
+            }
+        }
+    }
+
     /// Release a generated projection carrier once its last derived loan has
     /// ended. Multiple disjoint leaves may share one unique carrier, which is
     /// the atomic split-borrow representation used by the existing one-field
@@ -37886,6 +37975,9 @@ impl MirLowerer {
                 positive,
                 negative,
             } => {
+                let entry_borrowed = self.borrowed.clone();
+                let entry_borrow_parents = self.borrow_parents.clone();
+                let entry_loan_of = self.loan_of.clone();
                 let subject_flow = self.expression(subject);
                 let MirFlow::Value(subject_value) = subject_flow else {
                     return MirFlow::Diverged;
@@ -37948,6 +38040,7 @@ impl MirLowerer {
                 let mut join_borrowed = Vec::new();
                 let mut join_partial = Vec::new();
                 let mut join_result_parent = None;
+                let mut joined_entry_borrowed = BTreeSet::new();
                 let mut joined_uninitialized = BTreeSet::new();
                 let mut positive_reaches_join = false;
                 if let MirFlow::Value(value) = self.expression(positive) {
@@ -37996,12 +38089,22 @@ impl MirLowerer {
                         .copied()
                         .collect();
                     joined_uninitialized.extend(retire_at_join.iter().copied());
+                    self.cleanup_refinement_borrows(
+                        &entry_borrowed,
+                        &survivors,
+                        value,
+                        positive.span,
+                    );
                     for owner in self.owned.clone().into_iter().rev() {
                         if !survivors.contains(&owner) {
                             self.destroy(owner, positive.span);
                             self.transfer_owner(owner);
                         }
                     }
+                    joined_entry_borrowed = entry_borrowed
+                        .intersection(&self.borrowed)
+                        .copied()
+                        .collect();
                     let mut args = vec![Self::operand(value, mir::UseMode::Move)];
                     args.extend(
                         sources
@@ -38180,11 +38283,26 @@ impl MirLowerer {
                             debug_assert_eq!(join_borrowed[index], self.borrowed.contains(source));
                         }
                     }
+                    self.cleanup_refinement_borrows(
+                        &entry_borrowed,
+                        &survivors,
+                        value,
+                        negative.span,
+                    );
                     for owner in self.owned.clone().into_iter().rev() {
                         if !survivors.contains(&owner) {
                             self.destroy(owner, negative.span);
                             self.transfer_owner(owner);
                         }
+                    }
+                    let negative_entry_borrowed = entry_borrowed
+                        .intersection(&self.borrowed)
+                        .copied()
+                        .collect::<BTreeSet<_>>();
+                    if positive_reaches_join {
+                        debug_assert_eq!(joined_entry_borrowed, negative_entry_borrowed);
+                    } else {
+                        joined_entry_borrowed = negative_entry_borrowed;
                     }
                     let mut args = vec![Self::operand(value, mir::UseMode::Move)];
                     args.extend(
@@ -38230,13 +38348,19 @@ impl MirLowerer {
                     .zip(join_owned)
                     .filter_map(|(register, owned)| owned.then_some(*register))
                     .collect();
-                self.borrowed = join_registers
-                    .iter()
-                    .zip(join_borrowed)
-                    .filter_map(|(register, borrowed)| borrowed.then_some(*register))
-                    .collect();
-                self.borrow_parents.clear();
-                self.loan_of.clear();
+                self.borrowed = joined_entry_borrowed;
+                self.borrowed.extend(
+                    join_registers
+                        .iter()
+                        .zip(join_borrowed)
+                        .filter_map(|(register, borrowed)| borrowed.then_some(*register)),
+                );
+                self.borrow_parents = entry_borrow_parents;
+                self.borrow_parents
+                    .retain(|reference, _| self.borrowed.contains(reference));
+                self.loan_of = entry_loan_of;
+                self.loan_of
+                    .retain(|reference, _| self.borrowed.contains(reference));
                 if let Some(parent) =
                     join_result_parent.and_then(|position| join_registers.get(position).copied())
                 {
@@ -39366,6 +39490,11 @@ impl MirLowerer {
                     ));
                 }
                 let args = lowered_args;
+                let borrow_parent = matches!(
+                    primitive,
+                    Primitive::ArrayGetBorrowShared | Primitive::ArrayGetBorrowUnique
+                )
+                .then(|| args[0].register);
                 let dst = self.allocate(expression.ty);
                 self.push(
                     expression.span,
@@ -39375,6 +39504,16 @@ impl MirLowerer {
                         args,
                     },
                 );
+                if let Some(parent) = borrow_parent {
+                    // These primitives create a live reference loan just like
+                    // Borrow/ProjectBorrow. Keep the result in MIR's borrowed
+                    // set so consuming the surrounding expression emits
+                    // EndBorrow rather than an ordinary Drop, and retain the
+                    // temporary argument as its projection carrier through an
+                    // enclosing Core block.
+                    self.borrowed.insert(dst);
+                    self.borrow_parents.insert(dst, parent);
+                }
                 MirFlow::Value(Some(dst))
             }
             core::ExprKind::HostCall { import, args } => {

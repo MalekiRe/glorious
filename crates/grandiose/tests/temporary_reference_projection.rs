@@ -156,6 +156,18 @@ fn byte_view_wrapper_agrees_with_manifest_bytes_slice_lowering() {
 }
 
 #[test]
+fn character_iteration_keeps_manifest_bytes_get_index_as_usize() {
+    let source = r#"
+        next(value: &mut Chars) -> Option<char> {
+            Chars::next(value)
+        }
+
+        main() -> () { () }
+    "#;
+    grandiose::compile_source_to_bytecode("late-bytes-get-index-type.glorious", source).unwrap();
+}
+
+#[test]
 fn assignment_accepts_temporary_unique_reference_from_generic_associated_call() {
     let source = r#"
         struct Values { items: Vec<u32> }
@@ -164,6 +176,17 @@ fn assignment_accepts_temporary_unique_reference_from_generic_associated_call() 
             *Vec::index_mut(&mut value.items, wrapping_convert_to_usize(0)) =
                 wrapping_convert_to_u32(42);
             ()
+        }
+
+        write_on_one_branch(value: &mut Values, flag: Bool) -> () {
+            handle flag {
+                Result::Ok(_) => {
+                    *Vec::index_mut(&mut value.items, wrapping_convert_to_usize(0)) =
+                        wrapping_convert_to_u32(42);
+                    ()
+                },
+                Result::Err(_) => ()
+            }
         }
 
         main() -> () { () }
