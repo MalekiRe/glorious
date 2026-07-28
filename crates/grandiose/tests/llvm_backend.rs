@@ -3181,6 +3181,58 @@ fn llvm_effect_framed_alias_replays_preserve_terminal_clause_callable() {
 }
 
 #[test]
+fn llvm_multishot_clones_handler_array_capture_graphs() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-multishot-handler-array-capture.glorious",
+        r#"
+            effect Choice { [2,2] choose() -> i64 }
+            new_values() -> Vec<i64> { Vec::new() }
+            deref_i64(value: &i64) -> i64 { *value }
+            selected() -> i64 {
+                let values = new_values();
+                Vec::push(&mut values, 21);
+                handle perform Choice::choose() {
+                    Choice::choose() with continuation => {
+                        let input = deref_i64(Vec::index(&values, 0));
+                        resume(continuation, input) + resume(move continuation, input)
+                    }
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let vm_selected = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_selected, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    assert!(module.ir.contains("handler.snapshot.clone"));
+    assert!(module.ir.contains("guard.snapshot.payload.handler"));
+    run_native_i64(module, selected, 42, "multishot-handler-array-capture");
+}
+
+#[test]
 fn frontend_rejects_reusable_resumption_inside_a_multishot_snapshot() {
     let errors = grandiose::compile_source_to_phases_with_options(
         "nested-reusable-resumption-snapshot.glorious",

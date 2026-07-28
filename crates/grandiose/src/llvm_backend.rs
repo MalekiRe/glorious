@@ -88,6 +88,7 @@ struct Emitter<'a> {
     uses_effect_runtime: bool,
     host_imports: BTreeSet<HostImportRole>,
     snapshot_capture_fix_types: BTreeSet<TypeId>,
+    llvm_reachable_functions: BTreeSet<usize>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -119,11 +120,13 @@ impl<'a> Emitter<'a> {
             uses_effect_runtime: false,
             host_imports: BTreeSet::new(),
             snapshot_capture_fix_types: BTreeSet::new(),
+            llvm_reachable_functions: BTreeSet::new(),
         }
     }
 
     fn emit(mut self) -> Result<LlvmModule, Vec<Diagnostic>> {
         let reachable = self.reachable_functions()?;
+        self.llvm_reachable_functions = reachable.iter().copied().collect();
         self.prepare_runtime(&reachable)?;
         self.line("; Grandiose LLVM backend");
         self.line(&format!(
@@ -882,6 +885,26 @@ impl<'a> Emitter<'a> {
                     capture_type,
                     ..
                 } if *described == handler_def => Some(*capture_type),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                vec![backend_error(format!(
+                    "handler#{handler_def} has no runtime handler type"
+                ))]
+            })
+    }
+
+    fn handler_runtime_type(&self, handler_def: u32) -> Result<TypeId, Vec<Diagnostic>> {
+        self.phases
+            .artifact
+            .types
+            .iter()
+            .enumerate()
+            .find_map(|(index, ty)| match ty.representation() {
+                Type::Handler {
+                    handler_def: described,
+                    ..
+                } if *described == handler_def => Some(index as TypeId),
                 _ => None,
             })
             .ok_or_else(|| {
@@ -2291,8 +2314,13 @@ impl<'a> Emitter<'a> {
         self.line(&format!(
             "  %{cloned_guards} = load ptr, ptr %{cloned_guards_address}"
         ));
+        let snapshot_guards = self.emit_clone_effect_snapshot_guard_chain(
+            &format!("%{cloned_guards}"),
+            function,
+            "%context",
+        )?;
         self.line(&format!(
-            "  call void @g1_effect_guard_retain(ptr %{cloned_guards})"
+            "  store ptr {snapshot_guards}, ptr %{cloned_guards_address}"
         ));
         self.line(&format!("  ret ptr %{clone}"));
         self.line("}");
@@ -2300,6 +2328,25 @@ impl<'a> Emitter<'a> {
 
         self.line(&format!(
             "define void @g1_effect_fix_snapshot_f{index}(ptr %source, ptr %clone, ptr %context) {{"
+        ));
+        let cloned_header = self.temp();
+        let delimiter_address = self.temp();
+        let delimiter = self.temp();
+        let fixed_delimiter = self.temp();
+        self.line(&format!(
+            "  %{cloned_header} = getelementptr inbounds {frame_ty}, ptr %clone, i32 0, i32 0"
+        ));
+        self.line(&format!(
+            "  %{delimiter_address} = getelementptr inbounds %g1.effect_frame, ptr %{cloned_header}, i32 0, i32 5"
+        ));
+        self.line(&format!(
+            "  %{delimiter} = load ptr, ptr %{delimiter_address}"
+        ));
+        self.line(&format!(
+            "  %{fixed_delimiter} = call ptr @g1_snapshot_remap(ptr %context, ptr %{delimiter})"
+        ));
+        self.line(&format!(
+            "  store ptr %{fixed_delimiter}, ptr %{delimiter_address}"
         ));
         for register in 0..function.register_types.len() {
             let initialized_address = self.temp();
@@ -7565,6 +7612,34 @@ impl<'a> Emitter<'a> {
             .ok_or_else(|| vec![unsupported(function, "resumption handler type is missing")])
     }
 
+    fn resumption_handler_runtime_type(
+        &self,
+        function: &mir::Function,
+        resumption_type: TypeId,
+    ) -> Result<TypeId, Vec<Diagnostic>> {
+        let matching_handlers = self
+            .phases
+            .artifact
+            .handler_defs
+            .iter()
+            .enumerate()
+            .filter(|(_, definition)| {
+                definition
+                    .clauses
+                    .iter()
+                    .any(|clause| clause.resumption_type == Some(resumption_type))
+            })
+            .map(|(index, _)| index as u32)
+            .collect::<Vec<_>>();
+        let [handler_def] = matching_handlers.as_slice() else {
+            return Err(vec![unsupported(
+                function,
+                "resumption does not identify exactly one handler",
+            )]);
+        };
+        self.handler_runtime_type(*handler_def)
+    }
+
     fn emit_release_resumption(
         &mut self,
         resumption: &str,
@@ -8596,12 +8671,15 @@ impl<'a> Emitter<'a> {
         let contains_array = self.type_contains_array(ty, &mut BTreeSet::new())?;
         let contains_resumption = self.type_contains_resumption(ty, &mut BTreeSet::new())?;
         let contains_callable = self.type_contains_callable(ty, &mut BTreeSet::new())?;
-        if !contains_array && !contains_resumption && !contains_callable {
+        let is_handler = matches!(self.runtime_type(ty)?, Type::Handler { .. });
+        if !contains_array && !contains_resumption && !contains_callable && !is_handler {
             self.emit_retain(ty, value, function)?;
             return Ok(value.to_owned());
         }
         match self.runtime_type(ty)?.clone() {
-            Type::Resumption { .. } => self.emit_clone_resumption_wrapper(value, context),
+            Type::Resumption { .. } => {
+                self.emit_clone_resumption_wrapper(ty, value, function, context)
+            }
             Type::Callable { capture_type, .. } => {
                 self.emit_clone_effect_snapshot_callable(ty, capture_type, value, function, context)
             }
@@ -8634,17 +8712,332 @@ impl<'a> Emitter<'a> {
                 }
                 self.emit_clone_effect_snapshot_array(element, value, function, context)
             }
-            // Handler graph cloning remains separate from callable capture
-            // cloning. Keep its existing balanced shared ownership.
-            Type::Handler { .. } => {
-                self.emit_retain(ty, value, function)?;
-                Ok(value.to_owned())
+            Type::Handler { capture_type, .. } => {
+                self.emit_clone_effect_snapshot_handler(ty, capture_type, value, function, context)
             }
             _ => Err(vec![unsupported(
                 function,
                 "cloning an unsupported effect-frame Resumption carrier",
             )]),
         }
+    }
+
+    fn effect_callable_capture_type(
+        &self,
+        function: &mir::Function,
+    ) -> Result<TypeId, Vec<Diagnostic>> {
+        match (
+            function.receiver_mode,
+            self.runtime_type(function.receiver_type)?,
+        ) {
+            (Some(0), Type::RefShared { referent }) | (Some(1), Type::RefUnique { referent }) => {
+                Ok(*referent)
+            }
+            (Some(2), _) => Ok(function.receiver_type),
+            _ => Err(vec![unsupported(
+                function,
+                "effect callable has an invalid receiver layout",
+            )]),
+        }
+    }
+
+    fn callable_runtime_type_for_capture(
+        &self,
+        capture_type: TypeId,
+    ) -> Result<TypeId, Vec<Diagnostic>> {
+        self.phases
+            .artifact
+            .types
+            .iter()
+            .enumerate()
+            .find_map(|(index, ty)| match ty.representation() {
+                Type::Callable {
+                    capture_type: described,
+                    ..
+                } if *described == capture_type => Some(index as TypeId),
+                _ => None,
+            })
+            .ok_or_else(|| {
+                vec![backend_error(format!(
+                    "capture type t{capture_type} has no runtime callable type"
+                ))]
+            })
+    }
+
+    fn emit_clone_effect_snapshot_guard_chain(
+        &mut self,
+        source: &str,
+        function: &mir::Function,
+        context: &str,
+    ) -> Result<String, Vec<Diagnostic>> {
+        let usize_ty = format!("i{}", self.pointer_width());
+        let handler_cases = (0..self.phases.artifact.handler_defs.len())
+            .map(|handler_def| {
+                let handler_type = self.handler_runtime_type(handler_def as u32)?;
+                let Type::Handler { capture_type, .. } = self.runtime_type(handler_type)?.clone()
+                else {
+                    unreachable!()
+                };
+                Ok((handler_def, handler_type, capture_type))
+            })
+            .collect::<Result<Vec<_>, Vec<Diagnostic>>>()?;
+        let callable_cases = self
+            .llvm_reachable_functions
+            .iter()
+            .copied()
+            .filter(|index| {
+                self.phases
+                    .mir
+                    .functions
+                    .get(*index)
+                    .is_some_and(|function| {
+                        self.function_needs_effect_frame(function)
+                            && function.receiver_mode.is_some()
+                    })
+            })
+            .map(|index| {
+                let target = self.phases.mir.functions[index].clone();
+                let capture_type = self.effect_callable_capture_type(&target)?;
+                let callable_type = self.callable_runtime_type_for_capture(capture_type)?;
+                Ok((index, callable_type, capture_type))
+            })
+            .collect::<Result<Vec<_>, Vec<Diagnostic>>>()?;
+
+        let result_slot = self.temp();
+        let source_slot = self.temp();
+        let previous_clone_slot = self.temp();
+        let loop_label = self.temp();
+        let inspect_label = self.temp();
+        let finish_label = self.temp();
+        let done_label = self.temp();
+        self.line(&format!("  %{result_slot} = alloca ptr"));
+        self.line(&format!("  %{source_slot} = alloca ptr"));
+        self.line(&format!("  %{previous_clone_slot} = alloca ptr"));
+        self.line(&format!("  store ptr null, ptr %{result_slot}"));
+        self.line(&format!("  store ptr {source}, ptr %{source_slot}"));
+        self.line(&format!("  store ptr null, ptr %{previous_clone_slot}"));
+        self.line(&format!("  br label %guard.snapshot.loop{loop_label}"));
+        self.line(&format!("guard.snapshot.loop{loop_label}:"));
+        let current = self.temp();
+        let present = self.temp();
+        self.line(&format!("  %{current} = load ptr, ptr %{source_slot}"));
+        self.line(&format!("  %{present} = icmp ne ptr %{current}, null"));
+        self.line(&format!(
+            "  br i1 %{present}, label %guard.snapshot.inspect{inspect_label}, label %guard.snapshot.finish{finish_label}"
+        ));
+        self.line(&format!("guard.snapshot.inspect{inspect_label}:"));
+        let existing = self.temp();
+        let found = self.temp();
+        let reuse_label = self.temp();
+        let clone_label = self.temp();
+        self.line(&format!(
+            "  %{existing} = call ptr @g1_snapshot_lookup_exact(ptr {context}, ptr %{current})"
+        ));
+        self.line(&format!("  %{found} = icmp ne ptr %{existing}, null"));
+        self.line(&format!(
+            "  br i1 %{found}, label %guard.snapshot.reuse{reuse_label}, label %guard.snapshot.clone{clone_label}"
+        ));
+
+        self.line(&format!("guard.snapshot.reuse{reuse_label}:"));
+        self.line(&format!(
+            "  call void @g1_effect_guard_retain(ptr %{existing})"
+        ));
+        self.emit_link_cloned_guard(
+            &format!("%{result_slot}"),
+            &format!("%{previous_clone_slot}"),
+            &format!("%{existing}"),
+        );
+        self.line(&format!("  br label %guard.snapshot.done{done_label}"));
+
+        self.line(&format!("guard.snapshot.clone{clone_label}:"));
+        let guard_size = self.emit_array_element_size("%g1.effect_guard");
+        let cloned = self.temp();
+        let failed = self.temp();
+        self.line(&format!(
+            "  %{cloned} = call ptr @malloc({usize_ty} {guard_size})"
+        ));
+        self.line(&format!("  %{failed} = icmp eq ptr %{cloned}, null"));
+        self.emit_trap_if(failed);
+        self.line(&format!(
+            "  call void @llvm.memcpy.p0.p0.{usize_ty}(ptr %{cloned}, ptr %{current}, {usize_ty} {guard_size}, i1 false)"
+        ));
+        let count_address = self.temp();
+        let next_address = self.temp();
+        self.line(&format!(
+            "  %{count_address} = getelementptr inbounds %g1.effect_guard, ptr %{cloned}, i32 0, i32 0"
+        ));
+        self.line(&format!("  store i64 1, ptr %{count_address}"));
+        self.line(&format!(
+            "  %{next_address} = getelementptr inbounds %g1.effect_guard, ptr %{cloned}, i32 0, i32 3"
+        ));
+        self.line(&format!("  store ptr null, ptr %{next_address}"));
+        self.line(&format!(
+            "  call void @g1_snapshot_record(ptr {context}, ptr %{current}, {usize_ty} {guard_size}, ptr %{cloned}, ptr null)"
+        ));
+
+        let payload_address = self.temp();
+        let payload = self.temp();
+        let drop_address = self.temp();
+        let drop = self.temp();
+        self.line(&format!(
+            "  %{payload_address} = getelementptr inbounds %g1.effect_guard, ptr %{current}, i32 0, i32 1"
+        ));
+        self.line(&format!("  %{payload} = load ptr, ptr %{payload_address}"));
+        self.line(&format!(
+            "  %{drop_address} = getelementptr inbounds %g1.effect_guard, ptr %{current}, i32 0, i32 2"
+        ));
+        self.line(&format!("  %{drop} = load ptr, ptr %{drop_address}"));
+        let payload_slot = self.temp();
+        self.line(&format!("  %{payload_slot} = alloca ptr"));
+        let payload_ready = self.temp();
+
+        let mut next_check = None;
+        for (handler_def, handler_type, capture_type) in handler_cases {
+            if let Some(label) = next_check.take() {
+                self.line(&format!("guard.snapshot.payload.check{label}:"));
+            }
+            let matches = self.temp();
+            let matched_label = self.temp();
+            let otherwise_label = self.temp();
+            self.line(&format!(
+                "  %{matches} = icmp eq ptr %{drop}, @g1_effect_handler_drop_h{handler_def}"
+            ));
+            self.line(&format!(
+                "  br i1 %{matches}, label %guard.snapshot.payload.handler{matched_label}, label %guard.snapshot.payload.check{otherwise_label}"
+            ));
+            self.line(&format!("guard.snapshot.payload.handler{matched_label}:"));
+            let cloned_payload = self.emit_clone_effect_snapshot_handler(
+                handler_type,
+                capture_type,
+                &format!("%{payload}"),
+                function,
+                context,
+            )?;
+            self.line(&format!(
+                "  store ptr {cloned_payload}, ptr %{payload_slot}"
+            ));
+            self.line(&format!(
+                "  br label %guard.snapshot.payload.ready{payload_ready}"
+            ));
+            next_check = Some(otherwise_label);
+        }
+        for (index, callable_type, capture_type) in callable_cases {
+            if let Some(label) = next_check.take() {
+                self.line(&format!("guard.snapshot.payload.check{label}:"));
+            }
+            let matches = self.temp();
+            let matched_label = self.temp();
+            let otherwise_label = self.temp();
+            self.line(&format!(
+                "  %{matches} = icmp eq ptr %{drop}, @g1_effect_guard_drop_f{index}"
+            ));
+            self.line(&format!(
+                "  br i1 %{matches}, label %guard.snapshot.payload.callable{matched_label}, label %guard.snapshot.payload.check{otherwise_label}"
+            ));
+            self.line(&format!("guard.snapshot.payload.callable{matched_label}:"));
+            let cloned_payload = self.emit_clone_effect_snapshot_callable(
+                callable_type,
+                capture_type,
+                &format!("%{payload}"),
+                function,
+                context,
+            )?;
+            self.line(&format!(
+                "  store ptr {cloned_payload}, ptr %{payload_slot}"
+            ));
+            self.line(&format!(
+                "  br label %guard.snapshot.payload.ready{payload_ready}"
+            ));
+            next_check = Some(otherwise_label);
+        }
+        if let Some(label) = next_check.take() {
+            self.line(&format!("guard.snapshot.payload.check{label}:"));
+        }
+        let is_chain = self.temp();
+        let chain_label = self.temp();
+        let invalid_label = self.temp();
+        self.line(&format!(
+            "  %{is_chain} = icmp eq ptr %{drop}, @g1_effect_guard_drop_chain"
+        ));
+        self.line(&format!(
+            "  br i1 %{is_chain}, label %guard.snapshot.payload.chain{chain_label}, label %guard.snapshot.payload.invalid{invalid_label}"
+        ));
+        self.line(&format!("guard.snapshot.payload.chain{chain_label}:"));
+        let cloned_chain = self.temp();
+        self.line(&format!(
+            "  %{cloned_chain} = call ptr @g1_effect_clone_chain_owners(ptr %{payload}, ptr {context})"
+        ));
+        self.line(&format!("  store ptr %{cloned_chain}, ptr %{payload_slot}"));
+        self.line(&format!(
+            "  br label %guard.snapshot.payload.ready{payload_ready}"
+        ));
+        self.line(&format!("guard.snapshot.payload.invalid{invalid_label}:"));
+        self.line("  call void @llvm.trap()");
+        self.line("  unreachable");
+
+        self.line(&format!("guard.snapshot.payload.ready{payload_ready}:"));
+        let cloned_payload = self.temp();
+        let cloned_payload_address = self.temp();
+        self.line(&format!(
+            "  %{cloned_payload} = load ptr, ptr %{payload_slot}"
+        ));
+        self.line(&format!(
+            "  %{cloned_payload_address} = getelementptr inbounds %g1.effect_guard, ptr %{cloned}, i32 0, i32 1"
+        ));
+        self.line(&format!(
+            "  store ptr %{cloned_payload}, ptr %{cloned_payload_address}"
+        ));
+        self.emit_link_cloned_guard(
+            &format!("%{result_slot}"),
+            &format!("%{previous_clone_slot}"),
+            &format!("%{cloned}"),
+        );
+        self.line(&format!(
+            "  store ptr %{cloned}, ptr %{previous_clone_slot}"
+        ));
+        let source_next_address = self.temp();
+        let source_next = self.temp();
+        self.line(&format!(
+            "  %{source_next_address} = getelementptr inbounds %g1.effect_guard, ptr %{current}, i32 0, i32 3"
+        ));
+        self.line(&format!(
+            "  %{source_next} = load ptr, ptr %{source_next_address}"
+        ));
+        self.line(&format!("  store ptr %{source_next}, ptr %{source_slot}"));
+        self.line(&format!("  br label %guard.snapshot.loop{loop_label}"));
+
+        self.line(&format!("guard.snapshot.finish{finish_label}:"));
+        self.line(&format!("  br label %guard.snapshot.done{done_label}"));
+        self.line(&format!("guard.snapshot.done{done_label}:"));
+        let result = self.temp();
+        self.line(&format!("  %{result} = load ptr, ptr %{result_slot}"));
+        Ok(format!("%{result}"))
+    }
+
+    fn emit_link_cloned_guard(&mut self, top_slot: &str, previous_slot: &str, guard: &str) {
+        let previous = self.temp();
+        let has_previous = self.temp();
+        let previous_label = self.temp();
+        let top_label = self.temp();
+        let linked_label = self.temp();
+        self.line(&format!("  %{previous} = load ptr, ptr {previous_slot}"));
+        self.line(&format!(
+            "  %{has_previous} = icmp ne ptr %{previous}, null"
+        ));
+        self.line(&format!(
+            "  br i1 %{has_previous}, label %guard.snapshot.link.previous{previous_label}, label %guard.snapshot.link.top{top_label}"
+        ));
+        self.line(&format!("guard.snapshot.link.previous{previous_label}:"));
+        let next_address = self.temp();
+        self.line(&format!(
+            "  %{next_address} = getelementptr inbounds %g1.effect_guard, ptr %{previous}, i32 0, i32 3"
+        ));
+        self.line(&format!("  store ptr {guard}, ptr %{next_address}"));
+        self.line(&format!("  br label %guard.snapshot.linked{linked_label}"));
+        self.line(&format!("guard.snapshot.link.top{top_label}:"));
+        self.line(&format!("  store ptr {guard}, ptr {top_slot}"));
+        self.line(&format!("  br label %guard.snapshot.linked{linked_label}"));
+        self.line(&format!("guard.snapshot.linked{linked_label}:"));
     }
 
     fn emit_clone_effect_snapshot_aggregate(
@@ -8753,6 +9146,156 @@ impl<'a> Emitter<'a> {
         self.line(&format!("callable.snapshot.done{done_label}:"));
         let result = self.temp();
         self.line(&format!("  %{result} = load ptr, ptr %{result_slot}"));
+        Ok(format!("%{result}"))
+    }
+
+    fn emit_clone_effect_snapshot_handler(
+        &mut self,
+        handler_type: TypeId,
+        capture_type: TypeId,
+        source: &str,
+        function: &mir::Function,
+        context: &str,
+    ) -> Result<String, Vec<Diagnostic>> {
+        let clause_types = self.runtime_aggregate_fields(capture_type)?;
+        let usize_ty = format!("i{}", self.pointer_width());
+        let result_slot = self.temp();
+        let existing = self.temp();
+        let found = self.temp();
+        let reuse_label = self.temp();
+        let clone_label = self.temp();
+        let done_label = self.temp();
+        self.line(&format!("  %{result_slot} = alloca ptr"));
+        self.line(&format!(
+            "  %{existing} = call ptr @g1_snapshot_lookup_exact(ptr {context}, ptr {source})"
+        ));
+        self.line(&format!("  %{found} = icmp ne ptr %{existing}, null"));
+        self.line(&format!(
+            "  br i1 %{found}, label %handler.snapshot.reuse{reuse_label}, label %handler.snapshot.clone{clone_label}"
+        ));
+        self.line(&format!("handler.snapshot.reuse{reuse_label}:"));
+        self.emit_retain_handler(&format!("%{existing}"));
+        self.line(&format!("  store ptr %{existing}, ptr %{result_slot}"));
+        self.line(&format!("  br label %handler.snapshot.done{done_label}"));
+
+        self.line(&format!("handler.snapshot.clone{clone_label}:"));
+        let shell_size = self.emit_array_element_size("%g1.handler");
+        let cloned = self.temp();
+        let failed = self.temp();
+        self.line(&format!(
+            "  %{cloned} = call ptr @malloc({usize_ty} {shell_size})"
+        ));
+        self.line(&format!("  %{failed} = icmp eq ptr %{cloned}, null"));
+        self.emit_trap_if(failed);
+        self.line(&format!(
+            "  call void @llvm.memcpy.p0.p0.{usize_ty}(ptr %{cloned}, ptr {source}, {usize_ty} {shell_size}, i1 false)"
+        ));
+        let count_address = self.temp();
+        self.line(&format!(
+            "  %{count_address} = getelementptr inbounds %g1.handler, ptr %{cloned}, i32 0, i32 0"
+        ));
+        self.line(&format!("  store i64 1, ptr %{count_address}"));
+        self.line(&format!(
+            "  call void @g1_snapshot_record(ptr {context}, ptr {source}, {usize_ty} {shell_size}, ptr %{cloned}, ptr null)"
+        ));
+
+        let source_clauses_address = self.temp();
+        let source_clauses = self.temp();
+        self.line(&format!(
+            "  %{source_clauses_address} = getelementptr inbounds %g1.handler, ptr {source}, i32 0, i32 3"
+        ));
+        self.line(&format!(
+            "  %{source_clauses} = load ptr, ptr %{source_clauses_address}"
+        ));
+        let cloned_clauses = if clause_types.is_empty() {
+            "null".to_owned()
+        } else {
+            let storage = self.temp();
+            let storage_failed = self.temp();
+            let pointer_size = usize::from(self.pointer_width() / 8);
+            self.line(&format!(
+                "  %{storage} = call ptr @malloc({usize_ty} {})",
+                clause_types.len() * pointer_size
+            ));
+            self.line(&format!(
+                "  %{storage_failed} = icmp eq ptr %{storage}, null"
+            ));
+            self.emit_trap_if(storage_failed);
+            format!("%{storage}")
+        };
+        let cloned_clauses_address = self.temp();
+        self.line(&format!(
+            "  %{cloned_clauses_address} = getelementptr inbounds %g1.handler, ptr %{cloned}, i32 0, i32 3"
+        ));
+        self.line(&format!(
+            "  store ptr {cloned_clauses}, ptr %{cloned_clauses_address}"
+        ));
+
+        for (index, clause_type) in clause_types.into_iter().enumerate() {
+            let Type::Callable { capture_type, .. } = self.runtime_type(clause_type)?.clone()
+            else {
+                return Err(vec![unsupported(
+                    function,
+                    "handler clause has a non-callable runtime type",
+                )]);
+            };
+            let clause_result_slot = self.temp();
+            self.line(&format!("  %{clause_result_slot} = alloca ptr"));
+            let source_slot = self.temp();
+            let source_clause = self.temp();
+            let present = self.temp();
+            let clone_clause_label = self.temp();
+            let null_clause_label = self.temp();
+            let clause_done_label = self.temp();
+            self.line(&format!(
+                "  %{source_slot} = getelementptr inbounds ptr, ptr %{source_clauses}, {usize_ty} {index}"
+            ));
+            self.line(&format!(
+                "  %{source_clause} = load ptr, ptr %{source_slot}"
+            ));
+            self.line(&format!(
+                "  %{present} = icmp ne ptr %{source_clause}, null"
+            ));
+            self.line(&format!(
+                "  br i1 %{present}, label %handler.snapshot.clause{clone_clause_label}, label %handler.snapshot.null{null_clause_label}"
+            ));
+            self.line(&format!("handler.snapshot.clause{clone_clause_label}:"));
+            let cloned_clause = self.emit_clone_effect_snapshot_callable(
+                clause_type,
+                capture_type,
+                &format!("%{source_clause}"),
+                function,
+                context,
+            )?;
+            self.line(&format!(
+                "  store ptr {cloned_clause}, ptr %{clause_result_slot}"
+            ));
+            self.line(&format!(
+                "  br label %handler.snapshot.clause.done{clause_done_label}"
+            ));
+            self.line(&format!("handler.snapshot.null{null_clause_label}:"));
+            self.line(&format!("  store ptr null, ptr %{clause_result_slot}"));
+            self.line(&format!(
+                "  br label %handler.snapshot.clause.done{clause_done_label}"
+            ));
+            self.line(&format!("handler.snapshot.clause.done{clause_done_label}:"));
+            let final_clause = self.temp();
+            let cloned_slot = self.temp();
+            self.line(&format!(
+                "  %{final_clause} = load ptr, ptr %{clause_result_slot}"
+            ));
+            self.line(&format!(
+                "  %{cloned_slot} = getelementptr inbounds ptr, ptr {cloned_clauses}, {usize_ty} {index}"
+            ));
+            self.line(&format!("  store ptr %{final_clause}, ptr %{cloned_slot}"));
+        }
+
+        self.line(&format!("  store ptr %{cloned}, ptr %{result_slot}"));
+        self.line(&format!("  br label %handler.snapshot.done{done_label}"));
+        self.line(&format!("handler.snapshot.done{done_label}:"));
+        let result = self.temp();
+        self.line(&format!("  %{result} = load ptr, ptr %{result_slot}"));
+        let _ = handler_type;
         Ok(format!("%{result}"))
     }
 
@@ -9049,7 +9592,9 @@ impl<'a> Emitter<'a> {
 
     fn emit_clone_resumption_wrapper(
         &mut self,
+        resumption_type: TypeId,
         source: &str,
+        function: &mir::Function,
         context: &str,
     ) -> Result<String, Vec<Diagnostic>> {
         let result_slot = self.temp();
@@ -9071,7 +9616,8 @@ impl<'a> Emitter<'a> {
         self.line(&format!("  store ptr %{existing}, ptr %{result_slot}"));
         self.line(&format!("  br label %resumption.snapshot.done{done_label}"));
         self.line(&format!("resumption.snapshot.clone{clone_label}:"));
-        let cloned = self.emit_clone_resumption_wrapper_fresh(source, context)?;
+        let cloned =
+            self.emit_clone_resumption_wrapper_fresh(resumption_type, source, function, context)?;
         self.line(&format!("  store ptr {cloned}, ptr %{result_slot}"));
         self.line(&format!("  br label %resumption.snapshot.done{done_label}"));
         self.line(&format!("resumption.snapshot.done{done_label}:"));
@@ -9082,7 +9628,9 @@ impl<'a> Emitter<'a> {
 
     fn emit_clone_resumption_wrapper_fresh(
         &mut self,
+        resumption_type: TypeId,
         source: &str,
+        function: &mir::Function,
         context: &str,
     ) -> Result<String, Vec<Diagnostic>> {
         let fields = (0..5)
@@ -9173,13 +9721,23 @@ impl<'a> Emitter<'a> {
             ));
             rebased.push(format!("%{final_pointer}"));
         }
-        self.emit_retain_handler(handler);
+        let handler_type = self.resumption_handler_runtime_type(function, resumption_type)?;
+        let Type::Handler { capture_type, .. } = self.runtime_type(handler_type)?.clone() else {
+            unreachable!()
+        };
+        let cloned_handler = self.emit_clone_effect_snapshot_handler(
+            handler_type,
+            capture_type,
+            handler,
+            function,
+            context,
+        )?;
         for (field, value) in [
             (0, format!("%{cloned_top}")),
             (1, format!("%{cloned_bottom}")),
             (2, rebased[0].clone()),
             (3, rebased[1].clone()),
-            (4, handler.clone()),
+            (4, cloned_handler),
         ] {
             let address = self.temp();
             self.line(&format!(
