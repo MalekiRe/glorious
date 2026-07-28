@@ -3496,6 +3496,14 @@ impl<'a> Walker<'a> {
                 if arguments.len() != template.params.len() {
                     return None;
                 }
+                if template.generic_params.is_empty() {
+                    let result = template.result.clone();
+                    return ground(&result).then_some((result, false));
+                }
+                let argument_types = arguments
+                    .iter()
+                    .map(|argument| self.obvious_argument_type(argument))
+                    .collect::<Vec<_>>();
                 let mutable = template
                     .generic_params
                     .iter()
@@ -3503,12 +3511,11 @@ impl<'a> Walker<'a> {
                     .collect::<BTreeSet<_>>();
                 let mut substitutions = BTreeMap::new();
                 for defaulting in [false, true] {
-                    for (argument, formal) in arguments.iter().zip(&template.params) {
-                        let Some((actual, is_default)) = self.obvious_argument_type(argument)
-                        else {
+                    for (actual, formal) in argument_types.iter().zip(&template.params) {
+                        let Some((actual, is_default)) = actual else {
                             continue;
                         };
-                        if is_default != defaulting {
+                        if *is_default != defaulting {
                             continue;
                         }
                         let mut trial = substitutions.clone();
