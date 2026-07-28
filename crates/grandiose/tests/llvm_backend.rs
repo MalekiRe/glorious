@@ -761,6 +761,215 @@ fn host_calls_execute_and_consume_arguments_inside_effect_frames() {
 }
 
 #[test]
+fn synchronous_known_receiver_calls_execute_inside_effect_frames() {
+    let mut phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-sync-known-receiver-effect-frame.glorious",
+        r#"
+            effect Ask { [1,1] ask() -> i64 }
+            sync(value: i64) -> i64 { value + 1 }
+            outward() -> i64 / {Ask} {
+                let anchor = 7;
+                let borrowed = &anchor;
+                perform Ask::ask();
+                let answer = sync(41);
+                *borrowed;
+                answer
+            }
+            selected() -> i64 {
+                handle outward() {
+                    Ask::ask() with continuation => resume(move continuation, 0)
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let caller = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "outward")
+        .unwrap();
+    let target = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "sync")
+        .unwrap();
+    let receiver = phases.mir.functions[caller]
+        .blocks
+        .iter()
+        .flat_map(|block| &block.statements)
+        .find_map(|instruction| match instruction.kind {
+            grandiose::compiler_mir::InstructionKind::Borrow { dst, .. } => Some(dst),
+            _ => None,
+        })
+        .expect("outward test body should preserve a shared receiver");
+    let receiver_type = phases.mir.functions[caller].register_types[receiver as usize];
+    let call_block = phases.mir.functions[caller]
+        .blocks
+        .iter()
+        .position(|block| {
+            matches!(
+                block.terminator,
+                grandiose::compiler_mir::Terminator::Call {
+                    function,
+                    ..
+                } if function as usize == target
+            )
+        })
+        .expect("outward test body should call its synchronous helper");
+    let grandiose::compiler_mir::Terminator::Call {
+        result,
+        function,
+        args,
+        normal,
+    } = phases.mir.functions[caller].blocks[call_block]
+        .terminator
+        .clone()
+    else {
+        unreachable!()
+    };
+    phases.mir.functions[caller].blocks[call_block].terminator =
+        grandiose::compiler_mir::Terminator::CallKnownReceiver {
+            result,
+            function,
+            receiver: grandiose::compiler_mir::Operand {
+                register: receiver,
+                mode: grandiose::compiler_mir::UseMode::Copy,
+            },
+            args,
+            normal,
+        };
+    phases.mir.functions[target].receiver_mode = Some(0);
+    phases.mir.functions[target].receiver_type = receiver_type;
+    phases.mir.functions[target].register_types[0] = receiver_type;
+
+    assert_eq!(phases.mir.functions[target].receiver_mode, Some(0));
+    assert!(phases.mir.functions[target].outward_protocols.is_empty());
+
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let vm_selected = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_selected, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    run_native_i64(module, selected, 42, "sync-known-receiver-effect-frame");
+}
+
+#[test]
+fn outward_known_receiver_calls_suspend_inside_effect_frames() {
+    let phases = grandiose::compile_source_to_phases_with_options(
+        "llvm-outward-known-receiver-effect-frame.glorious",
+        r#"
+            effect Ask { [1,1] ask() -> i64 }
+            effect Step { next(value: i64) -> ! }
+            effect Marker { mark() -> ! }
+            outward() -> i64 / {Ask} {
+                let recurse = (remaining: i64) -> i64 / {Ask} {
+                    let answer = perform Ask::ask();
+                    handle perform Step::next(remaining) {
+                        Step::next(0) => answer,
+                        Step::next(value) => {
+                            handle perform Marker::mark() {
+                                Marker::mark() => ()
+                            };
+                            recurse(value - 1) + 1
+                        }
+                    }
+                };
+                recurse(2)
+            }
+            selected() -> i64 {
+                handle outward() {
+                    Ask::ask() with continuation => resume(move continuation, 40)
+                }
+            }
+            main() -> () { selected(); () }
+        "#,
+        grandiose::CompileOptions {
+            optimization_level: grandiose::OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let caller = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| {
+            !function.outward_protocols.is_empty()
+                && function.receiver_mode.is_some()
+                && function.blocks.iter().any(|block| {
+                    matches!(
+                        block.terminator,
+                        grandiose::compiler_mir::Terminator::CallKnownReceiver { .. }
+                    )
+                })
+        })
+        .expect("expected outward known-receiver call in an effect frame");
+    let (target, receiver) = phases.mir.functions[caller]
+        .blocks
+        .iter()
+        .find_map(|block| {
+            if let grandiose::compiler_mir::Terminator::CallKnownReceiver {
+                function,
+                receiver,
+                ..
+            } = &block.terminator
+            {
+                Some((*function as usize, receiver))
+            } else {
+                None
+            }
+        })
+        .unwrap();
+    assert_eq!(phases.mir.functions[target].receiver_mode, Some(0));
+    assert!(!phases.mir.functions[target].outward_protocols.is_empty());
+    assert_eq!(receiver.mode, grandiose::compiler_mir::UseMode::Copy);
+
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let vm_selected = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact.clone()).unwrap())
+            .run(vm_selected, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    run_native_i64(module, selected, 42, "outward-known-receiver-effect-frame");
+}
+
+#[test]
 fn synchronous_owned_indirect_call_executes_inside_effect_frame() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-sync-owned-indirect-effect.glorious",

@@ -2905,6 +2905,20 @@ impl<'a> Emitter<'a> {
                 args,
                 normal,
             } => self.emit_effect_call(function, *result, function_index, args, normal)?,
+            Terminator::CallKnownReceiver {
+                result,
+                function: callee,
+                receiver,
+                args,
+                normal,
+            } => self.emit_effect_known_receiver_call(
+                function,
+                *result,
+                *callee as usize,
+                receiver,
+                args,
+                normal,
+            )?,
             Terminator::HostCall {
                 result,
                 import,
@@ -3108,12 +3122,6 @@ impl<'a> Emitter<'a> {
                 self.line("  unreachable");
             }
             Terminator::Unreachable => self.line("  unreachable"),
-            other => {
-                return Err(vec![unsupported(
-                    function,
-                    format!("effect-frame terminator {other:?}"),
-                )]);
-            }
         }
         Ok(())
     }
@@ -4055,6 +4063,167 @@ impl<'a> Emitter<'a> {
         self.emit_effect_runtime_store(0, "ptr", &format!("%{child}"));
         self.line("  ret void");
         Ok(())
+    }
+
+    fn emit_effect_known_receiver_call(
+        &mut self,
+        caller: &mir::Function,
+        result: Option<u32>,
+        callee_index: usize,
+        receiver: &mir::Operand,
+        args: &[mir::Operand],
+        normal: &mir::Edge,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let callee = self
+            .phases
+            .mir
+            .functions
+            .get(callee_index)
+            .cloned()
+            .ok_or_else(|| {
+                vec![unsupported(
+                    caller,
+                    "effect known-receiver call target is missing",
+                )]
+            })?;
+        if callee.receiver_mode != Some(0)
+            || receiver.mode != mir::UseMode::Copy
+            || callee.params.len() != args.len()
+        {
+            return Err(vec![unsupported(
+                caller,
+                "malformed shared known-receiver call from an effect frame",
+            )]);
+        }
+        let receiver_type = self.register_runtime_type(caller, receiver.register)?;
+        if receiver_type != callee.receiver_type {
+            return Err(vec![unsupported(
+                caller,
+                "known-receiver call receiver type mismatch",
+            )]);
+        }
+        if let Some(result) = result {
+            if self.register_runtime_type(caller, result)? != callee.result {
+                return Err(vec![unsupported(
+                    caller,
+                    "known-receiver call result type mismatch",
+                )]);
+            }
+        } else if self.llvm_return_type(callee.result)? != "void" {
+            return Err(vec![unsupported(
+                caller,
+                "discarded non-unit known-receiver call result",
+            )]);
+        }
+
+        let receiver_ty = self.register_type(caller, receiver.register)?;
+        let receiver_value = self.load_operand(caller, receiver)?;
+        if callee.outward_protocols.is_empty() {
+            return self.emit_effect_sync_known_receiver_call(
+                caller,
+                result,
+                callee_index,
+                &callee,
+                &receiver_ty,
+                &receiver_value,
+                args,
+                normal,
+            );
+        }
+
+        let state_address = self.temp();
+        self.line(&format!(
+            "  %{state_address} = getelementptr inbounds %g1.effect_frame, ptr %frame, i32 0, i32 4"
+        ));
+        self.line(&format!(
+            "  store i32 {}, ptr %{state_address}",
+            normal.target
+        ));
+        self.emit_edge_arguments(caller, normal, result.into_iter().collect())?;
+
+        let mut arguments = vec![format!("{receiver_ty} {receiver_value}")];
+        for (operand, expected) in args.iter().zip(&callee.params) {
+            let actual = self.register_runtime_type(caller, operand.register)?;
+            if actual != *expected {
+                return Err(vec![unsupported(
+                    caller,
+                    "outward known-receiver call argument type mismatch",
+                )]);
+            }
+            let ty = self.register_type(caller, operand.register)?;
+            let value = self.load_operand(caller, operand)?;
+            if operand.mode == mir::UseMode::Copy {
+                self.emit_retain(actual, &value, caller)?;
+            } else {
+                self.emit_effect_set_initialized(caller, operand.register, false)?;
+            }
+            arguments.push(format!("{ty} {value}"));
+        }
+        let return_slot = result.map_or_else(|| "null".to_owned(), |result| format!("%r{result}"));
+        let return_init =
+            result.map_or_else(|| "null".to_owned(), |result| format!("%init{result}"));
+        let child = self.temp();
+        self.line(&format!(
+            "  %{child} = call ptr @g1_effect_new_f{callee_index}(ptr %frame, ptr {return_slot}, ptr {return_init}, {})",
+            arguments.join(", ")
+        ));
+        self.emit_effect_runtime_store(0, "ptr", &format!("%{child}"));
+        self.line("  ret void");
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn emit_effect_sync_known_receiver_call(
+        &mut self,
+        caller: &mir::Function,
+        result: Option<u32>,
+        callee_index: usize,
+        callee: &mir::Function,
+        receiver_ty: &str,
+        receiver_value: &str,
+        args: &[mir::Operand],
+        normal: &mir::Edge,
+    ) -> Result<(), Vec<Diagnostic>> {
+        let mut arguments = vec![format!("{receiver_ty} {receiver_value}")];
+        for (operand, expected) in args.iter().zip(&callee.params) {
+            let actual = self.register_runtime_type(caller, operand.register)?;
+            if actual != *expected {
+                return Err(vec![unsupported(
+                    caller,
+                    "synchronous known-receiver call argument type mismatch",
+                )]);
+            }
+            let ty = self.register_type(caller, operand.register)?;
+            let value = self.load_operand(caller, operand)?;
+            if operand.mode == mir::UseMode::Copy {
+                self.emit_retain(actual, &value, caller)?;
+            } else {
+                self.emit_effect_set_initialized(caller, operand.register, false)?;
+            }
+            arguments.push(format!("{ty} {value}"));
+        }
+        let result_ty = self.llvm_return_type(callee.result)?;
+        if result_ty == "void" {
+            self.line(&format!(
+                "  call void @g1_f{callee_index}({})",
+                arguments.join(", ")
+            ));
+            if let Some(result) = result {
+                self.line(&format!("  store i8 0, ptr %r{result}"));
+                self.emit_effect_set_initialized(caller, result, true)?;
+            }
+        } else {
+            let returned = self.temp();
+            self.line(&format!(
+                "  %{returned} = call {result_ty} @g1_f{callee_index}({})",
+                arguments.join(", ")
+            ));
+            if let Some(result) = result {
+                self.line(&format!("  store {result_ty} %{returned}, ptr %r{result}"));
+                self.emit_effect_set_initialized(caller, result, true)?;
+            }
+        }
+        self.emit_effect_edge(caller, normal, result.into_iter().collect())
     }
 
     fn emit_effect_sync_call(

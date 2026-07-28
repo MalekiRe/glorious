@@ -145,7 +145,8 @@ effect-state array elements and unsupported deep mutable replay shapes produce
    aggregate/callable captures, shared-reference aliases, cancellation, and
    direct residual-field state. Indirect outward-call
    propagation is implemented with callable starter thunks and refcounted
-   guard chains. Synchronous indirect calls and indirect tail calls from an
+   guard chains. Synchronous and outward calls through statically known shared
+   receivers, synchronous indirect calls, and indirect tail calls from an
    effect frame use the same callable receiver and ownership rules as ordinary
    native calls. Replay-time effectful terminal clauses use the same guarded
    takeover path under one-shot and multishot execution. Callable capture
