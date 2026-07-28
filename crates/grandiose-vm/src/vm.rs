@@ -606,7 +606,7 @@ impl Vm {
                         .map(|r| take(frame, r))
                         .collect::<Result<Vec<_>, _>>()?;
                     frame.pc += 1;
-                    stack.push(make_frame(a, function, values, Value::Unit, dst)?);
+                    stack.push(make_verified_frame(a, function, values, Value::Unit, dst)?);
                 }
                 Instruction::TailCall { function, args } => {
                     let values = args
@@ -614,7 +614,8 @@ impl Vm {
                         .map(|r| take(frame, r))
                         .collect::<Result<Vec<_>, _>>()?;
                     let return_dst = frame.return_dst;
-                    let mut replacement = make_frame(a, function, values, Value::Unit, return_dst)?;
+                    let mut replacement =
+                        make_verified_frame(a, function, values, Value::Unit, return_dst)?;
                     replacement.delimiter = frame.delimiter.take();
                     replacement.guards.append(&mut frame.guards);
                     replacement
@@ -634,7 +635,7 @@ impl Vm {
                     let receiver = get(frame, 0)?.clone();
                     let function = frame.function;
                     frame.pc += 1;
-                    stack.push(make_frame(a, function, values, receiver, dst)?);
+                    stack.push(make_verified_frame(a, function, values, receiver, dst)?);
                 }
                 Instruction::TailCallSelf { args } => {
                     if fun.receiver_mode.is_none() {
@@ -647,7 +648,8 @@ impl Vm {
                     let receiver = take(frame, 0)?;
                     let function = frame.function;
                     let return_dst = frame.return_dst;
-                    let mut replacement = make_frame(a, function, values, receiver, return_dst)?;
+                    let mut replacement =
+                        make_verified_frame(a, function, values, receiver, return_dst)?;
                     replacement.delimiter = frame.delimiter.take();
                     replacement.guards.append(&mut frame.guards);
                     replacement
@@ -675,7 +677,7 @@ impl Vm {
                         .map(|r| take(frame, r))
                         .collect::<Result<Vec<_>, _>>()?;
                     frame.pc += 1;
-                    stack.push(make_frame(a, function, values, receiver, dst)?);
+                    stack.push(make_verified_frame(a, function, values, receiver, dst)?);
                 }
                 Instruction::TailCallKnownReceiver {
                     function,
@@ -695,7 +697,8 @@ impl Vm {
                         .map(|r| take(frame, r))
                         .collect::<Result<Vec<_>, _>>()?;
                     let return_dst = frame.return_dst;
-                    let mut replacement = make_frame(a, function, values, receiver, return_dst)?;
+                    let mut replacement =
+                        make_verified_frame(a, function, values, receiver, return_dst)?;
                     replacement.delimiter = frame.delimiter.take();
                     replacement.guards.append(&mut frame.guards);
                     replacement
@@ -877,7 +880,7 @@ impl Vm {
                         .map(|register| take(frame, register))
                         .collect::<Result<Vec<_>, _>>()?;
                     frame.pc += 1;
-                    let mut callee = make_frame(a, function, values, receiver, dst)?;
+                    let mut callee = make_verified_frame(a, function, values, receiver, dst)?;
                     if let Some(guard) = guard {
                         callee.guards.push(guard);
                     }
@@ -895,7 +898,8 @@ impl Vm {
                         .map(|register| take(frame, register))
                         .collect::<Result<Vec<_>, _>>()?;
                     let return_dst = frame.return_dst;
-                    let mut replacement = make_frame(a, function, values, receiver, return_dst)?;
+                    let mut replacement =
+                        make_verified_frame(a, function, values, receiver, return_dst)?;
                     if let Some(guard) = guard {
                         replacement.guards.push(guard);
                     }
@@ -921,7 +925,8 @@ impl Vm {
                         .map(|register| take(frame, register))
                         .collect::<Result<Vec<_>, _>>()?;
                     frame.pc += 1;
-                    let mut body_frame = make_frame(a, function, values, receiver, Some(dst))?;
+                    let mut body_frame =
+                        make_verified_frame(a, function, values, receiver, Some(dst))?;
                     body_frame.delimiter = Some(handler);
                     stack.push(body_frame);
                 }
@@ -941,7 +946,8 @@ impl Vm {
                     let deferred_frames = stack.split_off(delimiter);
                     let (function, receiver) =
                         owned_callable_receiver(a, selected.callable, selected.receiver_mode)?;
-                    let mut clause = make_frame(a, function, values, receiver, return_dst)?;
+                    let mut clause =
+                        make_verified_frame(a, function, values, receiver, return_dst)?;
                     clause.guards.push(selected.handler_guard);
                     clause.deferred_frames = deferred_frames;
                     stack.push(clause);
@@ -999,7 +1005,8 @@ impl Vm {
                     ))));
                     let (function, receiver) =
                         owned_callable_receiver(a, selected.callable, selected.receiver_mode)?;
-                    let mut clause = make_frame(a, function, values, receiver, return_dst)?;
+                    let mut clause =
+                        make_verified_frame(a, function, values, receiver, return_dst)?;
                     clause.guards.push(selected.handler_guard);
                     stack.push(clause);
                 }
@@ -1432,12 +1439,52 @@ fn make_frame(
     if !value_matches(a, &receiver, f.register_types[0]) {
         return Err(RuntimeError::TypeConfusion);
     }
+    Ok(frame_from_verified_values(
+        f, function, args, receiver, return_dst,
+    ))
+}
+
+/// Construct a frame from values already produced by verified bytecode.
+///
+/// Public VM entry and host results are checked at their trust boundaries.
+/// Re-walking complete arrays and aggregates at every internal call would
+/// redundantly re-prove the verifier's call signature and can turn recursive
+/// accumulation into quadratic execution.
+fn make_verified_frame(
+    a: &ExecutionImage,
+    function: u32,
+    args: Vec<Value>,
+    receiver: Value,
+    return_dst: Option<u32>,
+) -> Result<Frame, RuntimeError> {
+    let f = a
+        .functions
+        .get(function as usize)
+        .ok_or(RuntimeError::InvalidFunction(function))?;
+    if args.len() != f.params.len() {
+        return Err(RuntimeError::WrongArgumentCount {
+            expected: f.params.len(),
+            actual: args.len(),
+        });
+    }
+    Ok(frame_from_verified_values(
+        f, function, args, receiver, return_dst,
+    ))
+}
+
+fn frame_from_verified_values(
+    f: &crate::bytecode::Function,
+    function: u32,
+    args: Vec<Value>,
+    receiver: Value,
+    return_dst: Option<u32>,
+) -> Frame {
     let mut registers = vec![None; f.register_types.len()];
     registers[0] = Some(receiver);
     for (i, v) in args.into_iter().enumerate() {
         registers[i + 1] = Some(v)
     }
-    Ok(Frame {
+    Frame {
         function,
         pc: 0,
         registers,
@@ -1451,7 +1498,7 @@ fn make_frame(
         // lazily at `LabelPush` so hostile-but-valid metadata cannot turn a
         // tiny function into a process-scale speculative reservation.
         labels: Vec::new(),
-    })
+    }
 }
 
 fn cleanup_registers(
