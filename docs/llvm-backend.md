@@ -65,7 +65,9 @@ The current vertical slice supports:
 - binding-pack payload construction, projection, copying, and cleanup;
 - typed native host-import calls for process arguments, filesystem read/write,
   and diagnostic output through the explicit C ABI above;
-- custom `Drop::drop` hooks followed by exactly-once structural cleanup.
+- custom `Drop::drop` hooks followed by exactly-once structural cleanup;
+- checked heap allocation and resizing paths that trap deterministically on
+  overflow, allocation failure, or a null owned host result.
 
 It emits only functions reachable from `main`, uses register allocas as the
 first stable ABI, and validates generated IR in tests with `llvm-as`. Native

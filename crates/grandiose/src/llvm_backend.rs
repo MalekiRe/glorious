@@ -403,6 +403,12 @@ impl<'a> Emitter<'a> {
         self.line(&format!("  %header = ptrtoint ptr %end to {usize_ty}"));
         self.line(&format!("  %size = add {usize_ty} %header, %length"));
         self.line(&format!("  %object = call ptr @malloc({usize_ty} %size)"));
+        self.line("  %allocation.failed = icmp eq ptr %object, null");
+        self.line("  br i1 %allocation.failed, label %allocation.trap, label %allocation.ready");
+        self.line("allocation.trap:");
+        self.line("  call void @llvm.trap()");
+        self.line("  unreachable");
+        self.line("allocation.ready:");
         self.line("  %count.address = getelementptr inbounds %g1.bytes, ptr %object, i32 0, i32 0");
         self.line("  store i64 1, ptr %count.address");
         self.line(
@@ -479,6 +485,12 @@ impl<'a> Emitter<'a> {
         self.line(&format!(
             "  %array = call ptr @malloc({usize_ty} %header.size)"
         ));
+        self.line("  %header.failed = icmp eq ptr %array, null");
+        self.line("  br i1 %header.failed, label %header.trap, label %header.ready");
+        self.line("header.trap:");
+        self.line("  call void @llvm.trap()");
+        self.line("  unreachable");
+        self.line("header.ready:");
         self.line("  %length.address = getelementptr inbounds %g1.array, ptr %array, i32 0, i32 0");
         self.line(&format!("  store {usize_ty} 0, ptr %length.address"));
         self.line(
@@ -518,14 +530,22 @@ impl<'a> Emitter<'a> {
         self.line(&format!(
             "  %initialized = call ptr @malloc({usize_ty} %capacity)"
         ));
+        self.line("  %data.failed = icmp eq ptr %data, null");
+        self.line("  %initialized.failed = icmp eq ptr %initialized, null");
+        self.line("  %storage.failed = or i1 %data.failed, %initialized.failed");
+        self.line("  br i1 %storage.failed, label %storage.trap, label %initialize.storage");
+        self.line("storage.trap:");
+        self.line("  call void @llvm.trap()");
+        self.line("  unreachable");
+        self.line("initialize.storage:");
         self.line(&format!(
             "  call void @llvm.memset.p0.{usize_ty}(ptr %initialized, i8 0, {usize_ty} %capacity, i1 false)"
         ));
         self.line("  br label %finish");
         self.line("finish:");
-        self.line("  %final.data = phi ptr [ null, %zero ], [ %data, %allocate.storage ]");
+        self.line("  %final.data = phi ptr [ null, %zero ], [ %data, %initialize.storage ]");
         self.line(
-            "  %final.initialized = phi ptr [ null, %zero ], [ %initialized, %allocate.storage ]",
+            "  %final.initialized = phi ptr [ null, %zero ], [ %initialized, %initialize.storage ]",
         );
         self.line("  %data.address = getelementptr inbounds %g1.array, ptr %array, i32 0, i32 3");
         self.line("  store ptr %final.data, ptr %data.address");
@@ -598,6 +618,12 @@ impl<'a> Emitter<'a> {
         self.line(&format!(
             "  %new.data = call ptr @realloc(ptr %data, {usize_ty} %data.size)"
         ));
+        self.line("  %data.failed = icmp eq ptr %new.data, null");
+        self.line("  br i1 %data.failed, label %allocation.trap, label %data.ready");
+        self.line("allocation.trap:");
+        self.line("  call void @llvm.trap()");
+        self.line("  unreachable");
+        self.line("data.ready:");
         self.line("  store ptr %new.data, ptr %data.address");
         self.line(
             "  %initialized.address = getelementptr inbounds %g1.array, ptr %array, i32 0, i32 4",
@@ -606,6 +632,12 @@ impl<'a> Emitter<'a> {
         self.line(&format!(
             "  %new.initialized = call ptr @realloc(ptr %initialized, {usize_ty} %new.capacity)"
         ));
+        self.line("  %initialized.failed = icmp eq ptr %new.initialized, null");
+        self.line("  br i1 %initialized.failed, label %initialized.trap, label %initialized.ready");
+        self.line("initialized.trap:");
+        self.line("  call void @llvm.trap()");
+        self.line("  unreachable");
+        self.line("initialized.ready:");
         self.line(&format!(
             "  %added = sub {usize_ty} %new.capacity, %capacity"
         ));
@@ -725,11 +757,21 @@ impl<'a> Emitter<'a> {
         self.line(&format!(
             "  %{callable} = call ptr @malloc({usize_ty} %{callable_size})"
         ));
+        let callable_failed = self.temp();
+        self.line(&format!(
+            "  %{callable_failed} = icmp eq ptr %{callable}, null"
+        ));
+        self.emit_trap_if(callable_failed);
         let capture_size = self.emit_array_element_size(&capture_ty);
         let capture = self.temp();
         self.line(&format!(
             "  %{capture} = call ptr @malloc({usize_ty} {capture_size})"
         ));
+        let capture_failed = self.temp();
+        self.line(&format!(
+            "  %{capture_failed} = icmp eq ptr %{capture}, null"
+        ));
+        self.emit_trap_if(capture_failed);
         self.line(&format!(
             "  store {capture_ty} {capture_value}, ptr %{capture}"
         ));
@@ -2663,6 +2705,9 @@ impl<'a> Emitter<'a> {
                 self.line(&format!(
                     "  %{value} = call ptr @g1_host_process_args_get()"
                 ));
+                let failed = self.temp();
+                self.line(&format!("  %{failed} = icmp eq ptr %{value}, null"));
+                self.emit_trap_if(failed);
                 Some(value)
             }
             HostImportRole::FsRead => {
@@ -2680,6 +2725,9 @@ impl<'a> Emitter<'a> {
                 self.line(&format!(
                     "  %{value} = call ptr @g1_host_fs_read({arguments})"
                 ));
+                let failed = self.temp();
+                self.line(&format!("  %{failed} = icmp eq ptr %{value}, null"));
+                self.emit_trap_if(failed);
                 Some(value)
             }
             HostImportRole::FsWrite => {
