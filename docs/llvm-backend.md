@@ -54,7 +54,7 @@ The current vertical slice supports:
   `usize`/`isize`;
 - immutable, reference-counted `Text`/`Bytes` storage, literals, length,
   concatenation, equality, byte indexing/slicing, and `Text`-to-`Bytes`
-  conversion;
+  conversion, plus checked canonical UTF-8 validation;
 - native arrays of supported scalar and owned aggregate values with capacity
   growth, initialization-state tracking, move/copy/borrow access, mutation,
   reserve, push/pop, recursive cleanup, and zero-copy-shaped
@@ -89,8 +89,8 @@ silently changing semantics.
 4. Runtime ABI: `Text`, `Bytes`, and arrays of supported owned aggregates are
    partially implemented; typed host imports are lowered through an external
    C ABI, while callable/effect-state array elements, a bundled native host
-   implementation, UTF-8 validation, and the remaining checked conversion
-   helpers remain.
+   implementation, and richer allocator/host-fault reporting remain. Every
+   primitive in the frozen bytecode primitive table has a native lowering.
 5. First-class callables: environments, indirect calls, receiver modes,
    callable ownership, and binding-pack value lowering are implemented;
    effect-bearing callable environments remain.

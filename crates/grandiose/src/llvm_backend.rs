@@ -454,6 +454,135 @@ impl<'a> Emitter<'a> {
         self.line("different:");
         self.line("  ret i32 0");
         self.line("}");
+        self.emit_utf8_runtime();
+    }
+
+    fn emit_utf8_runtime(&mut self) {
+        let usize_ty = format!("i{}", self.pointer_width());
+        self.line("");
+        self.line("define internal i1 @g1_utf8_validate(ptr %object) {");
+        self.line("entry:");
+        self.line(
+            "  %length.address = getelementptr inbounds %g1.bytes, ptr %object, i32 0, i32 1",
+        );
+        self.line(&format!("  %length = load {usize_ty}, ptr %length.address"));
+        self.line("  %data = call ptr @g1_bytes_data(ptr %object)");
+        self.line("  br label %loop");
+        self.line("loop:");
+        self.line(&format!(
+            "  %index = phi {usize_ty} [ 0, %entry ], [ %next.1, %accept.1 ], [ %next.2, %accept.2 ], [ %next.3, %accept.3 ], [ %next.4, %accept.4 ]"
+        ));
+        self.line(&format!("  %done = icmp eq {usize_ty} %index, %length"));
+        self.line("  br i1 %done, label %valid, label %read");
+        self.line("read:");
+        self.line(&format!(
+            "  %first.address = getelementptr inbounds i8, ptr %data, {usize_ty} %index"
+        ));
+        self.line("  %first = load i8, ptr %first.address");
+        self.line("  %ascii = icmp ult i8 %first, -128");
+        self.line("  br i1 %ascii, label %accept.1, label %classify.2");
+        self.line("classify.2:");
+        self.line("  %at.least.c2 = icmp uge i8 %first, -62");
+        self.line("  %at.most.df = icmp ule i8 %first, -33");
+        self.line("  %is.2 = and i1 %at.least.c2, %at.most.df");
+        self.line("  br i1 %is.2, label %check.2, label %classify.3");
+        self.line("classify.3:");
+        self.line("  %at.least.e0 = icmp uge i8 %first, -32");
+        self.line("  %at.most.ef = icmp ule i8 %first, -17");
+        self.line("  %is.3 = and i1 %at.least.e0, %at.most.ef");
+        self.line("  br i1 %is.3, label %check.3, label %classify.4");
+        self.line("classify.4:");
+        self.line("  %at.least.f0 = icmp uge i8 %first, -16");
+        self.line("  %at.most.f4 = icmp ule i8 %first, -12");
+        self.line("  %is.4 = and i1 %at.least.f0, %at.most.f4");
+        self.line("  br i1 %is.4, label %check.4, label %invalid");
+        self.line("check.2:");
+        self.line(&format!("  %remaining.2 = sub {usize_ty} %length, %index"));
+        self.line(&format!(
+            "  %enough.2 = icmp uge {usize_ty} %remaining.2, 2"
+        ));
+        self.line("  br i1 %enough.2, label %bytes.2, label %invalid");
+        self.line("bytes.2:");
+        self.line(&format!("  %second.index.2 = add {usize_ty} %index, 1"));
+        self.line(&format!(
+            "  %second.address.2 = getelementptr inbounds i8, ptr %data, {usize_ty} %second.index.2"
+        ));
+        self.line("  %second.2 = load i8, ptr %second.address.2");
+        self.line("  %second.valid.2 = icmp slt i8 %second.2, -64");
+        self.line("  br i1 %second.valid.2, label %accept.2, label %invalid");
+        self.line("check.3:");
+        self.line(&format!("  %remaining.3 = sub {usize_ty} %length, %index"));
+        self.line(&format!(
+            "  %enough.3 = icmp uge {usize_ty} %remaining.3, 3"
+        ));
+        self.line("  br i1 %enough.3, label %bytes.3, label %invalid");
+        self.line("bytes.3:");
+        self.line(&format!("  %second.index.3 = add {usize_ty} %index, 1"));
+        self.line(&format!("  %third.index.3 = add {usize_ty} %index, 2"));
+        self.line(&format!(
+            "  %second.address.3 = getelementptr inbounds i8, ptr %data, {usize_ty} %second.index.3"
+        ));
+        self.line(&format!(
+            "  %third.address.3 = getelementptr inbounds i8, ptr %data, {usize_ty} %third.index.3"
+        ));
+        self.line("  %second.3 = load i8, ptr %second.address.3");
+        self.line("  %third.3 = load i8, ptr %third.address.3");
+        self.line("  %second.cont.3 = icmp slt i8 %second.3, -64");
+        self.line("  %third.cont.3 = icmp slt i8 %third.3, -64");
+        self.line("  %continuations.3 = and i1 %second.cont.3, %third.cont.3");
+        self.line("  %is.e0 = icmp eq i8 %first, -32");
+        self.line("  %not.e0 = xor i1 %is.e0, true");
+        self.line("  %e0.second = icmp uge i8 %second.3, -96");
+        self.line("  %not.overlong.3 = or i1 %e0.second, %not.e0");
+        self.line("  %is.ed = icmp eq i8 %first, -19");
+        self.line("  %not.ed = xor i1 %is.ed, true");
+        self.line("  %ed.second = icmp ule i8 %second.3, -97");
+        self.line("  %not.surrogate = or i1 %ed.second, %not.ed");
+        self.line("  %canonical.3 = and i1 %not.overlong.3, %not.surrogate");
+        self.line("  %valid.3 = and i1 %continuations.3, %canonical.3");
+        self.line("  br i1 %valid.3, label %accept.3, label %invalid");
+        self.line("check.4:");
+        self.line(&format!("  %remaining.4 = sub {usize_ty} %length, %index"));
+        self.line(&format!(
+            "  %enough.4 = icmp uge {usize_ty} %remaining.4, 4"
+        ));
+        self.line("  br i1 %enough.4, label %bytes.4, label %invalid");
+        self.line("bytes.4:");
+        for (name, offset) in [("second", 1), ("third", 2), ("fourth", 3)] {
+            self.line(&format!(
+                "  %{name}.index.4 = add {usize_ty} %index, {offset}"
+            ));
+            self.line(&format!(
+                "  %{name}.address.4 = getelementptr inbounds i8, ptr %data, {usize_ty} %{name}.index.4"
+            ));
+            self.line(&format!("  %{name}.4 = load i8, ptr %{name}.address.4"));
+            self.line(&format!("  %{name}.cont.4 = icmp slt i8 %{name}.4, -64"));
+        }
+        self.line("  %last.cont.4 = and i1 %third.cont.4, %fourth.cont.4");
+        self.line("  %continuations.4 = and i1 %second.cont.4, %last.cont.4");
+        self.line("  %is.f0 = icmp eq i8 %first, -16");
+        self.line("  %not.f0 = xor i1 %is.f0, true");
+        self.line("  %f0.second = icmp uge i8 %second.4, -112");
+        self.line("  %not.overlong.4 = or i1 %f0.second, %not.f0");
+        self.line("  %is.f4 = icmp eq i8 %first, -12");
+        self.line("  %not.f4 = xor i1 %is.f4, true");
+        self.line("  %f4.second = icmp ule i8 %second.4, -113");
+        self.line("  %not.too.large = or i1 %f4.second, %not.f4");
+        self.line("  %canonical.4 = and i1 %not.overlong.4, %not.too.large");
+        self.line("  %valid.4 = and i1 %continuations.4, %canonical.4");
+        self.line("  br i1 %valid.4, label %accept.4, label %invalid");
+        for (suffix, width) in [(1, 1), (2, 2), (3, 3), (4, 4)] {
+            self.line(&format!("accept.{suffix}:"));
+            self.line(&format!(
+                "  %next.{suffix} = add {usize_ty} %index, {width}"
+            ));
+            self.line("  br label %loop");
+        }
+        self.line("valid:");
+        self.line("  ret i1 true");
+        self.line("invalid:");
+        self.line("  ret i1 false");
+        self.line("}");
     }
 
     fn emit_array_runtime(&mut self) {
@@ -2214,6 +2343,22 @@ impl<'a> Emitter<'a> {
                 self.release_byte_operands(function, args, &loaded)?;
                 result
             }
+            Primitive::TextFromUtf8Checked => {
+                let Some((_, object)) = loaded.first() else {
+                    return Err(vec![unsupported(
+                        function,
+                        "malformed checked UTF-8 conversion",
+                    )]);
+                };
+                let valid = self.temp();
+                self.line(&format!(
+                    "  %{valid} = call i1 @g1_utf8_validate(ptr {object})"
+                ));
+                let invalid = self.temp();
+                self.line(&format!("  %{invalid} = xor i1 %{valid}, true"));
+                self.emit_trap_if(invalid);
+                object.clone()
+            }
             Primitive::TextAsBytes => {
                 let Some((_, object)) = loaded.first() else {
                     return Err(vec![unsupported(
@@ -2365,12 +2510,6 @@ impl<'a> Emitter<'a> {
                 ));
                 self.emit_trap_if(invalid);
                 value.clone()
-            }
-            _ => {
-                return Err(vec![unsupported(
-                    function,
-                    format!("primitive {primitive:?}"),
-                )]);
             }
         };
         self.line(&format!("  store {dst_ty} {result}, ptr %r{dst}"));

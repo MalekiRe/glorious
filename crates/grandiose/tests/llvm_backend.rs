@@ -391,12 +391,16 @@ fn text_and_bytes_use_the_native_reference_counted_runtime() {
         .unwrap();
     let mut options = grandiose::LlvmOptions::default();
     options.emit_entry_wrapper = false;
-    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    let mut module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
     assert!(module.ir.contains("%g1.bytes = type"));
     assert!(module.ir.contains("define internal void @g1_bytes_retain"));
     assert!(module.ir.contains("define internal void @g1_bytes_release"));
     assert!(module.ir.contains("call ptr @g1_bytes_allocate"));
     assert!(module.ir.contains("@llvm.memcpy"));
+    assert!(module.ir.contains("@g1_utf8_validate"));
+    module.ir.push_str(
+        "define i1 @g1_test_utf8(ptr %object) {\n  %valid = call i1 @g1_utf8_validate(ptr %object)\n  ret i1 %valid\n}\n",
+    );
 
     let directory = tempfile::tempdir().unwrap();
     let source = directory.path().join("text-bytes.ll");
@@ -417,7 +421,7 @@ fn text_and_bytes_use_the_native_reference_counted_runtime() {
     fs::write(
         &harness,
         format!(
-            "#include <stdint.h>\nextern uint64_t g1_f{llvm_function}(void);\nint main(void) {{ return g1_f{llvm_function}() == 5 ? 0 : 1; }}\n"
+            "#include <stdint.h>\n#include <stddef.h>\ntypedef struct {{ int64_t count; uintptr_t length; unsigned char data[10]; }} G1Bytes;\nextern uint64_t g1_f{llvm_function}(void);\nextern _Bool g1_test_utf8(G1Bytes *);\nint main(void) {{\n  G1Bytes valid = {{1, 10, {{0x41, 0xc2, 0xa2, 0xe2, 0x82, 0xac, 0xf0, 0x9f, 0x98, 0x80}}}};\n  G1Bytes overlong = {{1, 3, {{0xe0, 0x80, 0x80}}}};\n  G1Bytes continuation = {{1, 2, {{0xc2, 0x41}}}};\n  G1Bytes surrogate = {{1, 3, {{0xed, 0xa0, 0x80}}}};\n  G1Bytes too_large = {{1, 4, {{0xf4, 0x90, 0x80, 0x80}}}};\n  return g1_f{llvm_function}() == 5 && g1_test_utf8(&valid) && !g1_test_utf8(&overlong) && !g1_test_utf8(&continuation) && !g1_test_utf8(&surrogate) && !g1_test_utf8(&too_large) ? 0 : 1;\n}}\n"
         ),
     )
     .unwrap();
