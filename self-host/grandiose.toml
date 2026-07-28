@@ -1,0 +1,8 @@
+[project]
+name = "grandiose-self-host"
+version = "0.1.0"
+entry = "src/main.glorious"
+sources = ["src"]
+
+[runtime]
+capabilities = ["process.args", "fs.read", "fs.write", "diagnostic"]
