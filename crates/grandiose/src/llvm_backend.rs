@@ -4845,16 +4845,33 @@ impl<'a> Emitter<'a> {
                 self.line(&format!("  store {field_ty} %{value}, ptr %r{dst}"));
             }
             InstructionKind::EnumTag { dst, src } => {
-                let aggregate_id = self.register_runtime_type(function, *src)?;
+                let source_id = self.register_runtime_type(function, *src)?;
+                let (aggregate_id, through_reference) = match self.runtime_type(source_id)? {
+                    Type::RefShared { referent } | Type::RefUnique { referent } => {
+                        (*referent, true)
+                    }
+                    _ => (source_id, false),
+                };
                 if !matches!(self.runtime_type(aggregate_id)?, Type::Enum { .. }) {
                     return Err(vec![unsupported(function, "tag read from a non-enum")]);
                 }
                 let aggregate_ty = self.llvm_type(aggregate_id)?;
                 let aggregate = self.load_register(function, *src)?;
-                let tag = self.temp();
-                self.line(&format!(
-                    "  %{tag} = extractvalue {aggregate_ty} {aggregate}, 0"
-                ));
+                let tag = if through_reference {
+                    let address = self.temp();
+                    self.line(&format!(
+                        "  %{address} = getelementptr inbounds {aggregate_ty}, ptr {aggregate}, i32 0, i32 0"
+                    ));
+                    let tag = self.temp();
+                    self.line(&format!("  %{tag} = load i32, ptr %{address}"));
+                    tag
+                } else {
+                    let tag = self.temp();
+                    self.line(&format!(
+                        "  %{tag} = extractvalue {aggregate_ty} {aggregate}, 0"
+                    ));
+                    tag
+                };
                 let dst_ty = self.register_type(function, *dst)?;
                 self.line(&format!("  store {dst_ty} %{tag}, ptr %r{dst}"));
             }

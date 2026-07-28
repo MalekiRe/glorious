@@ -359,6 +359,40 @@ fn enum_tags_and_payloads_lower_to_native_llvm_values() {
 }
 
 #[test]
+fn option_as_ref_reads_the_enum_tag_through_a_shared_reference() {
+    let phases = grandiose::compile_source_to_phases(
+        "llvm-option-as-ref.glorious",
+        r#"
+            read(value: Option<&i64>) -> i64 {
+                handle value { Option::Some(item) => *item, None => 0 }
+            }
+            some(value: i64) -> Option<i64> { Option::Some(value) }
+            selected() -> i64 {
+                let value = some(42);
+                read(Option::as_ref(&value))
+            }
+            main() -> () { selected(); () }
+        "#,
+    )
+    .unwrap();
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    assert!(
+        module
+            .ir
+            .contains("getelementptr inbounds { i32, [1 x i128] }, ptr")
+    );
+    run_native_i64(module, selected, 42, "llvm-option-as-ref");
+}
+
+#[test]
 fn custom_drop_hooks_run_before_native_structural_cleanup() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-custom-drop.glorious",
