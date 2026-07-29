@@ -10308,7 +10308,23 @@ pub(crate) fn normalize_ground_trait_methods(
         let result = match &mut expression.kind {
             ExprKind::Variable(path) if path.len() == 1 => locals.get(path[0].as_ref()).cloned(),
             ExprKind::Struct { name, fields } => {
-                for (_, value) in Rc::make_mut(fields) {
+                let declaration = program
+                    .structs
+                    .iter()
+                    .find(|item| item.name == name.as_ref());
+                let binders = declaration
+                    .and_then(|declaration| declaration.generics.as_ref())
+                    .into_iter()
+                    .flat_map(|generics| &generics.params)
+                    .filter(|parameter| parameter.kind == crate::ast::GenericParamKind::Type)
+                    .map(|parameter| parameter.name.clone())
+                    .collect::<BTreeSet<_>>();
+                let receiver = expected
+                    .cloned()
+                    .unwrap_or_else(|| ReceiverType::Name(name.to_string()));
+                for (field, value) in Rc::make_mut(fields) {
+                    let field_expected = projected_receiver_type(program, receiver.clone(), field)
+                        .filter(|ty| !receiver_mentions_binder(ty, &binders));
                     rewrite(
                         value,
                         locals,
@@ -10319,7 +10335,7 @@ pub(crate) fn normalize_ground_trait_methods(
                         dot_methods,
                         deferred_evidence,
                         trusted_standard_range,
-                        None,
+                        field_expected.as_ref(),
                         errors,
                     );
                 }
@@ -10626,18 +10642,109 @@ pub(crate) fn normalize_ground_trait_methods(
                     }
                     _ => None,
                 };
-                let arithmetic_argument_expected = match &callee.kind {
+                let operator_argument_expected = match &callee.kind {
                     ExprKind::Variable(path)
                         if path.len() == 2
                             && matches!(
                                 path[0].as_ref(),
-                                "Add" | "Subtract" | "Multiply" | "Divide" | "Remainder"
+                                "Add"
+                                    | "Subtract"
+                                    | "Multiply"
+                                    | "Divide"
+                                    | "Remainder"
+                                    | "Equal"
+                                    | "Less"
+                                    | "Greater"
                             ) =>
                     {
-                        expected
+                        args.iter()
+                            .filter(|argument| !two_phase_contextual_numeric_literal(argument))
+                            .find_map(|argument| match &argument.kind {
+                                ExprKind::Variable(path) if path.len() == 1 => {
+                                    locals.get(path[0].as_ref()).cloned()
+                                }
+                                _ => {
+                                    concrete_call_result(program, argument, trusted_standard_range)
+                                }
+                            })
+                            .or_else(|| expected.cloned())
                     }
                     _ => None,
                 };
+                let ordinary_argument_expectations = (|| {
+                    let ExprKind::Variable(path) = &callee.kind else {
+                        return Vec::new();
+                    };
+                    let [name] = path.as_ref() else {
+                        return Vec::new();
+                    };
+                    if locals.contains_key(name.as_ref()) {
+                        return Vec::new();
+                    }
+                    let Some(function) = program
+                        .functions
+                        .iter()
+                        .find(|function| function.name == name.as_ref())
+                    else {
+                        return Vec::new();
+                    };
+                    let binders = function
+                        .generics
+                        .iter()
+                        .flat_map(|generics| &generics.params)
+                        .filter(|parameter| parameter.kind == GenericParamKind::Type)
+                        .map(|parameter| parameter.name.clone())
+                        .collect::<BTreeSet<_>>();
+                    let mut substitutions = BTreeMap::new();
+                    for (parameter, argument) in function.params.iter().zip(args.iter()) {
+                        if two_phase_contextual_numeric_literal(argument)
+                            || matches!(
+                                argument.kind,
+                                ExprKind::Closure { .. } | ExprKind::TypedClosure { .. }
+                            )
+                        {
+                            continue;
+                        }
+                        let actual = match &argument.kind {
+                            ExprKind::Variable(path) if path.len() == 1 => {
+                                locals.get(path[0].as_ref()).cloned()
+                            }
+                            _ => concrete_call_result(program, argument, trusted_standard_range),
+                        };
+                        let (Some(pattern), Some(actual)) =
+                            (source_receiver_type(program, &parameter.ty), actual)
+                        else {
+                            continue;
+                        };
+                        let mut candidate = substitutions.clone();
+                        if !matches_receiver(&pattern, &actual, &binders, &mut candidate) {
+                            return Vec::new();
+                        }
+                        substitutions = candidate;
+                    }
+                    if let (Some(result), Some(expected)) = (
+                        function
+                            .return_type
+                            .as_ref()
+                            .and_then(|result| source_receiver_type(program, result)),
+                        expected,
+                    ) {
+                        let mut candidate = substitutions.clone();
+                        if !matches_receiver(&result, expected, &binders, &mut candidate) {
+                            return Vec::new();
+                        }
+                        substitutions = candidate;
+                    }
+                    function
+                        .params
+                        .iter()
+                        .map(|parameter| {
+                            source_receiver_type(program, &parameter.ty)
+                                .map(|parameter| substitute_receiver(&parameter, &substitutions))
+                                .filter(|parameter| !receiver_mentions_binder(parameter, &binders))
+                        })
+                        .collect::<Vec<_>>()
+                })();
                 let callable_argument_contexts = (|| {
                     let ExprKind::Variable(path) = &callee.kind else {
                         return BTreeMap::new();
@@ -10781,7 +10888,12 @@ pub(crate) fn normalize_ground_trait_methods(
                                 enum_argument_expectations
                                     .as_ref()
                                     .and_then(|expectations| expectations.get(index))
-                                    .or(arithmetic_argument_expected),
+                                    .or_else(|| {
+                                        ordinary_argument_expectations
+                                            .get(index)
+                                            .and_then(Option::as_ref)
+                                    })
+                                    .or(operator_argument_expected.as_ref()),
                                 errors,
                             )
                         })

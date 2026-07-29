@@ -76,6 +76,25 @@ fn full_width_integer_literals_survive_contextual_selection_at_o1_through_o3() {
 }
 
 #[test]
+fn struct_fields_contextualize_literals_inside_arithmetic() {
+    let source = r#"
+        struct TokenRange { start: usize, end: usize }
+        make(equal: usize) -> TokenRange {
+            TokenRange { start: equal, end: equal + 1 }
+        }
+        accept(value: usize) -> usize { value }
+        answer() -> usize { make(41).end }
+        call_answer() -> usize { accept(41 + 1) }
+        is_zero(value: u8) -> Bool { value == 0 }
+        main() -> { () }
+    "#;
+    for level in LEVELS {
+        assert_eq!(run(source, "answer", level), Value::U64(42));
+        assert_eq!(run(source, "call_answer", level), Value::U64(42));
+    }
+}
+
+#[test]
 fn recovery_contextually_selects_full_width_integer_literals() {
     for (name, source, expected) in [
         (
