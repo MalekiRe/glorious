@@ -24,6 +24,9 @@ pub type StageTypeId = Id<StageTypeTag>;
 pub struct ArtifactTypeTag {}
 pub type ArtifactTypeId = Id<ArtifactTypeTag>;
 
+pub struct StageConstantTag {}
+pub type StageConstantId = Id<StageConstantTag>;
+
 pub enum StageInstruction {
     Const(RegisterId, Bytes),
     Move(RegisterId, RegisterId),
@@ -63,7 +66,7 @@ pub struct StageFunction {
 
 pub struct StageProgram {
     functions: Arena<StageFunctionTag, StageFunction>,
-    constants: Vec<Vec<u8>>,
+    constants: Arena<StageConstantTag, Vec<u8>>,
     types: Arena<StageTypeTag, StageType>,
     type_names: Vec<String>
 }
@@ -95,14 +98,14 @@ pub stage_program_function_at<'a>(
 }
 
 pub stage_program_constant_count(value: &StageProgram) -> usize {
-    Vec::len(&value.constants)
+    Arena::len(&value.constants)
 }
 
 pub stage_program_constant_at<'a>(
     value: &'a StageProgram,
-    index: usize
+    id: StageConstantId
 ) -> &'a Vec<u8> {
-    Vec::index(&value.constants, index)
+    Arena::index(&value.constants, id)
 }
 
 pub stage_program_type_count(value: &StageProgram) -> usize {
@@ -368,11 +371,22 @@ pub stage_type_id_from_usize(value: usize) -> StageTypeId {
     }
 }
 
+pub stage_constant_id_from_usize(value: usize) -> StageConstantId {
+    handle Id::from_usize(value) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
 pub stage_function_raw(value: StageFunctionId) -> u32 {
     Id::to_u32(value)
 }
 
 pub artifact_type_raw(value: ArtifactTypeId) -> u32 {
+    Id::to_u32(value)
+}
+
+pub stage_constant_raw(value: StageConstantId) -> u32 {
     Id::to_u32(value)
 }
 
@@ -1154,15 +1168,36 @@ collect_function_constants(
     } else { () }
 }
 
+store_constants(
+    values: VecIntoIter<Vec<u8>>,
+    output: &mut Arena<StageConstantTag, Vec<u8>>
+) {
+    handle VecIntoIter::next(values) {
+        None => (),
+        Option::Some((value, remaining)) => {
+            handle Arena::alloc(&mut *output, value) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(_) => ()
+            };
+            store_constants(remaining, output)
+        }
+    }
+}
+
 pub finish_program(
     functions: Arena<StageFunctionTag, StageFunction>,
     types: Arena<StageTypeTag, StageType>,
     type_names: Vec<String>
 ) -> StageProgram {
-    let constants = Vec::new();
-    collect_function_constants(&functions, 0, &mut constants);
-    Vec::sort(&mut constants);
-    Vec::dedup(&mut constants);
+    let canonical_constants = Vec::new();
+    collect_function_constants(&functions, 0, &mut canonical_constants);
+    Vec::sort(&mut canonical_constants);
+    Vec::dedup(&mut canonical_constants);
+    let constants = Arena::new();
+    store_constants(
+        Vec::into_iter(canonical_constants),
+        &mut constants
+    );
     StageProgram {
         functions: functions,
         constants: constants,

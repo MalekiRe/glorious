@@ -62,7 +62,10 @@ constant_records(
     output: &mut Vec<super::artifact::Record>
 ) {
     if(index < super::lowering::stage_program_constant_count(program)) {
-        let key = super::lowering::stage_program_constant_at(program, index);
+        let key = super::lowering::stage_program_constant_at(
+            program,
+            super::lowering::stage_constant_id_from_usize(index)
+        );
         let payload = Vec::new();
         copy_bytes_after(key, 1, &mut payload);
         Vec::push(
@@ -81,13 +84,18 @@ find_constant(
     program: &super::lowering::StageProgram,
     key: &Vec<u8>,
     index: usize
-) -> Option<u32> {
+) -> Option<super::lowering::StageConstantId> {
     if(index < super::lowering::stage_program_constant_count(program)) {
         if(Eq::eq(
-            super::lowering::stage_program_constant_at(program, index),
+            super::lowering::stage_program_constant_at(
+                program,
+                super::lowering::stage_constant_id_from_usize(index)
+            ),
             key
         )) {
-            Option::Some(checked_u32(index))
+            Option::Some(
+                super::lowering::stage_constant_id_from_usize(index)
+            )
         } else {
             find_constant(program, key, index + 1)
         }
@@ -684,7 +692,10 @@ write_instruction(
             Result::Ok(constant) => {
                 ByteBuf::write_u32_le(&mut *code, 8193);
                 ByteBuf::write_u32_le(&mut *code, target_raw);
-                ByteBuf::write_u32_le(code, constant);
+                ByteBuf::write_u32_le(
+                    code,
+                    super::lowering::stage_constant_raw(constant)
+                );
                 Result::Ok(())
             }
         }
