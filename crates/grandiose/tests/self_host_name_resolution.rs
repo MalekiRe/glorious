@@ -410,6 +410,9 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "mod outer { probe_parent() { 1 } \
          mod child { probe_no_parent_fallback() { probe_parent() } } }",
         "probe_duplicate(x: u64, x: u64) { x }",
+        "probe_duplicate_callable() { 1 } \
+         probe_duplicate_callable() { 2 } \
+         probe_uses_duplicate() { probe_duplicate_callable() }",
         "probe_unknown_struct() { Missing {} }",
         "enum Choice { Some(u64) } \
          probe_unknown_variant(value: u64) { Choice::Missing(value) }",

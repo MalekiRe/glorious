@@ -56,6 +56,8 @@ lower_functions(
     original: &String,
     headers:
         &super::super::frontend::headers::ParsedHeaders,
+    resolution_index:
+        &super::super::frontend::resolution::ResolutionIndex,
     declarations:
         &super::super::frontend::scanner::DeclarationIndex,
     interfaces:
@@ -84,7 +86,8 @@ lower_functions(
             Result::Err(_) => Result::Err(error(6, shell)),
             Result::Ok(parsed) => handle
                 super::super::frontend::resolution::
-                    resolve_function_body(
+                    resolve_function_body_indexed(
+                        resolution_index,
                         headers,
                         declarations,
                         &parsed
@@ -117,6 +120,7 @@ lower_functions(
                             lower_functions(
                                 original,
                                 headers,
+                                resolution_index,
                                 declarations,
                                 interfaces,
                                 index + 1,
@@ -358,6 +362,8 @@ compile_interfaces(
     original: &String,
     headers:
         &super::super::frontend::headers::ParsedHeaders,
+    resolution_index:
+        &super::super::frontend::resolution::ResolutionIndex,
     declarations:
         &super::super::frontend::scanner::DeclarationIndex,
     interfaces:
@@ -369,6 +375,7 @@ compile_interfaces(
     try(lower_functions(
         original,
         headers,
+        resolution_index,
         declarations,
         &mut interfaces,
         0,
@@ -406,7 +413,12 @@ compile_headers(
     declarations:
         &super::super::frontend::scanner::DeclarationIndex
 ) -> Result<Bytes, CompileError> {
-    handle
+    handle super::super::frontend::resolution::build_resolution_index(
+        &headers,
+        declarations
+    ) {
+        Result::Err(_) => Result::Err(error(7, 0)),
+        Result::Ok(resolution_index) => handle
         super::super::frontend::elaboration::collect_interfaces(
             &headers,
             declarations
@@ -415,9 +427,11 @@ compile_headers(
         Result::Ok(interfaces) => compile_interfaces(
             original,
             &headers,
+            &resolution_index,
             declarations,
             interfaces
         )
+        }
     }
 }
 

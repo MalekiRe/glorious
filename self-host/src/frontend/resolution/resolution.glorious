@@ -39,8 +39,13 @@ pub struct ResolutionError { code: u8, token: usize, related: usize }
 struct FunctionSearch { first_plus_one: u32, count: u32 }
 struct NominalSearch { first_plus_one: u32, count: u32 }
 struct Binding { name: Id<String>, target: ResolvedTarget }
+pub struct ResolutionIndex {
+    functions: HashMap<(usize, u32), FunctionSearch>,
+    callable_by_shell: Vec<Option<u32>>
+}
 
 impl Use<[0, *]> for Binding {}
+impl Use<[0, *]> for FunctionSearch {}
 
 pub resolution_error_code(value: &ResolutionError) -> u8 { value.code }
 
@@ -128,78 +133,138 @@ binding_lookup(
     }
 }
 
-search_functions(
+index_callable(
+    index: &mut ResolutionIndex,
     headers: &super::headers::HeaderIndex,
     declarations: &super::scanner::DeclarationIndex,
-    name: u32,
-    module_plus_one: usize,
-    token: usize,
-    index: usize,
-    found: FunctionSearch
-) -> Result<FunctionSearch, ResolutionError> {
-    try_fold_range(
-        Range::new(index, super::headers::callable_count(headers)),
-        found,
-        { found, current => handle
-            super::headers::callable_at(headers, current) {
-            Result::Err(_) => Result::Err(
-                resolution_error(3, token, current)
-            ),
-            Result::Ok(callable) => {
-                let shell_index = super::headers::callable_shell(callable);
-                handle super::scanner::shell_at(
-                    declarations,
-                    usize_from_u32(shell_index)
-                ) {
-                    Result::Err(_) => Result::Err(resolution_error(
-                        3,
-                        token,
-                        usize_from_u32(shell_index)
-                    )),
-                    Result::Ok(shell) => {
-                        let matches_name =
-                            super::headers::callable_name_raw(callable) == name;
-                        let matches_module =
-                            super::scanner::shell_parent_plus_one(shell)
-                                == module_plus_one;
-                        if(matches_name and { matches_module }) {
-                            Result::Ok(
-                                FunctionSearch {
-                                    first_plus_one:
-                                        if(found.count == 0) {
-                                            shell_index + 1
-                                        } else {
-                                            found.first_plus_one
-                                    },
-                                    count: found.count + 1
-                                }
-                            )
-                        } else {
-                            Result::Ok(found)
-                        }
-                    }
-                }
-            }
-        } }
-    )
+    ordinal: usize
+) -> Result<(), ResolutionError> {
+    let callable = handle super::headers::callable_at(headers, ordinal) {
+        Result::Err(_) =>
+            @index_callable(Result::Err(resolution_error(
+                3,
+                ordinal,
+                ordinal
+            ))),
+        Result::Ok(callable) => callable
+    };
+    let shell_index = super::headers::callable_shell(callable);
+    let shell = handle super::scanner::shell_at(
+        declarations,
+        usize_from_u32(shell_index)
+    ) {
+        Result::Err(_) =>
+            @index_callable(Result::Err(resolution_error(
+                3,
+                usize_from_u32(shell_index),
+                usize_from_u32(shell_index)
+            ))),
+        Result::Ok(shell) => shell
+    };
+    let key = (
+        super::scanner::shell_parent_plus_one(shell),
+        super::headers::callable_name_raw(callable)
+    );
+    let found = handle HashMap::remove(&mut index.functions, &key) {
+        Result::Err(_) =>
+            FunctionSearch { first_plus_one: 0, count: 0 },
+        Result::Ok(found) => found
+    };
+    let updated = FunctionSearch {
+        first_plus_one: if(found.count == 0) {
+            shell_index + 1
+        } else {
+            found.first_plus_one
+        },
+        count: found.count + 1
+    };
+    let previous = HashMap::insert(
+        &mut index.functions,
+        move key,
+        move updated
+    );
+    handle move previous {
+        Result::Err(_) => (),
+        Result::Ok(previous) => {
+            previous;
+            ()
+        }
+    };
+    let slot = Vec::index_mut(
+        &mut index.callable_by_shell,
+        usize_from_u32(shell_index)
+    );
+    if(*slot is Result::Err(_)) {
+        *slot = Result::Ok(u32_from_usize(ordinal));
+        ()
+    } else {
+        ()
+    };
+    Result::Ok(())
+}
+
+fill_callable_slots(index: &mut ResolutionIndex, count: usize) {
+    if(count == 0) {
+        ()
+    } else {
+        Vec::push(&mut index.callable_by_shell, Result::Err(()));
+        fill_callable_slots(index, count - 1)
+    }
+}
+
+index_callables(
+    index: &mut ResolutionIndex,
+    headers: &super::headers::HeaderIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    ordinal: usize
+) -> Result<(), ResolutionError> {
+    if(ordinal < super::headers::callable_count(headers)) {
+        try(
+            index_callable(index, headers, declarations, ordinal),
+            @index_callables
+        );
+        index_callables(index, headers, declarations, ordinal + 1)
+    } else {
+        Result::Ok(())
+    }
+}
+
+pub build_resolution_index(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex
+) -> Result<ResolutionIndex, ResolutionError> {
+    let index = ResolutionIndex {
+        functions: HashMap::new(),
+        callable_by_shell: Vec::new()
+    };
+    fill_callable_slots(
+        &mut index,
+        super::scanner::shell_count(declarations)
+    );
+    try(
+        index_callables(
+            &mut index,
+            super::headers::parsed_index(headers),
+            declarations,
+            0
+        ),
+        @build_resolution_index
+    );
+    Result::Ok(index)
 }
 
 resolve_function_name_in(
-    headers: &super::headers::HeaderIndex,
-    declarations: &super::scanner::DeclarationIndex,
+    index: &ResolutionIndex,
     name: u32,
-    module_plus_one: usize,
-    token: usize
-) -> Result<FunctionSearch, ResolutionError> {
-    search_functions(
-        headers,
-        declarations,
-        name,
-        module_plus_one,
-        token,
-        0,
-        FunctionSearch { first_plus_one: 0, count: 0 }
-    )
+    module_plus_one: usize
+) -> FunctionSearch {
+    handle HashMap::get(&index.functions, &(module_plus_one, name)) {
+        Result::Err(_) => FunctionSearch { first_plus_one: 0, count: 0 },
+        Result::Ok(found) => FunctionSearch {
+            first_plus_one: found.first_plus_one,
+            count: found.count
+        }
+    }
 }
 
 finish_function_name(
@@ -237,28 +302,16 @@ finish_function_name(
 }
 
 resolve_function_name(
-    headers: &super::headers::HeaderIndex,
+    index: &ResolutionIndex,
     declarations: &super::scanner::DeclarationIndex,
     name: u32,
     module_plus_one: usize,
     token: usize
 ) -> Result<ResolvedTarget, ResolutionError> {
-    let found = try(resolve_function_name_in(
-        headers,
-        declarations,
-        name,
-        module_plus_one,
-        token
-    ), @resolve_function_name);
+    let found = resolve_function_name_in(index, name, module_plus_one);
     if(found.count == 0
         and { module_plus_one != 0 }) {
-        let root = try(resolve_function_name_in(
-            headers,
-            declarations,
-            name,
-            0,
-            token
-        ), @resolve_function_name);
+        let root = resolve_function_name_in(index, name, 0);
         finish_function_name(
             declarations,
             move root,
@@ -592,6 +645,7 @@ resolve_variant_name(
 
 resolve_identifier(
     headers: &super::headers::ParsedHeaders,
+    index: &ResolutionIndex,
     declarations: &super::scanner::DeclarationIndex,
     body: &super::bodies::ParsedBody,
     bindings: &Vec<Binding>,
@@ -620,7 +674,7 @@ resolve_identifier(
                 },
                 Result::Err(_) => {
                     let found = try(resolve_function_name(
-                        super::headers::parsed_index(headers),
+                        index,
                         declarations,
                         raw,
                         module_plus_one,
@@ -660,6 +714,7 @@ resolve_identifier(
 
 resolve_struct_constructor(
     headers: &super::headers::ParsedHeaders,
+    index: &ResolutionIndex,
     declarations: &super::scanner::DeclarationIndex,
     body: &super::bodies::ParsedBody,
     bindings: &mut Vec<Binding>,
@@ -682,6 +737,7 @@ resolve_struct_constructor(
     );
     resolve_children(
         headers,
+        index,
         declarations,
         body,
         bindings,
@@ -694,6 +750,7 @@ resolve_struct_constructor(
 
 resolve_children(
     headers: &super::headers::ParsedHeaders,
+    index: &ResolutionIndex,
     declarations: &super::scanner::DeclarationIndex,
     body: &super::bodies::ParsedBody,
     bindings: &mut Vec<Binding>,
@@ -705,6 +762,7 @@ resolve_children(
     if(child < super::bodies::expression_child_count_at(body, expression)) {
         try(resolve_expression(
                 headers,
+                index,
                 declarations,
                 body,
                 bindings,
@@ -714,6 +772,7 @@ resolve_children(
             ), @resolve_children);
             resolve_children(
                 headers,
+                index,
                 declarations,
                 body,
                 bindings,
@@ -729,6 +788,7 @@ resolve_children(
 
 resolve_block_children(
     headers: &super::headers::ParsedHeaders,
+    index: &ResolutionIndex,
     declarations: &super::scanner::DeclarationIndex,
     body: &super::bodies::ParsedBody,
     bindings: &mut Vec<Binding>,
@@ -794,6 +854,7 @@ resolve_block_children(
                                         try(
                                             resolve_expression(
                                                 headers,
+                                                index,
                                                 declarations,
                                                 body,
                                                 bindings,
@@ -813,6 +874,7 @@ resolve_block_children(
                                         );
                                         resolve_block_children(
                                             headers,
+                                            index,
                                             declarations,
                                             body,
                                             bindings,
@@ -831,6 +893,7 @@ resolve_block_children(
                     try(
                             resolve_expression(
                                 headers,
+                                index,
                                 declarations,
                                 body,
                                 bindings,
@@ -842,6 +905,7 @@ resolve_block_children(
                         );
                         resolve_block_children(
                             headers,
+                            index,
                             declarations,
                             body,
                             bindings,
@@ -870,6 +934,7 @@ resolve_block_children(
 
 resolve_block(
     headers: &super::headers::ParsedHeaders,
+    index: &ResolutionIndex,
     declarations: &super::scanner::DeclarationIndex,
     body: &super::bodies::ParsedBody,
     bindings: &mut Vec<Binding>,
@@ -880,6 +945,7 @@ resolve_block(
     let mark = Vec::len(&*bindings);
     handle resolve_block_children(
         headers,
+        index,
         declarations,
         body,
         bindings,
@@ -901,6 +967,7 @@ resolve_block(
 
 resolve_expression(
     headers: &super::headers::ParsedHeaders,
+    index: &ResolutionIndex,
     declarations: &super::scanner::DeclarationIndex,
     body: &super::bodies::ParsedBody,
     bindings: &mut Vec<Binding>,
@@ -911,6 +978,7 @@ resolve_expression(
     handle super::bodies::expression_kind_at(body, expression) {
         1 => resolve_identifier(
             headers,
+            index,
             declarations,
             body,
             &*bindings,
@@ -920,6 +988,7 @@ resolve_expression(
         ),
         8 => resolve_block(
             headers,
+            index,
             declarations,
             body,
             bindings,
@@ -929,6 +998,7 @@ resolve_expression(
         ),
         10 => resolve_struct_constructor(
             headers,
+            index,
             declarations,
             body,
             bindings,
@@ -938,6 +1008,7 @@ resolve_expression(
         ),
         _ => resolve_children(
             headers,
+            index,
             declarations,
             body,
             bindings,
@@ -1031,37 +1102,28 @@ duplicate_parameter_token(
     }
 }
 
-find_body_callable<'a>(
+body_callable<'a>(
+    index: &ResolutionIndex,
     headers: &'a super::headers::HeaderIndex,
-    shell: u32,
-    index: usize
+    shell: u32
 ) -> Option<&'a super::headers::CallableHeader> {
-    if(index < super::headers::callable_count(headers)) {
-        let callable = try(
-            super::headers::callable_at(headers, index),
-            @find_body_callable
-        );
-        if(super::headers::callable_shell(callable) == shell) {
-            Result::Ok(callable)
-        } else {
-            find_body_callable(
-                headers,
-                shell,
-                index + 1
-            )
-        }
-    } else {
-        Result::Err(())
+    handle *Vec::index(&index.callable_by_shell, usize_from_u32(shell)) {
+        Result::Err(_) => Result::Err(()),
+        Result::Ok(ordinal) => super::headers::callable_at(
+            headers,
+            usize_from_u32(ordinal)
+        )
     }
 }
 
-pub resolve_function_body(
+pub resolve_function_body_indexed(
+    index: &ResolutionIndex,
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex,
     body: &super::bodies::ParsedBody
 ) -> Result<ResolvedBody, ResolutionError> {
     let shell_index = super::bodies::body_shell(body);
-    let index = super::headers::parsed_index(headers);
+    let headers_index = super::headers::parsed_index(headers);
     handle super::scanner::shell_at(
         declarations,
         usize_from_u32(shell_index)
@@ -1071,7 +1133,11 @@ pub resolve_function_body(
             usize_from_u32(shell_index),
             usize_from_u32(shell_index)
         )),
-        Result::Ok(shell) => handle find_body_callable(index, shell_index, 0) {
+        Result::Ok(shell) => handle body_callable(
+            index,
+            headers_index,
+            shell_index
+        ) {
             Result::Err(_) => Result::Err(resolution_error(
                 3,
                 usize_from_u32(shell_index),
@@ -1085,17 +1151,18 @@ pub resolve_function_body(
                 };
                 try(
                     add_parameters(
-                        index,
+                        headers_index,
                         callable,
                         shell_index,
                         &mut bindings,
                         0
                     ),
-                    @resolve_function_body
+                    @resolve_function_body_indexed
                 );
                 try(
                     resolve_expression(
                         headers,
+                        index,
                         declarations,
                         body,
                         &mut bindings,
@@ -1103,12 +1170,24 @@ pub resolve_function_body(
                         super::bodies::body_root_index(body),
                         super::scanner::shell_parent_plus_one(shell)
                     ),
-                    @resolve_function_body
+                    @resolve_function_body_indexed
                 );
                 Result::Ok( output)
             }
         }
     }
+}
+
+pub resolve_function_body(
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    body: &super::bodies::ParsedBody
+) -> Result<ResolvedBody, ResolutionError> {
+    let index = try(
+        build_resolution_index(headers, declarations),
+        @resolve_function_body
+    );
+    resolve_function_body_indexed(&index, headers, declarations, body)
 }
 
 write_string(output: &mut ByteBuf, value: &String) {
@@ -1393,6 +1472,7 @@ write_resolved_function(
     output: &mut ByteBuf,
     original: &String,
     headers: &super::headers::ParsedHeaders,
+    resolution_index: &ResolutionIndex,
     declarations: &super::scanner::DeclarationIndex,
     shell_index: usize
 ) -> Result<(), ResolutionError> {
@@ -1415,7 +1495,8 @@ write_resolved_function(
             ),
             Result::Ok(body) => {
                 let resolved = try(
-                    resolve_function_body(
+                    resolve_function_body_indexed(
+                        resolution_index,
                         headers,
                         declarations,
                         &body
@@ -1488,6 +1569,7 @@ write_functions(
     output: &mut ByteBuf,
     original: &String,
     headers: &super::headers::ParsedHeaders,
+    resolution_index: &ResolutionIndex,
     declarations: &super::scanner::DeclarationIndex,
     index: usize
 ) -> Result<(), ResolutionError> {
@@ -1500,6 +1582,7 @@ write_functions(
                             &mut *output,
                             original,
                             headers,
+                            resolution_index,
                             declarations,
                             index
                         ),
@@ -1509,6 +1592,7 @@ write_functions(
                          output,
                         original,
                         headers,
+                        resolution_index,
                         declarations,
                         index + 1
                     )
@@ -1517,6 +1601,7 @@ write_functions(
                     output,
                     original,
                     headers,
+                    resolution_index,
                     declarations,
                     index + 1
                 )
@@ -1538,7 +1623,12 @@ encode_source(output: &mut ByteBuf, original: String) {
                 &declarations
             ) {
                 Result::Err(_) => ByteBuf::push( output, 3),
-                Result::Ok(headers) => {
+                Result::Ok(headers) => handle build_resolution_index(
+                        &headers,
+                        &declarations
+                    ) {
+                    Result::Err(_) => ByteBuf::push(output, 3),
+                    Result::Ok(resolution_index) => {
                     let encoded = ByteBuf::new();
                     ByteBuf::write_u32_le(
                         &mut encoded,
@@ -1548,6 +1638,7 @@ encode_source(output: &mut ByteBuf, original: String) {
                         &mut encoded,
                         &original,
                         &headers,
+                        &resolution_index,
                         &declarations,
                         0
                     ) {
@@ -1559,6 +1650,7 @@ encode_source(output: &mut ByteBuf, original: String) {
                                 &ByteBuf::finish( encoded)
                             )
                         }
+                    }
                     }
                 }
             }

@@ -5924,6 +5924,7 @@ write_function(
     output: &mut ByteBuf,
     original: &String,
     headers: &super::headers::ParsedHeaders,
+    resolution_index: &super::resolution::ResolutionIndex,
     declarations: &super::scanner::DeclarationIndex,
     interfaces: &mut TypedInterfaces,
     shell: usize
@@ -5939,7 +5940,8 @@ write_function(
         ) {
             Result::Err(_) => Result::Err(3),
             Result::Ok(parsed) => handle
-                super::resolution::resolve_function_body(
+                super::resolution::resolve_function_body_indexed(
+                    resolution_index,
                     headers,
                     declarations,
                     &parsed
@@ -6034,6 +6036,7 @@ write_functions(
     output: &mut ByteBuf,
     original: &String,
     headers: &super::headers::ParsedHeaders,
+    resolution_index: &super::resolution::ResolutionIndex,
     declarations: &super::scanner::DeclarationIndex,
     interfaces: &mut TypedInterfaces,
     index: usize
@@ -6045,6 +6048,7 @@ write_functions(
                     output,
                     original,
                     headers,
+                    resolution_index,
                     declarations,
                     interfaces,
                     index
@@ -6053,6 +6057,7 @@ write_functions(
                     output,
                     original,
                     headers,
+                    resolution_index,
                     declarations,
                     interfaces,
                     index + 1
@@ -6061,6 +6066,7 @@ write_functions(
                     output,
                     original,
                     headers,
+                    resolution_index,
                     declarations,
                     interfaces,
                     index + 1
@@ -6084,7 +6090,13 @@ encode_source(output: &mut ByteBuf, original: String) {
                     &declarations
                 ) {
                     Result::Err(_) => ByteBuf::push( output, 4),
-                    Result::Ok(interfaces) => {
+                    Result::Ok(interfaces) => handle
+                        super::resolution::build_resolution_index(
+                                &headers,
+                                &declarations
+                            ) {
+                        Result::Err(_) => ByteBuf::push(output, 3),
+                        Result::Ok(resolution_index) => {
                         let encoded = ByteBuf::new();
                         ByteBuf::write_u32_le(
                             &mut encoded,
@@ -6094,6 +6106,7 @@ encode_source(output: &mut ByteBuf, original: String) {
                             &mut encoded,
                             &original,
                             &headers,
+                            &resolution_index,
                             &declarations,
                             &mut interfaces,
                             0
@@ -6107,6 +6120,7 @@ encode_source(output: &mut ByteBuf, original: String) {
                                     &ByteBuf::finish( encoded)
                                 )
                             }
+                        }
                         }
                     }
                 }
