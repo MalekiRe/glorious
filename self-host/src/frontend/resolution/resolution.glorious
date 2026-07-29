@@ -3,24 +3,44 @@
 
 use super::lexer::TokenKind;
 
-pub struct ResolvedName {
-    expression: u32,
-    kind: u8,
-    owner: u32,
-    index: u32
+pub struct ParameterTag {}
+pub type ParameterId = Id<ParameterTag>;
+
+pub struct LocalTag {}
+pub type LocalId = Id<LocalTag>;
+
+pub enum ResolvedTarget {
+    Parameter(u32, ParameterId),
+    Local(u32, LocalId),
+    Function(u32, u32),
+    Struct(u32, u32),
+    Variant(u32, u32)
+}
+
+impl Use<[0, *]> for ResolvedTarget {}
+
+pub struct Resolution {
+    expression: super::bodies::ExprId,
+    target: ResolvedTarget
+}
+
+pub struct LocalBinding {
+    name_token: usize,
+    block_expression: super::bodies::ExprId
 }
 
 pub struct ResolvedBody {
-    // Repeating [expression, kind, owner, index].
-    names: Vec<u32>,
-    // Repeating [name token, containing block expression].
-    locals: Vec<u32>
+    names: Vec<Resolution>,
+    locals: Vec<LocalBinding>
 }
 
 pub struct ResolutionError { code: u8, token: usize, related: usize }
 
 struct FunctionSearch { first_plus_one: u32, count: u32 }
 struct NominalSearch { first_plus_one: u32, count: u32 }
+struct Binding { name: Id<String>, target: ResolvedTarget }
+
+impl Use<[0, *]> for Binding {}
 
 pub resolution_error_code(value: &ResolutionError) -> u8 { value.code }
 
@@ -31,105 +51,93 @@ pub resolution_error_related(value: &ResolutionError) -> usize {
 }
 
 pub resolved_name_count(value: &ResolvedBody) -> usize {
-    Vec::len(&value.names) / usize_value(4)
+    Vec::len(&value.names)
 }
 
 pub resolved_name_expression_at(value: &ResolvedBody, index: usize) -> u32 {
-    *Vec::index(&value.names, index * usize_value(4))
+    Id::to_u32(Vec::index(&value.names, index).expression)
 }
 
 pub resolved_name_kind_at(value: &ResolvedBody, index: usize) -> u8 {
-    u8_from_u32(*Vec::index(
-        &value.names,
-        index * usize_value(4) + usize_value(1)
-    ))
+    handle Vec::index(&value.names, index).target {
+        ResolvedTarget::Parameter(_, _) => 1,
+        ResolvedTarget::Local(_, _) => 2,
+        ResolvedTarget::Function(_, _) => 3,
+        ResolvedTarget::Struct(_, _) => 4,
+        ResolvedTarget::Variant(_, _) => 5
+    }
 }
 
 pub resolved_name_owner_at(value: &ResolvedBody, index: usize) -> u32 {
-    *Vec::index(
-        &value.names,
-        index * usize_value(4) + usize_value(2)
-    )
+    handle Vec::index(&value.names, index).target {
+        ResolvedTarget::Parameter(owner, _) => owner,
+        ResolvedTarget::Local(owner, _) => owner,
+        ResolvedTarget::Function(owner, _) => owner,
+        ResolvedTarget::Struct(owner, _) => owner,
+        ResolvedTarget::Variant(owner, _) => owner
+    }
 }
 
 pub resolved_name_index_at(value: &ResolvedBody, index: usize) -> u32 {
-    *Vec::index(
-        &value.names,
-        index * usize_value(4) + usize_value(3)
-    )
+    handle Vec::index(&value.names, index).target {
+        ResolvedTarget::Parameter(_, id) => Id::to_u32(id),
+        ResolvedTarget::Local(_, id) => Id::to_u32(id),
+        ResolvedTarget::Function(_, index) => index,
+        ResolvedTarget::Struct(_, index) => index,
+        ResolvedTarget::Variant(_, index) => index
+    }
 }
 
 pub local_count(value: &ResolvedBody) -> usize {
-    Vec::len(&value.locals) / usize_value(2)
+    Vec::len(&value.locals)
 }
 
 pub local_name_token_at(value: &ResolvedBody, index: usize) -> usize {
-    usize_from_u32(*Vec::index(
-        &value.locals,
-        index * usize_value(2)
-    ))
+    Vec::index(&value.locals, index).name_token
 }
 
 pub local_block_expression_at(value: &ResolvedBody, index: usize) -> u32 {
-    *Vec::index(
-        &value.locals,
-        index * usize_value(2) + usize_value(1)
-    )
+    Id::to_u32(Vec::index(&value.locals, index).block_expression)
 }
 
 resolution_error(code: u8, token: usize, related: usize) -> ResolutionError {
     ResolutionError { code: code, token:  token, related:  related }
 }
 
-push_word(value: &mut Vec<u32>, word: u32) {
-    Vec::push(&mut *value,  word)
+local_id_from_usize(value: usize) -> Option<LocalId> {
+    Id::from_usize(value)
 }
 
 push_binding(
-    bindings: &mut Vec<u32>,
-    name: u32,
-    kind: u8,
-    owner: u32,
-    index: u32
+    bindings: &mut Vec<Binding>,
+    name: Id<String>,
+    target: ResolvedTarget
 ) {
-    push_word(&mut *bindings, name);
-    push_word(&mut *bindings, u32_from_u8(kind));
-    push_word(&mut *bindings, owner);
-    push_word( bindings, index)
+    Vec::push(&mut *bindings, Binding { name: name, target: target })
 }
 
 push_resolution(
     output: &mut ResolvedBody,
-    expression: u32,
-    kind: u8,
-    owner: u32,
-    index: u32
+    expression: super::bodies::ExprId,
+    target: ResolvedTarget
 ) {
-    push_word(&mut output.names, expression);
-    push_word(&mut output.names, u32_from_u8(kind));
-    push_word(&mut output.names, owner);
-    push_word(&mut output.names, index)
+    Vec::push(&mut output.names, Resolution {
+        expression: expression,
+        target: target
+    })
 }
 
 binding_lookup(
-    bindings: &Vec<u32>,
-    name: u32,
+    bindings: &Vec<Binding>,
+    name: Id<String>,
     count: usize
-) -> Option<ResolvedName> {
+) -> Option<ResolvedTarget> {
     if(count == usize_value(0)) {
         Result::Err(())
     } else {
-            let base = (count - usize_value(1)) * usize_value(4);
-            if(*Vec::index(bindings, base) == name) {
-                Result::Ok(ResolvedName {
-                    expression: 0,
-                    kind: u8_from_u32(*Vec::index(
-                        bindings,
-                        base + usize_value(1)
-                    )),
-                    owner: *Vec::index(bindings, base + usize_value(2)),
-                    index: *Vec::index(bindings, base + usize_value(3))
-                })
+            let binding = Vec::index(bindings, count - usize_value(1));
+            if(binding.name == name) {
+                Result::Ok(binding.target)
             } else {
                 binding_lookup(
                     bindings,
@@ -231,7 +239,7 @@ finish_function_name(
     declarations: &super::scanner::DeclarationIndex,
     found: FunctionSearch,
     token: usize
-) -> Result<ResolvedName, ResolutionError> {
+) -> Result<ResolvedTarget, ResolutionError> {
     handle found.count {
         0 => Result::Err(resolution_error(1, token, token)),
         1 => {
@@ -245,14 +253,12 @@ finish_function_name(
                     token,
                     usize_from_u32(shell_index)
                 )),
-                Result::Ok(shell) => Result::Ok(ResolvedName {
-                    expression: 0,
-                    kind: 3,
-                    owner: u32_from_usize(
+                Result::Ok(shell) => Result::Ok(ResolvedTarget::Function(
+                    u32_from_usize(
                         super::scanner::shell_parent_plus_one(shell)
                     ),
-                    index: shell_index
-                })
+                    shell_index
+                ))
             }
         },
         _ => Result::Err(resolution_error(
@@ -269,7 +275,7 @@ resolve_function_name(
     name: u32,
     module_plus_one: usize,
     token: usize
-) -> Result<ResolvedName, ResolutionError> {
+) -> Result<ResolvedTarget, ResolutionError> {
     let found = try(resolve_function_name_in(
         headers,
         declarations,
@@ -370,7 +376,7 @@ finish_struct_name(
     nominal: &super::headers::NominalIndex,
     found: NominalSearch,
     token: usize
-) -> Result<ResolvedName, ResolutionError> {
+) -> Result<ResolvedTarget, ResolutionError> {
     handle found.count {
         0 => Result::Err(resolution_error(1, token, token)),
         1 => {
@@ -382,12 +388,10 @@ finish_struct_name(
                 Result::Err(_) => Result::Err(
                     resolution_error(3, token, usize_from_u32(index))
                 ),
-                Result::Ok(header) => Result::Ok(ResolvedName {
-                    expression: 0,
-                    kind: 4,
-                    owner: super::headers::struct_shell(header),
-                    index: index
-                })
+                Result::Ok(header) => Result::Ok(ResolvedTarget::Struct(
+                    super::headers::struct_shell(header),
+                    index
+                ))
             }
         },
         _ => Result::Err(resolution_error(
@@ -422,7 +426,7 @@ resolve_struct_name(
     name: u32,
     module_plus_one: usize,
     token: usize
-) -> Result<ResolvedName, ResolutionError> {
+) -> Result<ResolvedTarget, ResolutionError> {
     let found = try(resolve_struct_name_in(
         nominal,
         declarations,
@@ -556,7 +560,7 @@ finish_variant_name(
     variant_name: u32,
     enum_token: usize,
     variant_token: usize
-) -> Result<ResolvedName, ResolutionError> {
+) -> Result<ResolvedTarget, ResolutionError> {
     handle found.count {
         0 => Result::Err(resolution_error(1, enum_token, enum_token)),
         1 => {
@@ -583,12 +587,10 @@ finish_variant_name(
                         ),
                         @finish_variant_name
                     );
-                    Result::Ok(ResolvedName {
-                        expression: 0,
-                        kind: 5,
-                        owner: super::headers::enum_shell(header),
-                        index: variant
-                    })
+                    Result::Ok(ResolvedTarget::Variant(
+                        super::headers::enum_shell(header),
+                        variant
+                    ))
                 }
             }
         },
@@ -608,7 +610,7 @@ resolve_variant_name(
     module_plus_one: usize,
     enum_token: usize,
     variant_token: usize
-) -> Result<ResolvedName, ResolutionError> {
+) -> Result<ResolvedTarget, ResolutionError> {
     let found = try(search_enums(
         nominal,
         declarations,
@@ -652,7 +654,7 @@ resolve_identifier(
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex,
     body: &super::bodies::ParsedBody,
-    bindings: &Vec<u32>,
+    bindings: &Vec<Binding>,
     output: &mut ResolvedBody,
     expression: u32,
     module_plus_one: usize
@@ -665,16 +667,14 @@ resolve_identifier(
                 super::bodies::expression_name_value_at(body, expression, 0);
             handle binding_lookup(
                 bindings,
-                raw,
-                Vec::len(bindings) / usize_value(4)
+                Id::from_u32(raw),
+                Vec::len(bindings)
             ) {
                 Result::Ok(found) => {
                     push_resolution(
                         output,
-                        expression,
-                        found.kind,
-                        found.owner,
-                        found.index
+                        Id::from_u32(expression),
+                        found
                     );
                     Result::Ok(())
                 },
@@ -688,10 +688,8 @@ resolve_identifier(
                     ), @resolve_identifier);
                         push_resolution(
                             output,
-                            expression,
-                            found.kind,
-                            found.owner,
-                            found.index
+                            Id::from_u32(expression),
+                            found
                         );
                         Result::Ok(())
                 }
@@ -711,10 +709,8 @@ resolve_identifier(
             ), @resolve_identifier);
             push_resolution(
                 output,
-                expression,
-                found.kind,
-                found.owner,
-                found.index
+                Id::from_u32(expression),
+                found
             );
             Result::Ok(())
         },
@@ -726,7 +722,7 @@ resolve_struct_constructor(
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex,
     body: &super::bodies::ParsedBody,
-    bindings: &mut Vec<u32>,
+    bindings: &mut Vec<Binding>,
     output: &mut ResolvedBody,
     expression: u32,
     module_plus_one: usize
@@ -741,10 +737,8 @@ resolve_struct_constructor(
     ), @resolve_struct_constructor);
     push_resolution(
         output,
-        expression,
-        found.kind,
-        found.owner,
-        found.index
+        Id::from_u32(expression),
+        found
     );
     resolve_children(
         headers,
@@ -762,7 +756,7 @@ resolve_children(
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex,
     body: &super::bodies::ParsedBody,
-    bindings: &mut Vec<u32>,
+    bindings: &mut Vec<Binding>,
     output: &mut ResolvedBody,
     expression: u32,
     module_plus_one: usize,
@@ -797,7 +791,7 @@ resolve_block_children(
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex,
     body: &super::bodies::ParsedBody,
-    bindings: &mut Vec<u32>,
+    bindings: &mut Vec<Binding>,
     output: &mut ResolvedBody,
     expression: u32,
     module_plus_one: usize,
@@ -838,42 +832,57 @@ resolve_block_children(
                                 // to lexical lookup until its initializer has
                                 // resolved. Nested initializer lets therefore
                                 // cannot steal an earlier local ID.
-                                let local = Vec::len(&output.locals)
-                                    / usize_value(2);
-                                push_word(
-                                    &mut output.locals,
-                                    u32_from_usize(token)
-                                );
-                                push_word(&mut output.locals, expression);
-                                try(
-                                    resolve_expression(
-                                        headers,
-                                        declarations,
-                                        body,
-                                        bindings,
-                                        output,
-                                        value,
-                                        module_plus_one
+                                handle local_id_from_usize(
+                                    Vec::len(&output.locals)
+                                ) {
+                                    Result::Err(_) => Result::Err(
+                                        resolution_error(
+                                            3,
+                                            token,
+                                            Vec::len(&output.locals)
+                                        )
                                     ),
-                                    @resolve_block_children
-                                );
-                                push_binding(
-                                    bindings,
-                                    Id::to_u32(move name),
-                                    2,
-                                    super::bodies::body_shell(body),
-                                    u32_from_usize(local)
-                                );
-                                resolve_block_children(
-                                    headers,
-                                    declarations,
-                                    body,
-                                    bindings,
-                                    output,
-                                    expression,
-                                    module_plus_one,
-                                    child + u32_value(1)
-                                )
+                                    Result::Ok(local) => {
+                                        Vec::push(
+                                            &mut output.locals,
+                                            LocalBinding {
+                                                name_token: token,
+                                                block_expression:
+                                                    Id::from_u32(expression)
+                                            }
+                                        );
+                                        try(
+                                            resolve_expression(
+                                                headers,
+                                                declarations,
+                                                body,
+                                                bindings,
+                                                output,
+                                                value,
+                                                module_plus_one
+                                            ),
+                                            @resolve_block_children
+                                        );
+                                        push_binding(
+                                            bindings,
+                                            name,
+                                            ResolvedTarget::Local(
+                                                super::bodies::body_shell(body),
+                                                local
+                                            )
+                                        );
+                                        resolve_block_children(
+                                            headers,
+                                            declarations,
+                                            body,
+                                            bindings,
+                                            output,
+                                            expression,
+                                            module_plus_one,
+                                            child + u32_value(1)
+                                        )
+                                    }
+                                }
                             },
                             _ => Result::Err(resolution_error(3, token, token))
                         }
@@ -923,7 +932,7 @@ resolve_block(
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex,
     body: &super::bodies::ParsedBody,
-    bindings: &mut Vec<u32>,
+    bindings: &mut Vec<Binding>,
     output: &mut ResolvedBody,
     expression: u32,
     module_plus_one: usize
@@ -954,7 +963,7 @@ resolve_expression(
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex,
     body: &super::bodies::ParsedBody,
-    bindings: &mut Vec<u32>,
+    bindings: &mut Vec<Binding>,
     output: &mut ResolvedBody,
     expression: u32,
     module_plus_one: usize
@@ -1004,7 +1013,7 @@ add_parameters(
     headers: &super::headers::HeaderIndex,
     callable: &super::headers::CallableHeader,
     owner: u32,
-    bindings: &mut Vec<u32>,
+    bindings: &mut Vec<Binding>,
     ordinal: u32
 ) -> Result<(), ResolutionError> {
     let parameters = super::headers::callable_parameters(callable);
@@ -1030,10 +1039,13 @@ add_parameters(
                     Result::Err(_) => {
                         push_binding(
                             bindings,
-                            super::headers::parameter_name_raw(parameter),
-                            1,
-                            owner,
-                            ordinal
+                            Id::from_u32(
+                                super::headers::parameter_name_raw(parameter)
+                            ),
+                            ResolvedTarget::Parameter(
+                                owner,
+                                Id::from_u32(ordinal)
+                            )
                         );
                         add_parameters(
                             headers,
