@@ -901,7 +901,7 @@ lower_computation(
                 interfaces,
                 usize_from_u32(type_id)
             ) {
-                InterfaceTypeView::Tuple(_, expected) => {
+                InterfaceTypeView::Tuple(elements) => {
                     lower_product(
                         interfaces,
                         body,
@@ -910,7 +910,7 @@ lower_computation(
                         flavor,
                         start,
                         count,
-                        expected
+                        checked_u32(Slice::len(elements))
                     )
                 },
                 InterfaceTypeView::Nominal(nominal) => handle

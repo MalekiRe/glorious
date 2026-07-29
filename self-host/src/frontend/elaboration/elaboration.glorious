@@ -218,19 +218,19 @@ pub struct ElaborationError {
 }
 
 // Backend-facing views keep the finalized Core representation semantic.
-// They deliberately expose identities and compact ranges, not the storage
-// layout of the arenas that own them.
-pub enum InterfaceTypeView {
+// They deliberately expose identities and checked borrowed slices, not the
+// storage layout of the arenas that own them.
+pub enum InterfaceTypeView<'a> {
     Unit,
     Never,
     Scalar(u8),
-    Tuple(u32, u32),
+    Tuple(Slice<'a, TypeId>),
     Nominal(u32),
     SharedReference(u32),
     UniqueReference(u32)
 }
 
-impl Use<[0, *]> for InterfaceTypeView {}
+impl<'a> Use<[0, *]> for InterfaceTypeView<'a> {}
 
 pub enum InterfaceNominalView {
     Struct(u32, u32, u32),
@@ -642,16 +642,24 @@ pub interface_type_count(value: &TypedInterfaces) -> usize {
     Arena::len(&value.types)
 }
 
-pub interface_type_at(
-    value: &TypedInterfaces,
+pub interface_type_at<'a>(
+    value: &'a TypedInterfaces,
     index: usize
-) -> InterfaceTypeView {
+) -> InterfaceTypeView<'a> {
     handle type_kind_at(value, type_id_from_usize(index)) {
         TypeKind::Unit => InterfaceTypeView::Unit,
         TypeKind::Never => InterfaceTypeView::Never,
         TypeKind::Scalar(kind) => InterfaceTypeView::Scalar(kind),
-        TypeKind::Tuple(range) =>
-            InterfaceTypeView::Tuple(range.start, range.count),
+        TypeKind::Tuple(range) => InterfaceTypeView::Tuple(
+            handle Slice::subslice(
+                Vec::as_slice(&value.type_elements),
+                usize_from_u32(range.start),
+                usize_from_u32(range.count)
+            ) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(elements) => elements
+            }
+        ),
         TypeKind::Nominal(id) =>
             InterfaceTypeView::Nominal(Id::to_u32(id)),
         TypeKind::SharedReference(id) =>
@@ -703,10 +711,6 @@ pub interface_type_flags_at(value: &TypedInterfaces, index: usize) -> u32 {
 
 pub interface_type_element_count(value: &TypedInterfaces) -> usize {
     Vec::len(&value.type_elements)
-}
-
-pub interface_type_element_at(value: &TypedInterfaces, index: usize) -> u32 {
-    Id::to_u32(*Vec::index(&value.type_elements, index))
 }
 
 checked_u32_from_usize(value: usize) -> u32 {

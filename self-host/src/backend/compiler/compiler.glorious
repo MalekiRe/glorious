@@ -170,35 +170,6 @@ find_entry(
     }
 }
 
-collect_tuple_elements(
-    interfaces:
-        &super::super::frontend::elaboration::TypedInterfaces,
-    start: u32,
-    count: u32,
-    ordinal: u32,
-    output: &mut Vec<super::lowering::ArtifactTypeId>
-) {
-    if(ordinal < count) {
-        Vec::push(
-            &mut *output,
-            super::lowering::artifact_type_id(
-                super::super::frontend::elaboration::
-                    interface_type_element_at(
-                        interfaces,
-                        usize_from_u32(start + ordinal)
-                    )
-            )
-        );
-        collect_tuple_elements(
-            interfaces,
-            start,
-            count,
-            ordinal + 1,
-            output
-        )
-    } else { () }
-}
-
 interface_name(
     headers:
         &super::super::frontend::headers::ParsedHeaders,
@@ -286,15 +257,16 @@ collect_types(
             interfaces,
             index
         ) {
-            InterfaceTypeView::Tuple(start, count) => {
+            InterfaceTypeView::Tuple(elements) => {
                 let fields = Vec::new();
-                collect_tuple_elements(
-                    interfaces,
-                    start,
-                    count,
-                    0,
-                    &mut fields
-                );
+                Slice::for_each(elements, { element =>
+                    Vec::push(
+                        &mut fields,
+                        super::lowering::artifact_type_id(
+                            Id::to_u32(*element)
+                        )
+                    )
+                });
                 handle Arena::alloc(
                     &mut *output,
                     super::lowering::tuple_type(
