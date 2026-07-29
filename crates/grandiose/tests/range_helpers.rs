@@ -120,6 +120,17 @@ const SOURCE: &str = r#"
     range_fold() -> usize {
         fold_range(usize_range(0, 5), 0, add_index)
     }
+    inline_range_fold() -> usize {
+        fold_range(usize_range(0, 4), 0, { total, index =>
+            total + index + 1
+        })
+    }
+    inline_range_find() -> usize {
+        Option::unwrap_or(
+            find_range(usize_range(0, 6), { index => index + 1 == 4 }),
+            90
+        )
+    }
     range_try_for_each() -> usize {
         handle try_for_range(usize_range(0, 6), accept_index) {
             Result::Err(index) => index,
@@ -228,6 +239,8 @@ fn distributed_range_helpers_execute_with_o0_o3_boundary_parity() {
         ("offset_overflow", 94),
         ("range_for_each", 10),
         ("range_fold", 10),
+        ("inline_range_fold", 10),
+        ("inline_range_find", 3),
         ("range_try_for_each", 3),
         ("range_try_fold", 3),
         ("range_find", 3),

@@ -10632,28 +10632,154 @@ pub(crate) fn normalize_ground_trait_methods(
                     }
                     _ => None,
                 };
-                let argument_types = Rc::make_mut(args)
-                    .iter_mut()
-                    .enumerate()
-                    .map(|(index, argument)| {
-                        rewrite(
-                            argument,
-                            locals,
-                            program,
-                            methods,
-                            receiverless_methods,
-                            generic_methods,
-                            dot_methods,
-                            deferred_evidence,
-                            trusted_standard_range,
-                            enum_argument_expectations
-                                .as_ref()
-                                .and_then(|expectations| expectations.get(index))
-                                .or(arithmetic_argument_expected),
-                            errors,
-                        )
-                    })
-                    .collect::<Vec<_>>();
+                let callable_argument_contexts = (|| {
+                    let ExprKind::Variable(path) = &callee.kind else {
+                        return BTreeMap::new();
+                    };
+                    let [name] = path.as_ref() else {
+                        return BTreeMap::new();
+                    };
+                    if locals.contains_key(name.as_ref()) {
+                        return BTreeMap::new();
+                    }
+                    let Some(function) = program
+                        .functions
+                        .iter()
+                        .find(|function| function.name == name.as_ref())
+                    else {
+                        return BTreeMap::new();
+                    };
+                    let binders = function
+                        .generics
+                        .iter()
+                        .flat_map(|generics| &generics.params)
+                        .filter(|parameter| parameter.kind == GenericParamKind::Type)
+                        .map(|parameter| parameter.name.clone())
+                        .collect::<BTreeSet<_>>();
+                    let mut substitutions = BTreeMap::new();
+                    for (parameter, argument) in function.params.iter().zip(args.iter()) {
+                        if matches!(
+                            argument.kind,
+                            ExprKind::Closure { .. } | ExprKind::TypedClosure { .. }
+                        ) {
+                            continue;
+                        }
+                        let actual = match &argument.kind {
+                            ExprKind::Variable(path) if path.len() == 1 => {
+                                locals.get(path[0].as_ref()).cloned()
+                            }
+                            _ => concrete_call_result(program, argument, trusted_standard_range),
+                        };
+                        let (Some(pattern), Some(actual)) =
+                            (source_receiver_type(program, &parameter.ty), actual)
+                        else {
+                            continue;
+                        };
+                        let mut candidate = substitutions.clone();
+                        if !matches_receiver(&pattern, &actual, &binders, &mut candidate) {
+                            return BTreeMap::new();
+                        }
+                        substitutions = candidate;
+                    }
+                    if let (Some(result), Some(expected)) = (
+                        function
+                            .return_type
+                            .as_ref()
+                            .and_then(|result| source_receiver_type(program, result)),
+                        expected,
+                    ) {
+                        let mut candidate = substitutions.clone();
+                        if !matches_receiver(&result, expected, &binders, &mut candidate) {
+                            return BTreeMap::new();
+                        }
+                        substitutions = candidate;
+                    }
+                    function
+                        .params
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(index, parameter)| {
+                            let binder = parameter.ty.simple_name()?;
+                            let goal = function
+                                .where_clause
+                                .iter()
+                                .flat_map(|clause| &clause.goals)
+                                .find(|goal| {
+                                    goal.subject.simple_name() == Some(binder)
+                                        && goal.relation.path.len() == 1
+                                        && goal.relation.path[0].name == "Fn"
+                                })?;
+                            let input = match goal.relation.arguments.as_slice() {
+                                [crate::ast::GoalArgument::Type(input)] => {
+                                    source_receiver_type(program, input)?
+                                }
+                                _ => return None,
+                            };
+                            let inputs = match substitute_receiver(&input, &substitutions) {
+                                ReceiverType::Tuple(inputs) => inputs,
+                                input => vec![input],
+                            };
+                            let output = goal
+                                .relation
+                                .bindings
+                                .iter()
+                                .find(|binding| binding.name == "Output")
+                                .and_then(|binding| binding.value.as_type())
+                                .and_then(|output| source_receiver_type(program, output))
+                                .map(|output| substitute_receiver(&output, &substitutions));
+                            Some((index, (inputs, output)))
+                        })
+                        .collect::<BTreeMap<_, _>>()
+                })();
+                let argument_types =
+                    Rc::make_mut(args)
+                        .iter_mut()
+                        .enumerate()
+                        .map(|(index, argument)| {
+                            if let (
+                                Some((parameter_types, output)),
+                                ExprKind::Closure { params, body },
+                            ) = (callable_argument_contexts.get(&index), &mut argument.kind)
+                                && params.len() == parameter_types.len()
+                            {
+                                let saved = locals.clone();
+                                for (parameter, ty) in params.iter().zip(parameter_types) {
+                                    locals.insert(parameter.to_string(), ty.clone());
+                                }
+                                rewrite(
+                                    Rc::make_mut(body),
+                                    locals,
+                                    program,
+                                    methods,
+                                    receiverless_methods,
+                                    generic_methods,
+                                    dot_methods,
+                                    deferred_evidence,
+                                    trusted_standard_range,
+                                    output.as_ref(),
+                                    errors,
+                                );
+                                *locals = saved;
+                                return None;
+                            }
+                            rewrite(
+                                argument,
+                                locals,
+                                program,
+                                methods,
+                                receiverless_methods,
+                                generic_methods,
+                                dot_methods,
+                                deferred_evidence,
+                                trusted_standard_range,
+                                enum_argument_expectations
+                                    .as_ref()
+                                    .and_then(|expectations| expectations.get(index))
+                                    .or(arithmetic_argument_expected),
+                                errors,
+                            )
+                        })
+                        .collect::<Vec<_>>();
                 let qualified = match &callee.kind {
                     ExprKind::Variable(path) if path.len() == 2 => {
                         Some((path[0].to_string(), path[1].to_string()))

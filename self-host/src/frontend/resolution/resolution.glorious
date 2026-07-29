@@ -137,10 +137,13 @@ search_functions(
     index: usize,
     found: FunctionSearch
 ) -> Result<FunctionSearch, ResolutionError> {
-    if(index < super::headers::callable_count(headers)) {
-        handle super::headers::callable_at(headers, index) {
+    try_fold_range(
+        Range::new(index, super::headers::callable_count(headers)),
+        found,
+        { found, current => handle
+            super::headers::callable_at(headers, current) {
             Result::Err(_) => Result::Err(
-                resolution_error(3, token, index)
+                resolution_error(3, token, current)
             ),
             Result::Ok(callable) => {
                 let shell_index = super::headers::callable_shell(callable);
@@ -160,41 +163,25 @@ search_functions(
                             super::scanner::shell_parent_plus_one(shell)
                                 == module_plus_one;
                         if(matches_name and { matches_module }) {
-                            search_functions(
-                                headers,
-                                declarations,
-                                name,
-                                module_plus_one,
-                                token,
-                                index + usize_value(1),
+                            Result::Ok(
                                 FunctionSearch {
                                     first_plus_one:
                                         if(found.count == u32_value(0)) {
                                             shell_index + u32_value(1)
                                         } else {
                                             found.first_plus_one
-                                        },
+                                    },
                                     count: found.count + u32_value(1)
                                 }
                             )
                         } else {
-                            search_functions(
-                                headers,
-                                declarations,
-                                name,
-                                module_plus_one,
-                                token,
-                                index + usize_value(1),
-                                move found
-                            )
+                            Result::Ok(found)
                         }
                     }
                 }
             }
-        }
-    } else {
-        Result::Ok(move found)
-    }
+        } }
+    )
 }
 
 resolve_function_name_in(
@@ -295,10 +282,13 @@ search_structs(
     index: usize,
     found: NominalSearch
 ) -> Result<NominalSearch, ResolutionError> {
-    if(index < super::headers::struct_count(nominal)) {
-        handle super::headers::struct_at(nominal, index) {
+    try_fold_range(
+        Range::new(index, super::headers::struct_count(nominal)),
+        found,
+        { found, current => handle
+            super::headers::struct_at(nominal, current) {
             Result::Err(_) =>
-                Result::Err(resolution_error(3, token, index)),
+                Result::Err(resolution_error(3, token, current)),
             Result::Ok(header) => {
                 let shell_index = super::headers::struct_shell(header);
                 handle super::scanner::shell_at(
@@ -316,17 +306,11 @@ search_structs(
                                 super::scanner::shell_parent_plus_one(shell)
                                     == module_plus_one
                             }) {
-                        search_structs(
-                            nominal,
-                            declarations,
-                            name,
-                            module_plus_one,
-                            token,
-                            index + usize_value(1),
+                        Result::Ok(
                             NominalSearch {
                                 first_plus_one:
                                     if(found.count == u32_value(0)) {
-                                        u32_from_usize(index) + u32_value(1)
+                                        u32_from_usize(current) + u32_value(1)
                                     } else {
                                         found.first_plus_one
                                     },
@@ -334,22 +318,12 @@ search_structs(
                             }
                         )
                     } else {
-                        search_structs(
-                            nominal,
-                            declarations,
-                            name,
-                            module_plus_one,
-                            token,
-                            index + usize_value(1),
-                            move found
-                        )
+                        Result::Ok(found)
                     }
                 }
             }
-        }
-    } else {
-        Result::Ok(move found)
-    }
+        } }
+    )
 }
 
 finish_struct_name(
@@ -438,10 +412,13 @@ search_enums(
     index: usize,
     found: NominalSearch
 ) -> Result<NominalSearch, ResolutionError> {
-    if(index < super::headers::enum_count(nominal)) {
-        handle super::headers::enum_at(nominal, index) {
+    try_fold_range(
+        Range::new(index, super::headers::enum_count(nominal)),
+        found,
+        { found, current => handle
+            super::headers::enum_at(nominal, current) {
             Result::Err(_) =>
-                Result::Err(resolution_error(3, token, index)),
+                Result::Err(resolution_error(3, token, current)),
             Result::Ok(header) => {
                 let shell_index = super::headers::enum_shell(header);
                 handle super::scanner::shell_at(
@@ -459,25 +436,11 @@ search_enums(
                                 super::scanner::shell_parent_plus_one(shell)
                                     == module_plus_one
                             } {
-                        Result::Err(_) => search_enums(
-                            nominal,
-                            declarations,
-                            name,
-                            module_plus_one,
-                            token,
-                            index + usize_value(1),
-                            move found
-                        ),
-                        Result::Ok(_) => search_enums(
-                            nominal,
-                            declarations,
-                            name,
-                            module_plus_one,
-                            token,
-                            index + usize_value(1),
+                        Result::Err(_) => Result::Ok(found),
+                        Result::Ok(_) => Result::Ok(
                             NominalSearch {
                                 first_plus_one: if(found.count == u32_value(0)) {
-                                    u32_from_usize(index) + u32_value(1)
+                                    u32_from_usize(current) + u32_value(1)
                                 } else {
                                     found.first_plus_one
                                 },
@@ -487,10 +450,8 @@ search_enums(
                     }
                 }
             }
-        }
-    } else {
-        Result::Ok(move found)
-    }
+        } }
+    )
 }
 
 find_variant(
@@ -1343,22 +1304,14 @@ write_locals(
     resolved: &ResolvedBody,
     index: usize
 ) {
-    if(index < local_count(resolved)) {
+    for_range(Range::new(index, local_count(resolved)), { current => {
         ByteBuf::push(&mut *output, 2);
-            write_name_token(
-                &mut *output,
-                source,
-                local_name_token_at(resolved, index)
-            );
-            write_locals(
-                 output,
-                source,
-                resolved,
-                index + usize_value(1)
-            )
-    } else {
-        ()
-    }
+        write_name_token(
+            &mut *output,
+            source,
+            local_name_token_at(resolved, current)
+        )
+    } })
 }
 
 write_target(
@@ -1412,8 +1365,10 @@ write_occurrences(
     parameter_count: u32,
     occurrence: usize
 ) {
-    if(occurrence < resolved_name_count(resolved)) {
-        let expression = resolved_name_expression_id_at(resolved, occurrence);
+    for_range(
+        Range::new(occurrence, resolved_name_count(resolved)),
+        { current => {
+        let expression = resolved_name_expression_id_at(resolved, current);
         write_name_token(
             &mut *output,
             source,
@@ -1426,21 +1381,10 @@ write_occurrences(
             &mut *output,
             source,
             declarations,
-            resolved_name_target_at(resolved, occurrence),
+            resolved_name_target_at(resolved, current),
             parameter_count
-        );
-        write_occurrences(
-            output,
-            source,
-            declarations,
-            body,
-            resolved,
-            parameter_count,
-            occurrence + usize_value(1)
         )
-    } else {
-        ()
-    }
+    } })
 }
 
 write_resolved_function(

@@ -115,30 +115,27 @@ write_record_offsets(
     index: usize,
     offset: usize
 ) {
-    if(index < Vec::len(records)) {
-        let current = Vec::index(records, index);
-        let next = offset + Bytes::len(&current.bytes);
+    fold_range(Range::new(index, Vec::len(records)), offset, {
+        current_offset, current_index => {
+        let current = Vec::index(records, current_index);
+        let next = current_offset + Bytes::len(&current.bytes);
         ByteBuf::write_u32_le(
             &mut *output,
             wrapping_convert_to_u32(next)
         );
-        write_record_offsets(output, records, index + 1, next)
-    } else {
-        ()
-    }
+        next
+    }});
+    ()
 }
 
 write_record_data(output: &mut ByteBuf, records: &Vec<Record>, index: usize) {
-    if(index < Vec::len(records)) {
-        let current = Vec::index(records, index);
+    for_range(Range::new(index, Vec::len(records)), { current_index => {
+        let current = Vec::index(records, current_index);
         ByteBuf::append_bytes(
             &mut *output,
             &current.bytes
-        );
-        write_record_data(output, records, index + 1)
-    } else {
-        ()
-    }
+        )
+    }})
 }
 
 pub variable_section(records: &Vec<Record>) -> Section {
@@ -180,27 +177,25 @@ write_string_offsets(
     index: usize,
     offset: usize
 ) {
-    if(index < Vec::len(strings)) {
-        let bytes = String::as_bytes(Vec::index(strings, index));
-        let next = offset + Bytes::len(&bytes);
+    fold_range(Range::new(index, Vec::len(strings)), offset, {
+        current_offset, current_index => {
+        let bytes = String::as_bytes(Vec::index(strings, current_index));
+        let next = current_offset + Bytes::len(&bytes);
         ByteBuf::write_u32_le(
             &mut *output,
             wrapping_convert_to_u32(next)
         );
-        write_string_offsets(output, strings, index + 1, next)
-    } else {
-        ()
-    }
+        next
+    }});
+    ()
 }
 
 write_string_data(output: &mut ByteBuf, strings: &Vec<String>, index: usize) {
-    if(index < Vec::len(strings)) {
-        let bytes = String::as_bytes(Vec::index(strings, index));
+    for_range(Range::new(index, Vec::len(strings)), { current => {
+        let bytes = String::as_bytes(Vec::index(strings, current));
         ByteBuf::append_bytes(&mut *output, &bytes);
-        write_string_data(output, strings, index + 1)
-    } else {
         ()
-    }
+    }})
 }
 
 // The caller supplies strictly byte-sorted, deduplicated strings. This keeps
@@ -306,18 +301,12 @@ collect_offsets(
     index: usize,
     cursor: usize
 ) -> usize {
-    if(index < Vec::len(sections)) {
-        let section = Vec::index(sections, index);
-        Vec::push(&mut *offsets, cursor);
-        collect_offsets(
-            sections,
-            offsets,
-            index + 1,
-            align8(cursor + Bytes::len(&section.bytes))
-        )
-    } else {
-        cursor
-    }
+    fold_range(Range::new(index, Vec::len(sections)), cursor, {
+        current_offset, current_index => {
+        let section = Vec::index(sections, current_index);
+        Vec::push(&mut *offsets, current_offset);
+        align8(current_offset + Bytes::len(&section.bytes))
+    }})
 }
 
 fixed_sections_valid(sections: &Vec<Section>, index: usize) -> Bool {
@@ -354,27 +343,24 @@ write_directory(
     offsets: &Vec<usize>,
     index: usize
 ) {
-    if(index < Vec::len(sections)) {
-        let section = Vec::index(sections, index);
+    for_range(Range::new(index, Vec::len(sections)), { current => {
+        let section = Vec::index(sections, current);
         ByteBuf::write_u32_le(
             &mut *output,
-            wrapping_convert_to_u32(index + 1)
+            wrapping_convert_to_u32(current + 1)
         );
         ByteBuf::write_u32_le(&mut *output, 1);
         ByteBuf::write_u64_le(
             &mut *output,
-            wrapping_convert_to_u64(*Vec::index(offsets, index))
+            wrapping_convert_to_u64(*Vec::index(offsets, current))
         );
         ByteBuf::write_u64_le(
             &mut *output,
             wrapping_convert_to_u64(Bytes::len(&section.bytes))
         );
         ByteBuf::write_u32_le(&mut *output, section.count);
-        ByteBuf::write_u32_le(&mut *output, section_width(index));
-        write_directory(output, sections, offsets, index + 1)
-    } else {
-        ()
-    }
+        ByteBuf::write_u32_le(&mut *output, section_width(current))
+    }})
 }
 
 write_sections(
@@ -383,21 +369,19 @@ write_sections(
     offsets: &Vec<usize>,
     index: usize
 ) {
-    if(index < Vec::len(sections)) {
-        let section = Vec::index(sections, index);
+    for_range(Range::new(index, Vec::len(sections)), { current => {
+        let section = Vec::index(sections, current);
         ByteBuf::resize_zeroed(
             &mut *output,
-            *Vec::index(offsets, index)
+            *Vec::index(offsets, current)
         );
         ByteBuf::append_bytes(
             &mut *output,
             &section.bytes
         );
         ByteBuf::align_zeroed(&mut *output, 8);
-        write_sections(output, sections, offsets, index + 1)
-    } else {
         ()
-    }
+    }})
 }
 
 encode_valid(
