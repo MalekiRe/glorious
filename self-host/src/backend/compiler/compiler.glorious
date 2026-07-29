@@ -3,15 +3,29 @@
 
 use super::super::frontend::elaboration::InterfaceTypeView;
 use super::super::frontend::elaboration::InterfaceNominalView;
+use super::super::frontend::elaboration::ElaborationError;
+use super::super::frontend::resolution::ResolutionError;
+use super::super::frontend::headers::HeaderError;
+use super::super::frontend::scanner::ScanError;
+use super::super::frontend::bodies::BodyError;
+use super::super::frontend::lexer::LexError;
+use super::lowering::LoweringError;
+use super::emission::EmissionError;
 
-pub struct CompileError { code: u8, detail: u32 }
-
-pub compile_error_code(value: &CompileError) -> u8 { value.code }
-
-pub compile_error_detail(value: &CompileError) -> u32 { value.detail }
-
-error(code: u8, detail: u32) -> CompileError {
-    CompileError { code: code, detail: detail }
+pub enum CompileError {
+    Lex(LexError),
+    Scan(ScanError),
+    Headers(HeaderError),
+    ResolutionIndex(ResolutionError),
+    InterfaceCollection(ElaborationError),
+    DeclarationName(u32),
+    BodyParse(u32, BodyError),
+    BodyResolution(u32, ResolutionError),
+    BodyElaboration(u32, ElaborationError),
+    Lowering(u32, LoweringError),
+    InterfaceName(u32),
+    UnsupportedInterfaceType(usize),
+    Emission(EmissionError)
 }
 
 checked_u32(value: usize) -> u32 {
@@ -36,16 +50,19 @@ function_name(
         declarations,
         usize_from_u32(shell)
     ) {
-        Result::Err(_) => Result::Err(error(5, shell)),
+        Result::Err(_) =>
+            Result::Err(CompileError::DeclarationName(shell)),
         Result::Ok(declaration) => handle
             *super::super::frontend::scanner::shell_name(declaration) {
-            Result::Err(_) => Result::Err(error(5, shell)),
+            Result::Err(_) =>
+                Result::Err(CompileError::DeclarationName(shell)),
             Result::Ok(name) => handle
                 super::super::frontend::lexer::lexeme(
                     super::super::frontend::headers::parsed_source(headers),
                     name
                 ) {
-                Result::Err(_) => Result::Err(error(5, shell)),
+                Result::Err(_) =>
+                    Result::Err(CompileError::DeclarationName(shell)),
                 Result::Ok(found) => Result::Ok(*found)
             }
         }
@@ -86,7 +103,8 @@ lower_functions(
                 declarations,
                 usize_from_u32(shell)
             ) {
-            Result::Err(_) => Result::Err(error(6, shell)),
+            Result::Err(found) =>
+                Result::Err(CompileError::BodyParse(shell, found)),
             Result::Ok(parsed) => handle
                 super::super::frontend::resolution::
                     resolve_function_body_indexed(
@@ -95,7 +113,8 @@ lower_functions(
                         declarations,
                         &parsed
                     ) {
-                Result::Err(_) => Result::Err(error(7, shell)),
+                Result::Err(found) =>
+                    Result::Err(CompileError::BodyResolution(shell, found)),
                 Result::Ok(resolved) => handle
                     super::super::frontend::elaboration::
                         elaborate_function_body(
@@ -106,7 +125,11 @@ lower_functions(
                             &parsed,
                             &resolved
                         ) {
-                    Result::Err(_) => Result::Err(error(8, shell)),
+                    Result::Err(found) =>
+                        Result::Err(CompileError::BodyElaboration(
+                            shell,
+                            found
+                        )),
                     Result::Ok(body) => handle
                         super::lowering::lower_function(
                             name,
@@ -114,10 +137,8 @@ lower_functions(
                             &body,
                             index
                         ) {
-                        Result::Err(found) => Result::Err(error(
-                            9,
-                            super::lowering::lowering_error_detail(&found)
-                        )),
+                        Result::Err(found) =>
+                            Result::Err(CompileError::Lowering(shell, found)),
                         Result::Ok(function) => {
                             handle Arena::alloc(&mut *output, function) {
                                 Result::Err(_) => unreachable(),
@@ -180,7 +201,8 @@ interface_name(
         super::super::frontend::headers::parsed_source(headers),
         Id::from_u32(raw)
     ) {
-        Result::Err(_) => Result::Err(error(10, detail)),
+        Result::Err(_) =>
+            Result::Err(CompileError::InterfaceName(detail)),
         Result::Ok(found) => Result::Ok(*found)
     }
 }
@@ -343,9 +365,13 @@ collect_types(
                     )
                 },
                 InterfaceNominalView::Enum(_, _, _) =>
-                    Result::Err(error(10, checked_u32(index)))
+                    Result::Err(
+                        CompileError::UnsupportedInterfaceType(index)
+                    )
             },
-            _ => Result::Err(error(10, checked_u32(index)))
+            _ => Result::Err(
+                CompileError::UnsupportedInterfaceType(index)
+            )
         }
     } else {
         Result::Ok(())
@@ -392,10 +418,8 @@ compile_interfaces(
     );
     let entry = find_entry(&program, 0);
     handle super::emission::encode(&program, entry) {
-        Result::Err(found) => Result::Err(error(
-            11,
-            super::emission::emission_error_detail(&found)
-        )),
+        Result::Err(found) =>
+            Result::Err(CompileError::Emission(found)),
         Result::Ok(bytes) => Result::Ok(bytes)
     }
 }
@@ -411,13 +435,15 @@ compile_headers(
         &headers,
         declarations
     ) {
-        Result::Err(_) => Result::Err(error(7, 0)),
+        Result::Err(found) =>
+            Result::Err(CompileError::ResolutionIndex(found)),
         Result::Ok(resolution_index) => handle
         super::super::frontend::elaboration::collect_interfaces(
             &headers,
             declarations
         ) {
-        Result::Err(_) => Result::Err(error(4, 0)),
+        Result::Err(found) =>
+            Result::Err(CompileError::InterfaceCollection(found)),
         Result::Ok(interfaces) => compile_interfaces(
             original,
             &headers,
@@ -440,7 +466,8 @@ compile_declarations(
         source,
         &declarations
     ) {
-        Result::Err(_) => Result::Err(error(3, 0)),
+        Result::Err(found) =>
+            Result::Err(CompileError::Headers(found)),
         Result::Ok(headers) => compile_headers(
             original,
             headers,
@@ -451,10 +478,12 @@ compile_declarations(
 
 pub compile_source(original: &String) -> Result<Bytes, CompileError> {
     handle super::super::frontend::lexer::lex(original) {
-        Result::Err(_) => Result::Err(error(1, 0)),
+        Result::Err(found) =>
+            Result::Err(CompileError::Lex(found)),
         Result::Ok(source) => handle
             super::super::frontend::scanner::scan(&source) {
-            Result::Err(_) => Result::Err(error(2, 0)),
+            Result::Err(found) =>
+                Result::Err(CompileError::Scan(found)),
             Result::Ok(declarations) => compile_declarations(
                 original,
                 source,

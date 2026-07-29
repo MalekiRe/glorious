@@ -46,7 +46,34 @@ fn self_host_bundle() -> SourceBundle {
     let root = repository_root().join("self-host/src");
     let primary = Segment::new(
         root.join("main.glorious").to_string_lossy(),
-        "mod frontend;\nmod backend;\n\nmain() { run_compiler_host(backend::application) }\n",
+        r#"
+            mod frontend;
+            mod backend;
+            use backend::compiler::CompileError;
+
+            classify_compile_error(source: String) -> u8 {
+                handle backend::compiler::compile_source(&source) {
+                    Result::Ok(_) => 0,
+                    Result::Err(error) => handle error {
+                        CompileError::Lex(_) => 1,
+                        CompileError::Scan(_) => 2,
+                        CompileError::Headers(_) => 3,
+                        CompileError::ResolutionIndex(_) => 4,
+                        CompileError::InterfaceCollection(_) => 5,
+                        CompileError::DeclarationName(_) => 6,
+                        CompileError::BodyParse(_, _) => 7,
+                        CompileError::BodyResolution(_, _) => 8,
+                        CompileError::BodyElaboration(_, _) => 9,
+                        CompileError::Lowering(_, _) => 10,
+                        CompileError::InterfaceName(_) => 11,
+                        CompileError::UnsupportedInterfaceType(_) => 12,
+                        CompileError::Emission(_) => 13
+                    }
+                }
+            }
+
+            main() { run_compiler_host(backend::application) }
+        "#,
     );
     let paths = [
         root.join("frontend/frontend.glorious"),
@@ -134,6 +161,21 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
             .unwrap();
             let compiler_entry = phases.artifact.entry_function.unwrap();
             let compiler = grandiose_vm::verify(phases.artifact.clone()).unwrap();
+            let classify = function_id(&phases.artifact, "classify_compile_error");
+            for (source, expected) in [("\"", 1), ("}", 2), ("struct Broken { field }", 3)] {
+                assert_eq!(
+                    Vm::with_host(
+                        compiler.clone(),
+                        ["process.args", "fs.read", "fs.write", "diagnostic"],
+                        SystemHost::new(vec![]),
+                    )
+                    .unwrap()
+                    .run(classify, vec![Value::Text(source.into())])
+                    .unwrap(),
+                    Value::U64(expected),
+                    "{source:?}"
+                );
+            }
 
             let vm_output = directory.path().join("vm.grbc");
             let vm = Vm::with_host(
