@@ -4,13 +4,35 @@
 use super::lexer::TokenKind;
 use super::resolution::ResolvedTarget;
 
+pub struct TypeTag {}
+pub type TypeId = Id<TypeTag>;
+
+pub struct InterfaceNominalTag {}
+pub type InterfaceNominalId = Id<InterfaceNominalTag>;
+
+struct TypeElementRange { start: u32, count: u32 }
+
+impl Use<[0, *]> for TypeElementRange {}
+
+enum TypeKind {
+    Unit,
+    Never,
+    Scalar(u8),
+    Tuple(TypeElementRange),
+    Nominal(InterfaceNominalId),
+    SharedReference(TypeId),
+    UniqueReference(TypeId)
+}
+
+impl Use<[0, *]> for TypeKind {}
+
+struct TypeNode { kind: TypeKind, copyable: Bool }
+
+impl Use<[0, *]> for TypeNode {}
+
 pub struct TypedInterfaces {
-    // [tag, a, b, c]
-    types: Vec<u32>,
-    // Parallel structural capability flags. Bit 0 is copyable.
-    type_flags: Vec<u32>,
-    // Tuple elements and, in later slices, nominal substitutions.
-    type_elements: Vec<u32>,
+    types: Arena<TypeTag, TypeNode>,
+    type_elements: Vec<TypeId>,
     // [shell, kind (1 struct / 2 enum), member start, member count]
     nominals: Vec<u32>,
     // [owner nominal, name, type, flags, name token]
@@ -170,6 +192,46 @@ impl Use<[0, *]> for LetWrapper {}
 
 struct TypeNameTarget { kind: u8, index: u32 }
 
+type_id_from_usize(value: usize) -> TypeId {
+    handle Id::from_usize(value) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
+type_id_from_u32(value: u32) -> TypeId { Id::from_u32(value) }
+
+interface_nominal_id_from_u32(value: u32) -> InterfaceNominalId {
+    Id::from_u32(value)
+}
+
+type_node_at<'a>(
+    value: &'a TypedInterfaces,
+    id: TypeId
+) -> &'a TypeNode {
+    Arena::index(&value.types, id)
+}
+
+type_kind_at(value: &TypedInterfaces, id: TypeId) -> TypeKind {
+    type_node_at(value, id).kind
+}
+
+type_is_copyable(value: &TypedInterfaces, id: TypeId) -> Bool {
+    type_node_at(value, id).copyable
+}
+
+set_type_copyable(value: &mut TypedInterfaces, id: TypeId, flag: Bool) {
+    let node = Arena::index_mut(&mut value.types, id);
+    (*node).copyable = flag;
+}
+
+alloc_type(value: &mut TypedInterfaces, node: TypeNode) -> TypeId {
+    handle Arena::alloc(&mut value.types, node) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
 core_value_id_from_usize(value: usize) -> CoreValueId {
     handle Id::from_usize(value) {
         Result::Err(_) => unreachable(),
@@ -264,36 +326,47 @@ pub elaboration_error_expected(value: &ElaborationError) -> u32 {
 pub elaboration_error_found(value: &ElaborationError) -> u32 { value.found }
 
 pub interface_type_count(value: &TypedInterfaces) -> usize {
-    Vec::len(&value.types) / usize_value(4)
+    Arena::len(&value.types)
 }
 
 pub interface_type_tag_at(value: &TypedInterfaces, index: usize) -> u8 {
-    u8_from_u32(*Vec::index(&value.types, index * usize_value(4)))
+    handle type_kind_at(value, type_id_from_usize(index)) {
+        TypeKind::Unit => 1,
+        TypeKind::Never => 2,
+        TypeKind::Scalar(_) => 3,
+        TypeKind::Tuple(_) => 4,
+        TypeKind::Nominal(_) => 5,
+        TypeKind::SharedReference(_) => 6,
+        TypeKind::UniqueReference(_) => 7
+    }
 }
 
 pub interface_type_a_at(value: &TypedInterfaces, index: usize) -> u32 {
-    *Vec::index(
-        &value.types,
-        index * usize_value(4) + usize_value(1)
-    )
+    handle type_kind_at(value, type_id_from_usize(index)) {
+        TypeKind::Scalar(kind) => u32_from_u8(kind),
+        TypeKind::Tuple(range) => range.start,
+        TypeKind::Nominal(id) => Id::to_u32(id),
+        TypeKind::SharedReference(id) => Id::to_u32(id),
+        TypeKind::UniqueReference(id) => Id::to_u32(id),
+        _ => 0
+    }
 }
 
 pub interface_type_b_at(value: &TypedInterfaces, index: usize) -> u32 {
-    *Vec::index(
-        &value.types,
-        index * usize_value(4) + usize_value(2)
-    )
+    handle type_kind_at(value, type_id_from_usize(index)) {
+        TypeKind::Tuple(range) => range.count,
+        _ => 0
+    }
 }
 
 pub interface_type_c_at(value: &TypedInterfaces, index: usize) -> u32 {
-    *Vec::index(
-        &value.types,
-        index * usize_value(4) + usize_value(3)
-    )
+    value;
+    index;
+    0
 }
 
 pub interface_type_flags_at(value: &TypedInterfaces, index: usize) -> u32 {
-    *Vec::index(&value.type_flags, index)
+    if(type_is_copyable(value, type_id_from_usize(index))) { 1 } else { 0 }
 }
 
 pub interface_type_element_count(value: &TypedInterfaces) -> usize {
@@ -301,7 +374,7 @@ pub interface_type_element_count(value: &TypedInterfaces) -> usize {
 }
 
 pub interface_type_element_at(value: &TypedInterfaces, index: usize) -> u32 {
-    *Vec::index(&value.type_elements, index)
+    Id::to_u32(*Vec::index(&value.type_elements, index))
 }
 
 pub interface_nominal_count(value: &TypedInterfaces) -> usize {
@@ -702,39 +775,26 @@ scalar_kind_to_type(kind: u8) -> u32 {
     }
 }
 
-seed_scalar_types(value: &mut Vec<u32>, type_id: u32) {
+seed_scalar_types(value: &mut TypedInterfaces, type_id: u32) {
     if(type_id <= u32_value(13)) {
-        push_words4(
-            &mut *value,
-            3,
-            u32_from_u8(type_to_scalar_kind(type_id)),
-            0,
-            0
-        );
+        alloc_type(value, TypeNode {
+            kind: TypeKind::Scalar(type_to_scalar_kind(type_id)),
+            copyable: true
+        });
         seed_scalar_types( value, type_id + u32_value(1))
     } else { () }
 }
 
-seed_types() -> Vec<u32> {
-    let types = Vec::new();
-    push_words4(&mut types, 1, 0, 0, 0);
-    push_words4(&mut types, 2, 0, 0, 0);
-    seed_scalar_types(&mut types, 2);
-     types
-}
-
-seed_type_flags() -> Vec<u32> {
-    let flags = Vec::new();
-    push_zeroes(&mut flags, usize_value(14));
-    seed_copy_flags(&mut flags, 0);
-     flags
-}
-
-seed_copy_flags(value: &mut Vec<u32>, index: usize) {
-    if(index < Vec::len(value)) {
-        *Vec::index_mut(&mut *value, index) = 1;
-        seed_copy_flags(value, index + usize_value(1))
-    } else { () }
+seed_types(value: &mut TypedInterfaces) {
+    alloc_type(value, TypeNode {
+        kind: TypeKind::Unit,
+        copyable: true
+    });
+    alloc_type(value, TypeNode {
+        kind: TypeKind::Never,
+        copyable: true
+    });
+    seed_scalar_types(value, 2)
 }
 
 scalar_kind(value: &String) -> Option<u8> {
@@ -863,60 +923,76 @@ type_name_target(
 
 push_interface_type(
     output: &mut TypedInterfaces,
-    tag: u32,
-    a: u32,
-    b: u32,
-    c: u32,
-    flags: u32
+    kind: TypeKind,
+    copyable: Bool
 ) -> u32 {
-    let index = u32_from_usize(interface_type_count(&*output));
-    push_words4(&mut output.types, tag, a, b, c);
-    push_word(&mut output.type_flags, flags);
-    index
+    Id::to_u32(alloc_type(output, TypeNode {
+        kind: kind,
+        copyable: copyable
+    }))
+}
+
+type_kinds_equal(left: TypeKind, right: TypeKind) -> Bool {
+    handle left {
+        TypeKind::Unit => handle right {
+            TypeKind::Unit => true,
+            _ => false
+        },
+        TypeKind::Never => handle right {
+            TypeKind::Never => true,
+            _ => false
+        },
+        TypeKind::Scalar(left_kind) => handle right {
+            TypeKind::Scalar(right_kind) => left_kind == right_kind,
+            _ => false
+        },
+        TypeKind::Tuple(left_range) => handle right {
+            TypeKind::Tuple(right_range) =>
+                left_range.start == right_range.start
+                    and { left_range.count == right_range.count },
+            _ => false
+        },
+        TypeKind::Nominal(left_id) => handle right {
+            TypeKind::Nominal(right_id) => left_id == right_id,
+            _ => false
+        },
+        TypeKind::SharedReference(left_id) => handle right {
+            TypeKind::SharedReference(right_id) => left_id == right_id,
+            _ => false
+        },
+        TypeKind::UniqueReference(left_id) => handle right {
+            TypeKind::UniqueReference(right_id) => left_id == right_id,
+            _ => false
+        }
+    }
 }
 
 find_record_type(
     output: &TypedInterfaces,
-    tag: u32,
-    a: u32,
-    b: u32,
-    c: u32,
+    kind: TypeKind,
     index: usize
 ) -> Option<u32> {
     if(index < interface_type_count(output)) {
-        let base = index * usize_value(4);
-        let matches = bool_and(
-            *Vec::index(&output.types, base) == tag,
-            bool_and(
-                *Vec::index(&output.types, base + usize_value(1)) == a,
-                bool_and(
-                    *Vec::index(&output.types, base + usize_value(2)) == b,
-                    *Vec::index(&output.types, base + usize_value(3)) == c
-                )
-            )
+        let matches = type_kinds_equal(
+            type_kind_at(output, type_id_from_usize(index)),
+            kind
         );
         if(matches) { Result::Ok(u32_from_usize(index)) } else { find_record_type(
-                output,
-                tag,
-                a,
-                b,
-                c,
-                index + usize_value(1)
-            ) }
+            output,
+            kind,
+            index + usize_value(1)
+        ) }
     } else { Result::Err(()) }
 }
 
 intern_record_type(
     output: &mut TypedInterfaces,
-    tag: u32,
-    a: u32,
-    b: u32,
-    c: u32,
-    flags: u32
+    kind: TypeKind,
+    copyable: Bool
 ) -> u32 {
-    handle find_record_type(&*output, tag, a, b, c, 0) {
+    handle find_record_type(&*output, kind, 0) {
         Result::Ok(found) => found,
-        Result::Err(_) => push_interface_type(output, tag, a, b, c, flags)
+        Result::Err(_) => push_interface_type(output, kind, copyable)
     }
 }
 
@@ -926,10 +1002,10 @@ tuple_elements_equal(
     elements: &Vec<u32>,
     ordinal: usize
 ) -> Bool {
-    if(ordinal < Vec::len(elements)) { if(*Vec::index(
+    if(ordinal < Vec::len(elements)) { if(Id::to_u32(*Vec::index(
             &output.type_elements,
             wrapping_convert_to_usize(start) + ordinal
-        ) == *Vec::index(elements, ordinal)) { tuple_elements_equal(
+        )) == *Vec::index(elements, ordinal)) { tuple_elements_equal(
                 output,
                 start,
                 elements,
@@ -943,20 +1019,22 @@ find_tuple_type(
     index: usize
 ) -> Option<u32> {
     if(index < interface_type_count(output)) {
-        let base = index * usize_value(4);
-        let matches = *Vec::index(&output.types, base) == u32_value(4)
-            and {
-                *Vec::index(&output.types, base + usize_value(2))
-                    == u32_from_usize(Vec::len(elements))
-            }
-            and {
-                tuple_elements_equal(
-                    output,
-                    *Vec::index(&output.types, base + usize_value(1)),
-                    elements,
-                    0
-                )
-            };
+        let matches = handle type_kind_at(
+            output,
+            type_id_from_usize(index)
+        ) {
+            TypeKind::Tuple(range) =>
+                range.count == u32_from_usize(Vec::len(elements))
+                    and {
+                        tuple_elements_equal(
+                            output,
+                            range.start,
+                            elements,
+                            0
+                        )
+                    },
+            _ => false
+        };
         if(matches) { Result::Ok(u32_from_usize(index)) } else { find_tuple_type(
                 output,
                 elements,
@@ -965,19 +1043,33 @@ find_tuple_type(
     } else { Result::Err(()) }
 }
 
+append_type_ids(
+    output: &mut Vec<TypeId>,
+    source: &Vec<u32>,
+    index: usize
+) {
+    if(index < Vec::len(source)) {
+        Vec::push(
+            &mut *output,
+            type_id_from_u32(*Vec::index(source, index))
+        );
+        append_type_ids(output, source, index + usize_value(1))
+    } else { () }
+}
+
 intern_tuple_type(output: &mut TypedInterfaces, elements: &Vec<u32>) -> u32 {
     handle find_tuple_type(&*output, elements, 0) {
         Result::Ok(found) => found,
         Result::Err(_) => {
             let start = u32_from_usize(Vec::len(&output.type_elements));
-            append_words(&mut output.type_elements, elements, 0);
+            append_type_ids(&mut output.type_elements, elements, 0);
             push_interface_type(
                 output,
-                4,
-                start,
-                u32_from_usize(Vec::len(elements)),
-                0,
-                0
+                TypeKind::Tuple(TypeElementRange {
+                    start: start,
+                    count: u32_from_usize(Vec::len(elements))
+                }),
+                false
             )
         }
     }
@@ -1292,11 +1384,8 @@ resolve_signature_type(
             ), @resolve_signature_type);
             Result::Ok(intern_record_type(
                 output,
-                6,
-                referent,
-                0,
-                0,
-                1
+                TypeKind::SharedReference(type_id_from_u32(referent)),
+                true
             ))
         } else { Result::Err(error(1, token, token, 0, 0)) },
         3 => if(super::headers::type_lifetime_name_raw_plus_one_at(
@@ -1312,11 +1401,8 @@ resolve_signature_type(
             ), @resolve_signature_type);
             Result::Ok(intern_record_type(
                 output,
-                7,
-                referent,
-                0,
-                0,
-                0
+                TypeKind::UniqueReference(type_id_from_u32(referent)),
+                false
             ))
         } else { Result::Err(error(1, token, token, 0, 0)) },
         4 => if(super::headers::type_child_count_at(index, type_index)
@@ -1545,11 +1631,10 @@ predeclare_nominals(
                         u32_from_usize(interface_nominal_count(&*output));
                     let type_id = push_interface_type(
                         output,
-                        5,
-                        nominal_id,
-                        0,
-                        0,
-                        0
+                        TypeKind::Nominal(
+                            interface_nominal_id_from_u32(nominal_id)
+                        ),
+                        false
                     );
                     push_words4(
                         &mut output.nominals,
@@ -1857,27 +1942,25 @@ type_copyable(
     ty: u32,
     token: usize
 ) -> Result<Bool, ElaborationError> {
-    let base = usize_from_u32(ty) * usize_value(4);
-    handle *Vec::index(&output.types, base) {
-        1 => Result::Ok(true),
-        2 => Result::Ok(true),
-        3 => Result::Ok(true),
-        4 => tuple_copyable(
+    handle type_kind_at(&*output, type_id_from_u32(ty)) {
+        TypeKind::Unit => Result::Ok(true),
+        TypeKind::Never => Result::Ok(true),
+        TypeKind::Scalar(_) => Result::Ok(true),
+        TypeKind::Tuple(range) => tuple_copyable(
             output,
-            *Vec::index(&output.types, base + usize_value(1)),
-            *Vec::index(&output.types, base + usize_value(2)),
+            range.start,
+            range.count,
             0,
             token,
             ty
         ),
-        5 => nominal_copyable(
+        TypeKind::Nominal(nominal) => nominal_copyable(
             output,
-            *Vec::index(&output.types, base + usize_value(1)),
+            Id::to_u32(nominal),
             token
         ),
-        6 => Result::Ok(true),
-        7 => Result::Ok(false),
-        _ => Result::Err(error(7, token, token, 0, ty))
+        TypeKind::SharedReference(_) => Result::Ok(true),
+        TypeKind::UniqueReference(_) => Result::Ok(false)
     }
 }
 
@@ -1890,10 +1973,10 @@ tuple_copyable(
     ty: u32
 ) -> Result<Bool, ElaborationError> {
     if(ordinal < count) {
-        let element = *Vec::index(
+        let element = Id::to_u32(*Vec::index(
             &output.type_elements,
             usize_from_u32(start + ordinal)
-        );
+        ));
         let copy = try(
             type_copyable(output, element, token),
             @tuple_copyable
@@ -1907,7 +1990,7 @@ tuple_copyable(
                 ty
             ) } else { Result::Ok(false) }
     } else {
-        *Vec::index_mut(&mut output.type_flags, usize_from_u32(ty)) = 1;
+        set_type_copyable(output, type_id_from_u32(ty), true);
         Result::Ok(true)
     }
 }
@@ -2006,10 +2089,10 @@ nominal_copyable(
                 &output.shell_to_type_plus_one,
                 usize_from_u32(shell)
             ) - u32_value(1);
-            Result::Ok(
-                *Vec::index(&output.type_flags, usize_from_u32(ty))
-                    == u32_value(1)
-            )
+            Result::Ok(type_is_copyable(
+                output,
+                type_id_from_u32(ty)
+            ))
         },
         _ => {
             *Vec::index_mut(&mut output.nominal_states, index) = 1;
@@ -2050,10 +2133,11 @@ nominal_copyable(
                         &output.shell_to_type_plus_one,
                         usize_from_u32(shell)
                     ) - u32_value(1);
-                    *Vec::index_mut(
-                        &mut output.type_flags,
-                        usize_from_u32(ty)
-                    ) = if(flag) { 1 } else { 0 };
+                    set_type_copyable(
+                        output,
+                        type_id_from_u32(ty),
+                        flag
+                    );
                     *Vec::index_mut(&mut output.nominal_states, index) = 2;
                     Result::Ok(flag)
                 }
@@ -2101,8 +2185,7 @@ pub collect_interfaces(
     declarations: &super::scanner::DeclarationIndex
 ) -> Result<TypedInterfaces, ElaborationError> {
     let output = TypedInterfaces {
-        types: seed_types(),
-        type_flags: seed_type_flags(),
+        types: Arena::new(),
         type_elements: Vec::new(),
         nominals: Vec::new(),
         fields: Vec::new(),
@@ -2117,6 +2200,7 @@ pub collect_interfaces(
         alias_states: Vec::new(),
         nominal_states: Vec::new()
     };
+    seed_types(&mut output);
     let shell_count = super::scanner::shell_count(declarations);
     push_zeroes(
         &mut output.shell_to_callable_plus_one,
@@ -2613,10 +2697,7 @@ elaborate_local(
         if(ty == u32_value(0)) { Result::Err(error(7, token, token, 0, 0)) } else {
             let access = if(bool_and(
                 final_transfer != u32_value(0),
-                *Vec::index(
-                    &interfaces.type_flags,
-                    usize_from_u32(ty)
-                ) == u32_value(1)
+                type_is_copyable(interfaces, type_id_from_u32(ty))
             )) { CoreLocalAccess::Move } else { CoreLocalAccess::Copy };
             let core = push_value(
                 value,
@@ -3038,13 +3119,13 @@ tuple_expected_element(
     ty: u32,
     ordinal: u32
 ) -> u32 {
-    let base = usize_from_u32(ty) * usize_value(4);
-    *Vec::index(
-        &interfaces.type_elements,
-        usize_from_u32(
-            *Vec::index(&interfaces.types, base + usize_value(1)) + ordinal
-        )
-    )
+    handle type_kind_at(interfaces, type_id_from_u32(ty)) {
+        TypeKind::Tuple(range) => Id::to_u32(*Vec::index(
+            &interfaces.type_elements,
+            usize_from_u32(range.start + ordinal)
+        )),
+        _ => unreachable()
+    }
 }
 
 elaborate_tuple_elements(
@@ -3132,11 +3213,14 @@ elaborate_tuple(
             token
         ) } else {
         let expected = expected_plus_one - u32_value(1);
-        let base = usize_from_u32(expected) * usize_value(4);
-        if(bool_and(
-            *Vec::index(&interfaces.types, base) == u32_value(4),
-            *Vec::index(&interfaces.types, base + usize_value(2)) == count
-        )) { elaborate_tuple_checked(
+        let matches = handle type_kind_at(
+            interfaces,
+            type_id_from_u32(expected)
+        ) {
+            TypeKind::Tuple(range) => range.count == count,
+            _ => false
+        };
+        if(matches) { elaborate_tuple_checked(
                 original,
                 headers,
                 declarations,
@@ -3441,10 +3525,7 @@ elaborate_struct(
                     usize_from_u32(shell)
                 ) - u32_value(1);
                 if(bool_and(
-                    *Vec::index(
-                        &interfaces.type_flags,
-                        usize_from_u32(ty)
-                    ) == u32_value(1),
+                    type_is_copyable(interfaces, type_id_from_u32(ty)),
                     bool_or(
                         expected_plus_one == u32_value(0),
                         expected_plus_one == ty + u32_value(1)
@@ -3616,10 +3697,7 @@ elaborate_enum_construct(
         if(bool_and(
             payload_count == found_count,
             bool_and(
-                *Vec::index(
-                    &interfaces.type_flags,
-                    usize_from_u32(ty)
-                ) == u32_value(1),
+                type_is_copyable(interfaces, type_id_from_u32(ty)),
                 bool_or(
                     expected_plus_one == u32_value(0),
                     expected_plus_one == ty + u32_value(1)
@@ -3688,10 +3766,7 @@ elaborate_enum_bare(
         if(bool_and(
             payload_count == u32_value(0),
             bool_and(
-                *Vec::index(
-                    &interfaces.type_flags,
-                    usize_from_u32(ty)
-                ) == u32_value(1),
+                type_is_copyable(interfaces, type_id_from_u32(ty)),
                 bool_or(
                     expected_plus_one == u32_value(0),
                     expected_plus_one == ty + u32_value(1)
@@ -3745,18 +3820,20 @@ elaborate_projection(
         0
     ), @elaborate_projection);
     let subject_type = subject.type_id;
-    let base = usize_from_u32(subject_type) * usize_value(4);
-    let tag = *Vec::index(&interfaces.types, base);
-    let field = handle tag {
-                4 => if(name_kind == u8_value(2)) { if(name < *Vec::index(
-                        &interfaces.types,
-                        base + usize_value(2)
-                    )) { Result::Ok(name) } else { Result::Err(()) } } else { Result::Err(()) },
-                5 => if(name_kind == u8_value(1)) {
-                    let nominal = *Vec::index(
-                        &interfaces.types,
-                        base + usize_value(1)
-                    );
+    let subject_kind = type_kind_at(
+        interfaces,
+        type_id_from_u32(subject_type)
+    );
+    let field = handle subject_kind {
+                TypeKind::Tuple(range) =>
+                    if(name_kind == u8_value(2)) {
+                        if(name < range.count) {
+                            Result::Ok(name)
+                        } else { Result::Err(()) }
+                    } else { Result::Err(()) },
+                TypeKind::Nominal(nominal_id) =>
+                  if(name_kind == u8_value(1)) {
+                    let nominal = Id::to_u32(nominal_id);
                     let nominal_base =
                         usize_from_u32(nominal) * usize_value(4);
                     if(*Vec::index(
@@ -3777,7 +3854,7 @@ elaborate_projection(
                                     field
                                 )) { Result::Ok(field) } else { Result::Err(()) }
                         } } else { Result::Err(()) }
-                } else { Result::Err(()) },
+                  } else { Result::Err(()) },
                 _ => Result::Err(())
     };
     handle move field {
@@ -3785,31 +3862,30 @@ elaborate_projection(
                     error(6, token, token, subject_type, name)
                 ),
                 Result::Ok(field_index) => {
-                    let result_type = handle tag {
-                        4 => tuple_expected_element(
+                    let result_type = handle subject_kind {
+                        TypeKind::Tuple(_) => tuple_expected_element(
                             &*interfaces,
                             subject_type,
                             field_index
                         ),
-                        _ => nominal_struct_field_type(
+                        TypeKind::Nominal(nominal) =>
+                            nominal_struct_field_type(
                             &*interfaces,
-                            *Vec::index(
-                                &interfaces.types,
-                                base + usize_value(1)
-                            ),
+                            Id::to_u32(nominal),
                             field_index
-                        )
+                        ),
+                        _ => unreachable()
                     };
                     if(bool_and(
-                        *Vec::index(
-                            &interfaces.type_flags,
-                            usize_from_u32(subject_type)
-                        ) == u32_value(1),
+                        type_is_copyable(
+                            interfaces,
+                            type_id_from_u32(subject_type)
+                        ),
                         bool_and(
-                            *Vec::index(
-                                &interfaces.type_flags,
-                                usize_from_u32(result_type)
-                            ) == u32_value(1),
+                            type_is_copyable(
+                                interfaces,
+                                type_id_from_u32(result_type)
+                            ),
                             bool_or(
                                 expected_plus_one == u32_value(0),
                                 expected_plus_one
