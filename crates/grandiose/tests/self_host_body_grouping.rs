@@ -152,7 +152,11 @@ fn encode_expression(
             output.push(1);
             push_string(
                 output,
-                &path.iter().map(|part| part.as_ref()).collect::<Vec<_>>().join("::"),
+                &path
+                    .iter()
+                    .map(|part| part.as_ref())
+                    .collect::<Vec<_>>()
+                    .join("::"),
             );
         }
         ExprKind::Int(_) => {

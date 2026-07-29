@@ -4494,8 +4494,7 @@ fn compile_program_with_phases(
     if !region_contract_errors.is_empty() {
         return Err(region_contract_errors);
     }
-    let mut trait_db = TraitDb::build_with_manifest(program, manifest)?;
-    trait_db.share_compilation_table_budget_from(&initial_trait_db);
+    let trait_db = TraitDb::build_with_manifest(program, manifest)?;
     // The distributed library is an implementation dependency, not a set of
     // eager specialization roots. Walking every trusted body is both wasted
     // work and particularly costly for surface `handle` completion arms,
@@ -9320,6 +9319,7 @@ pub(crate) fn normalize_ground_trait_methods(
         result: Option<ReceiverType>,
         binders: BTreeSet<String>,
         target: String,
+        access: Option<ReceiverAccess>,
     }
 
     #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -9345,6 +9345,14 @@ pub(crate) fn normalize_ground_trait_methods(
             TypeSyntaxKind::UniqueReference { referent: _, .. } => ReceiverAccess::Unique,
             _ => ReceiverAccess::Owned,
         })
+    }
+
+    fn receiver_access_matches(actual: &ReceiverType, required: ReceiverAccess) -> bool {
+        match actual {
+            ReceiverType::Shared(_) => required == ReceiverAccess::Shared,
+            ReceiverType::Unique(_) => required != ReceiverAccess::Owned,
+            _ => required == ReceiverAccess::Owned,
+        }
     }
 
     fn source_receiver_type(program: &Program, syntax: &TypeSyntax) -> Option<ReceiverType> {
@@ -9768,7 +9776,7 @@ pub(crate) fn normalize_ground_trait_methods(
     }
 
     let mut normalized = program.clone();
-    let mut methods = BTreeMap::<MethodKey, String>::new();
+    let mut methods = BTreeMap::<MethodKey, (String, Option<ReceiverAccess>)>::new();
     let mut receiverless_methods = BTreeMap::<MethodKey, BTreeSet<String>>::new();
     let mut generic_methods = Vec::<GenericMethod>::new();
     let mut dot_methods = Vec::<DotMethod>::new();
@@ -9829,7 +9837,7 @@ pub(crate) fn normalize_ground_trait_methods(
             if implementation.generics.is_none() {
                 methods.insert(
                     (trait_name.clone(), method.name.clone(), receiver.clone()),
-                    wire_name.clone(),
+                    (wire_name.clone(), receiver_access(method)),
                 );
             } else {
                 generic_methods.push(GenericMethod {
@@ -9842,6 +9850,7 @@ pub(crate) fn normalize_ground_trait_methods(
                         .and_then(|result| canonical_source_receiver_type(program, result)),
                     binders: impl_binders.clone(),
                     target: wire_name.clone(),
+                    access: receiver_access(method),
                 });
             }
             let mut generic_params = implementation
@@ -10236,7 +10245,7 @@ pub(crate) fn normalize_ground_trait_methods(
         expression: &mut Expr,
         locals: &mut BTreeMap<String, ReceiverType>,
         program: &Program,
-        methods: &BTreeMap<MethodKey, String>,
+        methods: &BTreeMap<MethodKey, (String, Option<ReceiverAccess>)>,
         receiverless_methods: &BTreeMap<MethodKey, BTreeSet<String>>,
         generic_methods: &[GenericMethod],
         dot_methods: &[DotMethod],
@@ -10628,18 +10637,29 @@ pub(crate) fn normalize_ground_trait_methods(
                         .then_some(receiver.as_ref())
                         .flatten()
                         .and_then(|receiver| {
-                            let receiver = receiver_subject_type(receiver);
-                            let receiver =
-                                expand_receiver_alias(program, receiver, &mut BTreeSet::new());
+                            let actual_receiver = receiver;
+                            let receiver = expand_receiver_alias(
+                                program,
+                                receiver_subject_type(receiver),
+                                &mut BTreeSet::new(),
+                            );
                             methods
                                 .get(&(trait_name.clone(), method.clone(), receiver_key(&receiver)))
-                                .cloned()
+                                .filter(|(_, access)| {
+                                    access.is_some_and(|access| {
+                                        receiver_access_matches(actual_receiver, access)
+                                    })
+                                })
+                                .map(|(target, _)| target.clone())
                                 .or_else(|| {
                                     let matches = generic_methods
                                         .iter()
                                         .filter(|candidate| {
                                             candidate.trait_name == trait_name
                                                 && candidate.method == method
+                                                && candidate.access.is_some_and(|access| {
+                                                    receiver_access_matches(actual_receiver, access)
+                                                })
                                                 && matches_receiver(
                                                     &candidate.receiver,
                                                     &receiver,
@@ -10746,7 +10766,7 @@ pub(crate) fn normalize_ground_trait_methods(
                             type_error(
                                 callee.span,
                                 format!(
-                                    "no ground `{trait_name}::{method}` implementation matches receiver `{receiver_name}`"
+                                    "`{trait_name}::{method}` is not a callable for receiver `{receiver_name}`; no ground implementation has compatible receiver access"
                                 ),
                             )
                             .with_help("pass a typed local or direct nominal construction with one coherent positive implementation")
@@ -10848,7 +10868,9 @@ pub(crate) fn normalize_ground_trait_methods(
                                 errors,
                             );
                         }
-                        Stmt::Assign { value, .. } => {
+                        Stmt::Assign {
+                            destination, value, ..
+                        } => {
                             rewrite(
                                 value,
                                 locals,
@@ -10862,6 +10884,23 @@ pub(crate) fn normalize_ground_trait_methods(
                                 None,
                                 errors,
                             );
+                            if let AssignmentPlaceKind::Dereference { reference, .. } =
+                                &mut destination.kind
+                            {
+                                rewrite(
+                                    Rc::make_mut(reference),
+                                    locals,
+                                    program,
+                                    methods,
+                                    receiverless_methods,
+                                    generic_methods,
+                                    dot_methods,
+                                    deferred_evidence,
+                                    trusted_standard_range,
+                                    None,
+                                    errors,
+                                );
+                            }
                         }
                     }
                 }
@@ -13345,6 +13384,17 @@ fn two_phase_scalar_type(ty: &TypeSyntax) -> bool {
     })
 }
 
+fn two_phase_contextual_numeric_literal(expression: &Expr) -> bool {
+    match &expression.kind {
+        ExprKind::Int(_) | ExprKind::Float(_) => true,
+        ExprKind::Unary {
+            op: UnaryOp::Negate,
+            operand,
+        } => two_phase_contextual_numeric_literal(operand),
+        _ => false,
+    }
+}
+
 fn two_phase_read_only_use_of_root(
     expression: &Expr,
     root: &str,
@@ -13587,7 +13637,9 @@ fn normalize_two_phase_unique_call_arguments(program: &Program) -> Program {
                     let mut rewritten = arguments.as_ref().clone();
                     let mut statements = Vec::with_capacity(last_read + 2);
                     for index in 0..=last_read {
-                        if unique_roots[index].is_some() {
+                        if unique_roots[index].is_some()
+                            || two_phase_contextual_numeric_literal(&arguments[index])
+                        {
                             continue;
                         }
                         let temporary =

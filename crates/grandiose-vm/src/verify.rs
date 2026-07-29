@@ -11251,9 +11251,6 @@ fn verify_loans(
                 end_reference(&mut loans, *src)?;
             }
             Instruction::ReborrowShared { dst, src } => {
-                if is_suspended(*src, &loans) {
-                    return Err(conflict(*src));
-                }
                 let source = loans[*src as usize]
                     .first()
                     .filter(|loan| {
@@ -17282,6 +17279,52 @@ mod tests {
         suspended.required_features |= 1 << 1;
         assert!(matches!(
             verify(suspended),
+            Err(VerifyError::BorrowConflict {
+                function: 0,
+                instruction: 3,
+                register: 2,
+            })
+        ));
+    }
+
+    #[test]
+    fn unique_references_allow_multiple_shared_reborrows_but_not_a_unique_sibling() {
+        let mut shared = base(
+            vec![
+                Instruction::Const {
+                    dst: 1,
+                    constant: 0,
+                },
+                Instruction::BorrowUnique { dst: 2, src: 1 },
+                Instruction::ReborrowShared { dst: 3, src: 2 },
+                Instruction::ReborrowShared { dst: 4, src: 2 },
+                Instruction::Abort { message: None },
+            ],
+            vec![UNIT, I64, 19, 20, 20],
+        );
+        shared.types.push(Type::RefUnique { referent: I64 });
+        shared.types.push(Type::RefShared { referent: I64 });
+        shared.required_features |= 1 << 1;
+        verify(shared).unwrap();
+
+        let mut unique_sibling = base(
+            vec![
+                Instruction::Const {
+                    dst: 1,
+                    constant: 0,
+                },
+                Instruction::BorrowUnique { dst: 2, src: 1 },
+                Instruction::ReborrowShared { dst: 3, src: 2 },
+                Instruction::ReborrowUnique { dst: 4, src: 2 },
+                Instruction::Abort { message: None },
+            ],
+            vec![UNIT, I64, 19, 20, 19],
+        );
+        unique_sibling.types.push(Type::RefUnique { referent: I64 });
+        unique_sibling.types.push(Type::RefShared { referent: I64 });
+        unique_sibling.required_features |= 1 << 1;
+        assert!(matches!(
+            verify(unique_sibling),
             Err(VerifyError::BorrowConflict {
                 function: 0,
                 instruction: 3,

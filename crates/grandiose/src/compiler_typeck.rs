@@ -2940,7 +2940,7 @@ impl<'a> Typer<'a> {
             // type, then use the enclosing expectation as the fallback.
             let branch_expected = expected.cloned().or_else(|| {
                 self.obvious_non_never_context_type(positive)
-                .or_else(|| self.obvious_non_never_context_type(negative))
+                    .or_else(|| self.obvious_non_never_context_type(negative))
             });
             let condition = self.expression(condition, None);
             self.next_local += self
@@ -2975,10 +2975,10 @@ impl<'a> Typer<'a> {
         if path.len() == 2 {
             let key = expected
                 .and_then(|ty| match ty {
-                        ProvisionalType::Nominal(key) if key.declaration.0 == path[0].as_ref() => {
-                            Some(key.clone())
-                        }
-                        _ => None,
+                    ProvisionalType::Nominal(key) if key.declaration.0 == path[0].as_ref() => {
+                        Some(key.clone())
+                    }
+                    _ => None,
                 })
                 .or_else(|| self.planned_construction(source))
                 .unwrap_or_else(|| NominalInstanceKey::monomorphic(path[0].to_string()));

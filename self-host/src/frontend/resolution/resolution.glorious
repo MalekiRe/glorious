@@ -524,7 +524,10 @@ find_variant(
     ordinal: u32
 ) -> Result<u32, ResolutionError> {
     handle ordinal < count {
-        Result::Err(_) => Result::Err(resolution_error(1, token, token)),
+        // The enum namespace resolved, but its value member did not. Keep
+        // this distinct from an unknown namespace so the full compiler can
+        // classify the failure at its typed-construction boundary.
+        Result::Err(_) => Result::Err(resolution_error(4, token, token)),
         Result::Ok(_) => {
             let index = start + ordinal;
             handle super::headers::variant_at(

@@ -729,19 +729,19 @@ find_tuple_type(
         Result::Err(_) => Result::Err(()),
         Result::Ok(_) => {
             let base = index * usize_value(4);
-            let matches = bool_and(
-                *Vec::index(&output.types, base) == u32_value(4),
-                bool_and(
+            let matches = *Vec::index(&output.types, base) == u32_value(4)
+                and {
                     *Vec::index(&output.types, base + usize_value(2))
-                        == u32_from_usize(Vec::len(elements)),
+                        == u32_from_usize(Vec::len(elements))
+                }
+                and {
                     tuple_elements_equal(
                         output,
                         *Vec::index(&output.types, base + usize_value(1)),
                         elements,
                         0
                     )
-                )
-            );
+                };
             handle matches {
                 Result::Ok(_) => Result::Ok(u32_from_usize(index)),
                 Result::Err(_) => find_tuple_type(
@@ -2249,6 +2249,19 @@ materialize_operand(
     }
 }
 
+embed_operand(value: &mut BodyBuilder, found: Elaborated) -> u32 {
+    handle found.computation_plus_one == u32_value(0) {
+        Result::Ok(_) => found.value_plus_one - u32_value(1),
+        Result::Err(_) => push_value(
+            value,
+            5,
+            found.type_id,
+            found.computation_plus_one - u32_value(1),
+            0
+        )
+    }
+}
+
 check_expected(
     found: Elaborated,
     expected_plus_one: u32,
@@ -2595,8 +2608,7 @@ elaborate_call_arguments(
             ) {
                 Result::Err(found) => Result::Err(move found),
                 Result::Ok(argument) => {
-                    let operand =
-                        materialize_operand(value, argument, wrappers);
+                    let operand = embed_operand(value, argument);
                     push_word(&mut *operands, operand);
                     elaborate_call_arguments(
                         original,
@@ -3058,11 +3070,7 @@ elaborate_tuple_elements(
                 Result::Err(found) => Result::Err(move found),
                 Result::Ok(element) => {
                     let ty = element.type_id;
-                    let operand = materialize_operand(
-                        value,
-                        element,
-                        wrappers
-                    );
+                    let operand = embed_operand(value, element);
                     push_word(&mut *types, ty);
                     push_word(&mut *fields, ordinal);
                     push_word(&mut *fields, operand);
@@ -3388,11 +3396,7 @@ elaborate_struct_fields(
                         ) {
                             Result::Err(found) => Result::Err(move found),
                             Result::Ok(field_value) => {
-                                let operand = materialize_operand(
-                                    value,
-                                    field_value,
-                                    wrappers
-                                );
+                                let operand = embed_operand(value, field_value);
                                 *Vec::index_mut(
                                     &mut *seen,
                                     usize_from_u32(field)
@@ -3575,11 +3579,7 @@ elaborate_enum_payloads(
             ) {
                 Result::Err(found) => Result::Err(move found),
                 Result::Ok(payload) => {
-                    let operand = materialize_operand(
-                        value,
-                        payload,
-                        wrappers
-                    );
+                    let operand = embed_operand(value, payload);
                     push_word(&mut *fields, ordinal);
                     push_word(&mut *fields, operand);
                     elaborate_enum_payloads(
@@ -4339,6 +4339,11 @@ value_uses_local(body: &TypedBody, value: u32, local: u32) -> Bool {
             *Vec::index(&body.values, base + usize_value(2)),
             local
         ),
+        5 => computation_uses_local(
+            body,
+            *Vec::index(&body.values, base + usize_value(2)),
+            local
+        ),
         _ => false
     }
 }
@@ -4554,10 +4559,43 @@ write_value_expression(
     }
 }
 
+write_operand_expression(
+    output: &mut ByteBuf,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    resolved: &super::resolution::ResolvedBody,
+    body: &TypedBody,
+    value: u32,
+    source_local_limit: u32
+) -> Result<(), ElaborationError> {
+    let base = usize_from_u32(value) * usize_value(4);
+    handle *Vec::index(&body.values, base) == u32_value(5) {
+        Result::Err(_) => write_value_expression(
+            output,
+            source,
+            declarations,
+            body,
+            value,
+            source_local_limit
+        ),
+        Result::Ok(_) => write_computation_expression(
+            output,
+            source,
+            declarations,
+            resolved,
+            body,
+            *Vec::index(&body.values, base + usize_value(2)),
+            source_local_limit,
+            false
+        )
+    }
+}
+
 write_construct_fields(
     output: &mut ByteBuf,
     source: &super::lexer::LexedSource,
     declarations: &super::scanner::DeclarationIndex,
+    resolved: &super::resolution::ResolvedBody,
     body: &TypedBody,
     source_local_limit: u32,
     start: u32,
@@ -4572,10 +4610,11 @@ write_construct_fields(
                 &mut *output,
                 *Vec::index(&body.construction_fields, base)
             );
-            handle write_value_expression(
+            handle write_operand_expression(
                 output,
                 source,
                 declarations,
+                resolved,
                 body,
                 *Vec::index(
                     &body.construction_fields,
@@ -4588,6 +4627,7 @@ write_construct_fields(
                     output,
                     source,
                     declarations,
+                    resolved,
                     body,
                     source_local_limit,
                     start,
@@ -4603,6 +4643,7 @@ write_call_operands(
     output: &mut ByteBuf,
     source: &super::lexer::LexedSource,
     declarations: &super::scanner::DeclarationIndex,
+    resolved: &super::resolution::ResolvedBody,
     body: &TypedBody,
     source_local_limit: u32,
     start: u32,
@@ -4611,10 +4652,11 @@ write_call_operands(
 ) -> Result<(), ElaborationError> {
     handle ordinal < count {
         Result::Err(_) => Result::Ok(()),
-        Result::Ok(_) => handle write_value_expression(
+        Result::Ok(_) => handle write_operand_expression(
             output,
             source,
             declarations,
+            resolved,
             body,
             *Vec::index(
                 &body.operands,
@@ -4627,6 +4669,7 @@ write_call_operands(
                 output,
                 source,
                 declarations,
+                resolved,
                 body,
                 source_local_limit,
                 start,
@@ -4720,6 +4763,7 @@ write_computation_expression(
                 output,
                 source,
                 declarations,
+                resolved,
                 body,
                 source_local_limit,
                 start,
@@ -4753,6 +4797,7 @@ write_computation_expression(
                 output,
                 source,
                 declarations,
+                resolved,
                 body,
                 source_local_limit,
                 start,
@@ -4996,7 +5041,12 @@ write_function(
                     declarations,
                     &parsed
                 ) {
-                Result::Err(_) => Result::Err(3),
+                Result::Err(found) => handle
+                    super::resolution::resolution_error_code(&found)
+                        == u8_value(4) {
+                    Result::Ok(_) => Result::Err(4),
+                    Result::Err(_) => Result::Err(3)
+                },
                 Result::Ok(resolved) => handle elaborate_function_body(
                     original,
                     headers,

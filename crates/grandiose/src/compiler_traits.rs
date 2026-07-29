@@ -2,7 +2,6 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
-use std::sync::{Arc, Mutex};
 
 use grandiose_vm::Primitive;
 
@@ -1087,7 +1086,6 @@ pub(crate) struct TraitDb {
     candidates: BTreeMap<CandidateKey, Vec<usize>>,
     intrinsic_use_key: Option<TraitKey>,
     array_nominal: Option<NominalKey>,
-    compilation_tables: Arc<Mutex<BTreeSet<TableKey>>>,
 }
 
 #[derive(Clone, Debug)]
@@ -1136,10 +1134,6 @@ struct TraitSchema {
 }
 
 impl TraitDb {
-    pub(crate) fn share_compilation_table_budget_from(&mut self, other: &Self) {
-        self.compilation_tables = Arc::clone(&other.compilation_tables);
-    }
-
     fn candidate_indices(&self, goal: &GroundGoal) -> Vec<usize> {
         let mut candidates = self
             .candidates
@@ -1703,7 +1697,6 @@ impl TraitDb {
                 candidates,
                 intrinsic_use_key: Some(intrinsic_use_key),
                 array_nominal,
-                compilation_tables: Arc::new(Mutex::new(BTreeSet::new())),
             };
             let validation_errors = validate_supertrait_impls(&database, &impl_spans);
             if validation_errors.is_empty() {
@@ -2227,16 +2220,9 @@ impl TraitDb {
             diagnostics.record_limit(SolverLimit::NestedFrames, Some(&table_key));
             return table_answer(SolveResult::Overflow);
         }
-        {
-            let Ok(mut compilation_tables) = self.compilation_tables.lock() else {
-                diagnostics.record_limit(SolverLimit::Tables, Some(&table_key));
-                return table_answer(SolveResult::Overflow);
-            };
-            if !compilation_tables.contains(&table_key) && compilation_tables.len() >= MAX_TABLES {
-                diagnostics.record_limit(SolverLimit::Tables, Some(&table_key));
-                return table_answer(SolveResult::Overflow);
-            }
-            compilation_tables.insert(table_key.clone());
+        if tables.len() >= MAX_TABLES {
+            diagnostics.record_limit(SolverLimit::Tables, Some(&table_key));
+            return table_answer(SolveResult::Overflow);
         }
         tables.insert(table_key.clone(), TableState::Evaluating);
         diagnostics.active.push(table_key.clone());
@@ -6647,23 +6633,55 @@ mod tests {
     }
 
     #[test]
-    fn canonical_table_budget_is_shared_across_queries_for_the_database() {
+    fn canonical_table_budget_is_local_to_each_query() {
         let db = database("trait Marker {} impl Marker for i64 {}");
-        let mut ledger = db.compilation_tables.lock().unwrap();
+        let mut tables = BTreeMap::new();
         for index in 0..MAX_TABLES {
-            ledger.insert(TableKey {
-                goal: GroundGoal {
-                    polarity: GoalPolarity::Positive,
-                    trait_key: TraitKey::Local(format!("Synthetic{index}")),
-                    subject: ProvisionalType::Predefined("i64".into()),
-                    arguments: vec![],
-                    bindings: vec![],
-                    projections: vec![],
+            tables.insert(
+                TableKey {
+                    goal: GroundGoal {
+                        polarity: GoalPolarity::Positive,
+                        trait_key: TraitKey::Local(format!("Synthetic{index}")),
+                        subject: ProvisionalType::Predefined("i64".into()),
+                        arguments: vec![],
+                        bindings: vec![],
+                        projections: vec![],
+                    },
+                    param_env: ParamEnv::default(),
                 },
-                param_env: ParamEnv::default(),
-            });
+                TableState::Complete(table_answer(SolveResult::NoEvidence)),
+            );
         }
-        drop(ledger);
+        let mut diagnostics = SolverDiagnostics::default();
+        let mut steps = 0;
+        let mut projection_steps = 0;
+        let answer = db.solve_inner(
+            GroundGoal {
+                polarity: GoalPolarity::Positive,
+                trait_key: TraitKey::Local("Marker".into()),
+                subject: ProvisionalType::Predefined("i64".into()),
+                arguments: vec![],
+                bindings: vec![],
+                projections: vec![],
+            },
+            &ParamEnv::default(),
+            &mut tables,
+            0,
+            &mut steps,
+            &mut projection_steps,
+            &mut diagnostics,
+        );
+        assert_eq!(answer.result, SolveResult::Overflow);
+        assert!(matches!(
+            diagnostics.failure_for(answer.result),
+            Some(SolveFailure::Limit {
+                limit: SolverLimit::Tables,
+                ..
+            })
+        ));
+
+        // A completed query cannot consume the table allowance of an
+        // independent query issued later in the same compilation.
         let report = db.solve_with_param_env_values_detailed(
             &ParamEnv::default(),
             GoalPolarity::Positive,
@@ -6672,14 +6690,7 @@ mod tests {
             &[],
             &[],
         );
-        assert_eq!(report.result, SolveResult::Overflow);
-        assert!(matches!(
-            report.failure,
-            Some(SolveFailure::Limit {
-                limit: SolverLimit::Tables,
-                ..
-            })
-        ));
+        assert_eq!(report.result, SolveResult::Proven);
     }
 
     #[test]

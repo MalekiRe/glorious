@@ -179,14 +179,15 @@ fn later_shared_scalar_argument_is_materialized_before_unique_argument_activatio
     let source = r#"
         read(value: &i64) -> i64 { *value }
 
-        update(value: &mut i64, observed: i64) -> i64 {
+        update(value: &mut i64, tag: u8, observed: i64) -> i64 {
+            let _ = tag;
             *value = observed + 1;
             *value
         }
 
         selected() -> i64 {
             let value = 41;
-            update(&mut value, read(&value))
+            update(&mut value, 2, read(&value))
         }
 
         main() -> () { () }

@@ -113,6 +113,47 @@ fn grounded_qualified_trait_method_dispatches_statically() {
 }
 
 #[test]
+fn qualified_trait_calls_in_dereferenced_assignment_destinations_are_normalized() {
+    let source = r#"
+        trait AddIndex { add(self: Self, other: Self) -> Self; }
+        impl AddIndex for i64 {
+            add(self: i64, other: i64) -> i64 { self + other }
+        }
+        struct Cell { value: i64 }
+        slot<'a>(cell: &'a mut Cell, index: i64) -> &'a mut i64 {
+            let _ = index;
+            &mut cell.value
+        }
+        set(cell: &mut Cell, base: i64) -> () {
+            *slot(cell, AddIndex::add(base, 2)) = 42;
+            ()
+        }
+        selected() -> i64 {
+            let cell = Cell { value: 0 };
+            set(&mut cell, 0);
+            cell.value
+        }
+        main() -> { () }
+    "#;
+    let artifact = grandiose::compile_source_to_bytecode(
+        "trait-method-assignment-destination.glorious",
+        source,
+    )
+    .unwrap();
+    let selected = artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(artifact).unwrap())
+            .run(selected, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+}
+
+#[test]
 fn generic_qualified_trait_methods_specialize_with_where_evidence_at_all_levels() {
     let source = r#"
         trait Mark {}
