@@ -373,7 +373,7 @@ valid_struct_type_record(
         0,
         &mut payload
     ), @valid_struct_type_record);
-    let payload_bytes = ByteBuf::finish(move payload);
+    let payload_bytes = ByteBuf::finish( payload);
     Result::Ok(super::artifact::record(
         34,
         wrapping_convert_to_u8(custom_type_flags(program, index)),

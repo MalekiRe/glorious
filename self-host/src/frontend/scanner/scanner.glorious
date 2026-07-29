@@ -152,7 +152,7 @@ token_ident(
     index: usize
 ) -> Option<Id<String>> {
     handle token_kind_at(value, index) {
-        TokenKind::Ident(name) => Result::Ok(move name),
+        TokenKind::Ident(name) => Result::Ok( name),
         _ => Result::Err(())
     }
 }
@@ -415,7 +415,7 @@ name_at(
     start: usize
 ) -> Result<Id<String>, ScanError> {
     handle token_ident(value, index) {
-        Result::Ok(name) => Result::Ok(move name),
+        Result::Ok(name) => Result::Ok( name),
         Result::Err(_) => Result::Err(scan_error(6, index, start))
     }
 }
@@ -498,7 +498,7 @@ classify(
             value,
             cursor,
             start,
-            move name
+             name
         ),
         _ => Result::Err(scan_error(
             4,
@@ -619,7 +619,7 @@ scan_semicolon_shell(
         Result::Err(error) => scan_state_error(
             move kind,
             move name,
-            move error
+             error
         ),
         Result::Ok(end) => {
             if(u8_equal(kind_code, 5)) { handle find_top_level_eq(
@@ -701,7 +701,7 @@ scan_braced_shell(
         Result::Err(error) => scan_state_error(
             move kind,
             move name,
-            move error
+             error
         ),
         Result::Ok(bounds) => {
             let open = bounds.start;
@@ -856,7 +856,7 @@ scan_loop(
                 Result::Err(error) => scan_loop_error(
                      scopes,
                      output,
-                    move error
+                     error
                 ),
                 Result::Ok(step) => {
                     let next = step.next;
@@ -932,7 +932,7 @@ write_optional_name(
             ByteBuf::push(&mut *output, 1);
             handle super::lexer::lexeme(lexed, *name) {
                 Result::Err(_) => unreachable(),
-                Result::Ok(text) => write_string( output, move text)
+                Result::Ok(text) => write_string( output,  text)
             }
         }
     }

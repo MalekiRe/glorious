@@ -338,14 +338,14 @@ byte_is_operator(value: u8) -> Bool {
 
 peek(value: &Lexer, offset: usize) -> Option<u8> {
     handle Bytes::get(&value.bytes, value.cursor + move offset) {
-        Result::Ok(found) => Option::Some(move found),
+        Result::Ok(found) => Option::Some( found),
         Result::Err(_) => None
     }
 }
 
 peek_is(value: &Lexer, offset: usize, expected: u8) -> Bool {
     handle peek(value, move offset) {
-        Result::Ok(actual) => move actual == move expected,
+        Result::Ok(actual) =>  actual == move expected,
         Result::Err(_) => false
     }
 }
@@ -356,21 +356,21 @@ advance(value: &mut Lexer, amount: usize) {
 
 text_slice_result(result: Result<String, TextRangeError>) -> String {
     handle move result {
-        Result::Ok(text) => move text,
+        Result::Ok(text) =>  text,
         Result::Err(_) => unreachable()
     }
 }
 
 interned_id(result: Result<Id<String>, String>) -> Id<String> {
     handle move result {
-        Result::Ok(id) => move id,
+        Result::Ok(id) =>  id,
         Result::Err(_) => unreachable()
     }
 }
 
 present_byte(result: Option<u8>) -> u8 {
     handle move result {
-        Result::Ok(byte) => move byte,
+        Result::Ok(byte) =>  byte,
         Result::Err(_) => unreachable()
     }
 }
@@ -388,7 +388,7 @@ source_slice(value: &Lexer, start: usize, end: usize) -> String {
 intern_slice(value: &mut Lexer, start: usize, end: usize) -> Id<String> {
     let text = source_slice(&*value,  start,  end);
     handle Interner::intern_string(&mut value.lexemes, move text) {
-        Result::Ok(id) => move id,
+        Result::Ok(id) =>  id,
         // `lex` rejects a source longer than the u32 ID space. There can be no
         // more distinct source lexemes than source bytes, so exhaustion here
         // would contradict that checked boundary.
@@ -488,7 +488,7 @@ scan_word(value: &mut Lexer) {
     let end = value.cursor;
     let text = source_slice(&*value, start,  end);
     handle keyword(&text) {
-        Result::Ok(found) => push_keyword( value, move found, start),
+        Result::Ok(found) => push_keyword( value,  found, start),
         Result::Err(_) => {
             let end = value.cursor;
             let id = intern_slice(&mut *value, start, move end);
@@ -734,7 +734,7 @@ scan_operator_tail(value: &mut Lexer) {
                             let pair_structural = handle peek(&*value, 1) {
                                 Result::Ok(second) => structural_two_exists(
                                     first,
-                                    move second
+                                     second
                                 ),
                                 Result::Err(_) => false
                             };
@@ -760,7 +760,7 @@ scan_operator(value: &mut Lexer) {
     let start = value.cursor;
     let first = present_byte(peek(&*value, 0));
     let pair = handle peek(&*value, 1) {
-        Result::Ok(second) => structural_two(first, move second),
+        Result::Ok(second) => structural_two(first,  second),
         Result::Err(_) => None
     };
     handle move pair {
@@ -1164,7 +1164,7 @@ unicode_digits(
                 )
             } else {
                 handle char_from_u32(move scalar) {
-                Result::Ok(character) => scalar_ok(move character),
+                Result::Ok(character) => scalar_ok( character),
                 Result::Err(_) => Result::Err(
                 lex_error(
                 LexErrorKind::InvalidUnicodeScalar, 14,
@@ -1259,7 +1259,7 @@ scalar_escape(value: &mut Lexer, backslash: usize) -> Result<char, LexError> {
                         Result::Ok(byte) => handle char_from_u32(
                             wrapping_convert_to_u32(move byte)
                         ) {
-                            Result::Ok(character) => scalar_ok(move character),
+                            Result::Ok(character) => scalar_ok( character),
                             Result::Err(_) => unreachable()
                         },
                         Result::Err(_) => Result::Err(
@@ -1710,17 +1710,17 @@ run_one(value: Lexer) -> Result<LexedSource, LexError> {
 
 run_byte(value: Lexer, byte: u8, start: usize) -> Result<LexedSource, LexError> {
     handle split_byte(move byte, byte_value(58)) {
-        Result::Ok(byte) => run_byte_low( value, move byte, move start),
-        Result::Err(byte) => run_byte_high( value, move byte, move start)
+        Result::Ok(byte) => run_byte_low( value,  byte, move start),
+        Result::Err(byte) => run_byte_high( value,  byte, move start)
     }
 }
 
 run_byte_low(value: Lexer, byte: u8, start: usize) -> Result<LexedSource, LexError> {
     handle split_byte(move byte, byte_value(39)) {
-        Result::Ok(byte) => run_byte_low_39( value, move byte, move start),
+        Result::Ok(byte) => run_byte_low_39( value,  byte, move start),
         Result::Err(byte) => handle split_byte(move byte, byte_value(47)) {
-            Result::Ok(byte) => run_byte_low_47( value, move byte, move start),
-            Result::Err(byte) => run_byte_low_58( value, move byte, move start)
+            Result::Ok(byte) => run_byte_low_47( value,  byte, move start),
+            Result::Err(byte) => run_byte_low_58( value,  byte, move start)
         }
     }
 }
@@ -1744,7 +1744,7 @@ run_byte_low_47(
     start: usize
 ) -> Result<LexedSource, LexError> {
     handle split_byte(move byte, byte_value(44)) {
-        Result::Ok(byte) => run_byte_low_44( value, move byte, move start),
+        Result::Ok(byte) => run_byte_low_44( value,  byte, move start),
         Result::Err(byte) => handle byte {
             47 => run_slash_token( value, move start),
             _ => run_general_byte( value, move byte, move start)
@@ -1778,8 +1778,8 @@ run_byte_low_58(
 
 run_byte_high(value: Lexer, byte: u8, start: usize) -> Result<LexedSource, LexError> {
     handle split_byte(move byte, byte_value(93)) {
-        Result::Ok(byte) => run_byte_high_93( value, move byte, move start),
-        Result::Err(byte) => run_byte_above_93( value, move byte, move start)
+        Result::Ok(byte) => run_byte_high_93( value,  byte, move start),
+        Result::Err(byte) => run_byte_above_93( value,  byte, move start)
     }
 }
 
@@ -1969,7 +1969,7 @@ write_source_span(output: &mut ByteBuf, source: &String, value: &Span) {
 normalized_span_len(bytes: &Bytes, cursor: usize, end: usize, count: usize) -> usize {
     if(cursor < end) {
             let byte = handle Bytes::get(bytes, cursor) {
-                Result::Ok(found) => byte_value(move found),
+                Result::Ok(found) => byte_value( found),
                 Result::Err(_) => unreachable()
             };
             let next = if(byte == byte_value(95)) {
@@ -1992,7 +1992,7 @@ write_normalized_span_bytes(
 ) {
     if(cursor < end) {
             let byte = handle Bytes::get(bytes, cursor) {
-                Result::Ok(found) => byte_value(move found),
+                Result::Ok(found) => byte_value( found),
                 Result::Err(_) => unreachable()
             };
             if(byte == byte_value(95)) {
@@ -2087,9 +2087,9 @@ write_token_payload(
         TokenKind::String(id) => write_lexeme( output, lexed, &id),
         TokenKind::Char(character) => ByteBuf::write_u32_le(
         output,
-        char_to_u32(move character)
+        char_to_u32( character)
         ),
-        TokenKind::Byte(byte) => ByteBuf::push( output, move byte),
+        TokenKind::Byte(byte) => ByteBuf::push( output,  byte),
         TokenKind::ByteString(bytes) => write_bytes( output, &bytes),
         TokenKind::Label(id) => write_lexeme( output, lexed, &id),
         _ => unreachable()

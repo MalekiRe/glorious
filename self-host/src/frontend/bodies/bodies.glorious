@@ -279,7 +279,7 @@ last_expr(value: &Vec<u32>) -> ExprId {
 source_text(value: &String, start: usize, end: usize) -> String {
     handle String::slice(value, Range { start: move start, end: move end }) {
         Result::Err(_) => unreachable(),
-        Result::Ok(found) => move found
+        Result::Ok(found) =>  found
     }
 }
 
@@ -2843,7 +2843,7 @@ process_inputs(
             let bytes = read_file(move path);
             handle String::from_utf8(move bytes) {
                 Result::Err(_) => ByteBuf::push(&mut *output, 1),
-                Result::Ok(source) => encode_source(&mut *output, move source)
+                Result::Ok(source) => encode_source(&mut *output,  source)
             };
             process_inputs(
                 arguments,
