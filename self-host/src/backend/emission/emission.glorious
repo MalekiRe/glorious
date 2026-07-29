@@ -621,14 +621,6 @@ byte_at(bytes: &Bytes, index: usize) -> u32 {
     }
 }
 
-argument_at(bytes: &Bytes, ordinal: u32) -> u32 {
-    let start = usize_from_u32(ordinal) * 4;
-    byte_at(bytes, start)
-        + shift_left(byte_at(bytes, start + 1), 8)
-        + shift_left(byte_at(bytes, start + 2), 16)
-        + shift_left(byte_at(bytes, start + 3), 24)
-}
-
 append_arguments(
     arguments: &super::lowering::RegisterPack,
     ordinal: u32,
@@ -636,8 +628,15 @@ append_arguments(
 ) {
     let count = super::lowering::register_pack_count(arguments);
     if(ordinal < count) {
-        let bytes = super::lowering::register_pack_bytes(arguments);
-        Vec::push(&mut *output, argument_at(&bytes, ordinal));
+        Vec::push(
+            &mut *output,
+            super::lowering::register_raw(
+                super::lowering::register_pack_at(
+                    arguments,
+                    usize_from_u32(ordinal)
+                )
+            )
+        );
         append_arguments(
             arguments,
             ordinal + 1,
@@ -648,41 +647,62 @@ append_arguments(
 
 write_instruction(
     program: &super::lowering::StageProgram,
+    stage_function: &super::lowering::StageFunction,
     instruction: &StageInstruction,
     code: &mut ByteBuf,
     operands: &mut Vec<u32>
 ) -> Result<(), EmissionError> {
     if(*instruction is StageInstruction::Const(target, key)) {
+        let target_raw = super::lowering::register_raw(target);
         let words = Bytes::to_vec(key);
         handle find_constant(program, &words, 0) {
-            Result::Err(_) => Result::Err(error(1, target)),
+            Result::Err(_) => Result::Err(error(1, target_raw)),
             Result::Ok(constant) => {
                 ByteBuf::write_u32_le(&mut *code, 8193);
-                ByteBuf::write_u32_le(&mut *code, target);
+                ByteBuf::write_u32_le(&mut *code, target_raw);
                 ByteBuf::write_u32_le(code, constant);
                 Result::Ok(())
             }
         }
     } else if(*instruction is StageInstruction::Move(target, source)) {
         ByteBuf::write_u32_le(&mut *code, 8194);
-        ByteBuf::write_u32_le(&mut *code, target);
-        ByteBuf::write_u32_le(code, source);
+        ByteBuf::write_u32_le(
+            &mut *code,
+            super::lowering::register_raw(target)
+        );
+        ByteBuf::write_u32_le(
+            code,
+            super::lowering::register_raw(source)
+        );
         Result::Ok(())
     } else if(*instruction is StageInstruction::Copy(target, source)) {
         ByteBuf::write_u32_le(&mut *code, 8195);
-        ByteBuf::write_u32_le(&mut *code, target);
-        ByteBuf::write_u32_le(code, source);
+        ByteBuf::write_u32_le(
+            &mut *code,
+            super::lowering::register_raw(target)
+        );
+        ByteBuf::write_u32_le(
+            code,
+            super::lowering::register_raw(source)
+        );
         Result::Ok(())
     } else if(*instruction is StageInstruction::Construct(
         target,
         ty,
         variant,
-        fields
+        fields_id
     )) {
+        let fields = super::lowering::stage_function_register_pack(
+            stage_function,
+            fields_id
+        );
         let start = checked_u32(Vec::len(&*operands));
-        append_arguments(&fields, 0, operands);
+        append_arguments(fields, 0, operands);
         ByteBuf::write_u32_le(&mut *code, 20489);
-        ByteBuf::write_u32_le(&mut *code, target);
+        ByteBuf::write_u32_le(
+            &mut *code,
+            super::lowering::register_raw(target)
+        );
         ByteBuf::write_u32_le(&mut *code, ty);
         ByteBuf::write_u32_le(
             &mut *code,
@@ -694,7 +714,7 @@ write_instruction(
         ByteBuf::write_u32_le(&mut *code, start);
         ByteBuf::write_u32_le(
             code,
-            super::lowering::register_pack_count(&fields)
+            super::lowering::register_pack_count(fields)
         );
         Result::Ok(())
     } else if(*instruction is StageInstruction::ProjectCopy(
@@ -703,34 +723,48 @@ write_instruction(
         field
     )) {
         ByteBuf::write_u32_le(&mut *code, 12299);
-        ByteBuf::write_u32_le(&mut *code, target);
-        ByteBuf::write_u32_le(&mut *code, source);
+        ByteBuf::write_u32_le(
+            &mut *code,
+            super::lowering::register_raw(target)
+        );
+        ByteBuf::write_u32_le(
+            &mut *code,
+            super::lowering::register_raw(source)
+        );
         ByteBuf::write_u32_le(code, field);
         Result::Ok(())
     } else if(*instruction is StageInstruction::Drop(register)) {
         ByteBuf::write_u32_le(&mut *code, 4113);
-        ByteBuf::write_u32_le(code, register);
+        ByteBuf::write_u32_le(
+            code,
+            super::lowering::register_raw(register)
+        );
         Result::Ok(())
     } else if(*instruction is StageInstruction::Call(
         target,
         function,
-        arguments
+        arguments_id
     )) {
+        let arguments = super::lowering::stage_function_register_pack(
+            stage_function,
+            arguments_id
+        );
         let start = checked_u32(Vec::len(&*operands));
-        append_arguments(&arguments, 0, operands);
+        append_arguments(arguments, 0, operands);
         ByteBuf::write_u32_le(&mut *code, 16418);
         ByteBuf::write_u32_le(
             &mut *code,
             handle target {
                 Result::Err(_) => 4294967295,
-                Result::Ok(found) => found
+                Result::Ok(found) =>
+                    super::lowering::register_raw(found)
             }
         );
         ByteBuf::write_u32_le(&mut *code, function);
         ByteBuf::write_u32_le(&mut *code, start);
         ByteBuf::write_u32_le(
             code,
-            super::lowering::register_pack_count(&arguments)
+            super::lowering::register_pack_count(arguments)
         );
         Result::Ok(())
     } else if(*instruction is StageInstruction::Return(source)) {
@@ -739,7 +773,8 @@ write_instruction(
             code,
             handle source {
                 Result::Err(_) => 4294967295,
-                Result::Ok(found) => found
+                Result::Ok(found) =>
+                    super::lowering::register_raw(found)
             }
         );
         Result::Ok(())
@@ -759,6 +794,7 @@ write_function_code(
     try_for_range(Range::new(index, end), { current =>
         write_instruction(
             program,
+            function,
             super::lowering::stage_function_instruction_at(
                 function,
                 current
@@ -813,7 +849,12 @@ append_cleanup_registers(
     for_range(Range::new(index, end), { current =>
         Vec::push(
             &mut *operands,
-            super::lowering::stage_cleanup_register_at(cleanup, current)
+            super::lowering::register_raw(
+                super::lowering::stage_cleanup_register_at(
+                    cleanup,
+                    current
+                )
+            )
         )
     })
 }
