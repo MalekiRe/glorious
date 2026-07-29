@@ -766,8 +766,7 @@ resolve_struct_constructor(
         bindings,
         output,
         expression,
-        module,
-        0
+        module
     )
 }
 
@@ -779,34 +778,25 @@ resolve_children(
     bindings: &mut Vec<Binding>,
     output: &mut ResolvedBody,
     expression: u32,
-    module: Option<usize>,
-    child: u32
+    module: Option<usize>
 ) -> Result<(), ResolutionError> {
-    if(child < super::bodies::expression_child_count_at(body, expression)) {
-        try(resolve_expression(
+    Slice::try_for_each(
+        super::bodies::expression_children(body, expression),
+        { edge =>
+            resolve_expression(
                 headers,
                 index,
                 declarations,
                 body,
                 bindings,
                 output,
-                super::bodies::expression_child_at(body, expression, child),
+                Id::to_u32(
+                    super::bodies::expression_edge_value(edge)
+                ),
                 module
-            ), @resolve_children);
-            resolve_children(
-                headers,
-                index,
-                declarations,
-                body,
-                bindings,
-                output,
-                expression,
-                module,
-                child + 1
             )
-    } else {
-        Result::Ok(())
-    }
+        }
+    )
 }
 
 resolve_block_children(
@@ -817,24 +807,15 @@ resolve_block_children(
     bindings: &mut Vec<Binding>,
     output: &mut ResolvedBody,
     expression: u32,
-    module: Option<usize>,
-    child: u32
+    module: Option<usize>
 ) -> Result<(), ResolutionError> {
-    if(child < super::bodies::expression_child_count_at(body, expression)) {
-        let position = super::bodies::expression_child_position_at(
-                body,
-                expression,
-                child
-            );
-            let metadata = super::bodies::expression_child_metadata_at(
-                body,
-                expression,
-                child
-            );
-            let value = super::bodies::expression_child_at(
-                body,
-                expression,
-                child
+    Slice::try_for_each(
+        super::bodies::expression_children(body, expression),
+        { edge => {
+            let position = super::bodies::expression_edge_position(edge);
+            let metadata = super::bodies::expression_edge_metadata(edge);
+            let value = Id::to_u32(
+                super::bodies::expression_edge_value(edge)
             );
             handle position {
                 1 => if(metadata == 0) {
@@ -874,35 +855,23 @@ resolve_block_children(
                                                     Id::from_u32(expression)
                                             }
                                         );
-                                        try(
-                                            resolve_expression(
-                                                headers,
-                                                index,
-                                                declarations,
-                                                body,
-                                                bindings,
-                                                output,
-                                                value,
-                                                module
-                                            ),
-                                            @resolve_block_children
-                                        );
-                                        push_binding(
-                                            bindings,
-                                            name,
-                                            ResolvedTarget::Local(local)
-                                        );
-                                        resolve_block_children(
+                                        resolve_expression(
                                             headers,
                                             index,
                                             declarations,
                                             body,
                                             bindings,
                                             output,
-                                            expression,
-                                            module,
-                                            child + 1
-                                        )
+                                            value,
+                                            module
+                                        ) and {
+                                            push_binding(
+                                                bindings,
+                                                name,
+                                                ResolvedTarget::Local(local)
+                                            );
+                                            Result::Ok(())
+                                        }
                                     }
                                 }
                             },
@@ -910,30 +879,16 @@ resolve_block_children(
                         }
                 },
                 2 => if(metadata == 0) {
-                    try(
-                            resolve_expression(
-                                headers,
-                                index,
-                                declarations,
-                                body,
-                                bindings,
-                                output,
-                                value,
-                                module
-                            ),
-                            @resolve_block_children
-                        );
-                        resolve_block_children(
-                            headers,
-                            index,
-                            declarations,
-                            body,
-                            bindings,
-                            output,
-                            expression,
-                            module,
-                            child + 1
-                        )
+                    resolve_expression(
+                        headers,
+                        index,
+                        declarations,
+                        body,
+                        bindings,
+                        output,
+                        value,
+                        module
+                    )
                 } else {
                     Result::Err(resolution_error(
                         3,
@@ -947,9 +902,8 @@ resolve_block_children(
                     usize_from_u32(metadata)
                 ))
             }
-    } else {
-        Result::Ok(())
-    }
+        } }
+    )
 }
 
 resolve_block(
@@ -971,8 +925,7 @@ resolve_block(
         bindings,
         output,
         expression,
-        module,
-        0
+        module
     ) {
         Result::Err(error) => {
             Vec::truncate(bindings, mark);
@@ -1034,8 +987,7 @@ resolve_expression(
             bindings,
             output,
             expression,
-            module,
-            0
+            module
         )
     }
 }

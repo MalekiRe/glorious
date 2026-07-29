@@ -161,35 +161,104 @@ pub expression_name_token_at(
     ))
 }
 
-pub expression_child_count_at(value: &ParsedBody, index: u32) -> u32 {
-    arena_node_at_raw(&value.nodes, index).children.count
+expression_edges<'a>(
+    value: &'a ParsedBody,
+    node: &ExprNode
+) -> Slice<'a, ExprEdge> {
+    handle Slice::subslice(
+        Vec::as_slice(&value.edges),
+        usize_from_u32(node.children.start),
+        usize_from_u32(node.children.count)
+    ) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+pub expression_children<'a>(
+    value: &'a ParsedBody,
+    expression: u32
+) -> Slice<'a, ExprEdge> {
+    let node = arena_node_at_raw(&value.nodes, expression);
+    expression_edges(value, node)
+}
+
+pub expression_edge_value(value: &ExprEdge) -> ExprId {
+    value.value
+}
+
+pub expression_edge_position(value: &ExprEdge) -> u8 {
+    value.position
+}
+
+pub expression_edge_metadata(value: &ExprEdge) -> u32 {
+    value.metadata
+}
+
+// Transitional scalar accessors remain for elaboration's ordinal-sensitive
+// walks. Serialization and resolution consume the borrowed view directly.
+pub expression_child_count_at(
+    value: &ParsedBody,
+    expression: u32
+) -> u32 {
+    u32_from_usize(Slice::len(expression_children(value, expression)))
 }
 
 pub expression_child_at(
     value: &ParsedBody,
-    index: u32,
+    expression: u32,
     child: u32
 ) -> u32 {
-    let node = arena_node_at_raw(&value.nodes, index);
-    Id::to_u32(edge_at(value, node, child))
+    Id::to_u32(expression_edge_value(edge_in_slice(
+        expression_children(value, expression),
+        usize_from_u32(child)
+    )))
 }
 
 pub expression_child_position_at(
     value: &ParsedBody,
-    index: u32,
+    expression: u32,
     child: u32
 ) -> u8 {
-    let node = arena_node_at_raw(&value.nodes, index);
-    edge_position_at(value, node, child)
+    expression_edge_position(edge_in_slice(
+        expression_children(value, expression),
+        usize_from_u32(child)
+    ))
 }
 
 pub expression_child_metadata_at(
     value: &ParsedBody,
-    index: u32,
+    expression: u32,
     child: u32
 ) -> u32 {
-    let node = arena_node_at_raw(&value.nodes, index);
-    edge_metadata_at(value, node, child)
+    expression_edge_metadata(edge_in_slice(
+        expression_children(value, expression),
+        usize_from_u32(child)
+    ))
+}
+
+edge_in_slice<'a>(
+    value: Slice<'a, ExprEdge>,
+    index: usize
+) -> &'a ExprEdge {
+    handle Slice::get(value, index) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+edge_suffix<'a>(
+    value: Slice<'a, ExprEdge>,
+    start: usize
+) -> Slice<'a, ExprEdge> {
+    handle Slice::subslice(
+        value,
+        start,
+        Slice::len(value) - start
+    ) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
 }
 
 body_error(code: u8, token: usize, related: usize) -> BodyError {
@@ -2264,30 +2333,6 @@ write_string(output: &mut ByteBuf, value: &String) {
     ByteBuf::append_bytes( output, &bytes)
 }
 
-edge_at(value: &ParsedBody, node: &ExprNode, index: u32) -> ExprId {
-    let edge = Vec::index(
-        &value.edges,
-        usize_from_u32(node.children.start + index)
-    );
-    edge.value
-}
-
-edge_position_at(value: &ParsedBody, node: &ExprNode, index: u32) -> u8 {
-    let edge = Vec::index(
-        &value.edges,
-        usize_from_u32(node.children.start + index)
-    );
-    edge.position
-}
-
-edge_metadata_at(value: &ParsedBody, node: &ExprNode, index: u32) -> u32 {
-    let edge = Vec::index(
-        &value.edges,
-        usize_from_u32(node.children.start + index)
-    );
-    edge.metadata
-}
-
 write_name_token(
     output: &mut ByteBuf,
     source: &super::lexer::LexedSource,
@@ -2302,38 +2347,6 @@ write_name_token(
             }
         },
         _ => Result::Err(body_error(11, token, token))
-    }
-}
-
-write_call_arguments(
-    output: &mut ByteBuf,
-    original: &String,
-    source: &super::lexer::LexedSource,
-    value: &ParsedBody,
-    node: &ExprNode,
-    index: u32
-) -> Result<(), BodyError> {
-    if(index < node.children.count) {
-        try(
-                write_expression(
-                    &mut *output,
-                    original,
-                    source,
-                    value,
-                    edge_at(value, node, index)
-                ),
-                @write_call_arguments
-            );
-            write_call_arguments(
-                 output,
-                original,
-                source,
-                value,
-                node,
-                index + 1
-            )
-    } else {
-        Result::Ok(())
     }
 }
 
@@ -2374,147 +2387,90 @@ write_node_name(
     }
 }
 
-write_children(
+write_children<'a>(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &super::lexer::LexedSource,
+    value: &ParsedBody,
+    children: Slice<'a, ExprEdge>
+) -> Result<(), BodyError> {
+    Slice::try_for_each(children, { edge =>
+        write_expression(
+            &mut *output,
+            original,
+            source,
+            value,
+            expression_edge_value(edge)
+        )
+    })
+}
+
+write_struct_fields<'a>(
     output: &mut ByteBuf,
     original: &String,
     source: &super::lexer::LexedSource,
     value: &ParsedBody,
     node: &ExprNode,
-    index: u32
+    fields: Slice<'a, ExprEdge>
 ) -> Result<(), BodyError> {
-    if(index < node.children.count) {
-        try(
-                write_expression(
-                    &mut *output,
-                    original,
-                    source,
-                    value,
-                    edge_at(value, node, index)
-                ),
-                @write_children
-            );
-            write_children(
-                 output,
+    Slice::try_for_each(fields, { edge =>
+        write_node_name(
+            &mut *output,
+            original,
+            source,
+            value,
+            node,
+            expression_edge_metadata(edge)
+        ) and {
+            write_expression(
+                &mut *output,
                 original,
                 source,
                 value,
-                node,
-                index + 1
+                expression_edge_value(edge)
             )
-    } else {
-        Result::Ok(())
-    }
+        }
+    })
 }
 
-write_struct_fields(
+write_block_statements<'a>(
     output: &mut ByteBuf,
     original: &String,
     source: &super::lexer::LexedSource,
     value: &ParsedBody,
-    node: &ExprNode,
-    index: u32
+    statements: Slice<'a, ExprEdge>
 ) -> Result<(), BodyError> {
-    if(index < node.children.count) {
-        try(
-                write_node_name(
+    Slice::try_for_each(statements, { statement =>
+        handle expression_edge_position(statement) {
+            1 => {
+                ByteBuf::push(&mut *output, 1);
+                let metadata = expression_edge_metadata(statement);
+                write_name_token(
                     &mut *output,
-                    original,
                     source,
-                    value,
-                    node,
-                    edge_metadata_at(value, node, index)
-                ),
-                @write_struct_fields
-            );
-            try(
-                write_expression(
-                    &mut *output,
-                    original,
-                    source,
-                    value,
-                    edge_at(value, node, index)
-                ),
-                @write_struct_fields
-            );
-            write_struct_fields(
-                 output,
-                original,
-                source,
-                value,
-                node,
-                index + 1
-            )
-    } else {
-        Result::Ok(())
-    }
-}
-
-write_block_statements(
-    output: &mut ByteBuf,
-    original: &String,
-    source: &super::lexer::LexedSource,
-    value: &ParsedBody,
-    node: &ExprNode,
-    index: u32
-) -> Result<(), BodyError> {
-    if(index < node.children.count) {
-        let statement = edge_position_at(value, node, index);
-            handle statement {
-                1 => {
-                    ByteBuf::push(&mut *output, 1);
-                    let metadata = edge_metadata_at(value, node, index);
-                    try(
-                        write_name_token(
-                            &mut *output,
-                            source,
-                            usize_from_u32(metadata - 1)
-                        ),
-                        @write_block_statements
-                    );
-                    try(
-                        write_expression(
-                            &mut *output,
-                            original,
-                            source,
-                            value,
-                            edge_at(value, node, index)
-                        ),
-                        @write_block_statements
-                    );
-                    write_block_statements(
-                         output,
+                    usize_from_u32(metadata - 1)
+                ) and {
+                    write_expression(
+                        &mut *output,
                         original,
                         source,
                         value,
-                        node,
-                        index + 1
-                    )
-                },
-                _ => {
-                    ByteBuf::push(&mut *output, 2);
-                    try(
-                        write_expression(
-                            &mut *output,
-                            original,
-                            source,
-                            value,
-                            edge_at(value, node, index)
-                        ),
-                        @write_block_statements
-                    );
-                    write_block_statements(
-                         output,
-                        original,
-                        source,
-                        value,
-                        node,
-                        index + 1
+                        expression_edge_value(statement)
                     )
                 }
+            },
+            _ => {
+                ByteBuf::push(&mut *output, 2);
+                write_expression(
+                            &mut *output,
+                            original,
+                            source,
+                            value,
+                    expression_edge_value(statement)
+                )
             }
-    } else {
-        Result::Ok(())
-    }
+        }
+    })
 }
 
 write_expression(
@@ -2525,6 +2481,7 @@ write_expression(
     id: ExprId
 ) -> Result<(), BodyError> {
     let node = Arena::index(&value.nodes, id);
+    let children = expression_edges(value, node);
     handle node.kind_code {
         1 => {
             ByteBuf::push(&mut *output, 1);
@@ -2564,7 +2521,7 @@ write_expression(
             original,
             source,
             value,
-            edge_at(value, node, 0)
+            expression_edge_value(edge_in_slice(children, 0))
         ),
         5 => {
             ByteBuf::push(&mut *output, 5);
@@ -2580,7 +2537,7 @@ write_expression(
                 original,
                 source,
                 value,
-                edge_at(value, node, 0)
+                expression_edge_value(edge_in_slice(children, 0))
             )
         },
         6 => {
@@ -2598,7 +2555,7 @@ write_expression(
                     original,
                     source,
                     value,
-                    edge_at(value, node, 0)
+                    expression_edge_value(edge_in_slice(children, 0))
                 ),
                 @write_expression
             );
@@ -2607,7 +2564,7 @@ write_expression(
                 original,
                 source,
                 value,
-                edge_at(value, node, 1)
+                expression_edge_value(edge_in_slice(children, 1))
             )
         },
         7 => {
@@ -2618,7 +2575,7 @@ write_expression(
                     original,
                     source,
                     value,
-                    edge_at(value, node, 0)
+                    expression_edge_value(edge_in_slice(children, 0))
                 ),
                 @write_expression
             );
@@ -2626,13 +2583,12 @@ write_expression(
                 &mut *output,
                 node.children.count - 1
             );
-            write_call_arguments(
+            write_children(
                  output,
                 original,
                 source,
                 value,
-                node,
-                1
+                edge_suffix(children, 1)
             )
         },
         8 => {
@@ -2643,14 +2599,13 @@ write_expression(
                 original,
                 source,
                 value,
-                node,
-                0
+                children
             )
         },
         9 => {
             ByteBuf::push(&mut *output, 9);
             ByteBuf::write_u32_le(&mut *output, node.children.count);
-            write_children(output, original, source, value, node, 0)
+            write_children(output, original, source, value, children)
         },
         10 => {
             ByteBuf::push(&mut *output, 10);
@@ -2675,7 +2630,7 @@ write_expression(
                 source,
                 value,
                 node,
-                0
+                children
             )
         },
         11 => {
@@ -2686,7 +2641,7 @@ write_expression(
                     original,
                     source,
                     value,
-                    edge_at(value, node, 0)
+                    expression_edge_value(edge_in_slice(children, 0))
                 ),
                 @write_expression
             );
