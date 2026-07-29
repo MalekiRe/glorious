@@ -210,6 +210,62 @@ fn initializer_inference_rejects_incompatible_later_uses() {
 }
 
 #[test]
+fn initializer_inference_follows_a_nested_generic_producer_into_its_consumer() {
+    let source = r#"
+        project<'a, T>(value: &'a T) -> &'a T { value }
+        consume(value: &Vec<usize>) -> () { value; () }
+
+        exercise() -> usize {
+            let values = Vec::new();
+            consume(project(&values));
+            Vec::len(&values)
+        }
+
+        main() -> () { exercise(); () }
+    "#;
+    compile_source_to_bytecode("nested-initializer-use.glorious", source).unwrap();
+}
+
+#[test]
+fn contradictory_nested_consumers_are_rejected_in_either_source_order() {
+    for (name, uses) in [
+        (
+            "nested-initializer-conflict-usize-first.glorious",
+            "consume_usize(project(&values)); consume_u64(project(&values));",
+        ),
+        (
+            "nested-initializer-conflict-u64-first.glorious",
+            "consume_u64(project(&values)); consume_usize(project(&values));",
+        ),
+    ] {
+        let source = format!(
+            r#"
+                project<'a, T>(value: &'a T) -> &'a T {{ value }}
+                consume_usize(value: &Vec<usize>) -> () {{ value; () }}
+                consume_u64(value: &Vec<u64>) -> () {{ value; () }}
+
+                exercise() -> () {{
+                    let values = Vec::new();
+                    {uses}
+                }}
+
+                main() -> () {{ () }}
+            "#
+        );
+        let errors = compile_source_to_bytecode(name, &source)
+            .expect_err("conflicting nested consumers selected a source-order-dependent type");
+        assert!(
+            errors.iter().any(|error| {
+                error.message.contains("ambiguous")
+                    || error.message.contains("expected")
+                    || error.message.contains("cannot infer")
+            }),
+            "{name}: {errors:#?}"
+        );
+    }
+}
+
+#[test]
 fn initializer_alias_survives_shadowing_of_the_original_name() {
     let source = r#"
         empty<T>() -> Vec<T> { Vec::new() }

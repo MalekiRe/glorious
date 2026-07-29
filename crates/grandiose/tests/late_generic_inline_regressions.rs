@@ -143,6 +143,33 @@ fn retained_monomorphic_std_wrapper_keeps_its_generic_specialization() {
 }
 
 #[test]
+fn phantom_index_tag_is_recovered_from_the_planned_result() {
+    let source = r#"
+        struct ExpressionTag {}
+        struct TypedFlags {
+            values: IndexVec<ExpressionTag, Bool>
+        }
+        typed_flags() -> TypedFlags {
+            let flags = TypedFlags { values: IndexVec::new() };
+            handle IndexVec::push(&mut flags.values, false) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(_) => flags
+            }
+        }
+        answer() -> usize {
+            let flags = typed_flags();
+            IndexVec::len(&flags.values)
+        }
+        main() -> () { () }
+    "#;
+
+    assert_eq!(
+        run("late-inline-phantom-index-tag.glorious", source, "answer"),
+        Value::U64(1)
+    );
+}
+
+#[test]
 fn exact_two_resumption_uses_are_consumed_transitively_by_a_generic_callee() {
     let source = r#"
         effect Pick { [2,2] choose() -> i64 }

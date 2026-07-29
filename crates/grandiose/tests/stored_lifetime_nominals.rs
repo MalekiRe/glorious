@@ -85,6 +85,69 @@ fn stored_shared_origin_survives_construction_forwarding_and_projection() {
 }
 
 #[test]
+fn lifetime_parameterized_enum_carries_and_iterates_a_borrowed_slice() {
+    let source = r#"
+        enum BorrowedItems<'a, T> {
+            Items(Slice<'a, T>)
+        }
+
+        borrow_items<'a, T>(
+            values: &'a Vec<T>
+        ) -> BorrowedItems<'a, T> {
+            BorrowedItems::Items(Vec::as_slice(values))
+        }
+
+        add_item(total: usize, item: &usize) -> usize {
+            total + *item
+        }
+
+        sum_items<'a>(
+            view: BorrowedItems<'a, usize>
+        ) -> usize {
+            handle view {
+                BorrowedItems::Items(items) =>
+                    Slice::fold(items, 0, add_item)
+            }
+        }
+
+        answer() -> usize {
+            let values = Vec::new();
+            Vec::push(&mut values, 2);
+            Vec::push(&mut values, 3);
+            Vec::push(&mut values, 5);
+            sum_items(borrow_items(&values))
+        }
+
+        main() -> () { () }
+    "#;
+
+    for optimization_level in [
+        OptimizationLevel::O1,
+        OptimizationLevel::O2,
+        OptimizationLevel::O3,
+    ] {
+        let artifact = compile_source_to_bytecode_with_options(
+            "stored-slice-enum.glorious",
+            source,
+            CompileOptions { optimization_level },
+        )
+        .unwrap_or_else(|errors| panic!("{optimization_level:?}: {errors:#?}"));
+        let answer = artifact
+            .functions
+            .iter()
+            .position(|function| function.name == "answer")
+            .unwrap() as u32;
+        assert_eq!(
+            Vm::new(verify(artifact).unwrap())
+                .run(answer, vec![])
+                .unwrap(),
+            Value::U64(10),
+            "{optimization_level:?}"
+        );
+    }
+}
+
+#[test]
 fn private_stored_reference_cannot_be_projected_outside_its_authority_domain() {
     let bundle = SourceBundle::new(
         Segment::new("views.glorious", "struct View<'a,T>{private base:&'a T}\n"),

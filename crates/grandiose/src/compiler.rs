@@ -1374,6 +1374,12 @@ struct TransparentFinalUseLimit {
     allowed: BTreeSet<(String, usize, usize)>,
 }
 
+#[derive(Clone)]
+enum LateInlineLetExpectation {
+    Fixed(TypeId),
+    Binder(String),
+}
+
 struct CoreLowerer<'a> {
     program: &'a Program,
     nominal_ids: &'a BTreeMap<&'a str, TypeId>,
@@ -1474,6 +1480,11 @@ struct CoreLowerer<'a> {
     /// state for observational `is` decisions.
     defer_branch_region_ends: u32,
     late_inline_stack: BTreeSet<String>,
+    /// Expected types for argument-evaluation lets synthesized while a late
+    /// generic call is control-inlined. Source spans uniquely identify those
+    /// synthetic lets without imposing their context on user-written lets.
+    late_inline_let_expectations: BTreeMap<(usize, usize), LateInlineLetExpectation>,
+    late_inline_type_substitutions: BTreeMap<String, TypeId>,
     /// Lexically active direct destinations, keyed by source spelling. The
     /// value carries the allocation-independent typeck brand into Core.
     active_labels: BTreeMap<String, ActiveCoreLabel>,
@@ -10759,14 +10770,7 @@ pub(crate) fn normalize_ground_trait_methods(
                         if path.len() == 2
                             && matches!(
                                 path[0].as_ref(),
-                                "Add"
-                                    | "Subtract"
-                                    | "Multiply"
-                                    | "Divide"
-                                    | "Remainder"
-                                    | "Equal"
-                                    | "Less"
-                                    | "Greater"
+                                "Add" | "Subtract" | "Multiply" | "Divide" | "Remainder"
                             ) =>
                     {
                         args.iter()
@@ -10780,6 +10784,21 @@ pub(crate) fn normalize_ground_trait_methods(
                                 }
                             })
                             .or_else(|| expected.cloned())
+                    }
+                    ExprKind::Variable(path)
+                        if path.len() == 2
+                            && matches!(path[0].as_ref(), "Equal" | "Less" | "Greater") =>
+                    {
+                        args.iter()
+                            .filter(|argument| !two_phase_contextual_numeric_literal(argument))
+                            .find_map(|argument| match &argument.kind {
+                                ExprKind::Variable(path) if path.len() == 1 => {
+                                    locals.get(path[0].as_ref()).cloned()
+                                }
+                                _ => {
+                                    concrete_call_result(program, argument, trusted_standard_range)
+                                }
+                            })
                     }
                     _ => None,
                 };
@@ -24125,6 +24144,8 @@ impl<'a> CoreLowerer<'a> {
                 current_point: 0,
                 defer_branch_region_ends: 0,
                 late_inline_stack: BTreeSet::new(),
+                late_inline_let_expectations: BTreeMap::new(),
+                late_inline_type_substitutions: BTreeMap::new(),
                 active_labels: BTreeMap::new(),
                 static_labels: BTreeMap::new(),
                 static_closures: BTreeMap::new(),
@@ -24315,6 +24336,8 @@ impl<'a> CoreLowerer<'a> {
                 current_point: 0,
                 defer_branch_region_ends: 0,
                 late_inline_stack: BTreeSet::new(),
+                late_inline_let_expectations: BTreeMap::new(),
+                late_inline_type_substitutions: BTreeMap::new(),
                 active_labels: BTreeMap::new(),
                 static_labels: BTreeMap::new(),
                 static_closures: BTreeMap::new(),
@@ -26032,6 +26055,24 @@ impl<'a> CoreLowerer<'a> {
                 _ => self.static_closure_argument(argument),
             })
             .collect::<Vec<_>>();
+        let parameter_expectations = function
+            .params
+            .iter()
+            .map(|parameter| {
+                if let Some(binder) = parameter
+                    .ty
+                    .simple_name()
+                    .filter(|binder| generic_binders.contains(*binder))
+                {
+                    Some(LateInlineLetExpectation::Binder(format!(
+                        "{name}::{binder}"
+                    )))
+                } else {
+                    self.ground_source_type(&parameter.ty)
+                        .map(LateInlineLetExpectation::Fixed)
+                }
+            })
+            .collect::<Vec<_>>();
         let can_bind_directly = function.params.iter().enumerate().all(|(index, param)| {
             arguments
                 .iter()
@@ -26039,10 +26080,14 @@ impl<'a> CoreLowerer<'a> {
                 .all(|argument| !expression_mentions_name(argument, &param.name))
         });
         let mut statements = Vec::with_capacity(arguments.len() * 2 + 1);
+        let mut let_expectations = Vec::new();
         if can_bind_directly {
             for (index, (param, argument)) in function.params.iter().zip(arguments).enumerate() {
                 if label_arguments[index].is_some() || closure_arguments[index].is_some() {
                     continue;
+                }
+                if let Some(expected) = parameter_expectations[index].clone() {
+                    let_expectations.push((param.span, expected));
                 }
                 statements.push(Stmt::Let {
                     name: param.name.clone(),
@@ -26054,6 +26099,9 @@ impl<'a> CoreLowerer<'a> {
             for (index, argument) in arguments.iter().enumerate() {
                 if label_arguments[index].is_some() || closure_arguments[index].is_some() {
                     continue;
+                }
+                if let Some(expected) = parameter_expectations[index].clone() {
+                    let_expectations.push((argument.span, expected));
                 }
                 statements.push(Stmt::Let {
                     name: format!("$late_arg_{index}"),
@@ -26108,7 +26156,36 @@ impl<'a> CoreLowerer<'a> {
                 self.static_closures.insert(param.name.clone(), closure),
             ));
         }
+        let mut previous_let_expectations = Vec::with_capacity(let_expectations.len());
+        for (span, expected) in let_expectations {
+            let key = (span.start, span.end);
+            previous_let_expectations
+                .push((key, self.late_inline_let_expectations.insert(key, expected)));
+        }
+        let mut previous_type_substitutions = Vec::with_capacity(generic_binders.len());
+        for binder in &generic_binders {
+            let key = format!("{name}::{binder}");
+            let previous = self.late_inline_type_substitutions.get(&key).copied();
+            if let Some(ty) = substitutions.get(binder) {
+                self.late_inline_type_substitutions.insert(key.clone(), *ty);
+            }
+            previous_type_substitutions.push((key, previous));
+        }
         let result = self.block(&statements, span, expected);
+        for (key, previous) in previous_type_substitutions.into_iter().rev() {
+            if let Some(previous) = previous {
+                self.late_inline_type_substitutions.insert(key, previous);
+            } else {
+                self.late_inline_type_substitutions.remove(&key);
+            }
+        }
+        for (key, previous) in previous_let_expectations.into_iter().rev() {
+            if let Some(previous) = previous {
+                self.late_inline_let_expectations.insert(key, previous);
+            } else {
+                self.late_inline_let_expectations.remove(&key);
+            }
+        }
         for (name, previous) in previous_closures.into_iter().rev() {
             if let Some(previous) = previous {
                 self.static_closures.insert(name, previous);
@@ -29874,6 +29951,12 @@ impl<'a> CoreLowerer<'a> {
                 self.locals.get(path[0].as_ref()).map(|local| local.ty)
             }
             ExprKind::Move(value) => self.static_local_expression_type(value),
+            ExprKind::Unary {
+                op: UnaryOp::Dereference,
+                operand,
+            } => self
+                .static_local_expression_type(operand)
+                .and_then(|ty| self.reference_referent(ty)),
             ExprKind::Field(value, field) => {
                 let mut ty = self.static_local_expression_type(value)?;
                 if let Some(referent) = self.reference_referent(ty) {
@@ -37352,10 +37435,28 @@ impl<'a> CoreLowerer<'a> {
                     // both unique and shared-reference consumers; choosing the
                     // first later consumer would incorrectly weaken the
                     // initializer itself to a shared reference.
-                    let expected = self.handler_result_hint(value).or_else(|| {
-                        self.later_binding_expected_type(name, &statements[index + 1..])
-                    });
+                    let late_expectation = self
+                        .late_inline_let_expectations
+                        .get(&(span.start, span.end))
+                        .cloned();
+                    let expected = late_expectation
+                        .as_ref()
+                        .and_then(|expectation| match expectation {
+                            LateInlineLetExpectation::Fixed(ty) => Some(*ty),
+                            LateInlineLetExpectation::Binder(binder) => {
+                                self.late_inline_type_substitutions.get(binder).copied()
+                            }
+                        })
+                        .or_else(|| self.handler_result_hint(value))
+                        .or_else(|| {
+                            self.later_binding_expected_type(name, &statements[index + 1..])
+                        });
                     let value = self.expression(value, expected)?;
+                    if let Some(LateInlineLetExpectation::Binder(binder)) = late_expectation {
+                        self.late_inline_type_substitutions
+                            .entry(binder)
+                            .or_insert(value.ty);
+                    }
                     let local = self.next_local;
                     self.next_local += 1;
                     let mut owns_loan = matches!(

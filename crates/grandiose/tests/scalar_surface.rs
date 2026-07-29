@@ -94,6 +94,39 @@ fn value(ty: &str, raw: u128) -> Value {
 }
 
 #[test]
+fn generic_integer_wrapper_contextualizes_a_literal_from_a_nested_typed_argument() {
+    let source = r#"
+        bits() -> u32 { 0b101101 }
+        answer() -> u32 { bit_and(bits(), 0b001111) }
+        comparison() -> Bool {
+            __g1_integer_equal(bit_and(bits(), 0b001111), 0b001101)
+        }
+        main() -> { () }
+    "#;
+    let phases = compile_source_to_phases_with_options(
+        "generic-integer-wrapper-context.glorious",
+        source,
+        CompileOptions {
+            optimization_level: OptimizationLevel::O3,
+        },
+    )
+    .unwrap();
+    let verified = verify(phases.artifact.clone()).unwrap();
+    assert_eq!(
+        Vm::new(verified.clone())
+            .run(function_id(&phases.artifact, "answer"), vec![])
+            .unwrap(),
+        Value::U64(0b001101)
+    );
+    let comparison = function_id(&phases.artifact, "comparison");
+    let bool_type = phases.artifact.functions[comparison as usize].return_type;
+    assert_eq!(
+        Vm::new(verified).run(comparison, vec![]).unwrap(),
+        Value::aggregate_with_variant(bool_type, Some(0), [Value::Unit])
+    );
+}
+
+#[test]
 fn frozen_integer_surface_executes_all_widths_at_o1_through_o3() {
     for level in [
         OptimizationLevel::O1,

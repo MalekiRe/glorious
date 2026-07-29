@@ -3293,6 +3293,16 @@ impl<'a> Walker<'a> {
         arguments: &[Expr],
         binding: &str,
     ) -> Option<ProvisionalType> {
+        self.generic_call_binding_expected_with_result(callee, arguments, binding, None)
+    }
+
+    fn generic_call_binding_expected_with_result(
+        &self,
+        callee: &Expr,
+        arguments: &[Expr],
+        binding: &str,
+        expected_result: Option<&ProvisionalType>,
+    ) -> Option<ProvisionalType> {
         let ExprKind::Variable(path) = &callee.kind else {
             return None;
         };
@@ -3317,6 +3327,12 @@ impl<'a> Walker<'a> {
             .cloned()
             .collect::<BTreeSet<_>>();
         let mut substitutions = BTreeMap::new();
+        if let Some(expected_result) = expected_result {
+            let mut trial = substitutions.clone();
+            if unify_inference(&template.result, expected_result, &mutable, &mut trial) {
+                substitutions = trial;
+            }
+        }
         for (argument, formal) in arguments.iter().zip(&template.params) {
             if let Some((actual, false)) = self.obvious_argument_type(argument) {
                 let mut trial = substitutions.clone();
@@ -3337,7 +3353,7 @@ impl<'a> Walker<'a> {
                     ExprKind::Move(value) => value.as_ref(),
                     _ => argument,
                 };
-                match (&argument.kind, formal) {
+                match (&argument.kind, &formal) {
                     (
                         ExprKind::Unary {
                             op: UnaryOp::BorrowShared,
@@ -3351,8 +3367,15 @@ impl<'a> Walker<'a> {
                             operand,
                         },
                         ProvisionalType::Unique(referent),
-                    ) if named_binding(operand) => Some(*referent),
-                    (_, formal) if named_binding(argument) => Some(formal),
+                    ) if named_binding(operand) => Some((**referent).clone()),
+                    (_, formal) if named_binding(argument) => Some(formal.clone()),
+                    (ExprKind::Call(nested_callee, nested_arguments), formal) => self
+                        .generic_call_binding_expected_with_result(
+                            nested_callee,
+                            nested_arguments,
+                            binding,
+                            Some(formal),
+                        ),
                     _ => None,
                 }
             })
@@ -6844,12 +6867,14 @@ impl<'a> Walker<'a> {
                 closures.insert(closure);
             } else {
                 let contextual_formal = substitute(formal, &substitutions);
-                let mut actual = self.expression(
-                    argument,
-                    contextual_formal
-                        .as_ref()
-                        .filter(|formal| self.symbolic_validation || ground(formal)),
-                )?;
+                let contextual_formal = contextual_formal
+                    .as_ref()
+                    .filter(|formal| self.symbolic_validation || ground(formal));
+                let mut actual = self.expression(argument, contextual_formal).or_else(|| {
+                    self.may_use_bidirectional_result_fallback(argument)
+                        .then(|| contextual_formal.cloned())
+                        .flatten()
+                })?;
                 // Call-site reference elaboration reborrows a unique handle
                 // and may demote it to a shared reference. Discovery must use
                 // that same effective argument type or an enclosing generic
@@ -7457,13 +7482,20 @@ impl<'a> Walker<'a> {
                     let sibling_context = sibling_context.flatten();
                     let nominal_context = self.structural_else_nominal_context(positive, negative);
                     let obvious_context = self.structural_else_obvious_context(positive, negative);
+                    let numeric_expected = expected.filter(|expected| {
+                        matches!(expected, ProvisionalType::Predefined(name)
+                            if matches!(name.as_str(),
+                                "f32" | "f64"
+                                | "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+                                | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"))
+                    });
                     let branch_expected = if self.symbolic_validation
                         && expected.is_some_and(|expected| !ground(expected))
                     {
                         expected
                     } else {
-                        sibling_context
-                            .as_ref()
+                        numeric_expected
+                            .or(sibling_context.as_ref())
                             .or(nominal_context.as_ref())
                             .or(obvious_context.as_ref())
                             .or(expected)
