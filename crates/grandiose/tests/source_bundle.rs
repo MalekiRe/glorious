@@ -922,6 +922,41 @@ fn vec_get_mut_returned_loan_blocks_parent_mutation_until_consumed() {
 }
 
 #[test]
+fn option_unique_loan_is_absent_on_the_err_refinement_edge() {
+    let source = r#"
+        empty_i64() -> Vec<i64> { Vec::new() }
+        recover() -> usize {
+            let values = empty_i64();
+            handle Vec::get_mut(&mut values, 0) {
+                Result::Err(_) => {
+                    Vec::push(&mut values, 7);
+                    Vec::len(&values)
+                },
+                Result::Ok(value) => {
+                    *value = 8;
+                    0
+                }
+            }
+        }
+        main() -> () { () }
+    "#;
+    let phases = compile_source_to_phases("option-unique-loan-err-edge.glorious", source)
+        .expect("Err refinement must retire an impossible returned unique-reference loan");
+    let function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "recover")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact).unwrap())
+            .run(function, vec![])
+            .unwrap(),
+        VmValue::U64(1)
+    );
+}
+
+#[test]
 fn vec_pop_transfers_an_exact_linear_element_obligation() {
     let source = r#"
         struct Ticket { serial: i64 }

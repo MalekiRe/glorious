@@ -33049,6 +33049,74 @@ impl<'a> CoreLowerer<'a> {
 
                     let mut bindings = Vec::new();
                     let subject_reference_fields = Self::expression_reference_fields(&subject);
+                    let owned_handle_subject = match &subject.kind {
+                        core::ExprKind::Local { local, .. } => self.locals.iter().any(
+                            |(name, binding)| {
+                                binding.local == *local
+                                    && binding.owns_loan
+                                    && name.starts_with("$handle$result$")
+                            },
+                        ),
+                        _ => false,
+                    };
+                    // An enum decision proves that reference leaves stored in
+                    // every other variant cannot exist on its positive edge.
+                    // Retire those impossible loans before lowering the arm,
+                    // so an `Err` arm may immediately mutate the container
+                    // whose `Ok` payload would have held `&mut` into it.
+                    //
+                    // One origin may be listed under several mutually
+                    // exclusive result paths.  Release by origin only when no
+                    // path for that origin remains possible on this edge.
+                    let (positive_impossible_origins, negative_impossible_origins) =
+                        if owned_handle_subject
+                            && let core::DecisionPatternKind::Variant { variant, fields } =
+                                &decision.kind
+                        {
+                            let prefix = u32::MAX - *variant;
+                            let possible = |positive: bool| {
+                                subject_reference_fields
+                                    .iter()
+                                    .filter(|(path, _)| {
+                                        path.first().is_some_and(|head| (*head == prefix) == positive)
+                                    })
+                                    .map(|(_, origin)| origin.clone())
+                                    .collect::<Vec<_>>()
+                            };
+                            let all = subject_reference_fields
+                                .values()
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            let positive_possible = possible(true);
+                            let negative_possible = possible(false);
+                            let impossible = |possible: &[core::ReferenceOrigin]| {
+                                let mut result = Vec::new();
+                                for origin in &all {
+                                    if !possible.contains(origin) && !result.contains(origin) {
+                                        result.push(origin.clone());
+                                    }
+                                }
+                                result
+                            };
+                            let fields_irrefutable = fields.iter().all(|field| {
+                                matches!(
+                                    field.kind,
+                                    core::DecisionPatternKind::Binding { .. }
+                                        | core::DecisionPatternKind::Wildcard
+                                )
+                            });
+                            (
+                                impossible(&positive_possible),
+                                fields_irrefutable
+                                    .then(|| impossible(&negative_possible))
+                                    .unwrap_or_default(),
+                            )
+                        } else {
+                            (Vec::new(), Vec::new())
+                        };
+                    for origin in &positive_impossible_origins {
+                        self.release_loan(origin.clone());
+                    }
                     self.install_decision_bindings(
                         &decision,
                         &mut Vec::new(),
@@ -33076,6 +33144,22 @@ impl<'a> CoreLowerer<'a> {
                     let positive = self.expression(positive_source, branch_expected);
                     self.branch_final_use_scopes.pop();
                     let positive = positive?;
+                    if owned_handle_subject && consuming_subject {
+                        let retained = Self::expression_reference_fields(&positive)
+                            .into_values()
+                            .collect::<Vec<_>>();
+                        let mut subject_origins = Vec::new();
+                        for origin in subject_reference_fields.values() {
+                            if !subject_origins.contains(origin) {
+                                subject_origins.push(origin.clone());
+                            }
+                        }
+                        for origin in subject_origins {
+                            if !retained.contains(&origin) {
+                                self.release_loan(origin);
+                            }
+                        }
+                    }
                     let mut positive_moved = self.moved.clone();
                     let mut positive_moved_paths = self.moved_paths.clone();
                     let positive_empty_referents = self.empty_referents.clone();
@@ -33098,6 +33182,9 @@ impl<'a> CoreLowerer<'a> {
                     self.actual_uses = negative_actual_uses;
                     self.actual_use_lowers = negative_actual_use_lowers;
                     self.active_variant_proofs = baseline_active_variant_proofs.clone();
+                    for origin in &negative_impossible_origins {
+                        self.release_loan(origin.clone());
+                    }
                     let mut negative_variant = None;
                     if let Some((local, excluded_variant)) = refined_variant
                         && let Some(info) =
@@ -33339,8 +33426,14 @@ impl<'a> CoreLowerer<'a> {
                     let suspended_shape_matches = positive_suspended
                         .symmetric_difference(&self.suspended)
                         .all(|local| result_parents.contains(local));
-                    let unique_suspended_shape_matches =
-                        positive_uniquely_suspended == self.uniquely_suspended;
+                    let unique_result_parents = joined_result_references
+                        .values()
+                        .filter(|origin| origin.unique)
+                        .filter_map(|origin| origin.parent)
+                        .collect::<BTreeSet<_>>();
+                    let unique_suspended_shape_matches = positive_uniquely_suspended
+                        .symmetric_difference(&self.uniquely_suspended)
+                        .all(|local| unique_result_parents.contains(local));
                     let ownership_shape_matches = !result_reference_conflict
                         && suspended_shape_matches
                         && unique_suspended_shape_matches
