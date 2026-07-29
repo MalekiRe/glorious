@@ -169,7 +169,7 @@ struct CheckedRangeWords { start: u32, count: u32 }
 
 impl Use<[0, *]> for CheckedRangeWords {}
 
-enum ConstructionFlavor {
+pub enum ConstructionFlavor {
     Product,
     Variant(u32)
 }
@@ -189,7 +189,7 @@ struct CoreComputation { ty: TypeId, kind: CoreComputationKind }
 
 impl Use<[0, *]> for CoreComputation {}
 
-struct ConstructionField { field: u32, value: CoreValueId }
+pub struct ConstructionField { field: u32, value: CoreValueId }
 
 impl Use<[0, *]> for ConstructionField {}
 
@@ -244,23 +244,23 @@ pub struct InterfaceFieldView { name: u32, ty: u32 }
 impl Use<[0, *]> for InterfaceFieldView {}
 
 pub enum CoreValueView {
-    Unit(u32),
-    Integer(u32, u32),
-    Local(u32, u32, Bool),
-    Projection(u32, u32, u32),
-    Embedded(u32, u32)
+    Unit(TypeId),
+    Integer(TypeId, IntegerConstantId),
+    Local(TypeId, CoreLocalId, Bool),
+    Projection(TypeId, CoreValueId, u32),
+    Embedded(TypeId, CoreComputationId)
 }
 
 impl Use<[0, *]> for CoreValueView {}
 
-pub enum CoreComputationView {
-    Pure(u32, u32),
-    Let(u32, u32, u32, u32),
-    Call(u32, u32, u32, u32),
-    Construct(u32, u32, u32, u32)
+pub enum CoreComputationView<'a> {
+    Pure(TypeId, CoreValueId),
+    Let(TypeId, CoreLocalId, CoreComputationId, CoreComputationId),
+    Call(TypeId, u32, Slice<'a, CoreValueId>),
+    Construct(TypeId, ConstructionFlavor, Slice<'a, ConstructionField>)
 }
 
-impl Use<[0, *]> for CoreComputationView {}
+impl<'a> Use<[0, *]> for CoreComputationView<'a> {}
 
 pub struct IntegerConstantView {
     low0: u32,
@@ -910,43 +910,27 @@ pub interface_callable_for_shell(
 
 pub typed_body_shell(value: &TypedBody) -> u32 { value.shell }
 
-pub typed_body_result_type(value: &TypedBody) -> u32 {
-    Id::to_u32(value.result_type)
-}
+pub typed_body_result_type(value: &TypedBody) -> TypeId { value.result_type }
 
-pub typed_body_root(value: &TypedBody) -> u32 { Id::to_u32(value.root) }
+pub typed_body_root(value: &TypedBody) -> CoreComputationId { value.root }
 
 pub typed_body_local_count(value: &TypedBody) -> usize {
     IndexVec::len(&value.local_types)
 }
 
-pub typed_body_local_type_at(value: &TypedBody, index: usize) -> u32 {
-    Id::to_u32(*IndexVec::index(
-        &value.local_types,
-        core_local_id_from_usize(index)
-    ))
-}
-
-pub typed_body_value_count(value: &TypedBody) -> usize {
-    Arena::len(&value.values)
-}
-
 pub typed_body_value_at(
     value: &TypedBody,
-    index: usize
+    id: CoreValueId
 ) -> CoreValueView {
-    let node = core_value_at(
-        &value.values,
-        core_value_id_from_usize(index)
-    );
-    let ty = Id::to_u32(node.ty);
+    let node = core_value_at(&value.values, id);
+    let ty = node.ty;
     handle node.kind {
         CoreValueKind::Unit => CoreValueView::Unit(ty),
         CoreValueKind::Integer(constant) =>
-            CoreValueView::Integer(ty, Id::to_u32(constant)),
+            CoreValueView::Integer(ty, constant),
         CoreValueKind::Local(local, access) => CoreValueView::Local(
             ty,
-            Id::to_u32(local),
+            local,
             handle access {
                 CoreLocalAccess::Move => false,
                 CoreLocalAccess::Copy => true
@@ -955,164 +939,88 @@ pub typed_body_value_at(
         CoreValueKind::Projection(source, field) =>
             CoreValueView::Projection(
                 ty,
-                Id::to_u32(source),
+                source,
                 field
             ),
         CoreValueKind::Embedded(computation) =>
-            CoreValueView::Embedded(ty, Id::to_u32(computation))
+            CoreValueView::Embedded(ty, computation)
     }
 }
 
-pub typed_body_value_word_at(
-    value: &TypedBody,
-    index: usize,
-    word: usize
-) -> u32 {
-    let id = core_value_id_from_usize(index);
-    let node = core_value_at(&value.values, id);
-    handle word {
-        0 => handle node.kind {
-            CoreValueKind::Unit => 1,
-            CoreValueKind::Integer(_) => 2,
-            CoreValueKind::Local(_, _) => 3,
-            CoreValueKind::Projection(_, _) => 4,
-            CoreValueKind::Embedded(_) => 5
-        },
-        1 => Id::to_u32(node.ty),
-        2 => handle node.kind {
-            CoreValueKind::Unit => 0,
-            CoreValueKind::Integer(found) => Id::to_u32(found),
-            CoreValueKind::Local(found, _) => Id::to_u32(found),
-            CoreValueKind::Projection(found, _) => Id::to_u32(found),
-            CoreValueKind::Embedded(found) => Id::to_u32(found)
-        },
-        3 => handle node.kind {
-            CoreValueKind::Local(_, access) => handle access {
-                CoreLocalAccess::Move => 0,
-                CoreLocalAccess::Copy => 1
-            },
-            CoreValueKind::Projection(_, field) => field,
-            _ => 0
-        },
-        _ => unreachable()
+typed_body_operands<'a>(
+    value: &'a TypedBody,
+    range: OperandRange
+) -> Slice<'a, CoreValueId> {
+    handle Slice::subslice(
+        Vec::as_slice(&value.operands),
+        usize_from_u32(range.start),
+        usize_from_u32(range.count)
+    ) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
     }
 }
 
-pub typed_body_computation_count(value: &TypedBody) -> usize {
-    Arena::len(&value.computations)
+typed_body_construction_fields<'a>(
+    value: &'a TypedBody,
+    range: ConstructionFieldRange
+) -> Slice<'a, ConstructionField> {
+    handle Slice::subslice(
+        Vec::as_slice(&value.construction_fields),
+        usize_from_u32(range.start),
+        usize_from_u32(range.count)
+    ) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
 }
 
-pub typed_body_computation_at(
-    value: &TypedBody,
-    index: usize
-) -> CoreComputationView {
-    let node = core_computation_at(
-        &value.computations,
-        core_computation_id_from_usize(index)
-    );
-    let ty = Id::to_u32(node.ty);
+pub typed_body_computation_at<'a>(
+    value: &'a TypedBody,
+    id: CoreComputationId
+) -> CoreComputationView<'a> {
+    let node = core_computation_at(&value.computations, id);
+    let ty = node.ty;
     handle node.kind {
         CoreComputationKind::Pure(found) =>
-            CoreComputationView::Pure(ty, Id::to_u32(found)),
+            CoreComputationView::Pure(ty, found),
         CoreComputationKind::Let(local, initializer, remainder) =>
             CoreComputationView::Let(
                 ty,
-                Id::to_u32(local),
-                Id::to_u32(initializer),
-                Id::to_u32(remainder)
+                local,
+                initializer,
+                remainder
             ),
         CoreComputationKind::Call(shell, range) =>
             CoreComputationView::Call(
                 ty,
                 shell,
-                range.start,
-                range.count
+                typed_body_operands(value, range)
             ),
         CoreComputationKind::Construct(flavor, range) =>
             CoreComputationView::Construct(
                 ty,
-                construction_flavor_word(flavor),
-                range.start,
-                range.count
+                flavor,
+                typed_body_construction_fields(value, range)
             )
     }
 }
 
-pub typed_body_computation_word_at(
-    value: &TypedBody,
-    index: usize,
-    word: usize
-) -> u32 {
-    let id = core_computation_id_from_usize(index);
-    let node = core_computation_at(&value.computations, id);
-    handle word {
-        0 => handle node.kind {
-            CoreComputationKind::Pure(_) => 1,
-            CoreComputationKind::Let(_, _, _) => 2,
-            CoreComputationKind::Call(_, _) => 3,
-            CoreComputationKind::Construct(_, _) => 4
-        },
-        1 => Id::to_u32(node.ty),
-        2 => handle node.kind {
-            CoreComputationKind::Pure(found) => Id::to_u32(found),
-            CoreComputationKind::Let(found, _, _) => Id::to_u32(found),
-            CoreComputationKind::Call(shell, _) => shell,
-            CoreComputationKind::Construct(flavor, _) =>
-                construction_flavor_word(flavor)
-        },
-        3 => handle node.kind {
-            CoreComputationKind::Let(_, found, _) => Id::to_u32(found),
-            CoreComputationKind::Call(_, range) => range.start,
-            CoreComputationKind::Construct(_, range) => range.start,
-            _ => 0
-        },
-        4 => handle node.kind {
-            CoreComputationKind::Let(_, _, found) => Id::to_u32(found),
-            CoreComputationKind::Call(_, range) => range.count,
-            CoreComputationKind::Construct(_, range) => range.count,
-            _ => 0
-        },
-        _ => unreachable()
-    }
+pub construction_field_ordinal(value: &ConstructionField) -> u32 {
+    value.field
 }
 
-pub typed_body_operand_count(value: &TypedBody) -> usize {
-    Vec::len(&value.operands)
-}
-
-pub typed_body_operand_at(value: &TypedBody, index: usize) -> u32 {
-    Id::to_u32(*Vec::index(&value.operands, index))
-}
-
-pub typed_body_construction_field_count(value: &TypedBody) -> usize {
-    Vec::len(&value.construction_fields)
-}
-
-pub typed_body_construction_field_word_at(
-    value: &TypedBody,
-    index: usize,
-    word: usize
-) -> u32 {
-    let found = construction_field_at(&value.construction_fields, index);
-    handle word {
-        0 => found.field,
-        1 => Id::to_u32(found.value),
-        _ => unreachable()
-    }
-}
-
-pub typed_body_integer_constant_count(value: &TypedBody) -> usize {
-    Arena::len(&value.integer_constants)
+pub construction_field_value(
+    value: &ConstructionField
+) -> CoreValueId {
+    value.value
 }
 
 pub typed_body_integer_constant_at(
     value: &TypedBody,
-    index: usize
+    id: IntegerConstantId
 ) -> IntegerConstantView {
-    let found = integer_constant_at(
-        &value.integer_constants,
-        integer_constant_id_from_usize(index)
-    );
+    let found = integer_constant_at(&value.integer_constants, id);
     IntegerConstantView {
         low0: found.low0,
         low1: found.low1,

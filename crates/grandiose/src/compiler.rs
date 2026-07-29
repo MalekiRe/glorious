@@ -1755,23 +1755,31 @@ fn region_aggregate_reference_plan(
         return None;
     };
     let result_paths = artifact_reference_paths(artifact, signature.result);
-    let [result_path] = result_paths.as_slice() else {
+    if result_paths.is_empty() {
         return None;
-    };
-    let source_paths = signature
-        .params
-        .get(*parameter)
-        .map(|ty| region_source_reference_paths(artifact, *ty, signature.result, result_path))?;
-    let [source_path] = source_paths.as_slice() else {
-        return None;
-    };
-    Some(vec![ReferenceReturnRoute {
-        result_prefix: result_path.clone(),
-        source: ReferenceLeafSource {
-            parameter: *parameter,
-            path: source_path.clone(),
-        },
-    }])
+    }
+    let parameter_type = *signature.params.get(*parameter)?;
+    result_paths
+        .into_iter()
+        .map(|result_path| {
+            let source_paths = region_source_reference_paths(
+                artifact,
+                parameter_type,
+                signature.result,
+                &result_path,
+            );
+            let [source_path] = source_paths.as_slice() else {
+                return None;
+            };
+            Some(ReferenceReturnRoute {
+                result_prefix: result_path,
+                source: ReferenceLeafSource {
+                    parameter: *parameter,
+                    path: source_path.clone(),
+                },
+            })
+        })
+        .collect()
 }
 
 fn compose_reference_routes(
@@ -7773,12 +7781,10 @@ fn compile_program_with_phases(
     );
     // Structural syntax recovery intentionally fails closed across handlers,
     // because a handler body and its clauses are separate generated
-    // callables. An explicit lifetime contract still provides an exact route
-    // when precisely one parameter region can supply a single reference leaf
-    // in the result. Materialize that route at the fully concrete artifact
-    // boundary so aggregate wrappers such as `Option<&'a V>` retain the
-    // result-leaf prefix instead of becoming ambiguous with unrelated shared
-    // reference parameters.
+    // callables. An explicit lifetime contract can still provide exact routes
+    // when one parameter region uniquely supplies every reference leaf in the
+    // result. Materialize those routes at the concrete artifact boundary so
+    // variant-dependent borrowed views retain their distinct source fields.
     for signature in signatures.values().chain(generated_signatures.values()) {
         if emitted_reference_return_plans
             .get(&signature.id)
@@ -7791,42 +7797,9 @@ fn compile_program_with_phases(
         {
             continue;
         }
-        let suppliers = signature
-            .region_contract
-            .param_regions
-            .iter()
-            .enumerate()
-            .filter_map(|(parameter, region)| {
-                region
-                    .is_some_and(|region| signature.region_contract.permits_region(region))
-                    .then_some(parameter)
-            })
-            .collect::<Vec<_>>();
-        let [parameter] = suppliers.as_slice() else {
-            continue;
-        };
-        let result_paths = artifact_reference_paths(&artifact, signature.result);
-        let [result_path] = result_paths.as_slice() else {
-            continue;
-        };
-        let source_paths = signature
-            .params
-            .get(*parameter)
-            .map(|ty| region_source_reference_paths(&artifact, *ty, signature.result, result_path))
-            .unwrap_or_default();
-        let [source_path] = source_paths.as_slice() else {
-            continue;
-        };
-        emitted_reference_return_plans.insert(
-            signature.id,
-            vec![ReferenceReturnRoute {
-                result_prefix: result_path.clone(),
-                source: ReferenceLeafSource {
-                    parameter: *parameter,
-                    path: source_path.clone(),
-                },
-            }],
-        );
+        if let Some(plan) = region_aggregate_reference_plan(&artifact, signature) {
+            emitted_reference_return_plans.insert(signature.id, plan);
+        }
     }
     artifact.reference_return_contracts = emitted_reference_return_plans
         .iter()

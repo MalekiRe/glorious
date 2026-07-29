@@ -5,9 +5,16 @@
 // writer canonicalizes the shared constant and operand tables afterwards.
 
 use super::super::frontend::elaboration::CoreComputationView;
+use super::super::frontend::elaboration::CoreComputationId;
+use super::super::frontend::elaboration::CoreLocalId;
 use super::super::frontend::elaboration::CoreValueView;
+use super::super::frontend::elaboration::CoreValueId;
+use super::super::frontend::elaboration::ConstructionField;
+use super::super::frontend::elaboration::ConstructionFlavor;
+use super::super::frontend::elaboration::IntegerConstantId;
 use super::super::frontend::elaboration::InterfaceNominalView;
 use super::super::frontend::elaboration::InterfaceTypeView;
+use super::super::frontend::elaboration::TypeId;
 
 pub struct RegisterTag {}
 pub type RegisterId = Id<RegisterTag>;
@@ -465,21 +472,22 @@ scalar_width(type_id: u32) -> Option<usize> {
 
 constant_key(
     body: &super::super::frontend::elaboration::TypedBody,
-    type_id: u32,
-    constant: u32
+    type_id: TypeId,
+    constant: IntegerConstantId
 ) -> Result<Bytes, LoweringError> {
-    handle scalar_width(type_id) {
-        Result::Err(_) => Result::Err(error(2, type_id)),
+    let type_raw = Id::to_u32(type_id);
+    handle scalar_width(type_raw) {
+        Result::Err(_) => Result::Err(error(2, type_raw)),
         Result::Ok(width) => {
             let output = Vec::new();
             Vec::push(&mut output, wrapping_convert_to_u8(
-                artifact_type_raw(artifact_type_id(type_id))
+                artifact_type_raw(artifact_type_id(type_raw))
             ));
             let words =
                 super::super::frontend::elaboration::
                     typed_body_integer_constant_at(
                         body,
-                        usize_from_u32(constant)
+                        constant
             );
             append_constant_words(&mut output, &words, 0, width);
             Result::Ok(Bytes::from_vec(output))
@@ -723,17 +731,17 @@ emit_return(value: &mut FunctionBuilder, source: Option<RegisterId>) {
 
 local_register(
     value: &FunctionBuilder,
-    local: u32
+    local: CoreLocalId
 ) -> Option<RegisterId> {
-    *Vec::index(&value.locals, usize_from_u32(local))
+    *Vec::index(&value.locals, Id::to_usize(local))
 }
 
 set_local(
     value: &mut FunctionBuilder,
-    local: u32,
+    local: CoreLocalId,
     register: Option<RegisterId>
 ) {
-    *Vec::index_mut(&mut value.locals, usize_from_u32(local)) = register;
+    *Vec::index_mut(&mut value.locals, Id::to_usize(local)) = register;
     ()
 }
 
@@ -742,11 +750,11 @@ lower_value(
         &super::super::frontend::elaboration::TypedInterfaces,
     body: &super::super::frontend::elaboration::TypedBody,
     value: &mut FunctionBuilder,
-    id: u32
+    id: CoreValueId
 ) -> Result<Option<RegisterId>, LoweringError> {
     handle super::super::frontend::elaboration::typed_body_value_at(
         body,
-        usize_from_u32(id)
+        id
     ) {
         CoreValueView::Unit(_) => {
             let target = alloc_register(value);
@@ -766,7 +774,8 @@ lower_value(
         },
         CoreValueView::Local(type_id, local, copy) => {
             handle local_register(value, local) {
-                Result::Err(_) => Result::Err(error(3, local)),
+                Result::Err(_) =>
+                    Result::Err(error(3, Id::to_u32(local))),
                 Result::Ok(source) => {
                     let target = alloc_register(value);
                     if(copy) {
@@ -785,7 +794,8 @@ lower_value(
                 @lower_value
             );
             handle lowered {
-                Result::Err(_) => Result::Err(error(4, id)),
+                Result::Err(_) =>
+                    Result::Err(error(4, Id::to_u32(id))),
                 Result::Ok(source_register) => {
                     let target = alloc_register(value);
                     emit_project_copy(
@@ -804,42 +814,28 @@ lower_value(
     }
 }
 
-lower_arguments(
+lower_arguments<'a>(
     interfaces:
         &super::super::frontend::elaboration::TypedInterfaces,
     body: &super::super::frontend::elaboration::TypedBody,
     value: &mut FunctionBuilder,
-    start: u32,
-    count: u32,
-    ordinal: u32,
+    operands: Slice<'a, CoreValueId>,
     output: &mut Vec<RegisterId>
 ) -> Result<(), LoweringError> {
-    if(ordinal < count) {
-        let operand =
-            super::super::frontend::elaboration::typed_body_operand_at(
-                body,
-                usize_from_u32(start + ordinal)
-            );
-        let lowered = try(
-            lower_value(interfaces, body, value, operand),
-            @lower_arguments
-        );
-        handle lowered {
-            Result::Err(_) => Result::Err(error(8, operand)),
-            Result::Ok(register) => {
-                Vec::push(&mut *output, register);
-                lower_arguments(
-                    interfaces,
-                    body,
-                    value,
-                    start,
-                    count,
-                    ordinal + 1,
-                    output
-                )
+    Slice::try_for_each(operands, { operand => {
+        let id = *operand;
+        handle lower_value(interfaces, body, value, id) {
+            Result::Err(found) => Result::Err(found),
+            Result::Ok(lowered) => handle lowered {
+                Result::Err(_) =>
+                    Result::Err(error(8, Id::to_u32(id))),
+                Result::Ok(register) => {
+                    Vec::push(&mut *output, register);
+                    Result::Ok(())
+                }
             }
         }
-    } else { Result::Ok(()) }
+    } })
 }
 
 lower_computation(
@@ -847,12 +843,12 @@ lower_computation(
         &super::super::frontend::elaboration::TypedInterfaces,
     body: &super::super::frontend::elaboration::TypedBody,
     value: &mut FunctionBuilder,
-    id: u32
+    id: CoreComputationId
 ) -> Result<Option<RegisterId>, LoweringError> {
     handle
         super::super::frontend::elaboration::typed_body_computation_at(
             body,
-            usize_from_u32(id)
+            id
         ) {
         CoreComputationView::Pure(_, found) =>
             lower_value(interfaces, body, value, found),
@@ -869,15 +865,13 @@ lower_computation(
             set_local(value, local, initialized);
             lower_computation(interfaces, body, value, remainder)
         },
-        CoreComputationView::Call(type_id, shell, start, count) => {
+        CoreComputationView::Call(type_id, shell, operands) => {
             let arguments = Vec::new();
             try(lower_arguments(
                 interfaces,
                 body,
                 value,
-                start,
-                count,
-                0,
+                operands,
                 &mut arguments
             ), @lower_computation);
             handle
@@ -896,20 +890,20 @@ lower_computation(
                 }
             }
         },
-        CoreComputationView::Construct(type_id, flavor, start, count) => {
+        CoreComputationView::Construct(type_id, flavor, fields) => {
+            let type_raw = Id::to_u32(type_id);
             handle super::super::frontend::elaboration::interface_type_at(
                 interfaces,
-                usize_from_u32(type_id)
+                Id::to_usize(type_id)
             ) {
                 InterfaceTypeView::Tuple(elements) => {
                     lower_product(
                         interfaces,
                         body,
                         value,
-                        type_id,
+                        type_raw,
                         flavor,
-                        start,
-                        count,
+                        fields,
                         checked_u32(Slice::len(elements))
                     )
                 },
@@ -924,42 +918,39 @@ lower_computation(
                             interfaces,
                             body,
                             value,
-                            type_id,
+                            type_raw,
                             flavor,
-                            start,
-                            count,
+                            fields,
                             expected
                         ),
-                    _ => Result::Err(error(6, type_id))
+                    _ => Result::Err(error(6, type_raw))
                 },
-                _ => Result::Err(error(6, type_id))
+                _ => Result::Err(error(6, type_raw))
             }
         }
     }
 }
 
-lower_product(
+lower_product<'a>(
     interfaces:
         &super::super::frontend::elaboration::TypedInterfaces,
     body: &super::super::frontend::elaboration::TypedBody,
     value: &mut FunctionBuilder,
     type_id: u32,
-    flavor: u32,
-    start: u32,
-    count: u32,
+    flavor: ConstructionFlavor,
+    fields: Slice<'a, ConstructionField>,
     expected: u32
 ) -> Result<Option<RegisterId>, LoweringError> {
-    if(flavor == 0) {
-        if(count == expected) {
-            let fields = Vec::new();
+    handle flavor {
+        ConstructionFlavor::Product => {
+        if(checked_u32(Slice::len(fields)) == expected) {
+            let registers = Vec::new();
             try(lower_product_fields(
                 interfaces,
                 body,
                 value,
-                start,
-                count,
-                0,
-                &mut fields
+                fields,
+                &mut registers
             ), @lower_product);
             let target = alloc_register(value);
             emit_construct(
@@ -967,61 +958,49 @@ lower_product(
                 target,
                 artifact_type_id(type_id),
                 None,
-                fields
+                registers
             );
             Result::Ok(Option::Some(target))
         } else {
-            Result::Err(error(6, count))
+            Result::Err(error(6, checked_u32(Slice::len(fields))))
         }
-    } else {
-        Result::Err(error(6, flavor))
+        },
+        ConstructionFlavor::Variant(ordinal) =>
+            Result::Err(error(6, ordinal + 1))
     }
 }
 
-lower_product_fields(
+lower_product_fields<'a>(
     interfaces:
         &super::super::frontend::elaboration::TypedInterfaces,
     body: &super::super::frontend::elaboration::TypedBody,
     value: &mut FunctionBuilder,
-    start: u32,
-    count: u32,
-    ordinal: u32,
+    fields: Slice<'a, ConstructionField>,
     output: &mut Vec<RegisterId>
 ) -> Result<(), LoweringError> {
-    if(ordinal < count) {
-        let index = usize_from_u32(start + ordinal);
+    Slice::try_for_each(fields, { entry => {
         let field =
             super::super::frontend::elaboration::
-                typed_body_construction_field_word_at(body, index, 0);
+                construction_field_ordinal(entry);
         let operand =
             super::super::frontend::elaboration::
-                typed_body_construction_field_word_at(body, index, 1);
-        if(field == ordinal) {
-            let lowered = try(
-                lower_value(interfaces, body, value, operand),
-                @lower_product_fields
-            );
-            handle lowered {
-                Result::Err(_) => Result::Err(error(8, operand)),
-                Result::Ok(register) => {
-                    Vec::push(&mut *output, register);
-                    lower_product_fields(
-                        interfaces,
-                        body,
-                        value,
-                        start,
-                        count,
-                        ordinal + 1,
-                        output
-                    )
+                construction_field_value(entry);
+        if(field == checked_u32(Vec::len(output))) {
+            handle lower_value(interfaces, body, value, operand) {
+                Result::Err(found) => Result::Err(found),
+                Result::Ok(lowered) => handle lowered {
+                    Result::Err(_) =>
+                        Result::Err(error(8, Id::to_u32(operand))),
+                    Result::Ok(register) => {
+                        Vec::push(&mut *output, register);
+                        Result::Ok(())
+                    }
                 }
             }
         } else {
             Result::Err(error(6, field))
         }
-    } else {
-        Result::Ok(())
-    }
+    } })
 }
 
 parameter_types(
@@ -1104,7 +1083,10 @@ pub lower_function(
         super::super::frontend::elaboration::typed_body_root(body)
     ), @lower_function);
     let result_type = artifact_type_id(
-        super::super::frontend::elaboration::typed_body_result_type(body)
+        Id::to_u32(
+            super::super::frontend::elaboration::
+                typed_body_result_type(body)
+        )
     );
     handle result {
         Result::Err(_) => Result::Err(error(

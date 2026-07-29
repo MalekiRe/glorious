@@ -10010,6 +10010,36 @@ fn remap_carrier_origins_with_expected(
         // callers (it can only keep a loan live longer).
         return Ok(expected.clone());
     }
+    if let Type::Enum { variants, .. } = type_at(a, destination)?
+        && let Some(active_variant) = sources
+            .iter()
+            .filter_map(|(path, _)| {
+                path.first().and_then(|marker| {
+                    let variant = u32::MAX - *marker;
+                    (variant < variants.len() as u32).then_some(variant)
+                })
+            })
+            .next()
+        && sources.iter().all(|(path, origin)| {
+            let marker = u32::MAX - active_variant;
+            path.first() == Some(&marker)
+                && expected
+                    .iter()
+                    .any(|candidate| candidate.0 == *path && candidate.1 == *origin)
+        })
+        && expected.iter().all(|(path, origin)| {
+            path.first() != Some(&(u32::MAX - active_variant))
+                || sources
+                    .iter()
+                    .any(|candidate| candidate.0 == *path && candidate.1 == *origin)
+        })
+    {
+        // A known enum alternative carries only that alternative's reference
+        // leaves. Preserve the full provisional contract after proving the
+        // active alternative leaf-for-leaf; the other alternatives are
+        // mutually exclusive and are proved on their own return paths.
+        return Ok(expected.clone());
+    }
     let available = sources
         .into_iter()
         .map(|(_, origin)| origin)
@@ -26489,6 +26519,74 @@ mod tests {
         };
         verify(artifact)
             .expect("direct return provenance maps every result leaf to its argument leaf");
+    }
+
+    #[test]
+    fn distinct_enum_alternatives_export_their_own_reference_origins() {
+        let mut types = Type::predefined();
+        types.push(Type::RefShared { referent: I64 });
+        types.push(Type::Enum {
+            name: "BorrowedChoice".into(),
+            variants: vec![
+                EnumVariant {
+                    name: "Left".into(),
+                    fields: vec![Field {
+                        name: "value".into(),
+                        ty: 19,
+                    }],
+                },
+                EnumVariant {
+                    name: "Right".into(),
+                    fields: vec![Field {
+                        name: "value".into(),
+                        ty: 19,
+                    }],
+                },
+            ],
+            copy: true,
+        });
+        let artifact = Artifact {
+            types,
+            constants: vec![Constant::U32(0)],
+            reference_return_contracts: vec![],
+            functions: vec![Function {
+                flags: 0,
+                name: "borrowed_choice".into(),
+                params: vec![19, 19, U32],
+                return_type: 20,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, 19, 19, U32, 20, 20],
+                code_start: 0,
+                code_len: 5,
+                label_slot_count: 0,
+            }],
+            code: vec![
+                Instruction::Switch {
+                    discr: 3,
+                    cases: vec![(0, 1)],
+                    otherwise: 3,
+                },
+                Instruction::Construct {
+                    dst: 4,
+                    ty: 20,
+                    variant: Some(0),
+                    fields: vec![1],
+                },
+                Instruction::Return { src: Some(4) },
+                Instruction::Construct {
+                    dst: 5,
+                    ty: 20,
+                    variant: Some(1),
+                    fields: vec![2],
+                },
+                Instruction::Return { src: Some(5) },
+            ],
+            required_features: 1 | (1 << 1),
+            ..Artifact::default()
+        };
+
+        verify(artifact).expect("each enum alternative retains its own parameter provenance");
     }
 
     fn indirect_two_reference_artifact() -> Artifact {

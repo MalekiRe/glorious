@@ -155,6 +155,57 @@ fn lifetime_parameterized_enum_carries_and_iterates_a_borrowed_slice() {
 }
 
 #[test]
+fn enum_alternatives_can_borrow_distinct_fields_of_one_parameter() {
+    let source = r#"
+        struct Sources {
+            left: Vec<u32>,
+            right: Vec<u8>
+        }
+
+        enum BorrowedChoice<'a> {
+            Left(Slice<'a, u32>),
+            Right(Slice<'a, u8>)
+        }
+
+        borrow_choice<'a>(
+            sources: &'a Sources,
+            choose_left: Bool
+        ) -> BorrowedChoice<'a> {
+            if(choose_left) {
+                BorrowedChoice::Left(Vec::as_slice(&sources.left))
+            } else {
+                BorrowedChoice::Right(Vec::as_slice(&sources.right))
+            }
+        }
+
+        main() -> () { () }
+    "#;
+
+    let artifact = compile_source_to_bytecode("borrowed-choice.glorious", source)
+        .unwrap_or_else(|errors| panic!("{errors:#?}"));
+    let function = artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "borrow_choice")
+        .unwrap() as u32;
+    let contract = artifact
+        .reference_return_contracts
+        .iter()
+        .find(|contract| contract.function == function)
+        .expect("the compiler emitted an aggregate lifetime contract");
+    assert_eq!(contract.routes.len(), 2);
+    assert_ne!(
+        contract.routes[0].result_path,
+        contract.routes[1].result_path
+    );
+    assert!(contract.routes.iter().all(|route| matches!(
+        &route.origin,
+        grandiose_vm::bytecode::ReferenceReturnOrigin::Parameter { parameter: 0, .. }
+    )));
+    verify(artifact).expect("each borrowed alternative has an exact source-field route");
+}
+
+#[test]
 fn generic_borrowed_payload_accepts_a_monomorphic_alias_argument() {
     let source = r#"
         struct ItemTag {}
