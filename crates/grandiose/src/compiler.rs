@@ -1376,6 +1376,8 @@ struct TransparentFinalUseLimit {
 
 struct CoreLowerer<'a> {
     program: &'a Program,
+    nominal_ids: &'a BTreeMap<&'a str, TypeId>,
+    aliases: &'a BTreeMap<String, ResolvedType>,
     function_templates: &'a [Function],
     nominal_templates: &'a [StructDecl],
     signatures: &'a BTreeMap<String, Signature>,
@@ -1489,6 +1491,8 @@ struct CoreLowerer<'a> {
 #[derive(Clone, Copy)]
 struct CoreTables<'a> {
     program: &'a Program,
+    nominal_ids: &'a BTreeMap<&'a str, TypeId>,
+    aliases: &'a BTreeMap<String, ResolvedType>,
     function_templates: &'a [Function],
     nominal_templates: &'a [StructDecl],
     signatures: &'a BTreeMap<String, Signature>,
@@ -6922,6 +6926,8 @@ fn compile_program_with_phases(
     }
     let core_tables = CoreTables {
         program,
+        nominal_ids: &nominal_ids,
+        aliases: &alias_shapes,
         function_templates: &program.functions,
         nominal_templates: &nominal_templates,
         signatures: &signatures,
@@ -24043,6 +24049,8 @@ impl<'a> CoreLowerer<'a> {
         (
             Self {
                 program: tables.program,
+                nominal_ids: tables.nominal_ids,
+                aliases: tables.aliases,
                 function_templates: tables.function_templates,
                 nominal_templates: tables.nominal_templates,
                 signatures: tables.signatures,
@@ -24242,6 +24250,8 @@ impl<'a> CoreLowerer<'a> {
         (
             Self {
                 program: tables.program,
+                nominal_ids: tables.nominal_ids,
+                aliases: tables.aliases,
                 function_templates: tables.function_templates,
                 nominal_templates: tables.nominal_templates,
                 signatures: tables.signatures,
@@ -25924,6 +25934,64 @@ impl<'a> CoreLowerer<'a> {
                 ),
             )]);
         }
+        let generic_binders = function
+            .generics
+            .iter()
+            .flat_map(|generics| &generics.params)
+            .filter(|parameter| parameter.kind == GenericParamKind::Type)
+            .map(|parameter| parameter.name.clone())
+            .collect::<BTreeSet<_>>();
+        let mut substitutions = BTreeMap::new();
+        if let (Some(result), Some(expected)) = (&function.return_type, expected)
+            && !self.infer_late_substitutions(
+                result,
+                expected,
+                &generic_binders,
+                &mut substitutions,
+            )
+        {
+            return Err(vec![type_error(
+                span,
+                format!(
+                    "type mismatch: generic callable `{name}` has contradictory result-type evidence"
+                ),
+            )]);
+        }
+        for (parameter, argument) in function.params.iter().zip(arguments) {
+            let Some(actual) = self.static_local_expression_type(argument) else {
+                continue;
+            };
+            if !self.infer_late_substitutions(
+                &parameter.ty,
+                actual,
+                &generic_binders,
+                &mut substitutions,
+            ) {
+                return Err(vec![type_error(
+                    argument.span,
+                    format!(
+                        "type mismatch: generic callable `{name}` has contradictory argument-type evidence"
+                    ),
+                )]);
+            }
+        }
+        // A late-inlined generic can still declare a ground result when its
+        // caller supplies no contextual expectation. Preserve that result as
+        // context for nested generic calls and nominal constructors cloned
+        // from the template body.
+        let declared_result = function
+            .return_type
+            .as_ref()
+            .filter(|result| {
+                !type_syntax_any(result, |syntax| {
+                    syntax
+                        .simple_name()
+                        .is_some_and(|name| generic_binders.contains(name))
+                })
+            })
+            .and_then(|result| self.ground_source_type(result))
+            .or(Some(UNIT).filter(|_| function.return_type.is_none()));
+        let expected = expected.or(declared_result);
         if !self.late_inline_stack.insert(name.to_owned()) {
             return Err(vec![unsupported(
                 span,
@@ -26168,6 +26236,17 @@ impl<'a> CoreLowerer<'a> {
                 expression_ordinal,
             })
             .cloned()
+    }
+
+    fn ground_source_type(&self, syntax: &TypeSyntax) -> Option<TypeId> {
+        let resolved = resolve_source_type(
+            syntax,
+            self.nominal_ids,
+            self.aliases,
+            self.runtime_bindings.array_name(),
+        )
+        .ok()?;
+        self.existing_structural_type_id(&resolved)
     }
 
     fn monomorphic_source_type(&mut self, syntax: &TypeSyntax) -> Option<TypeId> {
@@ -29786,6 +29865,11 @@ impl<'a> CoreLowerer<'a> {
 
     fn static_local_expression_type(&self, expression: &Expr) -> Option<TypeId> {
         match &expression.kind {
+            ExprKind::Unit => Some(UNIT),
+            ExprKind::String(_) => Some(TEXT),
+            ExprKind::ByteString(_) => Some(BYTES),
+            ExprKind::Char(_) => Some(CHAR),
+            ExprKind::Byte(_) => Some(U8),
             ExprKind::Variable(path) if path.len() == 1 => {
                 self.locals.get(path[0].as_ref()).map(|local| local.ty)
             }
