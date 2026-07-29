@@ -128,6 +128,56 @@ fn lazy_structural_if_numeric_literals_use_the_later_binding_context() {
 }
 
 #[test]
+fn lazy_numeric_local_uses_a_later_usize_call_without_identity_wrapper() {
+    let source = r#"
+        consume_usize(value: usize) -> usize { value }
+        choose(condition: Bool) -> usize {
+            let sign = if(condition) { 1 } else { 0 };
+            let candidate = 1 + sign;
+            consume_usize(sign);
+            candidate
+        }
+        main() -> { choose(true); () }
+    "#;
+    compile_source_to_phases("later-usize-call-without-wrapper.glorious", source).unwrap();
+}
+
+#[test]
+fn lazy_numeric_local_uses_a_later_u8_field_without_identity_wrapper() {
+    let source = r#"
+        struct GenericParam { kind_code: u8 }
+        choose(condition: Bool) -> GenericParam {
+            let kind = if(condition) {
+                if(false) { 3 } else { 0 }
+            } else {
+                1
+            };
+            kind == 0;
+            GenericParam { kind_code: kind }
+        }
+        main() -> { choose(true); () }
+    "#;
+    compile_source_to_phases("later-u8-field-without-wrapper.glorious", source).unwrap();
+}
+
+#[test]
+fn numeric_later_use_hint_stops_at_a_sequential_shadow() {
+    let source = r#"
+        make_u64() -> u64 { 2 }
+        consume_u64(value: u64) -> u64 { value }
+        choose(condition: Bool) -> i64 {
+            let copy = if(condition) { 0 } else { 1 };
+            let result = 1 + copy;
+            let copy = make_u64();
+            consume_u64(copy);
+            result
+        }
+        main() -> { choose(true); () }
+    "#;
+    compile_source_to_phases("numeric-later-use-shadow.glorious", source).unwrap();
+}
+
+#[test]
 fn later_binding_context_stops_at_a_sequential_shadow() {
     let source = r#"
         consume_u32(value: u32) -> u32 { value }

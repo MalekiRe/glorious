@@ -10289,6 +10289,111 @@ pub(crate) fn normalize_ground_trait_methods(
         }
     }
 
+    fn later_binding_receiver_type(
+        program: &Program,
+        binding: &str,
+        remaining: &[Stmt],
+    ) -> Option<ReceiverType> {
+        fn direct(expression: &Expr, binding: &str) -> bool {
+            let expression = match &expression.kind {
+                ExprKind::Move(value) => value,
+                _ => expression,
+            };
+            matches!(&expression.kind, ExprKind::Variable(path) if path.len() == 1 && path[0].as_ref() == binding)
+        }
+
+        struct Finder<'a> {
+            program: &'a Program,
+            binding: &'a str,
+        }
+
+        impl Finder<'_> {
+            fn statements(&mut self, statements: &[Stmt]) -> ControlFlow<ReceiverType> {
+                for statement in statements {
+                    let (value, shadows) = match statement {
+                        Stmt::Let { name, value, .. } => (value, name.as_str() == self.binding),
+                        Stmt::Deconstruct { fields, value, .. } => (
+                            value,
+                            fields
+                                .iter()
+                                .any(|field| field.binding.as_deref() == Some(self.binding)),
+                        ),
+                        Stmt::Expr(value) | Stmt::Assign { value, .. } => (value, false),
+                    };
+                    self.visit_expr(value)?;
+                    if shadows {
+                        break;
+                    }
+                }
+                ControlFlow::Continue(())
+            }
+        }
+
+        impl<'ast> ExprVisitor<'ast> for Finder<'_> {
+            type Break = ReceiverType;
+
+            fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<Self::Break> {
+                match &expression.kind {
+                    ExprKind::Call(callee, arguments) => {
+                        if let ExprKind::Variable(path) = &callee.kind
+                            && path.len() == 1
+                            && let Some(function) = self.program.functions.iter().find(|function| {
+                                function.name == path[0].as_ref() && function.generics.is_none()
+                            })
+                        {
+                            for (argument, parameter) in arguments.iter().zip(&function.params) {
+                                if direct(argument, self.binding)
+                                    && let Some(ty) =
+                                        source_receiver_type(self.program, &parameter.ty)
+                                {
+                                    return ControlFlow::Break(ty);
+                                }
+                            }
+                        }
+                        walk_expr(self, expression)
+                    }
+                    ExprKind::Struct { name, fields } => {
+                        if let Some(declaration) = self.program.structs.iter().find(|declaration| {
+                            declaration.name == name.as_ref() && declaration.generics.is_none()
+                        }) {
+                            for (field, value) in fields.iter() {
+                                if direct(value, self.binding)
+                                    && let Some(ty) = declaration
+                                        .fields
+                                        .iter()
+                                        .find(|declared| declared.name == field.as_ref())
+                                        .and_then(|field| {
+                                            source_receiver_type(self.program, &field.ty)
+                                        })
+                                {
+                                    return ControlFlow::Break(ty);
+                                }
+                            }
+                        }
+                        walk_expr(self, expression)
+                    }
+                    ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                        self.statements(statements)
+                    }
+                    // These scopes may introduce an owner with the same source
+                    // name. This narrow hint deliberately does not infer
+                    // through them.
+                    ExprKind::Closure { .. }
+                    | ExprKind::TypedClosure { .. }
+                    | ExprKind::Handle { .. } => ControlFlow::Continue(()),
+                    _ => walk_expr(self, expression),
+                }
+            }
+        }
+
+        let mut finder = Finder { program, binding };
+        if let ControlFlow::Break(ty) = finder.statements(remaining) {
+            Some(ty)
+        } else {
+            None
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn rewrite(
         expression: &mut Expr,
@@ -11166,11 +11271,15 @@ pub(crate) fn normalize_ground_trait_methods(
                 let saved = locals.clone();
                 let mut result = None;
                 let statement_count = statements.len();
-                for (index, statement) in Rc::make_mut(statements).iter_mut().enumerate() {
+                let statements = Rc::make_mut(statements);
+                for index in 0..statement_count {
+                    let (_, tail) = statements.split_at_mut(index);
+                    let (statement, remaining) = tail.split_first_mut().unwrap();
                     let tail_expected =
                         (index + 1 == statement_count).then_some(expected).flatten();
                     match statement {
                         Stmt::Let { name, value, .. } => {
+                            let inferred = later_binding_receiver_type(program, name, remaining);
                             let ty = rewrite(
                                 value,
                                 locals,
@@ -11181,10 +11290,10 @@ pub(crate) fn normalize_ground_trait_methods(
                                 dot_methods,
                                 deferred_evidence,
                                 trusted_standard_range,
-                                None,
+                                inferred.as_ref(),
                                 errors,
                             );
-                            if let Some(ty) = ty {
+                            if let Some(ty) = ty.or(inferred) {
                                 locals.insert(name.clone(), ty);
                             }
                         }
@@ -27130,9 +27239,30 @@ impl<'a> CoreLowerer<'a> {
                         })
                     })
                 }
-                ExprKind::Struct { fields, .. } => fields
-                    .iter()
-                    .find_map(|(_, value)| expression_expected_type(lowerer, value, binding)),
+                ExprKind::Struct { name, fields } => {
+                    if let Some(declaration) = lowerer
+                        .program
+                        .structs
+                        .iter()
+                        .find(|declaration| declaration.name == name.as_ref())
+                    {
+                        for (field, value) in fields.iter() {
+                            if direct_binding(value, binding)
+                                && let Some(ty) = declaration
+                                    .fields
+                                    .iter()
+                                    .find(|declared| declared.name == field.as_ref())
+                                    .and_then(|field| field.ty.simple_name())
+                                    .and_then(scalar_type)
+                            {
+                                return Some(ty);
+                            }
+                        }
+                    }
+                    fields
+                        .iter()
+                        .find_map(|(_, value)| expression_expected_type(lowerer, value, binding))
+                }
                 ExprKind::Handle {
                     computation,
                     clauses,

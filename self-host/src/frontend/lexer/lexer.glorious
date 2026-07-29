@@ -1014,12 +1014,12 @@ scan_exponent_after_marker(value: &mut Lexer) -> Result<Option<NumberExponent>, 
     let marker = value.cursor;
     let sign = if(peek(&*value, 1) is Result::Ok(byte)) {
         handle byte {
-            43 => usize_value(1),
-            45 => usize_value(1),
-            _ => usize_value(0)
+            43 => 1,
+            45 => 1,
+            _ => 0
         }
     } else {
-        usize_value(0)
+        0
     };
     let candidate = if(
         peek(&*value, 1 + sign) is Result::Ok(byte)
@@ -2164,10 +2164,6 @@ process_inputs(arguments: &Vec<String>, index: usize, output: &mut ByteBuf) / Fi
     } else {
         ()
     }
-}
-
-usize_value(value: usize) -> usize {
-    value
 }
 
 pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {

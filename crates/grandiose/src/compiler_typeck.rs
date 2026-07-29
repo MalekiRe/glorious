@@ -3440,9 +3440,25 @@ impl<'a> Typer<'a> {
                 ExprKind::List(values) | ExprKind::Tuple(values) => values
                     .iter()
                     .find_map(|value| expression_binding_type(typer, value, binding)),
-                ExprKind::Struct { fields, .. } => fields
-                    .iter()
-                    .find_map(|(_, value)| expression_binding_type(typer, value, binding)),
+                ExprKind::Struct { name, fields } => {
+                    if let Some(NominalShape::Struct(declared)) = typer
+                        .tables
+                        .nominals
+                        .get(&NominalInstanceKey::monomorphic(name.as_ref()))
+                    {
+                        for (field, value) in fields.iter() {
+                            if binding_name(value) == Some(binding)
+                                && let Some((_, ty)) =
+                                    declared.iter().find(|(name, _)| name == field)
+                            {
+                                return Some(ty.clone());
+                            }
+                        }
+                    }
+                    fields
+                        .iter()
+                        .find_map(|(_, value)| expression_binding_type(typer, value, binding))
+                }
                 ExprKind::Field(subject, _)
                 | ExprKind::Move(subject)
                 | ExprKind::Unary {
