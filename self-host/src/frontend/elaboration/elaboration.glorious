@@ -153,7 +153,7 @@ enum CoreValueKind {
 
 impl Use<[0, *]> for CoreValueKind {}
 
-struct CoreValue { ty: u32, kind: CoreValueKind }
+struct CoreValue { ty: TypeId, kind: CoreValueKind }
 
 impl Use<[0, *]> for CoreValue {}
 
@@ -185,7 +185,7 @@ enum CoreComputationKind {
 
 impl Use<[0, *]> for CoreComputationKind {}
 
-struct CoreComputation { ty: u32, kind: CoreComputationKind }
+struct CoreComputation { ty: TypeId, kind: CoreComputationKind }
 
 impl Use<[0, *]> for CoreComputation {}
 
@@ -199,7 +199,7 @@ impl Use<[0, *]> for IntegerConstant {}
 
 pub struct TypedBody {
     shell: u32,
-    result_type: u32,
+    result_type: TypeId,
     root: CoreComputationId,
     local_types: IndexVec<CoreLocalTag, TypeId>,
     values: Arena<CoreValueTag, CoreValue>,
@@ -250,7 +250,7 @@ enum ElaboratedForm {
 impl Use<[0, *]> for ElaboratedForm {}
 
 struct Elaborated {
-    type_id: u32,
+    type_id: TypeId,
     form: ElaboratedForm
 }
 
@@ -786,7 +786,9 @@ pub interface_callable_for_shell(
 
 pub typed_body_shell(value: &TypedBody) -> u32 { value.shell }
 
-pub typed_body_result_type(value: &TypedBody) -> u32 { value.result_type }
+pub typed_body_result_type(value: &TypedBody) -> u32 {
+    Id::to_u32(value.result_type)
+}
 
 pub typed_body_root(value: &TypedBody) -> u32 { Id::to_u32(value.root) }
 
@@ -820,7 +822,7 @@ pub typed_body_value_word_at(
             CoreValueKind::Projection(_, _) => 4,
             CoreValueKind::Embedded(_) => 5
         },
-        1 => node.ty,
+        1 => Id::to_u32(node.ty),
         2 => handle node.kind {
             CoreValueKind::Unit => 0,
             CoreValueKind::Integer(found) => Id::to_u32(found),
@@ -858,7 +860,7 @@ pub typed_body_computation_word_at(
             CoreComputationKind::Call(_, _) => 3,
             CoreComputationKind::Construct(_, _) => 4
         },
-        1 => node.ty,
+        1 => Id::to_u32(node.ty),
         2 => handle node.kind {
             CoreComputationKind::Pure(found) => Id::to_u32(found),
             CoreComputationKind::Let(found, _, _) => Id::to_u32(found),
@@ -2675,7 +2677,7 @@ resolution_map(
 
 push_value(
     value: &mut BodyBuilder,
-    ty: u32,
+    ty: TypeId,
     kind: CoreValueKind
 ) -> CoreValueId {
     handle Arena::alloc(&mut value.values, CoreValue {
@@ -2689,7 +2691,7 @@ push_value(
 
 push_computation(
     value: &mut BodyBuilder,
-    ty: u32,
+    ty: TypeId,
     kind: CoreComputationKind
 ) -> CoreComputationId {
     handle Arena::alloc(&mut value.computations, CoreComputation {
@@ -2703,7 +2705,7 @@ push_computation(
 
 pure(
     value: &mut BodyBuilder,
-    ty: u32,
+    ty: TypeId,
     core_value: CoreValueId
 ) -> CoreComputationId {
     push_computation(value, ty, CoreComputationKind::Pure(core_value))
@@ -2739,7 +2741,7 @@ materialize_operand(
         ElaboratedForm::Computation(computation) => {
             let local = push_local_type(
                 &mut value.local_types,
-                Option::Some(type_id_from_u32(found.type_id))
+                Option::Some(found.type_id)
             );
             Vec::push(&mut *wrappers, LetWrapper {
                 local: local,
@@ -2767,35 +2769,54 @@ embed_operand(value: &mut BodyBuilder, found: Elaborated) -> CoreValueId {
 
 check_expected(
     found: Elaborated,
-    expected_plus_one: u32,
+    expected: Option<TypeId>,
     token: usize
 ) -> Result<Elaborated, ElaborationError> {
-    if(expected_plus_one == u32_value(0)) { Result::Ok(move found) } else {
-        let expected = expected_plus_one - u32_value(1);
-        if(found.type_id == expected) { Result::Ok(move found) } else { Result::Err(error(
+    handle expected {
+        Result::Err(_) => Result::Ok(move found),
+        Result::Ok(ty) =>
+            if(found.type_id == ty) { Result::Ok(move found) } else { Result::Err(error(
                 3,
                 token,
                 token,
-                expected,
-                found.type_id
+                Id::to_u32(ty),
+                Id::to_u32(found.type_id)
             )) }
     }
 }
 
 check_expected_type(
-    found: u32,
-    expected_plus_one: u32,
+    found: TypeId,
+    expected: Option<TypeId>,
     token: usize
 ) -> Result<(), ElaborationError> {
-    if(expected_plus_one == u32_value(0)) {
-        Result::Ok(())
-    } else {
-        let expected = expected_plus_one - u32_value(1);
-        if(found == expected) {
+    handle expected {
+        Result::Err(_) => Result::Ok(()),
+        Result::Ok(ty) => if(found == ty) {
             Result::Ok(())
         } else {
-            Result::Err(error(3, token, token, expected, found))
+            Result::Err(error(
+                3,
+                token,
+                token,
+                Id::to_u32(ty),
+                Id::to_u32(found)
+            ))
         }
+    }
+}
+
+expected_matches(expected: Option<TypeId>, found: TypeId) -> Bool {
+    handle expected {
+        Result::Err(_) => true,
+        Result::Ok(ty) => ty == found
+    }
+}
+
+expected_word_or(expected: Option<TypeId>, fallback: TypeId) -> u32 {
+    handle expected {
+        Result::Err(_) => Id::to_u32(fallback),
+        Result::Ok(ty) => Id::to_u32(ty)
     }
 }
 
@@ -2918,7 +2939,7 @@ elaborate_integer(
     body: &super::bodies::ParsedBody,
     value: &mut BodyBuilder,
     expression: u32,
-    expected_plus_one: u32
+    expected: Option<TypeId>
 ) -> Result<Elaborated, ElaborationError> {
     let token = super::bodies::expression_token_start_at(body, expression);
     handle super::lexer::token_kind_at(
@@ -2926,7 +2947,11 @@ elaborate_integer(
         token
     ) {
         TokenKind::Number(number) => if(super::lexer::number_is_float(&number)) { Result::Err(error(2, token, token, 0, 0)) } else {
-            let ty = if(expected_plus_one == u32_value(0)) { u32_value(10) } else { expected_plus_one - u32_value(1) };
+            let ty_id = handle expected {
+                Result::Err(_) => type_id_from_u32(10),
+                Result::Ok(found) => found
+            };
+            let ty = Id::to_u32(ty_id);
             if(bool_and(
                 u32_value(2) <= ty,
                 ty <= u32_value(13)
@@ -2955,11 +2980,11 @@ elaborate_integer(
                             );
                             let core = push_value(
                                 value,
-                                ty,
+                                ty_id,
                                 CoreValueKind::Integer(constant)
                             );
                             Result::Ok(Elaborated {
-                                type_id: ty,
+                                type_id: ty_id,
                                 form: ElaboratedForm::Value(core)
                             })
                         } else { Result::Err(error(
@@ -2983,7 +3008,7 @@ elaborate_identifier(
     map: &ResolutionMap,
     value: &mut BodyBuilder,
     expression: u32,
-    expected_plus_one: u32
+    expected: Option<TypeId>
 ) -> Result<Elaborated, ElaborationError> {
     let token = super::bodies::expression_token_start_at(body, expression);
     let final_transfer = *Vec::index(
@@ -2996,7 +3021,7 @@ elaborate_identifier(
             value,
             core_local_id_from_u32(Id::to_u32(id)),
             token,
-            expected_plus_one,
+            expected,
             final_transfer
         ),
         ElaborationTarget::Local(id) => elaborate_local(
@@ -3006,7 +3031,7 @@ elaborate_identifier(
                 value.parameter_count + Id::to_u32(id)
             ),
             token,
-            expected_plus_one,
+            expected,
             final_transfer
         ),
         ElaborationTarget::Function(_) =>
@@ -3020,7 +3045,7 @@ elaborate_local(
     value: &mut BodyBuilder,
     local: CoreLocalId,
     token: usize,
-    expected_plus_one: u32,
+    expected: Option<TypeId>,
     final_transfer: u32
 ) -> Result<Elaborated, ElaborationError> {
     if(Id::to_usize(local) < IndexVec::len(&value.local_types)) {
@@ -3034,15 +3059,15 @@ elaborate_local(
             )) { CoreLocalAccess::Move } else { CoreLocalAccess::Copy };
             let core = push_value(
                 value,
-                ty,
+                ty_id,
                 CoreValueKind::Local(local, access)
             );
             check_expected(
                 Elaborated {
-                    type_id: ty,
+                    type_id: ty_id,
                     form: ElaboratedForm::Value(core)
                 },
-                expected_plus_one,
+                expected,
                 token
             )
         } }
@@ -3065,12 +3090,12 @@ elaborate_call_arguments(
 ) -> Result<(), ElaborationError> {
     let parameters = interface_callable_parameters(interfaces, callable);
     if(ordinal < parameters.count) {
-        let parameter = Id::to_u32(callable_parameter_type_at(
+        let parameter = callable_parameter_type_at(
             interfaces,
             usize_from_u32(
                 parameters.start + ordinal
             )
-        ));
+        );
         let child = super::bodies::expression_child_at(
             body,
             expression,
@@ -3085,7 +3110,7 @@ elaborate_call_arguments(
             map,
             value,
             child,
-            parameter + u32_value(1)
+            Option::Some(parameter)
         ), @elaborate_call_arguments);
         let operand = embed_operand(value, argument);
         Vec::push(&mut *operands, operand);
@@ -3111,7 +3136,7 @@ wrap_lets_reverse(
     lets: &Vec<LetWrapper>,
     count: usize,
     body: CoreComputationId,
-    result_type: u32
+    result_type: TypeId
 ) -> CoreComputationId {
     if(count == usize_value(0)) { body } else {
         let wrapper = let_wrapper_at(lets, count - usize_value(1));
@@ -3143,7 +3168,7 @@ elaborate_call(
     map: &ResolutionMap,
     value: &mut BodyBuilder,
     expression: u32,
-    expected_plus_one: u32
+    expected: Option<TypeId>
 ) -> Result<Elaborated, ElaborationError> {
     let token = super::bodies::expression_token_start_at(body, expression);
     let callee = super::bodies::expression_child_at(body, expression, 0);
@@ -3160,10 +3185,7 @@ elaborate_call(
                         - u32_value(1);
                 if(expected_count == found_count) {
                     let result =
-                        Id::to_u32(interface_callable_result(
-                            interfaces,
-                            callable
-                        ));
+                        interface_callable_result(interfaces, callable);
                     let wrappers = Vec::new();
                     let arguments = Vec::new();
                     try(elaborate_call_arguments(
@@ -3182,7 +3204,7 @@ elaborate_call(
                     ), @elaborate_call);
                     try(check_expected_type(
                         result,
-                        expected_plus_one,
+                        expected,
                         token
                     ), @elaborate_call);
                     let operand_start = Vec::len(&value.operands);
@@ -3230,7 +3252,7 @@ elaborate_call(
             value,
             expression,
             variant,
-            expected_plus_one
+            expected
         ),
         target => Result::Err(error(
             6,
@@ -3251,7 +3273,7 @@ elaborate_block_statements(
     map: &ResolutionMap,
     value: &mut BodyBuilder,
     expression: u32,
-    expected_plus_one: u32,
+    expected: Option<TypeId>,
     ordinal: u32,
     lets: &mut Vec<LetWrapper>
 ) -> Result<Elaborated, ElaborationError> {
@@ -3283,12 +3305,12 @@ elaborate_block_statements(
                     map,
                     value,
                     child,
-                    0
+                    None
                 ), @elaborate_block_statements);
                 *IndexVec::index_mut(
                     &mut value.local_types,
                     local
-                ) = Option::Some(type_id_from_u32(initializer.type_id));
+                ) = Option::Some(initializer.type_id);
                 let computation = as_computation(value, initializer);
                 Vec::push(&mut *lets, LetWrapper {
                     local: local,
@@ -3303,7 +3325,7 @@ elaborate_block_statements(
                     map,
                     value,
                     expression,
-                    expected_plus_one,
+                    expected,
                     ordinal + u32_value(1),
                     lets
                 )
@@ -3319,7 +3341,7 @@ elaborate_block_statements(
                     map,
                     value,
                     child,
-                    if(is_final) { expected_plus_one } else { 0 }
+                    if(is_final) { expected } else { None }
                 ), @elaborate_block_statements);
                 if(is_final) { Result::Ok(move found) } else {
                     handle found.form {
@@ -3327,7 +3349,7 @@ elaborate_block_statements(
                         ElaboratedForm::Computation(computation) => {
                             let local = push_local_type(
                                 &mut value.local_types,
-                                Option::Some(type_id_from_u32(found.type_id))
+                                Option::Some(found.type_id)
                             );
                             Vec::push(&mut *lets, LetWrapper {
                                 local: local,
@@ -3344,7 +3366,7 @@ elaborate_block_statements(
                         map,
                         value,
                         expression,
-                        expected_plus_one,
+                        expected,
                         ordinal + u32_value(1),
                         lets
                     )
@@ -3360,13 +3382,17 @@ elaborate_block_statements(
         }
     } else {
         let token = super::bodies::expression_token_end_at(body, expression);
-        let unit = push_value(value, 0, CoreValueKind::Unit);
+        let unit = push_value(
+            value,
+            type_id_from_u32(0),
+            CoreValueKind::Unit
+        );
         check_expected(
             Elaborated {
-                type_id: 0,
+                type_id: type_id_from_u32(0),
                 form: ElaboratedForm::Value(unit)
             },
-            expected_plus_one,
+            expected,
             token
         )
     }
@@ -3381,7 +3407,7 @@ elaborate_block(
     map: &ResolutionMap,
     value: &mut BodyBuilder,
     expression: u32,
-    expected_plus_one: u32
+    expected: Option<TypeId>
 ) -> Result<Elaborated, ElaborationError> {
     let lets = Vec::new();
     let final_value = try(elaborate_block_statements(
@@ -3393,7 +3419,7 @@ elaborate_block(
         map,
         value,
         expression,
-        expected_plus_one,
+        expected,
         0,
         &mut lets
     ), @elaborate_block);
@@ -3414,7 +3440,7 @@ elaborate_block(
 
 finish_construct(
     value: &mut BodyBuilder,
-    ty: u32,
+    ty: TypeId,
     flavor: ConstructionFlavor,
     fields: &Vec<ConstructionField>,
     wrappers: &Vec<LetWrapper>
@@ -3445,14 +3471,14 @@ finish_construct(
 
 tuple_expected_element(
     interfaces: &TypedInterfaces,
-    ty: u32,
+    ty: TypeId,
     ordinal: u32
-) -> u32 {
-    handle type_kind_at(interfaces, type_id_from_u32(ty)) {
-        TypeKind::Tuple(range) => Id::to_u32(*Vec::index(
+) -> TypeId {
+    handle type_kind_at(interfaces, ty) {
+        TypeKind::Tuple(range) => *Vec::index(
             &interfaces.type_elements,
             usize_from_u32(range.start + ordinal)
-        )),
+        ),
         _ => unreachable()
     }
 }
@@ -3466,7 +3492,7 @@ elaborate_tuple_elements(
     map: &ResolutionMap,
     value: &mut BodyBuilder,
     expression: u32,
-    expected_plus_one: u32,
+    expected: Option<TypeId>,
     ordinal: u32,
     wrappers: &mut Vec<LetWrapper>,
     types: &mut Vec<u32>,
@@ -3474,11 +3500,14 @@ elaborate_tuple_elements(
 ) -> Result<(), ElaborationError> {
     let count = super::bodies::expression_child_count_at(body, expression);
     if(ordinal < count) {
-        let expected = if(expected_plus_one == u32_value(0)) { 0 } else { tuple_expected_element(
+        let element_expected = handle expected {
+            Result::Err(_) => None,
+            Result::Ok(ty) => Option::Some(tuple_expected_element(
                 &*interfaces,
-                expected_plus_one - u32_value(1),
+                ty,
                 ordinal
-            ) + u32_value(1) };
+            ))
+        };
         let element = try(elaborate_expression(
             original,
             headers,
@@ -3488,9 +3517,9 @@ elaborate_tuple_elements(
             map,
             value,
             super::bodies::expression_child_at(body, expression, ordinal),
-            expected
+            element_expected
         ), @elaborate_tuple_elements);
-        let ty = element.type_id;
+        let ty = Id::to_u32(element.type_id);
         let operand = embed_operand(value, element);
         push_word(&mut *types, ty);
         Vec::push(&mut *fields, ConstructionField {
@@ -3506,7 +3535,7 @@ elaborate_tuple_elements(
             map,
             value,
             expression,
-            expected_plus_one,
+            expected,
             ordinal + u32_value(1),
             wrappers,
             types,
@@ -3524,11 +3553,12 @@ elaborate_tuple(
     map: &ResolutionMap,
     value: &mut BodyBuilder,
     expression: u32,
-    expected_plus_one: u32
+    expected: Option<TypeId>
 ) -> Result<Elaborated, ElaborationError> {
     let token = super::bodies::expression_token_start_at(body, expression);
     let count = super::bodies::expression_child_count_at(body, expression);
-    if(expected_plus_one == u32_value(0)) { elaborate_tuple_checked(
+    handle expected {
+        Result::Err(_) => elaborate_tuple_checked(
             original,
             headers,
             declarations,
@@ -3537,19 +3567,18 @@ elaborate_tuple(
             map,
             value,
             expression,
-            0,
-            0,
+            None,
             token
-        ) } else {
-        let expected = expected_plus_one - u32_value(1);
-        let matches = handle type_kind_at(
-            interfaces,
-            type_id_from_u32(expected)
-        ) {
-            TypeKind::Tuple(range) => range.count == count,
-            _ => false
-        };
-        if(matches) { elaborate_tuple_checked(
+        ),
+        Result::Ok(expected_type) => {
+            let matches = handle type_kind_at(
+                interfaces,
+                expected_type
+            ) {
+                TypeKind::Tuple(range) => range.count == count,
+                _ => false
+            };
+            if(matches) { elaborate_tuple_checked(
                 original,
                 headers,
                 declarations,
@@ -3558,12 +3587,12 @@ elaborate_tuple(
                 map,
                 value,
                 expression,
-                expected_plus_one,
-                expected,
+                Option::Some(expected_type),
                 token
             ) } else { Result::Err(
-                error(3, token, token, expected, 0)
+                error(3, token, token, Id::to_u32(expected_type), 0)
             ) }
+        }
     }
 }
 
@@ -3576,8 +3605,7 @@ elaborate_tuple_checked(
     map: &ResolutionMap,
     value: &mut BodyBuilder,
     expression: u32,
-    expected_plus_one: u32,
-    expected_type: u32,
+    expected: Option<TypeId>,
     token: usize
 ) -> Result<Elaborated, ElaborationError> {
     let wrappers = Vec::new();
@@ -3592,13 +3620,18 @@ elaborate_tuple_checked(
         map,
         value,
         expression,
-        expected_plus_one,
+        expected,
         0,
         &mut wrappers,
         &mut types,
         &mut fields
     ), @elaborate_tuple_checked);
-    let ty = if(expected_plus_one == u32_value(0)) { intern_tuple_type(interfaces, &types) } else { expected_type };
+    let ty_id = handle expected {
+        Result::Err(_) =>
+            type_id_from_u32(intern_tuple_type(interfaces, &types)),
+        Result::Ok(found) => found
+    };
+    let ty = Id::to_u32(ty_id);
     let copy = try(type_copyable(
         interfaces,
         ty,
@@ -3606,7 +3639,7 @@ elaborate_tuple_checked(
     ), @elaborate_tuple_checked);
     if(copy) { Result::Ok(finish_construct(
             value,
-            ty,
+            ty_id,
             ConstructionFlavor::Product,
             &fields,
             &wrappers
@@ -3802,7 +3835,7 @@ elaborate_struct_fields(
                         expression,
                         ordinal
                     ),
-                    field_type + u32_value(1)
+                    Option::Some(type_id_from_u32(field_type))
                 ), @elaborate_struct_fields);
                 let operand = embed_operand(value, field_value);
                 *Vec::index_mut(
@@ -3842,7 +3875,7 @@ elaborate_struct(
     map: &ResolutionMap,
     value: &mut BodyBuilder,
     expression: u32,
-    expected_plus_one: u32
+    expected: Option<TypeId>
 ) -> Result<Elaborated, ElaborationError> {
     let token = super::bodies::expression_token_start_at(body, expression);
     handle elaboration_target_at(map, expression) {
@@ -3872,10 +3905,7 @@ elaborate_struct(
                 let nominal = Id::to_u32(nominal_id);
                 if(bool_and(
                     type_is_copyable(interfaces, ty_id),
-                    bool_or(
-                        expected_plus_one == u32_value(0),
-                        expected_plus_one == ty + u32_value(1)
-                    )
+                    expected_matches(expected, ty_id)
                 )) {
                     let nominal_node = *interface_nominal_at(
                         interfaces,
@@ -3917,7 +3947,7 @@ elaborate_struct(
                         );
                         Result::Ok(finish_construct(
                             value,
-                            ty,
+                            ty_id,
                             ConstructionFlavor::Product,
                             &fields,
                             &wrappers
@@ -3932,7 +3962,13 @@ elaborate_struct(
                                 expression
                             )
                         )) }
-                } else { Result::Err(error(3, token, token, ty, ty)) }
+                } else { Result::Err(error(
+                    3,
+                    token,
+                    token,
+                    expected_word_or(expected, ty_id),
+                    ty
+                )) }
             }
         },
         target => Result::Err(error(
@@ -3961,10 +3997,10 @@ elaborate_enum_payloads(
     fields: &mut Vec<ConstructionField>
 ) -> Result<(), ElaborationError> {
     if(ordinal < payload_count) {
-        let expected = Id::to_u32(*Vec::index(
+        let payload_type = *Vec::index(
             &interfaces.variant_payloads,
             usize_from_u32(payload_start + ordinal)
-        ));
+        );
         let payload = try(elaborate_expression(
             original,
             headers,
@@ -3978,7 +4014,7 @@ elaborate_enum_payloads(
                 expression,
                 ordinal + u32_value(1)
             ),
-            expected + u32_value(1)
+            Option::Some(payload_type)
         ), @elaborate_enum_payloads);
         let operand = embed_operand(value, payload);
         Vec::push(&mut *fields, ConstructionField {
@@ -4013,7 +4049,7 @@ elaborate_enum_construct(
     value: &mut BodyBuilder,
     expression: u32,
     variant_index: u32,
-    expected_plus_one: u32
+    expected: Option<TypeId>
 ) -> Result<Elaborated, ElaborationError> {
     let token = super::bodies::expression_token_start_at(body, expression);
     if(usize_from_u32(variant_index)
@@ -4046,10 +4082,7 @@ elaborate_enum_construct(
             payload_count == found_count,
             bool_and(
                 type_is_copyable(interfaces, ty_id),
-                bool_or(
-                    expected_plus_one == u32_value(0),
-                    expected_plus_one == ty + u32_value(1)
-                )
+                expected_matches(expected, ty_id)
             )
         )) {
             let wrappers = Vec::new();
@@ -4071,7 +4104,7 @@ elaborate_enum_construct(
             ), @elaborate_enum_construct);
             Result::Ok(finish_construct(
                 value,
-                ty,
+                ty_id,
                 ConstructionFlavor::Variant(variant_ordinal),
                 &fields,
                 &wrappers
@@ -4090,7 +4123,7 @@ elaborate_enum_bare(
     value: &mut BodyBuilder,
     expression: u32,
     variant_index: u32,
-    expected_plus_one: u32
+    expected: Option<TypeId>
 ) -> Result<Elaborated, ElaborationError> {
     let token = super::bodies::expression_token_start_at(body, expression);
     if(usize_from_u32(variant_index)
@@ -4118,17 +4151,14 @@ elaborate_enum_bare(
             payload_count == u32_value(0),
             bool_and(
                 type_is_copyable(interfaces, ty_id),
-                bool_or(
-                    expected_plus_one == u32_value(0),
-                    expected_plus_one == ty + u32_value(1)
-                )
+                expected_matches(expected, ty_id)
             )
         )) {
             let fields = Vec::new();
             let wrappers = Vec::new();
             Result::Ok(finish_construct(
                 value,
-                ty,
+                ty_id,
                 ConstructionFlavor::Variant(variant_ordinal),
                 &fields,
                 &wrappers
@@ -4146,7 +4176,7 @@ elaborate_projection(
     map: &ResolutionMap,
     value: &mut BodyBuilder,
     expression: u32,
-    expected_plus_one: u32
+    expected: Option<TypeId>
 ) -> Result<Elaborated, ElaborationError> {
     let token = super::bodies::expression_name_token_at(body, expression, 0);
     let name_kind = super::bodies::expression_name_kind_at(
@@ -4168,12 +4198,13 @@ elaborate_projection(
         map,
         value,
         super::bodies::expression_child_at(body, expression, 0),
-        0
+        None
     ), @elaborate_projection);
     let subject_type = subject.type_id;
+    let subject_type_word = Id::to_u32(subject_type);
     let subject_kind = type_kind_at(
         interfaces,
-        type_id_from_u32(subject_type)
+        subject_type
     );
     let field = handle subject_kind {
                 TypeKind::Tuple(range) =>
@@ -4210,7 +4241,7 @@ elaborate_projection(
     };
     handle move field {
                 Result::Err(_) => Result::Err(
-                    error(6, token, token, subject_type, name)
+                    error(6, token, token, subject_type_word, name)
                 ),
                 Result::Ok(field_index) => {
                     let result_type = handle subject_kind {
@@ -4220,28 +4251,25 @@ elaborate_projection(
                             field_index
                         ),
                         TypeKind::Nominal(nominal) =>
-                            nominal_struct_field_type(
-                            &*interfaces,
-                            Id::to_u32(nominal),
-                            field_index
-                        ),
+                            type_id_from_u32(nominal_struct_field_type(
+                                &*interfaces,
+                                Id::to_u32(nominal),
+                                field_index
+                            )),
                         _ => unreachable()
                     };
+                    let result_type_word = Id::to_u32(result_type);
                     if(bool_and(
                         type_is_copyable(
                             interfaces,
-                            type_id_from_u32(subject_type)
+                            subject_type
                         ),
                         bool_and(
                             type_is_copyable(
                                 interfaces,
-                                type_id_from_u32(result_type)
+                                result_type
                             ),
-                            bool_or(
-                                expected_plus_one == u32_value(0),
-                                expected_plus_one
-                                    == result_type + u32_value(1)
-                            )
+                            expected_matches(expected, result_type)
                         )
                     )) {
                         let wrappers = Vec::new();
@@ -4280,8 +4308,8 @@ elaborate_projection(
                             3,
                             token,
                             token,
-                            if(expected_plus_one == u32_value(0)) { result_type } else { expected_plus_one - u32_value(1) },
-                            result_type
+                            expected_word_or(expected, result_type),
+                            result_type_word
                         )) }
                 }
     }
@@ -4296,7 +4324,7 @@ elaborate_expression(
     map: &ResolutionMap,
     value: &mut BodyBuilder,
     expression: u32,
-    expected_plus_one: u32
+    expected: Option<TypeId>
 ) -> Result<Elaborated, ElaborationError> {
     handle super::bodies::expression_kind_at(body, expression) {
         1 => handle elaboration_target_at(map, expression) {
@@ -4306,7 +4334,7 @@ elaborate_expression(
                 value,
                 expression,
                 variant,
-                expected_plus_one
+                expected
             ),
             _ => elaborate_identifier(
                 &*interfaces,
@@ -4314,7 +4342,7 @@ elaborate_expression(
                 map,
                 value,
                 expression,
-                expected_plus_one
+                expected
             )
         },
         2 => elaborate_integer(
@@ -4323,20 +4351,24 @@ elaborate_expression(
             body,
             value,
             expression,
-            expected_plus_one
+            expected
         ),
         3 => {
             let token = super::bodies::expression_token_start_at(
                 body,
                 expression
             );
-            let unit = push_value(value, 0, CoreValueKind::Unit);
+            let unit = push_value(
+                value,
+                type_id_from_u32(0),
+                CoreValueKind::Unit
+            );
             check_expected(
                 Elaborated {
-                    type_id: 0,
+                    type_id: type_id_from_u32(0),
                     form: ElaboratedForm::Value(unit)
                 },
-                expected_plus_one,
+                expected,
                 token
             )
         },
@@ -4349,7 +4381,7 @@ elaborate_expression(
             map,
             value,
             super::bodies::expression_child_at(body, expression, 0),
-            expected_plus_one
+            expected
         ),
         5 => Result::Err(error(
             2,
@@ -4374,7 +4406,7 @@ elaborate_expression(
             map,
             value,
             expression,
-            expected_plus_one
+            expected
         ),
         8 => elaborate_block(
             original,
@@ -4385,7 +4417,7 @@ elaborate_expression(
             map,
             value,
             expression,
-            expected_plus_one
+            expected
         ),
         9 => elaborate_tuple(
             original,
@@ -4396,7 +4428,7 @@ elaborate_expression(
             map,
             value,
             expression,
-            expected_plus_one
+            expected
         ),
         10 => elaborate_struct(
             original,
@@ -4407,7 +4439,7 @@ elaborate_expression(
             map,
             value,
             expression,
-            expected_plus_one
+            expected
         ),
         11 => elaborate_projection(
             original,
@@ -4418,7 +4450,7 @@ elaborate_expression(
             map,
             value,
             expression,
-            expected_plus_one
+            expected
         ),
         _ => Result::Err(error(
             2,
@@ -4918,7 +4950,7 @@ pub elaborate_function_body(
         )),
         Result::Ok(callable) => {
             let result =
-                Id::to_u32(interface_callable_result(interfaces, callable));
+                interface_callable_result(interfaces, callable);
             let locals = IndexVec::new();
             seed_parameter_locals(interfaces, callable, &mut locals, 0);
             seed_untyped_locals(
@@ -4959,7 +4991,7 @@ pub elaborate_function_body(
                         &map,
                         &mut builder,
                         super::bodies::body_root_index(body),
-                        result + u32_value(1)
+                        Option::Some(result)
                     ) {
                         Result::Err(found) => Result::Err(found),
                         Result::Ok(root) => {
@@ -5216,7 +5248,7 @@ write_value_expression(
     source_local_limit: u32
 ) -> Result<(), ElaborationError> {
     let node = core_value_at(&body.values, value);
-    let ty = node.ty;
+    let ty = Id::to_u32(node.ty);
     handle node.kind {
         CoreValueKind::Unit => {
             ByteBuf::push(&mut *output, 0);
@@ -5427,7 +5459,7 @@ write_computation_expression(
     tail_position: Bool
 ) -> Result<(), ElaborationError> {
     let node = core_computation_at(&body.computations, computation);
-    let ty = node.ty;
+    let ty = Id::to_u32(node.ty);
     handle node.kind {
         CoreComputationKind::Pure(value) => write_value_expression(
             output,
@@ -5617,7 +5649,10 @@ write_block_expression(
     ByteBuf::push(&mut *output, 5);
     write_type_id(
         &mut *output,
-        core_computation_at(&body.computations, computation).ty
+        Id::to_u32(core_computation_at(
+            &body.computations,
+            computation
+        ).ty)
     );
     ByteBuf::write_u32_le(
         &mut *output,
@@ -5747,7 +5782,10 @@ write_function(
                                 interface_callable,
                                 0
                             );
-                            write_type_id(&mut *output, typed.result_type);
+                            write_type_id(
+                                &mut *output,
+                                Id::to_u32(typed.result_type)
+                            );
                             let source_local_limit = parameter_count
                                 + u32_from_usize(
                                     super::resolution::local_count(&resolved)
