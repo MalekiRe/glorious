@@ -77,6 +77,31 @@ fn nested_vec_zero_use_is_derived_from_its_symbolic_element() {
 }
 
 #[test]
+fn predefined_persistent_handles_satisfy_generic_use_bounds_intrinsically() {
+    let source = r#"
+        intrinsic_use_discard<T>(value: T) -> () where T: Use<[0,0]> { () }
+        intrinsic_use_duplicate<T>(value: T) -> (T, T) where T: Use<[0,infinity]> {
+            (value, value)
+        }
+
+        discard_string() -> () {
+            intrinsic_use_discard(String::concat("grand", "iose"))
+        }
+        duplicate_string(value: String) -> (String, String) {
+            intrinsic_use_duplicate(move value)
+        }
+        discard_bytes(value: Bytes) -> () {
+            intrinsic_use_discard(move value)
+        }
+        duplicate_bytes(value: Bytes) -> (Bytes, Bytes) {
+            intrinsic_use_duplicate(move value)
+        }
+        main() -> () { () }
+    "#;
+    assert_compiles_all_modes(source);
+}
+
+#[test]
 fn receiverless_associated_method_uses_generic_where_evidence() {
     let source = r#"
         generic_default<T>() -> T where T: Default { Default::default() }

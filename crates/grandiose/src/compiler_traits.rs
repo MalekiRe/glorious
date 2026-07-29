@@ -12,7 +12,7 @@ use crate::ast::{
 };
 use crate::compiler_typeck::{
     DeclarationKey, GenericParamKey, NominalInstanceKey, NominalKey, ProvisionalConst,
-    ProvisionalType, provisional_signature_type_any,
+    ProvisionalType, predefined_runtime_use_interval, provisional_signature_type_any,
 };
 use crate::diagnostic::Diagnostic;
 
@@ -1142,6 +1142,41 @@ struct TraitSchema {
 }
 
 impl TraitDb {
+    /// Predefined runtime leaves carry their `Use` capability out of band:
+    /// source cannot lawfully implement the external intrinsic for them, and
+    /// requiring the distributed standard library to do so would violate the
+    /// same orphan rule that protects every other external trait.  Reflect the
+    /// runtime type descriptor's maximal capability as intrinsic solver
+    /// evidence instead.
+    fn predefined_use_contains(goal: &GroundGoal) -> bool {
+        let ProvisionalType::Predefined(name) = &goal.subject else {
+            return false;
+        };
+        let Some((principal_lower, principal_upper)) =
+            predefined_runtime_use_interval(name.as_str())
+        else {
+            return false;
+        };
+        let [
+            GenericArg::Const(ConstValue::Quantity {
+                lower: requested_lower,
+                upper: requested_upper,
+            }),
+        ] = goal.arguments.as_slice()
+        else {
+            return false;
+        };
+        if goal.polarity != GoalPolarity::Positive || !goal.bindings.is_empty() {
+            return false;
+        }
+        principal_lower <= *requested_lower
+            && match (principal_upper, *requested_upper) {
+                (None, _) => true,
+                (Some(_), None) => false,
+                (Some(principal), Some(requested)) => requested <= principal,
+            }
+    }
+
     fn candidate_indices(&self, goal: &GroundGoal) -> Vec<usize> {
         let mut candidates = self
             .candidates
@@ -2239,6 +2274,14 @@ impl TraitDb {
             tables.insert(table_key, TableState::Complete(lexical.clone()));
             diagnostics.active.pop();
             return lexical;
+        }
+        if self.intrinsic_use_key.as_ref() == Some(&goal.trait_key)
+            && Self::predefined_use_contains(&goal)
+        {
+            let answer = table_answer(SolveResult::Proven);
+            tables.insert(table_key, TableState::Complete(answer.clone()));
+            diagnostics.active.pop();
+            return answer;
         }
         if goal.polarity == GoalPolarity::Positive
             && self.intrinsic_use_key.as_ref() == Some(&goal.trait_key)
@@ -7479,6 +7522,39 @@ mod tests {
             .result,
             SolveResult::Refuted
         );
+    }
+
+    #[test]
+    fn predefined_use_evidence_tracks_runtime_type_capabilities() {
+        let db = database("");
+        let use_key = db.intrinsic_key(IntrinsicRole::Use).unwrap();
+        let solve = |name: &str, lower, upper| {
+            let mut budget = SolverBudget::default();
+            db.solve_with_key_detailed_with_budget(
+                &mut budget,
+                &ParamEnv::default(),
+                GoalPolarity::Positive,
+                use_key,
+                &ProvisionalType::Predefined(name.into()),
+                &[GenericArg::Const(ConstValue::Quantity { lower, upper })],
+                &[],
+            )
+            .result
+        };
+        for name in [
+            "Unit", "u8", "u16", "u32", "u64", "u128", "i8", "i16", "i32", "i64", "i128", "usize",
+            "isize", "f32", "f64", "Char", "Text", "Bytes",
+        ] {
+            assert_eq!(
+                solve(name, 0, None),
+                SolveResult::Proven,
+                "{name} should expose its persistent runtime capability"
+            );
+            assert_eq!(solve(name, 0, Some(0)), SolveResult::Proven);
+        }
+        assert_eq!(solve("Never", 1, Some(1)), SolveResult::Proven);
+        assert_eq!(solve("Never", 0, Some(0)), SolveResult::NoEvidence);
+        assert_eq!(solve("Never", 0, None), SolveResult::NoEvidence);
     }
 
     #[test]

@@ -191,10 +191,36 @@ const ALGORITHM_SURFACE: &str = r#"
             + record_sequence(&values, 4)
     }
 
+    empty_nested() -> Vec<Vec<i64>> { Vec::new() }
+    nested_structural() -> usize {
+        let first = empty_i64();
+        Vec::push(&mut first, 1);
+        Vec::push(&mut first, 2);
+        let duplicate = empty_i64();
+        Vec::push(&mut duplicate, 1);
+        Vec::push(&mut duplicate, 2);
+        let last = empty_i64();
+        Vec::push(&mut last, 2);
+
+        let values = empty_nested();
+        Vec::push(&mut values, last);
+        Vec::push(&mut values, duplicate);
+        Vec::push(&mut values, first);
+        Vec::sort(&mut values);
+        Vec::dedup(&mut values);
+
+        let left = Vec::index(&values, 0);
+        let right = Vec::index(&values, 1);
+        Vec::len(&values) * 100
+            + wrapping_convert_to_usize(i64_at(left, 0)) * 10
+            + wrapping_convert_to_usize(i64_at(right, 0))
+    }
+
     comprehensive() -> usize {
         bounds_partition_dedup() + lexicographic()
             + wrapping_convert_to_usize(stable_merge())
             + wrapping_convert_to_usize(stable_records())
+            + nested_structural()
     }
 
     main() -> () { () }
@@ -221,7 +247,8 @@ fn algorithms_execute_on_hostile_inputs_at_o1_through_o3() {
             ("lexicographic", Value::U64(123)),
             ("stable_merge", Value::I64(11_222)),
             ("stable_records", Value::I64(13_024)),
-            ("comprehensive", Value::U64(169_311)),
+            ("nested_structural", Value::U64(212)),
+            ("comprehensive", Value::U64(169_523)),
         ] {
             assert_eq!(
                 vm.run(function_id(&phases.artifact, name), vec![]).unwrap(),
@@ -241,7 +268,7 @@ fn algorithms_have_recovery_execution_parity() {
         &mut NoHost,
     )
     .unwrap();
-    assert_eq!(result, RecoveryValue::Int(169_311));
+    assert_eq!(result, RecoveryValue::Int(169_523));
 }
 
 #[test]

@@ -1,0 +1,729 @@
+// Stage-A ownership-aware lowering from the finalized self-hosted Core.
+//
+// This module intentionally stops before the GRBC container layer.  Its
+// instructions retain semantic constant keys and argument lists; the artifact
+// writer canonicalizes the shared constant and operand tables afterwards.
+
+use super::super::frontend::elaboration::CoreComputationView;
+use super::super::frontend::elaboration::CoreValueView;
+
+pub enum StageInstruction {
+    Const(u32, Bytes),
+    Move(u32, u32),
+    Copy(u32, u32),
+    Call(Option<u32>, u32, RegisterPack),
+    Return(Option<u32>)
+}
+
+pub struct RegisterPack { bytes: Bytes, count: u32 }
+
+impl Use<[0, *]> for RegisterPack {}
+
+pub struct StageCleanup {
+    first_instruction: u32,
+    end_instruction: u32,
+    registers: Vec<u32>
+}
+
+pub struct StageFunction {
+    name: String,
+    parameters: Vec<u32>,
+    result: u32,
+    register_count: u32,
+    instructions: Vec<StageInstruction>,
+    cleanups: Vec<StageCleanup>
+}
+
+pub struct StageProgram {
+    functions: Vec<StageFunction>,
+    constants: Vec<Vec<u8>>
+}
+
+pub struct LoweringError { code: u8, detail: u32 }
+
+struct FunctionBuilder {
+    locals: Vec<Option<u32>>,
+    live_order: Vec<u32>,
+    instructions: Vec<StageInstruction>,
+    cleanups: Vec<StageCleanup>,
+    register_count: u32
+}
+
+pub lowering_error_code(value: &LoweringError) -> u8 { value.code }
+
+pub lowering_error_detail(value: &LoweringError) -> u32 { value.detail }
+
+pub stage_program_function_count(value: &StageProgram) -> usize {
+    Vec::len(&value.functions)
+}
+
+pub stage_program_function_at<'a>(
+    value: &'a StageProgram,
+    index: usize
+) -> &'a StageFunction {
+    Vec::index(&value.functions, index)
+}
+
+pub stage_program_constant_count(value: &StageProgram) -> usize {
+    Vec::len(&value.constants)
+}
+
+pub stage_program_constant_at<'a>(
+    value: &'a StageProgram,
+    index: usize
+) -> &'a Vec<u8> {
+    Vec::index(&value.constants, index)
+}
+
+pub stage_function_name(value: &StageFunction) -> &String { &value.name }
+
+pub stage_function_parameter_count(value: &StageFunction) -> usize {
+    Vec::len(&value.parameters)
+}
+
+pub stage_function_parameter_at(value: &StageFunction, index: usize) -> u32 {
+    *Vec::index(&value.parameters, index)
+}
+
+pub stage_function_result(value: &StageFunction) -> u32 { value.result }
+
+pub stage_function_register_count(value: &StageFunction) -> u32 {
+    value.register_count
+}
+
+pub stage_function_instruction_count(value: &StageFunction) -> usize {
+    Vec::len(&value.instructions)
+}
+
+pub stage_function_instruction_at<'a>(
+    value: &'a StageFunction,
+    index: usize
+) -> &'a StageInstruction {
+    Vec::index(&value.instructions, index)
+}
+
+pub stage_function_cleanup_count(value: &StageFunction) -> usize {
+    Vec::len(&value.cleanups)
+}
+
+pub stage_function_cleanup_at<'a>(
+    value: &'a StageFunction,
+    index: usize
+) -> &'a StageCleanup {
+    Vec::index(&value.cleanups, index)
+}
+
+pub stage_cleanup_first(value: &StageCleanup) -> u32 {
+    value.first_instruction
+}
+
+pub stage_cleanup_end(value: &StageCleanup) -> u32 {
+    value.end_instruction
+}
+
+pub stage_cleanup_register_count(value: &StageCleanup) -> usize {
+    Vec::len(&value.registers)
+}
+
+pub stage_cleanup_register_at(value: &StageCleanup, index: usize) -> u32 {
+    *Vec::index(&value.registers, index)
+}
+
+pub register_pack_count(value: &RegisterPack) -> u32 { value.count }
+
+pub register_pack_bytes(value: &RegisterPack) -> Bytes { value.bytes }
+
+error(code: u8, detail: u32) -> LoweringError {
+    LoweringError { code: code, detail: detail }
+}
+
+checked_u32(value: usize) -> u32 {
+    handle checked_usize_to_u32(value) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+usize_from_u32(value: u32) -> usize {
+    wrapping_convert_to_usize(value)
+}
+
+artifact_type_id(value: u32) -> u32 {
+    if(value < u32_value(14)) {
+        value
+    } else {
+        value + u32_value(5)
+    }
+}
+
+append_u32_bytes(output: &mut Vec<u8>, value: u32, count: usize) {
+    if(count == usize_value(0)) {
+        ()
+    } else {
+        Vec::push(&mut *output, wrapping_convert_to_u8(value));
+        append_u32_bytes(
+            output,
+            shift_right(value, 8),
+            count - usize_value(1)
+        )
+    }
+}
+
+append_constant_words(
+    output: &mut Vec<u8>,
+    value: &super::super::frontend::elaboration::IntegerConstantView,
+    word: usize,
+    bytes: usize
+) {
+    if(bytes == usize_value(0)) {
+        ()
+    } else {
+        let take = if(bytes < usize_value(4)) { bytes } else { 4 };
+        append_u32_bytes(
+            output,
+            super::super::frontend::elaboration::integer_constant_view_word(
+                value,
+                word
+            ),
+            take
+        );
+        append_constant_words(
+            output,
+            value,
+            word + usize_value(1),
+            bytes - take
+        )
+    }
+}
+
+scalar_width(type_id: u32) -> Option<usize> {
+    handle type_id {
+        0 => Option::Some(0),
+        2 => Option::Some(1),
+        3 => Option::Some(2),
+        4 => Option::Some(4),
+        5 => Option::Some(8),
+        6 => Option::Some(16),
+        7 => Option::Some(1),
+        8 => Option::Some(2),
+        9 => Option::Some(4),
+        10 => Option::Some(8),
+        11 => Option::Some(16),
+        12 => Option::Some(8),
+        13 => Option::Some(8),
+        _ => None
+    }
+}
+
+constant_key(
+    body: &super::super::frontend::elaboration::TypedBody,
+    type_id: u32,
+    constant: u32
+) -> Result<Bytes, LoweringError> {
+    handle scalar_width(type_id) {
+        Result::Err(_) => Result::Err(error(2, type_id)),
+        Result::Ok(width) => {
+            let output = Vec::new();
+            Vec::push(&mut output, wrapping_convert_to_u8(
+                artifact_type_id(type_id)
+            ));
+            let words =
+                super::super::frontend::elaboration::
+                    typed_body_integer_constant_at(
+                        body,
+                        usize_from_u32(constant)
+            );
+            append_constant_words(&mut output, &words, 0, width);
+            Result::Ok(Bytes::from_vec(output))
+        }
+    }
+}
+
+push_missing_locals(
+    output: &mut Vec<Option<u32>>,
+    remaining: usize
+) {
+    if(remaining == usize_value(0)) {
+        ()
+    } else {
+        Vec::push(&mut *output, None);
+        push_missing_locals(output, remaining - usize_value(1))
+    }
+}
+
+push_parameter_locals(
+    output: &mut Vec<Option<u32>>,
+    live: &mut Vec<u32>,
+    index: u32,
+    count: u32
+) {
+    if(index < count) {
+        let register = index + u32_value(1);
+        Vec::push(&mut *output, Option::Some(register));
+        Vec::push(&mut *live, register);
+        push_parameter_locals(
+            output,
+            live,
+            index + u32_value(1),
+            count
+        )
+    } else { () }
+}
+
+reverse_registers(
+    source: &Vec<u32>,
+    output: &mut Vec<u32>,
+    remaining: usize
+) {
+    if(remaining == usize_value(0)) {
+        ()
+    } else {
+        Vec::push(
+            &mut *output,
+            *Vec::index(source, remaining - usize_value(1))
+        );
+        reverse_registers(
+            source,
+            output,
+            remaining - usize_value(1)
+        )
+    }
+}
+
+record_cleanup(value: &mut FunctionBuilder) {
+    let instruction = checked_u32(Vec::len(&value.instructions));
+    let registers = Vec::new();
+    reverse_registers(
+        &value.live_order,
+        &mut registers,
+        Vec::len(&value.live_order)
+    );
+    Vec::push(&mut value.cleanups, StageCleanup {
+        first_instruction: instruction,
+        end_instruction: instruction + u32_value(1),
+        registers: registers
+    })
+}
+
+alloc_register(value: &mut FunctionBuilder) -> u32 {
+    let found = value.register_count;
+    value.register_count = found + u32_value(1);
+    found
+}
+
+find_live(value: &Vec<u32>, register: u32, index: usize) -> Option<usize> {
+    if(index < Vec::len(value)) {
+        if(*Vec::index(value, index) == register) {
+            Option::Some(index)
+        } else {
+            find_live(value, register, index + usize_value(1))
+        }
+    } else { None }
+}
+
+move_live(value: &mut FunctionBuilder, source: u32, target: u32) {
+    handle find_live(&value.live_order, source, 0) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(index) => {
+            *Vec::index_mut(&mut value.live_order, index) = target;
+            ()
+        }
+    }
+}
+
+consume_live(value: &mut FunctionBuilder, register: u32) {
+    handle find_live(&value.live_order, register, 0) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(index) => {
+            Vec::remove(&mut value.live_order, index);
+            ()
+        }
+    }
+}
+
+emit_const(value: &mut FunctionBuilder, target: u32, key: Bytes) {
+    record_cleanup(value);
+    Vec::push(&mut value.instructions, StageInstruction::Const(
+        target,
+        key
+    ));
+    Vec::push(&mut value.live_order, target)
+}
+
+emit_move(value: &mut FunctionBuilder, target: u32, source: u32) {
+    record_cleanup(value);
+    Vec::push(&mut value.instructions, StageInstruction::Move(
+        target,
+        source
+    ));
+    move_live(value, source, target)
+}
+
+emit_copy(value: &mut FunctionBuilder, target: u32, source: u32) {
+    record_cleanup(value);
+    Vec::push(&mut value.instructions, StageInstruction::Copy(
+        target,
+        source
+    ));
+    Vec::push(&mut value.live_order, target)
+}
+
+consume_arguments(
+    value: &mut FunctionBuilder,
+    arguments: &Vec<u32>,
+    index: usize
+) {
+    if(index < Vec::len(arguments)) {
+        consume_live(value, *Vec::index(arguments, index));
+        consume_arguments(value, arguments, index + usize_value(1))
+    } else { () }
+}
+
+write_argument_registers(
+    arguments: &Vec<u32>,
+    index: usize,
+    output: &mut ByteBuf
+) {
+    if(index < Vec::len(arguments)) {
+        ByteBuf::write_u32_le(
+            &mut *output,
+            *Vec::index(arguments, index)
+        );
+        write_argument_registers(
+            arguments,
+            index + usize_value(1),
+            output
+        )
+    } else { () }
+}
+
+emit_call(
+    value: &mut FunctionBuilder,
+    target: Option<u32>,
+    function: u32,
+    arguments: Vec<u32>
+) {
+    record_cleanup(value);
+    consume_arguments(value, &arguments, 0);
+    let encoded = ByteBuf::new();
+    write_argument_registers(&arguments, 0, &mut encoded);
+    Vec::push(&mut value.instructions, StageInstruction::Call(
+        target,
+        function,
+        RegisterPack {
+            bytes: ByteBuf::finish(encoded),
+            count: checked_u32(Vec::len(&arguments))
+        }
+    ));
+    let inserted = target;
+    handle inserted {
+        Result::Err(_) => (),
+        Result::Ok(register) => Vec::push(&mut value.live_order, register)
+    }
+}
+
+emit_return(value: &mut FunctionBuilder, source: Option<u32>) {
+    record_cleanup(value);
+    Vec::push(&mut value.instructions, StageInstruction::Return(source))
+}
+
+local_register(value: &FunctionBuilder, local: u32) -> Option<u32> {
+    *Vec::index(&value.locals, usize_from_u32(local))
+}
+
+set_local(value: &mut FunctionBuilder, local: u32, register: Option<u32>) {
+    *Vec::index_mut(&mut value.locals, usize_from_u32(local)) = register;
+    ()
+}
+
+lower_value(
+    interfaces:
+        &super::super::frontend::elaboration::TypedInterfaces,
+    body: &super::super::frontend::elaboration::TypedBody,
+    value: &mut FunctionBuilder,
+    id: u32
+) -> Result<Option<u32>, LoweringError> {
+    handle super::super::frontend::elaboration::typed_body_value_at(
+        body,
+        usize_from_u32(id)
+    ) {
+        CoreValueView::Unit(_) => {
+            let target = alloc_register(value);
+            let key = Vec::new();
+            Vec::push(&mut key, 0);
+            emit_const(value, target, Bytes::from_vec(key));
+            Result::Ok(Option::Some(target))
+        },
+        CoreValueView::Integer(type_id, constant) => {
+            let target = alloc_register(value);
+            let key = try(
+                constant_key(body, type_id, constant),
+                @lower_value
+            );
+            emit_const(value, target, key);
+            Result::Ok(Option::Some(target))
+        },
+        CoreValueView::Local(type_id, local, copy) => {
+            handle local_register(value, local) {
+                Result::Err(_) => Result::Err(error(3, local)),
+                Result::Ok(source) => {
+                    let target = alloc_register(value);
+                    if(copy) {
+                        emit_copy(value, target, source)
+                    } else {
+                        emit_move(value, target, source);
+                        set_local(value, local, None)
+                    };
+                    Result::Ok(Option::Some(target))
+                }
+            }
+        },
+        CoreValueView::Projection(_, _, _) =>
+            Result::Err(error(4, id)),
+        CoreValueView::Embedded(_, computation) =>
+            lower_computation(interfaces, body, value, computation)
+    }
+}
+
+lower_arguments(
+    interfaces:
+        &super::super::frontend::elaboration::TypedInterfaces,
+    body: &super::super::frontend::elaboration::TypedBody,
+    value: &mut FunctionBuilder,
+    start: u32,
+    count: u32,
+    ordinal: u32,
+    output: &mut Vec<u32>
+) -> Result<(), LoweringError> {
+    if(ordinal < count) {
+        let operand =
+            super::super::frontend::elaboration::typed_body_operand_at(
+                body,
+                usize_from_u32(start + ordinal)
+            );
+        let lowered = try(
+            lower_value(interfaces, body, value, operand),
+            @lower_arguments
+        );
+        handle lowered {
+            Result::Err(_) => Result::Err(error(8, operand)),
+            Result::Ok(register) => {
+                Vec::push(&mut *output, register);
+                lower_arguments(
+                    interfaces,
+                    body,
+                    value,
+                    start,
+                    count,
+                    ordinal + u32_value(1),
+                    output
+                )
+            }
+        }
+    } else { Result::Ok(()) }
+}
+
+lower_computation(
+    interfaces:
+        &super::super::frontend::elaboration::TypedInterfaces,
+    body: &super::super::frontend::elaboration::TypedBody,
+    value: &mut FunctionBuilder,
+    id: u32
+) -> Result<Option<u32>, LoweringError> {
+    handle
+        super::super::frontend::elaboration::typed_body_computation_at(
+            body,
+            usize_from_u32(id)
+        ) {
+        CoreComputationView::Pure(_, found) =>
+            lower_value(interfaces, body, value, found),
+        CoreComputationView::Let(_, local, initializer, remainder) => {
+            let initialized = try(
+                lower_computation(
+                    interfaces,
+                    body,
+                    value,
+                    initializer
+                ),
+                @lower_computation
+            );
+            set_local(value, local, initialized);
+            lower_computation(interfaces, body, value, remainder)
+        },
+        CoreComputationView::Call(type_id, shell, start, count) => {
+            let arguments = Vec::new();
+            try(lower_arguments(
+                interfaces,
+                body,
+                value,
+                start,
+                count,
+                0,
+                &mut arguments
+            ), @lower_computation);
+            handle
+                super::super::frontend::elaboration::
+                    interface_callable_for_shell(interfaces, shell) {
+                Result::Err(_) => Result::Err(error(5, shell)),
+                Result::Ok(function) => {
+                    let target = Option::Some(alloc_register(value));
+                    emit_call(value, target, function, arguments);
+                    Result::Ok(target)
+                }
+            }
+        },
+        CoreComputationView::Construct(_, _, _, _) =>
+            Result::Err(error(6, id))
+    }
+}
+
+parameter_types(
+    interfaces:
+        &super::super::frontend::elaboration::TypedInterfaces,
+    function: usize,
+    index: u32,
+    count: u32,
+    output: &mut Vec<u32>
+) {
+    if(index < count) {
+        let start =
+            super::super::frontend::elaboration::
+                interface_callable_parameter_start_at(
+                    interfaces,
+                    function
+                );
+        Vec::push(
+            &mut *output,
+            artifact_type_id(
+                super::super::frontend::elaboration::
+                    interface_callable_parameter_at(
+                        interfaces,
+                        usize_from_u32(start + index)
+                    )
+            )
+        );
+        parameter_types(
+            interfaces,
+            function,
+            index + u32_value(1),
+            count,
+            output
+        )
+    } else { () }
+}
+
+pub lower_function(
+    name: String,
+    interfaces:
+        &super::super::frontend::elaboration::TypedInterfaces,
+    body: &super::super::frontend::elaboration::TypedBody,
+    function: usize
+) -> Result<StageFunction, LoweringError> {
+    let parameter_count =
+        super::super::frontend::elaboration::
+            interface_callable_parameter_count_at(interfaces, function);
+    let parameters = Vec::new();
+    parameter_types(
+        interfaces,
+        function,
+        0,
+        parameter_count,
+        &mut parameters
+    );
+    let builder = FunctionBuilder {
+        locals: Vec::new(),
+        live_order: Vec::new(),
+        instructions: Vec::new(),
+        cleanups: Vec::new(),
+        register_count: parameter_count + u32_value(1)
+    };
+    push_parameter_locals(
+        &mut builder.locals,
+        &mut builder.live_order,
+        0,
+        parameter_count
+    );
+    let local_count =
+        super::super::frontend::elaboration::typed_body_local_count(body);
+    push_missing_locals(
+        &mut builder.locals,
+        local_count - usize_from_u32(parameter_count)
+    );
+    let result = try(lower_computation(
+        interfaces,
+        body,
+        &mut builder,
+        super::super::frontend::elaboration::typed_body_root(body)
+    ), @lower_function);
+    let result_type = artifact_type_id(
+        super::super::frontend::elaboration::typed_body_result_type(body)
+    );
+    handle result {
+        Result::Err(_) => Result::Err(error(7, result_type)),
+        Result::Ok(register) => {
+            emit_return(&mut builder, Option::Some(register));
+            Result::Ok(StageFunction {
+                name: name,
+                parameters: parameters,
+                result: result_type,
+                register_count: builder.register_count,
+                instructions: builder.instructions,
+                cleanups: builder.cleanups
+            })
+        }
+    }
+}
+
+collect_instruction_constants(
+    instructions: &Vec<StageInstruction>,
+    index: usize,
+    output: &mut Vec<Vec<u8>>
+) {
+    if(index < Vec::len(instructions)) {
+        handle Vec::index(instructions, index) {
+            StageInstruction::Const(_, key) =>
+                Vec::push(&mut *output, Bytes::to_vec(key)),
+            _ => ()
+        };
+        collect_instruction_constants(
+            instructions,
+            index + usize_value(1),
+            output
+        )
+    } else { () }
+}
+
+collect_function_constants(
+    functions: &Vec<StageFunction>,
+    index: usize,
+    output: &mut Vec<Vec<u8>>
+) {
+    if(index < Vec::len(functions)) {
+        let function = Vec::index(functions, index);
+        collect_instruction_constants(
+            &function.instructions,
+            0,
+            output
+        );
+        collect_function_constants(
+            functions,
+            index + usize_value(1),
+            output
+        )
+    } else { () }
+}
+
+pub finish_program(functions: Vec<StageFunction>) -> StageProgram {
+    let constants = Vec::new();
+    collect_function_constants(&functions, 0, &mut constants);
+    Vec::sort(&mut constants);
+    Vec::dedup(&mut constants);
+    StageProgram {
+        functions: functions,
+        constants: constants
+    }
+}
+
+usize_value(value: usize) -> usize { value }
+
+u32_value(value: u32) -> u32 { value }

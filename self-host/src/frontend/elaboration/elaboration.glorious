@@ -217,6 +217,49 @@ pub struct ElaborationError {
     found: u32
 }
 
+// Backend-facing views keep the finalized Core representation semantic.
+// They deliberately expose identities and compact ranges, not the storage
+// layout of the arenas that own them.
+pub enum InterfaceTypeView {
+    Unit,
+    Never,
+    Scalar(u8),
+    Tuple(u32, u32),
+    Nominal(u32),
+    SharedReference(u32),
+    UniqueReference(u32)
+}
+
+impl Use<[0, *]> for InterfaceTypeView {}
+
+pub enum CoreValueView {
+    Unit(u32),
+    Integer(u32, u32),
+    Local(u32, u32, Bool),
+    Projection(u32, u32, u32),
+    Embedded(u32, u32)
+}
+
+impl Use<[0, *]> for CoreValueView {}
+
+pub enum CoreComputationView {
+    Pure(u32, u32),
+    Let(u32, u32, u32, u32),
+    Call(u32, u32, u32, u32),
+    Construct(u32, u32, u32, u32)
+}
+
+impl Use<[0, *]> for CoreComputationView {}
+
+pub struct IntegerConstantView {
+    low0: u32,
+    low1: u32,
+    high0: u32,
+    high1: u32
+}
+
+impl Use<[0, *]> for IntegerConstantView {}
+
 enum ElaborationTarget {
     Missing,
     Parameter(super::resolution::ParameterId),
@@ -587,6 +630,25 @@ pub interface_type_count(value: &TypedInterfaces) -> usize {
     Arena::len(&value.types)
 }
 
+pub interface_type_at(
+    value: &TypedInterfaces,
+    index: usize
+) -> InterfaceTypeView {
+    handle type_kind_at(value, type_id_from_usize(index)) {
+        TypeKind::Unit => InterfaceTypeView::Unit,
+        TypeKind::Never => InterfaceTypeView::Never,
+        TypeKind::Scalar(kind) => InterfaceTypeView::Scalar(kind),
+        TypeKind::Tuple(range) =>
+            InterfaceTypeView::Tuple(range.start, range.count),
+        TypeKind::Nominal(id) =>
+            InterfaceTypeView::Nominal(Id::to_u32(id)),
+        TypeKind::SharedReference(id) =>
+            InterfaceTypeView::SharedReference(Id::to_u32(id)),
+        TypeKind::UniqueReference(id) =>
+            InterfaceTypeView::UniqueReference(Id::to_u32(id))
+    }
+}
+
 pub interface_type_tag_at(value: &TypedInterfaces, index: usize) -> u8 {
     handle type_kind_at(value, type_id_from_usize(index)) {
         TypeKind::Unit => 1,
@@ -807,6 +869,38 @@ pub typed_body_value_count(value: &TypedBody) -> usize {
     Arena::len(&value.values)
 }
 
+pub typed_body_value_at(
+    value: &TypedBody,
+    index: usize
+) -> CoreValueView {
+    let node = core_value_at(
+        &value.values,
+        core_value_id_from_usize(index)
+    );
+    let ty = Id::to_u32(node.ty);
+    handle node.kind {
+        CoreValueKind::Unit => CoreValueView::Unit(ty),
+        CoreValueKind::Integer(constant) =>
+            CoreValueView::Integer(ty, Id::to_u32(constant)),
+        CoreValueKind::Local(local, access) => CoreValueView::Local(
+            ty,
+            Id::to_u32(local),
+            handle access {
+                CoreLocalAccess::Move => false,
+                CoreLocalAccess::Copy => true
+            }
+        ),
+        CoreValueKind::Projection(source, field) =>
+            CoreValueView::Projection(
+                ty,
+                Id::to_u32(source),
+                field
+            ),
+        CoreValueKind::Embedded(computation) =>
+            CoreValueView::Embedded(ty, Id::to_u32(computation))
+    }
+}
+
 pub typed_body_value_word_at(
     value: &TypedBody,
     index: usize,
@@ -844,6 +938,42 @@ pub typed_body_value_word_at(
 
 pub typed_body_computation_count(value: &TypedBody) -> usize {
     Arena::len(&value.computations)
+}
+
+pub typed_body_computation_at(
+    value: &TypedBody,
+    index: usize
+) -> CoreComputationView {
+    let node = core_computation_at(
+        &value.computations,
+        core_computation_id_from_usize(index)
+    );
+    let ty = Id::to_u32(node.ty);
+    handle node.kind {
+        CoreComputationKind::Pure(found) =>
+            CoreComputationView::Pure(ty, Id::to_u32(found)),
+        CoreComputationKind::Let(local, initializer, remainder) =>
+            CoreComputationView::Let(
+                ty,
+                Id::to_u32(local),
+                Id::to_u32(initializer),
+                Id::to_u32(remainder)
+            ),
+        CoreComputationKind::Call(shell, range) =>
+            CoreComputationView::Call(
+                ty,
+                shell,
+                range.start,
+                range.count
+            ),
+        CoreComputationKind::Construct(flavor, range) =>
+            CoreComputationView::Construct(
+                ty,
+                construction_flavor_word(flavor),
+                range.start,
+                range.count
+            )
+    }
 }
 
 pub typed_body_computation_word_at(
@@ -911,6 +1041,35 @@ pub typed_body_construction_field_word_at(
 
 pub typed_body_integer_constant_count(value: &TypedBody) -> usize {
     Arena::len(&value.integer_constants)
+}
+
+pub typed_body_integer_constant_at(
+    value: &TypedBody,
+    index: usize
+) -> IntegerConstantView {
+    let found = integer_constant_at(
+        &value.integer_constants,
+        integer_constant_id_from_usize(index)
+    );
+    IntegerConstantView {
+        low0: found.low0,
+        low1: found.low1,
+        high0: found.high0,
+        high1: found.high1
+    }
+}
+
+pub integer_constant_view_word(
+    value: &IntegerConstantView,
+    word: usize
+) -> u32 {
+    handle word {
+        0 => value.low0,
+        1 => value.low1,
+        2 => value.high0,
+        3 => value.high1,
+        _ => unreachable()
+    }
 }
 
 pub typed_body_integer_constant_word_at(

@@ -1,0 +1,279 @@
+// The first self-hosted compiler driver: source through typed Core, Stage-A
+// ownership lowering, and canonical verified-bytecode emission.
+
+pub struct CompileError { code: u8, detail: u32 }
+
+pub compile_error_code(value: &CompileError) -> u8 { value.code }
+
+pub compile_error_detail(value: &CompileError) -> u32 { value.detail }
+
+error(code: u8, detail: u32) -> CompileError {
+    CompileError { code: code, detail: detail }
+}
+
+checked_u32(value: usize) -> u32 {
+    handle checked_usize_to_u32(value) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+usize_from_u32(value: u32) -> usize {
+    wrapping_convert_to_usize(value)
+}
+
+function_name(
+    headers:
+        &super::super::frontend::headers::ParsedHeaders,
+    declarations:
+        &super::super::frontend::scanner::DeclarationIndex,
+    shell: u32
+) -> Result<String, CompileError> {
+    handle super::super::frontend::scanner::shell_at(
+        declarations,
+        usize_from_u32(shell)
+    ) {
+        Result::Err(_) => Result::Err(error(5, shell)),
+        Result::Ok(declaration) => handle
+            *super::super::frontend::scanner::shell_name(declaration) {
+            Result::Err(_) => Result::Err(error(5, shell)),
+            Result::Ok(name) => handle
+                super::super::frontend::lexer::lexeme(
+                    super::super::frontend::headers::parsed_source(headers),
+                    name
+                ) {
+                Result::Err(_) => Result::Err(error(5, shell)),
+                Result::Ok(found) => Result::Ok(*found)
+            }
+        }
+    }
+}
+
+lower_functions(
+    original: &String,
+    headers:
+        &super::super::frontend::headers::ParsedHeaders,
+    declarations:
+        &super::super::frontend::scanner::DeclarationIndex,
+    interfaces:
+        &mut super::super::frontend::elaboration::TypedInterfaces,
+    index: usize,
+    output: &mut Vec<super::lowering::StageFunction>
+) -> Result<(), CompileError> {
+    if(index <
+        super::super::frontend::elaboration::
+            interface_callable_count(&*interfaces)
+    ) {
+        let shell =
+            super::super::frontend::elaboration::
+                interface_callable_shell_at(&*interfaces, index);
+        let name = try(
+            function_name(headers, declarations, shell),
+            @lower_functions
+        );
+        handle
+            super::super::frontend::bodies::parse_function_body(
+                original,
+                headers,
+                declarations,
+                usize_from_u32(shell)
+            ) {
+            Result::Err(_) => Result::Err(error(6, shell)),
+            Result::Ok(parsed) => handle
+                super::super::frontend::resolution::
+                    resolve_function_body(
+                        headers,
+                        declarations,
+                        &parsed
+                    ) {
+                Result::Err(_) => Result::Err(error(7, shell)),
+                Result::Ok(resolved) => handle
+                    super::super::frontend::elaboration::
+                        elaborate_function_body(
+                            original,
+                            headers,
+                            declarations,
+                            interfaces,
+                            &parsed,
+                            &resolved
+                        ) {
+                    Result::Err(_) => Result::Err(error(8, shell)),
+                    Result::Ok(body) => handle
+                        super::lowering::lower_function(
+                            name,
+                            &*interfaces,
+                            &body,
+                            index
+                        ) {
+                        Result::Err(found) => Result::Err(error(
+                            9,
+                            super::lowering::lowering_error_detail(&found)
+                        )),
+                        Result::Ok(function) => {
+                            Vec::push(&mut *output, function);
+                            lower_functions(
+                                original,
+                                headers,
+                                declarations,
+                                interfaces,
+                                index + usize_value(1),
+                                output
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    } else { Result::Ok(()) }
+}
+
+find_entry(
+    program: &super::lowering::StageProgram,
+    index: usize
+) -> Option<u32> {
+    if(index < super::lowering::stage_program_function_count(program)) {
+        let function =
+            super::lowering::stage_program_function_at(program, index);
+        if(String::eq(
+            super::lowering::stage_function_name(function),
+            &"main"
+        )) {
+            if(
+                super::lowering::stage_function_parameter_count(function)
+                    == usize_value(0)
+            ) {
+                if(super::lowering::stage_function_result(function)
+                    == u32_value(0)) {
+                    Option::Some(checked_u32(index))
+                } else { None }
+            } else { None }
+        } else {
+            find_entry(program, index + usize_value(1))
+        }
+    } else { None }
+}
+
+compile_interfaces(
+    original: &String,
+    headers:
+        &super::super::frontend::headers::ParsedHeaders,
+    declarations:
+        &super::super::frontend::scanner::DeclarationIndex,
+    interfaces:
+        super::super::frontend::elaboration::TypedInterfaces
+) -> Result<Bytes, CompileError> {
+    let functions = Vec::new();
+    try(lower_functions(
+        original,
+        headers,
+        declarations,
+        &mut interfaces,
+        0,
+        &mut functions
+    ), @compile_interfaces);
+    if(super::super::frontend::elaboration::interface_type_count(
+        &interfaces
+    ) != usize_value(14)) {
+        Result::Err(error(
+            10,
+            checked_u32(
+                super::super::frontend::elaboration::
+                    interface_type_count(&interfaces)
+            )
+        ))
+    } else {
+        let program = super::lowering::finish_program(functions);
+        let entry = find_entry(&program, 0);
+        handle super::emission::encode(&program, entry) {
+            Result::Err(found) => Result::Err(error(
+                11,
+                super::emission::emission_error_detail(&found)
+            )),
+            Result::Ok(bytes) => Result::Ok(bytes)
+        }
+    }
+}
+
+compile_headers(
+    original: &String,
+    headers:
+        super::super::frontend::headers::ParsedHeaders,
+    declarations:
+        &super::super::frontend::scanner::DeclarationIndex
+) -> Result<Bytes, CompileError> {
+    handle
+        super::super::frontend::elaboration::collect_interfaces(
+            &headers,
+            declarations
+        ) {
+        Result::Err(_) => Result::Err(error(4, 0)),
+        Result::Ok(interfaces) => compile_interfaces(
+            original,
+            &headers,
+            declarations,
+            interfaces
+        )
+    }
+}
+
+compile_declarations(
+    original: &String,
+    source: super::super::frontend::lexer::LexedSource,
+    declarations:
+        super::super::frontend::scanner::DeclarationIndex
+) -> Result<Bytes, CompileError> {
+    handle super::super::frontend::headers::parse(
+        original,
+        source,
+        &declarations
+    ) {
+        Result::Err(_) => Result::Err(error(3, 0)),
+        Result::Ok(headers) => compile_headers(
+            original,
+            headers,
+            &declarations
+        )
+    }
+}
+
+pub compile_source(original: &String) -> Result<Bytes, CompileError> {
+    handle super::super::frontend::lexer::lex(original) {
+        Result::Err(_) => Result::Err(error(1, 0)),
+        Result::Ok(source) => handle
+            super::super::frontend::scanner::scan(&source) {
+            Result::Err(_) => Result::Err(error(2, 0)),
+            Result::Ok(declarations) => compile_declarations(
+                original,
+                source,
+                declarations
+            )
+        }
+    }
+}
+
+pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
+    let arguments = process_args();
+    if(Vec::len(&arguments) < usize_value(2)) {
+        write_diagnostic(
+            "usage: grandiose-self-host-compiler <output.grbc> <input.glorious>"
+        )
+    } else {
+        let output_path = *Vec::index(&arguments, 0);
+        let input_path = *Vec::index(&arguments, 1);
+        let bytes = read_file(input_path);
+        handle String::from_utf8(bytes) {
+            Result::Err(_) =>
+                write_diagnostic("self-host compiler: input is not UTF-8"),
+            Result::Ok(source) => handle compile_source(&source) {
+                Result::Err(_) =>
+                    write_diagnostic("self-host compiler: compilation failed"),
+                Result::Ok(artifact) =>
+                    write_file(output_path, artifact)
+            }
+        }
+    }
+}
+
+usize_value(value: usize) -> usize { value }
+
+u32_value(value: u32) -> u32 { value }

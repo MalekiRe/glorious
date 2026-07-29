@@ -22,8 +22,8 @@ use crate::compiler_traits::{
 use crate::compiler_typeck::{
     CallableShape, DeclarationKey, GenericParamKey, NominalInstanceKey, NominalKey,
     ProvisionalConst, ProvisionalType, ProvisionalTypeFolder, fold_provisional_type_children,
-    label_payload_type, label_provisional_type, provisional_signature_children_any,
-    provisional_signature_type_any, provisional_type_any,
+    label_payload_type, label_provisional_type, predefined_runtime_use_interval,
+    provisional_signature_children_any, provisional_signature_type_any, provisional_type_any,
 };
 
 const ASSOCIATED_PROJECTION_PREFIX: &str = "$associated_projection$";
@@ -692,6 +692,10 @@ fn symbolic_type(
                 name.as_str(),
                 "Unit"
                     | "Text"
+                    | "Bytes"
+                    | "Char"
+                    | "f32"
+                    | "f64"
                     | "i8"
                     | "i16"
                     | "i32"
@@ -4503,12 +4507,7 @@ impl<'a> Walker<'a> {
             return None;
         }
         let principal = match subject {
-            ProvisionalType::Predefined(name) => match name.as_str() {
-                "Never" => (1, Some(1)),
-                "Unit" | "u8" | "u16" | "u32" | "u64" | "u128" | "usize" | "i8" | "i16" | "i32"
-                | "i64" | "i128" | "isize" | "Text" => (0, None),
-                _ => return None,
-            },
+            ProvisionalType::Predefined(name) => predefined_runtime_use_interval(name)?,
             ProvisionalType::Nominal(instance) => {
                 // These library-facing scalar spellings are sealed primitive
                 // leaves even though type lowering represents them as
@@ -4517,10 +4516,11 @@ impl<'a> Walker<'a> {
                 // primitive scalar values are structurally unrestricted and
                 // do not require a source-forgeable principal `Use` impl.
                 if instance.arguments.is_empty()
-                    && matches!(instance.declaration.0.as_str(), "f32" | "f64" | "Char")
+                    && let Some(principal) =
+                        predefined_runtime_use_interval(instance.declaration.0.as_str())
                 {
                     visiting.remove(subject);
-                    return Some((0, None));
+                    return Some(principal);
                 }
                 if instance.declaration.0 == "Array" {
                     let [element] = instance.arguments.as_slice() else {

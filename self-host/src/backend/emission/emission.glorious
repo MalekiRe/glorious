@@ -1,0 +1,679 @@
+// Canonical assembly of straight-line Stage-A bytecode into GRBC sections.
+
+use super::lowering::StageInstruction;
+
+struct FunctionSpans {
+    code_start: u32,
+    code_length: u32,
+    cleanup_start: u32,
+    cleanup_count: u32
+}
+
+pub struct EmissionError { code: u8, detail: u32 }
+
+pub emission_error_code(value: &EmissionError) -> u8 { value.code }
+
+pub emission_error_detail(value: &EmissionError) -> u32 { value.detail }
+
+error(code: u8, detail: u32) -> EmissionError {
+    EmissionError { code: code, detail: detail }
+}
+
+checked_u32(value: usize) -> u32 {
+    handle checked_usize_to_u32(value) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+usize_from_u32(value: u32) -> usize {
+    wrapping_convert_to_usize(value)
+}
+
+copy_bytes_after(
+    source: &Vec<u8>,
+    index: usize,
+    output: &mut Vec<u8>
+) {
+    if(index < Vec::len(source)) {
+        Vec::push(&mut *output, *Vec::index(source, index));
+        copy_bytes_after(source, index + usize_value(1), output)
+    } else { () }
+}
+
+constant_records(
+    program: &super::lowering::StageProgram,
+    index: usize,
+    output: &mut Vec<super::artifact::Record>
+) {
+    if(index < super::lowering::stage_program_constant_count(program)) {
+        let key = super::lowering::stage_program_constant_at(program, index);
+        let payload = Vec::new();
+        copy_bytes_after(key, 1, &mut payload);
+        Vec::push(
+            &mut *output,
+            super::artifact::record(
+                *Vec::index(key, 0),
+                0,
+                Bytes::from_vec(payload)
+            )
+        );
+        constant_records(program, index + usize_value(1), output)
+    } else { () }
+}
+
+find_constant(
+    program: &super::lowering::StageProgram,
+    key: &Vec<u8>,
+    index: usize
+) -> Option<u32> {
+    if(index < super::lowering::stage_program_constant_count(program)) {
+        if(Eq::eq(
+            super::lowering::stage_program_constant_at(program, index),
+            key
+        )) {
+            Option::Some(checked_u32(index))
+        } else {
+            find_constant(program, key, index + usize_value(1))
+        }
+    } else { None }
+}
+
+collect_names(
+    program: &super::lowering::StageProgram,
+    index: usize,
+    output: &mut Vec<String>
+) {
+    if(index < super::lowering::stage_program_function_count(program)) {
+        Vec::push(
+            &mut *output,
+            *super::lowering::stage_function_name(
+                super::lowering::stage_program_function_at(program, index)
+            )
+        );
+        collect_names(program, index + usize_value(1), output)
+    } else { () }
+}
+
+find_name(names: &Vec<String>, name: &String, index: usize) -> Option<u32> {
+    if(index < Vec::len(names)) {
+        if(String::eq(Vec::index(names, index), name)) {
+            Option::Some(checked_u32(index))
+        } else {
+            find_name(names, name, index + usize_value(1))
+        }
+    } else { None }
+}
+
+require_name(
+    names: &Vec<String>,
+    name: &String,
+    detail: u32
+) -> Result<u32, EmissionError> {
+    handle find_name(names, name, 0) {
+        Result::Err(_) => Result::Err(error(3, detail)),
+        Result::Ok(found) => Result::Ok(found)
+    }
+}
+
+signature_key(
+    function: &super::lowering::StageFunction
+) -> Vec<u32> {
+    let output = Vec::new();
+    Vec::push(
+        &mut output,
+        checked_u32(
+            super::lowering::stage_function_parameter_count(function)
+        )
+    );
+    Vec::push(
+        &mut output,
+        super::lowering::stage_function_result(function)
+    );
+    Vec::push(&mut output, 0);
+    append_parameter_types(function, 0, &mut output);
+    output
+}
+
+append_parameter_types(
+    function: &super::lowering::StageFunction,
+    index: usize,
+    output: &mut Vec<u32>
+) {
+    if(index < super::lowering::stage_function_parameter_count(function)) {
+        Vec::push(
+            &mut *output,
+            super::lowering::stage_function_parameter_at(function, index)
+        );
+        append_parameter_types(
+            function,
+            index + usize_value(1),
+            output
+        )
+    } else { () }
+}
+
+find_signature(
+    signatures: &Vec<Vec<u32>>,
+    key: &Vec<u32>,
+    index: usize
+) -> Option<u32> {
+    if(index < Vec::len(signatures)) {
+        if(Eq::eq(Vec::index(signatures, index), key)) {
+            Option::Some(checked_u32(index))
+        } else {
+            find_signature(signatures, key, index + usize_value(1))
+        }
+    } else { None }
+}
+
+require_signature(
+    signatures: &Vec<Vec<u32>>,
+    key: &Vec<u32>,
+    detail: u32
+) -> Result<u32, EmissionError> {
+    handle find_signature(signatures, key, 0) {
+        Result::Err(_) => Result::Err(error(4, detail)),
+        Result::Ok(found) => Result::Ok(found)
+    }
+}
+
+collect_signatures(
+    program: &super::lowering::StageProgram,
+    index: usize,
+    output: &mut Vec<Vec<u32>>
+) {
+    if(index < super::lowering::stage_program_function_count(program)) {
+        let key = signature_key(
+            super::lowering::stage_program_function_at(program, index)
+        );
+        handle find_signature(output, &key, 0) {
+            Result::Err(_) => Vec::push(&mut *output, key),
+            Result::Ok(_) => {
+                key;
+                ()
+            }
+        };
+        collect_signatures(program, index + usize_value(1), output)
+    } else { () }
+}
+
+write_words(
+    output: &mut ByteBuf,
+    words: &Vec<u32>,
+    index: usize
+) {
+    if(index < Vec::len(words)) {
+        ByteBuf::write_u32_le(&mut *output, *Vec::index(words, index));
+        write_words(output, words, index + usize_value(1))
+    } else { () }
+}
+
+signature_records(
+    signatures: &Vec<Vec<u32>>,
+    index: usize,
+    output: &mut Vec<super::artifact::Record>
+) {
+    if(index < Vec::len(signatures)) {
+        let payload = ByteBuf::new();
+        write_words(
+            &mut payload,
+            Vec::index(signatures, index),
+            0
+        );
+        Vec::push(
+            &mut *output,
+            super::artifact::record(
+                0,
+                0,
+                ByteBuf::finish(payload)
+            )
+        );
+        signature_records(
+            signatures,
+            index + usize_value(1),
+            output
+        )
+    } else { () }
+}
+
+byte_at(bytes: &Bytes, index: usize) -> u32 {
+    handle Bytes::get(bytes, index) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => wrapping_convert_to_u32(found)
+    }
+}
+
+argument_at(bytes: &Bytes, ordinal: u32) -> u32 {
+    let start = usize_from_u32(ordinal) * usize_value(4);
+    byte_at(bytes, start)
+        + shift_left(byte_at(bytes, start + usize_value(1)), 8)
+        + shift_left(byte_at(bytes, start + usize_value(2)), 16)
+        + shift_left(byte_at(bytes, start + usize_value(3)), 24)
+}
+
+append_arguments(
+    arguments: &super::lowering::RegisterPack,
+    ordinal: u32,
+    output: &mut Vec<u32>
+) {
+    let count = super::lowering::register_pack_count(arguments);
+    if(ordinal < count) {
+        let bytes = super::lowering::register_pack_bytes(arguments);
+        Vec::push(&mut *output, argument_at(&bytes, ordinal));
+        append_arguments(
+            arguments,
+            ordinal + u32_value(1),
+            output
+        )
+    } else { () }
+}
+
+write_instruction(
+    program: &super::lowering::StageProgram,
+    instruction: &StageInstruction,
+    code: &mut ByteBuf,
+    operands: &mut Vec<u32>
+) -> Result<(), EmissionError> {
+    if(*instruction is StageInstruction::Const(target, key)) {
+        let words = Bytes::to_vec(key);
+        handle find_constant(program, &words, 0) {
+            Result::Err(_) => Result::Err(error(1, target)),
+            Result::Ok(constant) => {
+                ByteBuf::write_u32_le(&mut *code, 8193);
+                ByteBuf::write_u32_le(&mut *code, target);
+                ByteBuf::write_u32_le(code, constant);
+                Result::Ok(())
+            }
+        }
+    } else if(*instruction is StageInstruction::Move(target, source)) {
+        ByteBuf::write_u32_le(&mut *code, 8194);
+        ByteBuf::write_u32_le(&mut *code, target);
+        ByteBuf::write_u32_le(code, source);
+        Result::Ok(())
+    } else if(*instruction is StageInstruction::Copy(target, source)) {
+        ByteBuf::write_u32_le(&mut *code, 8195);
+        ByteBuf::write_u32_le(&mut *code, target);
+        ByteBuf::write_u32_le(code, source);
+        Result::Ok(())
+    } else if(*instruction is StageInstruction::Call(
+        target,
+        function,
+        arguments
+    )) {
+        let start = checked_u32(Vec::len(&*operands));
+        append_arguments(&arguments, 0, operands);
+        ByteBuf::write_u32_le(&mut *code, 16418);
+        ByteBuf::write_u32_le(
+            &mut *code,
+            handle target {
+                Result::Err(_) => 4294967295,
+                Result::Ok(found) => found
+            }
+        );
+        ByteBuf::write_u32_le(&mut *code, function);
+        ByteBuf::write_u32_le(&mut *code, start);
+        ByteBuf::write_u32_le(
+            code,
+            super::lowering::register_pack_count(&arguments)
+        );
+        Result::Ok(())
+    } else if(*instruction is StageInstruction::Return(source)) {
+        ByteBuf::write_u32_le(&mut *code, 4134);
+        ByteBuf::write_u32_le(
+            code,
+            handle source {
+                Result::Err(_) => 4294967295,
+                Result::Ok(found) => found
+            }
+        );
+        Result::Ok(())
+    } else {
+        Result::Err(error(2, 0))
+    }
+}
+
+write_function_code(
+    program: &super::lowering::StageProgram,
+    function: &super::lowering::StageFunction,
+    index: usize,
+    code: &mut ByteBuf,
+    operands: &mut Vec<u32>
+) -> Result<(), EmissionError> {
+    if(index < super::lowering::stage_function_instruction_count(function)) {
+        try(write_instruction(
+            program,
+            super::lowering::stage_function_instruction_at(function, index),
+            code,
+            operands
+        ), @write_function_code);
+        write_function_code(
+            program,
+            function,
+            index + usize_value(1),
+            code,
+            operands
+        )
+    } else { Result::Ok(()) }
+}
+
+write_all_code(
+    program: &super::lowering::StageProgram,
+    index: usize,
+    code: &mut ByteBuf,
+    operands: &mut Vec<u32>,
+    spans: &mut Vec<FunctionSpans>
+) -> Result<(), EmissionError> {
+    if(index < super::lowering::stage_program_function_count(program)) {
+        let function =
+            super::lowering::stage_program_function_at(program, index);
+        let start = checked_u32(ByteBuf::len(&*code) / usize_value(4));
+        try(write_function_code(
+            program,
+            function,
+            0,
+            code,
+            operands
+        ), @write_all_code);
+        let end = checked_u32(ByteBuf::len(&*code) / usize_value(4));
+        Vec::push(&mut *spans, FunctionSpans {
+            code_start: start,
+            code_length: end - start,
+            cleanup_start: 0,
+            cleanup_count: 0
+        });
+        write_all_code(
+            program,
+            index + usize_value(1),
+            code,
+            operands,
+            spans
+        )
+    } else { Result::Ok(()) }
+}
+
+append_cleanup_registers(
+    cleanup: &super::lowering::StageCleanup,
+    index: usize,
+    operands: &mut Vec<u32>
+) {
+    if(index < super::lowering::stage_cleanup_register_count(cleanup)) {
+        Vec::push(
+            &mut *operands,
+            super::lowering::stage_cleanup_register_at(cleanup, index)
+        );
+        append_cleanup_registers(
+            cleanup,
+            index + usize_value(1),
+            operands
+        )
+    } else { () }
+}
+
+write_function_cleanups(
+    function: &super::lowering::StageFunction,
+    function_id: u32,
+    index: usize,
+    output: &mut ByteBuf,
+    operands: &mut Vec<u32>
+) {
+    if(index < super::lowering::stage_function_cleanup_count(function)) {
+        let cleanup =
+            super::lowering::stage_function_cleanup_at(function, index);
+        let operand_start = checked_u32(Vec::len(&*operands));
+        append_cleanup_registers(cleanup, 0, operands);
+        ByteBuf::write_u32_le(&mut *output, function_id);
+        ByteBuf::write_u32_le(
+            &mut *output,
+            super::lowering::stage_cleanup_first(cleanup)
+        );
+        ByteBuf::write_u32_le(
+            &mut *output,
+            super::lowering::stage_cleanup_end(cleanup)
+        );
+        ByteBuf::write_u32_le(&mut *output, operand_start);
+        ByteBuf::write_u32_le(
+            &mut *output,
+            checked_u32(
+                super::lowering::stage_cleanup_register_count(cleanup)
+            )
+        );
+        ByteBuf::write_u32_le(&mut *output, 0);
+        write_function_cleanups(
+            function,
+            function_id,
+            index + usize_value(1),
+            output,
+            operands
+        )
+    } else { () }
+}
+
+write_all_cleanups(
+    program: &super::lowering::StageProgram,
+    index: usize,
+    output: &mut ByteBuf,
+    operands: &mut Vec<u32>,
+    spans: &mut Vec<FunctionSpans>
+) {
+    if(index < super::lowering::stage_program_function_count(program)) {
+        let function =
+            super::lowering::stage_program_function_at(program, index);
+        let start = checked_u32(ByteBuf::len(&*output) / usize_value(24));
+        write_function_cleanups(
+            function,
+            checked_u32(index),
+            0,
+            output,
+            operands
+        );
+        let end = checked_u32(ByteBuf::len(&*output) / usize_value(24));
+        set_cleanup_span(spans, index, start, end - start);
+        write_all_cleanups(
+            program,
+            index + usize_value(1),
+            output,
+            operands,
+            spans
+        )
+    } else { () }
+}
+
+set_cleanup_span(
+    spans: &mut Vec<FunctionSpans>,
+    index: usize,
+    start: u32,
+    count: u32
+) {
+    let span = Vec::index_mut(&mut *spans, index);
+    (*span).cleanup_start = start;
+    (*span).cleanup_count = count;
+    ()
+}
+
+write_operand_words(
+    operands: &Vec<u32>,
+    index: usize,
+    output: &mut ByteBuf
+) {
+    if(index < Vec::len(operands)) {
+        ByteBuf::write_u32_le(
+            &mut *output,
+            *Vec::index(operands, index)
+        );
+        write_operand_words(
+            operands,
+            index + usize_value(1),
+            output
+        )
+    } else { () }
+}
+
+write_functions(
+    program: &super::lowering::StageProgram,
+    names: &Vec<String>,
+    signatures: &Vec<Vec<u32>>,
+    spans: &Vec<FunctionSpans>,
+    index: usize,
+    output: &mut ByteBuf
+) -> Result<(), EmissionError> {
+    if(index < super::lowering::stage_program_function_count(program)) {
+        let function =
+            super::lowering::stage_program_function_at(program, index);
+        let signature = signature_key(function);
+        let name = try(require_name(
+            names,
+            super::lowering::stage_function_name(function),
+            checked_u32(index)
+        ), @write_functions);
+        let signature_id = try(require_signature(
+            signatures,
+            &signature,
+            checked_u32(index)
+        ), @write_functions);
+        let span = Vec::index(spans, index);
+        ByteBuf::write_u32_le(&mut *output, name);
+        ByteBuf::write_u32_le(&mut *output, signature_id);
+        ByteBuf::write_u32_le(&mut *output, 0);
+        ByteBuf::write_u32_le(
+            &mut *output,
+            super::lowering::stage_function_register_count(function)
+        );
+        ByteBuf::write_u32_le(&mut *output, span.code_start);
+        ByteBuf::write_u32_le(&mut *output, span.code_length);
+        ByteBuf::write_u32_le(
+            &mut *output,
+            checked_u32(
+                super::lowering::stage_function_instruction_count(function)
+            )
+        );
+        ByteBuf::write_u32_le(&mut *output, span.cleanup_start);
+        ByteBuf::write_u32_le(&mut *output, span.cleanup_count);
+        ByteBuf::write_u32_le(&mut *output, 0);
+        ByteBuf::write_u32_le(&mut *output, 0);
+        ByteBuf::write_u32_le(&mut *output, 4294967295);
+        ByteBuf::write_u64_le(&mut *output, 0);
+        ByteBuf::write_u64_le(&mut *output, 0);
+        write_functions(
+            program,
+            names,
+            signatures,
+            spans,
+            index + usize_value(1),
+            output
+        )
+    } else { Result::Ok(()) }
+}
+
+pub encode(
+    program: &super::lowering::StageProgram,
+    entry: Option<u32>
+) -> Result<Bytes, EmissionError> {
+    let names = Vec::new();
+    collect_names(program, 0, &mut names);
+    Vec::sort(&mut names);
+    Vec::dedup(&mut names);
+
+    let signatures = Vec::new();
+    collect_signatures(program, 0, &mut signatures);
+    let signature_table_records = Vec::new();
+    signature_records(&signatures, 0, &mut signature_table_records);
+
+    let constant_table_records = Vec::new();
+    constant_records(program, 0, &mut constant_table_records);
+
+    let code = ByteBuf::new();
+    let operands = Vec::new();
+    let spans = Vec::new();
+    try(write_all_code(
+        program,
+        0,
+        &mut code,
+        &mut operands,
+        &mut spans
+    ), @encode);
+
+    let cleanups = ByteBuf::new();
+    write_all_cleanups(
+        program,
+        0,
+        &mut cleanups,
+        &mut operands,
+        &mut spans
+    );
+    let operand_bytes = ByteBuf::new();
+    write_operand_words(&operands, 0, &mut operand_bytes);
+    let functions = ByteBuf::new();
+    try(write_functions(
+        program,
+        &names,
+        &signatures,
+        &spans,
+        0,
+        &mut functions
+    ), @encode);
+    let code_count = checked_u32(ByteBuf::len(&code) / usize_value(4));
+    let code_bytes = ByteBuf::finish(code);
+    let cleanup_count =
+        checked_u32(ByteBuf::len(&cleanups) / usize_value(24));
+    let cleanup_bytes = ByteBuf::finish(cleanups);
+
+    let writer = super::artifact::new_writer();
+    super::artifact::set_section(
+        &mut writer,
+        super::artifact::SectionId::Strings,
+        super::artifact::sorted_string_section(&names)
+    );
+    super::artifact::set_section(
+        &mut writer,
+        super::artifact::SectionId::Constants,
+        super::artifact::variable_section(&constant_table_records)
+    );
+    super::artifact::set_section(
+        &mut writer,
+        super::artifact::SectionId::Signatures,
+        super::artifact::variable_section(&signature_table_records)
+    );
+    super::artifact::set_section(
+        &mut writer,
+        super::artifact::SectionId::Functions,
+        super::artifact::section(
+            ByteBuf::finish(functions),
+            checked_u32(
+                super::lowering::stage_program_function_count(program)
+            )
+        )
+    );
+    super::artifact::set_section(
+        &mut writer,
+        super::artifact::SectionId::Code,
+        super::artifact::section(
+            code_bytes,
+            code_count
+        )
+    );
+    super::artifact::set_section(
+        &mut writer,
+        super::artifact::SectionId::Operands,
+        super::artifact::section(
+            ByteBuf::finish(operand_bytes),
+            checked_u32(Vec::len(&operands))
+        )
+    );
+    super::artifact::set_section(
+        &mut writer,
+        super::artifact::SectionId::Cleanups,
+        super::artifact::section(
+            cleanup_bytes,
+            cleanup_count
+        )
+    );
+    handle super::artifact::encode_writer(&writer, entry, 1) {
+        Result::Err(_) => Result::Err(error(5, 0)),
+        Result::Ok(bytes) => Result::Ok(bytes)
+    }
+}
+
+usize_value(value: usize) -> usize { value }
+
+u32_value(value: u32) -> u32 { value }

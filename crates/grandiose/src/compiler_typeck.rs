@@ -9,7 +9,7 @@ use std::fmt::Write as _;
 use std::ops::ControlFlow;
 
 use grandiose_vm::bytecode::NEVER;
-use grandiose_vm::{BYTES, CHAR, F32, F64, I64, Primitive, TEXT, TypeId, U8, UNIT};
+use grandiose_vm::{BYTES, CHAR, F32, F64, I64, Primitive, TEXT, Type, TypeId, U8, UNIT};
 
 use crate::ast::{
     AssignmentPlace, AssignmentPlaceKind, BinaryOp, ConstKind, Expr, ExprKind, ExprVisitor,
@@ -1685,6 +1685,40 @@ impl TypedProgram {
 
 pub(crate) fn predefined_named(name: impl Into<String>) -> ProvisionalType {
     ProvisionalType::Predefined(name.into())
+}
+
+/// Principal `Use` capability carried by one sealed predefined runtime leaf.
+///
+/// These types cannot receive source `Use` impls under the external-trait
+/// orphan rule, so every phase that discharges generic evidence must derive
+/// the interval from the same runtime capability descriptor.
+pub(crate) fn predefined_runtime_use_interval(name: &str) -> Option<(u32, Option<u32>)> {
+    let descriptor = match name {
+        "Unit" => Type::Unit,
+        "Never" => Type::Never,
+        "u8" => Type::U8,
+        "u16" => Type::U16,
+        "u32" => Type::U32,
+        "u64" => Type::U64,
+        "u128" => Type::U128,
+        "i8" => Type::I8,
+        "i16" => Type::I16,
+        "i32" => Type::I32,
+        "i64" => Type::I64,
+        "i128" => Type::I128,
+        "usize" => Type::Usize,
+        "isize" => Type::Isize,
+        "f32" => Type::F32,
+        "f64" => Type::F64,
+        "Char" => Type::Char,
+        "Text" => Type::Text,
+        "Bytes" => Type::Bytes,
+        _ => return None,
+    };
+    Some((
+        u32::from(!descriptor.claimed_zero_use_allowed()),
+        (!descriptor.claimed_duplicable()).then_some(1),
+    ))
 }
 
 fn predefined(id: TypeId) -> ProvisionalType {

@@ -8251,6 +8251,42 @@ __g1_vec_lexicographic_cmp<T>(left: &Vec<T>, right: &Vec<T>) -> Ordering where T
     __g1_vec_lexicographic_at(left, right, 0, common)
 }
 
+__g1_vec_structural_eq_at<T>(
+    left: &Vec<T>,
+    right: &Vec<T>,
+    index: usize,
+    length: usize
+) -> Bool where T: Eq {
+    if(index < length) {
+        if(__g1_algorithm_eq(
+            Vec::index(left, index),
+            Vec::index(right, index)
+        )) {
+            __g1_vec_structural_eq_at(
+                left,
+                right,
+                index + 1,
+                length
+            )
+        } else { false }
+    } else { true }
+}
+
+impl < T > Eq for Vec<T> where T: Eq {
+    eq(self: &Vec<T>, other: &Vec<T>) -> Bool {
+        let length = Vec::len(self);
+        if(length == Vec::len(other)) {
+            __g1_vec_structural_eq_at(self, other, 0, length)
+        } else { false }
+    }
+}
+
+impl < T > Ord for Vec<T> where T: Ord {
+    cmp(self: &Vec<T>, other: &Vec<T>) -> Ordering {
+        __g1_vec_lexicographic_cmp(self, other)
+    }
+}
+
 let Vec::sort = __g1_vec_sort;
 let Vec::sort_stable = __g1_vec_sort_stable;
 let Vec::binary_search = __g1_vec_binary_search;

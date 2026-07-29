@@ -1,3 +1,4 @@
 mod frontend;
+mod backend;
 
 main() { run_compiler_host(frontend::application) }

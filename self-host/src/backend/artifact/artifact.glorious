@@ -1,0 +1,470 @@
+// Canonical Grandiose bytecode container emission.
+//
+// This module deliberately owns only the stable `.grbc` envelope and the
+// reusable variable-table encodings. MIR lowering and pool canonicalization
+// live above it, so the same writer can serve progressively richer backends.
+
+pub enum SectionId {
+    Strings,
+    Types,
+    Constants,
+    Signatures,
+    Imports,
+    Protocols,
+    HandlerDefinitions,
+    Functions,
+    Code,
+    Operands,
+    Cleanups,
+    Exports,
+    DropGlue,
+    ReferenceReturnContracts
+}
+
+impl Use<[0, *]> for SectionId {}
+
+pub enum ArtifactWriteError {
+    InvalidSectionCount,
+    InvalidFixedSectionLength
+}
+
+impl Use<[0, *]> for ArtifactWriteError {}
+
+pub struct Section {
+    bytes: Bytes,
+    count: u32
+}
+
+impl Use<[0, *]> for Section {}
+
+pub struct Record {
+    bytes: Bytes
+}
+
+impl Use<[0, *]> for Record {}
+
+pub struct ArtifactWriter {
+    sections: Vec<Section>
+}
+
+impl Use<[0, 1]> for ArtifactWriter {}
+
+section_ordinal(section: SectionId) -> usize {
+    handle section {
+        SectionId::Strings => 0,
+        SectionId::Types => 1,
+        SectionId::Constants => 2,
+        SectionId::Signatures => 3,
+        SectionId::Imports => 4,
+        SectionId::Protocols => 5,
+        SectionId::HandlerDefinitions => 6,
+        SectionId::Functions => 7,
+        SectionId::Code => 8,
+        SectionId::Operands => 9,
+        SectionId::Cleanups => 10,
+        SectionId::Exports => 11,
+        SectionId::DropGlue => 12,
+        SectionId::ReferenceReturnContracts => 13
+    }
+}
+
+section_width(ordinal: usize) -> u32 {
+    if(ordinal == 4) {
+        24
+    } else if(ordinal == 7) {
+        64
+    } else if(ordinal == 8) {
+        4
+    } else if(ordinal == 9) {
+        4
+    } else if(ordinal == 10) {
+        24
+    } else if(ordinal == 11) {
+        16
+    } else if(ordinal == 12) {
+        16
+    } else {
+        0
+    }
+}
+
+pub section(bytes: Bytes, count: u32) -> Section {
+    Section { bytes: bytes, count: count }
+}
+
+pub section_bytes(value: &Section) -> Bytes { value.bytes }
+
+pub section_count(value: &Section) -> u32 { value.count }
+
+pub record(tag: u8, flags: u8, payload: Bytes) -> Record {
+    let output = ByteBuf::with_capacity(Bytes::len(&payload) + 8);
+    ByteBuf::push(&mut output, tag);
+    ByteBuf::push(&mut output, flags);
+    ByteBuf::write_u16_le(&mut output, 0);
+    ByteBuf::write_u32_le(
+        &mut output,
+        wrapping_convert_to_u32(Bytes::len(&payload))
+    );
+    ByteBuf::append_bytes(&mut output, &payload);
+    Record { bytes: ByteBuf::finish(output) }
+}
+
+write_record_offsets(
+    output: &mut ByteBuf,
+    records: &Vec<Record>,
+    index: usize,
+    offset: usize
+) {
+    if(index < Vec::len(records)) {
+        let current = Vec::index(records, index);
+        let next = offset + Bytes::len(&current.bytes);
+        ByteBuf::write_u32_le(
+            &mut *output,
+            wrapping_convert_to_u32(next)
+        );
+        write_record_offsets(output, records, index + 1, next)
+    } else {
+        ()
+    }
+}
+
+write_record_data(output: &mut ByteBuf, records: &Vec<Record>, index: usize) {
+    if(index < Vec::len(records)) {
+        let current = Vec::index(records, index);
+        ByteBuf::append_bytes(
+            &mut *output,
+            &current.bytes
+        );
+        write_record_data(output, records, index + 1)
+    } else {
+        ()
+    }
+}
+
+pub variable_section(records: &Vec<Record>) -> Section {
+    let output = ByteBuf::new();
+    ByteBuf::write_u32_le(
+        &mut output,
+        wrapping_convert_to_u32(Vec::len(records))
+    );
+    ByteBuf::write_u32_le(&mut output, 0);
+    write_record_offsets(&mut output, records, 0, 0);
+    write_record_data(&mut output, records, 0);
+    section(
+        ByteBuf::finish(output),
+        wrapping_convert_to_u32(Vec::len(records))
+    )
+}
+
+pub empty_variable_section() -> Section {
+    variable_section(&Vec::new())
+}
+
+pub empty_fixed_section() -> Section {
+    section(Bytes::from_vec(Vec::new()), 0)
+}
+
+string_bytes_total(strings: &Vec<String>, index: usize) -> usize {
+    if(index < Vec::len(strings)) {
+        Bytes::len(&String::as_bytes(Vec::index(strings, index)))
+            + string_bytes_total(strings, index + 1)
+    } else {
+        0
+    }
+}
+
+write_string_offsets(
+    output: &mut ByteBuf,
+    strings: &Vec<String>,
+    index: usize,
+    offset: usize
+) {
+    if(index < Vec::len(strings)) {
+        let bytes = String::as_bytes(Vec::index(strings, index));
+        let next = offset + Bytes::len(&bytes);
+        ByteBuf::write_u32_le(
+            &mut *output,
+            wrapping_convert_to_u32(next)
+        );
+        write_string_offsets(output, strings, index + 1, next)
+    } else {
+        ()
+    }
+}
+
+write_string_data(output: &mut ByteBuf, strings: &Vec<String>, index: usize) {
+    if(index < Vec::len(strings)) {
+        let bytes = String::as_bytes(Vec::index(strings, index));
+        ByteBuf::append_bytes(&mut *output, &bytes);
+        write_string_data(output, strings, index + 1)
+    } else {
+        ()
+    }
+}
+
+// The caller supplies strictly byte-sorted, deduplicated strings. This keeps
+// name interning and ID assignment in the semantic backend while centralizing
+// the exact offset-table wire representation here.
+pub sorted_string_section(strings: &Vec<String>) -> Section {
+    let total = string_bytes_total(strings, 0);
+    let output = ByteBuf::new();
+    ByteBuf::write_u32_le(
+        &mut output,
+        wrapping_convert_to_u32(Vec::len(strings))
+    );
+    ByteBuf::write_u32_le(&mut output, wrapping_convert_to_u32(total));
+    ByteBuf::write_u32_le(&mut output, 0);
+    write_string_offsets(&mut output, strings, 0, 0);
+    write_string_data(&mut output, strings, 0);
+    section(
+        ByteBuf::finish(output),
+        wrapping_convert_to_u32(Vec::len(strings))
+    )
+}
+
+scalar_flags(tag: u8) -> u8 {
+    if(tag == 0) {
+        19
+    } else if(tag == 1) {
+        2
+    } else {
+        17
+    }
+}
+
+append_scalar_records(records: &mut Vec<Record>, tag: u8) {
+    if(tag < 19) {
+        Vec::push(
+            &mut *records,
+            record(
+                tag,
+                scalar_flags(tag),
+                Bytes::from_vec(Vec::new())
+            )
+        );
+        append_scalar_records(records, tag + 1)
+    } else {
+        ()
+    }
+}
+
+pub append_predefined_scalar_records(records: &mut Vec<Record>) {
+    append_scalar_records(records, 0)
+}
+
+// The VM ABI reserves type IDs 0 through 18 for the complete scalar table.
+pub predefined_scalar_types() -> Section {
+    let records = Vec::new();
+    append_predefined_scalar_records(&mut records);
+    variable_section(&records)
+}
+
+pub new_writer() -> ArtifactWriter {
+    let sections = Vec::with_capacity(14);
+    Vec::push(&mut sections, sorted_string_section(&Vec::new()));
+    Vec::push(&mut sections, predefined_scalar_types());
+    Vec::push(&mut sections, empty_variable_section());
+    Vec::push(&mut sections, empty_variable_section());
+    Vec::push(&mut sections, empty_fixed_section());
+    Vec::push(&mut sections, empty_variable_section());
+    Vec::push(&mut sections, empty_variable_section());
+    Vec::push(&mut sections, empty_fixed_section());
+    Vec::push(&mut sections, empty_fixed_section());
+    Vec::push(&mut sections, empty_fixed_section());
+    Vec::push(&mut sections, empty_fixed_section());
+    Vec::push(&mut sections, empty_fixed_section());
+    Vec::push(&mut sections, empty_fixed_section());
+    Vec::push(&mut sections, empty_variable_section());
+    ArtifactWriter { sections: sections }
+}
+
+pub set_section(
+    writer: &mut ArtifactWriter,
+    section: SectionId,
+    payload: Section
+) {
+    let previous = replace(
+        Vec::index_mut(
+            &mut writer.sections,
+            section_ordinal(move section)
+        ),
+        move payload
+    );
+    previous;
+    ()
+}
+
+align8(value: usize) -> usize {
+    let remainder = value % 8;
+    if(remainder == 0) { value } else { value + (8 - remainder) }
+}
+
+collect_offsets(
+    sections: &Vec<Section>,
+    offsets: &mut Vec<usize>,
+    index: usize,
+    cursor: usize
+) -> usize {
+    if(index < Vec::len(sections)) {
+        let section = Vec::index(sections, index);
+        Vec::push(&mut *offsets, cursor);
+        collect_offsets(
+            sections,
+            offsets,
+            index + 1,
+            align8(cursor + Bytes::len(&section.bytes))
+        )
+    } else {
+        cursor
+    }
+}
+
+fixed_sections_valid(sections: &Vec<Section>, index: usize) -> Bool {
+    if(index < Vec::len(sections)) {
+        let width = section_width(index);
+        if(width == 0) {
+            fixed_sections_valid(sections, index + 1)
+        } else {
+            let section = Vec::index(sections, index);
+            if(
+                Bytes::len(&section.bytes)
+                    == wrapping_convert_to_usize(section.count)
+                        * wrapping_convert_to_usize(width)
+            ) {
+                fixed_sections_valid(sections, index + 1)
+            } else {
+                false
+            }
+        }
+    } else {
+        true
+    }
+}
+
+write_magic(output: &mut ByteBuf) {
+    ByteBuf::push(&mut *output, 71);
+    ByteBuf::push(&mut *output, 82);
+    ByteBuf::push(&mut *output, 66);
+    ByteBuf::push(&mut *output, 67);
+    ByteBuf::push(&mut *output, 13);
+    ByteBuf::push(&mut *output, 10);
+    ByteBuf::push(&mut *output, 26);
+    ByteBuf::push(output, 10)
+}
+
+write_directory(
+    output: &mut ByteBuf,
+    sections: &Vec<Section>,
+    offsets: &Vec<usize>,
+    index: usize
+) {
+    if(index < Vec::len(sections)) {
+        let section = Vec::index(sections, index);
+        ByteBuf::write_u32_le(
+            &mut *output,
+            wrapping_convert_to_u32(index + 1)
+        );
+        ByteBuf::write_u32_le(&mut *output, 1);
+        ByteBuf::write_u64_le(
+            &mut *output,
+            wrapping_convert_to_u64(*Vec::index(offsets, index))
+        );
+        ByteBuf::write_u64_le(
+            &mut *output,
+            wrapping_convert_to_u64(Bytes::len(&section.bytes))
+        );
+        ByteBuf::write_u32_le(&mut *output, section.count);
+        ByteBuf::write_u32_le(&mut *output, section_width(index));
+        write_directory(output, sections, offsets, index + 1)
+    } else {
+        ()
+    }
+}
+
+write_sections(
+    output: &mut ByteBuf,
+    sections: &Vec<Section>,
+    offsets: &Vec<usize>,
+    index: usize
+) {
+    if(index < Vec::len(sections)) {
+        let section = Vec::index(sections, index);
+        ByteBuf::resize_zeroed(
+            &mut *output,
+            *Vec::index(offsets, index)
+        );
+        ByteBuf::append_bytes(
+            &mut *output,
+            &section.bytes
+        );
+        ByteBuf::align_zeroed(&mut *output, 8);
+        write_sections(output, sections, offsets, index + 1)
+    } else {
+        ()
+    }
+}
+
+encode_valid(
+    sections: &Vec<Section>,
+    entry_function: Option<u32>,
+    required_features: u64
+) -> Bytes {
+    let offsets = Vec::with_capacity(14);
+    let file_length = collect_offsets(sections, &mut offsets, 0, 512);
+    let output = ByteBuf::with_capacity(file_length);
+    write_magic(&mut output);
+    ByteBuf::write_u16_le(&mut output, 1);
+    ByteBuf::write_u16_le(&mut output, 0);
+    ByteBuf::write_u32_le(&mut output, 64);
+    handle entry_function {
+        Result::Ok(_) => ByteBuf::write_u32_le(&mut output, 1),
+        Result::Err(_) => ByteBuf::write_u32_le(&mut output, 0)
+    };
+    ByteBuf::write_u32_le(&mut output, 14);
+    ByteBuf::write_u32_le(&mut output, 32);
+    handle entry_function {
+        Result::Ok(entry) => ByteBuf::write_u32_le(&mut output, entry),
+        Result::Err(_) => ByteBuf::write_u32_le(&mut output, 4294967295)
+    };
+    ByteBuf::write_u64_le(&mut output, bit_or(required_features, 1));
+    ByteBuf::write_u64_le(&mut output, 0);
+    ByteBuf::write_u64_le(&mut output, 64);
+    ByteBuf::write_u64_le(
+        &mut output,
+        wrapping_convert_to_u64(file_length)
+    );
+    write_directory(&mut output, sections, &offsets, 0);
+    write_sections(&mut output, sections, &offsets, 0);
+    ByteBuf::resize_zeroed(&mut output, file_length);
+    ByteBuf::finish(output)
+}
+
+pub encode(
+    sections: &Vec<Section>,
+    entry_function: Option<u32>,
+    required_features: u64
+) -> Result<Bytes, ArtifactWriteError> {
+    if(Vec::len(sections) != 14) {
+        Result::Err(ArtifactWriteError::InvalidSectionCount)
+    } else if(fixed_sections_valid(sections, 0)) {
+        Result::Ok(encode_valid(
+            sections,
+            move entry_function,
+            move required_features
+        ))
+    } else {
+        Result::Err(ArtifactWriteError::InvalidFixedSectionLength)
+    }
+}
+
+pub encode_writer(
+    writer: &ArtifactWriter,
+    entry_function: Option<u32>,
+    required_features: u64
+) -> Result<Bytes, ArtifactWriteError> {
+    encode(
+        &writer.sections,
+        move entry_function,
+        move required_features
+    )
+}
