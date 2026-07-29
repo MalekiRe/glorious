@@ -54,6 +54,7 @@ const HANDLER_ENV_UNIQUE_CODE: &str = "G1HE002";
 /// that replay count.
 const HANDLER_ENV_REPLAY_CODE: &str = "G1HE003";
 const PATTERN_WARNING_CODE: &str = "G1PW001";
+const REDUNDANT_MOVE_CODE: &str = "G1RM001";
 const ENTRY_CODE: &str = "G1BC003";
 const PARSE_CODE: &str = "G1BC004";
 const REFERENCES_G1: u64 = 1 << 1;
@@ -1396,6 +1397,10 @@ struct CoreLowerer<'a> {
     label_evidence: &'a BTreeMap<typeck::DeclarationKey, Vec<typeck::LabelEvidence>>,
     provisional_types: &'a typeck::TypedProgram,
     body_instance: Option<specialization::BodyInstanceKey>,
+    /// True only while lowering a declaration's original body. Synthetic
+    /// handler/closure bodies may reuse source ordinals but have capture
+    /// transport semantics which make source rewrites context-sensitive.
+    direct_source_body: bool,
     environment_capture_modes: BTreeMap<String, specialization::CaptureMode>,
     expression_ordinals: BTreeMap<usize, u32>,
     expression_span_ordinals: BTreeMap<(usize, usize), u32>,
@@ -3897,8 +3902,14 @@ fn compile_stream_phases_with_manifest_and_domains(
         optimization_report,
         provisional_text,
         provisional_fingerprint,
-        diagnostics,
+        mut diagnostics,
     ) = compiled?;
+    diagnostics.retain(|diagnostic| {
+        diagnostic.code.as_deref() != Some(REDUNDANT_MOVE_CODE)
+            || !diagnostic
+                .span
+                .is_some_and(|span| bundle.is_trusted_distributed_standard_span(span))
+    });
     Ok((
         CompiledPhases {
             artifact,
@@ -23213,6 +23224,7 @@ impl<'a> CoreLowerer<'a> {
                 label_evidence: tables.label_evidence,
                 provisional_types: tables.provisional_types,
                 body_instance: Some(body_instance),
+                direct_source_body: true,
                 environment_capture_modes,
                 expression_ordinals,
                 expression_span_ordinals,
@@ -23405,6 +23417,7 @@ impl<'a> CoreLowerer<'a> {
                 label_evidence: tables.label_evidence,
                 provisional_types: tables.provisional_types,
                 body_instance: None,
+                direct_source_body: false,
                 environment_capture_modes: BTreeMap::new(),
                 expression_ordinals: BTreeMap::new(),
                 expression_span_ordinals: BTreeMap::new(),
@@ -30125,6 +30138,38 @@ impl<'a> CoreLowerer<'a> {
                         "moving an unavailable owner",
                         format!("local `{name}` has no runtime owner representation"),
                     )]);
+                }
+                let callable_transport = self
+                    .effects
+                    .extra_type(local.ty)
+                    .is_some_and(|ty| matches!(ty.representation(), Type::Callable { .. }));
+                let original_monomorphic_site = self.direct_source_body
+                    && matches!(
+                        &self.body_instance,
+                        Some(specialization::BodyInstanceKey::Root(_))
+                    )
+                    && self.expression_ordinal(expression).is_some()
+                    && span
+                        .start
+                        .checked_add(4)
+                        .is_some_and(|keyword_end| keyword_end <= operand.span.start);
+                if original_monomorphic_site
+                    && !self.is_copy(local.ty)
+                    && !callable_transport
+                    && self.effects.resumption(local.ty).is_none()
+                {
+                    self.effects.warnings.push(
+                        Diagnostic::advice(
+                            "redundant explicit move",
+                            format!(
+                                "`{name}` has a non-Copy type, so using it here already transfers ownership"
+                            ),
+                            Span::new(span.start, span.start + 4),
+                        )
+                        .with_code(REDUNDANT_MOVE_CODE)
+                        .with_help("remove `move`; keep it only when forcing consumption of a Copy value")
+                        .with_fix(Span::new(span.start, span.start + 4), ""),
+                    );
                 }
                 self.check(span, expected, local.ty)?;
                 self.check_borrow_only_capture(local.local, span, "moving", false)?;

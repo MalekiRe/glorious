@@ -190,7 +190,7 @@ name_count(value: &Vec<u32>) -> usize {
 push_name(value: &mut Vec<u32>, kind: u8, found: u32, token: usize) {
     push_word(&mut *value, u32_from_u8(kind));
     push_word(&mut *value, found);
-    push_word(move value, u32_from_usize(token))
+    push_word( value, u32_from_usize(token))
 }
 
 word_count(value: &Vec<u32>) -> usize { Vec::len(value) }
@@ -2267,7 +2267,7 @@ write_string(output: &mut ByteBuf, value: &String) {
         &mut *output,
         u32_from_usize(Bytes::len(&bytes))
     );
-    ByteBuf::append_bytes(move output, &bytes)
+    ByteBuf::append_bytes( output, &bytes)
 }
 
 edge_at(value: &ParsedBody, node: &ExprNode, index: u32) -> ExprId {
@@ -2303,7 +2303,7 @@ write_name_token(
         TokenKind::Ident(name) => handle super::lexer::lexeme(source, name) {
             Result::Err(_) => Result::Err(body_error(11, token, token)),
             Result::Ok(text) => {
-                write_string(move output, text);
+                write_string( output, text);
                 Result::Ok(())
             }
         },
@@ -2333,7 +2333,7 @@ write_call_arguments(
                 @write_call_arguments
             );
             write_call_arguments(
-                move output,
+                 output,
                 original,
                 source,
                 value,
@@ -2363,7 +2363,7 @@ write_node_name(
         1 => handle super::lexer::lexeme(source, Id::from_u32(found)) {
             Result::Err(_) => Result::Err(body_error(11, token, token)),
             Result::Ok(text) => {
-                write_string(move output, text);
+                write_string( output, text);
                 Result::Ok(())
             }
         },
@@ -2374,7 +2374,7 @@ write_node_name(
                 token,
                 token + usize_value(1)
             );
-            write_string(move output, &text);
+            write_string( output, &text);
             Result::Ok(())
         },
         _ => Result::Err(body_error(11, token, token))
@@ -2403,7 +2403,7 @@ write_children(
                 @write_children
             );
             write_children(
-                move output,
+                 output,
                 original,
                 source,
                 value,
@@ -2447,7 +2447,7 @@ write_struct_fields(
                 @write_struct_fields
             );
             write_struct_fields(
-                move output,
+                 output,
                 original,
                 source,
                 value,
@@ -2493,7 +2493,7 @@ write_block_statements(
                         @write_block_statements
                     );
                     write_block_statements(
-                        move output,
+                         output,
                         original,
                         source,
                         value,
@@ -2514,7 +2514,7 @@ write_block_statements(
                         @write_block_statements
                     );
                     write_block_statements(
-                        move output,
+                         output,
                         original,
                         source,
                         value,
@@ -2547,7 +2547,7 @@ write_expression(
                 node.tokens.start,
                 node.tokens.end
             );
-            write_string(move output, &spelling);
+            write_string( output, &spelling);
             Result::Ok(())
         },
         2 => {
@@ -2563,13 +2563,13 @@ write_expression(
                 ),
                 Result::Ok(number) => {
                     ByteBuf::push(&mut *output, 2);
-                    ByteBuf::write_u64_le(move output, number);
+                    ByteBuf::write_u64_le( output, number);
                     Result::Ok(())
                 }
             }
         },
         3 => {
-            ByteBuf::push(move output, 3);
+            ByteBuf::push( output, 3);
             Result::Ok(())
         },
         4 => write_expression(
@@ -2589,7 +2589,7 @@ write_expression(
             );
             write_string(&mut *output, &spelling);
             write_expression(
-                move output,
+                 output,
                 original,
                 source,
                 value,
@@ -2616,7 +2616,7 @@ write_expression(
                 @write_expression
             );
             write_expression(
-                move output,
+                 output,
                 original,
                 source,
                 value,
@@ -2640,7 +2640,7 @@ write_expression(
                 node.children.count - u32_value(1)
             );
             write_call_arguments(
-                move output,
+                 output,
                 original,
                 source,
                 value,
@@ -2652,7 +2652,7 @@ write_expression(
             ByteBuf::push(&mut *output, 8);
             ByteBuf::write_u32_le(&mut *output, node.children.count);
             write_block_statements(
-                move output,
+                 output,
                 original,
                 source,
                 value,
@@ -2683,7 +2683,7 @@ write_expression(
                 node.children.count
             );
             write_struct_fields(
-                move output,
+                 output,
                 original,
                 source,
                 value,
@@ -2704,7 +2704,7 @@ write_expression(
                 @write_expression
             );
             write_node_name(
-                move output,
+                 output,
                 original,
                 source,
                 value,
@@ -2750,7 +2750,7 @@ write_function_name(
         Result::Err(_) => unreachable(),
         Result::Ok(name) => handle super::lexer::lexeme(source, *name) {
             Result::Err(_) => unreachable(),
-            Result::Ok(text) => write_string(move output, text)
+            Result::Ok(text) => write_string( output, text)
         }
     }
 }
@@ -2798,7 +2798,7 @@ write_functions(
                         @write_functions
                     );
                     write_functions(
-                        move output,
+                         output,
                         original,
                         headers,
                         declarations,
@@ -2812,15 +2812,15 @@ write_functions(
 
 encode_source(output: &mut ByteBuf, source_text_value: String) {
     handle super::lexer::lex(&source_text_value) {
-        Result::Err(_) => ByteBuf::push(move output, 1),
+        Result::Err(_) => ByteBuf::push( output, 1),
         Result::Ok(lexed) => handle super::scanner::scan(&lexed) {
-            Result::Err(_) => ByteBuf::push(move output, 2),
+            Result::Err(_) => ByteBuf::push( output, 2),
             Result::Ok(declarations) => handle super::headers::parse(
                 &source_text_value,
-                move lexed,
+                 lexed,
                 &declarations
             ) {
-                Result::Err(_) => ByteBuf::push(move output, 3),
+                Result::Err(_) => ByteBuf::push( output, 3),
                 Result::Ok(headers) => {
                     let encoded = ByteBuf::new();
                     ByteBuf::write_u32_le(
@@ -2836,12 +2836,12 @@ encode_source(output: &mut ByteBuf, source_text_value: String) {
                         &declarations,
                         0
                     ) {
-                        Result::Err(_) => ByteBuf::push(move output, 3),
+                        Result::Err(_) => ByteBuf::push( output, 3),
                         Result::Ok(_) => {
                             ByteBuf::push(&mut *output, 0);
                             ByteBuf::append_bytes(
-                                move output,
-                                &ByteBuf::finish(move encoded)
+                                 output,
+                                &ByteBuf::finish( encoded)
                             )
                         }
                     }
@@ -2868,7 +2868,7 @@ process_inputs(
             process_inputs(
                 arguments,
                 index + usize_value(1),
-                move output
+                 output
             )
         }
     }
@@ -2889,7 +2889,7 @@ pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
                 u32_from_usize(count - usize_value(1))
             );
             process_inputs(&arguments, 1, &mut encoded);
-            write_file(move output_path, ByteBuf::finish(move encoded))
+            write_file(move output_path, ByteBuf::finish( encoded))
         }
     }
 }

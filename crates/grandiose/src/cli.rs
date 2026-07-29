@@ -417,6 +417,17 @@ fn write_json_diagnostic(
     if let Some(help) = &diagnostic.help {
         object.insert("help".into(), json!(help));
     }
+    if let Some(fix) = mapped.fix {
+        object.insert(
+            "fix".into(),
+            json!({
+                "file": fix.span.segment.name(),
+                "start_byte": fix.span.span.start,
+                "end_byte": fix.span.span.end,
+                "replacement": fix.replacement,
+            }),
+        );
+    }
     serde_json::to_writer(&mut output, &object).map_err(io::Error::other)?;
     writeln!(output)
 }
@@ -1286,6 +1297,37 @@ mod tests {
         assert_eq!(value["message"], "optimizer validation failed");
         assert_eq!(value["code"], "G1OPT999");
         assert_eq!(value["labels"], json!([]));
+    }
+
+    #[test]
+    fn json_diagnostics_emit_grand_machine_fix_contract() {
+        let bundle = SourceBundle::raw_for_conformance(
+            Segment::new("std.glorious", ""),
+            Segment::new("input.glorious", "move value"),
+            [],
+        );
+        let input_start = bundle.segments()[1].global_range().start;
+        let diagnostic = Diagnostic::warning(
+            "redundant move",
+            "the local is transferred without an explicit `move`",
+            grandiose::span::Span::new(input_start, input_start + 10),
+        )
+        .with_code("G1W001")
+        .with_fix(grandiose::span::Span::new(input_start, input_start + 4), "");
+        let mut output = Vec::new();
+
+        write_json_diagnostic(&bundle, &diagnostic, &mut output).unwrap();
+
+        let value: Value = serde_json::from_slice(&output).unwrap();
+        assert_eq!(
+            value["fix"],
+            json!({
+                "file": "input.glorious",
+                "start_byte": 0,
+                "end_byte": 4,
+                "replacement": "",
+            })
+        );
     }
 
     #[test]

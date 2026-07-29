@@ -646,7 +646,7 @@ append_edges(
                 }
             );
             append_edges(
-                move output,
+                 output,
                 values,
                 index + usize_value(1),
                 position + wrapping_convert_to_u32(1)
@@ -674,7 +674,7 @@ parse_type_values(
                         value,
                         closing_code,
                         related,
-                        move values
+                         values
                     )
                 }
             }
@@ -864,7 +864,7 @@ parse_tuple(
                         @parse_tuple
                     );
                     try(expect_code(value, 12, 3, related), @parse_tuple);
-                    finish_tuple(value, start, move elements)
+                    finish_tuple(value, start,  elements)
                 }
             }
         }
@@ -1054,11 +1054,11 @@ parse_effect_row(value: &mut Parser, related: usize) -> Result<EffectRow, Header
             finish_effects(
                 value,
                 start,
-                move effects,
+                 effects,
                 Result::Err(())
             )
         },
-        Result::Ok(_) => parse_effect_items(value, related, start, move effects)
+        Result::Ok(_) => parse_effect_items(value, related, start,  effects)
     }
 }
 
@@ -1075,7 +1075,7 @@ parse_effect_items(
             finish_effects(
                 value,
                 start,
-                move effects,
+                 effects,
                 Result::Ok(move row_tail)
             )
         },
@@ -1083,7 +1083,7 @@ parse_effect_items(
             Result::Ok(_) => finish_effects(
                 value,
                 start,
-                move effects,
+                 effects,
                 Result::Err(())
             ),
             Result::Err(_) => {
@@ -1091,20 +1091,20 @@ parse_effect_items(
                     parse_type(value, related),
                     @parse_effect_items
                 );
-                let next = move effects;
+                let next =  effects;
                 Vec::push(&mut next, move found_effect);
                 handle eat_code(value, 17) {
                     Result::Ok(_) => parse_effect_items(
                         value,
                         related,
                         start,
-                        move next
+                         next
                     ),
                     Result::Err(_) => parse_effect_items(
                         value,
                         related,
                         start,
-                        move next
+                         next
                     )
                 }
             }
@@ -1746,7 +1746,7 @@ parse_variants(
                     variants,
                     related,
                     move name,
-                    move fields
+                     fields
                 ),
                 Result::Ok(_) => {
                     try(
@@ -1772,7 +1772,7 @@ parse_variants(
                         variants,
                         related,
                         move name,
-                        move fields
+                         fields
                     )
                 }
             }
@@ -1845,10 +1845,10 @@ parse_shells(
     nominal: NominalIndex
 ) -> Result<ParsedHeaders, HeaderError> {
     handle index < super::scanner::shell_count(declarations) {
-        Result::Err(_) => Result::Ok(finish_parser(move parser, move nominal)),
+        Result::Err(_) => Result::Ok(finish_parser( parser,  nominal)),
         Result::Ok(_) => handle super::scanner::shell_at(declarations, index) {
             Result::Err(_) => Result::Ok(
-                finish_parser(move parser, move nominal)
+                finish_parser( parser,  nominal)
             ),
             Result::Ok(shell) => {
                 let bounds = header_bounds(shell);
@@ -1930,8 +1930,8 @@ parse_shells(
                     original,
                     declarations,
                     index + usize_value(1),
-                    move next,
-                    move nominal
+                     next,
+                     nominal
                 )
             }
         }
@@ -1942,7 +1942,7 @@ finish_parser(value: Parser, nominal: NominalIndex) -> ParsedHeaders {
     ParsedHeaders {
         source: move value.source,
         index: move value.output,
-        nominal: move nominal
+        nominal:  nominal
     }
 }
 
@@ -1956,7 +1956,7 @@ pub parse(
         declarations,
         0,
         Parser {
-            source: move source,
+            source:  source,
             cursor: 0,
             limit: 0,
             output: HeaderIndex {
@@ -1987,7 +1987,7 @@ write_string(output: &mut ByteBuf, value: &String) {
         &mut *output,
         wrapping_convert_to_u32(Bytes::len(&bytes))
     );
-    ByteBuf::append_bytes(move output, &bytes)
+    ByteBuf::append_bytes( output, &bytes)
 }
 
 write_name(
@@ -1997,7 +1997,7 @@ write_name(
 ) {
     handle super::lexer::lexeme(source, move name) {
         Result::Err(_) => unreachable(),
-        Result::Ok(text) => write_string(move output, text)
+        Result::Ok(text) => write_string( output, text)
     }
 }
 
@@ -2007,10 +2007,10 @@ write_optional_name(
     value: &Option<NameUse>
 ) {
     handle Option::as_ref(value) {
-        Result::Err(_) => ByteBuf::push(move output, 0),
+        Result::Err(_) => ByteBuf::push( output, 0),
         Result::Ok(name) => {
             ByteBuf::push(&mut *output, 1);
-            write_name(move output, source, name.name)
+            write_name( output, source, name.name)
         }
     }
 }
@@ -2030,7 +2030,7 @@ write_type_edges(
             );
             write_type(output, parsed, &edge.value);
             write_type_edges(
-                move output,
+                 output,
                 parsed,
                 range,
                 index + wrapping_convert_to_u32(1)
@@ -2054,7 +2054,7 @@ write_path_names(
             );
             write_name(&mut *output, &parsed.source, name.name);
             write_path_names(
-                move output,
+                 output,
                 parsed,
                 range,
                 index + wrapping_convert_to_u32(1)
@@ -2072,19 +2072,19 @@ write_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: &TypeId) {
     handle node.kind_code {
         1 => {
             ByteBuf::write_u32_le(&mut *output, node.names.count);
-            write_path_names(move output, parsed, &node.names, 0)
+            write_path_names( output, parsed, &node.names, 0)
         },
         2 => {
             write_optional_name(&mut *output, &parsed.source, &node.lifetime);
-            write_type_edges(move output, parsed, &node.children, 0)
+            write_type_edges( output, parsed, &node.children, 0)
         },
         3 => {
             write_optional_name(&mut *output, &parsed.source, &node.lifetime);
-            write_type_edges(move output, parsed, &node.children, 0)
+            write_type_edges( output, parsed, &node.children, 0)
         },
         4 => {
             ByteBuf::write_u32_le(&mut *output, node.children.count);
-            write_type_edges(move output, parsed, &node.children, 0)
+            write_type_edges( output, parsed, &node.children, 0)
         },
         5 => {
             handle Option::as_ref(&node.constructor) {
@@ -2096,7 +2096,7 @@ write_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: &TypeId) {
                 )
             };
             ByteBuf::write_u32_le(&mut *output, node.children.count);
-            write_type_edges(move output, parsed, &node.children, 0)
+            write_type_edges( output, parsed, &node.children, 0)
         },
         _ => ()
     }
@@ -2118,7 +2118,7 @@ write_generics(
             ByteBuf::push(&mut *output, parameter.kind_code);
             write_name(&mut *output, &parsed.source, parameter.name);
             write_generics(
-                move output,
+                 output,
                 parsed,
                 range,
                 index + wrapping_convert_to_u32(1)
@@ -2143,7 +2143,7 @@ write_parameters(
             write_name(&mut *output, &parsed.source, parameter.name);
             write_type(&mut *output, parsed, &parameter.ty);
             write_parameters(
-                move output,
+                 output,
                 parsed,
                 range,
                 index + wrapping_convert_to_u32(1)
@@ -2171,10 +2171,10 @@ write_callable(
         }
     };
     handle Option::as_ref(&value.effects) {
-        Result::Err(_) => ByteBuf::push(move output, 0),
+        Result::Err(_) => ByteBuf::push( output, 0),
         Result::Ok(row) => {
             ByteBuf::push(&mut *output, 1);
-            write_effect_row(move output, parsed, row)
+            write_effect_row( output, parsed, row)
         }
     }
 }
@@ -2186,7 +2186,7 @@ write_effect_row(
 ) {
     ByteBuf::write_u32_le(&mut *output, row.effects.count);
     write_type_edges(&mut *output, parsed, &row.effects, 0);
-    write_optional_name(move output, &parsed.source, &row.row_tail)
+    write_optional_name( output, &parsed.source, &row.row_tail)
 }
 
 write_callables(
@@ -2203,7 +2203,7 @@ write_callables(
                 Vec::index(&parsed.index.callables, index)
             );
             write_callables(
-                move output,
+                 output,
                 parsed,
                 index + usize_value(1)
             )
@@ -2221,7 +2221,7 @@ write_common(
     ByteBuf::push(&mut *output, bool_code(move public));
     write_name(&mut *output, &parsed.source, move name);
     ByteBuf::write_u32_le(&mut *output, generics.count);
-    write_generics(move output, parsed, generics, 0)
+    write_generics( output, parsed, generics, 0)
 }
 
 write_alias(
@@ -2236,7 +2236,7 @@ write_alias(
         value.name,
         &value.generics
     );
-    write_type(move output, parsed, &value.target)
+    write_type( output, parsed, &value.target)
 }
 
 write_fields(
@@ -2259,7 +2259,7 @@ write_fields(
             write_name(&mut *output, &parsed.source, field.name);
             write_type(&mut *output, parsed, &field.ty);
             write_fields(
-                move output,
+                 output,
                 parsed,
                 range,
                 index + wrapping_convert_to_u32(1)
@@ -2281,7 +2281,7 @@ write_struct(
         &value.generics
     );
     ByteBuf::write_u32_le(&mut *output, value.fields.count);
-    write_fields(move output, parsed, &value.fields, 0)
+    write_fields( output, parsed, &value.fields, 0)
 }
 
 write_variants(
@@ -2301,7 +2301,7 @@ write_variants(
             ByteBuf::write_u32_le(&mut *output, variant.fields.count);
             write_type_edges(&mut *output, parsed, &variant.fields, 0);
             write_variants(
-                move output,
+                 output,
                 parsed,
                 range,
                 index + wrapping_convert_to_u32(1)
@@ -2323,7 +2323,7 @@ write_enum(
         &value.generics
     );
     ByteBuf::write_u32_le(&mut *output, value.variants.count);
-    write_variants(move output, parsed, &value.variants, 0)
+    write_variants( output, parsed, &value.variants, 0)
 }
 
 parsed_token_span(
@@ -2355,7 +2355,7 @@ write_fixity(
         super::lexer::span_start(&first),
         super::lexer::span_end(&last)
     );
-    write_string(move output, &spelling)
+    write_string( output, &spelling)
 }
 
 write_interfaces(
@@ -2402,7 +2402,7 @@ write_interfaces(
                 _ => unreachable()
             };
             write_interfaces(
-                move output,
+                 output,
                 original,
                 parsed,
                 index + usize_value(1)
@@ -2413,15 +2413,15 @@ write_interfaces(
 
 encode_source(output: &mut ByteBuf, source: String) {
     handle super::lexer::lex(&source) {
-        Result::Err(_) => ByteBuf::push(move output, 1),
+        Result::Err(_) => ByteBuf::push( output, 1),
         Result::Ok(lexed) => handle super::scanner::scan(&lexed) {
-            Result::Err(_) => ByteBuf::push(move output, 2),
+            Result::Err(_) => ByteBuf::push( output, 2),
             Result::Ok(declarations) => handle parse(
                 &source,
-                move lexed,
+                 lexed,
                 &declarations
             ) {
-                Result::Err(_) => ByteBuf::push(move output, 3),
+                Result::Err(_) => ByteBuf::push( output, 3),
                 Result::Ok(parsed) => {
                     ByteBuf::push(&mut *output, 0);
                     ByteBuf::write_u32_le(
@@ -2430,7 +2430,7 @@ encode_source(output: &mut ByteBuf, source: String) {
                             Vec::len(&parsed.index.callables)
                         )
                     );
-                    write_callables(move output, &parsed, 0)
+                    write_callables( output, &parsed, 0)
                 }
             }
         }
@@ -2439,22 +2439,22 @@ encode_source(output: &mut ByteBuf, source: String) {
 
 encode_interface_source(output: &mut ByteBuf, source: String) {
     handle super::lexer::lex(&source) {
-        Result::Err(_) => ByteBuf::push(move output, 1),
+        Result::Err(_) => ByteBuf::push( output, 1),
         Result::Ok(lexed) => handle super::scanner::scan(&lexed) {
-            Result::Err(_) => ByteBuf::push(move output, 2),
+            Result::Err(_) => ByteBuf::push( output, 2),
             Result::Ok(declarations) => handle parse(
                 &source,
-                move lexed,
+                 lexed,
                 &declarations
             ) {
-                Result::Err(_) => ByteBuf::push(move output, 3),
+                Result::Err(_) => ByteBuf::push( output, 3),
                 Result::Ok(parsed) => {
                     ByteBuf::push(&mut *output, 0);
                     ByteBuf::write_u32_le(
                         &mut *output,
                         wrapping_convert_to_u32(header_count(&parsed.nominal))
                     );
-                    write_interfaces(move output, &source, &parsed, 0)
+                    write_interfaces( output, &source, &parsed, 0)
                 }
             }
         }
@@ -2478,7 +2478,7 @@ process_inputs(
             process_inputs(
                 arguments,
                 index + usize_value(1),
-                move output
+                 output
             )
         }
     }
@@ -2504,7 +2504,7 @@ process_interface_inputs(
             process_interface_inputs(
                 arguments,
                 index + usize_value(1),
-                move output
+                 output
             )
         }
     }
@@ -2525,7 +2525,7 @@ pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
                 wrapping_convert_to_u32(count - usize_value(1))
             );
             process_inputs(&arguments, 1, &mut encoded);
-            write_file(move output_path, ByteBuf::finish(move encoded))
+            write_file(move output_path, ByteBuf::finish( encoded))
         }
     }
 }
@@ -2550,7 +2550,7 @@ pub interface_application() / {
                 wrapping_convert_to_u32(count - usize_value(1))
             );
             process_interface_inputs(&arguments, 1, &mut encoded);
-            write_file(move output_path, ByteBuf::finish(move encoded))
+            write_file(move output_path, ByteBuf::finish( encoded))
         }
     }
 }

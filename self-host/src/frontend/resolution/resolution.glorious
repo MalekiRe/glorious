@@ -95,7 +95,7 @@ push_binding(
     push_word(&mut *bindings, name);
     push_word(&mut *bindings, u32_from_u8(kind));
     push_word(&mut *bindings, owner);
-    push_word(move bindings, index)
+    push_word( bindings, index)
 }
 
 push_resolution(
@@ -1159,7 +1159,7 @@ pub resolve_function_body(
                     ),
                     @resolve_function_body
                 );
-                Result::Ok(move output)
+                Result::Ok( output)
             }
         }
     }
@@ -1168,7 +1168,7 @@ pub resolve_function_body(
 write_string(output: &mut ByteBuf, value: &String) {
     let bytes = String::as_bytes(value);
     ByteBuf::write_u32_le(&mut *output, u32_from_usize(Bytes::len(&bytes)));
-    ByteBuf::append_bytes(move output, &bytes)
+    ByteBuf::append_bytes( output, &bytes)
 }
 
 write_name_id(
@@ -1178,7 +1178,7 @@ write_name_id(
 ) {
     handle super::lexer::lexeme(source, move name) {
         Result::Err(_) => unreachable(),
-        Result::Ok(text) => write_string(move output, text)
+        Result::Ok(text) => write_string( output, text)
     }
 }
 
@@ -1188,7 +1188,7 @@ write_name_token(
     token: usize
 ) {
     handle super::lexer::token_kind_at(source, token) {
-        TokenKind::Ident(name) => write_name_id(move output, source, move name),
+        TokenKind::Ident(name) => write_name_id( output, source, move name),
         _ => unreachable()
     }
 }
@@ -1241,7 +1241,7 @@ write_module_components(
                     declarations,
                     parent
                 );
-                write_name_id(move output, source, move name)
+                write_name_id( output, source, move name)
             }
         }
     }
@@ -1258,7 +1258,7 @@ write_module_path(
         u32_from_usize(module_depth(declarations, module_plus_one))
     );
     write_module_components(
-        move output,
+         output,
         source,
         declarations,
         module_plus_one
@@ -1282,7 +1282,7 @@ write_function_identity(
                 declarations,
                 parent
             );
-            write_name_id(move output, source, move name)
+            write_name_id( output, source, move name)
         }
     }
 }
@@ -1340,7 +1340,7 @@ write_parameters(
                         super::headers::parameter_name_token(parameter)
                     );
                     write_parameters(
-                        move output,
+                         output,
                         source,
                         index,
                         start,
@@ -1369,7 +1369,7 @@ write_locals(
                 local_name_token_at(resolved, index)
             );
             write_locals(
-                move output,
+                 output,
                 source,
                 resolved,
                 index + usize_value(1)
@@ -1390,14 +1390,14 @@ write_target(
         1 => {
             ByteBuf::push(&mut *output, 1);
             ByteBuf::write_u32_le(
-                move output,
+                 output,
                 resolved_name_index_at(resolved, occurrence)
             )
         },
         2 => {
             ByteBuf::push(&mut *output, 1);
             ByteBuf::write_u32_le(
-                move output,
+                 output,
                 parameter_count + resolved_name_index_at(
                     resolved,
                     occurrence
@@ -1407,7 +1407,7 @@ write_target(
         3 => {
             ByteBuf::push(&mut *output, 2);
             write_function_identity(
-                move output,
+                 output,
                 source,
                 declarations,
                 usize_from_u32(resolved_name_index_at(resolved, occurrence))
@@ -1416,14 +1416,14 @@ write_target(
         4 => {
             ByteBuf::push(&mut *output, 3);
             ByteBuf::write_u32_le(
-                move output,
+                 output,
                 resolved_name_index_at(resolved, occurrence)
             )
         },
         5 => {
             ByteBuf::push(&mut *output, 4);
             ByteBuf::write_u32_le(
-                move output,
+                 output,
                 resolved_name_index_at(resolved, occurrence)
             )
         },
@@ -1458,7 +1458,7 @@ write_occurrences(
                 parameter_count
             );
             write_occurrences(
-                move output,
+                 output,
                 source,
                 declarations,
                 body,
@@ -1527,7 +1527,7 @@ write_resolved_function(
                     u32_from_usize(resolved_name_count(&resolved))
                 );
                 write_occurrences(
-                    move output,
+                     output,
                     source,
                     declarations,
                     &body,
@@ -1595,7 +1595,7 @@ write_functions(
                         @write_functions
                     );
                     write_functions(
-                        move output,
+                         output,
                         original,
                         headers,
                         declarations,
@@ -1609,15 +1609,15 @@ write_functions(
 
 encode_source(output: &mut ByteBuf, original: String) {
     handle super::lexer::lex(&original) {
-        Result::Err(_) => ByteBuf::push(move output, 1),
+        Result::Err(_) => ByteBuf::push( output, 1),
         Result::Ok(source) => handle super::scanner::scan(&source) {
-            Result::Err(_) => ByteBuf::push(move output, 2),
+            Result::Err(_) => ByteBuf::push( output, 2),
             Result::Ok(declarations) => handle super::headers::parse(
                 &original,
-                move source,
+                 source,
                 &declarations
             ) {
-                Result::Err(_) => ByteBuf::push(move output, 3),
+                Result::Err(_) => ByteBuf::push( output, 3),
                 Result::Ok(headers) => {
                     let encoded = ByteBuf::new();
                     ByteBuf::write_u32_le(
@@ -1631,12 +1631,12 @@ encode_source(output: &mut ByteBuf, original: String) {
                         &declarations,
                         0
                     ) {
-                        Result::Err(_) => ByteBuf::push(move output, 3),
+                        Result::Err(_) => ByteBuf::push( output, 3),
                         Result::Ok(_) => {
                             ByteBuf::push(&mut *output, 0);
                             ByteBuf::append_bytes(
-                                move output,
-                                &ByteBuf::finish(move encoded)
+                                 output,
+                                &ByteBuf::finish( encoded)
                             )
                         }
                     }
@@ -1663,7 +1663,7 @@ process_inputs(
             process_inputs(
                 arguments,
                 index + usize_value(1),
-                move output
+                 output
             )
         }
     }
@@ -1684,7 +1684,7 @@ pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
                 u32_from_usize(count - usize_value(1))
             );
             process_inputs(&arguments, 1, &mut encoded);
-            write_file(move output_path, ByteBuf::finish(move encoded))
+            write_file(move output_path, ByteBuf::finish( encoded))
         }
     }
 }

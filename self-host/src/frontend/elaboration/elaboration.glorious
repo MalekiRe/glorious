@@ -350,7 +350,7 @@ push_words4(
     push_word(&mut *value, a);
     push_word(&mut *value, b);
     push_word(&mut *value, c);
-    push_word(move value, d)
+    push_word( value, d)
 }
 
 push_words5(
@@ -365,7 +365,7 @@ push_words5(
     push_word(&mut *value, b);
     push_word(&mut *value, c);
     push_word(&mut *value, d);
-    push_word(move value, e)
+    push_word( value, e)
 }
 
 push_zeroes(value: &mut Vec<u32>, remaining: usize) {
@@ -373,7 +373,7 @@ push_zeroes(value: &mut Vec<u32>, remaining: usize) {
         Result::Ok(_) => (),
         Result::Err(_) => {
             push_word(&mut *value, 0);
-            push_zeroes(move value, remaining - usize_value(1))
+            push_zeroes( value, remaining - usize_value(1))
         }
     }
 }
@@ -433,7 +433,7 @@ seed_scalar_types(value: &mut Vec<u32>, type_id: u32) {
                 0,
                 0
             );
-            seed_scalar_types(move value, type_id + u32_value(1))
+            seed_scalar_types( value, type_id + u32_value(1))
         }
     }
 }
@@ -443,14 +443,14 @@ seed_types() -> Vec<u32> {
     push_words4(&mut types, 1, 0, 0, 0);
     push_words4(&mut types, 2, 0, 0, 0);
     seed_scalar_types(&mut types, 2);
-    move types
+     types
 }
 
 seed_type_flags() -> Vec<u32> {
     let flags = Vec::new();
     push_zeroes(&mut flags, usize_value(14));
     seed_copy_flags(&mut flags, 0);
-    move flags
+     flags
 }
 
 seed_copy_flags(value: &mut Vec<u32>, index: usize) {
@@ -2085,7 +2085,7 @@ pub collect_interfaces(
         compute_type_flags(&mut output, 0),
         @collect_interfaces
     );
-    Result::Ok(move output)
+    Result::Ok( output)
 }
 
 build_resolution_map(
@@ -2153,7 +2153,7 @@ resolution_map(
         build_resolution_map(resolved, count, 0, &mut output),
         @resolution_map
     );
-    Result::Ok(move output)
+    Result::Ok( output)
 }
 
 push_value(
@@ -4078,7 +4078,7 @@ pub elaborate_function_body(
                     callable
                 ),
                 next_source_local: 0,
-                local_types: move locals,
+                local_types:  locals,
                 values: Vec::new(),
                 computations: Vec::new(),
                 operands: Vec::new(),
@@ -4123,7 +4123,7 @@ pub elaborate_function_body(
 write_string(output: &mut ByteBuf, value: &String) {
     let bytes = String::as_bytes(value);
     ByteBuf::write_u32_le(&mut *output, u32_from_usize(Bytes::len(&bytes)));
-    ByteBuf::append_bytes(move output, &bytes)
+    ByteBuf::append_bytes( output, &bytes)
 }
 
 write_name_id(
@@ -4133,7 +4133,7 @@ write_name_id(
 ) {
     handle super::lexer::lexeme(source, move name) {
         Result::Err(_) => unreachable(),
-        Result::Ok(text) => write_string(move output, text)
+        Result::Ok(text) => write_string( output, text)
     }
 }
 
@@ -4143,7 +4143,7 @@ write_name_token(
     token: usize
 ) {
     handle super::lexer::token_kind_at(source, token) {
-        TokenKind::Ident(name) => write_name_id(move output, source, move name),
+        TokenKind::Ident(name) => write_name_id( output, source, move name),
         _ => unreachable()
     }
 }
@@ -4194,7 +4194,7 @@ write_module_components(
                     declarations,
                     super::scanner::shell_parent_plus_one(shell)
                 );
-                write_name_id(move output, source, shell_name_id(shell))
+                write_name_id( output, source, shell_name_id(shell))
             }
         }
     }
@@ -4220,7 +4220,7 @@ write_function_identity(
                 declarations,
                 parent
             );
-            write_name_id(move output, source, shell_name_id(shell))
+            write_name_id( output, source, shell_name_id(shell))
         }
     }
 }
@@ -4377,7 +4377,7 @@ serialized_type_id(ty: u32) -> u32 {
 }
 
 write_type_id(output: &mut ByteBuf, ty: u32) {
-    ByteBuf::write_u32_le(move output, serialized_type_id(ty))
+    ByteBuf::write_u32_le( output, serialized_type_id(ty))
 }
 
 write_value_expression(
@@ -4394,7 +4394,7 @@ write_value_expression(
     handle tag {
         1 => {
             ByteBuf::push(&mut *output, 0);
-            write_type_id(move output, ty);
+            write_type_id( output, ty);
             Result::Ok(())
         },
         2 => {
@@ -4425,7 +4425,7 @@ write_value_expression(
                     ByteBuf::push(&mut *output, 1);
                     write_type_id(&mut *output, ty);
                     ByteBuf::write_u64_le(
-                        move output,
+                         output,
                         wrapping_convert_to_u64(low)
                             + shift_left(
                                 wrapping_convert_to_u64(high),
@@ -4450,7 +4450,7 @@ write_value_expression(
                     ByteBuf::push(&mut *output, 2);
                     write_type_id(&mut *output, ty);
                     ByteBuf::write_u32_le(&mut *output, local);
-                    ByteBuf::push(move output, 1);
+                    ByteBuf::push( output, 1);
                     Result::Ok(())
                 }
             }
@@ -5099,20 +5099,20 @@ write_functions(
 
 encode_source(output: &mut ByteBuf, original: String) {
     handle super::lexer::lex(&original) {
-        Result::Err(_) => ByteBuf::push(move output, 1),
+        Result::Err(_) => ByteBuf::push( output, 1),
         Result::Ok(source) => handle super::scanner::scan(&source) {
-            Result::Err(_) => ByteBuf::push(move output, 2),
+            Result::Err(_) => ByteBuf::push( output, 2),
             Result::Ok(declarations) => handle super::headers::parse(
                 &original,
-                move source,
+                 source,
                 &declarations
             ) {
-                Result::Err(_) => ByteBuf::push(move output, 3),
+                Result::Err(_) => ByteBuf::push( output, 3),
                 Result::Ok(headers) => handle collect_interfaces(
                     &headers,
                     &declarations
                 ) {
-                    Result::Err(_) => ByteBuf::push(move output, 4),
+                    Result::Err(_) => ByteBuf::push( output, 4),
                     Result::Ok(interfaces) => {
                         let encoded = ByteBuf::new();
                         ByteBuf::write_u32_le(
@@ -5128,12 +5128,12 @@ encode_source(output: &mut ByteBuf, original: String) {
                             0
                         ) {
                             Result::Err(status) =>
-                                ByteBuf::push(move output, move status),
+                                ByteBuf::push( output, move status),
                             Result::Ok(_) => {
                                 ByteBuf::push(&mut *output, 0);
                                 ByteBuf::append_bytes(
-                                    move output,
-                                    &ByteBuf::finish(move encoded)
+                                     output,
+                                    &ByteBuf::finish( encoded)
                                 )
                             }
                         }
@@ -5161,7 +5161,7 @@ process_inputs(
             process_inputs(
                 arguments,
                 index + usize_value(1),
-                move output
+                 output
             )
         }
     }
@@ -5182,7 +5182,7 @@ pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
                 u32_from_usize(count - usize_value(1))
             );
             process_inputs(&arguments, 1, &mut encoded);
-            write_file(move output_path, ByteBuf::finish(move encoded))
+            write_file(move output_path, ByteBuf::finish( encoded))
         }
     }
 }

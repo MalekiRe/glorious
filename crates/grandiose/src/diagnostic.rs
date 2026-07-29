@@ -11,6 +11,16 @@ pub enum Severity {
     Advice,
 }
 
+/// One machine-applicable source replacement.
+///
+/// The span uses the same bundle-global coordinates as the diagnostic until a
+/// [`crate::source_bundle::SourceBundle`] localizes it.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DiagnosticFix {
+    pub span: Span,
+    pub replacement: String,
+}
+
 #[derive(Clone, Debug)]
 pub struct Diagnostic {
     pub severity: Severity,
@@ -22,6 +32,7 @@ pub struct Diagnostic {
     pub note: Option<String>,
     pub code: Option<String>,
     pub related: Vec<(Span, String)>,
+    pub fix: Option<DiagnosticFix>,
     pub embedded_source: Option<String>,
 }
 
@@ -37,6 +48,7 @@ impl Diagnostic {
             note: None,
             code: None,
             related: Vec::new(),
+            fix: None,
             embedded_source: None,
         }
     }
@@ -52,6 +64,7 @@ impl Diagnostic {
             note: None,
             code: None,
             related: Vec::new(),
+            fix: None,
             embedded_source: None,
         }
     }
@@ -102,6 +115,14 @@ impl Diagnostic {
 
     pub fn with_related(mut self, span: Span, message: impl Into<String>) -> Self {
         self.related.push((span, message.into()));
+        self
+    }
+
+    pub fn with_fix(mut self, span: Span, replacement: impl Into<String>) -> Self {
+        self.fix = Some(DiagnosticFix {
+            span,
+            replacement: replacement.into(),
+        });
         self
     }
 

@@ -230,7 +230,7 @@ matching_close_walk(
                 let closing = delimiter_close(kind);
                 handle u8_equal(opening, 0) {
                     Result::Err(_) => {
-                        let next = move stack;
+                        let next =  stack;
                         Vec::push(
                             &mut next,
                             OpenDelimiter { kind: opening, token: index }
@@ -241,10 +241,10 @@ matching_close_walk(
                         Result::Ok(_) => matching_close_walk(
                             value,
                             index + usize_value(1),
-                            move stack
+                             stack
                         ),
                         Result::Err(_) => {
-                            let next = move stack;
+                            let next =  stack;
                             handle Vec::pop(&mut next) {
                                 Result::Err(_) => Result::Err(
                                     scan_error(1, index, count)
@@ -284,7 +284,7 @@ matching_close(
                 &mut stack,
                 OpenDelimiter { kind: kind, token: open }
             );
-            matching_close_walk(value, open + usize_value(1), move stack)
+            matching_close_walk(value, open + usize_value(1),  stack)
         }
     }
 }
@@ -940,15 +940,15 @@ scan_complete(
     scopes: Vec<ScanScope>,
     output: Vec<DeclarationShell>
 ) -> Result<DeclarationIndex, ScanError> {
-    let remaining = move scopes;
+    let remaining =  scopes;
     handle Vec::pop(&mut remaining) {
-        Result::Err(_) => Result::Ok(DeclarationIndex { shells: move output }),
+        Result::Err(_) => Result::Ok(DeclarationIndex { shells:  output }),
         Result::Ok(scope) => scan_loop(value, ScanState {
             cursor: scope.cursor,
             limit: scope.limit,
             parent: move scope.parent,
-            scopes: move remaining,
-            output: move output
+            scopes:  remaining,
+            output:  output
         })
     }
 }
@@ -963,9 +963,9 @@ scan_loop(
     let scopes = move state.scopes;
     let output = move state.output;
     handle cursor < limit {
-        Result::Err(_) => scan_complete(value, move scopes, move output),
+        Result::Err(_) => scan_complete(value,  scopes,  output),
         Result::Ok(_) => handle token_is_eof(value, cursor) {
-            Result::Ok(_) => scan_complete(value, move scopes, move output),
+            Result::Ok(_) => scan_complete(value,  scopes,  output),
             Result::Err(_) => handle scan_one(
                 value,
                 cursor,
@@ -973,8 +973,8 @@ scan_loop(
                 parent
             ) {
                 Result::Err(error) => scan_loop_error(
-                    move scopes,
-                    move output,
+                     scopes,
+                     output,
                     move error
                 ),
                 Result::Ok(step) => {
@@ -988,8 +988,8 @@ scan_loop(
                             cursor: next,
                             limit: limit,
                             parent: parent,
-                            scopes: move scopes,
-                            output: move output
+                            scopes:  scopes,
+                            output:  output
                         }),
                         Result::Ok(nested) => {
                             Vec::push(&mut scopes, ScanScope {
@@ -1003,8 +1003,8 @@ scan_loop(
                                     cursor: nested,
                                     limit: nested_end,
                                     parent: Result::Ok(shell),
-                                    scopes: move scopes,
-                                    output: move output
+                                    scopes:  scopes,
+                                    output:  output
                                 }
                             )
                         }
@@ -1039,7 +1039,7 @@ write_string(output: &mut ByteBuf, value: &String) {
         &mut *output,
         wrapping_convert_to_u32(Bytes::len(&bytes))
     );
-    ByteBuf::append_bytes(move output, &bytes)
+    ByteBuf::append_bytes( output, &bytes)
 }
 
 write_optional_name(
@@ -1048,12 +1048,12 @@ write_optional_name(
     value: &Option<Id<String>>
 ) {
     handle Option::as_ref(value) {
-        Result::Err(_) => ByteBuf::push(move output, 0),
+        Result::Err(_) => ByteBuf::push( output, 0),
         Result::Ok(name) => {
             ByteBuf::push(&mut *output, 1);
             handle super::lexer::lexeme(lexed, *name) {
                 Result::Err(_) => unreachable(),
-                Result::Ok(text) => write_string(move output, move text)
+                Result::Ok(text) => write_string( output, move text)
             }
         }
     }
@@ -1065,28 +1065,28 @@ write_range(output: &mut ByteBuf, value: &TokenRange) {
         wrapping_convert_to_u32(value.start)
     );
     ByteBuf::write_u32_le(
-        move output,
+         output,
         wrapping_convert_to_u32(value.end)
     )
 }
 
 write_optional_range(output: &mut ByteBuf, value: &Option<TokenRange>) {
     handle Option::as_ref(value) {
-        Result::Err(_) => ByteBuf::push(move output, 0),
+        Result::Err(_) => ByteBuf::push( output, 0),
         Result::Ok(range) => {
             ByteBuf::push(&mut *output, 1);
-            write_range(move output, move range)
+            write_range( output, move range)
         }
     }
 }
 
 write_optional_parent(output: &mut ByteBuf, value: &Option<usize>) {
     handle Option::as_ref(value) {
-        Result::Err(_) => ByteBuf::push(move output, 0),
+        Result::Err(_) => ByteBuf::push( output, 0),
         Result::Ok(parent) => {
             ByteBuf::push(&mut *output, 1);
             ByteBuf::write_u32_le(
-                move output,
+                 output,
                 wrapping_convert_to_u32(*parent)
             )
         }
@@ -1110,7 +1110,7 @@ write_shells(
             write_optional_range(&mut *output, &shell.body);
             write_range(&mut *output, &shell.whole);
             write_optional_parent(&mut *output, &shell.parent);
-            write_shells(move output, lexed, value, index + usize_value(1))
+            write_shells( output, lexed, value, index + usize_value(1))
         }
     }
 }
@@ -1128,7 +1128,7 @@ encode_scan(
                 wrapping_convert_to_u32(error.token)
             );
             ByteBuf::write_u32_le(
-                move output,
+                 output,
                 wrapping_convert_to_u32(error.related)
             )
         },
@@ -1138,7 +1138,7 @@ encode_scan(
                 &mut *output,
                 wrapping_convert_to_u32(Vec::len(&index.shells))
             );
-            write_shells(move output, &lexed, &index, 0)
+            write_shells( output, &lexed, &index, 0)
         }
     }
 }
@@ -1153,10 +1153,10 @@ process_inputs(arguments: &Vec<String>, index: usize, output: &mut ByteBuf) / Fi
                 Result::Err(_) => ByteBuf::push(&mut *output, 1),
                 Result::Ok(source) => handle super::lexer::lex(&source) {
                     Result::Err(_) => ByteBuf::push(&mut *output, 1),
-                    Result::Ok(lexed) => encode_scan(&mut *output, move lexed)
+                    Result::Ok(lexed) => encode_scan(&mut *output,  lexed)
                 }
             };
-            process_inputs(arguments, index + usize_value(1), move output)
+            process_inputs(arguments, index + usize_value(1),  output)
         }
     }
 }
@@ -1176,7 +1176,7 @@ pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
                 wrapping_convert_to_u32(argument_count - usize_value(1))
             );
             process_inputs(&arguments, 1, &mut encoded);
-            write_file(move output_path, ByteBuf::finish(move encoded))
+            write_file(move output_path, ByteBuf::finish( encoded))
         }
     }
 }

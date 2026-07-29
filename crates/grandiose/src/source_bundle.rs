@@ -236,6 +236,11 @@ impl SourceBundle {
         })
     }
 
+    pub(crate) fn is_trusted_distributed_standard_span(&self, span: Span) -> bool {
+        self.map_span(span)
+            .is_some_and(|mapped| mapped.segment.role == SegmentRole::TrustedDistributedStandard)
+    }
+
     /// Produces a diagnostic-only view with every independently mappable label
     /// translated back to its file-local byte offsets.
     pub fn map_diagnostic<'a>(&'a self, diagnostic: &'a Diagnostic) -> MappedDiagnostic<'a> {
@@ -249,6 +254,14 @@ impl SourceBundle {
                     self.map_span(*span).map(|span| (span, message.as_str()))
                 })
                 .collect(),
+            fix: diagnostic.fix.as_ref().and_then(|fix| {
+                self.map_span(fix.span)
+                    .filter(|span| span.segment.role == SegmentRole::User)
+                    .map(|span| MappedDiagnosticFix {
+                        span,
+                        replacement: &fix.replacement,
+                    })
+            }),
         }
     }
 
@@ -269,6 +282,14 @@ impl SourceBundle {
                 (mapped.segment.id == primary.segment.id).then_some((mapped.span, message))
             })
             .collect();
+        diagnostic.fix = diagnostic.fix.and_then(|mut fix| {
+            let mapped = self.map_span(fix.span)?;
+            if mapped.segment.id != primary.segment.id || mapped.segment.role != SegmentRole::User {
+                return None;
+            }
+            fix.span = mapped.span;
+            Some(fix)
+        });
         diagnostic
     }
 
@@ -325,6 +346,13 @@ pub struct MappedDiagnostic<'a> {
     pub diagnostic: &'a Diagnostic,
     pub span: Option<MappedSpan<'a>>,
     pub related: Vec<(MappedSpan<'a>, &'a str)>,
+    pub fix: Option<MappedDiagnosticFix<'a>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct MappedDiagnosticFix<'a> {
+    pub span: MappedSpan<'a>,
+    pub replacement: &'a str,
 }
 
 #[cfg(test)]
@@ -445,5 +473,55 @@ mod tests {
         assert_eq!(mapped.span, Span::new(1, 3));
         assert!(bundle.segment_at(3).is_none());
         assert!(bundle.map_span(Span::new(2, 5)).is_none());
+    }
+
+    #[test]
+    fn maps_and_localizes_machine_fixes_with_the_primary_segment() {
+        let bundle = SourceBundle::new(
+            Segment::new("std", "abc"),
+            Segment::new("primary", "move value"),
+            [],
+        );
+        let primary_start = bundle.segments()[1].global_range().start;
+        let diagnostic = Diagnostic::warning(
+            "redundant move",
+            "this noncopy local is already transferred by use",
+            Span::new(primary_start, primary_start + 10),
+        )
+        .with_fix(Span::new(primary_start, primary_start + 4), "");
+
+        let mapped = bundle.map_diagnostic(&diagnostic);
+        let fix = mapped.fix.expect("fix maps to an original source segment");
+        assert_eq!(fix.span.segment.name(), "primary");
+        assert_eq!(fix.span.span, Span::new(0, 4));
+        assert_eq!(fix.replacement, "");
+
+        let localized = bundle.localize_diagnostic(diagnostic);
+        assert_eq!(localized.source_name, "primary");
+        assert_eq!(
+            localized.fix,
+            Some(crate::diagnostic::DiagnosticFix {
+                span: Span::new(0, 4),
+                replacement: String::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn distributed_standard_diagnostics_do_not_offer_file_edits() {
+        let bundle = SourceBundle::distributed(Segment::new("primary", "main() -> { () }"), []);
+        let standard = &bundle.segments()[0];
+        let diagnostic = Diagnostic::advice(
+            "redundant move",
+            "the embedded standard library is not an editable package file",
+            Span::new(standard.global_range.start, standard.global_range.start + 4),
+        )
+        .with_fix(
+            Span::new(standard.global_range.start, standard.global_range.start + 4),
+            "",
+        );
+
+        assert!(bundle.map_diagnostic(&diagnostic).fix.is_none());
+        assert!(bundle.localize_diagnostic(diagnostic).fix.is_none());
     }
 }
