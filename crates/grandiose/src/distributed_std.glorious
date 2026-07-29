@@ -9154,14 +9154,32 @@ let HashSet::iter = __g1_hash_set_iter;
 let HashSet::into_iter = __g1_hash_set_into_iter;
 let HashSetIter::next = __g1_hash_set_iter_next;
 let HashSetIntoIter::next = __g1_hash_set_into_iter_next;
-// Layer 3c: compiler construction toolkit. These are ordinary source types;
-// their private fields make typed indices and arena marks unforgeable outside
-// this standard-library authority domain.
+// Layer 3c: compiler construction toolkit. These are ordinary source types.
+// Their private fields centralize representation access here; public raw-ID
+// constructors remain explicit for serialization and trusted table plumbing.
 enum ToolkitCapacityError { IdSpaceExhausted, CounterOverflow }
 
 struct Id<Tag> { private raw: u32 }
 
 impl < Tag > Use<[0, *]> for Id<Tag> {}
+
+impl < Tag > Equal for Id<Tag> {
+    ==(self: Id<Tag>, other: Id<Tag>) -> Bool {
+        __g1_bool_from_u32(__g1_int_equal(self.raw, other.raw))
+    }
+}
+
+impl < Tag > Eq for Id<Tag> {
+    eq(self: &Id<Tag>, other: &Id<Tag>) -> Bool {
+        __g1_bool_from_u32(__g1_int_equal(self.raw, other.raw))
+    }
+}
+
+impl < Tag > Hash for Id<Tag> {
+    hash(self: &Id<Tag>, state: &mut Hasher) {
+        __g1_hasher_write_u32(move state, self.raw)
+    }
+}
 
 __g1_id_from_u32<Tag>(raw: u32) -> Id<Tag> { Id { raw: move raw } }
 
@@ -9227,6 +9245,14 @@ __g1_index_vec_get_mut<'a, I, T>(value: &'a mut IndexVec<I, T>, id: Id<I>) -> Op
     Vec::get_mut(&mut value.values, Id::to_usize(move id))
 }
 
+__g1_index_vec_index<'a, I, T>(value: &'a IndexVec<I, T>, id: Id<I>) -> &'a T {
+    Vec::index(&value.values, Id::to_usize(move id))
+}
+
+__g1_index_vec_index_mut<'a, I, T>(value: &'a mut IndexVec<I, T>, id: Id<I>) -> &'a mut T {
+    Vec::index_mut(&mut value.values, Id::to_usize(move id))
+}
+
 __g1_index_vec_pop<I, T>(value: &mut IndexVec<I, T>) -> Option<T> {
     let length = value.length;
     handle length == 0 {
@@ -9266,6 +9292,8 @@ let IndexVec::is_empty = __g1_index_vec_is_empty;
 let IndexVec::push = __g1_index_vec_push;
 let IndexVec::get = __g1_index_vec_get;
 let IndexVec::get_mut = __g1_index_vec_get_mut;
+let IndexVec::index = __g1_index_vec_index;
+let IndexVec::index_mut = __g1_index_vec_index_mut;
 let IndexVec::pop = __g1_index_vec_pop;
 let IndexVec::get_copy = __g1_index_vec_get_copy;
 let IndexVec::replace = __g1_index_vec_replace;
@@ -9297,6 +9325,14 @@ __g1_arena_get<'a, I, T>(value: &'a Arena<I, T>, id: Id<I>) -> Option<& 'a T> {
 
 __g1_arena_get_mut<'a, I, T>(value: &'a mut Arena<I, T>, id: Id<I>) -> Option<& 'a mut T> {
     IndexVec::get_mut(&mut value.values, move id)
+}
+
+__g1_arena_index<'a, I, T>(value: &'a Arena<I, T>, id: Id<I>) -> &'a T {
+    IndexVec::index(&value.values, move id)
+}
+
+__g1_arena_index_mut<'a, I, T>(value: &'a mut Arena<I, T>, id: Id<I>) -> &'a mut T {
+    IndexVec::index_mut(&mut value.values, move id)
 }
 
 __g1_arena_get_copy<I, T>(value: &Arena<I, T>, id: Id<I>) -> Option<T> where T: Use<[0, *]> {
@@ -9352,6 +9388,8 @@ let Arena::mark = __g1_arena_mark;
 let Arena::alloc = __g1_arena_alloc;
 let Arena::get = __g1_arena_get;
 let Arena::get_mut = __g1_arena_get_mut;
+let Arena::index = __g1_arena_index;
+let Arena::index_mut = __g1_arena_index_mut;
 let Arena::get_copy = __g1_arena_get_copy;
 let Arena::truncate = __g1_arena_truncate;
 let Arena::drain_rollback = __g1_arena_drain_rollback;

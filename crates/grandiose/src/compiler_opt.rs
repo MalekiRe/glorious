@@ -19357,7 +19357,6 @@ mod tests {
             PassId::GlobalSimplify,
             PassId::SpecializeCleanup,
             PassId::EraseLoanProofsAndScalarizedReferences,
-            PassId::FormTailCallsAndHoist,
         ] {
             let mut candidate = original.clone();
             let before = candidate.canonical_text();
@@ -19370,6 +19369,22 @@ mod tests {
             assert_eq!(candidate.fingerprint(), fingerprint, "{pass:?}");
             assert_eq!(candidate.functions[0].invalid_analyses, 0, "{pass:?}");
         }
+
+        // The scheduling wrapper deliberately gives tail formation a fair
+        // per-function cap even after the shared profitability budget is
+        // depleted: this is the final stack-safety opportunity. Exercise the
+        // transformation's zero local budget directly so its scratch-body
+        // transaction remains covered without contradicting that scheduler
+        // contract.
+        let mut candidate = original.clone();
+        let before = candidate.canonical_text();
+        let fingerprint = candidate.fingerprint();
+        let (outcome, _) =
+            form_tail_calls_and_hoist(&mut candidate.functions[0], &types, &BTreeSet::new(), 0);
+        assert_eq!(outcome, PassOutcome::BudgetExhausted);
+        assert_eq!(candidate.canonical_text(), before);
+        assert_eq!(candidate.fingerprint(), fingerprint);
+        assert_eq!(candidate.functions[0].invalid_analyses, 0);
     }
 
     #[test]

@@ -1004,6 +1004,14 @@ impl SolverBudget {
         self.steps = 0;
         self.projection_steps = 0;
     }
+
+    #[cfg(test)]
+    pub(crate) fn exhausted_for_test() -> Self {
+        Self {
+            steps: MAX_STEPS.saturating_add(1),
+            projection_steps: MAX_PROJECTION_STEPS.saturating_add(1),
+        }
+    }
 }
 
 #[derive(Default)]

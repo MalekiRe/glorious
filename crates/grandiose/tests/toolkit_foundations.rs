@@ -94,6 +94,200 @@ fn user_code_cannot_replenish_step_budget_through_its_private_state() {
     );
 }
 
+#[test]
+fn id_from_usize_specialization_survives_reference_result_pattern_handling() {
+    let source = r#"
+        struct NodeTag {}
+
+        struct Node { value: i64 }
+
+        empty_nodes() -> Arena<NodeTag, Node> { Arena::new() }
+
+        select<'a>(
+            value: &'a Arena<NodeTag, Node>,
+            index: usize
+        ) -> Option<&'a Node> {
+            handle Id::from_usize(index) {
+                Result::Err(_) => None,
+                Result::Ok(id) => Arena::get(value, id)
+            }
+        }
+
+        main() -> () {
+            let nodes = empty_nodes();
+            select(&nodes, 0);
+            ()
+        }
+    "#;
+    compile_source_to_bytecode("id-from-usize-reference-result.glorious", source).unwrap();
+}
+
+#[test]
+fn shadowed_pattern_payload_does_not_constrain_a_generic_initializer() {
+    let source = r#"
+        struct NodeTag {}
+        enum Maybe<T> { Some(T), None }
+
+        consume(value: Id<NodeTag>) -> () {
+            value;
+            ()
+        }
+
+        make<T>() -> Maybe<T> { unreachable() }
+
+        exercise() -> () {
+            let value = make();
+            handle move value {
+                Maybe::Some(payload) => {
+                    let tag = NodeTag {};
+                    let payload = Id::with_tag(1, &tag);
+                    consume(payload)
+                },
+                Maybe::None => ()
+            }
+        }
+
+        main() -> () { () }
+    "#;
+    let errors = compile_source_to_bytecode("shadowed-pattern-payload.glorious", source)
+        .expect_err("a nested shadow must not infer the outer generic payload");
+    assert!(
+        errors.iter().any(|error| {
+            error.message.contains("unresolved")
+                || error.message.contains("ambiguous")
+                || error.message.contains("cannot infer")
+                || error.message.contains("variant pattern requires an enum")
+        }),
+        "{errors:#?}"
+    );
+}
+
+#[test]
+fn initializer_inference_rejects_incompatible_later_uses() {
+    let source = r#"
+        empty<T>() -> Vec<T> { Vec::new() }
+        consume_i64(value: &Vec<i64>) -> () { value; () }
+        consume_u64(value: &Vec<u64>) -> () { value; () }
+
+        exercise() -> () {
+            let values = empty();
+            consume_i64(&values);
+            consume_u64(&values)
+        }
+
+        main() -> () { () }
+    "#;
+    let errors = compile_source_to_bytecode("incompatible-initializer-uses.glorious", source)
+        .expect_err("incompatible uses must not select an arbitrary traversal-order candidate");
+    assert!(
+        errors.iter().any(|error| {
+            error.message.contains("ambiguous")
+                || error.message.contains("expected")
+                || error.message.contains("cannot infer")
+        }),
+        "{errors:#?}"
+    );
+}
+
+#[test]
+fn initializer_alias_survives_shadowing_of_the_original_name() {
+    let source = r#"
+        empty<T>() -> Vec<T> { Vec::new() }
+        consume(value: &Vec<i64>) -> () { value; () }
+
+        exercise() -> () {
+            let values = empty();
+            let retained = move values;
+            let values = 1;
+            values;
+            consume(&retained)
+        }
+
+        main() -> () { exercise() }
+    "#;
+    compile_source_to_bytecode("initializer-alias-survives-shadow.glorious", source).unwrap();
+}
+
+#[test]
+fn multimap_remove_handle_alias_preserves_the_initializer_wrapper_expectation() {
+    let source = r#"
+        struct Key { raw: i64 }
+        impl Use<[0, infinity]> for Key {}
+        impl Eq for Key {
+            eq(self: &Key, other: &Key) -> Bool { self.raw == other.raw }
+        }
+        impl Hash for Key {
+            hash(self: &Key, state: &mut Hasher) -> () {
+                Hasher::write_u64(move state, wrapping_convert_to_u64(self.raw))
+            }
+        }
+
+        empty_values() -> MultiMap<Key, i64> { MultiMap::new() }
+
+        exercise() -> () {
+            let values = empty_values();
+            MultiMap::add(&mut values, Key { raw: 1 }, 7)
+        }
+
+        main() -> () { exercise() }
+    "#;
+    compile_source_to_bytecode("multimap-remove-handle-alias.glorious", source).unwrap();
+}
+
+#[test]
+fn generic_hash_map_with_typed_ids_preserves_projected_assignment_expectations() {
+    let source = r#"
+        struct NodeTag {}
+
+        empty_values() -> HashMap<Id<NodeTag>, usize> { HashMap::new() }
+
+        insert_value() -> Bool {
+            let tag = NodeTag {};
+            let id = Id::with_tag(1, &tag);
+            let values = empty_values();
+            HashMap::insert(&mut values, id, 9);
+            HashMap::contains_key(&values, &id)
+        }
+
+        main() -> () { () }
+    "#;
+    compile_source_to_phases_with_options(
+        "typed-id-hash-map.glorious",
+        source,
+        CompileOptions {
+            optimization_level: OptimizationLevel::O1,
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn generic_bool_refinement_accepts_a_moved_global_tail_inside_a_block() {
+    let source = r#"
+        struct Witness {}
+
+        choose<T>(value: Bool, witness: &T) -> Bool {
+            witness;
+            handle move value {
+                Result::Ok(_) => {
+                    let ignored = 0;
+                    ignored;
+                    true
+                },
+                Result::Err(_) => false
+            }
+        }
+
+        selected() -> Bool {
+            let witness = Witness {};
+            choose(true, &witness)
+        }
+
+        main() -> () { () }
+    "#;
+    compile_source_to_bytecode("generic-bool-refinement.glorious", source).unwrap();
+}
+
 const TYPED_TOOLKIT_SURFACE: &str = r#"
     struct NodeTag {}
     struct MultiKey { raw: i64 }
@@ -122,6 +316,26 @@ const TYPED_TOOLKIT_SURFACE: &str = r#"
     empty_sparse() -> SparseSet<NodeTag> { SparseSet::new() }
     empty_queue() -> WorkQueue<NodeTag> { WorkQueue::new() }
     empty_multimap() -> MultiMap<MultiKey, i64> { MultiMap::new() }
+    empty_id_map() -> HashMap<Id<NodeTag>, usize> { HashMap::new() }
+
+    id_identity_evidence() -> usize {
+        let tag = NodeTag {};
+        let one = Id::with_tag(1, &tag);
+        let same_one = Id::with_tag(1, &tag);
+        let two = Id::with_tag(2, &tag);
+        let values = empty_id_map();
+        HashMap::insert(&mut values, one, 9);
+        uadd(
+            uadd(
+                umul(bool_score(one == same_one), 100),
+                uadd(
+                    umul(bool_score(Eq::eq(&one, &same_one)), 10),
+                    bool_score(HashMap::contains_key(&values, &one))
+                )
+            ),
+            bool_score(HashMap::contains_key(&values, &two))
+        )
+    }
 
     bit_set_algebra() -> usize {
         let left = empty_bits();
@@ -232,6 +446,7 @@ fn typed_compiler_toolkit_executes_at_o1_through_o3() {
             ("sparse_set_roundtrip", 102),
             ("work_queue_deduplicates", 101),
             ("multimap_groups_values", 3),
+            ("id_identity_evidence", 111),
             ("accounting_is_checked", 1025),
             ("id_capacity_is_checked", 10),
         ] {
@@ -299,18 +514,28 @@ const STORAGE_TOOLKIT_SURFACE: &str = r#"
         let tag = ItemTag {};
         let second = Id::with_tag(1, &tag);
         let previous = replace_or_zero(IndexVec::replace(&mut values, second, 30));
-        let current = usize_or_zero(IndexVec::get_copy(&values, second));
+        *IndexVec::index_mut(&mut values, second) = 40;
+        let current = *IndexVec::index(&values, second);
         uadd(umul(IndexVec::len(&values), 100), uadd(previous, current))
     }
 
     arena_rollback() -> usize {
         let arena = empty_arena();
-        alloc_item(&mut arena, 1);
+        let tag = ItemTag {};
+        let first = handle alloc_item(&mut arena, 1) {
+            Result::Ok(id) => id,
+            Result::Err(_) => Id::with_tag(0, &tag)
+        };
         let mark = Arena::mark(&arena);
         alloc_item(&mut arena, 2);
         alloc_item(&mut arena, 3);
         let removed = Arena::drain_rollback(&mut arena, mark);
-        uadd(umul(Arena::len(&arena), 100), Vec::len(&removed))
+        *Arena::index_mut(&mut arena, first) = 4;
+        let retained = *Arena::index(&arena, first);
+        uadd(
+            umul(Arena::len(&arena), 100),
+            uadd(Vec::len(&removed), retained)
+        )
     }
 
     interner_is_canonical() -> usize {
@@ -361,8 +586,8 @@ fn storage_and_source_toolkit_execute_at_o1_through_o3() {
         let artifact = verify(phases.artifact.clone()).unwrap();
         let vm = Vm::new(artifact);
         for (name, expected) in [
-            ("index_vec_growth", 250),
-            ("arena_rollback", 102),
+            ("index_vec_growth", 260),
+            ("arena_rollback", 106),
             ("interner_is_canonical", 203),
             ("source_map_lines", 251),
         ] {
@@ -424,6 +649,56 @@ fn compiler_toolkit_representations_are_private_and_arena_truncate_is_bounded() 
         assert!(
             errors.iter().any(|error| error.message.contains(expected)),
             "{name}: {errors:#?}"
+        );
+    }
+}
+
+#[test]
+fn invariant_typed_indexing_traps_while_fallible_lookup_stays_optional() {
+    let source = r#"
+        struct ItemTag {}
+
+        empty_index() -> IndexVec<ItemTag, usize> { IndexVec::new() }
+        empty_arena() -> Arena<ItemTag, usize> { Arena::new() }
+
+        missing_index() -> usize {
+            let values = empty_index();
+            let tag = ItemTag {};
+            *IndexVec::index(&values, Id::with_tag(0, &tag))
+        }
+
+        missing_arena() -> usize {
+            let values = empty_arena();
+            let tag = ItemTag {};
+            *Arena::index(&values, Id::with_tag(0, &tag))
+        }
+
+        fallible_miss() -> usize {
+            let values = empty_index();
+            let tag = ItemTag {};
+            handle IndexVec::get_copy(&values, Id::with_tag(0, &tag)) {
+                Result::Ok(_) => 1,
+                Result::Err(_) => 0
+            }
+        }
+
+        main() -> () { () }
+    "#;
+    let artifact = compile_source_to_bytecode("typed-index-invariants.glorious", source).unwrap();
+    let verified = verify(artifact.clone()).unwrap();
+    let vm = Vm::new(verified);
+    assert_eq!(
+        vm.run(function_id(&artifact, "fallible_miss"), vec![])
+            .unwrap(),
+        Value::U64(0)
+    );
+    for name in ["missing_index", "missing_arena"] {
+        let error = vm
+            .run(function_id(&artifact, name), vec![])
+            .expect_err("invariant indexing must retain Vec's trapping contract");
+        assert!(
+            error.to_string().contains("out of bounds"),
+            "{name}: {error}"
         );
     }
 }

@@ -774,6 +774,33 @@ fn qualified_methods_select_after_ground_gat_receiver_normalization() {
 }
 
 #[test]
+fn trait_addition_infers_through_arithmetic_on_typed_locals() {
+    let source = r#"
+        left() -> usize { 4 }
+        right() -> usize { 5 }
+        selected() -> usize {
+            let left_value = left();
+            let right_value = right();
+            left_value * 2 + right_value * 3
+        }
+        main() -> () { () }
+    "#;
+    let artifact =
+        grandiose::compile_source_to_bytecode("binary-result-trait-add.glorious", source).unwrap();
+    let selected = artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(artifact).unwrap())
+            .run(selected, vec![])
+            .unwrap(),
+        Value::U64(23),
+    );
+}
+
+#[test]
 fn qualified_method_projection_selection_requires_exact_associated_evidence() {
     let source = r#"
         struct Box<T> { value: T }

@@ -3019,6 +3019,122 @@ struct Walker<'a> {
 }
 
 impl<'a> Walker<'a> {
+    fn assignment_fields(
+        destination: &crate::ast::AssignmentPlace,
+    ) -> &[crate::ast::AssignmentField] {
+        match &destination.kind {
+            AssignmentPlaceKind::Local { fields, .. }
+            | AssignmentPlaceKind::Dereference { fields, .. } => fields,
+        }
+    }
+
+    fn assignment_active_variant(
+        &self,
+        destination: &crate::ast::AssignmentPlace,
+    ) -> Option<String> {
+        match &destination.kind {
+            AssignmentPlaceKind::Local { name, .. } => {
+                self.active_variants.get(name.as_ref()).cloned()
+            }
+            AssignmentPlaceKind::Dereference { reference, .. } => {
+                let ExprKind::Variable(path) = &reference.kind else {
+                    return None;
+                };
+                (path.len() == 1)
+                    .then(|| self.active_variants.get(path[0].as_ref()).cloned())
+                    .flatten()
+            }
+        }
+    }
+
+    fn assignment_projected_type(
+        &self,
+        mut ty: ProvisionalType,
+        destination: &crate::ast::AssignmentPlace,
+    ) -> Option<ProvisionalType> {
+        let mut variant = self.assignment_active_variant(destination);
+        for field in Self::assignment_fields(destination) {
+            ty = match ty {
+                ProvisionalType::Tuple(elements) => {
+                    elements.get(field.name.parse::<usize>().ok()?)?.clone()
+                }
+                ProvisionalType::Nominal(instance) => {
+                    let formal = variant
+                        .take()
+                        .and_then(|variant| {
+                            self.nominal_templates
+                                .get(&instance.declaration.0)?
+                                .variants
+                                .get(&variant)?
+                                .get(field.name.parse::<usize>().ok()?)
+                        })
+                        .or_else(|| {
+                            self.nominal_templates
+                                .get(&instance.declaration.0)?
+                                .fields
+                                .get(field.name.as_str())
+                        });
+                    if let Some(formal) = formal {
+                        let template = self.nominal_templates.get(&instance.declaration.0)?;
+                        if template.params.len() != instance.arguments.len() {
+                            return None;
+                        }
+                        let substitutions = template
+                            .params
+                            .iter()
+                            .cloned()
+                            .zip(
+                                instance
+                                    .arguments
+                                    .iter()
+                                    .cloned()
+                                    .map(SpecializationArgument::Type),
+                            )
+                            .collect();
+                        substitute(formal, &substitutions)?
+                    } else {
+                        self.struct_fields
+                            .get(&instance.declaration.0)?
+                            .get(field.name.as_str())?
+                            .clone()
+                    }
+                }
+                ProvisionalType::Shared(_)
+                | ProvisionalType::Unique(_)
+                | ProvisionalType::Predefined(_)
+                | ProvisionalType::Const(_)
+                | ProvisionalType::Param(_)
+                | ProvisionalType::Callable(_) => return None,
+            };
+        }
+        Some(ty)
+    }
+
+    fn assignment_expected_type(
+        &mut self,
+        destination: &crate::ast::AssignmentPlace,
+    ) -> Option<ProvisionalType> {
+        let fields = Self::assignment_fields(destination);
+        let base = match &destination.kind {
+            AssignmentPlaceKind::Local { name, .. } => {
+                let LocalBinding::Type(ty) = self.locals.get(name.as_ref())? else {
+                    return None;
+                };
+                match ty {
+                    ProvisionalType::Unique(referent) if !fields.is_empty() => (**referent).clone(),
+                    ty => ty.clone(),
+                }
+            }
+            AssignmentPlaceKind::Dereference { reference, .. } => {
+                let ProvisionalType::Unique(referent) = self.expression(reference, None)? else {
+                    return None;
+                };
+                *referent
+            }
+        };
+        self.assignment_projected_type(base, destination)
+    }
+
     fn static_label_shape(&self, name: &str) -> Option<CallableShape> {
         let LocalBinding::Type(subject) = self.locals.get(name)? else {
             return None;
@@ -3101,227 +3217,580 @@ impl<'a> Walker<'a> {
         }
     }
 
-    fn block_binding_expected_type(
+    fn generic_call_binding_expected(
         &self,
+        callee: &Expr,
+        arguments: &[Expr],
         binding: &str,
-        remaining: &[Stmt],
-        block_expected: Option<&ProvisionalType>,
     ) -> Option<ProvisionalType> {
-        fn moved_binding(expression: &Expr) -> Option<&str> {
+        let ExprKind::Variable(path) = &callee.kind else {
+            return None;
+        };
+        let [name] = path.as_ref() else {
+            return None;
+        };
+        let template = self.templates.get(name.as_ref())?;
+        if arguments.len() != template.params.len() {
+            return None;
+        }
+        let named_binding = |expression: &Expr| {
             let expression = match &expression.kind {
-                ExprKind::Move(value) => value,
+                ExprKind::Move(value) => value.as_ref(),
                 _ => expression,
             };
-            let ExprKind::Variable(path) = &expression.kind else {
-                return None;
-            };
-            (path.len() == 1).then_some(path[0].as_ref())
-        }
-
-        fn expression_mentions_binding(expression: &Expr, binding: &str) -> bool {
-            if moved_binding(expression) == Some(binding) {
-                return true;
-            }
-            match &expression.kind {
-                ExprKind::Binary { lhs, rhs, .. } => {
-                    expression_mentions_binding(lhs, binding)
-                        || expression_mentions_binding(rhs, binding)
-                }
-                ExprKind::Unary { operand, .. } | ExprKind::Field(operand, _) => {
-                    expression_mentions_binding(operand, binding)
-                }
-                _ => false,
-            }
-        }
-
-        let shadows_binding = |statement: &Stmt| match statement {
-            Stmt::Let { name, .. } => name == binding,
-            Stmt::Deconstruct { fields, .. } => fields
-                .iter()
-                .any(|field| field.binding.as_deref() == Some(binding)),
-            Stmt::Assign { .. } | Stmt::Expr(_) => false,
+            matches!(&expression.kind, ExprKind::Variable(path)
+                if path.len() == 1 && path[0].as_ref() == binding)
         };
-        let visible_end = remaining
+        let mutable = template
+            .generic_params
             .iter()
-            .position(shadows_binding)
-            .map_or(remaining.len(), |index| index + 1);
-        let visible_remaining = &remaining[..visible_end];
-
-        if let (Some(expected), Some(Stmt::Expr(result))) =
-            (block_expected, visible_remaining.last())
-        {
-            if moved_binding(result) == Some(binding) {
-                return Some(expected.clone());
-            }
-            if let (ExprKind::Struct { name, fields }, ProvisionalType::Nominal(instance)) =
-                (&result.kind, expected)
-                && instance.declaration.0 == name.as_ref()
-                && let Some(template) = self.nominal_templates.get(name.as_ref())
-                && template.params.len() == instance.arguments.len()
-            {
-                let substitutions = template
-                    .params
-                    .iter()
-                    .cloned()
-                    .zip(
-                        instance
-                            .arguments
-                            .iter()
-                            .cloned()
-                            .map(SpecializationArgument::Type),
-                    )
-                    .collect::<BTreeMap<_, _>>();
-                if let Some(expected) = fields.iter().find_map(|(field, value)| {
-                    expression_mentions_binding(value, binding)
-                        .then(|| template.fields.get(field))
-                        .flatten()
-                        .and_then(|formal| substitute(formal, &substitutions))
-                }) {
-                    return Some(expected);
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut substitutions = BTreeMap::new();
+        for (argument, formal) in arguments.iter().zip(&template.params) {
+            if let Some((actual, false)) = self.obvious_argument_type(argument) {
+                let mut trial = substitutions.clone();
+                if unify_inference(formal, &actual, &mutable, &mut trial) {
+                    substitutions = trial;
                 }
             }
         }
+        let mut candidates = arguments
+            .iter()
+            .zip(&template.params)
+            .filter_map(|(argument, formal)| {
+                let formal = substitute(formal, &substitutions).unwrap_or_else(|| formal.clone());
+                if !ground(&formal) {
+                    return None;
+                }
+                let argument = match &argument.kind {
+                    ExprKind::Move(value) => value.as_ref(),
+                    _ => argument,
+                };
+                match (&argument.kind, formal) {
+                    (
+                        ExprKind::Unary {
+                            op: UnaryOp::BorrowShared,
+                            operand,
+                        },
+                        ProvisionalType::Shared(referent),
+                    )
+                    | (
+                        ExprKind::Unary {
+                            op: UnaryOp::BorrowUnique,
+                            operand,
+                        },
+                        ProvisionalType::Unique(referent),
+                    ) if named_binding(operand) => Some(*referent),
+                    (_, formal) if named_binding(argument) => Some(formal),
+                    _ => None,
+                }
+            })
+            .collect::<BTreeSet<_>>();
+        (candidates.len() == 1).then(|| candidates.pop_first().unwrap())
+    }
 
-        // A zero-payload generic factory such as `Vec::new()` is commonly
-        // constrained by a later borrow (`consume(&mut value)`). Discover that
-        // exact ground parameter context before walking the initializer so its
-        // specialization is retained rather than relying on declaration order.
-        let mut pending = Vec::new();
-        for statement in visible_remaining {
+    fn moved_binding_name(expression: &Expr) -> Option<&str> {
+        let expression = match &expression.kind {
+            ExprKind::Move(value) => value,
+            _ => expression,
+        };
+        let ExprKind::Variable(path) = &expression.kind else {
+            return None;
+        };
+        (path.len() == 1).then_some(path[0].as_ref())
+    }
+
+    fn pattern_binds_name(pattern: &crate::ast::Pattern, binding: &str) -> bool {
+        match &pattern.kind {
+            PatternKind::Binding(name) => name == binding,
+            PatternKind::Variant { fields, .. } => fields
+                .iter()
+                .any(|field| Self::pattern_binds_name(field, binding)),
+            PatternKind::Tuple { elements, .. } => elements
+                .iter()
+                .any(|element| Self::pattern_binds_name(element, binding)),
+            PatternKind::Struct { fields, .. } => fields
+                .iter()
+                .any(|field| Self::pattern_binds_name(&field.pattern, binding)),
+            PatternKind::Wildcard
+            | PatternKind::Unit
+            | PatternKind::Int(_)
+            | PatternKind::Float(_)
+            | PatternKind::String(_)
+            | PatternKind::Char(_)
+            | PatternKind::Byte(_) => false,
+        }
+    }
+
+    fn expression_mentions_live_name(expression: &Expr, live: &BTreeSet<String>) -> bool {
+        if Self::moved_binding_name(expression).is_some_and(|name| live.contains(name)) {
+            return true;
+        }
+        match &expression.kind {
+            ExprKind::Binary { lhs, rhs, .. } => {
+                Self::expression_mentions_live_name(lhs, live)
+                    || Self::expression_mentions_live_name(rhs, live)
+            }
+            ExprKind::Unary { operand, .. } | ExprKind::Field(operand, _) => {
+                Self::expression_mentions_live_name(operand, live)
+            }
+            _ => false,
+        }
+    }
+
+    fn collect_statement_expectations(
+        &self,
+        statements: &[Stmt],
+        inherited: &BTreeSet<String>,
+        candidates: &mut BTreeSet<ProvisionalType>,
+        structural_initializer: Option<&Expr>,
+        block_expected: Option<&ProvisionalType>,
+    ) {
+        let mut live = inherited.clone();
+        for (index, statement) in statements.iter().enumerate() {
+            if candidates.len() > 1 {
+                return;
+            }
+            let is_tail = index + 1 == statements.len();
             let value = match statement {
-                // A shadowing initializer still observes the old binding, but
-                // statements after it observe the new one and cannot constrain
-                // this initializer.
                 Stmt::Let { value, .. }
                 | Stmt::Deconstruct { value, .. }
                 | Stmt::Expr(value)
                 | Stmt::Assign { value, .. } => value,
             };
-            pending.push(value);
-        }
-        while let Some(expression) = pending.pop() {
-            match &expression.kind {
-                ExprKind::Call(callee, arguments) => {
-                    if let ExprKind::Variable(path) = &callee.kind
-                        && path.len() == 1
-                        && let Some(template) = self.templates.get(path[0].as_ref())
-                    {
-                        let mutable = template.generic_params.iter().cloned().collect();
-                        let mut substitutions = BTreeMap::new();
-                        for (argument, formal) in arguments.iter().zip(&template.params) {
-                            if let Some((actual, defaulted)) = self.obvious_argument_type(argument)
-                                && !defaulted
-                            {
-                                let _ =
-                                    unify_inference(formal, &actual, &mutable, &mut substitutions);
-                            }
-                        }
-                        for (argument, formal) in arguments.iter().zip(&template.params) {
-                            let specialized = substitute(formal, &substitutions)
-                                .unwrap_or_else(|| formal.clone());
-                            let (candidate, expected) = match (&argument.kind, &specialized) {
-                                (
-                                    ExprKind::Unary {
-                                        op: UnaryOp::BorrowUnique,
-                                        operand,
-                                    },
-                                    ProvisionalType::Unique(referent),
-                                ) => (operand.as_ref(), referent.as_ref()),
-                                (
-                                    ExprKind::Unary {
-                                        op: UnaryOp::BorrowShared,
-                                        operand,
-                                    },
-                                    ProvisionalType::Shared(referent),
-                                ) => (operand.as_ref(), referent.as_ref()),
-                                _ => (argument, formal),
-                            };
-                            if moved_binding(candidate) == Some(binding) && ground(expected) {
-                                return Some(expected.clone());
-                            }
+            if is_tail && let (Some(expected), Stmt::Expr(result)) = (block_expected, statement) {
+                if Self::moved_binding_name(result).is_some_and(|name| live.contains(name)) {
+                    candidates.insert(expected.clone());
+                }
+                if let (ExprKind::Struct { name, fields }, ProvisionalType::Nominal(instance)) =
+                    (&result.kind, expected)
+                    && instance.declaration.0 == name.as_ref()
+                    && let Some(template) = self.nominal_templates.get(name.as_ref())
+                    && template.params.len() == instance.arguments.len()
+                {
+                    let substitutions = template
+                        .params
+                        .iter()
+                        .cloned()
+                        .zip(
+                            instance
+                                .arguments
+                                .iter()
+                                .cloned()
+                                .map(SpecializationArgument::Type),
+                        )
+                        .collect::<BTreeMap<_, _>>();
+                    for (field, value) in fields.iter() {
+                        if Self::expression_mentions_live_name(value, &live)
+                            && let Some(formal) = template.fields.get(field)
+                            && let Some(expected) = substitute(formal, &substitutions)
+                        {
+                            candidates.insert(expected);
                         }
                     }
-                    pending.push(callee);
-                    pending.extend(arguments.iter());
                 }
-                ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
-                    pending.extend(statements.iter().map(|statement| match statement {
-                        Stmt::Let { value, .. }
-                        | Stmt::Deconstruct { value, .. }
-                        | Stmt::Expr(value)
-                        | Stmt::Assign { value, .. } => value,
-                    }));
-                }
-                ExprKind::Handle {
-                    computation,
-                    clauses,
-                } => {
-                    pending.push(computation);
-                    pending.extend(clauses.iter().map(|clause| &clause.body));
-                }
-                ExprKind::List(values) | ExprKind::Tuple(values) => pending.extend(values.iter()),
-                ExprKind::Struct { fields, .. } => {
-                    pending.extend(fields.iter().map(|(_, value)| value));
-                }
-                ExprKind::Field(subject, _)
-                | ExprKind::Move(subject)
-                | ExprKind::Unary {
-                    operand: subject, ..
-                } => pending.push(subject),
-                ExprKind::Binary { lhs, rhs, .. } => {
-                    if expression_mentions_binding(lhs, binding)
-                        && let Some((ty, defaulted)) = self.obvious_argument_type(rhs)
-                        && !defaulted
-                        && ground(&ty)
+            }
+            if let Stmt::Assign { destination, .. } = statement
+                && let AssignmentPlaceKind::Dereference { reference, .. } = &destination.kind
+            {
+                self.collect_expression_expectations(
+                    reference,
+                    &live,
+                    candidates,
+                    structural_initializer,
+                );
+            }
+            self.collect_expression_expectations(value, &live, candidates, structural_initializer);
+            match statement {
+                Stmt::Let { name, value, .. } => {
+                    if let Some(source) =
+                        Self::moved_binding_name(value).filter(|source| live.contains(*source))
                     {
-                        return Some(ty);
+                        let source = source.to_owned();
+                        live.remove(&source);
+                        live.insert(name.clone());
+                    } else {
+                        live.remove(name);
                     }
-                    if expression_mentions_binding(rhs, binding)
-                        && let Some((ty, defaulted)) = self.obvious_argument_type(lhs)
-                        && !defaulted
-                        && ground(&ty)
-                    {
-                        return Some(ty);
+                }
+                Stmt::Deconstruct { fields, .. } => {
+                    for binding in fields.iter().filter_map(|field| field.binding.as_ref()) {
+                        live.remove(binding);
                     }
-                    pending.extend([lhs.as_ref(), rhs.as_ref()]);
                 }
-                ExprKind::Perform { args, .. } => pending.extend(args.iter()),
-                ExprKind::LabelDestination { body, .. } => pending.push(body),
-                ExprKind::Is { subject, .. } => pending.push(subject),
-                ExprKind::Resume { resumption, value }
-                | ExprKind::TailResume { resumption, value } => {
-                    pending.push(resumption);
-                    pending.extend(value.iter().map(AsRef::as_ref));
-                }
-                ExprKind::Cancel { resumption } => pending.push(resumption),
-                ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
-                    pending.push(body)
-                }
-                ExprKind::Unit
-                | ExprKind::Int(_)
-                | ExprKind::Float(_)
-                | ExprKind::Char(_)
-                | ExprKind::Byte(_)
-                | ExprKind::ByteString(_)
-                | ExprKind::String(_)
-                | ExprKind::Variable(_)
-                | ExprKind::LabelReference(_) => {}
+                Stmt::Assign { .. } | Stmt::Expr(_) => {}
             }
         }
-        None
     }
 
-    fn may_use_bidirectional_result_fallback(&self, expression: &Expr) -> bool {
-        let expression = match &expression.kind {
-            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
-                match statements.last() {
-                    Some(Stmt::Expr(value)) => value,
-                    _ => return false,
+    fn collect_expression_expectations(
+        &self,
+        expression: &Expr,
+        live: &BTreeSet<String>,
+        candidates: &mut BTreeSet<ProvisionalType>,
+        structural_initializer: Option<&Expr>,
+    ) {
+        // Candidate sets only grow. Once two distinct ground expectations
+        // exist, this binding is ambiguous and no deeper scan can restore a
+        // unique answer.
+        if candidates.len() > 1 {
+            return;
+        }
+        if let ExprKind::Call(callee, arguments) = &expression.kind {
+            for binding in live {
+                if let Some(expected) =
+                    self.generic_call_binding_expected(callee, arguments, binding)
+                {
+                    candidates.insert(expected);
                 }
             }
-            ExprKind::Move(value) => value,
-            _ => expression,
+        }
+        match &expression.kind {
+            ExprKind::Closure { params, body } => {
+                let retained = live
+                    .iter()
+                    .filter(|name| !params.iter().any(|param| param.as_ref() == name.as_str()))
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                self.collect_expression_expectations(
+                    body,
+                    &retained,
+                    candidates,
+                    structural_initializer,
+                );
+            }
+            ExprKind::TypedClosure { params, body, .. } => {
+                let retained = live
+                    .iter()
+                    .filter(|name| !params.iter().any(|param| param.name == name.as_str()))
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                self.collect_expression_expectations(
+                    body,
+                    &retained,
+                    candidates,
+                    structural_initializer,
+                );
+            }
+            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => self
+                .collect_statement_expectations(
+                    statements,
+                    live,
+                    candidates,
+                    structural_initializer,
+                    None,
+                ),
+            ExprKind::Call(callee, arguments) => {
+                if let ExprKind::Variable(else_path) = &callee.kind
+                    && else_path.len() == 1
+                    && else_path[0].as_ref() == "else"
+                    && let [if_expression, negative] = arguments.as_slice()
+                    && let ExprKind::Call(if_callee, if_arguments) = &if_expression.kind
+                    && let ExprKind::Variable(if_path) = &if_callee.kind
+                    && if_path.len() == 1
+                    && if_path[0].as_ref() == "if"
+                    && let [condition, positive] = if_arguments.as_slice()
+                    && let ExprKind::Is { subject, pattern } = &condition.kind
+                {
+                    self.collect_expression_expectations(
+                        condition,
+                        live,
+                        candidates,
+                        structural_initializer,
+                    );
+                    if Self::moved_binding_name(subject).is_some_and(|name| live.contains(name))
+                        && let Some(initializer) = structural_initializer
+                        && let Some(expected) = self.structural_pattern_initializer_expected(
+                            initializer,
+                            pattern,
+                            positive,
+                        )
+                    {
+                        candidates.insert(expected);
+                    }
+                    let positive_live = live
+                        .iter()
+                        .filter(|name| !Self::pattern_binds_name(pattern, name))
+                        .cloned()
+                        .collect::<BTreeSet<_>>();
+                    self.collect_expression_expectations(
+                        positive,
+                        &positive_live,
+                        candidates,
+                        structural_initializer,
+                    );
+                    self.collect_expression_expectations(
+                        negative,
+                        live,
+                        candidates,
+                        structural_initializer,
+                    );
+                } else {
+                    self.collect_expression_expectations(
+                        callee,
+                        live,
+                        candidates,
+                        structural_initializer,
+                    );
+                    for argument in arguments.iter() {
+                        self.collect_expression_expectations(
+                            argument,
+                            live,
+                            candidates,
+                            structural_initializer,
+                        );
+                    }
+                }
+            }
+            ExprKind::Handle {
+                computation,
+                clauses,
+            } => {
+                self.collect_expression_expectations(
+                    computation,
+                    live,
+                    candidates,
+                    structural_initializer,
+                );
+                for clause in clauses.iter() {
+                    let retained = live
+                        .iter()
+                        .filter(|name| {
+                            clause.resumption.as_deref() != Some(name.as_str())
+                                && !clause
+                                    .patterns
+                                    .iter()
+                                    .any(|pattern| Self::pattern_binds_name(pattern, name))
+                        })
+                        .cloned()
+                        .collect::<BTreeSet<_>>();
+                    self.collect_expression_expectations(
+                        &clause.body,
+                        &retained,
+                        candidates,
+                        structural_initializer,
+                    );
+                }
+            }
+            ExprKind::List(values) | ExprKind::Tuple(values) => {
+                for value in values.iter() {
+                    self.collect_expression_expectations(
+                        value,
+                        live,
+                        candidates,
+                        structural_initializer,
+                    );
+                }
+            }
+            ExprKind::Struct { fields, .. } => {
+                for (_, value) in fields.iter() {
+                    self.collect_expression_expectations(
+                        value,
+                        live,
+                        candidates,
+                        structural_initializer,
+                    );
+                }
+            }
+            ExprKind::Field(subject, _)
+            | ExprKind::Move(subject)
+            | ExprKind::Unary {
+                operand: subject, ..
+            }
+            | ExprKind::LabelDestination { body: subject, .. }
+            | ExprKind::Cancel {
+                resumption: subject,
+            }
+            | ExprKind::Is {
+                subject,
+                pattern: _,
+            } => self.collect_expression_expectations(
+                subject,
+                live,
+                candidates,
+                structural_initializer,
+            ),
+            ExprKind::Binary { lhs, rhs, .. } => {
+                if Self::expression_mentions_live_name(lhs, live)
+                    && let Some((ty, defaulted)) = self.obvious_argument_type(rhs)
+                    && !defaulted
+                    && ground(&ty)
+                {
+                    candidates.insert(ty);
+                }
+                if Self::expression_mentions_live_name(rhs, live)
+                    && let Some((ty, defaulted)) = self.obvious_argument_type(lhs)
+                    && !defaulted
+                    && ground(&ty)
+                {
+                    candidates.insert(ty);
+                }
+                self.collect_expression_expectations(lhs, live, candidates, structural_initializer);
+                self.collect_expression_expectations(rhs, live, candidates, structural_initializer);
+            }
+            ExprKind::Perform { args, .. } => {
+                for argument in args.iter() {
+                    self.collect_expression_expectations(
+                        argument,
+                        live,
+                        candidates,
+                        structural_initializer,
+                    );
+                }
+            }
+            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+                self.collect_expression_expectations(
+                    resumption,
+                    live,
+                    candidates,
+                    structural_initializer,
+                );
+                if let Some(value) = value {
+                    self.collect_expression_expectations(
+                        value,
+                        live,
+                        candidates,
+                        structural_initializer,
+                    );
+                }
+            }
+            ExprKind::Unit
+            | ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::String(_)
+            | ExprKind::Char(_)
+            | ExprKind::Byte(_)
+            | ExprKind::ByteString(_)
+            | ExprKind::Variable(_)
+            | ExprKind::LabelReference(_) => {}
+        }
+    }
+
+    fn expression_binding_expected(
+        &self,
+        expression: &Expr,
+        binding: &str,
+    ) -> Option<ProvisionalType> {
+        let live = BTreeSet::from([binding.to_owned()]);
+        let mut candidates = BTreeSet::new();
+        self.collect_expression_expectations(expression, &live, &mut candidates, None);
+        (candidates.len() == 1).then(|| candidates.pop_first().unwrap())
+    }
+
+    fn structural_pattern_initializer_expected(
+        &self,
+        initializer: &Expr,
+        pattern: &crate::ast::Pattern,
+        positive: &Expr,
+    ) -> Option<ProvisionalType> {
+        let PatternKind::Variant {
+            path, fields, rest, ..
+        } = &pattern.kind
+        else {
+            return None;
         };
+        let [owner, variant] = path.as_slice() else {
+            return None;
+        };
+        let (payload_binding, payload_position) =
+            fields.iter().enumerate().find_map(|(position, field)| {
+                let PatternKind::Binding(binding) = &field.kind else {
+                    return None;
+                };
+                Some((binding.as_str(), position))
+            })?;
+        let pattern_field_count = fields.len();
+        let payload = self.expression_binding_expected(positive, payload_binding)?;
+        let initializer = match &initializer.kind {
+            ExprKind::Move(value) => value.as_ref(),
+            _ => initializer,
+        };
+        let ExprKind::Call(callee, arguments) = &initializer.kind else {
+            return None;
+        };
+        let ExprKind::Variable(callee) = &callee.kind else {
+            return None;
+        };
+        let [callee] = callee.as_ref() else {
+            return None;
+        };
+        let producer = self.templates.get(callee.as_ref())?;
+        if arguments.len() != producer.params.len() {
+            return None;
+        }
+        let ProvisionalType::Nominal(produced) = &producer.result else {
+            return None;
+        };
+        if produced.declaration.0 != *owner {
+            return None;
+        }
+        let nominal = self.nominal_templates.get(owner.as_str())?;
+        if nominal.params.len() != produced.arguments.len() {
+            return None;
+        }
+        let fields = nominal.variants.get(variant.as_str())?;
+        let payload_index =
+            pattern_field_index(*rest, payload_position, pattern_field_count, fields.len());
+        let field = fields.get(payload_index)?;
+        let nominal_substitutions = nominal
+            .params
+            .iter()
+            .cloned()
+            .zip(
+                produced
+                    .arguments
+                    .iter()
+                    .cloned()
+                    .map(SpecializationArgument::Type),
+            )
+            .collect::<BTreeMap<_, _>>();
+        let produced_payload = substitute(field, &nominal_substitutions)?;
+        let mutable = producer
+            .generic_params
+            .iter()
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let mut substitutions = BTreeMap::new();
+        if !unify_inference(&produced_payload, &payload, &mutable, &mut substitutions) {
+            return None;
+        }
+        let expected = substitute(&producer.result, &substitutions)?;
+        ground(&expected).then_some(expected)
+    }
+
+    fn block_binding_expected_type(
+        &self,
+        binding: &str,
+        initializer: &Expr,
+        remaining: &[Stmt],
+        block_expected: Option<&ProvisionalType>,
+    ) -> Option<ProvisionalType> {
+        let live = BTreeSet::from([binding.to_owned()]);
+        let mut candidates = BTreeSet::new();
+        self.collect_statement_expectations(
+            remaining,
+            &live,
+            &mut candidates,
+            Some(initializer),
+            block_expected,
+        );
+        (candidates.len() == 1).then(|| candidates.pop_first().unwrap())
+    }
+    fn may_use_bidirectional_result_fallback(&self, expression: &Expr) -> bool {
+        let mut expression = expression;
+        loop {
+            expression = match &expression.kind {
+                ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                    match statements.last() {
+                        Some(Stmt::Expr(value)) => value,
+                        _ => return false,
+                    }
+                }
+                ExprKind::Move(value) => value,
+                _ => break,
+            };
+        }
         match &expression.kind {
             ExprKind::Variable(path) if path.len() == 1 => self
                 .program
@@ -5869,14 +6338,16 @@ impl<'a> Walker<'a> {
             return Some(result);
         }
         if name.starts_with("$trait_deferred$") {
+            if let Some(target) = self.ground_deferred_trait_template(name, args) {
+                return self.direct_call(source, &target, args, expected, requested_receiver_mode);
+            }
             for argument in args {
                 self.expression(argument, None)?;
             }
-            // The lexical where-evidence gate in trait normalization admits
-            // this identity only inside a constrained generic body. Its exact
-            // ground implementation is selected during Core specialization;
-            // discovery needs only the surrounding expected result (or Unit
-            // for an effect-style statement such as Hash::hash).
+            // Symbolic validation and genuinely ambiguous ground evidence stay
+            // opaque here. Core retains the finite fail-closed fallback for
+            // those cases; a uniquely ground generic implementation is routed
+            // through the ordinary specialization request path above.
             return Some(
                 expected
                     .cloned()
@@ -6548,6 +7019,79 @@ impl<'a> Walker<'a> {
         result
     }
 
+    /// Select a generated generic trait-method wire once lexical evidence has
+    /// become ground inside an enclosing specialization. Trait normalization
+    /// deliberately lowers every implementation method to an ordinary source
+    /// function, so returning its name lets `direct_call` reuse the sole
+    /// monomorphization, constraint-solving, recursion, and emission path.
+    ///
+    /// A symbolic receiver or a non-unique match remains deferred. Coherence
+    /// makes one structurally matching ground implementation head sufficient;
+    /// the subsequent ordinary call still proves all of its where constraints.
+    fn ground_deferred_trait_template(&self, deferred: &str, args: &[Expr]) -> Option<String> {
+        let rest = deferred.strip_prefix("$trait_deferred$")?;
+        let (trait_name, method) = rest.rsplit_once('$')?;
+        let prefix = format!("$trait${trait_name}$");
+        let suffix = format!("${method}");
+        let actuals = args
+            .iter()
+            .map(|argument| {
+                self.obvious_argument_type(argument)
+                    .and_then(|(ty, defaulted)| (!defaulted && ground(&ty)).then_some(ty))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let mut matches = self
+            .templates
+            .iter()
+            .filter(|(name, template)| {
+                name.starts_with(&prefix)
+                    && name.ends_with(&suffix)
+                    && !template.generic_params.is_empty()
+                    && template.params.len() == actuals.len()
+            })
+            .filter_map(|(name, template)| {
+                let mutable = template
+                    .generic_params
+                    .iter()
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let mut substitutions = BTreeMap::new();
+                let compatible = template
+                    .params
+                    .iter()
+                    .zip(&actuals)
+                    .all(|(formal, actual)| {
+                        let effective_actual = match (formal, actual) {
+                            (ProvisionalType::Shared(_), ProvisionalType::Unique(referent)) => {
+                                ProvisionalType::shared((**referent).clone())
+                            }
+                            _ => actual.clone(),
+                        };
+                        unify_inference(formal, &effective_actual, &mutable, &mut substitutions)
+                    });
+                let ground_substitutions = substitutions.values().all(|argument| match argument {
+                    SpecializationArgument::Type(ty) => ground(ty),
+                    SpecializationArgument::Closure(_, shape, captures, _) => {
+                        shape.params.iter().all(ground)
+                            && ground(&shape.result)
+                            && captures.iter().all(|capture| ground(&capture.ty))
+                    }
+                    SpecializationArgument::EffectRow(effects) => effects
+                        .iter()
+                        .all(|effect| effect.arguments.iter().all(ground)),
+                });
+                (compatible
+                    && ground_substitutions
+                    && template
+                        .generic_params
+                        .iter()
+                        .all(|param| substitutions.contains_key(param)))
+                .then(|| name.clone())
+            })
+            .collect::<BTreeSet<_>>();
+        (matches.len() == 1).then(|| matches.pop_first().unwrap())
+    }
+
     fn expression(
         &mut self,
         source: &Expr,
@@ -7113,6 +7657,7 @@ impl<'a> Walker<'a> {
                             }
                             let binding_expected = self.block_binding_expected_type(
                                 name,
+                                value,
                                 &statements[index + 1..],
                                 expected,
                             );
@@ -7360,26 +7905,7 @@ impl<'a> Walker<'a> {
                             // This is allocation-independent planning only;
                             // Core retains the language's RHS-before-place
                             // runtime evaluation order.
-                            let destination_ty = match &destination.kind {
-                                AssignmentPlaceKind::Local { name, .. } => self
-                                    .locals
-                                    .get(name.as_ref())
-                                    .and_then(|binding| match binding {
-                                        LocalBinding::Type(ty) => Some(ty.clone()),
-                                        LocalBinding::Closure(_)
-                                        | LocalBinding::ClosureSet(_)
-                                        | LocalBinding::ClosureTuple(_)
-                                        | LocalBinding::ClosureNominal(_)
-                                        | LocalBinding::RecursiveSelf(_, _)
-                                        | LocalBinding::DeferredFunctionItem(_) => None,
-                                    }),
-                                AssignmentPlaceKind::Dereference { reference, .. } => {
-                                    self.expression(reference, None).and_then(|ty| match ty {
-                                        ProvisionalType::Unique(referent) => Some(*referent),
-                                        _ => None,
-                                    })
-                                }
-                            };
+                            let destination_ty = self.assignment_expected_type(destination);
                             self.expression(value, destination_ty.as_ref());
                             result = Some(ProvisionalType::Predefined("Unit".into()));
                         }
@@ -9395,6 +9921,40 @@ mod tests {
         let discovery = discover_with_traits(&program, &db);
         assert!(discovery.errors.is_empty(), "{:?}", discovery.errors);
         assert_eq!(discovery.graph.requests.len(), 2);
+    }
+
+    #[test]
+    fn discovery_preserves_the_aggregate_declaration_solver_budget() {
+        let source = "trait Marker {}
+            impl Marker for i64 {}
+            constrained<T>(value: T) -> T where T: Marker { value }
+            caller() -> i64 { constrained(42) }
+            main() -> () { () }";
+        let program = crate::parser::parse(crate::lexer::lex(source).unwrap()).unwrap();
+        let db = TraitDb::build(&program).unwrap();
+        let mut budgets = BTreeMap::from([
+            (
+                DeclarationKey::Function("constrained".into()),
+                SolverBudget::exhausted_for_test(),
+            ),
+            (
+                DeclarationKey::Function("caller".into()),
+                SolverBudget::exhausted_for_test(),
+            ),
+        ]);
+
+        let discovery = discover_with_traits_and_budgets(&program, &db, &mut budgets);
+
+        assert!(
+            !discovery.errors.is_empty(),
+            "an exhausted declaration budget must not be replenished by discovery"
+        );
+        assert!(
+            !discovery.graph.requests.keys().any(|request| {
+                request.template == DeclarationKey::Function("constrained".into())
+            }),
+            "an over-budget declaration must not retain a specialization request"
+        );
     }
 
     #[test]

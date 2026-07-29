@@ -398,8 +398,29 @@ impl<'a> Emitter<'a> {
                 self.uses_effect_runtime |=
                     self.type_contains_resumption(ty, &mut BTreeSet::new())?;
             }
-            self.uses_effect_runtime |= self.function_needs_effect_frame(function);
+            let needs_effect_frame = self.function_needs_effect_frame(function);
+            self.uses_effect_runtime |= needs_effect_frame;
+            // Every directly callable effect-frame function gets a request
+            // router. The router walks the active handler chain even when
+            // optimized MIR contains neither a handler-typed register nor a
+            // local MakeHandler instruction.
+            self.uses_handler_runtime |= needs_effect_frame;
             for block in &function.blocks {
+                self.uses_handler_runtime |= block.statements.iter().any(|instruction| {
+                    matches!(
+                        instruction.kind,
+                        InstructionKind::MakeHandler { .. }
+                            | InstructionKind::MakeHandlerShared { .. }
+                    )
+                });
+                self.uses_handler_runtime |= matches!(
+                    block.terminator,
+                    Terminator::Handle { .. }
+                        | Terminator::Perform { .. }
+                        | Terminator::Resume { .. }
+                        | Terminator::TailResume { .. }
+                        | Terminator::Cancel { .. }
+                );
                 if let Terminator::HostCall { import, .. } = &block.terminator {
                     self.host_imports.insert(*import);
                 }

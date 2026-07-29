@@ -5,9 +5,9 @@
 
 use super::lexer::{Keyword, TokenKind};
 
-pub struct ExprId { index: u32 }
+pub struct ExprTag {}
 
-impl Use<[0, *]> for ExprId {}
+pub type ExprId = Id<ExprTag>;
 
 pub struct ExprRange { start: u32, count: u32 }
 
@@ -32,7 +32,7 @@ pub struct ExprNode {
 pub struct ParsedBody {
     shell: u32,
     root: ExprId,
-    nodes: Vec<ExprNode>,
+    nodes: Arena<ExprTag, ExprNode>,
     edges: Vec<ExprEdge>,
     // Repeating [kind, value, token].
     names: Vec<u32>
@@ -43,7 +43,7 @@ pub struct BodyError { code: u8, token: usize, related: usize }
 struct BodyParser {
     cursor: usize,
     limit: usize,
-    nodes: Vec<ExprNode>,
+    nodes: Arena<ExprTag, ExprNode>,
     edges: Vec<ExprEdge>,
     names: Vec<u32>
 }
@@ -64,33 +64,53 @@ pub error_token(value: &BodyError) -> usize { value.token }
 
 pub error_related(value: &BodyError) -> usize { value.related }
 
-pub expression_count(value: &ParsedBody) -> usize { Vec::len(&value.nodes) }
+arena_node_at_raw<'a>(
+    value: &'a Arena<ExprTag, ExprNode>,
+    raw: u32
+) -> &'a ExprNode {
+    Arena::index(value, Id::from_u32(raw))
+}
+
+alloc_node(
+    value: &mut Arena<ExprTag, ExprNode>,
+    node: ExprNode
+) -> ExprId {
+    handle Arena::alloc(value, move node) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
+pub expression_count(value: &ParsedBody) -> usize { Arena::len(&value.nodes) }
 
 pub expression_at<'a>(
     value: &'a ParsedBody,
     index: usize
 ) -> Option<&'a ExprNode> {
-    Vec::get(&value.nodes, index)
+    handle Id::from_usize(index) {
+        Result::Err(_) => None,
+        Result::Ok(id) => Arena::get(&value.nodes, id)
+    }
 }
 
 pub body_shell(value: &ParsedBody) -> u32 { value.shell }
 
-pub body_root_index(value: &ParsedBody) -> u32 { value.root.index }
+pub body_root_index(value: &ParsedBody) -> u32 { Id::to_u32(value.root) }
 
 pub expression_kind_at(value: &ParsedBody, index: u32) -> u8 {
-    Vec::index(&value.nodes, usize_from_u32(index)).kind_code
+    arena_node_at_raw(&value.nodes, index).kind_code
 }
 
 pub expression_token_start_at(value: &ParsedBody, index: u32) -> usize {
-    Vec::index(&value.nodes, usize_from_u32(index)).tokens.start
+    arena_node_at_raw(&value.nodes, index).tokens.start
 }
 
 pub expression_token_end_at(value: &ParsedBody, index: u32) -> usize {
-    Vec::index(&value.nodes, usize_from_u32(index)).tokens.end
+    arena_node_at_raw(&value.nodes, index).tokens.end
 }
 
 pub expression_name_count_at(value: &ParsedBody, index: u32) -> u32 {
-    Vec::index(&value.nodes, usize_from_u32(index)).names.count
+    arena_node_at_raw(&value.nodes, index).names.count
 }
 
 pub expression_name_kind_at(
@@ -98,7 +118,7 @@ pub expression_name_kind_at(
     index: u32,
     ordinal: u32
 ) -> u8 {
-    let node = Vec::index(&value.nodes, usize_from_u32(index));
+    let node = arena_node_at_raw(&value.nodes, index);
     u8_from_u32(*Vec::index(
         &value.names,
         usize_from_u32(
@@ -112,7 +132,7 @@ pub expression_name_value_at(
     index: u32,
     ordinal: u32
 ) -> u32 {
-    let node = Vec::index(&value.nodes, usize_from_u32(index));
+    let node = arena_node_at_raw(&value.nodes, index);
     *Vec::index(
         &value.names,
         usize_from_u32(
@@ -126,7 +146,7 @@ pub expression_name_token_at(
     index: u32,
     ordinal: u32
 ) -> usize {
-    let node = Vec::index(&value.nodes, usize_from_u32(index));
+    let node = arena_node_at_raw(&value.nodes, index);
     usize_from_u32(*Vec::index(
         &value.names,
         usize_from_u32(
@@ -136,7 +156,7 @@ pub expression_name_token_at(
 }
 
 pub expression_child_count_at(value: &ParsedBody, index: u32) -> u32 {
-    Vec::index(&value.nodes, usize_from_u32(index)).children.count
+    arena_node_at_raw(&value.nodes, index).children.count
 }
 
 pub expression_child_at(
@@ -144,8 +164,8 @@ pub expression_child_at(
     index: u32,
     child: u32
 ) -> u32 {
-    let node = Vec::index(&value.nodes, usize_from_u32(index));
-    edge_at(value, node, child).index
+    let node = arena_node_at_raw(&value.nodes, index);
+    Id::to_u32(edge_at(value, node, child))
 }
 
 pub expression_child_position_at(
@@ -153,7 +173,7 @@ pub expression_child_position_at(
     index: u32,
     child: u32
 ) -> u8 {
-    let node = Vec::index(&value.nodes, usize_from_u32(index));
+    let node = arena_node_at_raw(&value.nodes, index);
     edge_position_at(value, node, child)
 }
 
@@ -162,7 +182,7 @@ pub expression_child_metadata_at(
     index: u32,
     child: u32
 ) -> u32 {
-    let node = Vec::index(&value.nodes, usize_from_u32(index));
+    let node = arena_node_at_raw(&value.nodes, index);
     edge_metadata_at(value, node, child)
 }
 
@@ -211,7 +231,7 @@ pop_word(value: &mut Vec<u32>) -> u32 {
 }
 
 expr_id_at(value: &Vec<u32>, index: usize) -> ExprId {
-    ExprId { index: word_at(value, index) }
+    Id::from_u32(word_at(value, index))
 }
 
 operator_push(value: &mut Vec<u32>, operator: OperatorUse) {
@@ -289,18 +309,12 @@ range_text(
 }
 
 node_tokens(value: &BodyParser, id: ExprId) -> BodyTokenRange {
-    let node = Vec::index(
-        &value.nodes,
-        usize_from_u32(id.index)
-    );
+    let node = Arena::index(&value.nodes, id);
     node.tokens
 }
 
 node_kind(value: &BodyParser, id: ExprId) -> u8 {
-    Vec::index(
-        &value.nodes,
-        usize_from_u32(id.index)
-    ).kind_code
+    Arena::index(&value.nodes, id).kind_code
 }
 
 push_node(
@@ -312,10 +326,9 @@ push_node(
     name_start: usize,
     edge_start: usize
 ) -> ExprId {
-    let index = Vec::len(&value.nodes);
     let name_end = name_count(&value.names);
     let edge_end = Vec::len(&value.edges);
-    Vec::push(
+    alloc_node(
         &mut value.nodes,
         ExprNode {
             kind_code: kind_code,
@@ -325,8 +338,7 @@ push_node(
             names: expression_range(name_start, name_end),
             children: expression_range(edge_start, edge_end)
         }
-    );
-    ExprId { index: u32_from_usize(index) }
+    )
 }
 
 push_leaf(
@@ -368,7 +380,7 @@ push_named_leaf(
 }
 
 node_name_kind_at(value: &BodyParser, id: ExprId, ordinal: u32) -> u8 {
-    let node = Vec::index(&value.nodes, usize_from_u32(id.index));
+    let node = Arena::index(&value.nodes, id);
     u8_from_u32(*Vec::index(
         &value.names,
         usize_from_u32(
@@ -378,7 +390,7 @@ node_name_kind_at(value: &BodyParser, id: ExprId, ordinal: u32) -> u8 {
 }
 
 node_name_value_at(value: &BodyParser, id: ExprId, ordinal: u32) -> u32 {
-    let node = Vec::index(&value.nodes, usize_from_u32(id.index));
+    let node = Arena::index(&value.nodes, id);
     *Vec::index(
         &value.names,
         usize_from_u32(
@@ -388,7 +400,7 @@ node_name_value_at(value: &BodyParser, id: ExprId, ordinal: u32) -> u32 {
 }
 
 node_name_token_at(value: &BodyParser, id: ExprId, ordinal: u32) -> usize {
-    let node = Vec::index(&value.nodes, usize_from_u32(id.index));
+    let node = Arena::index(&value.nodes, id);
     usize_from_u32(*Vec::index(
         &value.names,
         usize_from_u32(
@@ -398,7 +410,7 @@ node_name_token_at(value: &BodyParser, id: ExprId, ordinal: u32) -> usize {
 }
 
 node_name_count(value: &BodyParser, id: ExprId) -> u32 {
-    Vec::index(&value.nodes, usize_from_u32(id.index)).names.count
+    Arena::index(&value.nodes, id).names.count
 }
 
 push_unary(
@@ -566,9 +578,10 @@ push_struct_fields(
             Vec::push(
                 &mut value.edges,
                 ExprEdge {
-                    value: ExprId {
-                        index: word_at(fields, base + usize_value(2))
-                    },
+                    value: Id::from_u32(word_at(
+                        fields,
+                        base + usize_value(2)
+                    )),
                     position: 1,
                     // Name zero is the constructed nominal.
                     metadata: u32_from_usize(index) + u32_value(1)
@@ -649,7 +662,7 @@ push_statement(
 ) {
     push_word(&mut *value, u32_from_u8(kind));
     push_word(&mut *value, name_token_plus_one);
-    push_word(&mut *value, expression.index)
+    push_word(&mut *value, Id::to_u32(expression))
 }
 
 push_statement_edges(
@@ -662,10 +675,10 @@ push_statement_edges(
             Vec::push(
                 &mut value.edges,
                 ExprEdge {
-                    value: ExprId { index: word_at(
+                    value: Id::from_u32(word_at(
                         statements,
                         base + usize_value(2)
-                    ) },
+                    )),
                     position: u8_from_u32(word_at(statements, base)),
                     metadata: word_at(
                         statements,
@@ -1165,7 +1178,7 @@ parse_tuple_tail(
                     ),
                     @parse_tuple_tail
                 );
-                push_word(&mut *elements, element.index);
+                push_word(&mut *elements, Id::to_u32(element));
                 if(value.cursor < value.limit) {
                     handle
                         super::lexer::token_code_at(source, value.cursor) {
@@ -1272,7 +1285,10 @@ parse_atom(
                                     },
                                     17 => {
                                         let elements = Vec::new();
-                                        push_word(&mut elements, child.index);
+                                        push_word(
+                                            &mut elements,
+                                            Id::to_u32(child)
+                                        );
                                         value.cursor = value.cursor
                                             + usize_value(1);
                                         parse_tuple_tail(
@@ -1355,7 +1371,7 @@ parse_call_arguments(
                     ),
                     @parse_call_arguments
                 );
-                push_word(&mut *arguments, argument.index);
+                push_word(&mut *arguments, Id::to_u32(argument));
                 if(value.cursor < value.limit) {
                     handle
                         super::lexer::token_code_at(source, value.cursor) {
@@ -1448,7 +1464,7 @@ parse_struct_fields(
                                     );
                                     push_word(
                                         &mut *fields,
-                                        field.index
+                                        Id::to_u32(field)
                                     );
                                     if(value.cursor < value.limit) {
                                         handle
@@ -1791,7 +1807,7 @@ parse_chain(
                             );
                             push_word(
                                 &mut *output,
-                                operand.index
+                                Id::to_u32(operand)
                             );
                             parse_chain(
                                 original,
@@ -1829,10 +1845,10 @@ reduce_once(
         form: u8_from_u32(form),
         precedence: u8_from_u32(precedence)
     };
-    let right = ExprId { index: pop_word(&mut *output) };
-    let left = ExprId { index: pop_word(&mut *output) };
+    let right = Id::from_u32(pop_word(&mut *output));
+    let left = Id::from_u32(pop_word(&mut *output));
     let grouped = push_binary(value, operator, left, right);
-    push_word(&mut *output, grouped.index)
+    push_word(&mut *output, Id::to_u32(grouped))
 }
 
 prepare_operator(
@@ -1888,9 +1904,7 @@ finish_chain(
     pending: &mut Vec<u32>
 ) -> Result<ExprId, BodyError> {
     if(word_count(&*pending) == usize_value(0)) {
-        Result::Ok(ExprId {
-            index: pop_word(&mut *output)
-        })
+        Result::Ok(Id::from_u32(pop_word(&mut *output)))
     } else {
         reduce_once(&mut *value, &mut *output, &mut *pending);
             finish_chain(value, output, pending)
@@ -1921,7 +1935,7 @@ parse_expression(
     );
     let output = Vec::new();
     let pending = Vec::new();
-    push_word(&mut output, first.index);
+    push_word(&mut output, Id::to_u32(first));
     parse_chain(
         original,
         source,
@@ -2198,7 +2212,7 @@ pub parse_function_body(
                     let parser = BodyParser {
                         cursor: start,
                         limit: end,
-                        nodes: Vec::new(),
+                        nodes: Arena::new(),
                         edges: Vec::new(),
                         names: Vec::new()
                     };
@@ -2504,10 +2518,7 @@ write_expression(
     value: &ParsedBody,
     id: ExprId
 ) -> Result<(), BodyError> {
-    let node = Vec::index(
-        &value.nodes,
-        usize_from_u32(id.index)
-    );
+    let node = Arena::index(&value.nodes, id);
     handle node.kind_code {
         1 => {
             ByteBuf::push(&mut *output, 1);

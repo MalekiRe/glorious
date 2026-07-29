@@ -4735,10 +4735,10 @@ fn compile_program_with_phases(
             break;
         }
     }
-    // Deferred generic trait calls are selected only after their enclosing
-    // specialization has ground receiver types. Retain the finite coherent
-    // implementation family here so Core can select exactly one member; this
-    // is reachability only and does not authorize a match.
+    // Deferred generic trait calls become ordinary specialization requests
+    // once their enclosing specialization grounds the receiver. Retain the
+    // finite coherent implementation family as a fail-closed Core fallback
+    // for symbolic or ambiguous sites; reachability alone authorizes no match.
     for deferred in retained_names.clone() {
         let Some(rest) = deferred.strip_prefix("$trait_deferred$") else {
             continue;
@@ -11137,8 +11137,8 @@ pub(crate) fn normalize_ground_trait_methods(
                 }
                 result.or_else(|| expected.cloned())
             }
-            ExprKind::Binary { lhs, rhs, .. } => {
-                rewrite(
+            ExprKind::Binary { op, lhs, rhs } => {
+                let lhs = rewrite(
                     Rc::make_mut(lhs),
                     locals,
                     program,
@@ -11151,7 +11151,7 @@ pub(crate) fn normalize_ground_trait_methods(
                     None,
                     errors,
                 );
-                rewrite(
+                let rhs = rewrite(
                     Rc::make_mut(rhs),
                     locals,
                     program,
@@ -11164,7 +11164,19 @@ pub(crate) fn normalize_ground_trait_methods(
                     None,
                     errors,
                 );
-                None
+                match op {
+                    BinaryOp::Eq
+                    | BinaryOp::NotEq
+                    | BinaryOp::Lt
+                    | BinaryOp::LtEq
+                    | BinaryOp::Gt
+                    | BinaryOp::GtEq => Some(ReceiverType::Name("Bool".into())),
+                    BinaryOp::Add
+                    | BinaryOp::Sub
+                    | BinaryOp::Mul
+                    | BinaryOp::Div
+                    | BinaryOp::Rem => lhs.or(rhs).or_else(|| expected.cloned()),
+                }
             }
             ExprKind::LabelDestination { body, .. } => rewrite(
                 Rc::make_mut(body),
@@ -32297,8 +32309,18 @@ impl<'a> CoreLowerer<'a> {
                 {
                     return self.inline_late_generic_call(source_name, arguments, span, expected);
                 }
-                let deferred_target =
-                    self.deferred_trait_target(source_name, arguments, expected, callee.span)?;
+                let deferred_target = if source_name.starts_with("$trait_deferred$")
+                    && self.planned_call(expression).is_some()
+                {
+                    // Ground generic evidence was already routed through the
+                    // ordinary specialization graph. The planned-call branch
+                    // below owns its generated signature; scanning only
+                    // monomorphic source signatures here would reject before
+                    // that specialization can be consumed.
+                    None
+                } else {
+                    self.deferred_trait_target(source_name, arguments, expected, callee.span)?
+                };
                 let name = deferred_target.as_deref().unwrap_or(source_name);
                 let source_bool_else = if name == "else"
                     && let [if_expression, _] = arguments.as_slice()

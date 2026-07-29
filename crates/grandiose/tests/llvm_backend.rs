@@ -393,6 +393,96 @@ fn option_as_ref_reads_the_enum_tag_through_a_shared_reference() {
 }
 
 #[test]
+fn typed_id_evidence_and_invariant_indexing_execute_natively() {
+    let phases = grandiose::compile_source_to_phases(
+        "llvm-typed-id-toolkit.glorious",
+        r#"
+            struct ItemTag {}
+
+            empty_index() -> IndexVec<ItemTag, i64> { IndexVec::new() }
+            empty_arena() -> Arena<ItemTag, i64> { Arena::new() }
+
+            id_or_zero(value: Result<Id<ItemTag>, i64>) -> Id<ItemTag> {
+                handle value {
+                    Result::Ok(id) => id,
+                    Result::Err(_) => Id::from_u32(wrapping_convert_to_u32(0))
+                }
+            }
+
+            score(value: Bool) -> i64 {
+                handle value {
+                    Result::Ok(_) => 1,
+                    Result::Err(_) => 0
+                }
+            }
+
+            digest<T>(value: &T) -> u64 where T: Hash {
+                let state = Hasher::new();
+                Hash::hash(value, &mut state);
+                Hasher::finish(&state)
+            }
+
+            iadd(left: i64, right: i64) -> i64 { left + right }
+            imul(left: i64, right: i64) -> i64 { left * right }
+
+            selected() -> i64 {
+                let values = empty_index();
+                let first = id_or_zero(IndexVec::push(&mut values, 7));
+                let second = id_or_zero(IndexVec::push(&mut values, 9));
+                *IndexVec::index_mut(&mut values, second) = 42;
+
+                let arena = empty_arena();
+                let retained = id_or_zero(Arena::alloc(&mut arena, 5));
+                *Arena::index_mut(&mut arena, retained) = 8;
+
+                iadd(
+                    imul(score(digest(&first) != digest(&second)), 1000000),
+                    iadd(
+                        imul(score(not(Eq::eq(&first, &second))), 100000),
+                        iadd(
+                            imul(score(not(first == second)), 10000),
+                            iadd(
+                                imul(score(first == first), 1000),
+                                iadd(
+                                    imul(score(Eq::eq(&first, &first)), 100),
+                                    iadd(
+                                        imul(
+                                            score(digest(&first) == digest(&first)),
+                                            10
+                                        ),
+                                        iadd(
+                                            *IndexVec::index(&values, second),
+                                            *Arena::index(&arena, retained)
+                                        )
+                                    )
+                                )
+                            )
+                        )
+                    )
+                )
+            }
+
+            main() -> () { selected(); () }
+        "#,
+    )
+    .unwrap();
+    let selected = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap();
+    let mut options = grandiose::LlvmOptions::default();
+    options.emit_entry_wrapper = false;
+    let module = grandiose::emit_llvm_ir(&phases, &options).unwrap();
+    assert!(
+        module.ir.contains("%g1.handler = type"),
+        "reachable effect operations require the sized handler runtime type"
+    );
+    run_native_i64(module, selected, 1_111_160, "llvm-typed-id-toolkit");
+}
+
+#[test]
 fn custom_drop_hooks_run_before_native_structural_cleanup() {
     let phases = grandiose::compile_source_to_phases_with_options(
         "llvm-custom-drop.glorious",
