@@ -16,6 +16,10 @@ const FIXTURE: &str = r#"
         let value = 7;
         identity(value)
     }
+    first() -> i64 {
+        let pair = (7, 9);
+        pair.0
+    }
     main() { () }
 "#;
 
@@ -73,10 +77,15 @@ fn assert_compiled_artifact(bytes: &[u8]) {
         "self-hosted GRBC must already be canonical"
     );
     let answer = function_id(&decoded, "answer");
+    let first = function_id(&decoded, "first");
     let main = function_id(&decoded, "main");
     let verified = load_verified(bytes).expect("self-hosted GRBC must verify");
     assert_eq!(
         Vm::new(verified.clone()).run(answer, vec![]).unwrap(),
+        Value::I64(7)
+    );
+    assert_eq!(
+        Vm::new(verified.clone()).run(first, vec![]).unwrap(),
         Value::I64(7)
     );
     assert_eq!(Vm::new(verified).run(main, vec![]).unwrap(), Value::Unit);

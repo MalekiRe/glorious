@@ -6,14 +6,20 @@
 
 use super::super::frontend::elaboration::CoreComputationView;
 use super::super::frontend::elaboration::CoreValueView;
+use super::super::frontend::elaboration::InterfaceTypeView;
 
 pub enum StageInstruction {
     Const(u32, Bytes),
     Move(u32, u32),
     Copy(u32, u32),
+    Construct(u32, u32, Option<u32>, RegisterPack),
+    ProjectCopy(u32, u32, u32),
+    Drop(u32),
     Call(Option<u32>, u32, RegisterPack),
     Return(Option<u32>)
 }
+
+pub struct StageType { fields: Vec<u32>, copy_flag: u32 }
 
 pub struct RegisterPack { bytes: Bytes, count: u32 }
 
@@ -36,7 +42,8 @@ pub struct StageFunction {
 
 pub struct StageProgram {
     functions: Vec<StageFunction>,
-    constants: Vec<Vec<u8>>
+    constants: Vec<Vec<u8>>,
+    types: Vec<StageType>
 }
 
 pub struct LoweringError { code: u8, detail: u32 }
@@ -74,6 +81,27 @@ pub stage_program_constant_at<'a>(
 ) -> &'a Vec<u8> {
     Vec::index(&value.constants, index)
 }
+
+pub stage_program_type_count(value: &StageProgram) -> usize {
+    Vec::len(&value.types)
+}
+
+pub stage_program_type_at<'a>(
+    value: &'a StageProgram,
+    index: usize
+) -> &'a StageType {
+    Vec::index(&value.types, index)
+}
+
+pub tuple_type(fields: Vec<u32>, copy_flag: u32) -> StageType {
+    StageType { fields: fields, copy_flag: copy_flag }
+}
+
+pub stage_type_fields(value: &StageType) -> &Vec<u32> {
+    &value.fields
+}
+
+pub stage_type_copy_flag(value: &StageType) -> u32 { value.copy_flag }
 
 pub stage_function_name(value: &StageFunction) -> &String { &value.name }
 
@@ -148,7 +176,7 @@ usize_from_u32(value: u32) -> usize {
     wrapping_convert_to_usize(value)
 }
 
-artifact_type_id(value: u32) -> u32 {
+pub artifact_type_id(value: u32) -> u32 {
     if(value < u32_value(14)) {
         value
     } else {
@@ -368,6 +396,50 @@ emit_copy(value: &mut FunctionBuilder, target: u32, source: u32) {
     Vec::push(&mut value.live_order, target)
 }
 
+emit_construct(
+    value: &mut FunctionBuilder,
+    target: u32,
+    ty: u32,
+    variant: Option<u32>,
+    fields: Vec<u32>
+) {
+    record_cleanup(value);
+    consume_arguments(value, &fields, 0);
+    let encoded = ByteBuf::new();
+    write_argument_registers(&fields, 0, &mut encoded);
+    Vec::push(&mut value.instructions, StageInstruction::Construct(
+        target,
+        ty,
+        variant,
+        RegisterPack {
+            bytes: ByteBuf::finish(encoded),
+            count: checked_u32(Vec::len(&fields))
+        }
+    ));
+    Vec::push(&mut value.live_order, target)
+}
+
+emit_project_copy(
+    value: &mut FunctionBuilder,
+    target: u32,
+    source: u32,
+    field: u32
+) {
+    record_cleanup(value);
+    Vec::push(&mut value.instructions, StageInstruction::ProjectCopy(
+        target,
+        source,
+        field
+    ));
+    Vec::push(&mut value.live_order, target)
+}
+
+emit_drop(value: &mut FunctionBuilder, register: u32) {
+    record_cleanup(value);
+    Vec::push(&mut value.instructions, StageInstruction::Drop(register));
+    consume_live(value, register)
+}
+
 consume_arguments(
     value: &mut FunctionBuilder,
     arguments: &Vec<u32>,
@@ -478,8 +550,26 @@ lower_value(
                 }
             }
         },
-        CoreValueView::Projection(_, _, _) =>
-            Result::Err(error(4, id)),
+        CoreValueView::Projection(_, source, field) => {
+            let lowered = try(
+                lower_value(interfaces, body, value, source),
+                @lower_value
+            );
+            handle lowered {
+                Result::Err(_) => Result::Err(error(4, id)),
+                Result::Ok(source_register) => {
+                    let target = alloc_register(value);
+                    emit_project_copy(
+                        value,
+                        target,
+                        source_register,
+                        field
+                    );
+                    emit_drop(value, source_register);
+                    Result::Ok(Option::Some(target))
+                }
+            }
+        },
         CoreValueView::Embedded(_, computation) =>
             lower_computation(interfaces, body, value, computation)
     }
@@ -572,8 +662,89 @@ lower_computation(
                 }
             }
         },
-        CoreComputationView::Construct(_, _, _, _) =>
-            Result::Err(error(6, id))
+        CoreComputationView::Construct(type_id, flavor, start, count) => {
+            handle super::super::frontend::elaboration::interface_type_at(
+                interfaces,
+                usize_from_u32(type_id)
+            ) {
+                InterfaceTypeView::Tuple(_, expected) => {
+                    if(flavor == u32_value(0)) {
+                        if(count == expected) {
+                            let fields = Vec::new();
+                            try(lower_tuple_fields(
+                                interfaces,
+                                body,
+                                value,
+                                start,
+                                count,
+                                0,
+                                &mut fields
+                            ), @lower_computation);
+                            let target = alloc_register(value);
+                            emit_construct(
+                                value,
+                                target,
+                                artifact_type_id(type_id),
+                                None,
+                                fields
+                            );
+                            Result::Ok(Option::Some(target))
+                        } else {
+                            Result::Err(error(6, count))
+                        }
+                    } else {
+                        Result::Err(error(6, flavor))
+                    }
+                },
+                _ => Result::Err(error(6, type_id))
+            }
+        }
+    }
+}
+
+lower_tuple_fields(
+    interfaces:
+        &super::super::frontend::elaboration::TypedInterfaces,
+    body: &super::super::frontend::elaboration::TypedBody,
+    value: &mut FunctionBuilder,
+    start: u32,
+    count: u32,
+    ordinal: u32,
+    output: &mut Vec<u32>
+) -> Result<(), LoweringError> {
+    if(ordinal < count) {
+        let index = usize_from_u32(start + ordinal);
+        let field =
+            super::super::frontend::elaboration::
+                typed_body_construction_field_word_at(body, index, 0);
+        let operand =
+            super::super::frontend::elaboration::
+                typed_body_construction_field_word_at(body, index, 1);
+        if(field == ordinal) {
+            let lowered = try(
+                lower_value(interfaces, body, value, operand),
+                @lower_tuple_fields
+            );
+            handle lowered {
+                Result::Err(_) => Result::Err(error(8, operand)),
+                Result::Ok(register) => {
+                    Vec::push(&mut *output, register);
+                    lower_tuple_fields(
+                        interfaces,
+                        body,
+                        value,
+                        start,
+                        count,
+                        ordinal + u32_value(1),
+                        output
+                    )
+                }
+            }
+        } else {
+            Result::Err(error(6, field))
+        }
+    } else {
+        Result::Ok(())
     }
 }
 
@@ -713,14 +884,18 @@ collect_function_constants(
     } else { () }
 }
 
-pub finish_program(functions: Vec<StageFunction>) -> StageProgram {
+pub finish_program(
+    functions: Vec<StageFunction>,
+    types: Vec<StageType>
+) -> StageProgram {
     let constants = Vec::new();
     collect_function_constants(&functions, 0, &mut constants);
     Vec::sort(&mut constants);
     Vec::dedup(&mut constants);
     StageProgram {
         functions: functions,
-        constants: constants
+        constants: constants,
+        types: types
     }
 }
 

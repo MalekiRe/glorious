@@ -1,6 +1,8 @@
 // The first self-hosted compiler driver: source through typed Core, Stage-A
 // ownership lowering, and canonical verified-bytecode emission.
 
+use super::super::frontend::elaboration::InterfaceTypeView;
+
 pub struct CompileError { code: u8, detail: u32 }
 
 pub compile_error_code(value: &CompileError) -> u8 { value.code }
@@ -153,6 +155,77 @@ find_entry(
     } else { None }
 }
 
+collect_tuple_elements(
+    interfaces:
+        &super::super::frontend::elaboration::TypedInterfaces,
+    start: u32,
+    count: u32,
+    ordinal: u32,
+    output: &mut Vec<u32>
+) {
+    if(ordinal < count) {
+        Vec::push(
+            &mut *output,
+            super::lowering::artifact_type_id(
+                super::super::frontend::elaboration::
+                    interface_type_element_at(
+                        interfaces,
+                        usize_from_u32(start + ordinal)
+                    )
+            )
+        );
+        collect_tuple_elements(
+            interfaces,
+            start,
+            count,
+            ordinal + u32_value(1),
+            output
+        )
+    } else { () }
+}
+
+collect_types(
+    interfaces:
+        &super::super::frontend::elaboration::TypedInterfaces,
+    index: usize,
+    output: &mut Vec<super::lowering::StageType>
+) -> Result<(), CompileError> {
+    if(index <
+        super::super::frontend::elaboration::interface_type_count(interfaces)
+    ) {
+        handle super::super::frontend::elaboration::interface_type_at(
+            interfaces,
+            index
+        ) {
+            InterfaceTypeView::Tuple(start, count) => {
+                let fields = Vec::new();
+                collect_tuple_elements(
+                    interfaces,
+                    start,
+                    count,
+                    0,
+                    &mut fields
+                );
+                Vec::push(
+                    &mut *output,
+                    super::lowering::tuple_type(
+                        fields,
+                        if(
+                            super::super::frontend::elaboration::
+                                interface_type_flags_at(interfaces, index)
+                                    % u32_value(2) == u32_value(1)
+                        ) { 1 } else { 0 }
+                    )
+                );
+                collect_types(interfaces, index + usize_value(1), output)
+            },
+            _ => Result::Err(error(10, checked_u32(index)))
+        }
+    } else {
+        Result::Ok(())
+    }
+}
+
 compile_interfaces(
     original: &String,
     headers:
@@ -163,6 +236,7 @@ compile_interfaces(
         super::super::frontend::elaboration::TypedInterfaces
 ) -> Result<Bytes, CompileError> {
     let functions = Vec::new();
+    let types = Vec::new();
     try(lower_functions(
         original,
         headers,
@@ -171,26 +245,21 @@ compile_interfaces(
         0,
         &mut functions
     ), @compile_interfaces);
-    if(super::super::frontend::elaboration::interface_type_count(
-        &interfaces
-    ) != usize_value(14)) {
-        Result::Err(error(
-            10,
-            checked_u32(
-                super::super::frontend::elaboration::
-                    interface_type_count(&interfaces)
-            )
-        ))
-    } else {
-        let program = super::lowering::finish_program(functions);
-        let entry = find_entry(&program, 0);
-        handle super::emission::encode(&program, entry) {
-            Result::Err(found) => Result::Err(error(
-                11,
-                super::emission::emission_error_detail(&found)
-            )),
-            Result::Ok(bytes) => Result::Ok(bytes)
-        }
+    // Body elaboration interns structural types into the shared interface
+    // arena, so freeze the emitted type table only after every body is typed.
+    try(collect_types(
+        &interfaces,
+        usize_value(14),
+        &mut types
+    ), @compile_interfaces);
+    let program = super::lowering::finish_program(functions, types);
+    let entry = find_entry(&program, 0);
+    handle super::emission::encode(&program, entry) {
+        Result::Err(found) => Result::Err(error(
+            11,
+            super::emission::emission_error_detail(&found)
+        )),
+        Result::Ok(bytes) => Result::Ok(bytes)
     }
 }
 

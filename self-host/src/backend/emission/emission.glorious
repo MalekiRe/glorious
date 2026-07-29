@@ -95,6 +95,147 @@ collect_names(
     } else { () }
 }
 
+aggregate_zero_sized_flag(
+    program: &super::lowering::StageProgram,
+    fields: &Vec<u32>,
+    index: usize
+) -> u32 {
+    if(index < Vec::len(fields)) {
+        if(type_zero_sized_flag(
+            program,
+            *Vec::index(fields, index)
+        ) == u32_value(2)) {
+            aggregate_zero_sized_flag(
+                program,
+                fields,
+                index + usize_value(1)
+            )
+        } else { 0 }
+    } else { 2 }
+}
+
+type_zero_sized_flag(
+    program: &super::lowering::StageProgram,
+    type_id: u32
+) -> u32 {
+    if(type_id < u32_value(19)) {
+        if(type_id == u32_value(0)) {
+            2
+        } else {
+            if(type_id == u32_value(1)) { 2 } else { 0 }
+        }
+    } else {
+        aggregate_zero_sized_flag(
+            program,
+            super::lowering::stage_type_fields(
+                super::lowering::stage_program_type_at(
+                    program,
+                    usize_from_u32(type_id - u32_value(19))
+                )
+            ),
+            0
+        )
+    }
+}
+
+aggregate_zero_use_flag(
+    program: &super::lowering::StageProgram,
+    fields: &Vec<u32>,
+    index: usize
+) -> u32 {
+    if(index < Vec::len(fields)) {
+        if(type_zero_use_flag(
+            program,
+            *Vec::index(fields, index)
+        ) == u32_value(16)) {
+            aggregate_zero_use_flag(
+                program,
+                fields,
+                index + usize_value(1)
+            )
+        } else { 0 }
+    } else { 16 }
+}
+
+type_zero_use_flag(
+    program: &super::lowering::StageProgram,
+    type_id: u32
+) -> u32 {
+    if(type_id < u32_value(19)) {
+        if(type_id == u32_value(1)) { 0 } else { 16 }
+    } else {
+        aggregate_zero_use_flag(
+            program,
+            super::lowering::stage_type_fields(
+                super::lowering::stage_program_type_at(
+                    program,
+                    usize_from_u32(type_id - u32_value(19))
+                )
+            ),
+            0
+        )
+    }
+}
+
+write_type_fields(
+    output: &mut ByteBuf,
+    fields: &Vec<u32>,
+    index: usize
+) {
+    if(index < Vec::len(fields)) {
+        ByteBuf::write_u32_le(
+            &mut *output,
+            *Vec::index(fields, index)
+        );
+        write_type_fields(output, fields, index + usize_value(1))
+    } else { () }
+}
+
+custom_type_records(
+    program: &super::lowering::StageProgram,
+    index: usize,
+    output: &mut Vec<super::artifact::Record>
+) {
+    if(index < super::lowering::stage_program_type_count(program)) {
+        let type_id = checked_u32(index) + u32_value(19);
+        let stage_type =
+            super::lowering::stage_program_type_at(program, index);
+        let fields = super::lowering::stage_type_fields(stage_type);
+        let payload = ByteBuf::new();
+        ByteBuf::write_u32_le(
+            &mut payload,
+            checked_u32(Vec::len(fields))
+        );
+        write_type_fields(&mut payload, fields, 0);
+        let flags =
+            super::lowering::stage_type_copy_flag(stage_type)
+            + type_zero_sized_flag(program, type_id)
+            + type_zero_use_flag(program, type_id);
+        Vec::push(
+            &mut *output,
+            super::artifact::record(
+                32,
+                wrapping_convert_to_u8(flags),
+                ByteBuf::finish(payload)
+            )
+        );
+        custom_type_records(
+            program,
+            index + usize_value(1),
+            output
+        )
+    } else { () }
+}
+
+type_section(
+    program: &super::lowering::StageProgram
+) -> super::artifact::Section {
+    let records = Vec::new();
+    super::artifact::append_predefined_scalar_records(&mut records);
+    custom_type_records(program, 0, &mut records);
+    super::artifact::variable_section(&records)
+}
+
 find_name(names: &Vec<String>, name: &String, index: usize) -> Option<u32> {
     if(index < Vec::len(names)) {
         if(String::eq(Vec::index(names, index), name)) {
@@ -295,6 +436,44 @@ write_instruction(
         ByteBuf::write_u32_le(&mut *code, 8195);
         ByteBuf::write_u32_le(&mut *code, target);
         ByteBuf::write_u32_le(code, source);
+        Result::Ok(())
+    } else if(*instruction is StageInstruction::Construct(
+        target,
+        ty,
+        variant,
+        fields
+    )) {
+        let start = checked_u32(Vec::len(&*operands));
+        append_arguments(&fields, 0, operands);
+        ByteBuf::write_u32_le(&mut *code, 20489);
+        ByteBuf::write_u32_le(&mut *code, target);
+        ByteBuf::write_u32_le(&mut *code, ty);
+        ByteBuf::write_u32_le(
+            &mut *code,
+            handle variant {
+                Result::Err(_) => 4294967295,
+                Result::Ok(found) => found
+            }
+        );
+        ByteBuf::write_u32_le(&mut *code, start);
+        ByteBuf::write_u32_le(
+            code,
+            super::lowering::register_pack_count(&fields)
+        );
+        Result::Ok(())
+    } else if(*instruction is StageInstruction::ProjectCopy(
+        target,
+        source,
+        field
+    )) {
+        ByteBuf::write_u32_le(&mut *code, 12299);
+        ByteBuf::write_u32_le(&mut *code, target);
+        ByteBuf::write_u32_le(&mut *code, source);
+        ByteBuf::write_u32_le(code, field);
+        Result::Ok(())
+    } else if(*instruction is StageInstruction::Drop(register)) {
+        ByteBuf::write_u32_le(&mut *code, 4113);
+        ByteBuf::write_u32_le(code, register);
         Result::Ok(())
     } else if(*instruction is StageInstruction::Call(
         target,
@@ -628,6 +807,11 @@ pub encode(
         &mut writer,
         super::artifact::SectionId::Constants,
         super::artifact::variable_section(&constant_table_records)
+    );
+    super::artifact::set_section(
+        &mut writer,
+        super::artifact::SectionId::Types,
+        type_section(program)
     );
     super::artifact::set_section(
         &mut writer,
