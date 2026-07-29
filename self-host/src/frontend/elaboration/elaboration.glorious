@@ -66,6 +66,14 @@ enum NominalCopyState { Unresolved, Resolving, Resolved }
 
 impl Use<[0, *]> for NominalCopyState {}
 
+enum AliasResolutionState {
+    Unresolved,
+    Resolving,
+    Resolved(TypeId)
+}
+
+impl Use<[0, *]> for AliasResolutionState {}
+
 struct InterfaceNominal {
     shell: u32,
     kind: InterfaceNominalKind,
@@ -114,10 +122,9 @@ pub struct TypedInterfaces {
     shell_to_callable: Vec<Option<InterfaceCallableId>>,
     // Dense declaration maps keep semantic lookup independent of arena order.
     shell_to_nominal: Vec<Option<InterfaceNominalId>>,
-    shell_to_type_plus_one: Vec<u32>,
-    // Collection-only memo tables retained for deterministic diagnostics.
-    alias_type_plus_one: Vec<u32>,
-    alias_states: Vec<u32>
+    shell_to_type: Vec<Option<TypeId>>,
+    // Collection-only memo state retained for deterministic diagnostics.
+    alias_states: Vec<AliasResolutionState>
 }
 
 pub struct CoreValueTag {}
@@ -194,7 +201,7 @@ pub struct TypedBody {
     shell: u32,
     result_type: u32,
     root: CoreComputationId,
-    local_types: IndexVec<CoreLocalTag, u32>,
+    local_types: IndexVec<CoreLocalTag, TypeId>,
     values: Arena<CoreValueTag, CoreValue>,
     computations: Arena<CoreComputationTag, CoreComputation>,
     operands: Vec<CoreValueId>,
@@ -227,7 +234,7 @@ struct BodyBuilder {
     parameter_count: u32,
     next_source_local: u32,
     final_transfer_expressions: Vec<u32>,
-    local_types: IndexVec<CoreLocalTag, u32>,
+    local_types: IndexVec<CoreLocalTag, Option<TypeId>>,
     values: Arena<CoreValueTag, CoreValue>,
     computations: Arena<CoreComputationTag, CoreComputation>,
     operands: Vec<CoreValueId>,
@@ -355,6 +362,15 @@ interface_callable_for_shell_id(
 ) -> Option<InterfaceCallableId> {
     if(usize_from_u32(shell) < Vec::len(&value.shell_to_callable)) {
         *Vec::index(&value.shell_to_callable, usize_from_u32(shell))
+    } else { None }
+}
+
+interface_type_for_shell(
+    value: &TypedInterfaces,
+    shell: u32
+) -> Option<TypeId> {
+    if(usize_from_u32(shell) < Vec::len(&value.shell_to_type)) {
+        *Vec::index(&value.shell_to_type, usize_from_u32(shell))
     } else { None }
 }
 
@@ -779,10 +795,10 @@ pub typed_body_local_count(value: &TypedBody) -> usize {
 }
 
 pub typed_body_local_type_at(value: &TypedBody, index: usize) -> u32 {
-    *IndexVec::index(
+    Id::to_u32(*IndexVec::index(
         &value.local_types,
         core_local_id_from_usize(index)
-    )
+    ))
 }
 
 pub typed_body_value_count(value: &TypedBody) -> usize {
@@ -959,6 +975,30 @@ push_missing_callable_ids(
     } else {
         Vec::push(&mut *value, None);
         push_missing_callable_ids(value, remaining - usize_value(1))
+    }
+}
+
+push_missing_type_ids(
+    value: &mut Vec<Option<TypeId>>,
+    remaining: usize
+) {
+    if(remaining == usize_value(0)) {
+        ()
+    } else {
+        Vec::push(&mut *value, None);
+        push_missing_type_ids(value, remaining - usize_value(1))
+    }
+}
+
+push_unresolved_aliases(
+    value: &mut Vec<AliasResolutionState>,
+    remaining: usize
+) {
+    if(remaining == usize_value(0)) {
+        ()
+    } else {
+        Vec::push(&mut *value, AliasResolutionState::Unresolved);
+        push_unresolved_aliases(value, remaining - usize_value(1))
     }
 }
 
@@ -1391,13 +1431,13 @@ resolve_alias_type(
 ) -> Result<u32, ElaborationError> {
     let state = *Vec::index(&output.alias_states, alias_index);
     handle state {
-        1 => Result::Err(error(1, token, token, 0, 0)),
-        2 => Result::Ok(
-            *Vec::index(&output.alias_type_plus_one, alias_index)
-                - u32_value(1)
-        ),
-        _ => {
-            *Vec::index_mut(&mut output.alias_states, alias_index) = 1;
+        AliasResolutionState::Resolving =>
+            Result::Err(error(1, token, token, 0, 0)),
+        AliasResolutionState::Resolved(ty) =>
+            Result::Ok(Id::to_u32(ty)),
+        AliasResolutionState::Unresolved => {
+            *Vec::index_mut(&mut output.alias_states, alias_index) =
+                AliasResolutionState::Resolving;
             handle super::headers::alias_at(
                 super::headers::nominal_index(headers),
                 alias_index
@@ -1425,13 +1465,11 @@ resolve_alias_type(
                                 Result::Err(found) => Result::Err(found),
                                 Result::Ok(ty) => {
                                     *Vec::index_mut(
-                                        &mut output.alias_type_plus_one,
-                                        alias_index
-                                    ) = ty + u32_value(1);
-                                    *Vec::index_mut(
                                         &mut output.alias_states,
                                         alias_index
-                                    ) = 2;
+                                    ) = AliasResolutionState::Resolved(
+                                        type_id_from_u32(ty)
+                                    );
                                     Result::Ok(ty)
                                 }
                             }
@@ -1521,11 +1559,11 @@ resolve_type_name_target(
                     Result::Ok(value) => super::headers::enum_shell(value)
                 }
             };
-            let plus_one = *Vec::index(
-                &output.shell_to_type_plus_one,
-                usize_from_u32(shell)
-            );
-            if(plus_one == u32_value(0)) { Result::Err(error(7, token, token, 0, 0)) } else { Result::Ok(plus_one - u32_value(1)) }
+            handle interface_type_for_shell(&*output, shell) {
+                Result::Err(_) =>
+                    Result::Err(error(7, token, token, 0, 0)),
+                Result::Ok(ty) => Result::Ok(Id::to_u32(ty))
+            }
         }
     }
 }
@@ -1598,15 +1636,16 @@ resolve_signature_type(
                                                 )
                                         }
                                     };
-                                    let plus_one = *Vec::index(
-                                        &output.shell_to_type_plus_one,
-                                        usize_from_u32(nominal)
-                                    );
-                                    if(plus_one == u32_value(0)) { Result::Err(
+                                    handle interface_type_for_shell(
+                                        &*output,
+                                        nominal
+                                    ) {
+                                        Result::Err(_) => Result::Err(
                                             error(7, token, token, 0, 0)
-                                        ) } else { Result::Ok(
-                                            plus_one - u32_value(1)
-                                        ) }
+                                        ),
+                                        Result::Ok(ty) =>
+                                            Result::Ok(Id::to_u32(ty))
+                                    }
                                 }
                             }
                         },
@@ -1942,9 +1981,9 @@ predeclare_nominals(
                         usize_from_u32(found.0)
                     ) = Option::Some(nominal_id);
                     *Vec::index_mut(
-                        &mut output.shell_to_type_plus_one,
+                        &mut output.shell_to_type,
                         usize_from_u32(found.0)
-                    ) = type_id + u32_value(1);
+                    ) = Option::Some(type_id_from_u32(type_id));
                 };
                 predeclare_nominals(headers, output, ordinal + usize_value(1))
             }
@@ -2389,13 +2428,13 @@ nominal_copyable(
             Result::Err(error(1, token, token, nominal, nominal)),
         NominalCopyState::Resolved => {
             let shell = node.shell;
-            let ty = *Vec::index(
-                &output.shell_to_type_plus_one,
-                usize_from_u32(shell)
-            ) - u32_value(1);
+            let ty = handle interface_type_for_shell(&*output, shell) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            };
             Result::Ok(type_is_copyable(
                 output,
-                type_id_from_u32(ty)
+                ty
             ))
         },
         NominalCopyState::Unresolved => {
@@ -2426,13 +2465,13 @@ nominal_copyable(
                 Result::Err(found) => Result::Err(found),
                 Result::Ok(flag) => {
                     let shell = node.shell;
-                    let ty = *Vec::index(
-                        &output.shell_to_type_plus_one,
-                        usize_from_u32(shell)
-                    ) - u32_value(1);
+                    let ty = handle interface_type_for_shell(&*output, shell) {
+                        Result::Err(_) => unreachable(),
+                        Result::Ok(found) => found
+                    };
                     set_type_copyable(
                         output,
-                        type_id_from_u32(ty),
+                        ty,
                         flag
                     );
                     set_nominal_copy_state(
@@ -2496,20 +2535,15 @@ pub collect_interfaces(
         callable_parameters: Vec::new(),
         shell_to_callable: Vec::new(),
         shell_to_nominal: Vec::new(),
-        shell_to_type_plus_one: Vec::new(),
-        alias_type_plus_one: Vec::new(),
+        shell_to_type: Vec::new(),
         alias_states: Vec::new()
     };
     seed_types(&mut output);
     let shell_count = super::scanner::shell_count(declarations);
     push_missing_callable_ids(&mut output.shell_to_callable, shell_count);
     push_missing_nominal_ids(&mut output.shell_to_nominal, shell_count);
-    push_zeroes(&mut output.shell_to_type_plus_one, shell_count);
-    push_zeroes(
-        &mut output.alias_type_plus_one,
-        super::headers::alias_count(super::headers::nominal_index(headers))
-    );
-    push_zeroes(
+    push_missing_type_ids(&mut output.shell_to_type, shell_count);
+    push_unresolved_aliases(
         &mut output.alias_states,
         super::headers::alias_count(super::headers::nominal_index(headers))
     );
@@ -2676,8 +2710,8 @@ pure(
 }
 
 push_local_type(
-    value: &mut IndexVec<CoreLocalTag, u32>,
-    ty: u32
+    value: &mut IndexVec<CoreLocalTag, Option<TypeId>>,
+    ty: Option<TypeId>
 ) -> CoreLocalId {
     handle IndexVec::push(value, ty) {
         Result::Err(_) => unreachable(),
@@ -2705,7 +2739,7 @@ materialize_operand(
         ElaboratedForm::Computation(computation) => {
             let local = push_local_type(
                 &mut value.local_types,
-                found.type_id
+                Option::Some(type_id_from_u32(found.type_id))
             );
             Vec::push(&mut *wrappers, LetWrapper {
                 local: local,
@@ -2990,11 +3024,13 @@ elaborate_local(
     final_transfer: u32
 ) -> Result<Elaborated, ElaborationError> {
     if(Id::to_usize(local) < IndexVec::len(&value.local_types)) {
-        let ty = *IndexVec::index(&value.local_types, local);
-        if(ty == u32_value(0)) { Result::Err(error(7, token, token, 0, 0)) } else {
+        handle *IndexVec::index(&value.local_types, local) {
+        Result::Err(_) => Result::Err(error(7, token, token, 0, 0)),
+        Result::Ok(ty_id) => {
+            let ty = Id::to_u32(ty_id);
             let access = if(bool_and(
                 final_transfer != u32_value(0),
-                type_is_copyable(interfaces, type_id_from_u32(ty))
+                type_is_copyable(interfaces, ty_id)
             )) { CoreLocalAccess::Move } else { CoreLocalAccess::Copy };
             let core = push_value(
                 value,
@@ -3009,7 +3045,7 @@ elaborate_local(
                 expected_plus_one,
                 token
             )
-        }
+        } }
     } else { Result::Err(error(7, token, token, 0, 0)) }
 }
 
@@ -3252,7 +3288,7 @@ elaborate_block_statements(
                 *IndexVec::index_mut(
                     &mut value.local_types,
                     local
-                ) = initializer.type_id;
+                ) = Option::Some(type_id_from_u32(initializer.type_id));
                 let computation = as_computation(value, initializer);
                 Vec::push(&mut *lets, LetWrapper {
                     local: local,
@@ -3291,7 +3327,7 @@ elaborate_block_statements(
                         ElaboratedForm::Computation(computation) => {
                             let local = push_local_type(
                                 &mut value.local_types,
-                                found.type_id
+                                Option::Some(type_id_from_u32(found.type_id))
                             );
                             Vec::push(&mut *lets, LetWrapper {
                                 local: local,
@@ -3818,10 +3854,14 @@ elaborate_struct(
             Result::Err(_) => Result::Err(error(7, token, token, 0, 0)),
             Result::Ok(header) => {
                 let shell = super::headers::struct_shell(header);
-                let ty = *Vec::index(
-                    &interfaces.shell_to_type_plus_one,
-                    usize_from_u32(shell)
-                ) - u32_value(1);
+                let ty_id = handle interface_type_for_shell(
+                    &*interfaces,
+                    shell
+                ) {
+                    Result::Err(_) => unreachable(),
+                    Result::Ok(found) => found
+                };
+                let ty = Id::to_u32(ty_id);
                 let nominal_id = handle *Vec::index(
                     &interfaces.shell_to_nominal,
                     usize_from_u32(shell)
@@ -3831,7 +3871,7 @@ elaborate_struct(
                 };
                 let nominal = Id::to_u32(nominal_id);
                 if(bool_and(
-                    type_is_copyable(interfaces, type_id_from_u32(ty)),
+                    type_is_copyable(interfaces, ty_id),
                     bool_or(
                         expected_plus_one == u32_value(0),
                         expected_plus_one == ty + u32_value(1)
@@ -3994,17 +4034,18 @@ elaborate_enum_construct(
             _ => unreachable()
         };
         let variant_ordinal = variant_index - nominal_start;
-        let ty = *Vec::index(
-            &interfaces.shell_to_type_plus_one,
-            usize_from_u32(shell)
-        ) - u32_value(1);
+        let ty_id = handle interface_type_for_shell(&*interfaces, shell) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let ty = Id::to_u32(ty_id);
         let found_count =
             super::bodies::expression_child_count_at(body, expression)
                 - u32_value(1);
         if(bool_and(
             payload_count == found_count,
             bool_and(
-                type_is_copyable(interfaces, type_id_from_u32(ty)),
+                type_is_copyable(interfaces, ty_id),
                 bool_or(
                     expected_plus_one == u32_value(0),
                     expected_plus_one == ty + u32_value(1)
@@ -4068,14 +4109,15 @@ elaborate_enum_bare(
             InterfaceNominalKind::Enum(range) => range.start,
             _ => unreachable()
         };
-        let ty = *Vec::index(
-            &interfaces.shell_to_type_plus_one,
-            usize_from_u32(shell)
-        ) - u32_value(1);
+        let ty_id = handle interface_type_for_shell(&*interfaces, shell) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let ty = Id::to_u32(ty_id);
         if(bool_and(
             payload_count == u32_value(0),
             bool_and(
-                type_is_copyable(interfaces, type_id_from_u32(ty)),
+                type_is_copyable(interfaces, ty_id),
                 bool_or(
                     expected_plus_one == u32_value(0),
                     expected_plus_one == ty + u32_value(1)
@@ -4391,14 +4433,14 @@ elaborate_expression(
 seed_parameter_locals(
     interfaces: &TypedInterfaces,
     callable: InterfaceCallableId,
-    output: &mut IndexVec<CoreLocalTag, u32>,
+    output: &mut IndexVec<CoreLocalTag, Option<TypeId>>,
     ordinal: u32
 ) {
     let parameters = interface_callable_parameters(interfaces, callable);
     if(ordinal < parameters.count) {
         push_local_type(
             &mut *output,
-            Id::to_u32(callable_parameter_type_at(
+            Option::Some(callable_parameter_type_at(
                 interfaces,
                 usize_from_u32(parameters.start + ordinal)
             ))
@@ -4413,15 +4455,37 @@ seed_parameter_locals(
 }
 
 seed_untyped_locals(
-    output: &mut IndexVec<CoreLocalTag, u32>,
+    output: &mut IndexVec<CoreLocalTag, Option<TypeId>>,
     remaining: usize
 ) {
     if(remaining == usize_value(0)) {
         ()
     } else {
-        push_local_type(&mut *output, 0);
+        push_local_type(&mut *output, None);
         seed_untyped_locals(output, remaining - usize_value(1))
     }
+}
+
+finalize_local_types(
+    source: &IndexVec<CoreLocalTag, Option<TypeId>>,
+    output: &mut IndexVec<CoreLocalTag, TypeId>,
+    index: usize
+) {
+    if(index < IndexVec::len(source)) {
+        let id = core_local_id_from_usize(index);
+        let ty = handle *IndexVec::index(source, id) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        handle IndexVec::push(&mut *output, ty) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(_) => finalize_local_types(
+                source,
+                output,
+                index + usize_value(1)
+            )
+        }
+    } else { () }
 }
 
 resolved_local_plus_one(
@@ -4901,11 +4965,17 @@ pub elaborate_function_body(
                         Result::Ok(root) => {
                             let computation =
                                 as_computation(&mut builder, root);
+                            let local_types = IndexVec::new();
+                            finalize_local_types(
+                                &builder.local_types,
+                                &mut local_types,
+                                0
+                            );
                             Result::Ok(TypedBody {
                                 shell: shell,
                                 result_type: result,
                                 root: computation,
-                                local_types: move builder.local_types,
+                                local_types: local_types,
                                 values: move builder.values,
                                 computations: move builder.computations,
                                 operands: move builder.operands,
@@ -5458,10 +5528,10 @@ write_block_statements(
                 );
                 write_type_id(
                     &mut *output,
-                    *IndexVec::index(
+                    Id::to_u32(*IndexVec::index(
                         &body.local_types,
                         local_id
-                    )
+                    ))
                 );
                 handle write_computation_expression(
                     output,

@@ -755,6 +755,16 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
          { let value = 2; value }; value }",
         "probe_target(value: i64) -> i64 { value } \
          probe_statement(value: i64) { probe_target(value); () }",
+        "type Count = u64; \
+         probe_scalar_alias(value: Count) -> Count { value }",
+        "type Empty = Unit; \
+         probe_unit_alias(value: Empty) -> Empty { value }",
+        "type BackwardBase = i64; type Backward = BackwardBase; \
+         type Forward = ForwardTarget; type ForwardTarget = u64; \
+         probe_backward(value: Backward) -> Backward { value } \
+         probe_forward_alias(value: Forward) -> Forward { value }",
+        "mod aliases { pub type Count = u64; } \
+         probe_qualified_alias(value: aliases::Count) -> aliases::Count { value }",
     ];
     let errors = [
         "probe_bad_result() -> i64 { () }",
@@ -765,6 +775,8 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
          probe_bad_argument(value: i64) -> u64 { probe_target(value) }",
         "probe_value() -> i64 { 1 } \
          probe_bad_call_result() -> u64 { probe_value() }",
+        "type Left = Right; type Right = Left; \
+         probe_alias_cycle(value: Left) -> Left { value }",
     ];
 
     let mut paths = Vec::new();
@@ -812,6 +824,11 @@ fn stage_a_corpus(directory: &Path) -> Vec<PathBuf> {
          tuple_forward(left: i64, right: u64) -> (i64, u64) { \
              tuple_identity((left, right)) \
          }",
+        "struct Pair { left: i64, right: u64 } type PairAlias = Pair; \
+         make_alias(left: i64, right: u64) -> PairAlias { \
+             Pair { left: left, right: right } \
+         } \
+         read_alias(value: PairAlias) -> u64 { value.right }",
     ];
     let errors = [
         "struct Pair { left: i64 } bad() -> Pair { Pair { nope: 1 } }",
