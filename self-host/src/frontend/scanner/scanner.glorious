@@ -95,10 +95,8 @@ pub shell_header(value: &DeclarationShell) -> &TokenRange { &value.header }
 pub shell_body(value: &DeclarationShell) -> &Option<TokenRange> { &value.body }
 
 pub shell_body_range(value: &DeclarationShell) -> Option<TokenRange> {
-    handle Option::as_ref(&value.body) {
-        Result::Err(_) => Result::Err(()),
-        Result::Ok(found) => Result::Ok(*found)
-    }
+    let found = try(Option::as_ref(&value.body), @shell_body_range);
+    Result::Ok(*found)
 }
 
 pub shell_whole(value: &DeclarationShell) -> &TokenRange { &value.whole }

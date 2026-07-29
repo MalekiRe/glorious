@@ -422,6 +422,64 @@ fn primitive_consumes_projected_reference_before_try_leaves() {
 }
 
 #[test]
+fn try_joins_reference_free_error_with_reference_bearing_success() {
+    let source = r#"
+        pass<'a>(
+            value: &'a i64,
+            state: Result<(), ()>
+        ) -> Result<&'a i64, ()> {
+            try(move state, @pass);
+            Result::Ok(value)
+        }
+        read_ok() -> i64 {
+            let value = 42;
+            handle pass(&value, Result::Ok(())) {
+                Result::Ok(found) => *found,
+                Result::Err(_) => 0
+            }
+        }
+        read_error() -> i64 {
+            let value = 42;
+            handle pass(&value, Result::Err(())) {
+                Result::Ok(_) => 0,
+                Result::Err(_) => 7
+            }
+        }
+        main() -> { () }
+    "#;
+    for optimization_level in [
+        OptimizationLevel::O1,
+        OptimizationLevel::O2,
+        OptimizationLevel::O3,
+    ] {
+        let phases = compile_source_to_phases_with_options(
+            "try-reference-variant-join.glorious",
+            source,
+            CompileOptions { optimization_level },
+        )
+        .unwrap_or_else(|errors| panic!("{optimization_level:?}: {errors:#?}"));
+        assert!(
+            has_direct_mir_leave(&phases),
+            "{optimization_level:?}: try did not lower to direct MIR LEAVE"
+        );
+        let artifact = phases.artifact;
+        let verified = verify(artifact.clone()).unwrap();
+        for (name, expected) in [("read_ok", 42), ("read_error", 7)] {
+            let function = artifact
+                .functions
+                .iter()
+                .position(|function| function.name == name)
+                .unwrap() as u32;
+            assert_eq!(
+                Vm::new(verified.clone()).run(function, vec![]).unwrap(),
+                Value::I64(expected),
+                "{optimization_level:?} {name}"
+            );
+        }
+    }
+}
+
+#[test]
 fn a_label_captured_by_an_inlined_closure_stays_a_direct_transfer() {
     let source = r#"
         invoke<F>(body: F) -> () where F: Fn<(), Output=()> { body() }

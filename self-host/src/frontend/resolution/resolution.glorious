@@ -1013,21 +1013,22 @@ duplicate_parameter_token(
         Result::Err(())
     } else {
         let index = start + count - u32_value(1);
-            handle super::headers::parameter_at(headers, usize_from_u32(index)) {
-                Result::Err(_) => Result::Err(()),
-                Result::Ok(parameter) => if(super::headers::parameter_name_raw(parameter) == name) {
-                    Result::Ok(
-                        super::headers::parameter_name_token(parameter)
-                    )
-                } else {
-                    duplicate_parameter_token(
-                        headers,
-                        start,
-                        name,
-                        count - u32_value(1)
-                    )
-                }
-            }
+        let parameter = try(
+            super::headers::parameter_at(headers, usize_from_u32(index)),
+            @duplicate_parameter_token
+        );
+        if(super::headers::parameter_name_raw(parameter) == name) {
+            Result::Ok(
+                super::headers::parameter_name_token(parameter)
+            )
+        } else {
+            duplicate_parameter_token(
+                headers,
+                start,
+                name,
+                count - u32_value(1)
+            )
+        }
     }
 }
 
@@ -1037,17 +1038,18 @@ find_body_callable<'a>(
     index: usize
 ) -> Option<&'a super::headers::CallableHeader> {
     if(index < super::headers::callable_count(headers)) {
-        handle super::headers::callable_at(headers, index) {
-            Result::Err(_) => Result::Err(()),
-            Result::Ok(callable) => if(super::headers::callable_shell(callable) == shell) {
-                Result::Ok(callable)
-            } else {
-                find_body_callable(
-                    headers,
-                    shell,
-                    index + usize_value(1)
-                )
-            }
+        let callable = try(
+            super::headers::callable_at(headers, index),
+            @find_body_callable
+        );
+        if(super::headers::callable_shell(callable) == shell) {
+            Result::Ok(callable)
+        } else {
+            find_body_callable(
+                headers,
+                shell,
+                index + usize_value(1)
+            )
         }
     } else {
         Result::Err(())
@@ -1242,22 +1244,23 @@ find_parameter_range(
     at: usize
 ) -> Option<ParameterSearch> {
     if(at < super::headers::callable_count(index)) {
-        handle super::headers::callable_at(index, at) {
-            Result::Err(_) => Result::Err(()),
-            Result::Ok(callable) => if(super::headers::callable_shell(callable) == shell) {
-                let parameters =
-                        super::headers::callable_parameters(callable);
-                    Result::Ok(ParameterSearch {
-                        start: super::headers::range_start(parameters),
-                        count: super::headers::range_count(parameters)
-                    })
-            } else {
-                find_parameter_range(
-                    index,
-                    shell,
-                    at + usize_value(1)
-                )
-            }
+        let callable = try(
+            super::headers::callable_at(index, at),
+            @find_parameter_range
+        );
+        if(super::headers::callable_shell(callable) == shell) {
+            let parameters =
+                super::headers::callable_parameters(callable);
+            Result::Ok(ParameterSearch {
+                start: super::headers::range_start(parameters),
+                count: super::headers::range_count(parameters)
+            })
+        } else {
+            find_parameter_range(
+                index,
+                shell,
+                at + usize_value(1)
+            )
         }
     } else {
         Result::Err(())

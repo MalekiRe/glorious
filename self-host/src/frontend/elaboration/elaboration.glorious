@@ -1386,12 +1386,12 @@ type_name_target_in(
                 kind,
                 index + usize_value(1)
             ),
-            Result::Ok(found) => handle super::scanner::shell_at(
-                declarations,
-                usize_from_u32(found.0)
-            ) {
-                Result::Err(_) => Result::Err(()),
-                Result::Ok(shell) => if(bool_and(
+            Result::Ok(found) => {
+                let shell = try(super::scanner::shell_at(
+                    declarations,
+                    usize_from_u32(found.0)
+                ), @type_name_target_in);
+                if(bool_and(
                     found.1 == name,
                     super::scanner::shell_parent_plus_one(shell)
                         == module_plus_one
@@ -1405,7 +1405,8 @@ type_name_target_in(
                         module_plus_one,
                         kind,
                         index + usize_value(1)
-                    ) }
+                    )
+                }
             }
         }
     } else { Result::Err(()) }
@@ -1671,25 +1672,23 @@ resolve_alias_type(
                         ) {
                             Result::Err(_) =>
                                 Result::Err(error(7, token, token, 0, 0)),
-                            Result::Ok(owner) => handle resolve_signature_type(
-                                headers,
-                                declarations,
-                                output,
-                                super::headers::type_index(
-                                    super::headers::alias_target(alias)
-                                ),
-                                super::scanner::shell_parent_plus_one(owner)
-                            ) {
-                                Result::Err(found) => Result::Err(found),
-                                Result::Ok(ty) => {
-                                    *Vec::index_mut(
-                                        &mut output.alias_states,
-                                        alias_index
-                                    ) = AliasResolutionState::Resolved(
-                                        type_id_from_u32(ty)
-                                    );
-                                    Result::Ok(ty)
-                                }
+                            Result::Ok(owner) => {
+                                let ty = try(resolve_signature_type(
+                                    headers,
+                                    declarations,
+                                    output,
+                                    super::headers::type_index(
+                                        super::headers::alias_target(alias)
+                                    ),
+                                    super::scanner::shell_parent_plus_one(owner)
+                                ), @resolve_alias_type);
+                                *Vec::index_mut(
+                                    &mut output.alias_states,
+                                    alias_index
+                                ) = AliasResolutionState::Resolved(
+                                    type_id_from_u32(ty)
+                                );
+                                Result::Ok(ty)
                             }
                         } } else { Result::Err(error(1, token, token, 0, 0)) }
                 }
@@ -1704,9 +1703,12 @@ module_named_in(
     parent_plus_one: usize,
     index: usize
 ) -> Option<usize> {
-    if(index < super::scanner::shell_count(declarations)) { handle super::scanner::shell_at(declarations, index) {
-            Result::Err(_) => Result::Err(()),
-            Result::Ok(shell) => if(bool_and(
+    if(index < super::scanner::shell_count(declarations)) {
+        let shell = try(
+            super::scanner::shell_at(declarations, index),
+            @module_named_in
+        );
+        if(bool_and(
                 super::scanner::shell_kind_code(shell) == u8_value(1),
                 super::scanner::shell_parent_plus_one(shell)
                     == parent_plus_one
@@ -1730,8 +1732,9 @@ module_named_in(
                     name,
                     parent_plus_one,
                     index + usize_value(1)
-                ) }
-        } } else { Result::Err(()) }
+                )
+        }
+    } else { Result::Err(()) }
 }
 
 module_named(
@@ -2214,14 +2217,17 @@ find_struct_shell<'a>(
     shell: u32,
     index: usize
 ) -> Option<&'a super::headers::StructHeader> {
-    if(index < super::headers::struct_count(nominal)) { handle super::headers::struct_at(nominal, index) {
-            Result::Err(_) => Result::Err(()),
-            Result::Ok(found) => if(super::headers::struct_shell(found) == shell) { Result::Ok(found) } else { find_struct_shell(
-                    nominal,
-                    shell,
-                    index + usize_value(1)
-                ) }
-        } } else { Result::Err(()) }
+    if(index < super::headers::struct_count(nominal)) {
+        let found = try(
+            super::headers::struct_at(nominal, index),
+            @find_struct_shell
+        );
+        if(super::headers::struct_shell(found) == shell) {
+            Result::Ok(found)
+        } else {
+            find_struct_shell(nominal, shell, index + usize_value(1))
+        }
+    } else { Result::Err(()) }
 }
 
 find_enum_shell<'a>(
@@ -2229,14 +2235,17 @@ find_enum_shell<'a>(
     shell: u32,
     index: usize
 ) -> Option<&'a super::headers::EnumHeader> {
-    if(index < super::headers::enum_count(nominal)) { handle super::headers::enum_at(nominal, index) {
-            Result::Err(_) => Result::Err(()),
-            Result::Ok(found) => if(super::headers::enum_shell(found) == shell) { Result::Ok(found) } else { find_enum_shell(
-                    nominal,
-                    shell,
-                    index + usize_value(1)
-                ) }
-        } } else { Result::Err(()) }
+    if(index < super::headers::enum_count(nominal)) {
+        let found = try(
+            super::headers::enum_at(nominal, index),
+            @find_enum_shell
+        );
+        if(super::headers::enum_shell(found) == shell) {
+            Result::Ok(found)
+        } else {
+            find_enum_shell(nominal, shell, index + usize_value(1))
+        }
+    } else { Result::Err(()) }
 }
 
 collect_struct_fields(
@@ -2679,27 +2688,23 @@ nominal_copyable(
                     token
                 )
             };
-            handle move copy {
-                Result::Err(found) => Result::Err(found),
-                Result::Ok(flag) => {
-                    let shell = node.shell;
-                    let ty = handle interface_type_for_shell(&*output, shell) {
-                        Result::Err(_) => unreachable(),
-                        Result::Ok(found) => found
-                    };
-                    set_type_copyable(
-                        output,
-                        ty,
-                        flag
-                    );
-                    set_nominal_copy_state(
-                        output,
-                        id,
-                        NominalCopyState::Resolved
-                    );
-                    Result::Ok(flag)
-                }
-            }
+            let flag = try(move copy, @nominal_copyable);
+            let shell = node.shell;
+            let ty = handle interface_type_for_shell(&*output, shell) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            };
+            set_type_copyable(
+                output,
+                ty,
+                flag
+            );
+            set_nominal_copy_state(
+                output,
+                id,
+                NominalCopyState::Resolved
+            );
+            Result::Ok(flag)
         }
     }
 }
@@ -5202,69 +5207,64 @@ pub elaborate_function_body(
                 &mut locals,
                 super::resolution::local_count(resolved)
             );
-            handle resolution_map(body, resolved) {
-                Result::Err(found) => Result::Err(found),
-                Result::Ok(map) => {
-                    let parameter_count =
-                        interface_callable_parameters(
-                            interfaces,
-                            callable
-                        ).count;
-                    let builder = BodyBuilder {
-                        parameter_count: parameter_count,
-                        next_source_local: 0,
-                        final_transfer_expressions:
-                            final_transfer_expressions(
-                                body,
-                                &map,
-                                parameter_count,
-                                IndexVec::len(&locals)
-                            ),
-                        local_types: locals,
-                        values: Arena::new(),
-                        computations: Arena::new(),
-                        operands: Vec::new(),
-                        construction_fields: Vec::new(),
-                        integer_constants: Arena::new()
-                    };
-                    handle elaborate_expression(
-                        original,
-                        headers,
-                        declarations,
-                        interfaces,
+            let map = try(
+                resolution_map(body, resolved),
+                @elaborate_function_body
+            );
+            let parameter_count =
+                interface_callable_parameters(
+                    interfaces,
+                    callable
+                ).count;
+            let builder = BodyBuilder {
+                parameter_count: parameter_count,
+                next_source_local: 0,
+                final_transfer_expressions:
+                    final_transfer_expressions(
                         body,
                         &map,
-                        &mut builder,
-                        super::bodies::body_root_index(body),
-                        Option::Some(result)
-                    ) {
-                        Result::Err(found) => Result::Err(found),
-                        Result::Ok(root) => {
-                            let computation =
-                                as_computation(&mut builder, root);
-                            let local_types = IndexVec::new();
-                            finalize_local_types(
-                                &builder.local_types,
-                                &mut local_types,
-                                0
-                            );
-                            Result::Ok(TypedBody {
-                                shell: shell,
-                                result_type: result,
-                                root: computation,
-                                local_types: local_types,
-                                values: move builder.values,
-                                computations: move builder.computations,
-                                operands: move builder.operands,
-                                construction_fields:
-                                    move builder.construction_fields,
-                                integer_constants:
-                                    move builder.integer_constants
-                            })
-                        }
-                    }
-                }
-            }
+                        parameter_count,
+                        IndexVec::len(&locals)
+                    ),
+                local_types: locals,
+                values: Arena::new(),
+                computations: Arena::new(),
+                operands: Vec::new(),
+                construction_fields: Vec::new(),
+                integer_constants: Arena::new()
+            };
+            let root = try(elaborate_expression(
+                original,
+                headers,
+                declarations,
+                interfaces,
+                body,
+                &map,
+                &mut builder,
+                super::bodies::body_root_index(body),
+                Option::Some(result)
+            ), @elaborate_function_body);
+            let computation =
+                as_computation(&mut builder, root);
+            let local_types = IndexVec::new();
+            finalize_local_types(
+                &builder.local_types,
+                &mut local_types,
+                0
+            );
+            Result::Ok(TypedBody {
+                shell: shell,
+                result_type: result,
+                root: computation,
+                local_types: local_types,
+                values: move builder.values,
+                computations: move builder.computations,
+                operands: move builder.operands,
+                construction_fields:
+                    move builder.construction_fields,
+                integer_constants:
+                    move builder.integer_constants
+            })
         }
     }
 }
@@ -5373,14 +5373,17 @@ find_callable<'a>(
     shell: u32,
     index: usize
 ) -> Option<&'a super::headers::CallableHeader> {
-    if(index < super::headers::callable_count(headers)) { handle super::headers::callable_at(headers, index) {
-            Result::Err(_) => Result::Err(()),
-            Result::Ok(callable) => if(super::headers::callable_shell(callable) == shell) { Result::Ok(callable) } else { find_callable(
-                    headers,
-                    shell,
-                    index + usize_value(1)
-                ) }
-        } } else { Result::Err(()) }
+    if(index < super::headers::callable_count(headers)) {
+        let callable = try(
+            super::headers::callable_at(headers, index),
+            @find_callable
+        );
+        if(super::headers::callable_shell(callable) == shell) {
+            Result::Ok(callable)
+        } else {
+            find_callable(headers, shell, index + usize_value(1))
+        }
+    } else { Result::Err(()) }
 }
 
 value_uses_local(
@@ -5618,7 +5621,7 @@ write_construct_fields(
             usize_from_u32(start + ordinal)
         );
         ByteBuf::write_u32_le(&mut *output, field.field);
-        handle write_operand_expression(
+        try(write_operand_expression(
             output,
             source,
             declarations,
@@ -5626,20 +5629,18 @@ write_construct_fields(
             body,
             field.value,
             source_local_limit
-        ) {
-            Result::Err(found) => Result::Err(found),
-            Result::Ok(_) => write_construct_fields(
-                output,
-                source,
-                declarations,
-                resolved,
-                body,
-                source_local_limit,
-                start,
-                count,
-                ordinal + u32_value(1)
-            )
-        }
+        ), @write_construct_fields);
+        write_construct_fields(
+            output,
+            source,
+            declarations,
+            resolved,
+            body,
+            source_local_limit,
+            start,
+            count,
+            ordinal + u32_value(1)
+        )
     } else { Result::Ok(()) }
 }
 
@@ -5654,7 +5655,8 @@ write_call_operands(
     count: u32,
     ordinal: u32
 ) -> Result<(), ElaborationError> {
-    if(ordinal < count) { handle write_operand_expression(
+    if(ordinal < count) {
+        try(write_operand_expression(
             output,
             source,
             declarations,
@@ -5665,20 +5667,19 @@ write_call_operands(
                 usize_from_u32(start + ordinal)
             ),
             source_local_limit
-        ) {
-            Result::Err(found) => Result::Err(found),
-            Result::Ok(_) => write_call_operands(
-                output,
-                source,
-                declarations,
-                resolved,
-                body,
-                source_local_limit,
-                start,
-                count,
-                ordinal + u32_value(1)
-            )
-        } } else { Result::Ok(()) }
+        ), @write_call_operands);
+        write_call_operands(
+            output,
+            source,
+            declarations,
+            resolved,
+            body,
+            source_local_limit,
+            start,
+            count,
+            ordinal + u32_value(1)
+        )
+    } else { Result::Ok(()) }
 }
 
 leading_let_count(
@@ -5810,7 +5811,7 @@ write_block_statements(
                         local_id
                     ))
                 );
-                handle write_computation_expression(
+                try(write_computation_expression(
                     output,
                     source,
                     declarations,
@@ -5819,19 +5820,17 @@ write_block_statements(
                     initializer,
                     source_local_limit,
                     false
-                ) {
-                    Result::Err(found) => Result::Err(found),
-                    Result::Ok(_) => write_block_statements(
-                        output,
-                        source,
-                        declarations,
-                        resolved,
-                        body,
-                        remainder,
-                        source_local_limit,
-                        tail_position
-                    )
-                }
+                ), @write_block_statements);
+                write_block_statements(
+                    output,
+                    source,
+                    declarations,
+                    resolved,
+                    body,
+                    remainder,
+                    source_local_limit,
+                    tail_position
+                )
             } else { if(computation_uses_local(
                     body,
                     remainder,
@@ -5844,7 +5843,7 @@ write_block_statements(
                         local
                     )) } else {
                     ByteBuf::push(&mut *output, 2);
-                    handle write_computation_expression(
+                    try(write_computation_expression(
                         output,
                         source,
                         declarations,
@@ -5853,19 +5852,17 @@ write_block_statements(
                         initializer,
                         source_local_limit,
                         false
-                    ) {
-                        Result::Err(found) => Result::Err(found),
-                        Result::Ok(_) => write_block_statements(
-                            output,
-                            source,
-                            declarations,
-                            resolved,
-                            body,
-                            remainder,
-                            source_local_limit,
-                            tail_position
-                        )
-                    }
+                    ), @write_block_statements);
+                    write_block_statements(
+                        output,
+                        source,
+                        declarations,
+                        resolved,
+                        body,
+                        remainder,
+                        source_local_limit,
+                        tail_position
+                    )
                 } }
         },
         _ => write_computation_expression(
@@ -6081,24 +6078,24 @@ write_functions(
 ) -> Result<(), u8> {
     if(index < super::scanner::shell_count(declarations)) { handle super::scanner::shell_at(declarations, index) {
             Result::Err(_) => Result::Err(3),
-            Result::Ok(shell) => if(super::scanner::shell_kind_code(shell) == u8_value(12)) { handle write_function(
+            Result::Ok(shell) => if(super::scanner::shell_kind_code(shell) == u8_value(12)) {
+                try(write_function(
                     output,
                     original,
                     headers,
                     declarations,
                     interfaces,
                     index
-                ) {
-                    Result::Err(status) => Result::Err(status),
-                    Result::Ok(_) => write_functions(
-                        output,
-                        original,
-                        headers,
-                        declarations,
-                        interfaces,
-                        index + usize_value(1)
-                    )
-                } } else { write_functions(
+                ), @write_functions);
+                write_functions(
+                    output,
+                    original,
+                    headers,
+                    declarations,
+                    interfaces,
+                    index + usize_value(1)
+                )
+            } else { write_functions(
                     output,
                     original,
                     headers,

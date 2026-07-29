@@ -24175,6 +24175,21 @@ impl<'a> CoreLowerer<'a> {
         expression.reference_fields = fields;
     }
 
+    fn merge_reference_fields(
+        fields: &mut BTreeMap<Vec<u32>, core::ReferenceOrigin>,
+        incoming: BTreeMap<Vec<u32>, core::ReferenceOrigin>,
+    ) -> bool {
+        for (path, origin) in incoming {
+            if let Some(existing) = fields.get(&path)
+                && existing != &origin
+            {
+                return false;
+            }
+            fields.insert(path, origin);
+        }
+        true
+    }
+
     fn projected_reference_fields(
         fields: &BTreeMap<Vec<u32>, core::ReferenceOrigin>,
         field: u32,
@@ -32505,14 +32520,16 @@ impl<'a> CoreLowerer<'a> {
                     };
                     self.validate_anonymous_use(&value, 1, "typed label result")?;
                     self.validate_leave_cleanup(&destination, span)?;
-                    let references = Self::expression_reference_fields(&value);
-                    if let Some(previous) = &destination.transferred_references
-                        && previous != &references
-                    {
-                        return Err(self.borrow_error(
-                            span,
-                            "label-call edges to one reference-bearing destination have incompatible origins",
-                        ));
+                    let mut references = Self::expression_reference_fields(&value);
+                    if let Some(previous) = &destination.transferred_references {
+                        let mut merged = previous.clone();
+                        if !Self::merge_reference_fields(&mut merged, references) {
+                            return Err(self.borrow_error(
+                                span,
+                                "label-call edges to one reference-bearing destination have incompatible origins",
+                            ));
+                        }
+                        references = merged;
                     }
                     destination.transferred_references = Some(references);
                     self.active_labels
@@ -34841,13 +34858,16 @@ impl<'a> CoreLowerer<'a> {
                             | specialization::BodyInstanceKey::Closure(_) => None,
                         });
                 let reference_fields = match (normal_references, completed.transferred_references) {
-                    (Some(normal), Some(transferred)) if normal != transferred => {
-                        return Err(self.borrow_error(
-                            span,
-                            "normal and leave exits of a reference-bearing label destination have incompatible origins",
-                        ));
+                    (Some(mut normal), Some(transferred)) => {
+                        if !Self::merge_reference_fields(&mut normal, transferred) {
+                            return Err(self.borrow_error(
+                                span,
+                                "normal and leave exits of a reference-bearing label destination have incompatible origins",
+                            ));
+                        }
+                        normal
                     }
-                    (Some(normal), _) => normal,
+                    (Some(normal), None) => normal,
                     (_, Some(transferred)) => transferred,
                     (None, None) => BTreeMap::new(),
                 };
