@@ -36516,14 +36516,14 @@ impl<'a> CoreLowerer<'a> {
             self.current_point = points[index];
             let last = index + 1 == statements.len();
             self.inferred_final_uses = match statement {
-                Stmt::Let { value, .. } | Stmt::Expr(value) | Stmt::Assign { value, .. } => {
-                    straight_line_final_uses(
-                        value,
-                        &liveness.live_out[&points[index]],
-                        self.program,
-                    )
-                }
-                Stmt::Deconstruct { .. } => BTreeSet::new(),
+                Stmt::Let { value, .. }
+                | Stmt::Deconstruct { value, .. }
+                | Stmt::Expr(value)
+                | Stmt::Assign { value, .. } => straight_line_final_uses(
+                    value,
+                    &liveness.live_out[&points[index]],
+                    self.program,
+                ),
             };
             match statement {
                 Stmt::Let { name, value, span } => {
@@ -36604,36 +36604,96 @@ impl<'a> CoreLowerer<'a> {
                     span,
                     ..
                 } => {
-                    let place = match &value.kind {
-                        ExprKind::Variable(path) => path,
-                        ExprKind::Move(operand) => {
-                            let ExprKind::Variable(path) = &operand.kind else {
-                                return Err(vec![type_error(
-                                    value.span,
-                                    "ownership deconstruction requires `move` to name one whole owned local",
-                                )]);
-                            };
-                            path
-                        }
-                        _ => {
+                    let source_place = match &value.kind {
+                        ExprKind::Variable(path) if path.len() == 1 => Some(path),
+                        ExprKind::Move(operand) => match &operand.kind {
+                            ExprKind::Variable(path) if path.len() == 1 => Some(path),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    let (source_name, source) = if let Some(place) = source_place {
+                        let source_name = place[0].as_ref();
+                        let Some(source) = self.locals.get(source_name).cloned() else {
                             return Err(vec![type_error(
                                 value.span,
-                                "ownership deconstruction requires a whole owned local on the right-hand side",
+                                format!(
+                                    "`{source_name}` is not an owned local in this source scope"
+                                ),
                             )]);
+                        };
+                        (source_name.to_owned(), source)
+                    } else {
+                        let expected = ty
+                            .as_ref()
+                            .and_then(|name| self.nominals.get(name))
+                            .map(|info| info.id);
+                        let temporary_value = self.expression(value, expected)?;
+                        if temporary_value.ty == NEVER {
+                            if last {
+                                tail = temporary_value;
+                            } else {
+                                lowered.push(core::Stmt::Expr(temporary_value));
+                            }
+                            self.inferred_final_uses.clear();
+                            continue;
                         }
-                    };
-                    if place.len() != 1 {
-                        return Err(vec![type_error(
-                            value.span,
-                            "ownership deconstruction requires one unqualified owned local",
-                        )]);
-                    }
-                    let source_name = place[0].as_ref();
-                    let Some(source) = self.locals.get(source_name).cloned() else {
-                        return Err(vec![type_error(
-                            value.span,
-                            format!("`{source_name}` is not an owned local in this source scope"),
-                        )]);
+                        let local = self.next_local;
+                        self.next_local += 1;
+                        let mut owns_loan =
+                            matches!(
+                                &temporary_value.kind,
+                                core::ExprKind::Borrow { .. }
+                                    | core::ExprKind::ProjectBorrow { .. }
+                                    | core::ExprKind::TemporaryProjectBorrow { .. }
+                                    | core::ExprKind::Reborrow { .. }
+                                    | core::ExprKind::Local { copy: true, .. }
+                                    | core::ExprKind::Call { .. }
+                                    | core::ExprKind::Construct { .. }
+                                    | core::ExprKind::Block { .. }
+                            ) && !Self::expression_reference_fields(&temporary_value).is_empty();
+                        if matches!(
+                            &temporary_value.kind,
+                            core::ExprKind::Borrow { .. }
+                                | core::ExprKind::ProjectBorrow { .. }
+                                | core::ExprKind::TemporaryProjectBorrow { .. }
+                                | core::ExprKind::Reborrow { .. }
+                        ) {
+                            for origin in
+                                Self::expression_reference_fields(&temporary_value).into_values()
+                            {
+                                self.register_loan(origin);
+                            }
+                        }
+                        if let Some(source) = match &temporary_value.kind {
+                            core::ExprKind::Local { local, copy: false }
+                            | core::ExprKind::Move { local } => Some(*local),
+                            _ => None,
+                        } && let Some(source) = self
+                            .locals
+                            .values_mut()
+                            .find(|candidate| candidate.local == source)
+                        {
+                            owns_loan = source.owns_loan;
+                            source.owns_loan = false;
+                        }
+                        let source = CoreLocal {
+                            local,
+                            ty: temporary_value.ty,
+                            reference: temporary_value.reference.clone(),
+                            reference_fields: temporary_value.reference_fields.clone(),
+                            owns_loan,
+                        };
+                        self.owner_types.insert(local, temporary_value.ty);
+                        introduced.push(local);
+                        lowered.push(core::Stmt::Let {
+                            local,
+                            name: "<deconstruction temporary>".to_owned(),
+                            ty: temporary_value.ty,
+                            span: value.span,
+                            value: temporary_value,
+                        });
+                        ("<deconstruction temporary>".to_owned(), source)
                     };
                     let (declared, aggregate_name, nominal_id) = if let Some(ty) = ty {
                         let info = self.nominals.get(ty).cloned().or_else(|| {

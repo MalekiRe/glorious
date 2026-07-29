@@ -1536,81 +1536,118 @@ impl TypedProgram {
                         tail: lowered_tail,
                     },
                 ) => {
-                    let structural = statements
-                        .iter()
-                        .filter(|statement| !matches!(statement, core::Stmt::EndBorrow { .. }))
-                        .collect::<Vec<_>>();
+                    let mut structural = Vec::new();
+                    let mut statement_index = 0;
+                    while statement_index < statements.len() {
+                        let statement = &statements[statement_index];
+                        if matches!(statement, core::Stmt::EndBorrow { .. }) {
+                            statement_index += 1;
+                            continue;
+                        }
+                        if let core::Stmt::Let {
+                            local, name, value, ..
+                        } = statement
+                            && name == "<deconstruction temporary>"
+                            && matches!(
+                                statements.get(statement_index + 1),
+                                Some(core::Stmt::Deconstruct { source, .. })
+                                    if source == local
+                            )
+                        {
+                            structural.push((statement, Some(value)));
+                            statement_index += 2;
+                            continue;
+                        }
+                        structural.push((statement, None));
+                        statement_index += 1;
+                    }
                     values.len() == structural.len()
-                        && values
-                            .iter()
-                            .zip(structural)
-                            .all(|(left, statement)| match statement {
-                                core::Stmt::Let { value, .. } | core::Stmt::Expr(value) => {
-                                    expression(
+                        && values.iter().zip(structural).all(
+                            |(left, (statement, synthetic_value))| {
+                                if let Some(value) = synthetic_value {
+                                    return expression(
                                         left,
                                         value,
                                         type_id,
                                         declaration_id,
                                         nominal_id,
                                         primitive_id,
-                                    )
+                                    );
                                 }
-                                core::Stmt::Deconstruct { source, .. } => {
-                                    matches!(
-                                        &left.kind,
-                                        TypedExprKind::Local(local) if local.ordinal == *source
-                                    ) || matches!(&left.kind, TypedExprKind::Unsupported(_))
-                                        || matches!(
-                                            &left.ty,
-                                            Some(ProvisionalType::Nominal(nominal))
-                                                if nominal_id(nominal).is_none()
-                                        )
-                                }
-                                core::Stmt::Assign {
-                                    destination, value, ..
-                                } => {
-                                    let TypedExprKind::EffectBoundary(children) = &left.kind else {
-                                        return false;
-                                    };
-                                    children.first().is_some_and(|rhs| {
+                                match statement {
+                                    core::Stmt::Let { value, .. } | core::Stmt::Expr(value) => {
                                         expression(
-                                            rhs,
+                                            left,
                                             value,
                                             type_id,
                                             declaration_id,
                                             nominal_id,
                                             primitive_id,
                                         )
-                                    }) && match &destination.root {
-                                        core::AssignmentRoot::Local { .. } => children.len() == 1,
-                                        core::AssignmentRoot::DereferenceLocal { .. } => {
-                                            // A projected assignment through
-                                            // a named `&mut` local may be
-                                            // written with field auto-deref
-                                            // (`owner.field = value`). The
-                                            // provisional tree then has no
-                                            // explicit dereference child even
-                                            // though Core canonicalizes both
-                                            // spellings to DereferenceLocal.
-                                            matches!(children.len(), 1 | 2)
-                                        }
-                                        core::AssignmentRoot::Dereference { reference, .. } => {
-                                            children.len() == 2
-                                                && expression(
-                                                    &children[1],
-                                                    reference,
-                                                    type_id,
-                                                    declaration_id,
-                                                    nominal_id,
-                                                    primitive_id,
-                                                )
+                                    }
+                                    core::Stmt::Deconstruct { source, .. } => {
+                                        matches!(
+                                            &left.kind,
+                                            TypedExprKind::Local(local) if local.ordinal == *source
+                                        ) || matches!(&left.kind, TypedExprKind::Unsupported(_))
+                                            || matches!(
+                                                &left.ty,
+                                                Some(ProvisionalType::Nominal(nominal))
+                                                    if nominal_id(nominal).is_none()
+                                            )
+                                    }
+                                    core::Stmt::Assign {
+                                        destination, value, ..
+                                    } => {
+                                        let TypedExprKind::EffectBoundary(children) = &left.kind
+                                        else {
+                                            return false;
+                                        };
+                                        children.first().is_some_and(|rhs| {
+                                            expression(
+                                                rhs,
+                                                value,
+                                                type_id,
+                                                declaration_id,
+                                                nominal_id,
+                                                primitive_id,
+                                            )
+                                        }) && match &destination.root {
+                                            core::AssignmentRoot::Local { .. } => {
+                                                children.len() == 1
+                                            }
+                                            core::AssignmentRoot::DereferenceLocal { .. } => {
+                                                // A projected assignment through
+                                                // a named `&mut` local may be
+                                                // written with field auto-deref
+                                                // (`owner.field = value`). The
+                                                // provisional tree then has no
+                                                // explicit dereference child even
+                                                // though Core canonicalizes both
+                                                // spellings to DereferenceLocal.
+                                                matches!(children.len(), 1 | 2)
+                                            }
+                                            core::AssignmentRoot::Dereference {
+                                                reference, ..
+                                            } => {
+                                                children.len() == 2
+                                                    && expression(
+                                                        &children[1],
+                                                        reference,
+                                                        type_id,
+                                                        declaration_id,
+                                                        nominal_id,
+                                                        primitive_id,
+                                                    )
+                                            }
                                         }
                                     }
+                                    core::Stmt::EndBorrow { .. } => unreachable!(
+                                        "synthetic end-borrow statements are filtered structurally"
+                                    ),
                                 }
-                                core::Stmt::EndBorrow { .. } => unreachable!(
-                                    "synthetic end-borrow statements are filtered structurally"
-                                ),
-                            })
+                            },
+                        )
                         && expression(
                             tail,
                             lowered_tail,
@@ -3353,7 +3390,34 @@ impl<'a> Typer<'a> {
                 Stmt::Deconstruct {
                     ty, fields, value, ..
                 } => {
-                    let value = self.expression(value, None);
+                    let whole_local = match &value.kind {
+                        ExprKind::Variable(path) => path.len() == 1,
+                        ExprKind::Move(operand) => {
+                            matches!(&operand.kind, ExprKind::Variable(path) if path.len() == 1)
+                        }
+                        _ => false,
+                    };
+                    let nominal_expected = ty.as_ref().and_then(|name| {
+                        let key = NominalInstanceKey::monomorphic(name);
+                        self.tables
+                            .nominals
+                            .contains_key(&key)
+                            .then_some(ProvisionalType::Nominal(key))
+                    });
+                    let value = self.expression(value, nominal_expected.as_ref());
+                    if value.ty.as_ref() == Some(&predefined(NEVER)) {
+                        if last {
+                            tail = value;
+                        } else {
+                            values.push(value);
+                        }
+                        continue;
+                    }
+                    if !whole_local {
+                        // Core materializes an owned rvalue into one hygienic
+                        // local immediately before deconstructing it.
+                        self.next_local += 1;
+                    }
                     if let Some(ty) = ty {
                         let key = NominalInstanceKey::monomorphic(ty);
                         if value.ty.as_ref() == Some(&ProvisionalType::Nominal(key.clone()))

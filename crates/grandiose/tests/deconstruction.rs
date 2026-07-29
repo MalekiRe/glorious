@@ -291,6 +291,166 @@ fn exhaustive_tuple_deconstruction_lowers_through_core_mir_and_vm() {
 }
 
 #[test]
+fn owned_rvalue_deconstruction_runs_and_consumes_exact_linear_payloads() {
+    let source = r#"
+        struct Ticket { marker: i64 }
+        impl Use<[1,1]> for Ticket {}
+
+        struct Parcel { value: i64 }
+
+        make_pair() -> (Ticket, i64) {
+            (Ticket { marker: 40 }, 2)
+        }
+        make_parcel() -> Parcel {
+            Parcel { value: 42 }
+        }
+        tuple_answer() -> i64 {
+            let (ticket, amount) = make_pair();
+            let Ticket { marker } = ticket;
+            marker + amount
+        }
+        struct_answer() -> i64 {
+            let Parcel { value } = make_parcel();
+            value
+        }
+        main() -> { tuple_answer(); struct_answer(); () }
+    "#;
+
+    run_i64_at_all_levels(
+        "rvalue-tuple-deconstruct.glorious",
+        source,
+        "tuple_answer",
+        42,
+    );
+    run_i64_at_all_levels(
+        "rvalue-struct-deconstruct.glorious",
+        source,
+        "struct_answer",
+        42,
+    );
+
+    let phases = compile_source_to_phases_with_options(
+        "rvalue-deconstruct-once.glorious",
+        source,
+        CompileOptions {
+            optimization_level: OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let answer = phases
+        .mir
+        .functions
+        .iter()
+        .find(|function| function.name == "tuple_answer")
+        .unwrap();
+    assert_eq!(
+        answer
+            .blocks
+            .iter()
+            .filter(|block| {
+                matches!(
+                    block.terminator,
+                    grandiose::compiler_mir::Terminator::Call { .. }
+                )
+            })
+            .count(),
+        1,
+        "the rvalue producer must be evaluated exactly once"
+    );
+}
+
+#[test]
+fn deconstruction_rvalue_participates_in_final_use_transfer_inference() {
+    let source = r#"
+        struct Relevant { marker: i64 }
+        impl Use<[1,infinity]> for Relevant {}
+
+        pair(value: Relevant) -> (Relevant, i64) { (value, 2) }
+        answer(value: Relevant) -> i64 {
+            let (retained, amount) = pair(value);
+            let Relevant { marker } = retained;
+            marker + amount
+        }
+        main() -> { () }
+    "#;
+    let phases = compile_source_to_phases_with_options(
+        "rvalue-deconstruct-final-use.glorious",
+        source,
+        CompileOptions {
+            optimization_level: OptimizationLevel::O0,
+        },
+    )
+    .unwrap();
+    let answer = phases
+        .mir
+        .functions
+        .iter()
+        .find(|function| function.name == "answer")
+        .unwrap();
+    assert!(answer.blocks.iter().any(|block| {
+        matches!(
+            &block.terminator,
+            grandiose::compiler_mir::Terminator::Call { args, .. }
+                if args.iter().any(|argument| {
+                    argument.mode == grandiose::compiler_mir::UseMode::Move
+                })
+        )
+    }));
+}
+
+#[test]
+fn owned_rvalue_deconstruction_transfers_reference_origins() {
+    let source = r#"
+        borrowed_pair(value: &mut i64) -> (&mut i64, i64) { (value, 2) }
+        answer() -> i64 {
+            let number = 40;
+            let (borrowed, amount) = borrowed_pair(&mut number);
+            *borrowed + amount
+        }
+        main() -> { answer(); () }
+    "#;
+    run_i64_at_all_levels(
+        "rvalue-deconstruct-reference.glorious",
+        source,
+        "answer",
+        42,
+    );
+}
+
+#[test]
+fn owned_rvalue_deconstruction_still_rejects_custom_drop_aggregates() {
+    let source = r#"
+        struct Guard { marker: i64 }
+        impl Drop for Guard { drop(&mut self) -> { self.marker; () } }
+        make() -> Guard { Guard { marker: 42 } }
+        bad() -> i64 {
+            let Guard { marker } = make();
+            marker
+        }
+        main() -> { () }
+    "#;
+    let errors =
+        compile_source_to_bytecode("rvalue-deconstruct-drop.glorious", source).unwrap_err();
+    assert!(errors.iter().any(|error| {
+        error.message.contains("custom Drop") && error.message.contains("deconstruct")
+    }));
+}
+
+#[test]
+fn diverging_rvalue_deconstruction_remains_diverging() {
+    let source = r#"
+        struct Pair { left: i64, right: i64 }
+        stop() -> ! {
+            let Pair { left: _, right: _ } = abort();
+        }
+        main() -> { () }
+    "#;
+    let artifact =
+        compile_source_to_bytecode("rvalue-deconstruct-diverging.glorious", source).unwrap();
+    verify(artifact).unwrap();
+}
+
+#[test]
 fn tuple_deconstruction_rejects_excess_arity_and_duplicate_bindings() {
     let cases = [
         (
@@ -499,7 +659,7 @@ fn exact_zero_field_with_observable_drop_keeps_its_runtime_slot() {
         impl Use<[0,0]> for Proof {}
         impl Drop for Proof { drop(&mut self) -> { self.marker; () } }
         struct Envelope { proof: Proof }
-        discard(value: Envelope) -> {
+        discard_envelope(value: Envelope) -> {
             let Envelope {} = value;
             ()
         }
@@ -521,7 +681,7 @@ fn exact_zero_field_with_observable_drop_keeps_its_runtime_slot() {
     let function = artifact
         .functions
         .iter()
-        .find(|function| function.name == "discard")
+        .find(|function| function.name == "discard_envelope")
         .unwrap();
     let code = &artifact.code
         [function.code_start as usize..(function.code_start + function.code_len) as usize];
@@ -544,7 +704,7 @@ fn discarded_runtime_fields_drop_in_reverse_declaration_order() {
         impl Use<[0,0]> for Child {}
         impl Drop for Child { drop(&mut self) -> { self.marker; () } }
         struct Bundle { first: Child, second: Child }
-        discard(value: Bundle) -> {
+        discard_bundle(value: Bundle) -> {
             let Bundle {} = value;
             ()
         }
@@ -554,7 +714,7 @@ fn discarded_runtime_fields_drop_in_reverse_declaration_order() {
     let function = artifact
         .functions
         .iter()
-        .find(|function| function.name == "discard")
+        .find(|function| function.name == "discard_bundle")
         .unwrap();
     let code = &artifact.code
         [function.code_start as usize..(function.code_start + function.code_len) as usize];
