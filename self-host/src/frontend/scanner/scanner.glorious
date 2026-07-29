@@ -519,7 +519,7 @@ named_braced(
     Result::Ok(Classification {
         kind: kind,
         kind_code: kind_code,
-        name: Result::Ok(move name),
+        name: Result::Ok( name),
         style: 2
     })
 }

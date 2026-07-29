@@ -913,9 +913,9 @@ scan_number(value: &mut Lexer) -> Result<(), LexError> {
                  } else {
                      scan_digits(&mut *value, base_code, start)
                  };
-    let digit_span = try(move digits, @scan_number);
+    let digit_span = try( digits, @scan_number);
     let fraction_span = try(
-        scan_fraction(&mut *value, base_code, move after_projection_dot),
+        scan_fraction(&mut *value, base_code,  after_projection_dot),
         @scan_number
     );
     let exponent_span = try(
@@ -1508,7 +1508,7 @@ scan_byte_literal(value: &mut Lexer) -> Result<(), LexError> {
             }
         }
     };
-    let byte = try(move decoded, @scan_byte_literal);
+    let byte = try( decoded, @scan_byte_literal);
     if(peek_is(&*value, 0, 39)) {
             advance(&mut *value, 1);
             push( value, TokenKind::Byte(move byte), 7, start);

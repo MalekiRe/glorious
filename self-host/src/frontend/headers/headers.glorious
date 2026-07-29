@@ -797,7 +797,7 @@ parse_reference_kind(
         header_range(0, 0),
         header_range(edge_start, edge_start + usize_value(1)),
         Result::Err(()),
-        move lifetime
+         lifetime
     ))
 }
 
@@ -1052,11 +1052,11 @@ parse_callable(
     parse_callable_suffix(
         value,
         shell,
-        move public,
+         public,
         start,
-        move name,
-        move generics,
-        move parameters
+         name,
+         generics,
+         parameters
     )
 }
 
@@ -1555,11 +1555,11 @@ parse_sum_body(
         order_kinds,
         order_indices,
         shell,
-        move public,
+         public,
         start,
         whole_end,
-        move name,
-        move generics,
+         name,
+         generics,
         variant_start
     );
     Result::Ok(())

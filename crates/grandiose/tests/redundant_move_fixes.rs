@@ -157,6 +157,89 @@ fn bare_final_copy_use_lowers_as_transfer() {
 }
 
 #[test]
+fn compiler_owned_try_wrappers_preserve_final_use_transfer() {
+    let source = r#"
+        struct Relevant { value: i64 }
+        impl Use<[0,infinity]> for Relevant {}
+
+        forward(
+            status: Result<(), i64>,
+            value: Relevant
+        ) -> Result<Relevant, i64> {
+            try(status, @forward);
+            Result::Ok(value)
+        }
+        combine(
+            status: Result<(), i64>,
+            value: Relevant
+        ) -> Result<((), Relevant), i64> {
+            Result::Ok((try(status, @combine), move value))
+        }
+        observe(
+            value: Relevant,
+            status: Result<(), i64>
+        ) -> Result<(), i64> {
+            value;
+            status
+        }
+        preserve_after_try_argument(
+            status: Result<(), i64>,
+            value: Relevant
+        ) -> Result<Relevant, i64> {
+            try(observe(value, status), @preserve_after_try_argument);
+            Result::Ok(value)
+        }
+        main() -> { () }
+    "#;
+    let phases = compile_source_to_phases("try-final-use-transfer.glorious", source).unwrap();
+    let diagnostic = phases
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code.as_deref() == Some(REDUNDANT_MOVE_CODE))
+        .expect("the final sibling after try should receive redundant-move advice");
+    let fix = diagnostic
+        .fix
+        .as_ref()
+        .expect("the advice should be exactly machine-applicable");
+    assert_eq!(&source[fix.span.range()], "move");
+    assert_eq!(fix.replacement, "");
+    for name in ["forward", "combine"] {
+        let function = phases
+            .mir
+            .functions
+            .iter()
+            .find(|function| function.name == name)
+            .unwrap();
+        assert!(
+            function
+                .blocks
+                .iter()
+                .flat_map(|block| &block.statements)
+                .any(|statement| matches!(
+                    statement.kind,
+                    grandiose::compiler_mir::InstructionKind::Move {
+                        src: grandiose::compiler_mir::Operand {
+                            register: 1,
+                            mode: grandiose::compiler_mir::UseMode::Move,
+                        },
+                        ..
+                    }
+                )),
+            "{name} did not transfer its final status argument:\n{}",
+            phases.mir.canonical_text()
+        );
+        assert!(
+            function.blocks.iter().any(|block| matches!(
+                block.terminator,
+                grandiose::compiler_mir::Terminator::Leave { .. }
+            )),
+            "{name}:\n{}",
+            phases.mir.canonical_text()
+        );
+    }
+}
+
+#[test]
 fn final_use_inference_does_not_cross_completion_match_branches() {
     let source = r#"
         preserve(value: Bool) -> Bool {

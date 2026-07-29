@@ -1369,6 +1369,11 @@ struct ActiveLoans {
     unique: bool,
 }
 
+struct TransparentFinalUseLimit {
+    outer_names: BTreeSet<String>,
+    allowed: BTreeSet<(String, usize, usize)>,
+}
+
 struct CoreLowerer<'a> {
     program: &'a Program,
     function_templates: &'a [Function],
@@ -1405,6 +1410,7 @@ struct CoreLowerer<'a> {
     expression_ordinals: BTreeMap<usize, u32>,
     expression_span_ordinals: BTreeMap<(usize, usize), u32>,
     inferred_final_uses: BTreeSet<(String, usize, usize)>,
+    transparent_final_use_limits: Vec<TransparentFinalUseLimit>,
     final_use_control_spans: BTreeSet<(usize, usize)>,
     final_use_barrier_depth: usize,
     final_use_block_depth: usize,
@@ -23846,6 +23852,7 @@ impl<'a> CoreLowerer<'a> {
                 expression_ordinals,
                 expression_span_ordinals,
                 inferred_final_uses: BTreeSet::new(),
+                transparent_final_use_limits: Vec::new(),
                 final_use_control_spans,
                 final_use_barrier_depth: 0,
                 final_use_block_depth: 0,
@@ -24044,6 +24051,7 @@ impl<'a> CoreLowerer<'a> {
                 expression_ordinals: BTreeMap::new(),
                 expression_span_ordinals: BTreeMap::new(),
                 inferred_final_uses: BTreeSet::new(),
+                transparent_final_use_limits: Vec::new(),
                 final_use_control_spans: BTreeSet::new(),
                 final_use_barrier_depth: 0,
                 final_use_block_depth: 0,
@@ -25655,7 +25663,14 @@ impl<'a> CoreLowerer<'a> {
             ])),
             span,
         };
-        self.expression(&fused, expected)
+        let ExprKind::Block(statements) = &fused.kind else {
+            unreachable!("standard try fusion always builds one compiler-owned block")
+        };
+        // This block exists only to evaluate `value` once before the
+        // canonical Ok/Err discrimination. Keep it at the caller's source
+        // block depth so an already-proven final use at the original argument
+        // occurrence remains eligible for transfer inference.
+        self.transparent_block(statements, span, expected)
     }
 
     fn inline_late_generic_call(
@@ -27394,6 +27409,9 @@ impl<'a> CoreLowerer<'a> {
                 Some(specialization::BodyInstanceKey::Closure(_))
             )
             && self.inferred_final_uses.contains(&occurrence)
+            && self.transparent_final_use_limits.iter().all(|limit| {
+                !limit.outer_names.contains(name) || limit.allowed.contains(&occurrence)
+            })
             && (ordinary_straight_line || branch_local)
             && self.is_copy(local.ty)
             && {
@@ -34829,11 +34847,42 @@ impl<'a> CoreLowerer<'a> {
                     outer_locals: self.locals.values().map(|local| local.local).collect(),
                     transferred_references: None,
                 };
+                let current_declaration =
+                    self.body_instance
+                        .as_ref()
+                        .and_then(|instance| match instance {
+                            specialization::BodyInstanceKey::Root(declaration) => Some(declaration),
+                            specialization::BodyInstanceKey::Specialization(key) => {
+                                Some(&key.template)
+                            }
+                            specialization::BodyInstanceKey::Drop(_)
+                            | specialization::BodyInstanceKey::Closure(_) => None,
+                        });
+                let function_boundary = matches!(
+                    &evidence.brand.owner,
+                    typeck::DeclarationKey::Function(name)
+                        if name == label.name.as_ref()
+                            && current_declaration == Some(&evidence.brand.owner)
+                            && self
+                                .function_templates
+                                .iter()
+                                .find(|function| function.name == *name)
+                                .is_some_and(|function| {
+                                    function.span.start == label.span.start
+                                })
+                );
                 let previous = self
                     .active_labels
                     .insert(label.name.to_string(), destination);
-                let lowered_body =
-                    self.with_final_use_barrier(|this| this.expression(body, Some(result)));
+                let lowered_body = if function_boundary {
+                    // The implicit destination is the function's return edge,
+                    // not a source control island. Preserve ordinary source
+                    // liveness inside it; direct LEAVE cleanup is still
+                    // validated by the active destination below.
+                    self.expression(body, Some(result))
+                } else {
+                    self.with_final_use_barrier(|this| this.expression(body, Some(result)))
+                };
                 let completed = self
                     .active_labels
                     .remove(label.name.as_ref())
@@ -34846,17 +34895,6 @@ impl<'a> CoreLowerer<'a> {
                     .then(|| Self::expression_reference_fields(&body))
                     .filter(|fields| !fields.is_empty());
                 let has_inlined_leave = completed.transferred_references.is_some();
-                let current_declaration =
-                    self.body_instance
-                        .as_ref()
-                        .and_then(|instance| match instance {
-                            specialization::BodyInstanceKey::Root(declaration) => Some(declaration),
-                            specialization::BodyInstanceKey::Specialization(key) => {
-                                Some(&key.template)
-                            }
-                            specialization::BodyInstanceKey::Drop(_)
-                            | specialization::BodyInstanceKey::Closure(_) => None,
-                        });
                 let reference_fields = match (normal_references, completed.transferred_references) {
                     (Some(mut normal), Some(transferred)) => {
                         if !Self::merge_reference_fields(&mut normal, transferred) {
@@ -34877,19 +34915,7 @@ impl<'a> CoreLowerer<'a> {
                     core::ExprKind::LabelDestination {
                         label: completed.label,
                         has_leave: !evidence.leaves.is_empty() || has_inlined_leave,
-                        function_boundary: matches!(
-                            &evidence.brand.owner,
-                            typeck::DeclarationKey::Function(name)
-                                if name == label.name.as_ref()
-                                    && current_declaration == Some(&evidence.brand.owner)
-                                    && self
-                                        .function_templates
-                                        .iter()
-                                        .find(|function| function.name == *name)
-                                        .is_some_and(|function| {
-                                            function.span.start == label.span.start
-                                        })
-                        ),
+                        function_boundary,
                         body: Box::new(body),
                     },
                 );
@@ -36760,6 +36786,27 @@ impl<'a> CoreLowerer<'a> {
         let result = self.block_inner(statements, span, expected);
         self.final_use_block_depth -= 1;
         self.inferred_final_uses = saved_final_uses;
+        result
+    }
+
+    fn transparent_block(
+        &mut self,
+        statements: &[Stmt],
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> Result<core::Expr, Vec<Diagnostic>> {
+        let saved_final_uses = std::mem::take(&mut self.inferred_final_uses);
+        self.transparent_final_use_limits
+            .push(TransparentFinalUseLimit {
+                outer_names: self.locals.keys().cloned().collect(),
+                allowed: saved_final_uses,
+            });
+        let result = self.block_inner(statements, span, expected);
+        self.inferred_final_uses = self
+            .transparent_final_use_limits
+            .pop()
+            .expect("transparent final-use limit stack must remain balanced")
+            .allowed;
         result
     }
 
