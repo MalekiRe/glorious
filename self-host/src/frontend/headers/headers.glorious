@@ -8,9 +8,9 @@ pub struct HeaderRange { start: u32, count: u32 }
 
 pub struct HeaderTokenRange { start: usize, end: usize }
 
-pub struct TypeId { index: u32 }
+pub struct TypeTag {}
 
-impl Use<[0, *]> for TypeId {}
+pub type TypeId = Id<TypeTag>;
 
 pub struct NameUse { name: Id<String>, token: usize }
 
@@ -118,7 +118,7 @@ pub struct HeaderIndex {
     callables: Vec<CallableHeader>,
     generic_params: Vec<GenericParam>,
     parameters: Vec<Parameter>,
-    types: Vec<TypeNode>,
+    types: Arena<TypeTag, TypeNode>,
     names: Vec<NameUse>,
     type_edges: Vec<TypeEdge>
 }
@@ -155,7 +155,7 @@ pub range_start(value: &HeaderRange) -> u32 { value.start }
 
 pub range_count(value: &HeaderRange) -> u32 { value.count }
 
-pub type_index(value: &TypeId) -> u32 { value.index }
+pub type_index(value: &TypeId) -> u32 { Id::to_u32(*value) }
 
 pub callable_count(value: &HeaderIndex) -> usize { Vec::len(&value.callables) }
 
@@ -183,7 +183,7 @@ pub fixity_count(value: &NominalIndex) -> usize { Vec::len(&value.fixities.value
 
 variant_arena_count(value: &VariantArena) -> usize { Vec::len(&value.values) }
 
-pub type_count(value: &HeaderIndex) -> usize { Vec::len(&value.types) }
+pub type_count(value: &HeaderIndex) -> usize { Arena::len(&value.types) }
 
 pub parameter_count(value: &HeaderIndex) -> usize { Vec::len(&value.parameters) }
 
@@ -286,7 +286,7 @@ pub parameter_name_raw(value: &Parameter) -> u32 {
 
 pub parameter_name_token(value: &Parameter) -> usize { value.name_token }
 
-pub parameter_type_index(value: &Parameter) -> u32 { value.ty.index }
+pub parameter_type_index(value: &Parameter) -> u32 { Id::to_u32(value.ty) }
 
 pub callable_generic_count(value: &CallableHeader) -> u32 {
     value.generics.count
@@ -299,17 +299,21 @@ pub callable_has_effects(value: &CallableHeader) -> Bool {
 pub callable_result_index_plus_one(value: &CallableHeader) -> u32 {
     handle Option::as_ref(&value.result) {
         Result::Err(_) => 0,
-        Result::Ok(result) => result.index + wrapping_convert_to_u32(1)
+        Result::Ok(result) => Id::to_u32(*result) + wrapping_convert_to_u32(1)
     }
 }
 
+type_node_at_raw<'a>(value: &'a HeaderIndex, index: u32) -> &'a TypeNode {
+    Arena::index(&value.types, Id::from_u32(index))
+}
+
 pub type_kind_code_at(value: &HeaderIndex, index: u32) -> u8 {
-    let node = Vec::index(&value.types, wrapping_convert_to_usize(index));
+    let node = type_node_at_raw(value, index);
     node.kind_code
 }
 
 pub type_child_count_at(value: &HeaderIndex, index: u32) -> u32 {
-    let node = Vec::index(&value.types, wrapping_convert_to_usize(index));
+    let node = type_node_at_raw(value, index);
     node.children.count
 }
 
@@ -318,26 +322,27 @@ pub type_child_index_at(
     index: u32,
     ordinal: u32
 ) -> u32 {
-    let node = Vec::index(&value.types, wrapping_convert_to_usize(index));
+    let node = type_node_at_raw(value, index);
     type_edge_index_at(value, node.children.start + ordinal)
 }
 
 pub type_edge_index_at(value: &HeaderIndex, index: u32) -> u32 {
-    Vec::index(
+    let edge = Vec::index(
         &value.type_edges,
         wrapping_convert_to_usize(index)
-    ).value.index
+    );
+    Id::to_u32(edge.value)
 }
 
 pub type_constructor_index_plus_one_at(
     value: &HeaderIndex,
     index: u32
 ) -> u32 {
-    let node = Vec::index(&value.types, wrapping_convert_to_usize(index));
+    let node = type_node_at_raw(value, index);
     handle Option::as_ref(&node.constructor) {
         Result::Err(_) => 0,
         Result::Ok(found) =>
-            found.index + wrapping_convert_to_u32(1)
+            Id::to_u32(*found) + wrapping_convert_to_u32(1)
     }
 }
 
@@ -345,7 +350,7 @@ pub type_lifetime_name_raw_plus_one_at(
     value: &HeaderIndex,
     index: u32
 ) -> u32 {
-    let node = Vec::index(&value.types, wrapping_convert_to_usize(index));
+    let node = type_node_at_raw(value, index);
     handle Option::as_ref(&node.lifetime) {
         Result::Err(_) => 0,
         Result::Ok(found) =>
@@ -357,7 +362,7 @@ pub type_lifetime_token_plus_one_at(
     value: &HeaderIndex,
     index: u32
 ) -> usize {
-    let node = Vec::index(&value.types, wrapping_convert_to_usize(index));
+    let node = type_node_at_raw(value, index);
     handle Option::as_ref(&node.lifetime) {
         Result::Err(_) => 0,
         Result::Ok(found) => found.token + 1
@@ -365,7 +370,7 @@ pub type_lifetime_token_plus_one_at(
 }
 
 pub type_name_count_at(value: &HeaderIndex, index: u32) -> u32 {
-    let node = Vec::index(&value.types, wrapping_convert_to_usize(index));
+    let node = type_node_at_raw(value, index);
     node.names.count
 }
 
@@ -374,7 +379,7 @@ pub type_name_raw_at(
     index: u32,
     ordinal: u32
 ) -> u32 {
-    let node = Vec::index(&value.types, wrapping_convert_to_usize(index));
+    let node = type_node_at_raw(value, index);
     let name = Vec::index(
         &value.names,
         wrapping_convert_to_usize(node.names.start + ordinal)
@@ -387,7 +392,7 @@ pub type_name_token_at(
     index: u32,
     ordinal: u32
 ) -> usize {
-    let node = Vec::index(&value.types, wrapping_convert_to_usize(index));
+    let node = type_node_at_raw(value, index);
     let name = Vec::index(
         &value.names,
         wrapping_convert_to_usize(node.names.start + ordinal)
@@ -412,7 +417,12 @@ pub fixity_operator_start(value: &FixityHeader) -> usize {
 pub fixity_operator_end(value: &FixityHeader) -> usize { value.operator.end }
 
 pub type_at<'a>(value: &'a HeaderIndex, index: usize) -> Option<&'a TypeNode> {
-    Vec::get(&value.types, index)
+    if(index < Arena::len(&value.types)) {
+        Arena::get(
+            &value.types,
+            Id::from_u32(wrapping_convert_to_u32(index))
+        )
+    } else { None }
 }
 
 pub alias_generics(value: &TypeAliasHeader) -> &HeaderRange { &value.generics }
@@ -593,14 +603,14 @@ push_type(
     value: &mut Parser,
     kind_code: u8,
     start: usize,
+    related: usize,
     names: HeaderRange,
     children: HeaderRange,
     constructor: Option<TypeId>,
     lifetime: Option<NameUse>
-) -> TypeId {
-    let index = Vec::len(&value.output.types);
+) -> Result<TypeId, HeaderError> {
     let end = value.cursor;
-    Vec::push(
+    handle Arena::alloc(
         &mut value.output.types,
         TypeNode {
             kind_code: kind_code,
@@ -610,8 +620,10 @@ push_type(
             constructor: move constructor,
             lifetime: move lifetime
         }
-    );
-    TypeId { index: wrapping_convert_to_u32(index) }
+    ) {
+        Result::Err(_) => Result::Err(header_error(14, start, related)),
+        Result::Ok(id) => Result::Ok(id)
+    }
 }
 
 append_edges(
@@ -678,14 +690,18 @@ parse_path_tail(
     } else {
         let name_end = Vec::len(&value.output.names);
         let edge_position = Vec::len(&value.output.type_edges);
-        let path = push_type(
-            value,
-            1,
-            start,
-            header_range(name_start, name_end),
-            header_range(edge_position, edge_position),
-            Result::Err(()),
-            Result::Err(())
+        let path = try(
+            push_type(
+                value,
+                1,
+                start,
+                related,
+                header_range(name_start, name_end),
+                header_range(edge_position, edge_position),
+                Result::Err(()),
+                Result::Err(())
+            ),
+            @parse_path_tail
         );
         parse_application(value, related, start, move path)
     }
@@ -713,10 +729,11 @@ parse_application(
             0,
             0
         );
-        Result::Ok(push_type(
+        push_type(
             value,
             5,
             start,
+            related,
             header_range(0, 0),
             header_range(
                 edge_start,
@@ -724,7 +741,7 @@ parse_application(
             ),
             Result::Ok(move constructor),
             Result::Err(())
-        ))
+        )
         } } else { Result::Ok(move constructor) }
 }
 
@@ -790,15 +807,16 @@ parse_reference_kind(
         &mut value.output.type_edges,
         TypeEdge { value: move referent, position: 0 }
     );
-    Result::Ok(push_type(
+    push_type(
         value,
         kind_code,
         start,
+        related,
         header_range(0, 0),
         header_range(edge_start, edge_start + 1),
         Result::Err(()),
          lifetime
-    ))
+    )
 }
 
 parse_tuple(
@@ -806,7 +824,9 @@ parse_tuple(
     related: usize,
     start: usize
 ) -> Result<TypeId, HeaderError> {
-    if(eat_code(value, 12)) { finish_tuple(value, start, Vec::new()) } else {
+    if(eat_code(value, 12)) {
+        finish_tuple(value, start, related, Vec::new())
+    } else {
         let first = try(parse_type(value, related), @parse_tuple);
         if(eat_code(value, 17)) {
             let elements = Vec::new();
@@ -816,7 +836,7 @@ parse_tuple(
                 @parse_tuple
             );
             try(expect_code(value, 12, 3, related), @parse_tuple);
-            finish_tuple(value, start,  elements)
+            finish_tuple(value, start, related, elements)
         } else {
             try(expect_code(value, 12, 3, related), @parse_tuple);
             Result::Ok(move first)
@@ -827,32 +847,36 @@ parse_tuple(
 finish_tuple(
     value: &mut Parser,
     start: usize,
+    related: usize,
     elements: Vec<TypeId>
 ) -> Result<TypeId, HeaderError> {
     let edge_start = Vec::len(&value.output.type_edges);
     append_edges(&mut value.output.type_edges, &elements, 0, 0);
-    Result::Ok(push_type(
+    let edge_end = Vec::len(&value.output.type_edges);
+    push_type(
         value,
         4,
         start,
+        related,
         header_range(0, 0),
-        header_range(edge_start, Vec::len(&value.output.type_edges)),
+        header_range(edge_start, edge_end),
         Result::Err(()),
         Result::Err(())
-    ))
+    )
 }
 
 parse_type(value: &mut Parser, related: usize) -> Result<TypeId, HeaderError> {
     let start = value.cursor;
-    if(eat_code(value, 38)) { parse_reference(value, related, start) } else { if(eat_code(value, 11)) { parse_tuple(value, related, start) } else { if(eat_code(value, 39)) { Result::Ok(push_type(
+    if(eat_code(value, 38)) { parse_reference(value, related, start) } else { if(eat_code(value, 11)) { parse_tuple(value, related, start) } else { if(eat_code(value, 39)) { push_type(
                     value,
                     6,
                     start,
+                    related,
                     header_range(0, 0),
                     empty_range(&value.output.type_edges),
                     Result::Err(()),
                     Result::Err(())
-                )) } else { parse_path(value, related) } } }
+                ) } else { parse_path(value, related) } } }
 }
 
 parse_generics(value: &mut Parser, related: usize) -> Result<HeaderRange, HeaderError> {
@@ -1789,7 +1813,7 @@ pub parse(
                 callables: Vec::new(),
                 generic_params: Vec::new(),
                 parameters: Vec::new(),
-                types: Vec::new(),
+                types: Arena::new(),
                 names: Vec::new(),
                 type_edges: Vec::new()
             }
@@ -1884,10 +1908,7 @@ write_path_names(
 }
 
 write_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: &TypeId) {
-    let node = Vec::index(
-        &parsed.index.types,
-        wrapping_convert_to_usize(id.index)
-    );
+    let node = Arena::index(&parsed.index.types, *id);
     ByteBuf::push(&mut *output, node.kind_code);
     handle node.kind_code {
         1 => {
