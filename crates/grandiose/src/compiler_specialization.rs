@@ -7461,6 +7461,9 @@ impl<'a> Walker<'a> {
                             .or(obvious_context.as_ref())
                             .or(expected)
                     };
+                    let explicit_unit_context = obvious_context.as_ref().is_some_and(|context| {
+                        context == &ProvisionalType::Predefined("Unit".into())
+                    });
                     let saved_locals = self.locals.clone();
                     let saved_bindings = self.bindings.clone();
                     let saved_active_variants = self.active_variants.clone();
@@ -7536,18 +7539,24 @@ impl<'a> Walker<'a> {
                                 .flatten();
                     }
                     // A bounded trait call may deliberately defer while its
-                    // receiver is symbolic, and a typed global such as the
-                    // library Bool values has no local-expression type of its
-                    // own. In both cases the enclosing bidirectional context
-                    // remains exact. Concrete specialization still visits and
-                    // validates each branch; any real failure is recorded in
-                    // `discovery.errors` before this contextual fallback.
+                    // receiver is symbolic, a typed global such as the library
+                    // Bool values has no local-expression type of its own, and
+                    // a statement block ending in explicit `()` retains that
+                    // exact result even when one preceding expression cannot
+                    // synthesize its type. In all three cases the enclosing
+                    // bidirectional context remains authoritative. Restrict
+                    // the concrete fallback to syntactically explicit Unit
+                    // tails: using an arbitrary expected nominal here would
+                    // conceal conflicting constructor payload inference. A
+                    // concrete incompatible `Some` result is never replaced.
                     if self.symbolic_validation
+                        || explicit_unit_context
                         || self.may_use_bidirectional_result_fallback(positive)
                     {
                         positive_ty = positive_ty.or_else(|| branch_expected.cloned());
                     }
                     if self.symbolic_validation
+                        || explicit_unit_context
                         || self.may_use_bidirectional_result_fallback(negative)
                     {
                         negative_ty = negative_ty.or_else(|| branch_expected.cloned());
@@ -9981,6 +9990,44 @@ mod tests {
              main()->(){()}",
         );
         assert!(discovery.errors.is_empty(), "{:#?}", discovery.errors);
+    }
+
+    #[test]
+    fn ground_refinement_context_preserves_subsequent_generic_call_plans() {
+        let discovery = parse_discovery(
+            "infixr 1 else;
+             enum Result<T,E>{Ok(T),Err(E)}
+             struct Vec<T>{slot:T}
+             struct HashMap<K,V>{item:V}
+             struct FunctionSearch{first_plus_one:u32,count:u32}
+             struct ResolutionIndex{
+                 functions:HashMap<(usize,u32),FunctionSearch>,
+                 callable_by_shell:Vec<Result<u32,()>>
+             }
+             hash_insert<K,V>(value:&mut HashMap<K,V>,key:K,item:V)->(){()}
+             index_callable(index:&mut ResolutionIndex)->(){
+                 if(index.callable_by_shell.slot is Result::Err(_)){
+                     index.callable_by_shell.slot=Result::Ok(7);()
+                 }else{()};
+                 hash_insert(
+                     &mut index.functions,
+                     (3,9),
+                     FunctionSearch{first_plus_one:8,count:1}
+                 );
+                 ()
+             }
+             main()->(){()}",
+        );
+        assert!(discovery.errors.is_empty(), "{:#?}", discovery.errors);
+        assert!(
+            discovery.graph.direct_calls.iter().any(|(site, target)| {
+                site.body
+                    == BodyInstanceKey::Root(DeclarationKey::Function("index_callable".into()))
+                    && target.template == DeclarationKey::Function("hash_insert".into())
+            }),
+            "{}",
+            discovery.graph.canonical_text()
+        );
     }
 
     #[test]
