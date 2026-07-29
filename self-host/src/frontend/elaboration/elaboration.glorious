@@ -2977,28 +2977,6 @@ materialize_operand(
     }
 }
 
-materialize_ordered_operand(
-    value: &mut BodyBuilder,
-    found: Elaborated,
-    wrappers: &mut Vec<LetWrapper>
-) -> CoreValueId {
-    let ty = found.type_id;
-    let computation = as_computation(value, found);
-    let local = push_local_type(
-        &mut value.local_types,
-        Option::Some(ty)
-    );
-    Vec::push(&mut *wrappers, LetWrapper {
-        local: local,
-        initializer: computation
-    });
-    push_value(
-        value,
-        ty,
-        CoreValueKind::Local(local, CoreLocalAccess::Move)
-    )
-}
-
 embed_operand(value: &mut BodyBuilder, found: Elaborated) -> CoreValueId {
     handle found.form {
         ElaboratedForm::Value(core) => core,
@@ -4025,7 +4003,6 @@ elaborate_struct_fields(
     expression: u32,
     nominal: u32,
     ordinal: u32,
-    wrappers: &mut Vec<LetWrapper>,
     seen: &mut Vec<u32>,
     values: &mut Vec<Option<CoreValueId>>
 ) -> Result<(), ElaborationError> {
@@ -4080,14 +4057,10 @@ elaborate_struct_fields(
                     ),
                     Option::Some(type_id_from_u32(field_type))
                 ), @elaborate_struct_fields);
-                // Evaluate named initializers in source order.  Only the
-                // resulting local moves are reordered into declaration order
-                // for the aggregate ABI.
-                let operand = materialize_ordered_operand(
-                    value,
-                    field_value,
-                    wrappers
-                );
+                // Construction fields are canonicalized into declaration
+                // order. Embed computations so their evaluation follows that
+                // same canonical order, matching ordinary Core construction.
+                let operand = embed_operand(value, field_value);
                 *Vec::index_mut(
                     &mut *seen,
                     usize_from_u32(field)
@@ -4107,7 +4080,6 @@ elaborate_struct_fields(
                     expression,
                     nominal,
                     ordinal + u32_value(1),
-                    wrappers,
                     seen,
                     values
                 )
@@ -4184,7 +4156,6 @@ elaborate_struct(
                         expression,
                         nominal,
                         0,
-                        &mut wrappers,
                         &mut seen,
                         &mut values
                     ), @elaborate_struct);

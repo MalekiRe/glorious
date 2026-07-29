@@ -603,10 +603,9 @@ emit_call(
         }
     ));
     let inserted = target;
-    handle inserted {
-        Result::Err(_) => (),
-        Result::Ok(register) => Vec::push(&mut value.live_order, register)
-    }
+    if(inserted is Result::Ok(register)) {
+        Vec::push(&mut value.live_order, register)
+    } else { () }
 }
 
 emit_return(value: &mut FunctionBuilder, source: Option<u32>) {

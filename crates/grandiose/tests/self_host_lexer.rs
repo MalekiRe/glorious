@@ -31,6 +31,7 @@ fn self_host_bundle() -> SourceBundle {
     let mut segments = paths.into_iter().map(|path| {
         let source = fs::read_to_string(&path)
             .unwrap()
+            .replace("mod backend;\n", "")
             .replace("pub mod scanner;\n", "")
             .replace("pub mod headers;\n", "")
             .replace("pub mod bodies;\n", "")

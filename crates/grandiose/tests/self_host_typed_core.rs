@@ -802,6 +802,11 @@ fn stage_a_corpus(directory: &Path) -> Vec<PathBuf> {
         "struct Pair { left: i64, right: u64 } \
          make(left: i64, right: u64) -> Pair { Pair { right: right, left: left } } \
          read(value: Pair) -> u64 { value.right }",
+        "struct Pair { left: i64, right: u64 } \
+         left_value() -> i64 { 1 } right_value() -> u64 { 2 } \
+         make() -> Pair { \
+             Pair { right: right_value(), left: left_value() } \
+         }",
         "struct Inner { value: i64 } struct Outer { inner: Inner, marker: u64 } \
          make(value: i64) -> Outer { \
              Outer { marker: 7, inner: Inner { value: value } } \
