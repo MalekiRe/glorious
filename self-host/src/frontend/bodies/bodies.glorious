@@ -55,7 +55,14 @@ struct OperatorUse {
     precedence: u8
 }
 
+struct PendingStatement {
+    position: u8,
+    binding_token: Option<usize>,
+    expression: ExprId
+}
+
 impl Use<[0, *]> for OperatorUse {}
+impl Use<[0, *]> for PendingStatement {}
 
 pub error_code(value: &BodyError) -> u8 { value.code }
 
@@ -639,40 +646,42 @@ push_projection(
     )
 }
 
-statement_count(value: &Vec<u32>) -> usize {
-    word_count(value) / 3
-}
-
 push_statement(
-    value: &mut Vec<u32>,
-    kind: u8,
-    name_token_plus_one: u32,
+    value: &mut Vec<PendingStatement>,
+    position: u8,
+    binding_token: Option<usize>,
     expression: ExprId
 ) {
-    push_word(&mut *value, u32_from_u8(kind));
-    push_word(&mut *value, name_token_plus_one);
-    push_word(&mut *value, Id::to_u32(expression))
+    Vec::push(
+        &mut *value,
+        PendingStatement {
+            position: position,
+            binding_token: binding_token,
+            expression: expression
+        }
+    )
+}
+
+statement_metadata(value: &Option<usize>) -> u32 {
+    handle Option::as_ref(value) {
+        Result::Err(_) => 0,
+        Result::Ok(token) => u32_from_usize(*token) + 1
+    }
 }
 
 push_statement_edges(
     value: &mut BodyParser,
-    statements: &Vec<u32>,
+    statements: &Vec<PendingStatement>,
     index: usize
 ) {
-    if(index < statement_count(statements)) {
-            let base = index * 3;
+    if(index < Vec::len(statements)) {
+            let statement = Vec::index(statements, index);
             Vec::push(
                 &mut value.edges,
                 ExprEdge {
-                    value: Id::from_u32(word_at(
-                        statements,
-                        base + 2
-                    )),
-                    position: u8_from_u32(word_at(statements, base)),
-                    metadata: word_at(
-                        statements,
-                        base + 1
-                    )
+                    value: statement.expression,
+                    position: statement.position,
+                    metadata: statement_metadata(&statement.binding_token)
                 }
             );
             push_statement_edges(value, statements, index + 1)
@@ -683,7 +692,7 @@ push_statement_edges(
 
 push_block(
     value: &mut BodyParser,
-    statements: &Vec<u32>,
+    statements: &Vec<PendingStatement>,
     start: usize,
     end: usize
 ) -> ExprId {
@@ -1956,7 +1965,7 @@ parse_block_statement(
     value: &mut BodyParser,
     owner: Option<usize>,
     depth: u16,
-    statements: &mut Vec<u32>
+    statements: &mut Vec<PendingStatement>
 ) -> Result<(), BodyError> {
     let start = value.cursor;
     handle super::lexer::token_kind_at(source, start) {
@@ -1988,8 +1997,7 @@ parse_block_statement(
                                     push_statement(
                                         &mut *statements,
                                         1,
-                                        u32_from_usize(name_token)
-                                            + 1,
+                                        Option::Some(name_token),
                                         initializer
                                     );
                                     Result::Ok(())
@@ -2026,7 +2034,7 @@ parse_block_statement(
                 ),
                 @parse_block_statement
             );
-            push_statement(&mut *statements, 2, 0, expression);
+            push_statement(&mut *statements, 2, None, expression);
             Result::Ok(())
         }
     }
@@ -2042,7 +2050,7 @@ parse_block_after_statement(
     depth: u16,
     start: usize,
     close_code: u16,
-    statements: &mut Vec<u32>
+    statements: &mut Vec<PendingStatement>
 ) -> Result<ExprId, BodyError> {
     if(value.cursor < value.limit) {
         handle super::lexer::token_code_at(
@@ -2110,7 +2118,7 @@ parse_block_contents(
     depth: u16,
     start: usize,
     close_code: u16,
-    statements: &mut Vec<u32>
+    statements: &mut Vec<PendingStatement>
 ) -> Result<ExprId, BodyError> {
     if(value.cursor < value.limit) {
         if(close_code == 14) {
