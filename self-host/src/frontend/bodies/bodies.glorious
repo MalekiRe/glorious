@@ -24,7 +24,6 @@ pub struct ExprNode {
     kind_code: u8,
     tokens: BodyTokenRange,
     operator: BodyTokenRange,
-    fixity_plus_one: u32,
     names: ExprRange,
     children: ExprRange
 }
@@ -322,7 +321,6 @@ push_node(
     kind_code: u8,
     tokens: BodyTokenRange,
     operator: BodyTokenRange,
-    fixity_plus_one: u32,
     name_start: usize,
     edge_start: usize
 ) -> ExprId {
@@ -334,7 +332,6 @@ push_node(
             kind_code: kind_code,
             tokens: move tokens,
             operator: move operator,
-            fixity_plus_one: fixity_plus_one,
             names: expression_range(name_start, name_end),
             children: expression_range(edge_start, edge_end)
         }
@@ -354,7 +351,6 @@ push_leaf(
         kind_code,
         token_range(start, end),
         empty_tokens(start),
-        0,
         name_start,
         edge_start
     )
@@ -373,7 +369,6 @@ push_named_leaf(
         kind_code,
         token_range(start, end),
         empty_tokens(start),
-        0,
         name_start,
         edge_start
     )
@@ -432,7 +427,6 @@ push_unary(
         kind_code,
         token_range(start, end),
         token_range(operator.start, operator.end),
-        operator.fixity + 1,
         name_start,
         edge_start
     )
@@ -461,7 +455,6 @@ push_binary(
         6,
         token_range(start, end),
         token_range(operator.start, operator.end),
-        operator.fixity + 1,
         name_start,
         edge_start
     )
@@ -506,7 +499,6 @@ push_call(
         7,
         token_range(start, end),
         empty_tokens(start),
-        0,
         name_start,
         edge_start
     )
@@ -552,7 +544,6 @@ push_tuple(
         9,
         token_range(start, end),
         empty_tokens(start),
-        0,
         name_start,
         edge_start
     )
@@ -617,7 +608,6 @@ push_struct(
         10,
         token_range(start, end),
         empty_tokens(start),
-        0,
         name_start,
         edge_start
     )
@@ -644,7 +634,6 @@ push_projection(
         11,
         token_range(start, end),
         empty_tokens(name_token),
-        0,
         name_start,
         edge_start
     )
@@ -706,7 +695,6 @@ push_block(
         8,
         token_range(start, end),
         empty_tokens(start),
-        0,
         name_start,
         edge_start
     )

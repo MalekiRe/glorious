@@ -36,7 +36,7 @@ pub struct ResolvedBody {
 
 pub struct ResolutionError { code: u8, token: usize, related: usize }
 
-struct FunctionSearch { first_plus_one: u32, count: u32 }
+struct FunctionSearch { first: Option<u32>, count: u32 }
 struct NominalSearch { first_plus_one: u32, count: u32 }
 struct Binding { name: Id<String>, target: ResolvedTarget }
 pub struct ResolutionIndex {
@@ -167,14 +167,14 @@ index_callable(
     );
     let found = handle HashMap::remove(&mut index.functions, &key) {
         Result::Err(_) =>
-            FunctionSearch { first_plus_one: 0, count: 0 },
+            FunctionSearch { first: Result::Err(()), count: 0 },
         Result::Ok(found) => found
     };
     let updated = FunctionSearch {
-        first_plus_one: if(found.count == 0) {
-            shell_index + 1
+        first: if(found.count == 0) {
+            Result::Ok(shell_index)
         } else {
-            found.first_plus_one
+            found.first
         },
         count: found.count + 1
     };
@@ -259,9 +259,10 @@ resolve_function_name_in(
     module_plus_one: usize
 ) -> FunctionSearch {
     handle HashMap::get(&index.functions, &(module_plus_one, name)) {
-        Result::Err(_) => FunctionSearch { first_plus_one: 0, count: 0 },
+        Result::Err(_) =>
+            FunctionSearch { first: Result::Err(()), count: 0 },
         Result::Ok(found) => FunctionSearch {
-            first_plus_one: found.first_plus_one,
+            first: found.first,
             count: found.count
         }
     }
@@ -274,30 +275,36 @@ finish_function_name(
 ) -> Result<ResolvedTarget, ResolutionError> {
     handle found.count {
         0 => Result::Err(resolution_error(1, token, token)),
-        1 => {
-            let shell_index = found.first_plus_one - 1;
-            handle super::scanner::shell_at(
-                declarations,
-                usize_from_u32(shell_index)
-            ) {
-                Result::Err(_) => Result::Err(resolution_error(
-                    3,
-                    token,
+        1 => handle found.first {
+            Result::Err(_) => Result::Err(resolution_error(3, token, token)),
+            Result::Ok(shell_index) => {
+                handle super::scanner::shell_at(
+                    declarations,
                     usize_from_u32(shell_index)
-                )),
-                Result::Ok(shell) => Result::Ok(ResolvedTarget::Function(
-                    u32_from_usize(
-                        super::scanner::shell_parent_plus_one(shell)
-                    ),
-                    shell_index
-                ))
+                ) {
+                    Result::Err(_) => Result::Err(resolution_error(
+                        3,
+                        token,
+                        usize_from_u32(shell_index)
+                    )),
+                    Result::Ok(shell) =>
+                        Result::Ok(ResolvedTarget::Function(
+                            u32_from_usize(
+                                super::scanner::shell_parent_plus_one(shell)
+                            ),
+                            shell_index
+                        ))
+                }
             }
         },
-        _ => Result::Err(resolution_error(
-            2,
-            token,
-            usize_from_u32(found.first_plus_one - 1)
-        ))
+        _ => handle found.first {
+            Result::Err(_) => Result::Err(resolution_error(3, token, token)),
+            Result::Ok(shell_index) => Result::Err(resolution_error(
+                2,
+                token,
+                usize_from_u32(shell_index)
+            ))
+        }
     }
 }
 
