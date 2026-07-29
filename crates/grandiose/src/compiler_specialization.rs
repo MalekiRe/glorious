@@ -3990,15 +3990,22 @@ impl<'a> Walker<'a> {
                 .iter()
                 .any(|global| global.name == path[0].as_ref()),
             ExprKind::Call(callee, _) => {
-                let ExprKind::Variable(path) = &callee.kind else {
-                    return false;
-                };
-                path.len() == 2
-                    && self
-                        .program
-                        .traits
-                        .iter()
-                        .any(|declaration| declaration.name == path[0].as_ref())
+                match &callee.kind {
+                    // Static label application is bottom-typed. Its ordinary
+                    // expression walk remains valueless so captured labels
+                    // keep their mandatory direct-control classification, but
+                    // a refinement join may adopt its exact sibling context.
+                    ExprKind::LabelReference(_) => true,
+                    ExprKind::Variable(path) => {
+                        path.len() == 2
+                            && self
+                                .program
+                                .traits
+                                .iter()
+                                .any(|declaration| declaration.name == path[0].as_ref())
+                    }
+                    _ => false,
+                }
             }
             _ => false,
         }
@@ -10024,6 +10031,47 @@ mod tests {
                 site.body
                     == BodyInstanceKey::Root(DeclarationKey::Function("index_callable".into()))
                     && target.template == DeclarationKey::Function("hash_insert".into())
+            }),
+            "{}",
+            discovery.graph.canonical_text()
+        );
+    }
+
+    #[test]
+    fn label_exit_is_never_through_generic_option_reference_refinement() {
+        let discovery = parse_discovery(
+            "infixr 1 else;
+             enum Result<T,E>{Ok(T),Err(E)}
+             struct Cell<T>{value:T}
+             struct Failure{code:u8}
+             maybe_get<'a,T>(
+                 value:&'a Cell<T>
+             )->Result<&'a T,()>{
+                 Result::Ok(&value.value)
+             }
+             retain<T>(value:T)->T{value}
+             accept(value:&u32)->(){()}
+             index_callable(
+                 value:&Cell<u32>,
+                 present:Result<(),()>
+             )->Result<(),Failure>{
+                 present;
+                 let candidate=maybe_get(value);
+                 let found=if(candidate is Result::Err(_)){
+                     @index_callable(Result::Err(Failure{code:1}))
+                 }else{candidate.0};
+                 accept(found);
+                 retain(found);
+                 Result::Ok(())
+             }
+             main()->(){()}",
+        );
+        assert!(discovery.errors.is_empty(), "{:#?}", discovery.errors);
+        assert!(
+            discovery.graph.direct_calls.iter().any(|(site, target)| {
+                site.body
+                    == BodyInstanceKey::Root(DeclarationKey::Function("index_callable".into()))
+                    && target.template == DeclarationKey::Function("retain".into())
             }),
             "{}",
             discovery.graph.canonical_text()
