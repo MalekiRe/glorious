@@ -103,13 +103,6 @@ pub shell_whole(value: &DeclarationShell) -> &TokenRange { &value.whole }
 
 pub shell_parent(value: &DeclarationShell) -> &Option<usize> { &value.parent }
 
-pub shell_parent_plus_one(value: &DeclarationShell) -> usize {
-    handle Option::as_ref(&value.parent) {
-        Result::Err(_) => 0,
-        Result::Ok(parent) => *parent + 1
-    }
-}
-
 pub scan_error_code(value: &ScanError) -> u8 { value.code }
 
 pub scan_error_token(value: &ScanError) -> usize { value.token }

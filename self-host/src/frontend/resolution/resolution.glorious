@@ -10,11 +10,11 @@ pub struct LocalTag {}
 pub type LocalId = Id<LocalTag>;
 
 pub enum ResolvedTarget {
-    Parameter(u32, ParameterId),
-    Local(u32, LocalId),
-    Function(u32, u32),
-    Struct(u32, u32),
-    Variant(u32, u32)
+    Parameter(ParameterId),
+    Local(LocalId),
+    Function(u32),
+    Struct(u32),
+    Variant(u32)
 }
 
 impl Use<[0, *]> for ResolvedTarget {}
@@ -89,20 +89,10 @@ resolution_error(code: u8, token: usize, related: usize) -> ResolutionError {
     ResolutionError { code: code, token:  token, related:  related }
 }
 
-module_from_parent_plus_one(value: usize) -> Option<usize> {
-    if(value == 0) {
-        Result::Err(())
-    } else {
-        Result::Ok(value - 1)
-    }
-}
-
 shell_parent_module(
     shell: &super::scanner::DeclarationShell
 ) -> Option<usize> {
-    module_from_parent_plus_one(
-        super::scanner::shell_parent_plus_one(shell)
-    )
+    *super::scanner::shell_parent(shell)
 }
 
 same_module(left: Option<usize>, right: Option<usize>) -> Bool {
@@ -314,12 +304,7 @@ finish_function_name(
                         usize_from_u32(shell_index)
                     )),
                     Result::Ok(shell) =>
-                        Result::Ok(ResolvedTarget::Function(
-                            u32_from_usize(
-                                super::scanner::shell_parent_plus_one(shell)
-                            ),
-                            shell_index
-                        ))
+                        Result::Ok(ResolvedTarget::Function(shell_index))
                 }
             }
         },
@@ -427,10 +412,9 @@ finish_struct_name(
                     Result::Err(_) => Result::Err(
                         resolution_error(3, token, usize_from_u32(index))
                     ),
-                    Result::Ok(header) => Result::Ok(ResolvedTarget::Struct(
-                        super::headers::struct_shell(header),
-                        index
-                    ))
+                    Result::Ok(_) => Result::Ok(
+                        ResolvedTarget::Struct(index)
+                    )
                 }
             }
         },
@@ -618,10 +602,7 @@ finish_variant_name(
                             ),
                             @finish_variant_name
                         );
-                        Result::Ok(ResolvedTarget::Variant(
-                            super::headers::enum_shell(header),
-                            variant
-                        ))
+                        Result::Ok(ResolvedTarget::Variant(variant))
                     }
                 }
             }
@@ -909,10 +890,7 @@ resolve_block_children(
                                         push_binding(
                                             bindings,
                                             name,
-                                            ResolvedTarget::Local(
-                                                super::bodies::body_shell(body),
-                                                local
-                                            )
+                                            ResolvedTarget::Local(local)
                                         );
                                         resolve_block_children(
                                             headers,
@@ -1065,7 +1043,6 @@ resolve_expression(
 add_parameters(
     headers: &super::headers::HeaderIndex,
     callable: &super::headers::CallableHeader,
-    owner: u32,
     bindings: &mut Vec<Binding>,
     ordinal: u32
 ) -> Result<(), ResolutionError> {
@@ -1095,15 +1072,11 @@ add_parameters(
                             Id::from_u32(
                                 super::headers::parameter_name_raw(parameter)
                             ),
-                            ResolvedTarget::Parameter(
-                                owner,
-                                Id::from_u32(ordinal)
-                            )
+                            ResolvedTarget::Parameter(Id::from_u32(ordinal))
                         );
                         add_parameters(
                             headers,
                             callable,
-                            owner,
                             bindings,
                             ordinal + 1
                         )
@@ -1195,7 +1168,6 @@ pub resolve_function_body_indexed(
                     add_parameters(
                         headers_index,
                         callable,
-                        shell_index,
                         &mut bindings,
                         0
                     ),
@@ -1443,21 +1415,21 @@ write_target(
     parameter_count: u32
 ) {
     handle target {
-        ResolvedTarget::Parameter(_, id) => {
+        ResolvedTarget::Parameter(id) => {
             ByteBuf::push(&mut *output, 1);
             ByteBuf::write_u32_le(
                 output,
                 Id::to_u32(id)
             )
         },
-        ResolvedTarget::Local(_, id) => {
+        ResolvedTarget::Local(id) => {
             ByteBuf::push(&mut *output, 1);
             ByteBuf::write_u32_le(
                 output,
                 parameter_count + Id::to_u32(id)
             )
         },
-        ResolvedTarget::Function(_, shell) => {
+        ResolvedTarget::Function(shell) => {
             ByteBuf::push(&mut *output, 2);
             write_function_identity(
                 output,
@@ -1466,11 +1438,11 @@ write_target(
                 usize_from_u32(shell)
             )
         },
-        ResolvedTarget::Struct(_, header) => {
+        ResolvedTarget::Struct(header) => {
             ByteBuf::push(&mut *output, 3);
             ByteBuf::write_u32_le(output, header)
         },
-        ResolvedTarget::Variant(_, variant) => {
+        ResolvedTarget::Variant(variant) => {
             ByteBuf::push(&mut *output, 4);
             ByteBuf::write_u32_le(output, variant)
         }

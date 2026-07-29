@@ -1339,11 +1339,30 @@ signed_scalar_kind(value: &String) -> Option<u8> {
     if(String::eq(value, &"i8")) { Result::Ok(7) } else { if(String::eq(value, &"i16")) { Result::Ok(8) } else { if(String::eq(value, &"i32")) { Result::Ok(9) } else { if(String::eq(value, &"i64")) { Result::Ok(10) } else { if(String::eq(value, &"i128")) { Result::Ok(11) } else { if(String::eq(value, &"isize")) { Result::Ok(12) } else { Result::Err(()) } } } } } }
 }
 
+shell_parent_module(
+    shell: &super::scanner::DeclarationShell
+) -> Option<usize> {
+    *super::scanner::shell_parent(shell)
+}
+
+same_module(left: Option<usize>, right: Option<usize>) -> Bool {
+    handle left {
+        Result::Err(_) => handle right {
+            Result::Err(_) => true,
+            Result::Ok(_) => false
+        },
+        Result::Ok(left_index) => handle right {
+            Result::Err(_) => false,
+            Result::Ok(right_index) => left_index == right_index
+        }
+    }
+}
+
 type_name_target_in(
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex,
     name: u32,
-    module_plus_one: usize,
+    module: Option<usize>,
     kind: u8,
     index: usize
 ) -> Option<TypeNameTarget> {
@@ -1382,7 +1401,7 @@ type_name_target_in(
                 headers,
                 declarations,
                 name,
-                module_plus_one,
+                module,
                 kind,
                 index + 1
             ),
@@ -1393,8 +1412,7 @@ type_name_target_in(
                 ), @type_name_target_in);
                 if(bool_and(
                     found.1 == name,
-                    super::scanner::shell_parent_plus_one(shell)
-                        == module_plus_one
+                    same_module(shell_parent_module(shell), module)
                 )) { Result::Ok(TypeNameTarget {
                         kind: kind,
                         index: u32_from_usize(index)
@@ -1402,7 +1420,7 @@ type_name_target_in(
                         headers,
                         declarations,
                         name,
-                        module_plus_one,
+                        module,
                         kind,
                         index + 1
                     )
@@ -1416,13 +1434,13 @@ type_name_target(
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex,
     name: u32,
-    module_plus_one: usize
+    module: Option<usize>
 ) -> Option<TypeNameTarget> {
     handle type_name_target_in(
         headers,
         declarations,
         name,
-        module_plus_one,
+        module,
         1,
         0
     ) {
@@ -1431,7 +1449,7 @@ type_name_target(
             headers,
             declarations,
             name,
-            module_plus_one,
+            module,
             2,
             0
         ) {
@@ -1440,17 +1458,20 @@ type_name_target(
                 headers,
                 declarations,
                 name,
-                module_plus_one,
+                module,
                 3,
                 0
             ) {
                 Result::Ok(found) => Result::Ok(found),
-                Result::Err(_) => if(module_plus_one == 0) { Result::Err(()) } else { type_name_target(
+                Result::Err(_) => handle module {
+                    Result::Err(_) => Result::Err(()),
+                    Result::Ok(_) => type_name_target(
                         headers,
                         declarations,
                         name,
-                        0
-                    ) }
+                        None
+                    )
+                }
             }
         }
     }
@@ -1615,7 +1636,7 @@ resolve_type_children(
     declarations: &super::scanner::DeclarationIndex,
     output: &mut TypedInterfaces,
     type_index: u32,
-    module_plus_one: usize,
+    module: Option<usize>,
     ordinal: u32,
     elements: &mut Vec<u32>
 ) -> Result<(), ElaborationError> {
@@ -1626,7 +1647,7 @@ resolve_type_children(
             declarations,
             output,
             super::headers::type_child_index_at(index, type_index, ordinal),
-            module_plus_one
+            module
         ), @resolve_type_children);
         push_word(&mut *elements, ty);
         resolve_type_children(
@@ -1634,7 +1655,7 @@ resolve_type_children(
             declarations,
             output,
             type_index,
-            module_plus_one,
+            module,
             ordinal + 1,
             elements
         )
@@ -1680,7 +1701,7 @@ resolve_alias_type(
                                     super::headers::type_index(
                                         super::headers::alias_target(alias)
                                     ),
-                                    super::scanner::shell_parent_plus_one(owner)
+                                    shell_parent_module(owner)
                                 ), @resolve_alias_type);
                                 *Vec::index_mut(
                                     &mut output.alias_states,
@@ -1700,7 +1721,7 @@ resolve_alias_type(
 module_named_in(
     declarations: &super::scanner::DeclarationIndex,
     name: u32,
-    parent_plus_one: usize,
+    parent: Option<usize>,
     index: usize
 ) -> Option<usize> {
     if(index < super::scanner::shell_count(declarations)) {
@@ -1710,27 +1731,26 @@ module_named_in(
         );
         if(bool_and(
                 super::scanner::shell_kind_code(shell) == 1,
-                super::scanner::shell_parent_plus_one(shell)
-                    == parent_plus_one
+                same_module(shell_parent_module(shell), parent)
             )) { handle Option::as_ref(
                     super::scanner::shell_name(shell)
                 ) {
                     Result::Err(_) => module_named_in(
                         declarations,
                         name,
-                        parent_plus_one,
+                        parent,
                         index + 1
                     ),
-                    Result::Ok(found) => if(Id::to_u32(*found) == name) { Result::Ok(index + 1) } else { module_named_in(
+                    Result::Ok(found) => if(Id::to_u32(*found) == name) { Result::Ok(index) } else { module_named_in(
                             declarations,
                             name,
-                            parent_plus_one,
+                            parent,
                             index + 1
                         ) }
                 } } else { module_named_in(
                     declarations,
                     name,
-                    parent_plus_one,
+                    parent,
                     index + 1
                 )
         }
@@ -1740,11 +1760,19 @@ module_named_in(
 module_named(
     declarations: &super::scanner::DeclarationIndex,
     name: u32,
-    parent_plus_one: usize
+    parent: Option<usize>
 ) -> Option<usize> {
-    handle module_named_in(declarations, name, parent_plus_one, 0) {
+    handle module_named_in(declarations, name, parent, 0) {
         Result::Ok(found) => Result::Ok(found),
-        Result::Err(_) => if(parent_plus_one == 0) { Result::Err(()) } else { module_named_in(declarations, name, 0, 0) }
+        Result::Err(_) => handle parent {
+            Result::Err(_) => Result::Err(()),
+            Result::Ok(_) => module_named_in(
+                declarations,
+                name,
+                None,
+                0
+            )
+        }
     }
 }
 
@@ -1794,7 +1822,7 @@ resolve_signature_type(
     declarations: &super::scanner::DeclarationIndex,
     output: &mut TypedInterfaces,
     type_index: u32,
-    module_plus_one: usize
+    module: Option<usize>
 ) -> Result<u32, ElaborationError> {
     let index = super::headers::parsed_index(headers);
     let kind = super::headers::type_kind_code_at(index, type_index);
@@ -1815,7 +1843,7 @@ resolve_signature_type(
                             headers,
                             declarations,
                             raw,
-                            module_plus_one
+                            module
                         ) {
                             Result::Err(_) => Result::Err(
                                 error(1, token, token, 0, 0)
@@ -1882,7 +1910,7 @@ resolve_signature_type(
                         type_index,
                         0
                     ),
-                    module_plus_one
+                    module
                 ) {
                     Result::Err(_) =>
                         Result::Err(error(1, token, token, 0, 0)),
@@ -1894,7 +1922,7 @@ resolve_signature_type(
                             type_index,
                             1
                         ),
-                        module
+                        Option::Some(module)
                     ) {
                         Result::Err(_) =>
                             Result::Err(error(1, token, token, 0, 0)),
@@ -1918,7 +1946,7 @@ resolve_signature_type(
                         type_index,
                         0
                     ),
-                    module_plus_one
+                    module
                 ), @resolve_signature_type);
                 Result::Ok(intern_record_type(
                     output,
@@ -1940,7 +1968,7 @@ resolve_signature_type(
                         type_index,
                         0
                     ),
-                    module_plus_one
+                    module
                 ), @resolve_signature_type);
                 Result::Ok(intern_record_type(
                     output,
@@ -1959,7 +1987,7 @@ resolve_signature_type(
                 declarations,
                 output,
                 type_index,
-                module_plus_one,
+                module,
                 0,
                 &mut elements
             ), @resolve_signature_type);
@@ -1975,7 +2003,7 @@ collect_parameter_types(
     declarations: &super::scanner::DeclarationIndex,
     callable: &super::headers::CallableHeader,
     output: &mut TypedInterfaces,
-    module_plus_one: usize,
+    module: Option<usize>,
     ordinal: u32
 ) -> Result<(), ElaborationError> {
     let range = super::headers::callable_parameters(callable);
@@ -1998,7 +2026,7 @@ collect_parameter_types(
                     declarations,
                     output,
                     super::headers::parameter_type_index(parameter),
-                    module_plus_one
+                    module
                 ), @collect_parameter_types);
                 Vec::push(
                     &mut output.callable_parameters,
@@ -2009,7 +2037,7 @@ collect_parameter_types(
                     declarations,
                     callable,
                     output,
-                    module_plus_one,
+                    module,
                     ordinal + 1
                 )
             }
@@ -2063,11 +2091,9 @@ collect_callables(
                                     super::headers::callable_shell(callable)
                                 )
                             ) {
-                                Result::Err(_) => 0,
+                                Result::Err(_) => None,
                                 Result::Ok(owner) =>
-                                    super::scanner::shell_parent_plus_one(
-                                        owner
-                                    )
+                                    shell_parent_module(owner)
                             }
                         ), @collect_callables);
                         collect_callable(
@@ -2096,19 +2122,19 @@ collect_callable(
     let shell = super::headers::callable_shell(callable);
     let parameters = super::headers::callable_parameters(callable);
     let start = u32_from_usize(Vec::len(&output.callable_parameters));
-    let module_plus_one = handle super::scanner::shell_at(
+    let module = handle super::scanner::shell_at(
         declarations,
         usize_from_u32(shell)
     ) {
-        Result::Err(_) => 0,
-        Result::Ok(owner) => super::scanner::shell_parent_plus_one(owner)
+        Result::Err(_) => None,
+        Result::Ok(owner) => shell_parent_module(owner)
     };
     try(collect_parameter_types(
         headers,
         declarations,
         callable,
         output,
-        module_plus_one,
+        module,
         0
     ), @collect_callable);
             let callable_id = alloc_interface_callable(
@@ -2263,7 +2289,7 @@ collect_struct_fields(
     output: &mut TypedInterfaces,
     owner: InterfaceNominalId,
     fields: &super::headers::HeaderRange,
-    module_plus_one: usize,
+    module: Option<usize>,
     ordinal: u32
 ) -> Result<(), ElaborationError> {
     if(ordinal < super::headers::range_count(fields)) {
@@ -2287,7 +2313,7 @@ collect_struct_fields(
                     super::headers::type_index(
                         super::headers::field_type(field)
                     ),
-                    module_plus_one
+                    module
                 ), @collect_struct_fields);
                 alloc_interface_field(output, InterfaceField {
                     owner: owner,
@@ -2302,7 +2328,7 @@ collect_struct_fields(
                     output,
                     owner,
                     fields,
-                    module_plus_one,
+                    module,
                     ordinal + 1
                 )
             }
@@ -2315,7 +2341,7 @@ collect_variant_payloads(
     declarations: &super::scanner::DeclarationIndex,
     output: &mut TypedInterfaces,
     fields: &super::headers::HeaderRange,
-    module_plus_one: usize,
+    module: Option<usize>,
     ordinal: u32
 ) -> Result<(), ElaborationError> {
     if(ordinal < super::headers::range_count(fields)) {
@@ -2327,7 +2353,7 @@ collect_variant_payloads(
                 super::headers::parsed_index(headers),
                 super::headers::range_start(fields) + ordinal
             ),
-            module_plus_one
+            module
         ), @collect_variant_payloads);
         Vec::push(
             &mut output.variant_payloads,
@@ -2338,7 +2364,7 @@ collect_variant_payloads(
             declarations,
             output,
             fields,
-            module_plus_one,
+            module,
             ordinal + 1
         )
     } else { Result::Ok(()) }
@@ -2350,7 +2376,7 @@ collect_enum_variants(
     output: &mut TypedInterfaces,
     owner: InterfaceNominalId,
     variants: &super::headers::HeaderRange,
-    module_plus_one: usize,
+    module: Option<usize>,
     ordinal: u32
 ) -> Result<(), ElaborationError> {
     if(ordinal < super::headers::range_count(variants)) {
@@ -2376,7 +2402,7 @@ collect_enum_variants(
                     declarations,
                     output,
                     payloads,
-                    module_plus_one,
+                    module,
                     0
                 ), @collect_enum_variants);
                 alloc_interface_variant(output, InterfaceVariant {
@@ -2394,7 +2420,7 @@ collect_enum_variants(
                     output,
                     owner,
                     variants,
-                    module_plus_one,
+                    module,
                     ordinal + 1
                 )
             }
@@ -2412,12 +2438,12 @@ collect_nominal_definitions(
         let id = interface_nominal_id_from_usize(nominal_id);
         let nominal = *interface_nominal_at(&*output, id);
         let shell = nominal.shell;
-        let module_plus_one = handle super::scanner::shell_at(
+        let module = handle super::scanner::shell_at(
             declarations,
             usize_from_u32(shell)
         ) {
-            Result::Err(_) => 0,
-            Result::Ok(owner) => super::scanner::shell_parent_plus_one(owner)
+            Result::Err(_) => None,
+            Result::Ok(owner) => shell_parent_module(owner)
         };
         handle nominal.kind {
             InterfaceNominalKind::Struct(_) => handle find_struct_shell(
@@ -2443,7 +2469,7 @@ collect_nominal_definitions(
                         output,
                         id,
                         fields,
-                        module_plus_one,
+                        module,
                         0
                     ), @collect_nominal_definitions);
                     set_interface_nominal_kind(
@@ -2487,7 +2513,7 @@ collect_nominal_definitions(
                         output,
                         id,
                         variants,
-                        module_plus_one,
+                        module,
                         0
                     ), @collect_nominal_definitions);
                     set_interface_nominal_kind(
@@ -2838,15 +2864,15 @@ elaboration_target(
     target: ResolvedTarget
 ) -> ElaborationTarget {
     handle target {
-        ResolvedTarget::Parameter(_, id) =>
+        ResolvedTarget::Parameter(id) =>
             ElaborationTarget::Parameter(id),
-        ResolvedTarget::Local(_, id) =>
+        ResolvedTarget::Local(id) =>
             ElaborationTarget::Local(id),
-        ResolvedTarget::Function(_, shell) =>
+        ResolvedTarget::Function(shell) =>
             ElaborationTarget::Function(shell),
-        ResolvedTarget::Struct(_, header) =>
+        ResolvedTarget::Struct(header) =>
             ElaborationTarget::Struct(header),
-        ResolvedTarget::Variant(_, variant) =>
+        ResolvedTarget::Variant(variant) =>
             ElaborationTarget::Variant(variant)
     }
 }
@@ -3947,8 +3973,10 @@ struct_field_accessible(
             ) {
                 Result::Err(_) => false,
                 Result::Ok(current) =>
-                    super::scanner::shell_parent_plus_one(owner)
-                        == super::scanner::shell_parent_plus_one(current)
+                    same_module(
+                        shell_parent_module(owner),
+                        shell_parent_module(current)
+                    )
             }
         }
     }
@@ -5308,41 +5336,49 @@ shell_name_id(shell: &super::scanner::DeclarationShell) -> Id<String> {
 
 module_depth(
     declarations: &super::scanner::DeclarationIndex,
-    module_plus_one: usize
+    module: Option<usize>
 ) -> usize {
-    if(module_plus_one == 0) { 0 } else { handle super::scanner::shell_at(
+    handle module {
+        Result::Err(_) => 0,
+        Result::Ok(index) => handle super::scanner::shell_at(
             declarations,
-            module_plus_one - 1
+            index
         ) {
             Result::Err(_) => unreachable(),
             Result::Ok(shell) => 1 + module_depth(
                 declarations,
-                super::scanner::shell_parent_plus_one(shell)
+                shell_parent_module(shell)
             )
-        } }
+        }
+    }
 }
 
 write_module_components(
     output: &mut ByteBuf,
     source: &super::lexer::LexedSource,
     declarations: &super::scanner::DeclarationIndex,
-    module_plus_one: usize
+    module: Option<usize>
 ) {
-    if(module_plus_one == 0) { () } else { handle super::scanner::shell_at(
+    handle module {
+        Result::Err(_) => (),
+        Result::Ok(index) => handle super::scanner::shell_at(
             declarations,
-            module_plus_one - 1
+            index
         ) {
             Result::Err(_) => unreachable(),
             Result::Ok(shell) => {
+                let parent = shell_parent_module(shell);
+                let name = shell_name_id(shell);
                 write_module_components(
                     &mut *output,
                     source,
                     declarations,
-                    super::scanner::shell_parent_plus_one(shell)
+                    parent
                 );
-                write_name_id( output, source, shell_name_id(shell))
+                write_name_id( output, source, move name)
             }
-        } }
+        }
+    }
 }
 
 write_function_identity(
@@ -5354,7 +5390,8 @@ write_function_identity(
     handle super::scanner::shell_at(declarations, shell_index) {
         Result::Err(_) => unreachable(),
         Result::Ok(shell) => {
-            let parent = super::scanner::shell_parent_plus_one(shell);
+            let parent = shell_parent_module(shell);
+            let name = shell_name_id(shell);
             ByteBuf::write_u32_le(
                 &mut *output,
                 u32_from_usize(module_depth(declarations, parent))
@@ -5365,7 +5402,7 @@ write_function_identity(
                 declarations,
                 parent
             );
-            write_name_id( output, source, shell_name_id(shell))
+            write_name_id( output, source, move name)
         }
     }
 }

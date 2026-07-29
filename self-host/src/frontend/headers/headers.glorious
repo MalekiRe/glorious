@@ -329,18 +329,6 @@ pub type_edge_index_at(value: &HeaderIndex, index: u32) -> u32 {
     Id::to_u32(edge.value)
 }
 
-pub type_constructor_index_plus_one_at(
-    value: &HeaderIndex,
-    index: u32
-) -> u32 {
-    let node = type_node_at_raw(value, index);
-    handle Option::as_ref(&node.constructor) {
-        Result::Err(_) => 0,
-        Result::Ok(found) =>
-            Id::to_u32(*found) + wrapping_convert_to_u32(1)
-    }
-}
-
 pub type_lifetime_name_at(
     value: &HeaderIndex,
     index: u32
@@ -349,17 +337,6 @@ pub type_lifetime_name_at(
     handle Option::as_ref(&node.lifetime) {
         Result::Err(_) => None,
         Result::Ok(found) => Option::Some(found.name)
-    }
-}
-
-pub type_lifetime_token_plus_one_at(
-    value: &HeaderIndex,
-    index: u32
-) -> usize {
-    let node = type_node_at_raw(value, index);
-    handle Option::as_ref(&node.lifetime) {
-        Result::Err(_) => 0,
-        Result::Ok(found) => found.token + 1
     }
 }
 

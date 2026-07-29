@@ -700,24 +700,34 @@ push_block(
     )
 }
 
-shell_owner_plus_one(
+shell_owner(
     declarations: &super::scanner::DeclarationIndex,
     shell: usize
-) -> usize {
+) -> Option<usize> {
     handle super::scanner::shell_at(declarations, shell) {
-        Result::Err(_) => 0,
-        Result::Ok(found) => super::scanner::shell_parent_plus_one(found)
+        Result::Err(_) => Result::Err(()),
+        Result::Ok(found) => *super::scanner::shell_parent(found)
     }
 }
 
-fixity_owner_plus_one(
+fixity_owner(
     declarations: &super::scanner::DeclarationIndex,
     value: &super::headers::FixityHeader
-) -> usize {
-    shell_owner_plus_one(
+) -> Option<usize> {
+    shell_owner(
         declarations,
         usize_from_u32(super::headers::fixity_shell(value))
     )
+}
+
+same_owner(left: Option<usize>, right: Option<usize>) -> Bool {
+    handle left {
+        Result::Err(_) => Option::is_none(&right),
+        Result::Ok(left_index) => handle right {
+            Result::Err(_) => false,
+            Result::Ok(right_index) => left_index == right_index
+        }
+    }
 }
 
 operator_range(
@@ -784,7 +794,7 @@ lookup_scope(
     nominal: &super::headers::NominalIndex,
     operator: &BodyTokenRange,
     prefix: Bool,
-    owner_plus_one: usize,
+    owner: Option<usize>,
     index: usize,
     selected: Option<u32>
 ) -> Result<Option<u32>, BodyError> {
@@ -793,8 +803,8 @@ lookup_scope(
             Result::Err(_) => Result::Ok(move selected),
             Result::Ok(fixity) => {
                 let form = super::headers::fixity_form_code(fixity);
-                let owner = fixity_owner_plus_one(declarations, fixity);
-                let matches = owner == owner_plus_one
+                let fixity_scope = fixity_owner(declarations, fixity);
+                let matches = same_owner(fixity_scope, owner)
                     and { form_matches(form, prefix) }
                     and {
                         same_operator(
@@ -814,7 +824,7 @@ lookup_scope(
                             nominal,
                             operator,
                             prefix,
-                            owner_plus_one,
+                            owner,
                             index + 1,
                             Result::Ok(u32_from_usize(index))
                         ),
@@ -835,7 +845,7 @@ lookup_scope(
                                         nominal,
                                         operator,
                                         prefix,
-                                        owner_plus_one,
+                                        owner,
                                         index + 1,
                                         Result::Ok(previous)
                                     )
@@ -869,7 +879,7 @@ lookup_scope(
                         nominal,
                         operator,
                         prefix,
-                        owner_plus_one,
+                        owner,
                         index + 1,
                         move selected
                     )
@@ -888,7 +898,7 @@ lookup_fixity(
     nominal: &super::headers::NominalIndex,
     operator: &BodyTokenRange,
     prefix: Bool,
-    owner_plus_one: usize
+    owner: Option<usize>
 ) -> Result<Option<u32>, BodyError> {
     let found = try(
         lookup_scope(
@@ -898,7 +908,7 @@ lookup_fixity(
             nominal,
             operator,
             prefix,
-            owner_plus_one,
+            owner,
             0,
             Result::Err(())
         ),
@@ -906,7 +916,7 @@ lookup_fixity(
     );
     handle move found {
         Result::Ok(index) => Result::Ok(Result::Ok(index)),
-        Result::Err(_) => if(owner_plus_one == 0) {
+        Result::Err(_) => if(Option::is_none(&owner)) {
             Result::Ok(Result::Err(()))
         } else {
             lookup_scope(
@@ -916,7 +926,7 @@ lookup_fixity(
                 nominal,
                 operator,
                 prefix,
-                0,
+                Result::Err(()),
                 0,
                 Result::Err(())
             )
@@ -931,7 +941,7 @@ peek_operator(
     nominal: &super::headers::NominalIndex,
     value: &BodyParser,
     prefix: Bool,
-    owner_plus_one: usize
+    owner: Option<usize>
 ) -> Result<Option<OperatorUse>, BodyError> {
     handle operator_range(source, value.cursor, value.limit) {
         Result::Err(_) => Result::Ok(Result::Err(())),
@@ -944,7 +954,7 @@ peek_operator(
                     nominal,
                     &range,
                     prefix,
-                    owner_plus_one
+                    owner
                 ),
                 @peek_operator
             );
@@ -977,7 +987,7 @@ parse_primary(
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
-    owner_plus_one: usize,
+    owner: Option<usize>,
     depth: u16
 ) -> Result<ExprId, BodyError> {
     if(depth < 128) {
@@ -989,7 +999,7 @@ parse_primary(
                     nominal,
                     &*value,
                     true,
-                    owner_plus_one
+                    owner
                 ),
                 @parse_primary
             );
@@ -1003,7 +1013,7 @@ parse_primary(
                             declarations,
                             nominal,
                             value,
-                            owner_plus_one,
+                            owner,
                             operator.precedence,
                             depth + 1
                         ),
@@ -1027,7 +1037,7 @@ parse_primary(
                             declarations,
                             nominal,
                             value,
-                            owner_plus_one,
+                            owner,
                             depth
                         ),
                         @parse_primary
@@ -1038,7 +1048,7 @@ parse_primary(
                         declarations,
                         nominal,
                         value,
-                        owner_plus_one,
+                        owner,
                         depth,
                         atom
                     )
@@ -1137,7 +1147,7 @@ parse_tuple_tail(
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
-    owner_plus_one: usize,
+    owner: Option<usize>,
     depth: u16,
     start: usize,
     elements: &mut Vec<u32>
@@ -1160,7 +1170,7 @@ parse_tuple_tail(
                         declarations,
                         nominal,
                         value,
-                        owner_plus_one,
+                        owner,
                         0,
                         depth
                     ),
@@ -1187,7 +1197,7 @@ parse_tuple_tail(
                                 declarations,
                                 nominal,
                                 value,
-                                owner_plus_one,
+                                owner,
                                 depth,
                                 start,
                                 elements
@@ -1214,7 +1224,7 @@ parse_atom(
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
-    owner_plus_one: usize,
+    owner: Option<usize>,
     depth: u16
 ) -> Result<ExprId, BodyError> {
     let start = value.cursor;
@@ -1241,7 +1251,7 @@ parse_atom(
                                 declarations,
                                 nominal,
                                 value,
-                                owner_plus_one,
+                                owner,
                                 0,
                                 depth + 1
                             ),
@@ -1285,7 +1295,7 @@ parse_atom(
                                             declarations,
                                             nominal,
                                             value,
-                                            owner_plus_one,
+                                            owner,
                                             depth + 1,
                                             start,
                                             &mut elements
@@ -1313,7 +1323,7 @@ parse_atom(
                     declarations,
                     nominal,
                     value,
-                    owner_plus_one,
+                    owner,
                     depth + 1,
                     start,
                     14,
@@ -1333,7 +1343,7 @@ parse_call_arguments(
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
-    owner_plus_one: usize,
+    owner: Option<usize>,
     depth: u16,
     arguments: &mut Vec<u32>,
     open: usize
@@ -1353,7 +1363,7 @@ parse_call_arguments(
                         declarations,
                         nominal,
                         value,
-                        owner_plus_one,
+                        owner,
                         0,
                         depth
                     ),
@@ -1375,7 +1385,7 @@ parse_call_arguments(
                                 declarations,
                                 nominal,
                                 value,
-                                owner_plus_one,
+                                owner,
                                 depth,
                                 arguments,
                                 open
@@ -1402,7 +1412,7 @@ parse_struct_fields(
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
-    owner_plus_one: usize,
+    owner: Option<usize>,
     depth: u16,
     constructor: ExprId,
     start: usize,
@@ -1436,7 +1446,7 @@ parse_struct_fields(
                                             declarations,
                                             nominal,
                                             value,
-                                            owner_plus_one,
+                                            owner,
                                             0,
                                             depth
                                         ),
@@ -1482,7 +1492,7 @@ parse_struct_fields(
                                                     declarations,
                                                     nominal,
                                                     value,
-                                                    owner_plus_one,
+                                                    owner,
                                                     depth,
                                                     constructor,
                                                     start,
@@ -1587,7 +1597,7 @@ parse_postfix(
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
-    owner_plus_one: usize,
+    owner: Option<usize>,
     depth: u16,
     callee: ExprId
 ) -> Result<ExprId, BodyError> {
@@ -1607,7 +1617,7 @@ parse_postfix(
                             declarations,
                             nominal,
                             value,
-                            owner_plus_one,
+                            owner,
                             depth + 1,
                             &mut arguments,
                             open
@@ -1628,7 +1638,7 @@ parse_postfix(
                         declarations,
                         nominal,
                         value,
-                        owner_plus_one,
+                        owner,
                         depth + 1,
                         call
                     )
@@ -1649,7 +1659,7 @@ parse_postfix(
                                     declarations,
                                     nominal,
                                     value,
-                                    owner_plus_one,
+                                    owner,
                                     depth + 1,
                                     callee,
                                     start,
@@ -1664,7 +1674,7 @@ parse_postfix(
                                 declarations,
                                 nominal,
                                 value,
-                                owner_plus_one,
+                                owner,
                                 depth + 1,
                                 found
                             )
@@ -1693,7 +1703,7 @@ parse_postfix(
                         declarations,
                         nominal,
                         value,
-                        owner_plus_one,
+                        owner,
                         depth + 1,
                         found
                     )
@@ -1742,7 +1752,7 @@ parse_chain(
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
-    owner_plus_one: usize,
+    owner: Option<usize>,
     minimum: u8,
     depth: u16,
     output: &mut Vec<u32>,
@@ -1756,7 +1766,7 @@ parse_chain(
             nominal,
             &*value,
             false,
-            owner_plus_one
+            owner
         ),
         @parse_chain
     );
@@ -1775,7 +1785,7 @@ parse_chain(
                                     declarations,
                                     nominal,
                                     value,
-                                    owner_plus_one,
+                                    owner,
                                     depth
                                 ),
                                 @parse_chain
@@ -1803,7 +1813,7 @@ parse_chain(
                                 declarations,
                                 nominal,
                                 value,
-                                owner_plus_one,
+                                owner,
                                 minimum,
                                 depth,
                                 output,
@@ -1905,7 +1915,7 @@ parse_expression(
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
-    owner_plus_one: usize,
+    owner: Option<usize>,
     minimum: u8,
     depth: u16
 ) -> Result<ExprId, BodyError> {
@@ -1916,7 +1926,7 @@ parse_expression(
             declarations,
             nominal,
             value,
-            owner_plus_one,
+            owner,
             depth
         ),
         @parse_expression
@@ -1930,7 +1940,7 @@ parse_expression(
         declarations,
         nominal,
         value,
-        owner_plus_one,
+        owner,
         minimum,
         depth,
         &mut output,
@@ -1944,7 +1954,7 @@ parse_block_statement(
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
-    owner_plus_one: usize,
+    owner: Option<usize>,
     depth: u16,
     statements: &mut Vec<u32>
 ) -> Result<(), BodyError> {
@@ -1969,7 +1979,7 @@ parse_block_statement(
                                             declarations,
                                             nominal,
                                             value,
-                                            owner_plus_one,
+                                            owner,
                                             0,
                                             depth
                                         ),
@@ -2010,7 +2020,7 @@ parse_block_statement(
                     declarations,
                     nominal,
                     value,
-                    owner_plus_one,
+                    owner,
                     0,
                     depth
                 ),
@@ -2028,7 +2038,7 @@ parse_block_after_statement(
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
-    owner_plus_one: usize,
+    owner: Option<usize>,
     depth: u16,
     start: usize,
     close_code: u16,
@@ -2047,7 +2057,7 @@ parse_block_after_statement(
                     declarations,
                     nominal,
                     value,
-                    owner_plus_one,
+                    owner,
                     depth,
                     start,
                     close_code,
@@ -2061,7 +2071,7 @@ parse_block_after_statement(
                     declarations,
                     nominal,
                     value,
-                    owner_plus_one,
+                    owner,
                     depth,
                     start,
                     close_code,
@@ -2081,7 +2091,7 @@ parse_block_after_statement(
             declarations,
             nominal,
             value,
-            owner_plus_one,
+            owner,
             depth,
             start,
             close_code,
@@ -2096,7 +2106,7 @@ parse_block_contents(
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
-    owner_plus_one: usize,
+    owner: Option<usize>,
     depth: u16,
     start: usize,
     close_code: u16,
@@ -2123,7 +2133,7 @@ parse_block_contents(
                             declarations,
                             nominal,
                             value,
-                            owner_plus_one,
+                            owner,
                             depth,
                             statements
                         ),
@@ -2135,7 +2145,7 @@ parse_block_contents(
                         declarations,
                         nominal,
                         value,
-                        owner_plus_one,
+                        owner,
                         depth,
                         start,
                         close_code,
@@ -2150,7 +2160,7 @@ parse_block_contents(
                         declarations,
                         nominal,
                         value,
-                        owner_plus_one,
+                        owner,
                         depth,
                         statements
                     ),
@@ -2162,7 +2172,7 @@ parse_block_contents(
                     declarations,
                     nominal,
                     value,
-                    owner_plus_one,
+                    owner,
                     depth,
                     start,
                     close_code,
@@ -2214,7 +2224,7 @@ pub parse_function_body(
                             declarations,
                             nominal,
                             &mut parser,
-                            shell_owner_plus_one(declarations, shell),
+                            shell_owner(declarations, shell),
                             0,
                             start,
                             0,
