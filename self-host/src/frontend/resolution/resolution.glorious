@@ -54,10 +54,6 @@ pub resolved_name_count(value: &ResolvedBody) -> usize {
     Vec::len(&value.names)
 }
 
-pub resolved_name_expression_at(value: &ResolvedBody, index: usize) -> u32 {
-    Id::to_u32(Vec::index(&value.names, index).expression)
-}
-
 pub resolved_name_expression_id_at(
     value: &ResolvedBody,
     index: usize
@@ -70,36 +66,6 @@ pub resolved_name_target_at(
     index: usize
 ) -> ResolvedTarget {
     Vec::index(&value.names, index).target
-}
-
-pub resolved_name_kind_at(value: &ResolvedBody, index: usize) -> u8 {
-    handle Vec::index(&value.names, index).target {
-        ResolvedTarget::Parameter(_, _) => 1,
-        ResolvedTarget::Local(_, _) => 2,
-        ResolvedTarget::Function(_, _) => 3,
-        ResolvedTarget::Struct(_, _) => 4,
-        ResolvedTarget::Variant(_, _) => 5
-    }
-}
-
-pub resolved_name_owner_at(value: &ResolvedBody, index: usize) -> u32 {
-    handle Vec::index(&value.names, index).target {
-        ResolvedTarget::Parameter(owner, _) => owner,
-        ResolvedTarget::Local(owner, _) => owner,
-        ResolvedTarget::Function(owner, _) => owner,
-        ResolvedTarget::Struct(owner, _) => owner,
-        ResolvedTarget::Variant(owner, _) => owner
-    }
-}
-
-pub resolved_name_index_at(value: &ResolvedBody, index: usize) -> u32 {
-    handle Vec::index(&value.names, index).target {
-        ResolvedTarget::Parameter(_, id) => Id::to_u32(id),
-        ResolvedTarget::Local(_, id) => Id::to_u32(id),
-        ResolvedTarget::Function(_, index) => index,
-        ResolvedTarget::Struct(_, index) => index,
-        ResolvedTarget::Variant(_, index) => index
-    }
 }
 
 pub local_count(value: &ResolvedBody) -> usize {
@@ -1399,52 +1365,41 @@ write_target(
     output: &mut ByteBuf,
     source: &super::lexer::LexedSource,
     declarations: &super::scanner::DeclarationIndex,
-    resolved: &ResolvedBody,
-    occurrence: usize,
+    target: ResolvedTarget,
     parameter_count: u32
 ) {
-    handle resolved_name_kind_at(resolved, occurrence) {
-        1 => {
+    handle target {
+        ResolvedTarget::Parameter(_, id) => {
             ByteBuf::push(&mut *output, 1);
             ByteBuf::write_u32_le(
-                 output,
-                resolved_name_index_at(resolved, occurrence)
+                output,
+                Id::to_u32(id)
             )
         },
-        2 => {
+        ResolvedTarget::Local(_, id) => {
             ByteBuf::push(&mut *output, 1);
             ByteBuf::write_u32_le(
-                 output,
-                parameter_count + resolved_name_index_at(
-                    resolved,
-                    occurrence
-                )
+                output,
+                parameter_count + Id::to_u32(id)
             )
         },
-        3 => {
+        ResolvedTarget::Function(_, shell) => {
             ByteBuf::push(&mut *output, 2);
             write_function_identity(
-                 output,
+                output,
                 source,
                 declarations,
-                usize_from_u32(resolved_name_index_at(resolved, occurrence))
+                usize_from_u32(shell)
             )
         },
-        4 => {
+        ResolvedTarget::Struct(_, header) => {
             ByteBuf::push(&mut *output, 3);
-            ByteBuf::write_u32_le(
-                 output,
-                resolved_name_index_at(resolved, occurrence)
-            )
+            ByteBuf::write_u32_le(output, header)
         },
-        5 => {
+        ResolvedTarget::Variant(_, variant) => {
             ByteBuf::push(&mut *output, 4);
-            ByteBuf::write_u32_le(
-                 output,
-                resolved_name_index_at(resolved, occurrence)
-            )
-        },
-        _ => unreachable()
+            ByteBuf::write_u32_le(output, variant)
+        }
     }
 }
 
@@ -1458,29 +1413,31 @@ write_occurrences(
     occurrence: usize
 ) {
     if(occurrence < resolved_name_count(resolved)) {
-        let expression = resolved_name_expression_at(resolved, occurrence);
-            write_name_token(
-                &mut *output,
-                source,
-                super::bodies::expression_token_start_at(body, expression)
-            );
-            write_target(
-                &mut *output,
-                source,
-                declarations,
-                resolved,
-                occurrence,
-                parameter_count
-            );
-            write_occurrences(
-                 output,
-                source,
-                declarations,
+        let expression = resolved_name_expression_id_at(resolved, occurrence);
+        write_name_token(
+            &mut *output,
+            source,
+            super::bodies::expression_token_start_at(
                 body,
-                resolved,
-                parameter_count,
-                occurrence + usize_value(1)
+                Id::to_u32(expression)
             )
+        );
+        write_target(
+            &mut *output,
+            source,
+            declarations,
+            resolved_name_target_at(resolved, occurrence),
+            parameter_count
+        );
+        write_occurrences(
+            output,
+            source,
+            declarations,
+            body,
+            resolved,
+            parameter_count,
+            occurrence + usize_value(1)
+        )
     } else {
         ()
     }
