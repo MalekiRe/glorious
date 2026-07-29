@@ -63,6 +63,7 @@ struct ResolutionMap {
 struct BodyBuilder {
     parameter_count: u32,
     next_source_local: u32,
+    final_transfer_expressions: Vec<u32>,
     local_types: Vec<u32>,
     values: Vec<u32>,
     computations: Vec<u32>,
@@ -329,15 +330,15 @@ error(
 ) -> ElaborationError {
     ElaborationError {
         code: code,
-        token: move token,
-        related: move related,
+        token:  token,
+        related:  related,
         expected: expected,
         found: found
     }
 }
 
 push_word(value: &mut Vec<u32>, word: u32) {
-    Vec::push(&mut *value, move word)
+    Vec::push(&mut *value,  word)
 }
 
 push_words4(
@@ -2481,6 +2482,7 @@ elaborate_integer(
 }
 
 elaborate_identifier(
+    interfaces: &TypedInterfaces,
     body: &super::bodies::ParsedBody,
     map: &ResolutionMap,
     value: &mut BodyBuilder,
@@ -2490,13 +2492,23 @@ elaborate_identifier(
     let token = super::bodies::expression_token_start_at(body, expression);
     let kind = *Vec::index(&map.kinds, usize_from_u32(expression));
     let index = *Vec::index(&map.indices, usize_from_u32(expression));
+    let final_transfer = *Vec::index(
+        &value.final_transfer_expressions,
+        usize_from_u32(expression)
+    );
     handle kind {
-        1 => elaborate_local(value, index, token, expected_plus_one),
+        1 => elaborate_local(
+            interfaces,
+            value, index, token, expected_plus_one,
+            final_transfer
+        ),
         2 => elaborate_local(
+            interfaces,
             value,
             value.parameter_count + index,
             token,
-            expected_plus_one
+            expected_plus_one,
+            final_transfer
         ),
         3 => Result::Err(error(2, token, token, 0, 0)),
         _ => Result::Err(error(7, token, token, 0, 0))
@@ -2504,10 +2516,12 @@ elaborate_identifier(
 }
 
 elaborate_local(
+    interfaces: &TypedInterfaces,
     value: &mut BodyBuilder,
     local: u32,
     token: usize,
-    expected_plus_one: u32
+    expected_plus_one: u32,
+    final_transfer: u32
 ) -> Result<Elaborated, ElaborationError> {
     handle usize_from_u32(local) < Vec::len(&value.local_types) {
         Result::Err(_) => Result::Err(error(7, token, token, 0, 0)),
@@ -2516,7 +2530,17 @@ elaborate_local(
             handle ty == u32_value(0) {
                 Result::Ok(_) => Result::Err(error(7, token, token, 0, 0)),
                 Result::Err(_) => {
-                    let core = push_value(value, 3, ty, local, 0);
+                    let copy = handle bool_and(
+                        final_transfer != u32_value(0),
+                        *Vec::index(
+                            &interfaces.type_flags,
+                            usize_from_u32(ty)
+                        ) == u32_value(1)
+                    ) {
+                        Result::Ok(_) => 0,
+                        Result::Err(_) => 1
+                    };
+                    let core = push_value(value, 3, ty, local, copy);
                     check_expected(
                         Elaborated {
                             type_id: ty,
@@ -3893,6 +3917,7 @@ elaborate_expression(
                 expected_plus_one
             ),
             Result::Err(_) => elaborate_identifier(
+                &*interfaces,
                 body,
                 map,
                 value,
@@ -4046,6 +4071,479 @@ seed_parameter_locals(
     }
 }
 
+resolved_local_plus_one(
+    map: &ResolutionMap,
+    parameter_count: u32,
+    expression: u32
+) -> u32 {
+    let kind = *Vec::index(&map.kinds, usize_from_u32(expression));
+    let index = *Vec::index(&map.indices, usize_from_u32(expression));
+    handle kind {
+        1 => index + u32_value(1),
+        2 => parameter_count + index + u32_value(1),
+        _ => 0
+    }
+}
+
+record_last_local_expressions(
+    body: &super::bodies::ParsedBody,
+    map: &ResolutionMap,
+    parameter_count: u32,
+    expression: u32,
+    last_expressions_plus_one: &mut Vec<u32>
+) {
+    handle super::bodies::expression_kind_at(body, expression) {
+        1 => {
+            let local_plus_one = resolved_local_plus_one(
+                map,
+                parameter_count,
+                expression
+            );
+            handle local_plus_one == u32_value(0) {
+                Result::Ok(_) => (),
+                Result::Err(_) => {
+                    *Vec::index_mut(
+                        &mut *last_expressions_plus_one,
+                        usize_from_u32(local_plus_one - u32_value(1))
+                    ) = expression + u32_value(1);
+                }
+            }
+        },
+        _ => record_last_local_expression_children(
+            body,
+            map,
+            parameter_count,
+            expression,
+            0,
+            last_expressions_plus_one
+        )
+    }
+}
+
+record_last_local_expression_children(
+    body: &super::bodies::ParsedBody,
+    map: &ResolutionMap,
+    parameter_count: u32,
+    expression: u32,
+    ordinal: u32,
+    last_expressions_plus_one: &mut Vec<u32>
+) {
+    handle ordinal < super::bodies::expression_child_count_at(
+        body,
+        expression
+    ) {
+        Result::Err(_) => (),
+        Result::Ok(_) => {
+            record_last_local_expressions(
+                body,
+                map,
+                parameter_count,
+                super::bodies::expression_child_at(
+                    body,
+                    expression,
+                    ordinal
+                ),
+                last_expressions_plus_one
+            );
+            record_last_local_expression_children(
+                body,
+                map,
+                parameter_count,
+                expression,
+                ordinal + u32_value(1),
+                last_expressions_plus_one
+            )
+        }
+    }
+}
+
+straight_line_children(
+    body: &super::bodies::ParsedBody,
+    expression: u32,
+    ordinal: u32
+) -> Bool {
+    handle ordinal < super::bodies::expression_child_count_at(
+        body,
+        expression
+    ) {
+        Result::Err(_) => true,
+        Result::Ok(_) => handle straight_line_expression(
+            body,
+            super::bodies::expression_child_at(body, expression, ordinal)
+        ) {
+            Result::Err(_) => false,
+            Result::Ok(_) => straight_line_children(
+                body,
+                expression,
+                ordinal + u32_value(1)
+            )
+        }
+    }
+}
+
+straight_line_call_arguments(
+    body: &super::bodies::ParsedBody,
+    expression: u32
+) -> Bool {
+    // Child zero is the callable receiver. Its ownership follows Fn mode,
+    // rather than ordinary final-use inference.
+    straight_line_children(body, expression, 1)
+}
+
+straight_line_expression(
+    body: &super::bodies::ParsedBody,
+    expression: u32
+) -> Bool {
+    handle super::bodies::expression_kind_at(body, expression) {
+        1 => true,
+        2 => true,
+        3 => true,
+        4 => straight_line_children(body, expression, 0),
+        5 => straight_line_children(body, expression, 0),
+        7 => straight_line_call_arguments(body, expression),
+        9 => straight_line_children(body, expression, 0),
+        10 => straight_line_children(body, expression, 0),
+        _ => false
+    }
+}
+
+local_occurrences_in_expression(
+    body: &super::bodies::ParsedBody,
+    map: &ResolutionMap,
+    parameter_count: u32,
+    expression: u32,
+    local_plus_one: u32
+) -> u32 {
+    handle super::bodies::expression_kind_at(body, expression) {
+        1 => handle resolved_local_plus_one(
+            map,
+            parameter_count,
+            expression
+        ) == local_plus_one {
+            Result::Ok(_) => 1,
+            Result::Err(_) => 0
+        },
+        _ => local_occurrences_in_children(
+            body,
+            map,
+            parameter_count,
+            expression,
+            0,
+            local_plus_one
+        )
+    }
+}
+
+local_occurrences_in_children(
+    body: &super::bodies::ParsedBody,
+    map: &ResolutionMap,
+    parameter_count: u32,
+    expression: u32,
+    ordinal: u32,
+    local_plus_one: u32
+) -> u32 {
+    handle ordinal < super::bodies::expression_child_count_at(
+        body,
+        expression
+    ) {
+        Result::Err(_) => 0,
+        Result::Ok(_) => local_occurrences_in_expression(
+            body,
+            map,
+            parameter_count,
+            super::bodies::expression_child_at(body, expression, ordinal),
+            local_plus_one
+        ) + local_occurrences_in_children(
+            body,
+            map,
+            parameter_count,
+            expression,
+            ordinal + u32_value(1),
+            local_plus_one
+        )
+    }
+}
+
+struct_has_repeated_local(
+    body: &super::bodies::ParsedBody,
+    map: &ResolutionMap,
+    parameter_count: u32,
+    expression: u32,
+    local: usize,
+    local_count: usize
+) -> Bool {
+    handle local < local_count {
+        Result::Err(_) => false,
+        Result::Ok(_) => handle local_occurrences_in_expression(
+            body,
+            map,
+            parameter_count,
+            expression,
+            u32_from_usize(local) + u32_value(1)
+        ) > u32_value(1) {
+            Result::Ok(_) => true,
+            Result::Err(_) => struct_has_repeated_local(
+                body,
+                map,
+                parameter_count,
+                expression,
+                local + usize_value(1),
+                local_count
+            )
+        }
+    }
+}
+
+expression_contains_repeated_struct_local(
+    body: &super::bodies::ParsedBody,
+    map: &ResolutionMap,
+    parameter_count: u32,
+    expression: u32,
+    local_count: usize
+) -> Bool {
+    handle bool_and(
+        super::bodies::expression_kind_at(body, expression) == u8_value(10),
+        struct_has_repeated_local(
+            body,
+            map,
+            parameter_count,
+            expression,
+            0,
+            local_count
+        )
+    ) {
+        Result::Ok(_) => true,
+        Result::Err(_) => expression_children_contain_repeated_struct_local(
+            body,
+            map,
+            parameter_count,
+            expression,
+            0,
+            local_count
+        )
+    }
+}
+
+expression_children_contain_repeated_struct_local(
+    body: &super::bodies::ParsedBody,
+    map: &ResolutionMap,
+    parameter_count: u32,
+    expression: u32,
+    ordinal: u32,
+    local_count: usize
+) -> Bool {
+    handle ordinal < super::bodies::expression_child_count_at(
+        body,
+        expression
+    ) {
+        Result::Err(_) => false,
+        Result::Ok(_) => handle expression_contains_repeated_struct_local(
+            body,
+            map,
+            parameter_count,
+            super::bodies::expression_child_at(body, expression, ordinal),
+            local_count
+        ) {
+            Result::Ok(_) => true,
+            Result::Err(_) =>
+                expression_children_contain_repeated_struct_local(
+                    body,
+                    map,
+                    parameter_count,
+                    expression,
+                    ordinal + u32_value(1),
+                    local_count
+                )
+        }
+    }
+}
+
+mark_final_transfer_candidates(
+    body: &super::bodies::ParsedBody,
+    map: &ResolutionMap,
+    parameter_count: u32,
+    expression: u32,
+    ordinal: u32,
+    last_expressions_plus_one: &Vec<u32>,
+    output: &mut Vec<u32>
+) {
+    handle super::bodies::expression_kind_at(body, expression) {
+        1 => {
+            let local_plus_one = resolved_local_plus_one(
+                map,
+                parameter_count,
+                expression
+            );
+            handle local_plus_one == u32_value(0) {
+                Result::Ok(_) => (),
+                Result::Err(_) => handle *Vec::index(
+                    last_expressions_plus_one,
+                    usize_from_u32(local_plus_one - u32_value(1))
+                ) == expression + u32_value(1) {
+                    Result::Err(_) => (),
+                    Result::Ok(_) => {
+                        *Vec::index_mut(
+                            &mut *output,
+                            usize_from_u32(expression)
+                        ) = 1;
+                    }
+                }
+            }
+        },
+        7 => {
+            let argument = handle ordinal < u32_value(1) {
+                Result::Ok(_) => u32_value(1),
+                Result::Err(_) => ordinal
+            };
+            handle argument < super::bodies::expression_child_count_at(
+                body,
+                expression
+            ) {
+                Result::Err(_) => (),
+                Result::Ok(_) => {
+                    mark_final_transfer_candidates(
+                        body,
+                        map,
+                        parameter_count,
+                        super::bodies::expression_child_at(
+                            body,
+                            expression,
+                            argument
+                        ),
+                        0,
+                        last_expressions_plus_one,
+                        output
+                    );
+                    mark_final_transfer_candidates(
+                        body,
+                        map,
+                        parameter_count,
+                        expression,
+                        argument + u32_value(1),
+                        last_expressions_plus_one,
+                        output
+                    )
+                }
+            }
+        },
+        _ => handle ordinal < super::bodies::expression_child_count_at(
+            body,
+            expression
+        ) {
+            Result::Err(_) => (),
+            Result::Ok(_) => {
+                mark_final_transfer_candidates(
+                    body,
+                    map,
+                    parameter_count,
+                    super::bodies::expression_child_at(
+                        body,
+                        expression,
+                        ordinal
+                    ),
+                    0,
+                    last_expressions_plus_one,
+                    output
+                );
+                mark_final_transfer_candidates(
+                    body,
+                    map,
+                    parameter_count,
+                    expression,
+                    ordinal + u32_value(1),
+                    last_expressions_plus_one,
+                    output
+                )
+            }
+        }
+    }
+}
+
+mark_root_statement_candidates(
+    body: &super::bodies::ParsedBody,
+    map: &ResolutionMap,
+    parameter_count: u32,
+    root: u32,
+    ordinal: u32,
+    last_expressions_plus_one: &Vec<u32>,
+    output: &mut Vec<u32>
+) {
+    handle ordinal < super::bodies::expression_child_count_at(body, root) {
+        Result::Err(_) => (),
+        Result::Ok(_) => {
+            let expression = super::bodies::expression_child_at(
+                body,
+                root,
+                ordinal
+            );
+            handle straight_line_expression(body, expression) {
+                Result::Err(_) => (),
+                Result::Ok(_) => handle
+                    expression_contains_repeated_struct_local(
+                        body,
+                        map,
+                        parameter_count,
+                        expression,
+                        Vec::len(last_expressions_plus_one)
+                    ) {
+                    Result::Ok(_) => (),
+                    Result::Err(_) => mark_final_transfer_candidates(
+                        body,
+                        map,
+                        parameter_count,
+                        expression,
+                        0,
+                        last_expressions_plus_one,
+                        output
+                    )
+                }
+            };
+            mark_root_statement_candidates(
+                body,
+                map,
+                parameter_count,
+                root,
+                ordinal + u32_value(1),
+                last_expressions_plus_one,
+                output
+            )
+        }
+    }
+}
+
+final_transfer_expressions(
+    body: &super::bodies::ParsedBody,
+    map: &ResolutionMap,
+    parameter_count: u32,
+    local_count: usize
+) -> Vec<u32> {
+    let root = super::bodies::body_root_index(body);
+    let last_expressions_plus_one = Vec::new();
+    push_zeroes(&mut last_expressions_plus_one, local_count);
+    record_last_local_expressions(
+        body,
+        map,
+        parameter_count,
+        root,
+        &mut last_expressions_plus_one
+    );
+    let output = Vec::new();
+    push_zeroes(&mut output, super::bodies::expression_count(body));
+    handle super::bodies::expression_kind_at(body, root) == u8_value(8) {
+        Result::Err(_) => (),
+        Result::Ok(_) => mark_root_statement_candidates(
+            body,
+            map,
+            parameter_count,
+            root,
+            0,
+            &last_expressions_plus_one,
+            &mut output
+        )
+    };
+    output
+}
+
 pub elaborate_function_body(
     original: &String,
     headers: &super::headers::ParsedHeaders,
@@ -4072,12 +4570,24 @@ pub elaborate_function_body(
                 &mut locals,
                 super::resolution::local_count(resolved)
             );
-            let builder = BodyBuilder {
-                parameter_count: interface_callable_parameter_count_at(
-                    interfaces,
-                    callable
-                ),
+            handle resolution_map(body, resolved) {
+                Result::Err(found) => Result::Err(move found),
+                Result::Ok(map) => {
+                    let parameter_count =
+                        interface_callable_parameter_count_at(
+                            interfaces,
+                            callable
+                        );
+                    let builder = BodyBuilder {
+                parameter_count: parameter_count,
                 next_source_local: 0,
+                        final_transfer_expressions:
+                            final_transfer_expressions(
+                                body,
+                                &map,
+                                parameter_count,
+                                Vec::len(&locals)
+                            ),
                 local_types:  locals,
                 values: Vec::new(),
                 computations: Vec::new(),
@@ -4085,9 +4595,7 @@ pub elaborate_function_body(
                 construction_fields: Vec::new(),
                 integer_constants: Vec::new()
             };
-            handle resolution_map(body, resolved) {
-                Result::Err(found) => Result::Err(move found),
-                Result::Ok(map) => handle elaborate_expression(
+                    handle elaborate_expression(
                     original,
                     headers,
                     declarations,
@@ -4113,6 +4621,7 @@ pub elaborate_function_body(
                                 move builder.construction_fields,
                             integer_constants: move builder.integer_constants
                         })
+                        }
                     }
                 }
             }
@@ -4450,7 +4959,14 @@ write_value_expression(
                     ByteBuf::push(&mut *output, 2);
                     write_type_id(&mut *output, ty);
                     ByteBuf::write_u32_le(&mut *output, local);
-                    ByteBuf::push( output, 1);
+                    ByteBuf::push( output,
+                        wrapping_convert_to_u8(
+                            *Vec::index(
+                                &body.values,
+                                base + usize_value(3)
+                            )
+                        )
+                    );
                     Result::Ok(())
                 }
             }
@@ -5187,21 +5703,21 @@ pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
     }
 }
 
-usize_value(value: usize) -> usize { move value }
+usize_value(value: usize) -> usize {  value }
 
-u8_value(value: u8) -> u8 { move value }
+u8_value(value: u8) -> u8 {  value }
 
-u32_value(value: u32) -> u32 { move value }
+u32_value(value: u32) -> u32 {  value }
 
-u32_from_usize(value: usize) -> u32 { wrapping_convert_to_u32(move value) }
+u32_from_usize(value: usize) -> u32 { wrapping_convert_to_u32( value) }
 
-usize_from_u32(value: u32) -> usize { wrapping_convert_to_usize(move value) }
+usize_from_u32(value: u32) -> usize { wrapping_convert_to_usize( value) }
 
-usize_from_u8(value: u8) -> usize { wrapping_convert_to_usize(move value) }
+usize_from_u8(value: u8) -> usize { wrapping_convert_to_usize( value) }
 
-u32_from_u8(value: u8) -> u32 { wrapping_convert_to_u32(move value) }
+u32_from_u8(value: u8) -> u32 { wrapping_convert_to_u32( value) }
 
-u8_from_u32(value: u32) -> u8 { wrapping_convert_to_u8(move value) }
+u8_from_u32(value: u32) -> u8 { wrapping_convert_to_u8( value) }
 
 bool_and(left: Bool, right: Bool) -> Bool {
     handle move left {

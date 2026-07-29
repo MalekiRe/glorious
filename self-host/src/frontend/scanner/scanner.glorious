@@ -119,10 +119,10 @@ pub scan_error_token(value: &ScanError) -> usize { value.token }
 pub scan_error_related(value: &ScanError) -> usize { value.related }
 
 scan_error(code: u8, token: usize, related: usize) -> ScanError {
-    ScanError { code: code, token: move token, related: related }
+    ScanError { code: code, token:  token, related: related }
 }
 
-u8_equal(left: u8, right: u8) -> Bool { move left == move right }
+u8_equal(left: u8, right: u8) -> Bool {  left ==  right }
 
 delimiter_open(value: TokenKind) -> u8 {
     handle move value {
@@ -654,7 +654,7 @@ function_classification(name: Id<String>) -> Result<Classification, ScanError> {
     Result::Ok(Classification {
         kind: DeclarationKind::Function,
         kind_code: 12,
-        name: Result::Ok(move name),
+        name: Result::Ok( name),
         style: 3
     })
 }
@@ -689,7 +689,7 @@ scan_state_error(
     name: Option<Id<String>>,
     error: ScanError
 ) -> Result<ScanStep, ScanError> {
-    Result::Err(move error)
+    Result::Err( error)
 }
 
 scan_semicolon_shell(
@@ -932,7 +932,7 @@ scan_loop_error(
     output: Vec<DeclarationShell>,
     error: ScanError
 ) -> Result<DeclarationIndex, ScanError> {
-    Result::Err(move error)
+    Result::Err( error)
 }
 
 scan_complete(
@@ -1031,7 +1031,7 @@ bool_code(value: Bool) -> u8 {
     handle move value { Result::Ok(_) => 1, Result::Err(_) => 0 }
 }
 
-usize_value(value: usize) -> usize { move value }
+usize_value(value: usize) -> usize {  value }
 
 write_string(output: &mut ByteBuf, value: &String) {
     let bytes = String::as_bytes(value);

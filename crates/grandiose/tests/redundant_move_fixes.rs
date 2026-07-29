@@ -63,7 +63,7 @@ fn monomorphic_noncopy_move_has_an_exact_machine_fix() {
 }
 
 #[test]
-fn copy_and_generic_moves_are_not_rewritten() {
+fn final_copy_moves_are_rewritten_but_generic_source_is_not() {
     let copy_source = r#"
         forward(value: i64) -> i64 { move value }
         main() -> { () }
@@ -72,7 +72,7 @@ fn copy_and_generic_moves_are_not_rewritten() {
     assert!(
         copy.diagnostics
             .iter()
-            .all(|diagnostic| diagnostic.code.as_deref() != Some(REDUNDANT_MOVE_CODE))
+            .any(|diagnostic| diagnostic.code.as_deref() == Some(REDUNDANT_MOVE_CODE))
     );
 
     // A closed program may currently instantiate this only with Vec, but a
@@ -86,6 +86,125 @@ fn copy_and_generic_moves_are_not_rewritten() {
     let generic = compile_source_to_phases("generic-move.glorious", generic_source).unwrap();
     assert!(
         generic
+            .diagnostics
+            .iter()
+            .all(|diagnostic| diagnostic.code.as_deref() != Some(REDUNDANT_MOVE_CODE))
+    );
+}
+
+#[test]
+fn bare_final_copy_use_lowers_as_transfer() {
+    let source = r#"
+        forward(value: i64) -> i64 { value }
+        struct Relevant { value: i64 }
+        impl Use<[1,infinity]> for Relevant {}
+        duplicate_then_transfer(value: Relevant) -> (Relevant, Relevant) { (value, value) }
+        main() -> { () }
+    "#;
+    let phases = compile_source_to_phases("final-use-transfer.glorious", source).unwrap();
+    let forward = phases
+        .mir
+        .functions
+        .iter()
+        .find(|function| function.name == "forward")
+        .unwrap();
+    assert!(matches!(
+        forward.blocks[0].terminator,
+        grandiose::compiler_mir::Terminator::Return {
+            value: Some(grandiose::compiler_mir::Operand {
+                register: 1,
+                mode: grandiose::compiler_mir::UseMode::Move,
+            })
+        }
+    ));
+    assert!(
+        !forward
+            .blocks
+            .iter()
+            .flat_map(|block| &block.statements)
+            .any(|statement| matches!(
+                statement.kind,
+                grandiose::compiler_mir::InstructionKind::Copy { .. }
+            ))
+    );
+
+    let duplicate = phases
+        .mir
+        .functions
+        .iter()
+        .find(|function| function.name == "duplicate_then_transfer")
+        .unwrap();
+    assert!(
+        duplicate
+            .blocks
+            .iter()
+            .flat_map(|block| &block.statements)
+            .any(|statement| matches!(
+                statement.kind,
+                grandiose::compiler_mir::InstructionKind::Copy { .. }
+            ))
+    );
+    assert!(
+        duplicate
+            .blocks
+            .iter()
+            .flat_map(|block| &block.statements)
+            .any(|statement| matches!(
+                statement.kind,
+                grandiose::compiler_mir::InstructionKind::Move { .. }
+            ))
+    );
+}
+
+#[test]
+fn final_use_inference_does_not_cross_completion_match_branches() {
+    let source = r#"
+        preserve(value: Bool) -> Bool {
+            handle value {
+                Result::Ok(_) => value,
+                Result::Err(_) => value
+            }
+        }
+        main() -> { () }
+    "#;
+    compile_source_to_phases("final-use-control.glorious", source).unwrap();
+}
+
+#[test]
+fn nested_block_liveness_does_not_consume_an_outer_local() {
+    let source = r#"
+        preserve(value: i64) -> i64 {
+            { value };
+            value
+        }
+        main() -> { () }
+    "#;
+    compile_source_to_phases("final-use-nested-block.glorious", source).unwrap();
+}
+
+#[test]
+fn final_use_inference_respects_live_loans_and_custom_drop() {
+    let loan_source = r#"
+        preserve(value: i64) -> i64 {
+            let borrowed = &value;
+            let copied = value;
+            *borrowed
+        }
+        main() -> { () }
+    "#;
+    compile_source_to_phases("final-use-loan.glorious", loan_source).unwrap();
+
+    let drop_source = r#"
+        struct Guard { marker: i64 }
+        impl Use<[0,infinity]> for Guard {}
+        impl Drop for Guard { drop(&mut self) -> { self.marker; () } }
+        forward(value: Guard) -> Guard { move value }
+        copy(value: Guard) -> Guard { value }
+        main() -> { () }
+    "#;
+    let phases = compile_source_to_phases("final-use-drop.glorious", drop_source).unwrap();
+    assert!(
+        phases
             .diagnostics
             .iter()
             .all(|diagnostic| diagnostic.code.as_deref() != Some(REDUNDANT_MOVE_CODE))

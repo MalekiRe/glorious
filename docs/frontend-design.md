@@ -1022,13 +1022,17 @@ bound additionally creates a must-move obligation on every normally completing
 path. Counts contributed only by non-consuming copies do not discharge the
 still-live source owner.
 
-Source `move value` forces whole-owner transfer even when `value` is duplicable;
-a bare owned use retains the ordinary copy selection when available. The prefix
-is contextual and the selected `Move` versus `Copy` mode remains explicit in
-Typed Core and MIR. The forced move is rejected for an unavailable, borrowed,
-or partially moved source place. Immediate abort and proven nontermination have
-no successor ownership state and are exempt; ordinary terminal or nonlocal
-control with cleanup is not.
+Source `move value` forces whole-owner transfer even when `value` is duplicable.
+A bare whole-local use also transfers when liveness proves that occurrence is
+the owner's final use on the current straight-line path; otherwise a duplicable
+value is copied. Inference is deliberately conservative across branches,
+closures, projections, labels, handlers, effects, resumptions, active loans,
+and custom `Drop`. Explicit `move` remains the spelling for an early or
+syntax-sensitive transfer. The selected `Move` versus `Copy` mode is always
+explicit in Typed Core and MIR. A transfer is rejected for an unavailable,
+borrowed, or partially moved source place. Immediate abort and proven
+nontermination have no successor ownership state and are exempt; ordinary
+terminal or nonlocal control with cleanup is not.
 
 This is the only quantitative checker. Callable invocation bounds, environment
 transitions, resumption quantities, cancellation zero-use checks, and

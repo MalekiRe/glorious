@@ -476,11 +476,11 @@ empty_range(value: &Vec<TypeEdge>) -> HeaderRange {
 }
 
 token_range(start: usize, end: usize) -> HeaderTokenRange {
-    HeaderTokenRange { start: move start, end: move end }
+    HeaderTokenRange { start:  start, end:  end }
 }
 
 header_error(code: u8, token: usize, related: usize) -> HeaderError {
-    HeaderError { code: code, token: move token, related: related }
+    HeaderError { code: code, token:  token, related: related }
 }
 
 next_index(value: usize) -> usize { value + usize_value(1) }
@@ -768,7 +768,7 @@ parse_reference(
     start: usize
 ) -> Result<TypeId, HeaderError> {
     let lifetime = take_lifetime(value);
-    parse_reference_referent(value, related, start, move lifetime)
+    parse_reference_referent(value, related, start,  lifetime)
 }
 
 take_lifetime(value: &mut Parser) -> Option<NameUse> {
@@ -1473,7 +1473,7 @@ parse_alias(
         order_kinds,
         order_indices,
         shell,
-        move public,
+         public,
         start,
         whole_end
     )
@@ -2218,7 +2218,7 @@ write_common(
     name: Id<String>,
     generics: &HeaderRange
 ) {
-    ByteBuf::push(&mut *output, bool_code(move public));
+    ByteBuf::push(&mut *output, bool_code( public));
     write_name(&mut *output, &parsed.source, move name);
     ByteBuf::write_u32_le(&mut *output, generics.count);
     write_generics( output, parsed, generics, 0)
@@ -2559,10 +2559,10 @@ bool_code(value: Bool) -> u8 {
     handle move value { Result::Ok(_) => 1, Result::Err(_) => 0 }
 }
 
-usize_value(value: usize) -> usize { move value }
+usize_value(value: usize) -> usize {  value }
 
-u8_value(value: u8) -> u8 { move value }
+u8_value(value: u8) -> u8 {  value }
 
-u16_value(value: u16) -> u16 { move value }
+u16_value(value: u16) -> u16 {  value }
 
-u64_value(value: u64) -> u64 { move value }
+u64_value(value: u64) -> u64 {  value }

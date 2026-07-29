@@ -848,7 +848,7 @@ fn actual_use_counts_copy_destinations_temporaries_and_projection_boundaries() {
 }
 
 #[test]
-fn explicit_move_forces_final_transfer_of_a_duplicable_relevant_owner() {
+fn explicit_and_inferred_final_moves_transfer_duplicable_relevant_owners() {
     let source = r#"
         struct Relevant { value: i64 }
         impl Use<[1,infinity]> for Relevant {}
@@ -870,14 +870,9 @@ fn explicit_move_forces_final_transfer_of_a_duplicable_relevant_owner() {
         bad(value: Relevant) -> (Relevant, Relevant) { (value, value) }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("copies-only.glorious", copies_only).unwrap_err();
-    assert!(
-        errors.iter().any(|error| {
-            error.code.as_deref() == Some("G1BC002")
-                && error.message.contains("remains live after Copy uses")
-        }),
-        "got {errors:#?}"
-    );
+    let inferred = compile_source_to_phases("copies-only.glorious", copies_only).unwrap();
+    assert!(inferred.mir.canonical_text().contains("Copy"));
+    assert!(inferred.mir.canonical_text().contains("Move"));
 
     let live_local = r#"
         struct Relevant { value: i64 }
@@ -886,16 +881,7 @@ fn explicit_move_forces_final_transfer_of_a_duplicable_relevant_owner() {
         bad() -> Relevant { let original = make(); let copy = original; move copy }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("live-copy-local.glorious", live_local).unwrap_err();
-    assert!(
-        errors.iter().any(|error| {
-            error.code.as_deref() == Some("G1BC002")
-                && error
-                    .message
-                    .contains("local `original` remains live after Copy uses")
-        }),
-        "got {errors:#?}"
-    );
+    compile_source_to_bytecode("live-copy-local.glorious", live_local).unwrap();
 }
 
 #[test]
@@ -6089,7 +6075,7 @@ fn shared_and_unique_reference_forwarding_emit_verified_ownership_modes() {
     assert_eq!(shared_id.return_type, shared);
     assert!(matches!(
         phases.artifact.code[shared_id.code_start as usize],
-        Instruction::Copy { src: 1, .. }
+        Instruction::Move { src: 1, .. }
     ));
 
     let unique_id = phases
@@ -8217,7 +8203,7 @@ fn core_carries_exact_types_and_resolved_nominal_member_ids() {
 }
 
 #[test]
-fn mir_owns_reverse_cleanup_and_explicit_operand_modes() {
+fn mir_owns_final_use_transfer_and_explicit_operand_modes() {
     let phases = compile_source_to_phases_with_options(
         "mir-cleanup.glorious",
         r#"
@@ -8239,34 +8225,19 @@ fn mir_owns_reverse_cleanup_and_explicit_operand_modes() {
         .iter()
         .find(|function| function.name == "shadow")
         .unwrap();
-    assert_eq!(function.return_cleanup.len(), 3);
     assert!(
-        function
-            .return_cleanup
-            .windows(2)
-            .all(|pair| pair[0] > pair[1])
+        function.return_cleanup.is_empty(),
+        "every scalar owner is discharged by its inferred final transfer"
     );
-    let drops = function
-        .blocks
-        .iter()
-        .flat_map(|block| &block.statements)
-        .filter_map(|instruction| match instruction.kind {
-            grandiose::compiler_mir::InstructionKind::Drop { owner } => Some(owner),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    assert!(
-        drops.ends_with(
-            &function
-                .return_cleanup
-                .iter()
-                .map(|register| grandiose::compiler_mir::Operand {
-                    register: *register,
-                    mode: grandiose::compiler_mir::UseMode::Move,
-                })
-                .collect::<Vec<_>>()
-        )
-    );
+    assert!(function.blocks.iter().any(|block| matches!(
+        block.terminator,
+        grandiose::compiler_mir::Terminator::Return {
+            value: Some(grandiose::compiler_mir::Operand {
+                mode: grandiose::compiler_mir::UseMode::Move,
+                ..
+            })
+        }
+    )));
 }
 
 #[test]

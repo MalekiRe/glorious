@@ -89,11 +89,11 @@ struct CodedTokenKind { kind: TokenKind, code: u16 }
 struct RecognizedKeyword { value: Keyword, code: u8 }
 
 coded_token_kind(kind: TokenKind, code: u16) -> CodedTokenKind {
-    CodedTokenKind { kind: move kind, code: move code }
+    CodedTokenKind { kind:  kind, code:  code }
 }
 
 recognized_keyword(value: Keyword, code: u8) -> RecognizedKeyword {
-    RecognizedKeyword { value: move value, code: move code }
+    RecognizedKeyword { value:  value, code:  code }
 }
 
 pub struct LexedSource {
@@ -142,7 +142,7 @@ pub token_kind(value: &Token) -> &TokenKind { &value.kind }
 
 pub token_kind_at(value: &LexedSource, index: usize) -> TokenKind {
     let token = Vec::index(&value.tokens, move index);
-    *token_kind(move token)
+    *token_kind( token)
 }
 
 pub token_code(value: &Token) -> u16 { value.code }
@@ -251,13 +251,13 @@ struct Lexer {
     after_projection_dot: Bool
 }
 
-span(start: usize, end: usize) -> Span { Span { start: move start, end: move end } }
+span(start: usize, end: usize) -> Span { Span { start:  start, end:  end } }
 
 lex_error(kind: LexErrorKind, code: u16, start: usize, end: usize) -> LexError {
     LexError {
-        kind: move kind,
-        code: move code,
-        span: span(move start, move end)
+        kind:  kind,
+        code:  code,
+        span: span( start,  end)
     }
 }
 
@@ -265,11 +265,11 @@ bool_value(value: Bool) -> u32 {
     handle move value { Result::Ok(_) => 1, Result::Err(_) => 0 }
 }
 
-byte_value(value: u8) -> u8 { move value }
+byte_value(value: u8) -> u8 {  value }
 
-u16_value(value: u16) -> u16 { move value }
+u16_value(value: u16) -> u16 {  value }
 
-u32_value(value: u32) -> u32 { move value }
+u32_value(value: u32) -> u32 {  value }
 
 u16_is(value: &u16, expected: u16) -> Bool {
     *value == expected
@@ -415,7 +415,7 @@ present_byte(result: Option<u8>) -> u8 {
 
 text_slice(source: &String, start: usize, end: usize) -> String {
     text_slice_result(
-        String::slice(source, Range { start: move start, end: move end })
+        String::slice(source, Range { start:  start, end:  end })
     )
 }
 
@@ -424,7 +424,7 @@ source_slice(value: &Lexer, start: usize, end: usize) -> String {
 }
 
 intern_slice(value: &mut Lexer, start: usize, end: usize) -> Id<String> {
-    let text = source_slice(&*value, move start, move end);
+    let text = source_slice(&*value,  start,  end);
     handle Interner::intern_string(&mut value.lexemes, move text) {
         Result::Ok(id) => move id,
         // `lex` rejects a source longer than the u32 ID space. There can be no
@@ -456,11 +456,11 @@ push_with_metadata(
             span: span(move start, move end)
         }
     );
-    (*value).after_projection_dot = move after_dot;
+    (*value).after_projection_dot =  after_dot;
 }
 
 push(value: &mut Lexer, kind: TokenKind, code: u16, start: usize) {
-    push_with_metadata( value, move kind, move code, 0, move start)
+    push_with_metadata( value,  kind,  code, 0,  start)
 }
 
 push_keyword(value: &mut Lexer, found: RecognizedKeyword, start: usize) {
@@ -519,7 +519,7 @@ scan_word(value: &mut Lexer) {
     advance(&mut *value, 1);
     scan_word_tail(&mut *value);
     let end = value.cursor;
-    let text = source_slice(&*value, start, move end);
+    let text = source_slice(&*value, start,  end);
     handle keyword(&text) {
         Result::Ok(found) => push_keyword( value, move found, start),
         Result::Err(_) => {
@@ -1116,12 +1116,12 @@ finish_number(
     push(
          value,
         TokenKind::Number(NumberToken {
-            spelling: move spelling,
-            base: move base,
+            spelling:  spelling,
+            base:  base,
             base_code: base_code,
-            digits: move digits,
-            fraction: move fraction,
-            exponent: move exponent
+            digits:  digits,
+            fraction:  fraction,
+            exponent:  exponent
         }),
         4,
         start
@@ -1263,7 +1263,7 @@ unicode_escape(value: &mut Lexer, backslash: usize) -> Result<char, LexError> {
     }
 }
 
-scalar_ok(value: char) -> Result<char, LexError> { Result::Ok(move value) }
+scalar_ok(value: char) -> Result<char, LexError> { Result::Ok( value) }
 
 scalar_escape(value: &mut Lexer, backslash: usize) -> Result<char, LexError> {
     handle peek(&*value, 0) {
@@ -1318,7 +1318,7 @@ scalar_escape(value: &mut Lexer, backslash: usize) -> Result<char, LexError> {
     }
 }
 
-byte_ok(value: u8) -> Result<u8, LexError> { Result::Ok(move value) }
+byte_ok(value: u8) -> Result<u8, LexError> { Result::Ok( value) }
 
 byte_escape(value: &mut Lexer, backslash: usize) -> Result<u8, LexError> {
     handle peek(&*value, 0) {
@@ -1880,7 +1880,7 @@ run_slash_token(value: Lexer, start: usize) -> Result<LexedSource, LexError> {
 }
 
 run_dollar_token(value: Lexer, start: usize) -> Result<LexedSource, LexError> {
-    run_structural( value, TokenKind::Dollar, 40, move start)
+    run_structural( value, TokenKind::Dollar, 40,  start)
 }
 
 run_colon_token(value: Lexer, start: usize) -> Result<LexedSource, LexError> {
@@ -1978,7 +1978,7 @@ run_structural(
     start: usize
 ) -> Result<LexedSource, LexError> {
     advance(&mut value, 1);
-    push(&mut value, move kind, move code, move start);
+    push(&mut value,  kind,  code,  start);
     run( value)
 }
 

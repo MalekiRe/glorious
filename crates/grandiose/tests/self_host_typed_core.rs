@@ -804,6 +804,10 @@ fn stage_a_corpus(directory: &Path) -> Vec<PathBuf> {
          forward(left: i64, right: u64) -> Pair { \
              pair_passthrough(Pair { left: left, right: right }) \
          }",
+        "struct Pair { left: i64, right: i64 } \
+         repeated(value: i64) -> Pair { \
+             Pair { right: value, left: value } \
+         }",
         "tuple_identity(value: (i64, u64)) -> (i64, u64) { value } \
          tuple_forward(left: i64, right: u64) -> (i64, u64) { \
              tuple_identity((left, right)) \

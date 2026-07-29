@@ -291,8 +291,9 @@ tests).
 
 ## 3. Explicit non-goals for this change
 
-- No implicit last-use `move`, no auto-reborrow, no method-call syntax, no
-  `true`/`false` patterns, no `is` changes — separately tracked.
+- No auto-reborrow, no method-call syntax, no `true`/`false` patterns, and no
+  `is` changes — separately tracked. Straight-line final-use transfer inference
+  is now implemented independently of this effect-syntax change.
 - No change to resumption quantity *semantics*, multishot representation,
   cancellation cleanup semantics, or the exclusion of cancelling
   exact-positive resumptions.

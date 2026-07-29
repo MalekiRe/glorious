@@ -1404,6 +1404,10 @@ struct CoreLowerer<'a> {
     environment_capture_modes: BTreeMap<String, specialization::CaptureMode>,
     expression_ordinals: BTreeMap<usize, u32>,
     expression_span_ordinals: BTreeMap<(usize, usize), u32>,
+    inferred_final_uses: BTreeSet<(String, usize, usize)>,
+    final_use_control_spans: BTreeSet<(usize, usize)>,
+    final_use_barrier_depth: usize,
+    final_use_block_depth: usize,
     effects: &'a mut EffectLowering,
     allow_terminal_perform: Option<BTreeSet<(u32, u32)>>,
     outward_protocols: BTreeSet<u32>,
@@ -7094,6 +7098,7 @@ fn compile_program_with_phases(
                 specialization::expression_ordinals(root),
                 specialization::expression_ordinal_maps(discovery_root).1,
             ),
+            root,
         );
         lowerer.active_reference_return_plan = reference_return_plans.get(&signature.id).cloned();
         if let Emission::Closure { request, .. } = &emission
@@ -10026,6 +10031,12 @@ pub(crate) fn normalize_ground_trait_methods(
         return Err(errors);
     }
     if methods.is_empty() && generic_methods.is_empty() {
+        // Raw/conformance bundles may intentionally omit the distributed
+        // operator traits. In that environment the parser's canonical
+        // `Add::+`/comparison calls have no user-selectable implementation
+        // surface, so recover the frozen scalar operations across the bundle
+        // rather than misclassifying the qualified callee as an enum variant.
+        restore_trusted_scalar_operators(&mut normalized, &(0..usize::MAX));
         return Ok(normalized);
     }
 
@@ -10091,6 +10102,22 @@ pub(crate) fn normalize_ground_trait_methods(
             }
             ReceiverType::Const(_) | ReceiverType::Never => false,
         }
+    }
+
+    fn local_callable_result(
+        callee: &Expr,
+        locals: &BTreeMap<String, ReceiverType>,
+    ) -> Option<ReceiverType> {
+        let ExprKind::Variable(path) = &callee.kind else {
+            return None;
+        };
+        let [name] = path.as_ref() else {
+            return None;
+        };
+        let ReceiverType::Name(binder) = locals.get(name.as_ref())? else {
+            return None;
+        };
+        locals.get(&format!("$callable$output${binder}")).cloned()
     }
 
     /// Infer the result of an ordinary generic direct call from the ground
@@ -10820,6 +10847,7 @@ pub(crate) fn normalize_ground_trait_methods(
                         expression_span,
                         trusted_standard_range,
                     )
+                    .or_else(|| local_callable_result(callee, locals))
                     .or_else(|| expected.cloned())
                 }
             }
@@ -10849,8 +10877,10 @@ pub(crate) fn normalize_ground_trait_methods(
                                 locals.insert(name.clone(), ty);
                             }
                         }
-                        Stmt::Deconstruct { value, .. } => {
-                            rewrite(
+                        Stmt::Deconstruct {
+                            ty, fields, value, ..
+                        } => {
+                            let value_ty = rewrite(
                                 value,
                                 locals,
                                 program,
@@ -10863,6 +10893,69 @@ pub(crate) fn normalize_ground_trait_methods(
                                 None,
                                 errors,
                             );
+                            if let Some(name) = ty {
+                                if let Some(declaration) =
+                                    program.structs.iter().find(|item| item.name == *name)
+                                {
+                                    let substitutions = match &value_ty {
+                                        Some(ReceiverType::Application(constructor, arguments))
+                                            if matches!(
+                                                constructor.as_ref(),
+                                                ReceiverType::Name(actual) if actual == name
+                                            ) =>
+                                        {
+                                            declaration
+                                                .generics
+                                                .iter()
+                                                .flat_map(|generics| &generics.params)
+                                                .map(|parameter| parameter.name.clone())
+                                                .zip(arguments.iter().cloned())
+                                                .collect()
+                                        }
+                                        _ => BTreeMap::new(),
+                                    };
+                                    for field in fields.iter() {
+                                        let Some(binding) = &field.binding else {
+                                            continue;
+                                        };
+                                        let Some(declared) = declaration
+                                            .fields
+                                            .iter()
+                                            .find(|declared| declared.name == field.field)
+                                        else {
+                                            continue;
+                                        };
+                                        if let Some(field_ty) =
+                                            source_receiver_type(program, &declared.ty)
+                                        {
+                                            locals.insert(
+                                                binding.clone(),
+                                                substitute_receiver(&field_ty, &substitutions),
+                                            );
+                                        }
+                                    }
+                                }
+                            } else if let Some(ReceiverType::Tuple(elements)) = value_ty {
+                                for field in fields.iter() {
+                                    let Some(binding) = &field.binding else {
+                                        continue;
+                                    };
+                                    let Some(index) =
+                                        field.field.parse::<usize>().ok().and_then(|index| {
+                                            if field.from_end {
+                                                elements.len().checked_sub(index)
+                                            } else {
+                                                Some(index)
+                                            }
+                                        })
+                                    else {
+                                        continue;
+                                    };
+                                    if let Some(field_ty) = elements.get(index) {
+                                        locals.insert(binding.clone(), field_ty.clone());
+                                    }
+                                }
+                            }
                         }
                         Stmt::Expr(value) => {
                             result = rewrite(
@@ -10978,9 +11071,10 @@ pub(crate) fn normalize_ground_trait_methods(
                             expected_elements.and_then(|elements| elements.get(index)),
                             errors,
                         )
+                        .unwrap_or_else(|| ReceiverType::Name("$unknown".into()))
                     })
-                    .collect::<Option<Vec<_>>>();
-                elements.map(ReceiverType::Tuple)
+                    .collect();
+                Some(ReceiverType::Tuple(elements))
             }
             ExprKind::Perform { args, .. } => {
                 for value in Rc::make_mut(args) {
@@ -11187,7 +11281,30 @@ pub(crate) fn normalize_ground_trait_methods(
             .filter_map(|param| {
                 source_receiver_type(program, &param.ty).map(|ty| (param.name.clone(), ty))
             })
-            .collect();
+            .collect::<BTreeMap<_, _>>();
+        locals.extend(
+            function
+                .where_clause
+                .iter()
+                .flat_map(|clause| &clause.goals)
+                .filter(|goal| {
+                    goal.polarity == GoalPolarity::Positive
+                        && goal.relation.path.len() == 1
+                        && goal.relation.path[0].name == "Fn"
+                })
+                .filter_map(|goal| {
+                    let binder = goal.subject.simple_name()?;
+                    let output = goal
+                        .relation
+                        .bindings
+                        .iter()
+                        .find(|binding| binding.name == "Output")?
+                        .value
+                        .as_type()
+                        .and_then(|output| source_receiver_type(program, output))?;
+                    Some((format!("$callable$output${binder}"), output))
+                }),
+        );
         rewrite(
             &mut function.body,
             &mut locals,
@@ -20728,6 +20845,171 @@ fn contains_closure(expression: &Expr) -> bool {
     }
 }
 
+/// Collect whole-local occurrences whose evaluation order is straight-line.
+///
+/// Control/effect boundaries deliberately reject the complete expression for
+/// now. This keeps final-use transfer at its original evaluation point while
+/// the richer source CFG grows branch and non-local-edge support.
+fn straight_line_final_uses(
+    expression: &Expr,
+    live_after: &BTreeSet<String>,
+    program: &Program,
+) -> BTreeSet<(String, usize, usize)> {
+    fn collect(expression: &Expr, uses: &mut Vec<(String, Span)>, program: &Program) -> bool {
+        match &expression.kind {
+            ExprKind::Variable(path) => {
+                if path.len() == 1 {
+                    uses.push((path[0].to_string(), expression.span));
+                }
+                true
+            }
+            ExprKind::Move(operand) => {
+                if let ExprKind::Variable(path) = &operand.kind
+                    && path.len() == 1
+                {
+                    uses.push((path[0].to_string(), operand.span));
+                    true
+                } else {
+                    false
+                }
+            }
+            ExprKind::List(values) | ExprKind::Tuple(values) => {
+                values.iter().all(|value| collect(value, uses, program))
+            }
+            ExprKind::Struct { name, fields } => {
+                let use_start = uses.len();
+                let Some(declaration) = program
+                    .structs
+                    .iter()
+                    .find(|item| item.name == name.as_ref())
+                else {
+                    return false;
+                };
+                let complete = declaration.fields.iter().all(|declared| {
+                    fields
+                        .iter()
+                        .find(|(field, _)| field == &declared.name)
+                        .is_some_and(|(_, value)| collect(value, uses, program))
+                });
+                let mut names = BTreeSet::new();
+                if !complete
+                    || uses[use_start..]
+                        .iter()
+                        .any(|(name, _)| !names.insert(name.clone()))
+                {
+                    // Source field order is not necessarily declaration order.
+                    // Until every frontend carries the canonical order into
+                    // this analysis, a repeated local makes the complete
+                    // containing expression a conservative barrier.
+                    uses.truncate(use_start);
+                    false
+                } else {
+                    true
+                }
+            }
+            ExprKind::Call(callee, arguments)
+                if !matches!(callee.kind, ExprKind::LabelReference(_)) =>
+            {
+                // Callable receiver ownership is selected from its Fn mode
+                // and specialization plan, not ordinary local liveness.
+                arguments
+                    .iter()
+                    .all(|argument| collect(argument, uses, program))
+            }
+            ExprKind::Unary { operand, .. } => collect(operand, uses, program),
+            ExprKind::Binary { lhs, rhs, .. } => {
+                collect(lhs, uses, program) && collect(rhs, uses, program)
+            }
+            ExprKind::Unit
+            | ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Char(_)
+            | ExprKind::Byte(_)
+            | ExprKind::ByteString(_)
+            | ExprKind::String(_)
+            | ExprKind::LabelReference(_) => true,
+            ExprKind::Closure { .. }
+            | ExprKind::TypedClosure { .. }
+            | ExprKind::Field(_, _)
+            | ExprKind::Block(_)
+            | ExprKind::ContextBlock(_)
+            | ExprKind::Perform { .. }
+            | ExprKind::Handle { .. }
+            | ExprKind::LabelDestination { .. }
+            | ExprKind::Is { .. }
+            | ExprKind::Resume { .. }
+            | ExprKind::Cancel { .. }
+            | ExprKind::TailResume { .. }
+            | ExprKind::Call(_, _) => false,
+        }
+    }
+
+    let mut uses = Vec::new();
+    if !collect(expression, &mut uses, program) {
+        return BTreeSet::new();
+    }
+    let mut last = BTreeMap::new();
+    for (name, span) in uses {
+        last.insert(name, span);
+    }
+    last.into_iter()
+        .filter(|(name, _)| !live_after.contains(name))
+        .map(|(name, span)| (name, span.start, span.end))
+        .collect()
+}
+
+fn final_use_control_spans(root: &Expr) -> BTreeSet<(usize, usize)> {
+    struct Collector {
+        spans: BTreeSet<(usize, usize)>,
+    }
+
+    impl<'ast> ExprVisitor<'ast> for Collector {
+        type Break = ();
+
+        fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<()> {
+            let enters = matches!(
+                expression.kind,
+                ExprKind::Closure { .. }
+                    | ExprKind::TypedClosure { .. }
+                    | ExprKind::Perform { .. }
+                    | ExprKind::Handle { .. }
+                    | ExprKind::LabelDestination { .. }
+                    | ExprKind::Is { .. }
+                    | ExprKind::Binary { .. }
+                    | ExprKind::Resume { .. }
+                    | ExprKind::Cancel { .. }
+                    | ExprKind::TailResume { .. }
+            ) || matches!(
+                &expression.kind,
+                ExprKind::Call(callee, _) if matches!(callee.kind, ExprKind::LabelReference(_))
+            ) || matches!(
+                &expression.kind,
+                // Completion-only handlers normalize into a compiler-owned
+                // block before Core lowering. Preserve that control origin:
+                // its computation and clauses are not one straight-line path.
+                ExprKind::Block(statements)
+                    if matches!(
+                        statements.first(),
+                        Some(Stmt::Let { name, .. })
+                            if name.starts_with("$handle$result$")
+                    )
+            );
+            if enters {
+                self.spans
+                    .insert((expression.span.start, expression.span.end));
+            }
+            let result = walk_expr(self, expression);
+            result
+        }
+    }
+
+    let mut collector = Collector {
+        spans: BTreeSet::new(),
+    };
+    let _ = collector.visit_expr(root);
+    collector.spans
+}
+
 fn expression_uses_name(expression: &Expr, searched: &str) -> bool {
     match &expression.kind {
         ExprKind::Variable(path) => path.len() == 1 && path[0].as_ref() == searched,
@@ -23082,8 +23364,10 @@ impl<'a> CoreLowerer<'a> {
         allowance: EffectAllowance,
         body_instance: specialization::BodyInstanceKey,
         expression_ordinals: (BTreeMap<usize, u32>, BTreeMap<(usize, usize), u32>),
+        final_use_root: &Expr,
     ) -> (Self, Vec<core::Param>, Vec<core::Param>) {
         let (expression_ordinals, expression_span_ordinals) = expression_ordinals;
+        let final_use_control_spans = final_use_control_spans(final_use_root);
         let environment_capture_modes = match &body_instance {
             specialization::BodyInstanceKey::Closure(request) => request
                 .captures
@@ -23228,6 +23512,10 @@ impl<'a> CoreLowerer<'a> {
                 environment_capture_modes,
                 expression_ordinals,
                 expression_span_ordinals,
+                inferred_final_uses: BTreeSet::new(),
+                final_use_control_spans,
+                final_use_barrier_depth: 0,
+                final_use_block_depth: 0,
                 effects,
                 allow_terminal_perform: allowance.terminal_performs,
                 outward_protocols: allowance.outward_protocols,
@@ -23421,6 +23709,10 @@ impl<'a> CoreLowerer<'a> {
                 environment_capture_modes: BTreeMap::new(),
                 expression_ordinals: BTreeMap::new(),
                 expression_span_ordinals: BTreeMap::new(),
+                inferred_final_uses: BTreeSet::new(),
+                final_use_control_spans: BTreeSet::new(),
+                final_use_barrier_depth: 0,
+                final_use_block_depth: 0,
                 effects,
                 allow_terminal_perform: allowance.terminal_performs,
                 outward_protocols: allowance.outward_protocols,
@@ -26515,6 +26807,50 @@ impl<'a> CoreLowerer<'a> {
             return principal.duplicable();
         }
         self.is_structurally_copy(ty)
+    }
+
+    fn with_final_use_barrier<T>(&mut self, lower: impl FnOnce(&mut Self) -> T) -> T {
+        self.final_use_barrier_depth += 1;
+        let result = lower(self);
+        self.final_use_barrier_depth -= 1;
+        result
+    }
+
+    fn inferred_final_transfer(&self, name: &str, span: Span, local: &CoreLocal) -> bool {
+        self.direct_source_body
+            && self.final_use_barrier_depth == 0
+            && self.final_use_block_depth == 1
+            && !matches!(
+                &self.body_instance,
+                Some(specialization::BodyInstanceKey::Closure(_))
+            )
+            && self
+                .inferred_final_uses
+                .contains(&(name.to_string(), span.start, span.end))
+            && !self
+                .final_use_control_spans
+                .iter()
+                .any(|(start, end)| *start <= span.start && span.end <= *end)
+            && self.is_copy(local.ty)
+            && {
+                let interval = self.use_interval(local.ty);
+                interval.lower != 0 || interval.upper != Some(0)
+            }
+            && !self.contains_custom_drop(local.ty, &mut BTreeSet::new())
+            && self.effects.resumption(local.ty).is_none()
+            && !self
+                .effects
+                .extra_type(local.ty)
+                .is_some_and(|ty| matches!(ty.representation(), Type::Callable { .. }))
+            && !self.suspended.contains(&local.local)
+            && !self
+                .loans
+                .get(&local.local)
+                .is_some_and(|loans| loans.unique || loans.shared != 0)
+            && !self
+                .projected_loans
+                .get(&local.local)
+                .is_some_and(|loans| !loans.is_empty())
     }
 
     fn is_structurally_copy(&self, ty: TypeId) -> bool {
@@ -30153,21 +30489,28 @@ impl<'a> CoreLowerer<'a> {
                         .start
                         .checked_add(4)
                         .is_some_and(|keyword_end| keyword_end <= operand.span.start);
+                let inferred_without_keyword =
+                    self.inferred_final_transfer(name, operand.span, &local);
                 if original_monomorphic_site
-                    && !self.is_copy(local.ty)
+                    && (!self.is_copy(local.ty) || inferred_without_keyword)
                     && !callable_transport
                     && self.effects.resumption(local.ty).is_none()
                 {
+                    let reason = if inferred_without_keyword {
+                        "this is the final whole-local use, so ownership transfer is inferred"
+                    } else {
+                        "the local has a non-Copy type, so using it already transfers ownership"
+                    };
                     self.effects.warnings.push(
                         Diagnostic::advice(
                             "redundant explicit move",
-                            format!(
-                                "`{name}` has a non-Copy type, so using it here already transfers ownership"
-                            ),
+                            format!("`{name}` is redundant here: {reason}"),
                             Span::new(span.start, span.start + 4),
                         )
                         .with_code(REDUNDANT_MOVE_CODE)
-                        .with_help("remove `move`; keep it only when forcing consumption of a Copy value")
+                        .with_help(
+                            "remove `move`; keep it for intentional early consumption or syntax-sensitive ownership",
+                        )
                         .with_fix(Span::new(span.start, span.start + 4), ""),
                     );
                 }
@@ -30261,14 +30604,15 @@ impl<'a> CoreLowerer<'a> {
                     }
                     self.check(span, expected, local.ty)?;
                     let copy = self.is_copy(local.ty);
-                    if !copy {
+                    let inferred_transfer = self.inferred_final_transfer(name, span, &local);
+                    if !copy || inferred_transfer {
                         self.check_borrow_only_capture(local.local, span, "using", false)?;
                     }
                     self.record_local_use(local.local, span)?;
                     for origin in Self::local_reference_fields(&local).values() {
                         self.mark_region_live(origin.region);
                     }
-                    if !copy {
+                    if !copy || inferred_transfer {
                         self.moved.insert(local.local);
                     }
                     let mut expression = self.typed(
@@ -30276,7 +30620,7 @@ impl<'a> CoreLowerer<'a> {
                         local.ty,
                         core::ExprKind::Local {
                             local: local.local,
-                            copy,
+                            copy: copy && !inferred_transfer,
                         },
                     );
                     Self::set_expression_reference_fields(
@@ -33722,14 +34066,14 @@ impl<'a> CoreLowerer<'a> {
             ExprKind::Handle {
                 computation,
                 clauses,
-            } => {
+            } => self.with_final_use_barrier(|this| {
                 if let Some(result) =
-                    self.inline_static_label_handler(computation, clauses, expected)
+                    this.inline_static_label_handler(computation, clauses, expected)
                 {
                     return result;
                 }
-                if !self.active_labels.is_empty()
-                    && let Some(perform) = self.multishot_perform_in(computation)
+                if !this.active_labels.is_empty()
+                    && let Some(perform) = this.multishot_perform_in(computation)
                 {
                     return Err(vec![unsupported(
                         perform,
@@ -33737,14 +34081,14 @@ impl<'a> CoreLowerer<'a> {
                         "an active label targets this frame and cannot be replayed by a multi-shot resumption",
                     )]);
                 }
-                if !self.empty_referents.is_empty() {
-                    return Err(self.borrow_error(
+                if !this.empty_referents.is_empty() {
+                    return Err(this.borrow_error(
                         span,
                         "a handler boundary cannot be entered while a unique-reference referent is uninitialized; restore it first",
                     ));
                 }
-                self.handle(computation, clauses, span, expected)
-            }
+                this.handle(computation, clauses, span, expected)
+            }),
             ExprKind::LabelDestination { label, body, .. } => {
                 let evidence = self
                     .direct_label_evidence(label.name.as_ref(), label.span)
@@ -33774,7 +34118,8 @@ impl<'a> CoreLowerer<'a> {
                 let previous = self
                     .active_labels
                     .insert(label.name.to_string(), destination);
-                let lowered_body = self.expression(body, Some(result));
+                let lowered_body =
+                    self.with_final_use_barrier(|this| this.expression(body, Some(result)));
                 let completed = self
                     .active_labels
                     .remove(label.name.as_ref())
@@ -35693,6 +36038,20 @@ impl<'a> CoreLowerer<'a> {
         span: Span,
         expected: Option<TypeId>,
     ) -> Result<core::Expr, Vec<Diagnostic>> {
+        let saved_final_uses = std::mem::take(&mut self.inferred_final_uses);
+        self.final_use_block_depth += 1;
+        let result = self.block_inner(statements, span, expected);
+        self.final_use_block_depth -= 1;
+        self.inferred_final_uses = saved_final_uses;
+        result
+    }
+
+    fn block_inner(
+        &mut self,
+        statements: &[Stmt],
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> Result<core::Expr, Vec<Diagnostic>> {
         let saved = self.locals.clone();
         let mut introduced = Vec::new();
         let mut lowered = Vec::new();
@@ -35787,9 +36146,20 @@ impl<'a> CoreLowerer<'a> {
         for (index, statement) in statements.iter().enumerate() {
             self.current_point = points[index];
             let last = index + 1 == statements.len();
+            self.inferred_final_uses = match statement {
+                Stmt::Let { value, .. } | Stmt::Expr(value) | Stmt::Assign { value, .. } => {
+                    straight_line_final_uses(
+                        value,
+                        &liveness.live_out[&points[index]],
+                        self.program,
+                    )
+                }
+                Stmt::Deconstruct { .. } => BTreeSet::new(),
+            };
             match statement {
                 Stmt::Let { name, value, span } => {
                     if self.is_erased_callable_alias(value) {
+                        self.inferred_final_uses.clear();
                         continue;
                     }
                     let expected = self.later_binding_expected_type(name, &statements[index + 1..]);
@@ -36220,6 +36590,7 @@ impl<'a> CoreLowerer<'a> {
                     lowered.push(core::Stmt::Expr(value));
                 }
             }
+            self.inferred_final_uses.clear();
             self.current_point = points[index];
             if !last && !closure_barrier {
                 self.end_dead_regions(

@@ -78,11 +78,11 @@ pub local_block_expression_at(value: &ResolvedBody, index: usize) -> u32 {
 }
 
 resolution_error(code: u8, token: usize, related: usize) -> ResolutionError {
-    ResolutionError { code: code, token: move token, related: move related }
+    ResolutionError { code: code, token:  token, related:  related }
 }
 
 push_word(value: &mut Vec<u32>, word: u32) {
-    Vec::push(&mut *value, move word)
+    Vec::push(&mut *value,  word)
 }
 
 push_binding(
@@ -1689,19 +1689,19 @@ pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
     }
 }
 
-u32_from_usize(value: usize) -> u32 { wrapping_convert_to_u32(move value) }
+u32_from_usize(value: usize) -> u32 { wrapping_convert_to_u32( value) }
 
-usize_from_u32(value: u32) -> usize { wrapping_convert_to_usize(move value) }
+usize_from_u32(value: u32) -> usize { wrapping_convert_to_usize( value) }
 
-u32_from_u8(value: u8) -> u32 { wrapping_convert_to_u32(move value) }
+u32_from_u8(value: u8) -> u32 { wrapping_convert_to_u32( value) }
 
-u8_from_u32(value: u32) -> u8 { wrapping_convert_to_u8(move value) }
+u8_from_u32(value: u32) -> u8 { wrapping_convert_to_u8( value) }
 
-u8_value(value: u8) -> u8 { move value }
+u8_value(value: u8) -> u8 {  value }
 
-usize_value(value: usize) -> usize { move value }
+usize_value(value: usize) -> usize {  value }
 
-u32_value(value: u32) -> u32 { move value }
+u32_value(value: u32) -> u32 {  value }
 
 bool_and(left: Bool, right: Bool) -> Bool {
     handle move left {
