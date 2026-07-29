@@ -1907,40 +1907,50 @@ resolve_signature_type(
                         )
                     }
                 } } else { Result::Err(error(1, token, token, 0, 0)) } },
-        2 => if(super::headers::type_lifetime_name_raw_plus_one_at(
-                index,
-                type_index
-            ) == 0) {
-            let referent = try(resolve_signature_type(
-                headers,
-                declarations,
-                output,
-                super::headers::type_child_index_at(index, type_index, 0),
-                module_plus_one
-            ), @resolve_signature_type);
-            Result::Ok(intern_record_type(
-                output,
-                TypeKind::SharedReference(type_id_from_u32(referent)),
-                true
-            ))
-        } else { Result::Err(error(1, token, token, 0, 0)) },
-        3 => if(super::headers::type_lifetime_name_raw_plus_one_at(
-                index,
-                type_index
-            ) == 0) {
-            let referent = try(resolve_signature_type(
-                headers,
-                declarations,
-                output,
-                super::headers::type_child_index_at(index, type_index, 0),
-                module_plus_one
-            ), @resolve_signature_type);
-            Result::Ok(intern_record_type(
-                output,
-                TypeKind::UniqueReference(type_id_from_u32(referent)),
-                false
-            ))
-        } else { Result::Err(error(1, token, token, 0, 0)) },
+        2 => handle super::headers::type_lifetime_name_at(index, type_index) {
+            Result::Err(_) => {
+                let referent = try(resolve_signature_type(
+                    headers,
+                    declarations,
+                    output,
+                    super::headers::type_child_index_at(
+                        index,
+                        type_index,
+                        0
+                    ),
+                    module_plus_one
+                ), @resolve_signature_type);
+                Result::Ok(intern_record_type(
+                    output,
+                    TypeKind::SharedReference(type_id_from_u32(referent)),
+                    true
+                ))
+            },
+            Result::Ok(_) =>
+                Result::Err(error(1, token, token, 0, 0))
+        },
+        3 => handle super::headers::type_lifetime_name_at(index, type_index) {
+            Result::Err(_) => {
+                let referent = try(resolve_signature_type(
+                    headers,
+                    declarations,
+                    output,
+                    super::headers::type_child_index_at(
+                        index,
+                        type_index,
+                        0
+                    ),
+                    module_plus_one
+                ), @resolve_signature_type);
+                Result::Ok(intern_record_type(
+                    output,
+                    TypeKind::UniqueReference(type_id_from_u32(referent)),
+                    false
+                ))
+            },
+            Result::Ok(_) =>
+                Result::Err(error(1, token, token, 0, 0))
+        },
         4 => if(super::headers::type_child_count_at(index, type_index)
             == 0) { Result::Ok(0) } else {
             let elements = Vec::new();
@@ -2032,23 +2042,21 @@ collect_callables(
                         0
                     ))
                 } else {
-                    let result_plus_one =
-                        super::headers::callable_result_index_plus_one(
-                            callable
-                        );
-                    if(result_plus_one == 0) { collect_callable(
+                    handle super::headers::callable_result(callable) {
+                        Result::Err(_) => collect_callable(
                             headers,
                             declarations,
                             output,
                             callable,
                             index,
                             type_id_from_u32(0)
-                        ) } else {
+                        ),
+                        Result::Ok(result_type) => {
                         let result = try(resolve_signature_type(
                             headers,
                             declarations,
                             output,
-                            result_plus_one - 1,
+                            Id::to_u32(result_type),
                             handle super::scanner::shell_at(
                                 declarations,
                                 usize_from_u32(
@@ -2070,6 +2078,7 @@ collect_callables(
                             index,
                             type_id_from_u32(result)
                         )
+                        }
                     }
                 }
             }

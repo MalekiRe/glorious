@@ -296,12 +296,7 @@ pub callable_has_effects(value: &CallableHeader) -> Bool {
     Option::is_some(&value.effects)
 }
 
-pub callable_result_index_plus_one(value: &CallableHeader) -> u32 {
-    handle Option::as_ref(&value.result) {
-        Result::Err(_) => 0,
-        Result::Ok(result) => Id::to_u32(*result) + wrapping_convert_to_u32(1)
-    }
-}
+pub callable_result(value: &CallableHeader) -> Option<TypeId> { value.result }
 
 type_node_at_raw<'a>(value: &'a HeaderIndex, index: u32) -> &'a TypeNode {
     Arena::index(&value.types, Id::from_u32(index))
@@ -346,15 +341,14 @@ pub type_constructor_index_plus_one_at(
     }
 }
 
-pub type_lifetime_name_raw_plus_one_at(
+pub type_lifetime_name_at(
     value: &HeaderIndex,
     index: u32
-) -> u32 {
+) -> Option<Id<String>> {
     let node = type_node_at_raw(value, index);
     handle Option::as_ref(&node.lifetime) {
-        Result::Err(_) => 0,
-        Result::Ok(found) =>
-            Id::to_u32(found.name) + wrapping_convert_to_u32(1)
+        Result::Err(_) => None,
+        Result::Ok(found) => Option::Some(found.name)
     }
 }
 

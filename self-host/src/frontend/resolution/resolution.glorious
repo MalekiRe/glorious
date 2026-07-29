@@ -40,7 +40,7 @@ struct FunctionSearch { first: Option<u32>, count: u32 }
 struct NominalSearch { first: Option<u32>, count: u32 }
 struct Binding { name: Id<String>, target: ResolvedTarget }
 pub struct ResolutionIndex {
-    functions: HashMap<(usize, u32), FunctionSearch>,
+    functions: HashMap<(Option<usize>, u32), FunctionSearch>,
     callable_by_shell: Vec<Option<u32>>
 }
 
@@ -87,6 +87,32 @@ pub local_block_expression_at(value: &ResolvedBody, index: usize) -> u32 {
 
 resolution_error(code: u8, token: usize, related: usize) -> ResolutionError {
     ResolutionError { code: code, token:  token, related:  related }
+}
+
+module_from_parent_plus_one(value: usize) -> Option<usize> {
+    if(value == 0) {
+        Result::Err(())
+    } else {
+        Result::Ok(value - 1)
+    }
+}
+
+shell_parent_module(
+    shell: &super::scanner::DeclarationShell
+) -> Option<usize> {
+    module_from_parent_plus_one(
+        super::scanner::shell_parent_plus_one(shell)
+    )
+}
+
+same_module(left: Option<usize>, right: Option<usize>) -> Bool {
+    handle left {
+        Result::Err(_) => Option::is_none(&right),
+        Result::Ok(left_index) => handle right {
+            Result::Err(_) => false,
+            Result::Ok(right_index) => left_index == right_index
+        }
+    }
 }
 
 local_id_from_usize(value: usize) -> Option<LocalId> {
@@ -162,7 +188,7 @@ index_callable(
         Result::Ok(shell) => shell
     };
     let key = (
-        super::scanner::shell_parent_plus_one(shell),
+        shell_parent_module(shell),
         super::headers::callable_name_raw(callable)
     );
     let found = handle HashMap::remove(&mut index.functions, &key) {
@@ -256,9 +282,9 @@ pub build_resolution_index(
 resolve_function_name_in(
     index: &ResolutionIndex,
     name: u32,
-    module_plus_one: usize
+    module: Option<usize>
 ) -> FunctionSearch {
-    handle HashMap::get(&index.functions, &(module_plus_one, name)) {
+    handle HashMap::get(&index.functions, &(module, name)) {
         Result::Err(_) =>
             FunctionSearch { first: Result::Err(()), count: 0 },
         Result::Ok(found) => FunctionSearch {
@@ -312,13 +338,13 @@ resolve_function_name(
     index: &ResolutionIndex,
     declarations: &super::scanner::DeclarationIndex,
     name: u32,
-    module_plus_one: usize,
+    module: Option<usize>,
     token: usize
 ) -> Result<ResolvedTarget, ResolutionError> {
-    let found = resolve_function_name_in(index, name, module_plus_one);
+    let found = resolve_function_name_in(index, name, module);
     if(found.count == 0
-        and { module_plus_one != 0 }) {
-        let root = resolve_function_name_in(index, name, 0);
+        and { Option::is_some(&module) }) {
+        let root = resolve_function_name_in(index, name, Result::Err(()));
         finish_function_name(
             declarations,
             move root,
@@ -337,7 +363,7 @@ search_structs(
     nominal: &super::headers::NominalIndex,
     declarations: &super::scanner::DeclarationIndex,
     name: u32,
-    module_plus_one: usize,
+    module: Option<usize>,
     token: usize,
     index: usize,
     found: NominalSearch
@@ -363,8 +389,7 @@ search_structs(
                     Result::Ok(shell) =>
                         if(super::headers::struct_name_raw(header) == name
                             and {
-                                super::scanner::shell_parent_plus_one(shell)
-                                    == module_plus_one
+                                same_module(shell_parent_module(shell), module)
                             }) {
                         Result::Ok(
                             NominalSearch {
@@ -424,14 +449,14 @@ resolve_struct_name_in(
     nominal: &super::headers::NominalIndex,
     declarations: &super::scanner::DeclarationIndex,
     name: u32,
-    module_plus_one: usize,
+    module: Option<usize>,
     token: usize
 ) -> Result<NominalSearch, ResolutionError> {
     search_structs(
         nominal,
         declarations,
         name,
-        module_plus_one,
+        module,
         token,
         0,
         NominalSearch { first: Result::Err(()), count: 0 }
@@ -442,23 +467,23 @@ resolve_struct_name(
     nominal: &super::headers::NominalIndex,
     declarations: &super::scanner::DeclarationIndex,
     name: u32,
-    module_plus_one: usize,
+    module: Option<usize>,
     token: usize
 ) -> Result<ResolvedTarget, ResolutionError> {
     let found = try(resolve_struct_name_in(
         nominal,
         declarations,
         name,
-        module_plus_one,
+        module,
         token
     ), @resolve_struct_name);
     if(found.count == 0
-        and { module_plus_one != 0 }) {
+        and { Option::is_some(&module) }) {
         let root = try(resolve_struct_name_in(
             nominal,
             declarations,
             name,
-            0,
+            Result::Err(()),
             token
         ), @resolve_struct_name);
         finish_struct_name(nominal, move root, token)
@@ -471,7 +496,7 @@ search_enums(
     nominal: &super::headers::NominalIndex,
     declarations: &super::scanner::DeclarationIndex,
     name: u32,
-    module_plus_one: usize,
+    module: Option<usize>,
     token: usize,
     index: usize,
     found: NominalSearch
@@ -497,8 +522,7 @@ search_enums(
                     Result::Ok(shell) =>
                         if(super::headers::enum_name_raw(header) == name
                             and {
-                                super::scanner::shell_parent_plus_one(shell)
-                                    == module_plus_one
+                                same_module(shell_parent_module(shell), module)
                             }) {
                         Result::Ok(
                             NominalSearch {
@@ -619,7 +643,7 @@ resolve_variant_name(
     declarations: &super::scanner::DeclarationIndex,
     enum_name: u32,
     variant_name: u32,
-    module_plus_one: usize,
+    module: Option<usize>,
     enum_token: usize,
     variant_token: usize
 ) -> Result<ResolvedTarget, ResolutionError> {
@@ -627,18 +651,18 @@ resolve_variant_name(
         nominal,
         declarations,
         enum_name,
-        module_plus_one,
+        module,
         enum_token,
         0,
         NominalSearch { first: Result::Err(()), count: 0 }
     ), @resolve_variant_name);
     if(found.count == 0
-        and { module_plus_one != 0 }) {
+        and { Option::is_some(&module) }) {
         let root = try(search_enums(
             nominal,
             declarations,
             enum_name,
-            0,
+            Result::Err(()),
             enum_token,
             0,
             NominalSearch { first: Result::Err(()), count: 0 }
@@ -669,7 +693,7 @@ resolve_identifier(
     bindings: &Vec<Binding>,
     output: &mut ResolvedBody,
     expression: u32,
-    module_plus_one: usize
+    module: Option<usize>
 ) -> Result<(), ResolutionError> {
     let count = super::bodies::expression_name_count_at(body, expression);
     let token = super::bodies::expression_name_token_at(body, expression, 0);
@@ -695,7 +719,7 @@ resolve_identifier(
                         index,
                         declarations,
                         raw,
-                        module_plus_one,
+                        module,
                         token
                     ), @resolve_identifier);
                         push_resolution(
@@ -715,7 +739,7 @@ resolve_identifier(
                 declarations,
                 super::bodies::expression_name_value_at(body, expression, 0),
                 super::bodies::expression_name_value_at(body, expression, 1),
-                module_plus_one,
+                module,
                 token,
                 variant_token
             ), @resolve_identifier);
@@ -738,14 +762,14 @@ resolve_struct_constructor(
     bindings: &mut Vec<Binding>,
     output: &mut ResolvedBody,
     expression: u32,
-    module_plus_one: usize
+    module: Option<usize>
 ) -> Result<(), ResolutionError> {
     let token = super::bodies::expression_name_token_at(body, expression, 0);
     let found = try(resolve_struct_name(
         super::headers::nominal_index(headers),
         declarations,
         super::bodies::expression_name_value_at(body, expression, 0),
-        module_plus_one,
+        module,
         token
     ), @resolve_struct_constructor);
     push_resolution(
@@ -761,7 +785,7 @@ resolve_struct_constructor(
         bindings,
         output,
         expression,
-        module_plus_one,
+        module,
         0
     )
 }
@@ -774,7 +798,7 @@ resolve_children(
     bindings: &mut Vec<Binding>,
     output: &mut ResolvedBody,
     expression: u32,
-    module_plus_one: usize,
+    module: Option<usize>,
     child: u32
 ) -> Result<(), ResolutionError> {
     if(child < super::bodies::expression_child_count_at(body, expression)) {
@@ -786,7 +810,7 @@ resolve_children(
                 bindings,
                 output,
                 super::bodies::expression_child_at(body, expression, child),
-                module_plus_one
+                module
             ), @resolve_children);
             resolve_children(
                 headers,
@@ -796,7 +820,7 @@ resolve_children(
                 bindings,
                 output,
                 expression,
-                module_plus_one,
+                module,
                 child + 1
             )
     } else {
@@ -812,7 +836,7 @@ resolve_block_children(
     bindings: &mut Vec<Binding>,
     output: &mut ResolvedBody,
     expression: u32,
-    module_plus_one: usize,
+    module: Option<usize>,
     child: u32
 ) -> Result<(), ResolutionError> {
     if(child < super::bodies::expression_child_count_at(body, expression)) {
@@ -878,7 +902,7 @@ resolve_block_children(
                                                 bindings,
                                                 output,
                                                 value,
-                                                module_plus_one
+                                                module
                                             ),
                                             @resolve_block_children
                                         );
@@ -898,7 +922,7 @@ resolve_block_children(
                                             bindings,
                                             output,
                                             expression,
-                                            module_plus_one,
+                                            module,
                                             child + 1
                                         )
                                     }
@@ -917,7 +941,7 @@ resolve_block_children(
                                 bindings,
                                 output,
                                 value,
-                                module_plus_one
+                                module
                             ),
                             @resolve_block_children
                         );
@@ -929,7 +953,7 @@ resolve_block_children(
                             bindings,
                             output,
                             expression,
-                            module_plus_one,
+                            module,
                             child + 1
                         )
                 } else {
@@ -958,7 +982,7 @@ resolve_block(
     bindings: &mut Vec<Binding>,
     output: &mut ResolvedBody,
     expression: u32,
-    module_plus_one: usize
+    module: Option<usize>
 ) -> Result<(), ResolutionError> {
     let mark = Vec::len(&*bindings);
     handle resolve_block_children(
@@ -969,7 +993,7 @@ resolve_block(
         bindings,
         output,
         expression,
-        module_plus_one,
+        module,
         0
     ) {
         Result::Err(error) => {
@@ -991,7 +1015,7 @@ resolve_expression(
     bindings: &mut Vec<Binding>,
     output: &mut ResolvedBody,
     expression: u32,
-    module_plus_one: usize
+    module: Option<usize>
 ) -> Result<(), ResolutionError> {
     handle super::bodies::expression_kind_at(body, expression) {
         1 => resolve_identifier(
@@ -1002,7 +1026,7 @@ resolve_expression(
             &*bindings,
             output,
             expression,
-            module_plus_one
+            module
         ),
         8 => resolve_block(
             headers,
@@ -1012,7 +1036,7 @@ resolve_expression(
             bindings,
             output,
             expression,
-            module_plus_one
+            module
         ),
         10 => resolve_struct_constructor(
             headers,
@@ -1022,7 +1046,7 @@ resolve_expression(
             bindings,
             output,
             expression,
-            module_plus_one
+            module
         ),
         _ => resolve_children(
             headers,
@@ -1032,7 +1056,7 @@ resolve_expression(
             bindings,
             output,
             expression,
-            module_plus_one,
+            module,
             0
         )
     }
@@ -1186,7 +1210,7 @@ pub resolve_function_body_indexed(
                         &mut bindings,
                         &mut output,
                         super::bodies::body_root_index(body),
-                        super::scanner::shell_parent_plus_one(shell)
+                        shell_parent_module(shell)
                     ),
                     @resolve_function_body_indexed
                 );
@@ -1245,19 +1269,18 @@ shell_name_id(shell: &super::scanner::DeclarationShell) -> Id<String> {
 
 module_depth(
     declarations: &super::scanner::DeclarationIndex,
-    module_plus_one: usize
+    module: Option<usize>
 ) -> usize {
-    if(module_plus_one == 0) {
-        0
-    } else {
-        handle super::scanner::shell_at(
+    handle module {
+        Result::Err(_) => 0,
+        Result::Ok(index) => handle super::scanner::shell_at(
             declarations,
-            module_plus_one - 1
+            index
         ) {
             Result::Err(_) => unreachable(),
             Result::Ok(shell) => 1 + module_depth(
                 declarations,
-                super::scanner::shell_parent_plus_one(shell)
+                shell_parent_module(shell)
             )
         }
     }
@@ -1267,18 +1290,17 @@ write_module_components(
     output: &mut ByteBuf,
     source: &super::lexer::LexedSource,
     declarations: &super::scanner::DeclarationIndex,
-    module_plus_one: usize
+    module: Option<usize>
 ) {
-    if(module_plus_one == 0) {
-        ()
-    } else {
-        handle super::scanner::shell_at(
+    handle module {
+        Result::Err(_) => (),
+        Result::Ok(index) => handle super::scanner::shell_at(
             declarations,
-            module_plus_one - 1
+            index
         ) {
             Result::Err(_) => unreachable(),
             Result::Ok(shell) => {
-                let parent = super::scanner::shell_parent_plus_one(shell);
+                let parent = shell_parent_module(shell);
                 let name = shell_name_id(shell);
                 write_module_components(
                     &mut *output,
@@ -1296,17 +1318,17 @@ write_module_path(
     output: &mut ByteBuf,
     source: &super::lexer::LexedSource,
     declarations: &super::scanner::DeclarationIndex,
-    module_plus_one: usize
+    module: Option<usize>
 ) {
     ByteBuf::write_u32_le(
         &mut *output,
-        u32_from_usize(module_depth(declarations, module_plus_one))
+        u32_from_usize(module_depth(declarations, module))
     );
     write_module_components(
          output,
         source,
         declarations,
-        module_plus_one
+        module
     )
 }
 
@@ -1319,7 +1341,7 @@ write_function_identity(
     handle super::scanner::shell_at(declarations, shell_index) {
         Result::Err(_) => unreachable(),
         Result::Ok(shell) => {
-            let parent = super::scanner::shell_parent_plus_one(shell);
+            let parent = shell_parent_module(shell);
             let name = shell_name_id(shell);
             write_module_path(
                 &mut *output,
