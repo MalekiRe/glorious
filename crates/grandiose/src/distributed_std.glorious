@@ -2392,6 +2392,7 @@ let Range::is_empty = __g1_range_is_empty;
 let Range::contains = __g1_range_contains;
 let Range::intersection = __g1_range_intersection;
 let Range::checked_offset = __g1_range_checked_offset;
+let Range::new = __g1_range_usize;
 
 // Effect-polymorphic traversal over half-open usize ranges. The open effect
 // row is inferred from the callback and forwarded unchanged by each

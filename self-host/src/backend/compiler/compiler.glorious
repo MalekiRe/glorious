@@ -134,26 +134,23 @@ find_entry(
     program: &super::lowering::StageProgram,
     index: usize
 ) -> Option<u32> {
-    if(index < super::lowering::stage_program_function_count(program)) {
+    let count = super::lowering::stage_program_function_count(program);
+    handle find_range(Range::new(index, count), { current => {
         let function =
-            super::lowering::stage_program_function_at(program, index);
-        if(String::eq(
+            super::lowering::stage_program_function_at(program, current);
+        String::eq(
             super::lowering::stage_function_name(function),
             &"main"
-        )) {
-            if(
-                super::lowering::stage_function_parameter_count(function)
-                    == usize_value(0)
-            ) {
-                if(super::lowering::stage_function_result(function)
-                    == u32_value(0)) {
-                    Option::Some(checked_u32(index))
-                } else { None }
-            } else { None }
-        } else {
-            find_entry(program, index + usize_value(1))
+        ) and {
+            super::lowering::stage_function_parameter_count(function)
+                == usize_value(0)
+        } and {
+            super::lowering::stage_function_result(function) == u32_value(0)
         }
-    } else { None }
+    } }) {
+        Option::Some(found) => Option::Some(checked_u32(found)),
+        None => None
+    }
 }
 
 collect_tuple_elements(

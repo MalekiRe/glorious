@@ -164,13 +164,14 @@ pub empty_fixed_section() -> Section {
     section(Bytes::from_vec(Vec::new()), 0)
 }
 
-string_bytes_total(strings: &Vec<String>, index: usize) -> usize {
-    if(index < Vec::len(strings)) {
-        Bytes::len(&String::as_bytes(Vec::index(strings, index)))
-            + string_bytes_total(strings, index + 1)
-    } else {
-        0
-    }
+string_bytes_total(strings: &Vec<String>) -> usize {
+    Slice::fold(
+        Vec::as_slice(strings),
+        0,
+        { total, value =>
+            total + Bytes::len(&String::as_bytes(value))
+        }
+    )
 }
 
 write_string_offsets(
@@ -206,7 +207,7 @@ write_string_data(output: &mut ByteBuf, strings: &Vec<String>, index: usize) {
 // name interning and ID assignment in the semantic backend while centralizing
 // the exact offset-table wire representation here.
 pub sorted_string_section(strings: &Vec<String>) -> Section {
-    let total = string_bytes_total(strings, 0);
+    let total = string_bytes_total(strings);
     let output = ByteBuf::new();
     ByteBuf::write_u32_le(
         &mut output,
@@ -320,24 +321,19 @@ collect_offsets(
 }
 
 fixed_sections_valid(sections: &Vec<Section>, index: usize) -> Bool {
-    if(index < Vec::len(sections)) {
-        let width = section_width(index);
+    handle find_range(Range::new(index, Vec::len(sections)), { current => {
+        let width = section_width(current);
         if(width == 0) {
-            fixed_sections_valid(sections, index + 1)
+            false
         } else {
-            let section = Vec::index(sections, index);
-            if(
-                Bytes::len(&section.bytes)
-                    == wrapping_convert_to_usize(section.count)
-                        * wrapping_convert_to_usize(width)
-            ) {
-                fixed_sections_valid(sections, index + 1)
-            } else {
-                false
-            }
+            let section = Vec::index(sections, current);
+            Bytes::len(&section.bytes)
+                != wrapping_convert_to_usize(section.count)
+                    * wrapping_convert_to_usize(width)
         }
-    } else {
-        true
+    } }) {
+        Option::Some(_) => false,
+        None => true
     }
 }
 

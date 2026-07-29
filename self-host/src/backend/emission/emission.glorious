@@ -51,10 +51,9 @@ copy_bytes_after(
     index: usize,
     output: &mut Vec<u8>
 ) {
-    if(index < Vec::len(source)) {
-        Vec::push(&mut *output, *Vec::index(source, index));
-        copy_bytes_after(source, index + usize_value(1), output)
-    } else { () }
+    for_range(Range::new(index, Vec::len(source)), { current =>
+        Vec::push(&mut *output, *Vec::index(source, current))
+    })
 }
 
 constant_records(
@@ -100,15 +99,18 @@ collect_names(
     index: usize,
     output: &mut Vec<String>
 ) {
-    if(index < super::lowering::stage_program_function_count(program)) {
+    let end = super::lowering::stage_program_function_count(program);
+    for_range(Range::new(index, end), { current =>
         Vec::push(
             &mut *output,
             *super::lowering::stage_function_name(
-                super::lowering::stage_program_function_at(program, index)
+                super::lowering::stage_program_function_at(
+                    program,
+                    current
+                )
             )
-        );
-        collect_names(program, index + usize_value(1), output)
-    } else { () }
+        )
+    })
 }
 
 collect_stage_field_names(
@@ -259,27 +261,18 @@ write_type_fields(
     type_index: usize,
     field_index: usize
 ) {
-    if(field_index <
-        super::lowering::stage_program_type_field_count_at(
-            program,
-            type_index
-        )
-    ) {
+    let end =
+        super::lowering::stage_program_type_field_count_at(program, type_index);
+    for_range(Range::new(field_index, end), { current =>
         ByteBuf::write_u32_le(
             &mut *output,
             super::lowering::stage_program_type_field_type_at(
                 program,
                 type_index,
-                field_index
+                current
             )
-        );
-        write_type_fields(
-            output,
-            program,
-            type_index,
-            field_index + usize_value(1)
         )
-    } else { () }
+    })
 }
 
 write_named_type_fields(
@@ -289,42 +282,34 @@ write_named_type_fields(
     field_index: usize,
     output: &mut ByteBuf
 ) -> Result<(), EmissionError> {
-    if(field_index <
-        super::lowering::stage_program_type_field_count_at(
-            program,
-            type_index
-        )
-    ) {
-        let field_name = try(require_program_name(
+    let end =
+        super::lowering::stage_program_type_field_count_at(program, type_index);
+    try_for_range(Range::new(field_index, end), { current =>
+        handle require_program_name(
             program,
             names,
-            super::lowering::
-                stage_program_type_field_name_index_at(
-                    program,
-                    type_index,
-                    field_index
-                ),
-            checked_u32(field_index)
-        ), @write_named_type_fields);
-        ByteBuf::write_u32_le(&mut *output, field_name);
-        ByteBuf::write_u32_le(
-            &mut *output,
-            super::lowering::stage_program_type_field_type_at(
+            super::lowering::stage_program_type_field_name_index_at(
                 program,
                 type_index,
-                field_index
-            )
-        );
-        write_named_type_fields(
-            program,
-            names,
-            type_index,
-            field_index + usize_value(1),
-            output
-        )
-    } else {
-        Result::Ok(())
-    }
+                current
+            ),
+            checked_u32(current)
+        ) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(field_name) => {
+                ByteBuf::write_u32_le(&mut *output, field_name);
+                ByteBuf::write_u32_le(
+                    &mut *output,
+                    super::lowering::stage_program_type_field_type_at(
+                        program,
+                        type_index,
+                        current
+                    )
+                );
+                Result::Ok(())
+            }
+        }
+    })
 }
 
 custom_type_flags(
@@ -437,22 +422,16 @@ custom_type_records(
     index: usize,
     output: &mut Vec<super::artifact::Record>
 ) -> Result<(), EmissionError> {
-    if(index < super::lowering::stage_program_type_count(program)) {
-        Vec::push(
-            &mut *output,
-            try(custom_type_record(
-                program,
-                names,
-                index
-            ), @custom_type_records)
-        );
-        custom_type_records(
-            program,
-            names,
-            index + usize_value(1),
-            output
-        )
-    } else { Result::Ok(()) }
+    let end = super::lowering::stage_program_type_count(program);
+    try_for_range(Range::new(index, end), { current =>
+        handle custom_type_record(program, names, current) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(record) => {
+                Vec::push(&mut *output, record);
+                Result::Ok(())
+            }
+        }
+    })
 }
 
 type_section(
@@ -540,17 +519,16 @@ append_parameter_types(
     index: usize,
     output: &mut Vec<u32>
 ) {
-    if(index < super::lowering::stage_function_parameter_count(function)) {
+    let end = super::lowering::stage_function_parameter_count(function);
+    for_range(Range::new(index, end), { current =>
         Vec::push(
             &mut *output,
-            super::lowering::stage_function_parameter_at(function, index)
-        );
-        append_parameter_types(
-            function,
-            index + usize_value(1),
-            output
+            super::lowering::stage_function_parameter_at(
+                function,
+                current
+            )
         )
-    } else { () }
+    })
 }
 
 find_signature(
@@ -603,10 +581,9 @@ write_words(
     words: &Vec<u32>,
     index: usize
 ) {
-    if(index < Vec::len(words)) {
-        ByteBuf::write_u32_le(&mut *output, *Vec::index(words, index));
-        write_words(output, words, index + usize_value(1))
-    } else { () }
+    for_range(Range::new(index, Vec::len(words)), { current =>
+        ByteBuf::write_u32_le(&mut *output, *Vec::index(words, current))
+    })
 }
 
 signature_records(
@@ -778,21 +755,18 @@ write_function_code(
     code: &mut ByteBuf,
     operands: &mut Vec<u32>
 ) -> Result<(), EmissionError> {
-    if(index < super::lowering::stage_function_instruction_count(function)) {
-        try(write_instruction(
+    let end = super::lowering::stage_function_instruction_count(function);
+    try_for_range(Range::new(index, end), { current =>
+        write_instruction(
             program,
-            super::lowering::stage_function_instruction_at(function, index),
-            code,
-            operands
-        ), @write_function_code);
-        write_function_code(
-            program,
-            function,
-            index + usize_value(1),
+            super::lowering::stage_function_instruction_at(
+                function,
+                current
+            ),
             code,
             operands
         )
-    } else { Result::Ok(()) }
+    })
 }
 
 write_all_code(
@@ -835,17 +809,13 @@ append_cleanup_registers(
     index: usize,
     operands: &mut Vec<u32>
 ) {
-    if(index < super::lowering::stage_cleanup_register_count(cleanup)) {
+    let end = super::lowering::stage_cleanup_register_count(cleanup);
+    for_range(Range::new(index, end), { current =>
         Vec::push(
             &mut *operands,
-            super::lowering::stage_cleanup_register_at(cleanup, index)
-        );
-        append_cleanup_registers(
-            cleanup,
-            index + usize_value(1),
-            operands
+            super::lowering::stage_cleanup_register_at(cleanup, current)
         )
-    } else { () }
+    })
 }
 
 write_function_cleanups(
@@ -934,17 +904,9 @@ write_operand_words(
     index: usize,
     output: &mut ByteBuf
 ) {
-    if(index < Vec::len(operands)) {
-        ByteBuf::write_u32_le(
-            &mut *output,
-            *Vec::index(operands, index)
-        );
-        write_operand_words(
-            operands,
-            index + usize_value(1),
-            output
-        )
-    } else { () }
+    for_range(Range::new(index, Vec::len(operands)), { current =>
+        ByteBuf::write_u32_le(&mut *output, *Vec::index(operands, current))
+    })
 }
 
 write_functions(
