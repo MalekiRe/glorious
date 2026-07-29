@@ -663,21 +663,19 @@ parse_type_values(
 ) -> Result<(), HeaderError> {
     handle at_code(&*value, closing_code) {
         Result::Ok(_) => Result::Ok(()),
-        Result::Err(_) => handle parse_type(value, related) {
-            Result::Err(error) => Result::Err(move error),
-            Result::Ok(ty) => {
-                Vec::push(&mut *values, move ty);
-                handle eat_code(value, 17) {
-                    Result::Err(_) => Result::Ok(()),
-                    Result::Ok(_) => handle at_code(&*value, closing_code) {
-                        Result::Ok(_) => Result::Ok(()),
-                        Result::Err(_) => parse_type_values(
-                            value,
-                            closing_code,
-                            related,
-                            move values
-                        )
-                    }
+        Result::Err(_) => {
+            let ty = try(parse_type(value, related), @parse_type_values);
+            Vec::push(&mut *values, move ty);
+            handle eat_code(value, 17) {
+                Result::Err(_) => Result::Ok(()),
+                Result::Ok(_) => handle at_code(&*value, closing_code) {
+                    Result::Ok(_) => Result::Ok(()),
+                    Result::Err(_) => parse_type_values(
+                        value,
+                        closing_code,
+                        related,
+                        move values
+                    )
                 }
             }
         }
@@ -687,13 +685,9 @@ parse_type_values(
 parse_path(value: &mut Parser, related: usize) -> Result<TypeId, HeaderError> {
     let start = value.cursor;
     let name_start = Vec::len(&value.output.names);
-    handle ident(value, related) {
-        Result::Err(error) => Result::Err(move error),
-        Result::Ok(name) => {
-            Vec::push(&mut value.output.names, move name);
-            parse_path_tail(value, related, start, name_start)
-        }
-    }
+    let name = try(ident(value, related), @parse_path);
+    Vec::push(&mut value.output.names, move name);
+    parse_path_tail(value, related, start, name_start)
 }
 
 parse_path_tail(
@@ -703,12 +697,10 @@ parse_path_tail(
     name_start: usize
 ) -> Result<TypeId, HeaderError> {
     handle eat_code(value, 19) {
-        Result::Ok(_) => handle ident(value, related) {
-            Result::Err(error) => Result::Err(move error),
-            Result::Ok(name) => {
-                Vec::push(&mut value.output.names, move name);
-                parse_path_tail(value, related, start, name_start)
-            }
+        Result::Ok(_) => {
+            let name = try(ident(value, related), @parse_path_tail);
+            Vec::push(&mut value.output.names, move name);
+            parse_path_tail(value, related, start, name_start)
         },
         Result::Err(_) => {
             let name_end = Vec::len(&value.output.names);
@@ -741,33 +733,30 @@ parse_application(
             ),
             Result::Err(_) => {
             let arguments = Vec::new();
-            handle parse_type_values(value, 36, related, &mut arguments) {
-                Result::Err(error) => Result::Err(move error),
-                Result::Ok(_) => handle expect_code(value, 36, 4, related) {
-                    Result::Err(error) => Result::Err(move error),
-                    Result::Ok(_) => {
-                        let edge_start = Vec::len(&value.output.type_edges);
-                        append_edges(
-                            &mut value.output.type_edges,
-                            &arguments,
-                            0,
-                            0
-                        );
-                        Result::Ok(push_type(
-                            value,
-                            5,
-                            start,
-                            header_range(0, 0),
-                            header_range(
-                                edge_start,
-                                Vec::len(&value.output.type_edges)
-                            ),
-                            Result::Ok(move constructor),
-                            Result::Err(())
-                        ))
-                    }
-                }
-            }
+            try(
+                parse_type_values(value, 36, related, &mut arguments),
+                @parse_application
+            );
+            try(expect_code(value, 36, 4, related), @parse_application);
+            let edge_start = Vec::len(&value.output.type_edges);
+            append_edges(
+                &mut value.output.type_edges,
+                &arguments,
+                0,
+                0
+            );
+            Result::Ok(push_type(
+                value,
+                5,
+                start,
+                header_range(0, 0),
+                header_range(
+                    edge_start,
+                    Vec::len(&value.output.type_edges)
+                ),
+                Result::Ok(move constructor),
+                Result::Err(())
+            ))
             }
         }
     }
@@ -836,25 +825,21 @@ parse_reference_kind(
     lifetime: Option<NameUse>,
     kind_code: u8
 ) -> Result<TypeId, HeaderError> {
-    handle parse_type(value, related) {
-        Result::Err(error) => Result::Err(move error),
-        Result::Ok(referent) => {
-            let edge_start = Vec::len(&value.output.type_edges);
-            Vec::push(
-                &mut value.output.type_edges,
-                TypeEdge { value: move referent, position: 0 }
-            );
-            Result::Ok(push_type(
-                value,
-                kind_code,
-                start,
-                header_range(0, 0),
-                header_range(edge_start, edge_start + usize_value(1)),
-                Result::Err(()),
-                move lifetime
-            ))
-        }
-    }
+    let referent = try(parse_type(value, related), @parse_reference_kind);
+    let edge_start = Vec::len(&value.output.type_edges);
+    Vec::push(
+        &mut value.output.type_edges,
+        TypeEdge { value: move referent, position: 0 }
+    );
+    Result::Ok(push_type(
+        value,
+        kind_code,
+        start,
+        header_range(0, 0),
+        header_range(edge_start, edge_start + usize_value(1)),
+        Result::Err(()),
+        move lifetime
+    ))
 }
 
 parse_tuple(
@@ -864,23 +849,22 @@ parse_tuple(
 ) -> Result<TypeId, HeaderError> {
     handle eat_code(value, 12) {
         Result::Ok(_) => finish_tuple(value, start, Vec::new()),
-        Result::Err(_) => handle parse_type(value, related) {
-            Result::Err(error) => Result::Err(move error),
-            Result::Ok(first) => handle eat_code(value, 17) {
-                Result::Err(_) => handle expect_code(value, 12, 3, related) {
-                    Result::Err(error) => Result::Err(move error),
-                    Result::Ok(_) => Result::Ok(move first)
+        Result::Err(_) => {
+            let first = try(parse_type(value, related), @parse_tuple);
+            handle eat_code(value, 17) {
+                Result::Err(_) => {
+                    try(expect_code(value, 12, 3, related), @parse_tuple);
+                    Result::Ok(move first)
                 },
                 Result::Ok(_) => {
                     let elements = Vec::new();
                     Vec::push(&mut elements, move first);
-                    handle parse_type_values(value, 12, related, &mut elements) {
-                        Result::Err(error) => Result::Err(move error),
-                        Result::Ok(_) => handle expect_code(value, 12, 3, related) {
-                            Result::Err(error) => Result::Err(move error),
-                            Result::Ok(_) => finish_tuple(value, start, move elements)
-                        }
-                    }
+                    try(
+                        parse_type_values(value, 12, related, &mut elements),
+                        @parse_tuple
+                    );
+                    try(expect_code(value, 12, 3, related), @parse_tuple);
+                    finish_tuple(value, start, move elements)
                 }
             }
         }
@@ -942,22 +926,20 @@ parse_generic_items(
 ) -> Result<HeaderRange, HeaderError> {
     handle at_code(&*value, 36) {
         Result::Ok(_) => Result::Err(header_error(5, value.cursor, related)),
-        Result::Err(_) => handle parse_one_generic(value, related) {
-                Result::Err(error) => Result::Err(move error),
-                Result::Ok(found) => {
-                    Vec::push(&mut value.output.generic_params, move found);
-                    handle eat_code(value, 17) {
-                        Result::Ok(_) => handle at_code(&*value, 36) {
-                            Result::Ok(_) => finish_generics(value, related, start),
-                            Result::Err(_) => parse_generic_items(
-                                value,
-                                related,
-                                start
-                            )
-                        },
-                        Result::Err(_) => finish_generics(value, related, start)
-                    }
-                }
+        Result::Err(_) => {
+            let found = try(parse_one_generic(value, related), @parse_generic_items);
+            Vec::push(&mut value.output.generic_params, move found);
+            handle eat_code(value, 17) {
+                Result::Ok(_) => handle at_code(&*value, 36) {
+                    Result::Ok(_) => finish_generics(value, related, start),
+                    Result::Err(_) => parse_generic_items(
+                        value,
+                        related,
+                        start
+                    )
+                },
+                Result::Err(_) => finish_generics(value, related, start)
+            }
         }
     }
 }
@@ -976,29 +958,27 @@ parse_one_generic(
                 tokens: token_range(token, value.cursor)
             })
         },
-        _ => handle ident(value, related) {
-            Result::Err(error) => Result::Err(move error),
-            Result::Ok(name) => {
-                let kind = handle eat_code(value, 18) {
-                    Result::Err(_) => u8_value(1),
-                    Result::Ok(_) => handle at_ident(&*value, &"EffectRow") {
-                        Result::Err(_) => u8_value(0),
-                        Result::Ok(_) => {
-                            value.cursor = value.cursor + usize_value(1);
-                            u8_value(3)
-                        }
+        _ => {
+            let name = try(ident(value, related), @parse_one_generic);
+            let kind = handle eat_code(value, 18) {
+                Result::Err(_) => u8_value(1),
+                Result::Ok(_) => handle at_ident(&*value, &"EffectRow") {
+                    Result::Err(_) => u8_value(0),
+                    Result::Ok(_) => {
+                        value.cursor = value.cursor + usize_value(1);
+                        u8_value(3)
                     }
-                };
-                handle kind == u8_value(0) {
-                    Result::Ok(_) => Result::Err(
-                        header_error(6, value.cursor, related)
-                    ),
-                    Result::Err(_) => Result::Ok(GenericParam {
-                        name: name.name,
-                        kind_code: kind,
-                        tokens: token_range(token, value.cursor)
-                    })
                 }
+            };
+            handle kind == u8_value(0) {
+                Result::Ok(_) => Result::Err(
+                    header_error(6, value.cursor, related)
+                ),
+                Result::Err(_) => Result::Ok(GenericParam {
+                    name: name.name,
+                    kind_code: kind,
+                    tokens: token_range(token, value.cursor)
+                })
             }
         }
     }
@@ -1009,12 +989,10 @@ finish_generics(
     related: usize,
     start: usize
 ) -> Result<HeaderRange, HeaderError> {
-    handle expect_code(value, 36, 4, related) {
-        Result::Err(error) => Result::Err(move error),
-        Result::Ok(_) => Result::Ok(
-            header_range(start, Vec::len(&value.output.generic_params))
-        )
-    }
+    try(expect_code(value, 36, 4, related), @finish_generics);
+    Result::Ok(
+        header_range(start, Vec::len(&value.output.generic_params))
+    )
 }
 
 parse_parameters(
@@ -1033,41 +1011,36 @@ parse_parameter_items(
     related: usize,
     start: usize
 ) -> Result<HeaderRange, HeaderError> {
-    handle ident(value, related) {
-        Result::Err(error) => Result::Err(move error),
-        Result::Ok(name) => handle expect_code(value, 18, 7, related) {
-            Result::Err(error) => Result::Err(move error),
-            Result::Ok(_) => handle parse_type(value, related) {
-                Result::Err(error) => Result::Err(move error),
-                Result::Ok(ty) => {
-                    Vec::push(
-                        &mut value.output.parameters,
-                        Parameter {
-                            name: name.name,
-                            name_token: name.token,
-                            ty: move ty
-                        }
-                    );
-                    handle eat_code(value, 17) {
-                        Result::Ok(_) => handle at_code(&*value, 12) {
-                            Result::Ok(_) => Result::Ok(header_range(
-                                start,
-                                Vec::len(&value.output.parameters)
-                            )),
-                            Result::Err(_) => parse_parameter_items(
-                                value,
-                                related,
-                                start
-                            )
-                        },
-                        Result::Err(_) => Result::Ok(header_range(
+    let name = try(ident(value, related), @parse_parameter_items);
+    try(
+        expect_code(value, 18, 7, related),
+        @parse_parameter_items
+    );
+    let ty = try(parse_type(value, related), @parse_parameter_items);
+    Vec::push(
+        &mut value.output.parameters,
+        Parameter {
+            name: name.name,
+            name_token: name.token,
+            ty: move ty
+        }
+    );
+    handle eat_code(value, 17) {
+        Result::Ok(_) => handle at_code(&*value, 12) {
+            Result::Ok(_) => Result::Ok(header_range(
+                start,
+                Vec::len(&value.output.parameters)
+            )),
+            Result::Err(_) => parse_parameter_items(
+                value,
+                related,
+                start
+            )
+        },
+        Result::Err(_) => Result::Ok(header_range(
                             start,
                             Vec::len(&value.output.parameters)
-                        ))
-                    }
-                }
-            }
-        }
+        ))
     }
 }
 
@@ -1075,17 +1048,15 @@ parse_effect_row(value: &mut Parser, related: usize) -> Result<EffectRow, Header
     let start = value.cursor;
     let effects = Vec::new();
     handle eat_code(value, 13) {
-        Result::Err(_) => handle parse_type(value, related) {
-            Result::Err(error) => Result::Err(move error),
-            Result::Ok(found_effect) => {
-                Vec::push(&mut effects, move found_effect);
-                finish_effects(
-                    value,
-                    start,
-                    move effects,
-                    Result::Err(())
-                )
-            }
+        Result::Err(_) => {
+            let found_effect = try(parse_type(value, related), @parse_effect_row);
+            Vec::push(&mut effects, move found_effect);
+            finish_effects(
+                value,
+                start,
+                move effects,
+                Result::Err(())
+            )
         },
         Result::Ok(_) => parse_effect_items(value, related, start, move effects)
     }
@@ -1098,17 +1069,15 @@ parse_effect_items(
     effects: Vec<TypeId>
 ) -> Result<EffectRow, HeaderError> {
     handle eat_code(value, 30) {
-        Result::Ok(_) => handle ident(value, related) {
-            Result::Err(error) => Result::Err(move error),
-            Result::Ok(row_tail) => handle expect_code(value, 14, 8, related) {
-                Result::Err(error) => Result::Err(move error),
-                Result::Ok(_) => finish_effects(
-                    value,
-                    start,
-                    move effects,
-                    Result::Ok(move row_tail)
-                )
-            }
+        Result::Ok(_) => {
+            let row_tail = try(ident(value, related), @parse_effect_items);
+            try(expect_code(value, 14, 8, related), @parse_effect_items);
+            finish_effects(
+                value,
+                start,
+                move effects,
+                Result::Ok(move row_tail)
+            )
         },
         Result::Err(_) => handle eat_code(value, 14) {
             Result::Ok(_) => finish_effects(
@@ -1117,25 +1086,26 @@ parse_effect_items(
                 move effects,
                 Result::Err(())
             ),
-            Result::Err(_) => handle parse_type(value, related) {
-                Result::Err(error) => Result::Err(move error),
-                Result::Ok(found_effect) => {
-                    let next = move effects;
-                    Vec::push(&mut next, move found_effect);
-                    handle eat_code(value, 17) {
-                        Result::Ok(_) => parse_effect_items(
-                            value,
-                            related,
-                            start,
-                            move next
-                        ),
-                        Result::Err(_) => parse_effect_items(
-                            value,
-                            related,
-                            start,
-                            move next
-                        )
-                    }
+            Result::Err(_) => {
+                let found_effect = try(
+                    parse_type(value, related),
+                    @parse_effect_items
+                );
+                let next = move effects;
+                Vec::push(&mut next, move found_effect);
+                handle eat_code(value, 17) {
+                    Result::Ok(_) => parse_effect_items(
+                        value,
+                        related,
+                        start,
+                        move next
+                    ),
+                    Result::Err(_) => parse_effect_items(
+                        value,
+                        related,
+                        start,
+                        move next
+                    )
                 }
             }
         }
@@ -1173,35 +1143,20 @@ parse_callable(
         Result::Ok(_) => { value.cursor = value.cursor + usize_value(1); },
         Result::Err(_) => ()
     };
-    handle ident(value, start) {
-        Result::Err(error) => Result::Err(move error),
-        Result::Ok(name) => handle parse_generics(value, start) {
-            Result::Err(error) => Result::Err(move error),
-            Result::Ok(generics) => handle expect_code(value, 11, 2, start) {
-                Result::Err(error) => Result::Err(move error),
-                Result::Ok(_) => handle parse_parameters(value, start) {
-                    Result::Err(error) => Result::Err(move error),
-                    Result::Ok(parameters) => handle expect_code(
-                        value,
-                        12,
-                        3,
-                        start
-                    ) {
-                        Result::Err(error) => Result::Err(move error),
-                        Result::Ok(_) => parse_callable_suffix(
-                            value,
-                            shell,
-                            move public,
-                            start,
-                            move name,
-                            move generics,
-                            move parameters
-                        )
-                    }
-                }
-            }
-        }
-    }
+    let name = try(ident(value, start), @parse_callable);
+    let generics = try(parse_generics(value, start), @parse_callable);
+    try(expect_code(value, 11, 2, start), @parse_callable);
+    let parameters = try(parse_parameters(value, start), @parse_callable);
+    try(expect_code(value, 12, 3, start), @parse_callable);
+    parse_callable_suffix(
+        value,
+        shell,
+        move public,
+        start,
+        move name,
+        move generics,
+        move parameters
+    )
 }
 
 parse_callable_suffix(
@@ -1235,9 +1190,12 @@ parse_callable_suffix(
                 move parameters,
                 Result::Err(())
             ),
-            Result::Err(_) => handle parse_type(value, start) {
-                Result::Err(error) => Result::Err(move error),
-                Result::Ok(parsed_result) => parse_callable_effects(
+            Result::Err(_) => {
+                let parsed_result = try(
+                    parse_type(value, start),
+                    @parse_callable_suffix
+                );
+                parse_callable_effects(
                     value,
                     shell,
                     move public,
@@ -1274,9 +1232,12 @@ parse_callable_effects(
             move result,
             Result::Err(())
         ),
-        Result::Ok(_) => handle parse_effect_row(value, start) {
-            Result::Err(error) => Result::Err(move error),
-            Result::Ok(parsed_effects) => finish_callable(
+        Result::Ok(_) => {
+            let parsed_effects = try(
+                parse_effect_row(value, start),
+                @parse_callable_effects
+            );
+            finish_callable(
                 value,
                 shell,
                 move public,
@@ -1454,45 +1415,37 @@ parse_fixity(
         Result::Ok(_) => Result::Err(header_error(13, value.cursor, start)),
         Result::Err(_) => {
             value.cursor = value.cursor + usize_value(1);
-            handle parse_precedence(original, value, start) {
-                Result::Err(error) => Result::Err(move error),
-                Result::Ok(precedence) => handle take_operator(value, start) {
-                    Result::Err(error) => Result::Err(move error),
-                    Result::Ok(operator) => handle expect_code(
-                        value,
-                        22,
-                        8,
-                        start
-                    ) {
-                        Result::Err(error) => Result::Err(move error),
-                        Result::Ok(_) => handle value.cursor == value.limit {
-                            Result::Err(_) => Result::Err(
-                                header_error(9, value.cursor, start)
-                            ),
-                            Result::Ok(_) => {
-                                Vec::push(
-                                    &mut fixities.values,
-                                    FixityHeader {
-                                        shell: shell,
-                                        public: move public,
-                                        form: form,
-                                        precedence: precedence,
-                                        operator: move operator,
-                                        tokens: token_range(start, whole_end)
-                                    }
-                                );
-                                let index = Vec::len(&fixities.values)
-                                    - usize_value(1);
-                                record_header(
-                                    order_kinds,
-                                    order_indices,
-                                    6,
-                                    index
-                                );
-                                Result::Ok(())
-                            }
+            let precedence = try(
+                parse_precedence(original, value, start),
+                @parse_fixity
+            );
+            let operator = try(take_operator(value, start), @parse_fixity);
+            try(expect_code(value, 22, 8, start), @parse_fixity);
+            handle value.cursor == value.limit {
+                Result::Err(_) => Result::Err(
+                    header_error(9, value.cursor, start)
+                ),
+                Result::Ok(_) => {
+                    Vec::push(
+                        &mut fixities.values,
+                        FixityHeader {
+                            shell: shell,
+                            public: move public,
+                            form: form,
+                            precedence: precedence,
+                            operator: move operator,
+                            tokens: token_range(start, whole_end)
                         }
-                    }
+                    );
+                    let index = Vec::len(&fixities.values)
+                        - usize_value(1);
+                    record_header(
+                        order_kinds,
+                        order_indices,
+                        6,
+                        index
+                    );
+                    Result::Ok(())
                 }
             }
         }
@@ -1537,37 +1490,27 @@ parse_alias_name(
     whole_end: usize
 ) -> Result<(), HeaderError> {
     value.cursor = value.cursor + usize_value(1);
-    handle ident(value, start) {
-        Result::Err(error) => Result::Err(move error),
-        Result::Ok(name) => handle parse_generics(value, start) {
-            Result::Err(error) => Result::Err(move error),
-            Result::Ok(generics) => handle expect_code(value, 31, 10, start) {
-                Result::Err(error) => Result::Err(move error),
-                Result::Ok(_) => {
-                    value.limit = whole_end - usize_value(1);
-                    handle parse_type(value, start) {
-                        Result::Err(error) => Result::Err(move error),
-                        Result::Ok(target) => handle value.cursor == value.limit {
-                            Result::Err(_) => Result::Err(
-                                header_error(9, value.cursor, start)
-                            ),
-                            Result::Ok(_) => finish_alias(
-                                aliases,
-                                order_kinds,
-                                order_indices,
-                                shell,
-                                move public,
-                                start,
-                                whole_end,
-                                move name,
-                                move generics,
-                                move target
-                            )
-                        }
-                    }
-                }
-            }
-        }
+    let name = try(ident(value, start), @parse_alias_name);
+    let generics = try(parse_generics(value, start), @parse_alias_name);
+    try(expect_code(value, 31, 10, start), @parse_alias_name);
+    value.limit = whole_end - usize_value(1);
+    let target = try(parse_type(value, start), @parse_alias_name);
+    handle value.cursor == value.limit {
+        Result::Err(_) => Result::Err(
+            header_error(9, value.cursor, start)
+        ),
+        Result::Ok(_) => finish_alias(
+            aliases,
+            order_kinds,
+            order_indices,
+            shell,
+            move public,
+            start,
+            whole_end,
+            move name,
+            move generics,
+            move target
+        )
     }
 }
 
@@ -1617,36 +1560,30 @@ parse_struct(
         Result::Err(_) => ()
     };
     value.cursor = value.cursor + usize_value(1);
-    handle ident(value, start) {
-        Result::Err(error) => Result::Err(move error),
-        Result::Ok(name) => handle parse_generics(value, start) {
-            Result::Err(error) => Result::Err(move error),
-            Result::Ok(generics) => handle value.cursor == header_end {
-                Result::Err(_) => Result::Err(
-                    header_error(9, value.cursor, start)
-                ),
-                Result::Ok(_) => {
-                    value.cursor = header_end + usize_value(1);
-                    value.limit = whole_end - usize_value(1);
-                    let field_start = Vec::len(&fields.values);
-                    handle parse_fields(value, fields, start) {
-                        Result::Err(error) => Result::Err(move error),
-                        Result::Ok(_) => finish_struct(
-                            structs,
-                            fields,
-                            order_kinds,
-                            order_indices,
-                            shell,
-                            move public,
-                            start,
-                            whole_end,
-                            move name,
-                            move generics,
-                            field_start
-                        )
-                    }
-                }
-            }
+    let name = try(ident(value, start), @parse_struct);
+    let generics = try(parse_generics(value, start), @parse_struct);
+    handle value.cursor == header_end {
+        Result::Err(_) => Result::Err(
+            header_error(9, value.cursor, start)
+        ),
+        Result::Ok(_) => {
+            value.cursor = header_end + usize_value(1);
+            value.limit = whole_end - usize_value(1);
+            let field_start = Vec::len(&fields.values);
+            try(parse_fields(value, fields, start), @parse_struct);
+            finish_struct(
+                structs,
+                fields,
+                order_kinds,
+                order_indices,
+                shell,
+                move public,
+                start,
+                whole_end,
+                move name,
+                move generics,
+                field_start
+            )
         }
     }
 }
@@ -1669,34 +1606,21 @@ parse_fields(
                 },
                 Result::Err(_) => ()
             };
-            handle ident(value, related) {
-                Result::Err(error) => Result::Err(move error),
-                Result::Ok(name) => handle expect_code(
-                    value,
-                    18,
-                    7,
-                    related
-                ) {
-                    Result::Err(error) => Result::Err(move error),
-                    Result::Ok(_) => handle parse_type(value, related) {
-                        Result::Err(error) => Result::Err(move error),
-                        Result::Ok(ty) => {
-                            Vec::push(
-                                &mut fields.values,
-                                FieldHeader {
-                                    name: name.name,
-                                    name_token: name.token,
-                                    private: private,
-                                    ty: move ty
-                                }
-                            );
-                            eat_code(value, 17);
-                            eat_code(value, 22);
-                            parse_fields(value, fields, related)
-                        }
-                    }
+            let name = try(ident(value, related), @parse_fields);
+            try(expect_code(value, 18, 7, related), @parse_fields);
+            let ty = try(parse_type(value, related), @parse_fields);
+            Vec::push(
+                &mut fields.values,
+                FieldHeader {
+                    name: name.name,
+                    name_token: name.token,
+                    private: private,
+                    ty: move ty
                 }
-            }
+            );
+            eat_code(value, 17);
+            eat_code(value, 22);
+            parse_fields(value, fields, related)
         }
     }
 }
@@ -1749,30 +1673,26 @@ parse_sum_header(
         Result::Err(_) => ()
     };
     value.cursor = value.cursor + usize_value(1);
-    handle ident(value, start) {
-        Result::Err(error) => Result::Err(move error),
-        Result::Ok(name) => handle parse_generics(value, start) {
-            Result::Err(error) => Result::Err(move error),
-            Result::Ok(generics) => handle value.cursor == header_end {
-                Result::Err(_) => Result::Err(
-                    header_error(9, value.cursor, start)
-                ),
-                Result::Ok(_) => parse_sum_body(
-                    value,
-                    enums,
-                    variants,
-                    order_kinds,
-                    order_indices,
-                    shell,
-                    move public,
-                    start,
-                    header_end,
-                    whole_end,
-                    move name,
-                    move generics
-                )
-            }
-        }
+    let name = try(ident(value, start), @parse_sum_header);
+    let generics = try(parse_generics(value, start), @parse_sum_header);
+    handle value.cursor == header_end {
+        Result::Err(_) => Result::Err(
+            header_error(9, value.cursor, start)
+        ),
+        Result::Ok(_) => parse_sum_body(
+            value,
+            enums,
+            variants,
+            order_kinds,
+            order_indices,
+            shell,
+            move public,
+            start,
+            header_end,
+            whole_end,
+            move name,
+            move generics
+        )
     }
 }
 
@@ -1793,25 +1713,21 @@ parse_sum_body(
     value.cursor = next_index(header_end);
     value.limit = previous_index(whole_end);
     let variant_start = variant_arena_count(&*variants);
-    handle parse_variants(value, variants, start) {
-        Result::Err(error) => Result::Err(move error),
-        Result::Ok(_) => {
-            finish_enum(
-                enums,
-                variants,
-                order_kinds,
-                order_indices,
-                shell,
-                move public,
-                start,
-                whole_end,
-                move name,
-                move generics,
-                variant_start
-            );
-            Result::Ok(())
-        }
-    }
+    try(parse_variants(value, variants, start), @parse_sum_body);
+    finish_enum(
+        enums,
+        variants,
+        order_kinds,
+        order_indices,
+        shell,
+        move public,
+        start,
+        whole_end,
+        move name,
+        move generics,
+        variant_start
+    );
+    Result::Ok(())
 }
 
 parse_variants(
@@ -1821,41 +1737,43 @@ parse_variants(
 ) -> Result<(), HeaderError> {
     handle value.cursor < value.limit {
         Result::Err(_) => Result::Ok(()),
-        Result::Ok(_) => handle ident(value, related) {
-            Result::Err(error) => Result::Err(move error),
-            Result::Ok(name) => {
-                let fields = Vec::new();
-                handle eat_code(value, 11) {
-                    Result::Err(_) => finish_variant(
+        Result::Ok(_) => {
+            let name = try(ident(value, related), @parse_variants);
+            let fields = Vec::new();
+            handle eat_code(value, 11) {
+                Result::Err(_) => finish_variant(
+                    value,
+                    variants,
+                    related,
+                    move name,
+                    move fields
+                ),
+                Result::Ok(_) => {
+                    try(
+                        parse_type_values(
+                            value,
+                            12,
+                            related,
+                            &mut fields
+                        ),
+                        @parse_variants
+                    );
+                    try(
+                        expect_code(
+                            value,
+                            12,
+                            3,
+                            related
+                        ),
+                        @parse_variants
+                    );
+                    finish_variant(
                         value,
                         variants,
                         related,
                         move name,
                         move fields
-                    ),
-                    Result::Ok(_) => handle parse_type_values(
-                        value,
-                        12,
-                        related,
-                        &mut fields
-                    ) {
-                        Result::Err(error) => Result::Err(move error),
-                        Result::Ok(_) => handle expect_code(
-                            value,
-                            12,
-                            3,
-                            related
-                        ) {
-                            Result::Err(error) => Result::Err(move error),
-                            Result::Ok(_) => finish_variant(
-                                value,
-                                variants,
-                                related,
-                                move name,
-                                move fields
-                            )
-                        }
-                    }
+                    )
                 }
             }
         }
@@ -2007,16 +1925,14 @@ parse_shells(
                     ),
                     _ => Result::Ok(())
                 };
-                handle move parsed {
-                    Result::Err(error) => Result::Err(move error),
-                    Result::Ok(_) => parse_shells(
-                        original,
-                        declarations,
-                        index + usize_value(1),
-                        move next,
-                        move nominal
-                    )
-                }
+                try(move parsed, @parse_shells);
+                parse_shells(
+                    original,
+                    declarations,
+                    index + usize_value(1),
+                    move next,
+                    move nominal
+                )
             }
         }
     }

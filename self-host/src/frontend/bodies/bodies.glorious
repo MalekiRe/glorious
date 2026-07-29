@@ -1090,22 +1090,23 @@ parse_identifier_tail(
                     Result::Err(_) => Result::Err(
                         body_error(13, token, separator)
                     ),
-                    Result::Ok(_) => handle push_identifier_name(
-                        source,
-                        value,
-                        token,
-                        separator
-                    ) {
-                        Result::Err(error) => Result::Err(move error),
-                        Result::Ok(_) => {
-                            value.cursor = token + usize_value(1);
-                            parse_identifier_tail(
+                    Result::Ok(_) => {
+                        try(
+                            push_identifier_name(
                                 source,
                                 value,
-                                start,
-                                name_start
-                            )
-                        }
+                                token,
+                                separator
+                            ),
+                            @parse_identifier_tail
+                        );
+                        value.cursor = token + usize_value(1);
+                        parse_identifier_tail(
+                            source,
+                            value,
+                            start,
+                            name_start
+                        )
                     }
                 }
             }
@@ -1119,13 +1120,12 @@ parse_identifier(
     start: usize
 ) -> Result<ExprId, BodyError> {
     let name_start = name_count(&value.names);
-    handle push_identifier_name(source, value, start, start) {
-        Result::Err(error) => Result::Err(move error),
-        Result::Ok(_) => {
-            value.cursor = start + usize_value(1);
-            parse_identifier_tail(source, value, start, name_start)
-        }
-    }
+    try(
+        push_identifier_name(source, value, start, start),
+        @parse_identifier
+    );
+    value.cursor = start + usize_value(1);
+    parse_identifier_tail(source, value, start, name_start)
 }
 
 parse_tuple_tail(
@@ -2305,15 +2305,18 @@ write_call_arguments(
 ) -> Result<(), BodyError> {
     handle index < node.children.count {
         Result::Err(_) => Result::Ok(()),
-        Result::Ok(_) => handle write_expression(
-            &mut *output,
-            original,
-            source,
-            value,
-            edge_at(value, node, index)
-        ) {
-            Result::Err(error) => Result::Err(move error),
-            Result::Ok(_) => write_call_arguments(
+        Result::Ok(_) => {
+            try(
+                write_expression(
+                    &mut *output,
+                    original,
+                    source,
+                    value,
+                    edge_at(value, node, index)
+                ),
+                @write_call_arguments
+            );
+            write_call_arguments(
                 move output,
                 original,
                 source,
@@ -2372,15 +2375,18 @@ write_children(
 ) -> Result<(), BodyError> {
     handle index < node.children.count {
         Result::Err(_) => Result::Ok(()),
-        Result::Ok(_) => handle write_expression(
-            &mut *output,
-            original,
-            source,
-            value,
-            edge_at(value, node, index)
-        ) {
-            Result::Err(error) => Result::Err(move error),
-            Result::Ok(_) => write_children(
+        Result::Ok(_) => {
+            try(
+                write_expression(
+                    &mut *output,
+                    original,
+                    source,
+                    value,
+                    edge_at(value, node, index)
+                ),
+                @write_children
+            );
+            write_children(
                 move output,
                 original,
                 source,
@@ -2402,32 +2408,36 @@ write_struct_fields(
 ) -> Result<(), BodyError> {
     handle index < node.children.count {
         Result::Err(_) => Result::Ok(()),
-        Result::Ok(_) => handle write_node_name(
-            &mut *output,
-            original,
-            source,
-            value,
-            node,
-            edge_metadata_at(value, node, index)
-        ) {
-            Result::Err(error) => Result::Err(move error),
-            Result::Ok(_) => handle write_expression(
-                &mut *output,
-                original,
-                source,
-                value,
-                edge_at(value, node, index)
-            ) {
-                Result::Err(error) => Result::Err(move error),
-                Result::Ok(_) => write_struct_fields(
-                    move output,
+        Result::Ok(_) => {
+            try(
+                write_node_name(
+                    &mut *output,
                     original,
                     source,
                     value,
                     node,
-                    index + u32_value(1)
-                )
-            }
+                    edge_metadata_at(value, node, index)
+                ),
+                @write_struct_fields
+            );
+            try(
+                write_expression(
+                    &mut *output,
+                    original,
+                    source,
+                    value,
+                    edge_at(value, node, index)
+                ),
+                @write_struct_fields
+            );
+            write_struct_fields(
+                move output,
+                original,
+                source,
+                value,
+                node,
+                index + u32_value(1)
+            )
         }
     }
 }
@@ -2448,50 +2458,53 @@ write_block_statements(
                 1 => {
                     ByteBuf::push(&mut *output, 1);
                     let metadata = edge_metadata_at(value, node, index);
-                    handle write_name_token(
-                        &mut *output,
-                        source,
-                        usize_from_u32(metadata - u32_value(1))
-                    ) {
-                        Result::Err(error) => Result::Err(move error),
-                        Result::Ok(_) => handle write_expression(
+                    try(
+                        write_name_token(
+                            &mut *output,
+                            source,
+                            usize_from_u32(metadata - u32_value(1))
+                        ),
+                        @write_block_statements
+                    );
+                    try(
+                        write_expression(
                             &mut *output,
                             original,
                             source,
                             value,
                             edge_at(value, node, index)
-                        ) {
-                            Result::Err(error) => Result::Err(move error),
-                            Result::Ok(_) => write_block_statements(
-                                move output,
-                                original,
-                                source,
-                                value,
-                                node,
-                                index + u32_value(1)
-                            )
-                        }
-                    }
-                },
-                _ => {
-                    ByteBuf::push(&mut *output, 2);
-                    handle write_expression(
-                        &mut *output,
+                        ),
+                        @write_block_statements
+                    );
+                    write_block_statements(
+                        move output,
                         original,
                         source,
                         value,
-                        edge_at(value, node, index)
-                    ) {
-                        Result::Err(error) => Result::Err(move error),
-                        Result::Ok(_) => write_block_statements(
-                            move output,
+                        node,
+                        index + u32_value(1)
+                    )
+                },
+                _ => {
+                    ByteBuf::push(&mut *output, 2);
+                    try(
+                        write_expression(
+                            &mut *output,
                             original,
                             source,
                             value,
-                            node,
-                            index + u32_value(1)
-                        )
-                    }
+                            edge_at(value, node, index)
+                        ),
+                        @write_block_statements
+                    );
+                    write_block_statements(
+                        move output,
+                        original,
+                        source,
+                        value,
+                        node,
+                        index + u32_value(1)
+                    )
                 }
             }
         }
@@ -2576,48 +2589,48 @@ write_expression(
                 node.operator.end
             );
             write_string(&mut *output, &spelling);
-            handle write_expression(
-                &mut *output,
-                original,
-                source,
-                value,
-                edge_at(value, node, 0)
-            ) {
-                Result::Err(error) => Result::Err(move error),
-                Result::Ok(_) => write_expression(
-                    move output,
+            try(
+                write_expression(
+                    &mut *output,
                     original,
                     source,
                     value,
-                    edge_at(value, node, 1)
-                )
-            }
-        },
-        7 => {
-            ByteBuf::push(&mut *output, 7);
-            handle write_expression(
-                &mut *output,
+                    edge_at(value, node, 0)
+                ),
+                @write_expression
+            );
+            write_expression(
+                move output,
                 original,
                 source,
                 value,
-                edge_at(value, node, 0)
-            ) {
-                Result::Err(error) => Result::Err(move error),
-                Result::Ok(_) => {
-                    ByteBuf::write_u32_le(
-                        &mut *output,
-                        node.children.count - u32_value(1)
-                    );
-                    write_call_arguments(
-                        move output,
-                        original,
-                        source,
-                        value,
-                        node,
-                        1
-                    )
-                }
-            }
+                edge_at(value, node, 1)
+            )
+        },
+        7 => {
+            ByteBuf::push(&mut *output, 7);
+            try(
+                write_expression(
+                    &mut *output,
+                    original,
+                    source,
+                    value,
+                    edge_at(value, node, 0)
+                ),
+                @write_expression
+            );
+            ByteBuf::write_u32_le(
+                &mut *output,
+                node.children.count - u32_value(1)
+            );
+            write_call_arguments(
+                move output,
+                original,
+                source,
+                value,
+                node,
+                1
+            )
         },
         8 => {
             ByteBuf::push(&mut *output, 8);
@@ -2638,50 +2651,50 @@ write_expression(
         },
         10 => {
             ByteBuf::push(&mut *output, 10);
-            handle write_node_name(
-                &mut *output,
-                original,
-                source,
-                value,
-                node,
-                0
-            ) {
-                Result::Err(error) => Result::Err(move error),
-                Result::Ok(_) => {
-                    ByteBuf::write_u32_le(
-                        &mut *output,
-                        node.children.count
-                    );
-                    write_struct_fields(
-                        output,
-                        original,
-                        source,
-                        value,
-                        node,
-                        0
-                    )
-                }
-            }
-        },
-        11 => {
-            ByteBuf::push(&mut *output, 11);
-            handle write_expression(
-                &mut *output,
-                original,
-                source,
-                value,
-                edge_at(value, node, 0)
-            ) {
-                Result::Err(error) => Result::Err(move error),
-                Result::Ok(_) => write_node_name(
-                    output,
+            try(
+                write_node_name(
+                    &mut *output,
                     original,
                     source,
                     value,
                     node,
                     0
-                )
-            }
+                ),
+                @write_expression
+            );
+            ByteBuf::write_u32_le(
+                &mut *output,
+                node.children.count
+            );
+            write_struct_fields(
+                move output,
+                original,
+                source,
+                value,
+                node,
+                0
+            )
+        },
+        11 => {
+            ByteBuf::push(&mut *output, 11);
+            try(
+                write_expression(
+                    &mut *output,
+                    original,
+                    source,
+                    value,
+                    edge_at(value, node, 0)
+                ),
+                @write_expression
+            );
+            write_node_name(
+                move output,
+                original,
+                source,
+                value,
+                node,
+                0
+            )
         },
         _ => Result::Err(body_error(
             9,

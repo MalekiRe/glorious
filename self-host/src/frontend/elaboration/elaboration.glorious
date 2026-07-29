@@ -784,26 +784,24 @@ resolve_type_children(
     let index = super::headers::parsed_index(headers);
     handle ordinal < super::headers::type_child_count_at(index, type_index) {
         Result::Err(_) => Result::Ok(()),
-        Result::Ok(_) => handle resolve_signature_type(
-            headers,
-            declarations,
-            output,
-            super::headers::type_child_index_at(index, type_index, ordinal),
-            module_plus_one
-        ) {
-            Result::Err(found) => Result::Err(move found),
-            Result::Ok(ty) => {
-                push_word(&mut *elements, ty);
-                resolve_type_children(
-                    headers,
-                    declarations,
-                    output,
-                    type_index,
-                    module_plus_one,
-                    ordinal + u32_value(1),
-                    elements
-                )
-            }
+        Result::Ok(_) => {
+            let ty = try(resolve_signature_type(
+                headers,
+                declarations,
+                output,
+                super::headers::type_child_index_at(index, type_index, ordinal),
+                module_plus_one
+            ), @resolve_type_children);
+            push_word(&mut *elements, ty);
+            resolve_type_children(
+                headers,
+                declarations,
+                output,
+                type_index,
+                module_plus_one,
+                ordinal + u32_value(1),
+                elements
+            )
         }
     }
 }
@@ -1329,16 +1327,14 @@ collect_callable(
         Result::Err(_) => 0,
         Result::Ok(owner) => super::scanner::shell_parent_plus_one(owner)
     };
-    handle collect_parameter_types(
+    try(collect_parameter_types(
         headers,
         declarations,
         callable,
         output,
         module_plus_one,
         0
-    ) {
-        Result::Err(found) => Result::Err(move found),
-        Result::Ok(_) => {
+    ), @collect_callable);
             push_words4(
                 &mut output.callables,
                 shell,
@@ -1368,8 +1364,6 @@ collect_callable(
                     )
                 }
             }
-        }
-    }
 }
 
 predeclare_nominals(
@@ -1823,19 +1817,20 @@ tuple_copyable(
                 &output.type_elements,
                 usize_from_u32(start + ordinal)
             );
-            handle type_copyable(output, element, token) {
-                Result::Err(found) => Result::Err(move found),
-                Result::Ok(copy) => handle copy {
-                    Result::Err(_) => Result::Ok(false),
-                    Result::Ok(_) => tuple_copyable(
-                        output,
-                        start,
-                        count,
-                        ordinal + u32_value(1),
-                        token,
-                        ty
-                    )
-                }
+            let copy = try(
+                type_copyable(output, element, token),
+                @tuple_copyable
+            );
+            handle copy {
+                Result::Err(_) => Result::Ok(false),
+                Result::Ok(_) => tuple_copyable(
+                    output,
+                    start,
+                    count,
+                    ordinal + u32_value(1),
+                    token,
+                    ty
+                )
             }
         }
     }
@@ -1853,18 +1848,19 @@ struct_fields_copyable(
         Result::Ok(_) => {
             let base = usize_from_u32(start + ordinal) * usize_value(5);
             let ty = *Vec::index(&output.fields, base + usize_value(2));
-            handle type_copyable(output, ty, token) {
-                Result::Err(found) => Result::Err(move found),
-                Result::Ok(copy) => handle copy {
-                    Result::Err(_) => Result::Ok(false),
-                    Result::Ok(_) => struct_fields_copyable(
-                        output,
-                        start,
-                        count,
-                        ordinal + u32_value(1),
-                        token
-                    )
-                }
+            let copy = try(
+                type_copyable(output, ty, token),
+                @struct_fields_copyable
+            );
+            handle copy {
+                Result::Err(_) => Result::Ok(false),
+                Result::Ok(_) => struct_fields_copyable(
+                    output,
+                    start,
+                    count,
+                    ordinal + u32_value(1),
+                    token
+                )
             }
         }
     }
@@ -1879,16 +1875,16 @@ variant_payloads_copyable(
 ) -> Result<Bool, ElaborationError> {
     handle ordinal < count {
         Result::Err(_) => Result::Ok(true),
-        Result::Ok(_) => handle type_copyable(
-            output,
-            *Vec::index(
-                &output.variant_payloads,
-                usize_from_u32(start + ordinal)
-            ),
-            token
-        ) {
-            Result::Err(found) => Result::Err(move found),
-            Result::Ok(copy) => handle copy {
+        Result::Ok(_) => {
+            let copy = try(type_copyable(
+                output,
+                *Vec::index(
+                    &output.variant_payloads,
+                    usize_from_u32(start + ordinal)
+                ),
+                token
+            ), @variant_payloads_copyable);
+            handle copy {
                 Result::Err(_) => Result::Ok(false),
                 Result::Ok(_) => variant_payloads_copyable(
                     output,
@@ -1913,24 +1909,22 @@ enum_variants_copyable(
         Result::Err(_) => Result::Ok(true),
         Result::Ok(_) => {
             let base = usize_from_u32(start + ordinal) * usize_value(5);
-            handle variant_payloads_copyable(
+            let copy = try(variant_payloads_copyable(
                 output,
                 *Vec::index(&output.variants, base + usize_value(2)),
                 *Vec::index(&output.variants, base + usize_value(3)),
                 0,
                 token
-            ) {
-                Result::Err(found) => Result::Err(move found),
-                Result::Ok(copy) => handle copy {
-                    Result::Err(_) => Result::Ok(false),
-                    Result::Ok(_) => enum_variants_copyable(
-                        output,
-                        start,
-                        count,
-                        ordinal + u32_value(1),
-                        token
-                    )
-                }
+            ), @enum_variants_copyable);
+            handle copy {
+                Result::Err(_) => Result::Ok(false),
+                Result::Ok(_) => enum_variants_copyable(
+                    output,
+                    start,
+                    count,
+                    ordinal + u32_value(1),
+                    token
+                )
             }
         }
     }
@@ -2019,13 +2013,13 @@ compute_nominal_flags(
 ) -> Result<(), ElaborationError> {
     handle index < interface_nominal_count(&*output) {
         Result::Err(_) => Result::Ok(()),
-        Result::Ok(_) => handle nominal_copyable(
-            output,
-            u32_from_usize(index),
-            index
-        ) {
-            Result::Err(found) => Result::Err(move found),
-            Result::Ok(_) => compute_nominal_flags(
+        Result::Ok(_) => {
+            try(nominal_copyable(
+                output,
+                u32_from_usize(index),
+                index
+            ), @compute_nominal_flags);
+            compute_nominal_flags(
                 output,
                 index + usize_value(1)
             )
@@ -2039,13 +2033,13 @@ compute_type_flags(
 ) -> Result<(), ElaborationError> {
     handle index < interface_type_count(&*output) {
         Result::Err(_) => Result::Ok(()),
-        Result::Ok(_) => handle type_copyable(
-            output,
-            u32_from_usize(index),
-            index
-        ) {
-            Result::Err(found) => Result::Err(move found),
-            Result::Ok(_) => compute_type_flags(
+        Result::Ok(_) => {
+            try(type_copyable(
+                output,
+                u32_from_usize(index),
+                index
+            ), @compute_type_flags);
+            compute_type_flags(
                 output,
                 index + usize_value(1)
             )
@@ -2089,35 +2083,31 @@ pub collect_interfaces(
         &mut output.alias_states,
         super::headers::alias_count(super::headers::nominal_index(headers))
     );
-    handle predeclare_nominals(headers, &mut output, 0) {
-        Result::Err(found) => Result::Err(move found),
-        Result::Ok(_) => handle collect_nominal_definitions(
-            headers,
-            declarations,
-            &mut output,
-            0
-        ) {
-            Result::Err(found) => Result::Err(move found),
-            Result::Ok(_) => handle compute_nominal_flags(&mut output, 0) {
-                Result::Err(found) => Result::Err(move found),
-                Result::Ok(_) => handle collect_callables(
-                    headers,
-                    declarations,
-                    &mut output,
-                    0
-                ) {
-                    Result::Err(found) => Result::Err(move found),
-                    Result::Ok(_) => handle compute_type_flags(
-                        &mut output,
-                        0
-                    ) {
-                        Result::Err(found) => Result::Err(move found),
-                        Result::Ok(_) => Result::Ok(move output)
-                    }
-                }
-            }
-        }
-    }
+    try(
+        predeclare_nominals(headers, &mut output, 0),
+        @collect_interfaces
+    );
+    try(collect_nominal_definitions(
+        headers,
+        declarations,
+        &mut output,
+        0
+    ), @collect_interfaces);
+    try(
+        compute_nominal_flags(&mut output, 0),
+        @collect_interfaces
+    );
+    try(collect_callables(
+        headers,
+        declarations,
+        &mut output,
+        0
+    ), @collect_interfaces);
+    try(
+        compute_type_flags(&mut output, 0),
+        @collect_interfaces
+    );
+    Result::Ok(move output)
 }
 
 build_resolution_map(
@@ -2181,10 +2171,11 @@ resolution_map(
     };
     push_zeroes(&mut output.kinds, count);
     push_zeroes(&mut output.indices, count);
-    handle build_resolution_map(resolved, count, 0, &mut output) {
-        Result::Err(found) => Result::Err(move found),
-        Result::Ok(_) => Result::Ok(move output)
-    }
+    try(
+        build_resolution_map(resolved, count, 0, &mut output),
+        @resolution_map
+    );
+    Result::Ok(move output)
 }
 
 push_value(

@@ -65,6 +65,37 @@ fn external_modules_resolve_from_the_crate_root_exception() {
 }
 
 #[test]
+fn implicit_function_labels_follow_canonical_module_names() {
+    let bundle = bundle(
+        (
+            "/work/src/main.glorious",
+            r#"
+            mod worker;
+            use crate::worker::answer;
+            probe() -> i64 {
+                handle answer() {
+                    Result::Ok(value) => value,
+                    Result::Err(error) => error
+                }
+            }
+            main() -> { () }
+            "#,
+        ),
+        &[(
+            "/work/src/worker/worker.glorious",
+            r#"
+            fail() -> Result<i64, i64> { Result::Err(42) }
+            pub answer() -> Result<i64, i64> {
+                let value = try(fail(), @answer);
+                Result::Ok(value)
+            }
+            "#,
+        )],
+    );
+    assert_eq!(run_root_i64(&bundle, "probe"), 42);
+}
+
+#[test]
 fn nested_external_and_inline_modules_use_the_logical_module_directory() {
     let bundle = bundle(
         (

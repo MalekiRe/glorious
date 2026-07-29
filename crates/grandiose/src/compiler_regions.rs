@@ -4426,6 +4426,11 @@ fn join_states(
         }
         if context.strict {
             let flagged = context.has_drop_flag(register);
+            let ownership = context.locals[register as usize].ownership;
+            let ownership_is_unrestricted = matches!(
+                ownership,
+                OwnershipCategory::CopyValue | OwnershipCategory::ZstErased
+            );
             let conditional = matches!(
                 (&left, &right),
                 (RegState::Live, RegState::Consumed)
@@ -4435,7 +4440,7 @@ fn join_states(
                     | (RegState::MaybeLive, RegState::Live)
                     | (RegState::Live, RegState::MaybeLive)
             );
-            if !flagged || !conditional {
+            if (!flagged && !ownership_is_unrestricted) || !conditional {
                 return Err(flow_error(
                     block,
                     format!(
@@ -5627,6 +5632,59 @@ mod ownership_engine_tests {
         };
         solve_function(&abandonment, &types)
             .expect("a whole drop flag remains cancellation-safe at terminal abandonment");
+    }
+
+    #[test]
+    fn branch_joins_allow_conditionally_initialized_copy_temporaries() {
+        let types = Type::predefined();
+        let arm = |id, statements| {
+            block(
+                id,
+                statements,
+                Terminator::Goto(Edge {
+                    target: 3,
+                    args: vec![],
+                }),
+            )
+        };
+        let function = exported_function(
+            vec![UNIT, grandiose_vm::U32, grandiose_vm::U32],
+            2,
+            vec![
+                block(
+                    0,
+                    vec![],
+                    Terminator::Switch {
+                        discr: Operand {
+                            register: 2,
+                            mode: UseMode::Copy,
+                        },
+                        cases: vec![(
+                            grandiose_vm::Constant::U32(0),
+                            Edge {
+                                target: 1,
+                                args: vec![],
+                            },
+                        )],
+                        otherwise: Edge {
+                            target: 2,
+                            args: vec![],
+                        },
+                    },
+                ),
+                arm(
+                    1,
+                    vec![statement(InstructionKind::Drop {
+                        owner: move_operand(1),
+                    })],
+                ),
+                arm(2, vec![]),
+                block(3, vec![], Terminator::Return { value: None }),
+            ],
+            &types,
+        );
+        solve_function(&function, &types)
+            .expect("Copy temporaries need no runtime drop flag at an unused join");
     }
 
     #[test]

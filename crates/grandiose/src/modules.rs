@@ -405,6 +405,8 @@ struct AstRewriter<'a> {
     scopes: &'a Scopes,
     effect_sites: &'a BTreeMap<(usize, usize), String>,
     errors: &'a mut Vec<Diagnostic>,
+    implicit_function_label: Option<(String, String)>,
+    implicit_function_label_shadow_depth: usize,
 }
 
 impl AstRewriter<'_> {
@@ -721,9 +723,21 @@ impl AstRewriter<'_> {
             }
             ExprKind::Move(value)
             | ExprKind::Unary { operand: value, .. }
-            | ExprKind::LabelDestination { body: value, .. }
             | ExprKind::Cancel { resumption: value }
             | ExprKind::Field(value, _) => self.rewrite_expression(Rc::make_mut(value), bound),
+            ExprKind::LabelDestination { label, body, .. } => {
+                let shadows_implicit = self
+                    .implicit_function_label
+                    .as_ref()
+                    .is_some_and(|(source, _)| label.name.as_ref() == source);
+                if shadows_implicit {
+                    self.implicit_function_label_shadow_depth += 1;
+                }
+                self.rewrite_expression(Rc::make_mut(body), bound);
+                if shadows_implicit {
+                    self.implicit_function_label_shadow_depth -= 1;
+                }
+            }
             ExprKind::Closure { params, body } => {
                 let mut nested = bound.clone();
                 nested.extend(params.iter().map(ToString::to_string));
@@ -864,8 +878,15 @@ impl AstRewriter<'_> {
             | ExprKind::String(_)
             | ExprKind::Char(_)
             | ExprKind::Byte(_)
-            | ExprKind::ByteString(_)
-            | ExprKind::LabelReference(_) => {}
+            | ExprKind::ByteString(_) => {}
+            ExprKind::LabelReference(label) => {
+                if self.implicit_function_label_shadow_depth == 0
+                    && let Some((source, backend)) = &self.implicit_function_label
+                    && label.name.as_ref() == source
+                {
+                    label.name = Rc::from(backend.as_str());
+                }
+            }
         }
     }
 
@@ -1040,6 +1061,8 @@ fn rewrite_program_ast(
         scopes,
         effect_sites: &effect_sites,
         errors: &mut errors,
+        implicit_function_label: None,
+        implicit_function_label_shadow_depth: 0,
     };
 
     for declaration in &mut program.type_aliases {
@@ -1155,6 +1178,17 @@ fn rewrite_program_ast(
             .resolution
             .owner(bundle, function.span)
             .unwrap_or(ModuleId(0));
+        rewrite.implicit_function_label =
+            rewrite
+                .resolution
+                .definition_at(function.span)
+                .map(|definition| {
+                    (
+                        function.name.clone(),
+                        rewrite.resolution.backend_spelling(definition),
+                    )
+                });
+        rewrite.implicit_function_label_shadow_depth = 0;
         for parameter in &mut function.params {
             rewrite.rewrite_type(&mut parameter.ty);
         }
@@ -1171,6 +1205,7 @@ fn rewrite_program_ast(
             .map(|parameter| parameter.name.clone())
             .collect();
         rewrite.rewrite_expression(&mut function.body, &bound);
+        rewrite.implicit_function_label = None;
     }
 
     // Declarations are renamed last so every lookup above uses source names.

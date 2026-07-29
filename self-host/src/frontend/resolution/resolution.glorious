@@ -269,37 +269,35 @@ resolve_function_name(
     module_plus_one: usize,
     token: usize
 ) -> Result<ResolvedName, ResolutionError> {
-    handle resolve_function_name_in(
+    let found = try(resolve_function_name_in(
         headers,
         declarations,
         name,
         module_plus_one,
         token
+    ), @resolve_function_name);
+    handle bool_and(
+        found.count == u32_value(0),
+        module_plus_one != usize_value(0)
     ) {
-        Result::Err(error) => Result::Err(move error),
-        Result::Ok(found) => handle bool_and(
-            found.count == u32_value(0),
-            module_plus_one != usize_value(0)
-        ) {
-            Result::Err(_) => finish_function_name(
-                declarations,
-                move found,
-                token
-            ),
-            Result::Ok(_) => handle resolve_function_name_in(
+        Result::Err(_) => finish_function_name(
+            declarations,
+            move found,
+            token
+        ),
+        Result::Ok(_) => {
+            let root = try(resolve_function_name_in(
                 headers,
                 declarations,
                 name,
                 0,
                 token
-            ) {
-                Result::Err(error) => Result::Err(move error),
-                Result::Ok(root) => finish_function_name(
-                    declarations,
-                    move root,
-                    token
-                )
-            }
+            ), @resolve_function_name);
+            finish_function_name(
+                declarations,
+                move root,
+                token
+            )
         }
     }
 }
@@ -424,30 +422,27 @@ resolve_struct_name(
     module_plus_one: usize,
     token: usize
 ) -> Result<ResolvedName, ResolutionError> {
-    handle resolve_struct_name_in(
+    let found = try(resolve_struct_name_in(
         nominal,
         declarations,
         name,
         module_plus_one,
         token
+    ), @resolve_struct_name);
+    handle bool_and(
+        found.count == u32_value(0),
+        module_plus_one != usize_value(0)
     ) {
-        Result::Err(error) => Result::Err(move error),
-        Result::Ok(found) => handle bool_and(
-            found.count == u32_value(0),
-            module_plus_one != usize_value(0)
-        ) {
-            Result::Err(_) => finish_struct_name(nominal, move found, token),
-            Result::Ok(_) => handle resolve_struct_name_in(
+        Result::Err(_) => finish_struct_name(nominal, move found, token),
+        Result::Ok(_) => {
+            let root = try(resolve_struct_name_in(
                 nominal,
                 declarations,
                 name,
                 0,
                 token
-            ) {
-                Result::Err(error) => Result::Err(move error),
-                Result::Ok(root) =>
-                    finish_struct_name(nominal, move root, token)
-            }
+            ), @resolve_struct_name);
+            finish_struct_name(nominal, move root, token)
         }
     }
 }
@@ -614,7 +609,7 @@ resolve_variant_name(
     enum_token: usize,
     variant_token: usize
 ) -> Result<ResolvedName, ResolutionError> {
-    handle search_enums(
+    let found = try(search_enums(
         nominal,
         declarations,
         enum_name,
@@ -622,20 +617,20 @@ resolve_variant_name(
         enum_token,
         0,
         NominalSearch { first_plus_one: 0, count: 0 }
+    ), @resolve_variant_name);
+    handle bool_and(
+        found.count == u32_value(0),
+        module_plus_one != usize_value(0)
     ) {
-        Result::Err(error) => Result::Err(move error),
-        Result::Ok(found) => handle bool_and(
-            found.count == u32_value(0),
-            module_plus_one != usize_value(0)
-        ) {
-            Result::Err(_) => finish_variant_name(
-                nominal,
-                move found,
-                variant_name,
-                enum_token,
-                variant_token
-            ),
-            Result::Ok(_) => handle search_enums(
+        Result::Err(_) => finish_variant_name(
+            nominal,
+            move found,
+            variant_name,
+            enum_token,
+            variant_token
+        ),
+        Result::Ok(_) => {
+            let root = try(search_enums(
                 nominal,
                 declarations,
                 enum_name,
@@ -643,16 +638,14 @@ resolve_variant_name(
                 enum_token,
                 0,
                 NominalSearch { first_plus_one: 0, count: 0 }
-            ) {
-                Result::Err(error) => Result::Err(move error),
-                Result::Ok(root) => finish_variant_name(
-                    nominal,
-                    move root,
-                    variant_name,
-                    enum_token,
-                    variant_token
-                )
-            }
+            ), @resolve_variant_name);
+            finish_variant_name(
+                nominal,
+                move root,
+                variant_name,
+                enum_token,
+                variant_token
+            )
         }
     }
 }
@@ -687,15 +680,14 @@ resolve_identifier(
                     );
                     Result::Ok(())
                 },
-                Result::Err(_) => handle resolve_function_name(
-                    super::headers::parsed_index(headers),
-                    declarations,
-                    raw,
-                    module_plus_one,
-                    token
-                ) {
-                    Result::Err(error) => Result::Err(move error),
-                    Result::Ok(found) => {
+                Result::Err(_) => {
+                    let found = try(resolve_function_name(
+                        super::headers::parsed_index(headers),
+                        declarations,
+                        raw,
+                        module_plus_one,
+                        token
+                    ), @resolve_identifier);
                         push_resolution(
                             output,
                             expression,
@@ -704,14 +696,13 @@ resolve_identifier(
                             found.index
                         );
                         Result::Ok(())
-                    }
                 }
             }
         },
         2 => {
             let variant_token =
                 super::bodies::expression_name_token_at(body, expression, 1);
-            handle resolve_variant_name(
+            let found = try(resolve_variant_name(
                 super::headers::nominal_index(headers),
                 declarations,
                 super::bodies::expression_name_value_at(body, expression, 0),
@@ -719,19 +710,15 @@ resolve_identifier(
                 module_plus_one,
                 token,
                 variant_token
-            ) {
-                Result::Err(error) => Result::Err(move error),
-                Result::Ok(found) => {
-                    push_resolution(
-                        output,
-                        expression,
-                        found.kind,
-                        found.owner,
-                        found.index
-                    );
-                    Result::Ok(())
-                }
-            }
+            ), @resolve_identifier);
+            push_resolution(
+                output,
+                expression,
+                found.kind,
+                found.owner,
+                found.index
+            );
+            Result::Ok(())
         },
         _ => Result::Err(resolution_error(1, token, token))
     }
@@ -747,34 +734,30 @@ resolve_struct_constructor(
     module_plus_one: usize
 ) -> Result<(), ResolutionError> {
     let token = super::bodies::expression_name_token_at(body, expression, 0);
-    handle resolve_struct_name(
+    let found = try(resolve_struct_name(
         super::headers::nominal_index(headers),
         declarations,
         super::bodies::expression_name_value_at(body, expression, 0),
         module_plus_one,
         token
-    ) {
-        Result::Err(error) => Result::Err(move error),
-        Result::Ok(found) => {
-            push_resolution(
-                output,
-                expression,
-                found.kind,
-                found.owner,
-                found.index
-            );
-            resolve_children(
-                headers,
-                declarations,
-                body,
-                bindings,
-                output,
-                expression,
-                module_plus_one,
-                0
-            )
-        }
-    }
+    ), @resolve_struct_constructor);
+    push_resolution(
+        output,
+        expression,
+        found.kind,
+        found.owner,
+        found.index
+    );
+    resolve_children(
+        headers,
+        declarations,
+        body,
+        bindings,
+        output,
+        expression,
+        module_plus_one,
+        0
+    )
 }
 
 resolve_children(
@@ -789,17 +772,17 @@ resolve_children(
 ) -> Result<(), ResolutionError> {
     handle child < super::bodies::expression_child_count_at(body, expression) {
         Result::Err(_) => Result::Ok(()),
-        Result::Ok(_) => handle resolve_expression(
-            headers,
-            declarations,
-            body,
-            bindings,
-            output,
-            super::bodies::expression_child_at(body, expression, child),
-            module_plus_one
-        ) {
-            Result::Err(error) => Result::Err(move error),
-            Result::Ok(_) => resolve_children(
+        Result::Ok(_) => {
+            try(resolve_expression(
+                headers,
+                declarations,
+                body,
+                bindings,
+                output,
+                super::bodies::expression_child_at(body, expression, child),
+                module_plus_one
+            ), @resolve_children);
+            resolve_children(
                 headers,
                 declarations,
                 body,

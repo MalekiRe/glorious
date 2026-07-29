@@ -306,9 +306,12 @@ find_semicolon(
                 handle token_is_semicolon(value, index) {
                     Result::Ok(_) => Result::Ok(index),
                     Result::Err(_) => handle u8_equal(opening, 0) {
-                        Result::Err(_) => handle matching_close(value, index) {
-                            Result::Err(error) => Result::Err(move error),
-                            Result::Ok(close) => find_semicolon(
+                        Result::Err(_) => {
+                            let close = try(
+                                matching_close(value, index),
+                                @find_semicolon
+                            );
+                            find_semicolon(
                                 value,
                                 close + usize_value(1),
                                 limit,
@@ -388,9 +391,12 @@ find_body(
                                         limit,
                                         start
                                     ),
-                                    Result::Ok(_) => handle matching_close(value, index) {
-                                        Result::Err(error) => Result::Err(move error),
-                                        Result::Ok(close) => find_body(
+                                    Result::Ok(_) => {
+                                        let close = try(
+                                            matching_close(value, index),
+                                            @find_body
+                                        );
+                                        find_body(
                                             value,
                                             close + usize_value(1),
                                             limit,
@@ -407,9 +413,12 @@ find_body(
                                 start
                             )
                         },
-                        Result::Ok(_) => handle matching_close(value, index) {
-                            Result::Err(error) => Result::Err(move error),
-                            Result::Ok(close) => find_body(
+                        Result::Ok(_) => {
+                            let close = try(
+                                matching_close(value, index),
+                                @find_body
+                            );
+                            find_body(
                                 value,
                                 close + usize_value(1),
                                 limit,
@@ -430,14 +439,12 @@ body_range(
     limit: usize,
     start: usize
 ) -> Result<TokenRange, ScanError> {
-    handle matching_close(value, open) {
-        Result::Err(error) => Result::Err(move error),
-        Result::Ok(close) => handle close < limit {
-            Result::Err(_) => Result::Err(scan_error(5, limit, start)),
-            Result::Ok(_) => Result::Ok(
-                TokenRange { start: open, end: close }
-            )
-        }
+    let close = try(matching_close(value, open), @body_range);
+    handle close < limit {
+        Result::Err(_) => Result::Err(scan_error(5, limit, start)),
+        Result::Ok(_) => Result::Ok(
+            TokenRange { start: open, end: close }
+        )
     }
 }
 
@@ -489,26 +496,24 @@ classify(
     start: usize
 ) -> Result<Classification, ScanError> {
     handle token_kind_at(value, cursor) {
-        TokenKind::Keyword(Keyword::Type) => handle name_at(
-            value,
-            cursor + usize_value(1),
-            start
-        ) {
-            Result::Err(error) => Result::Err(move error),
-            Result::Ok(name) => Result::Ok(Classification {
+        TokenKind::Keyword(Keyword::Type) => {
+            let name = try(
+                name_at(value, cursor + usize_value(1), start),
+                @classify
+            );
+            Result::Ok(Classification {
                 kind: DeclarationKind::TypeAlias,
                 kind_code: 3,
                 name: Result::Ok(move name),
                 style: 1
             })
         },
-        TokenKind::Keyword(Keyword::Let) => handle name_at(
-            value,
-            cursor + usize_value(1),
-            start
-        ) {
-            Result::Err(error) => Result::Err(move error),
-            Result::Ok(name) => Result::Ok(Classification {
+        TokenKind::Keyword(Keyword::Let) => {
+            let name = try(
+                name_at(value, cursor + usize_value(1), start),
+                @classify
+            );
+            Result::Ok(Classification {
                 kind: DeclarationKind::Global,
                 kind_code: 5,
                 name: Result::Ok(move name),
@@ -580,15 +585,13 @@ named_braced(
     kind: DeclarationKind,
     kind_code: u8
 ) -> Result<Classification, ScanError> {
-    handle name_at(value, name_index, start) {
-        Result::Err(error) => Result::Err(move error),
-        Result::Ok(name) => Result::Ok(Classification {
-            kind: kind,
-            kind_code: kind_code,
-            name: Result::Ok(move name),
-            style: 2
-        })
-    }
+    let name = try(name_at(value, name_index, start), @named_braced);
+    Result::Ok(Classification {
+        kind: kind,
+        kind_code: kind_code,
+        name: Result::Ok(move name),
+        style: 2
+    })
 }
 
 classify_ident(
@@ -598,9 +601,12 @@ classify_ident(
     name: Id<String>
 ) -> Result<Classification, ScanError> {
     handle ident_is(value, cursor, &"mod") {
-        Result::Ok(_) => handle name_at(value, cursor + usize_value(1), start) {
-            Result::Err(error) => Result::Err(move error),
-            Result::Ok(found) => Result::Ok(Classification {
+        Result::Ok(_) => {
+            let found = try(
+                name_at(value, cursor + usize_value(1), start),
+                @classify_ident
+            );
+            Result::Ok(Classification {
                 kind: DeclarationKind::Module,
                 kind_code: 1,
                 name: Result::Ok(move found),
@@ -618,9 +624,12 @@ classify_ident(
                 })
             },
             Result::Err(_) => handle ident_is(value, cursor, &"cases") {
-                Result::Ok(_) => handle name_at(value, cursor + usize_value(1), start) {
-                    Result::Err(error) => Result::Err(move error),
-                    Result::Ok(found) => Result::Ok(Classification {
+                Result::Ok(_) => {
+                    let found = try(
+                        name_at(value, cursor + usize_value(1), start),
+                        @classify_ident
+                    );
+                    Result::Ok(Classification {
                         kind: DeclarationKind::EffectRowAlias,
                         kind_code: 4,
                         name: Result::Ok(move found),
@@ -828,57 +837,56 @@ scan_one(
         Result::Ok(_) => start + usize_value(1),
         Result::Err(_) => start
     };
-    handle classify(value, cursor, start) {
-        Result::Err(error) => Result::Err(move error),
-        Result::Ok(classification) => {
-            let style = classification.style;
-            handle u8_equal(style, 1) {
-            Result::Ok(_) => scan_semicolon_shell(
+    let classification = try(classify(value, cursor, start), @scan_one);
+    let style = classification.style;
+    handle u8_equal(style, 1) {
+        Result::Ok(_) => scan_semicolon_shell(
+            value,
+            start,
+            cursor + usize_value(1),
+            limit,
+            public,
+            move classification,
+            parent
+        ),
+        Result::Err(_) => handle u8_equal(style, 4) {
+            Result::Ok(_) => {
+                let style = try(
+                    find_module_style(value, cursor, limit, start),
+                    @scan_one
+                );
+                handle u8_equal(style, 1) {
+                    Result::Ok(_) => scan_semicolon_shell(
+                        value,
+                        start,
+                        cursor + usize_value(1),
+                        limit,
+                        public,
+                        move classification,
+                        parent
+                    ),
+                    Result::Err(_) => scan_braced_shell(
+                        value,
+                        start,
+                        cursor + usize_value(1),
+                        limit,
+                        public,
+                        move classification,
+                        parent,
+                        false
+                    )
+                }
+            },
+            Result::Err(_) => scan_braced_shell(
                 value,
                 start,
                 cursor + usize_value(1),
                 limit,
                 public,
                 move classification,
-                parent
-            ),
-            Result::Err(_) => handle u8_equal(style, 4) {
-                Result::Ok(_) => handle find_module_style(value, cursor, limit, start) {
-                    Result::Err(error) => Result::Err(move error),
-                    Result::Ok(style) => handle u8_equal(style, 1) {
-                        Result::Ok(_) => scan_semicolon_shell(
-                            value,
-                            start,
-                            cursor + usize_value(1),
-                            limit,
-                            public,
-                            move classification,
-                            parent
-                        ),
-                        Result::Err(_) => scan_braced_shell(
-                            value,
-                            start,
-                            cursor + usize_value(1),
-                            limit,
-                            public,
-                            move classification,
-                            parent,
-                            false
-                        )
-                    }
-                },
-                Result::Err(_) => scan_braced_shell(
-                    value,
-                    start,
-                    cursor + usize_value(1),
-                    limit,
-                    public,
-                    move classification,
-                    parent,
-                    u8_equal(style, 3)
-                )
-            }
-        }
+                parent,
+                u8_equal(style, 3)
+            )
         }
     }
 }
