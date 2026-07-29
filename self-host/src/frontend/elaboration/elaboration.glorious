@@ -4751,7 +4751,7 @@ record_last_local_expressions(
     map: &ResolutionMap,
     parameter_count: u32,
     expression: u32,
-    last_expressions_plus_one: &mut Vec<u32>
+    last_expressions: &mut Vec<Option<super::bodies::ExprId>>
 ) {
     handle super::bodies::expression_kind_at(body, expression) {
         1 => {
@@ -4762,9 +4762,9 @@ record_last_local_expressions(
             );
             if(local_plus_one == 0) { () } else {
                 *Vec::index_mut(
-                    &mut *last_expressions_plus_one,
+                    &mut *last_expressions,
                     usize_from_u32(local_plus_one - 1)
-                ) = expression + 1;
+                ) = Option::Some(Id::from_u32(expression));
             }
         },
         _ => record_last_local_expression_children(
@@ -4773,7 +4773,7 @@ record_last_local_expressions(
             parameter_count,
             expression,
             0,
-            last_expressions_plus_one
+            last_expressions
         )
     }
 }
@@ -4784,7 +4784,7 @@ record_last_local_expression_children(
     parameter_count: u32,
     expression: u32,
     ordinal: u32,
-    last_expressions_plus_one: &mut Vec<u32>
+    last_expressions: &mut Vec<Option<super::bodies::ExprId>>
 ) {
     if(ordinal < super::bodies::expression_child_count_at(
         body,
@@ -4799,7 +4799,7 @@ record_last_local_expression_children(
                 expression,
                 ordinal
             ),
-            last_expressions_plus_one
+            last_expressions
         );
         record_last_local_expression_children(
             body,
@@ -4807,7 +4807,7 @@ record_last_local_expression_children(
             parameter_count,
             expression,
             ordinal + 1,
-            last_expressions_plus_one
+            last_expressions
         )
     } else { () }
 }
@@ -4991,7 +4991,7 @@ mark_final_transfer_candidates(
     parameter_count: u32,
     expression: u32,
     ordinal: u32,
-    last_expressions_plus_one: &Vec<u32>,
+    last_expressions: &Vec<Option<super::bodies::ExprId>>,
     output: &mut Vec<u32>
 ) {
     handle super::bodies::expression_kind_at(body, expression) {
@@ -5001,15 +5001,22 @@ mark_final_transfer_candidates(
                 parameter_count,
                 expression
             );
-            if(local_plus_one == 0) { () } else { if(*Vec::index(
-                    last_expressions_plus_one,
+            if(local_plus_one == 0) { () } else {
+                handle *Vec::index(
+                    last_expressions,
                     usize_from_u32(local_plus_one - 1)
-                ) == expression + 1) {
-                    *Vec::index_mut(
-                        &mut *output,
-                        usize_from_u32(expression)
-                    ) = 1;
-                } else { () } }
+                ) {
+                    Result::Err(_) => (),
+                    Result::Ok(last) => if(
+                        Id::to_u32(last) == expression
+                    ) {
+                        *Vec::index_mut(
+                            &mut *output,
+                            usize_from_u32(expression)
+                        ) = 1;
+                    } else { () }
+                }
+            }
         },
         7 => {
             let argument = if(ordinal < 1) { 1 } else { ordinal };
@@ -5027,7 +5034,7 @@ mark_final_transfer_candidates(
                         argument
                     ),
                     0,
-                    last_expressions_plus_one,
+                    last_expressions,
                     output
                 );
                 mark_final_transfer_candidates(
@@ -5036,7 +5043,7 @@ mark_final_transfer_candidates(
                     parameter_count,
                     expression,
                     argument + 1,
-                    last_expressions_plus_one,
+                    last_expressions,
                     output
                 )
             } else { () }
@@ -5055,7 +5062,7 @@ mark_final_transfer_candidates(
                     ordinal
                 ),
                 0,
-                last_expressions_plus_one,
+                last_expressions,
                 output
             );
             mark_final_transfer_candidates(
@@ -5064,7 +5071,7 @@ mark_final_transfer_candidates(
                 parameter_count,
                 expression,
                 ordinal + 1,
-                last_expressions_plus_one,
+                last_expressions,
                 output
             )
         } else { () }
@@ -5077,7 +5084,7 @@ mark_root_statement_candidates(
     parameter_count: u32,
     root: u32,
     ordinal: u32,
-    last_expressions_plus_one: &Vec<u32>,
+    last_expressions: &Vec<Option<super::bodies::ExprId>>,
     output: &mut Vec<u32>
 ) {
     if(ordinal < super::bodies::expression_child_count_at(body, root)) {
@@ -5091,14 +5098,14 @@ mark_root_statement_candidates(
                     map,
                     parameter_count,
                     expression,
-                    Vec::len(last_expressions_plus_one)
+                    Vec::len(last_expressions)
                 )) { () } else { mark_final_transfer_candidates(
                     body,
                     map,
                     parameter_count,
                     expression,
                     0,
-                    last_expressions_plus_one,
+                    last_expressions,
                     output
                 ) } } else { () };
         mark_root_statement_candidates(
@@ -5107,10 +5114,22 @@ mark_root_statement_candidates(
             parameter_count,
             root,
             ordinal + 1,
-            last_expressions_plus_one,
+            last_expressions,
             output
         )
     } else { () }
+}
+
+push_missing_expressions(
+    output: &mut Vec<Option<super::bodies::ExprId>>,
+    remaining: usize
+) {
+    if(remaining == 0) {
+        ()
+    } else {
+        Vec::push(&mut *output, None);
+        push_missing_expressions(output, remaining - 1)
+    }
 }
 
 final_transfer_expressions(
@@ -5120,14 +5139,14 @@ final_transfer_expressions(
     local_count: usize
 ) -> Vec<u32> {
     let root = super::bodies::body_root_index(body);
-    let last_expressions_plus_one = Vec::new();
-    push_zeroes(&mut last_expressions_plus_one, local_count);
+    let last_expressions = Vec::new();
+    push_missing_expressions(&mut last_expressions, local_count);
     record_last_local_expressions(
         body,
         map,
         parameter_count,
         root,
-        &mut last_expressions_plus_one
+        &mut last_expressions
     );
     let output = Vec::new();
     push_zeroes(&mut output, super::bodies::expression_count(body));
@@ -5137,7 +5156,7 @@ final_transfer_expressions(
             parameter_count,
             root,
             0,
-            &last_expressions_plus_one,
+            &last_expressions,
             &mut output
         ) } else { () };
     output
