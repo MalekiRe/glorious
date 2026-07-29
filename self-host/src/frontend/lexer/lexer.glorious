@@ -203,13 +203,8 @@ pub number_base(value: &NumberToken) -> &NumberBase { &value.base }
 pub number_base_code(value: &NumberToken) -> u8 { value.base_code }
 
 pub number_is_float(value: &NumberToken) -> Bool {
-    handle Option::as_ref(&value.fraction) {
-        Result::Ok(_) => true,
-        Result::Err(_) => handle Option::as_ref(&value.exponent) {
-            Result::Ok(_) => true,
-            Result::Err(_) => false
-        }
-    }
+    (Option::as_ref(&value.fraction) is Result::Ok(_))
+        or { (Option::as_ref(&value.exponent) is Result::Ok(_)) }
 }
 
 pub number_digits(value: &NumberToken) -> Span {
@@ -344,9 +339,10 @@ peek(value: &Lexer, offset: usize) -> Option<u8> {
 }
 
 peek_is(value: &Lexer, offset: usize, expected: u8) -> Bool {
-    handle peek(value, move offset) {
-        Result::Ok(actual) =>  actual == move expected,
-        Result::Err(_) => false
+    if(peek(value, move offset) is Result::Ok(actual)) {
+        actual == move expected
+    } else {
+        false
     }
 }
 
@@ -725,34 +721,30 @@ structural_two_exists(first: u8, second: u8) -> Bool {
 }
 
 scan_operator_tail(value: &mut Lexer) {
-    handle peek(&*value, 0) {
-        Result::Ok(first) => {
-            if(byte_is_operator(first)) {
-                    if(structural_one(first)) {
-                        ()
-                    } else {
-                            let pair_structural = handle peek(&*value, 1) {
-                                Result::Ok(second) => structural_two_exists(
-                                    first,
-                                     second
-                                ),
-                                Result::Err(_) => false
-                            };
-                            if(move pair_structural) {
-                                ()
-                            } else {
-                                    advance(&mut *value, 1);
-                                    scan_operator_tail( value)
-
-                            }
-
-                    }
-
-            } else {
+    if(peek(&*value, 0) is Result::Ok(first)) {
+        if(byte_is_operator(first)) {
+            if(structural_one(first)) {
                 ()
+            } else {
+                let pair_structural = if(
+                    peek(&*value, 1) is Result::Ok(second)
+                ) {
+                    structural_two_exists(first, second)
+                } else {
+                    false
+                };
+                if(move pair_structural) {
+                    ()
+                } else {
+                    advance(&mut *value, 1);
+                    scan_operator_tail(value)
+                }
             }
-        },
-        Result::Err(_) => ()
+        } else {
+            ()
+        }
+    } else {
+        ()
     }
 }
 
@@ -1024,18 +1016,21 @@ scan_exponent(
 
 scan_exponent_after_marker(value: &mut Lexer) -> Result<Option<NumberExponent>, LexError> {
     let marker = value.cursor;
-    let sign = handle peek(&*value, 1) {
-        Result::Ok(byte) => handle byte {
+    let sign = if(peek(&*value, 1) is Result::Ok(byte)) {
+        handle byte {
             43 => usize_value(1),
             45 => usize_value(1),
             _ => usize_value(0)
-        },
-        Result::Err(_) => usize_value(0)
+        }
+    } else {
+        usize_value(0)
     };
-    let candidate = handle peek(&*value, usize_value(1) + sign) {
-        Result::Ok(byte) =>
-            byte_is_digit(byte) or { byte == byte_value(95) },
-        Result::Err(_) => false
+    let candidate = if(
+        peek(&*value, usize_value(1) + sign) is Result::Ok(byte)
+    ) {
+        byte_is_digit(byte) or { byte == byte_value(95) }
+    } else {
+        false
     };
     if(move candidate) {
             advance(&mut *value, 1);
