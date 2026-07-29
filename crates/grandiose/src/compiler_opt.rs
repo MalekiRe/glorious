@@ -2572,6 +2572,44 @@ fn thread_one_constant_switch_parameter_diamond(
     // one candidate commits, at which point this helper returns immediately.
     // Compute whole-function use counts once rather than once per dispatcher.
     let uses = register_uses(function);
+    // A scalar-only dispatcher can still carry hidden ownership state: loans
+    // remain live in their reference registers even though they are not edge
+    // arguments. Bypassing such a dispatcher can combine path refinements
+    // across a loop and change the strict loan state seen at a later join.
+    // This narrow transform has no loan-state equivalence proof, so retain the
+    // dispatcher whenever an explicit loan reference or external reference
+    // local crosses an incoming edge.
+    let loan_sensitive_references = function
+        .flow
+        .loans
+        .iter()
+        .map(|loan| loan.reference)
+        .chain(
+            function
+                .flow
+                .locals
+                .iter()
+                .enumerate()
+                .filter_map(|(register, local)| {
+                    matches!(
+                        local.ownership,
+                        super::OwnershipCategory::SharedRef | super::OwnershipCategory::UniqueRef
+                    )
+                    .then_some(register as Register)
+                }),
+        )
+        .collect::<BTreeSet<_>>();
+    let reference_liveness = if loan_sensitive_references.is_empty() {
+        None
+    } else {
+        let remaining = budget.saturating_sub(*work);
+        let liveness = EdgeLiveness::compute(function, remaining).map_err(|_| ())?;
+        *work = work.saturating_add(liveness.work());
+        if *work > budget {
+            return Err(());
+        }
+        Some(liveness)
+    };
 
     for dispatcher_id in candidates {
         *work = work.saturating_add(1);
@@ -2722,6 +2760,19 @@ fn thread_one_constant_switch_parameter_diamond(
             });
         }
         if invalid_incoming || incoming.is_empty() {
+            continue;
+        }
+        if reference_liveness.as_ref().is_some_and(|liveness| {
+            incoming.iter().any(|incoming| {
+                loan_sensitive_references.iter().any(|reference| {
+                    liveness.live_on_any_edge(
+                        super::BlockId(incoming.source),
+                        super::BlockId(dispatcher_id),
+                        *reference,
+                    )
+                })
+            })
+        }) {
             continue;
         }
 
@@ -13354,6 +13405,35 @@ mod tests {
             ));
         }
         assert_eq!(register_uses(&body)[4], 0);
+    }
+
+    #[test]
+    fn normalize_cfg_does_not_thread_a_diamond_across_a_live_reference() {
+        let types = Type::predefined();
+        let mut body = constant_switch_parameter_diamond(true);
+        body.register_types.push(UNIT);
+        for target in [4, 5] {
+            body.blocks
+                .iter_mut()
+                .find(|block| block.id == target)
+                .unwrap()
+                .terminator = Terminator::Return {
+                value: Some(move_operand(5)),
+            };
+        }
+        body.flow.locals = body
+            .register_types
+            .iter()
+            .map(|ty| LocalFact::conservative(*ty, &types[*ty as usize]))
+            .collect();
+        body.flow.locals[5].ownership = crate::compiler_mir::OwnershipCategory::SharedRef;
+        let original = body.clone();
+        let mut work = 0;
+
+        assert!(
+            !thread_one_constant_switch_parameter_diamond(&mut body, u64::MAX, &mut work).unwrap()
+        );
+        assert_eq!(body, original);
     }
 
     #[test]

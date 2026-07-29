@@ -36,6 +36,9 @@ pub type InterfaceFieldId = Id<InterfaceFieldTag>;
 pub struct InterfaceVariantTag {}
 pub type InterfaceVariantId = Id<InterfaceVariantTag>;
 
+pub struct InterfaceCallableTag {}
+pub type InterfaceCallableId = Id<InterfaceCallableTag>;
+
 struct InterfaceFieldRange { start: u32, count: u32 }
 
 impl Use<[0, *]> for InterfaceFieldRange {}
@@ -47,6 +50,10 @@ impl Use<[0, *]> for InterfaceVariantRange {}
 struct VariantPayloadRange { start: u32, count: u32 }
 
 impl Use<[0, *]> for VariantPayloadRange {}
+
+struct CallableParameterRange { start: u32, count: u32 }
+
+impl Use<[0, *]> for CallableParameterRange {}
 
 enum InterfaceNominalKind {
     Struct(InterfaceFieldRange),
@@ -86,6 +93,14 @@ struct InterfaceVariant {
 
 impl Use<[0, *]> for InterfaceVariant {}
 
+struct InterfaceCallable {
+    shell: u32,
+    result: TypeId,
+    parameters: CallableParameterRange
+}
+
+impl Use<[0, *]> for InterfaceCallable {}
+
 pub struct TypedInterfaces {
     types: Arena<TypeTag, TypeNode>,
     type_elements: Vec<TypeId>,
@@ -93,11 +108,10 @@ pub struct TypedInterfaces {
     fields: Arena<InterfaceFieldTag, InterfaceField>,
     variants: Arena<InterfaceVariantTag, InterfaceVariant>,
     variant_payloads: Vec<TypeId>,
-    // [shell, result type, parameter start, parameter count]
-    callables: Vec<u32>,
-    callable_parameters: Vec<u32>,
-    // Indexed by declaration shell, containing callable index + 1.
-    shell_to_callable_plus_one: Vec<u32>,
+    callables: Arena<InterfaceCallableTag, InterfaceCallable>,
+    callable_parameters: Vec<TypeId>,
+    // Indexed by declaration shell.
+    shell_to_callable: Vec<Option<InterfaceCallableId>>,
     // Dense declaration maps keep semantic lookup independent of arena order.
     shell_to_nominal: Vec<Option<InterfaceNominalId>>,
     shell_to_type_plus_one: Vec<u32>,
@@ -286,6 +300,13 @@ interface_variant_id_from_usize(value: usize) -> InterfaceVariantId {
     }
 }
 
+interface_callable_id_from_usize(value: usize) -> InterfaceCallableId {
+    handle Id::from_usize(value) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
 interface_nominal_at<'a>(
     value: &'a TypedInterfaces,
     id: InterfaceNominalId
@@ -305,6 +326,43 @@ interface_variant_at<'a>(
     id: InterfaceVariantId
 ) -> &'a InterfaceVariant {
     Arena::index(&value.variants, id)
+}
+
+interface_callable_at<'a>(
+    value: &'a TypedInterfaces,
+    id: InterfaceCallableId
+) -> &'a InterfaceCallable {
+    Arena::index(&value.callables, id)
+}
+
+interface_callable_result(
+    value: &TypedInterfaces,
+    id: InterfaceCallableId
+) -> TypeId {
+    interface_callable_at(value, id).result
+}
+
+interface_callable_parameters(
+    value: &TypedInterfaces,
+    id: InterfaceCallableId
+) -> CallableParameterRange {
+    interface_callable_at(value, id).parameters
+}
+
+interface_callable_for_shell_id(
+    value: &TypedInterfaces,
+    shell: u32
+) -> Option<InterfaceCallableId> {
+    if(usize_from_u32(shell) < Vec::len(&value.shell_to_callable)) {
+        *Vec::index(&value.shell_to_callable, usize_from_u32(shell))
+    } else { None }
+}
+
+callable_parameter_type_at(
+    value: &TypedInterfaces,
+    index: usize
+) -> TypeId {
+    *Vec::index(&value.callable_parameters, index)
 }
 
 interface_nominal_is_struct(
@@ -356,6 +414,16 @@ alloc_interface_variant(
     variant: InterfaceVariant
 ) -> InterfaceVariantId {
     handle Arena::alloc(&mut value.variants, variant) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
+alloc_interface_callable(
+    value: &mut TypedInterfaces,
+    callable: InterfaceCallable
+) -> InterfaceCallableId {
+    handle Arena::alloc(&mut value.callables, callable) {
         Result::Err(_) => unreachable(),
         Result::Ok(id) => id
     }
@@ -640,64 +708,64 @@ pub interface_variant_payload_at(
 }
 
 pub interface_callable_count(value: &TypedInterfaces) -> usize {
-    Vec::len(&value.callables) / usize_value(4)
+    Arena::len(&value.callables)
 }
 
 pub interface_callable_shell_at(
     value: &TypedInterfaces,
     index: usize
 ) -> u32 {
-    *Vec::index(&value.callables, index * usize_value(4))
+    interface_callable_at(
+        value,
+        interface_callable_id_from_usize(index)
+    ).shell
 }
 
 pub interface_callable_result_at(
     value: &TypedInterfaces,
     index: usize
 ) -> u32 {
-    *Vec::index(
-        &value.callables,
-        index * usize_value(4) + usize_value(1)
-    )
+    Id::to_u32(interface_callable_at(
+        value,
+        interface_callable_id_from_usize(index)
+    ).result)
 }
 
 pub interface_callable_parameter_start_at(
     value: &TypedInterfaces,
     index: usize
 ) -> u32 {
-    *Vec::index(
-        &value.callables,
-        index * usize_value(4) + usize_value(2)
-    )
+    interface_callable_at(
+        value,
+        interface_callable_id_from_usize(index)
+    ).parameters.start
 }
 
 pub interface_callable_parameter_count_at(
     value: &TypedInterfaces,
     index: usize
 ) -> u32 {
-    *Vec::index(
-        &value.callables,
-        index * usize_value(4) + usize_value(3)
-    )
+    interface_callable_at(
+        value,
+        interface_callable_id_from_usize(index)
+    ).parameters.count
 }
 
 pub interface_callable_parameter_at(
     value: &TypedInterfaces,
     index: usize
 ) -> u32 {
-    *Vec::index(&value.callable_parameters, index)
+    Id::to_u32(callable_parameter_type_at(value, index))
 }
 
 pub interface_callable_for_shell(
     value: &TypedInterfaces,
     shell: u32
 ) -> Option<u32> {
-    if(usize_from_u32(shell) < Vec::len(&value.shell_to_callable_plus_one)) {
-        let found = *Vec::index(
-            &value.shell_to_callable_plus_one,
-            usize_from_u32(shell)
-        );
-        if(found == u32_value(0)) { Result::Err(()) } else { Result::Ok(found - u32_value(1)) }
-    } else { Result::Err(()) }
+    handle interface_callable_for_shell_id(value, shell) {
+        Result::Err(_) => None,
+        Result::Ok(found) => Option::Some(Id::to_u32(found))
+    }
 }
 
 pub typed_body_shell(value: &TypedBody) -> u32 { value.shell }
@@ -863,19 +931,6 @@ push_word(value: &mut Vec<u32>, word: u32) {
     Vec::push(&mut *value,  word)
 }
 
-push_words4(
-    value: &mut Vec<u32>,
-    a: u32,
-    b: u32,
-    c: u32,
-    d: u32
-) {
-    push_word(&mut *value, a);
-    push_word(&mut *value, b);
-    push_word(&mut *value, c);
-    push_word( value, d)
-}
-
 push_zeroes(value: &mut Vec<u32>, remaining: usize) {
     if(remaining == usize_value(0)) { () } else {
         push_word(&mut *value, 0);
@@ -895,11 +950,16 @@ push_missing_nominal_ids(
     }
 }
 
-append_words(output: &mut Vec<u32>, source: &Vec<u32>, index: usize) {
-    if(index < Vec::len(source)) {
-        push_word(&mut *output, *Vec::index(source, index));
-        append_words(output, source, index + usize_value(1))
-    } else { () }
+push_missing_callable_ids(
+    value: &mut Vec<Option<InterfaceCallableId>>,
+    remaining: usize
+) {
+    if(remaining == usize_value(0)) {
+        ()
+    } else {
+        Vec::push(&mut *value, None);
+        push_missing_callable_ids(value, remaining - usize_value(1))
+    }
 }
 
 append_core_values(
@@ -1670,7 +1730,10 @@ collect_parameter_types(
                     super::headers::parameter_type_index(parameter),
                     module_plus_one
                 ), @collect_parameter_types);
-                push_word(&mut output.callable_parameters, ty);
+                Vec::push(
+                    &mut output.callable_parameters,
+                    type_id_from_u32(ty)
+                );
                 collect_parameter_types(
                     headers,
                     declarations,
@@ -1719,7 +1782,7 @@ collect_callables(
                             output,
                             callable,
                             index,
-                            0
+                            type_id_from_u32(0)
                         ) } else {
                         let result = try(resolve_signature_type(
                             headers,
@@ -1745,7 +1808,7 @@ collect_callables(
                             output,
                             callable,
                             index,
-                            result
+                            type_id_from_u32(result)
                         )
                     }
                 }
@@ -1759,7 +1822,7 @@ collect_callable(
     output: &mut TypedInterfaces,
     callable: &super::headers::CallableHeader,
     index: usize,
-    result: u32
+    result: TypeId
 ) -> Result<(), ElaborationError> {
     let shell = super::headers::callable_shell(callable);
     let parameters = super::headers::callable_parameters(callable);
@@ -1779,19 +1842,23 @@ collect_callable(
         module_plus_one,
         0
     ), @collect_callable);
-            push_words4(
-                &mut output.callables,
-                shell,
-                result,
-                start,
-                super::headers::range_count(parameters)
+            let callable_id = alloc_interface_callable(
+                output,
+                InterfaceCallable {
+                    shell: shell,
+                    result: result,
+                    parameters: CallableParameterRange {
+                        start: start,
+                        count: super::headers::range_count(parameters)
+                    }
+                }
             );
             if(usize_from_u32(shell)
-                < Vec::len(&output.shell_to_callable_plus_one)) {
+                < Vec::len(&output.shell_to_callable)) {
                 *Vec::index_mut(
-                    &mut output.shell_to_callable_plus_one,
+                    &mut output.shell_to_callable,
                     usize_from_u32(shell)
-                ) = u32_from_usize(index) + u32_value(1);
+                ) = Option::Some(callable_id);
                 collect_callables(
                     headers,
                     declarations,
@@ -2425,9 +2492,9 @@ pub collect_interfaces(
         fields: Arena::new(),
         variants: Arena::new(),
         variant_payloads: Vec::new(),
-        callables: Vec::new(),
+        callables: Arena::new(),
         callable_parameters: Vec::new(),
-        shell_to_callable_plus_one: Vec::new(),
+        shell_to_callable: Vec::new(),
         shell_to_nominal: Vec::new(),
         shell_to_type_plus_one: Vec::new(),
         alias_type_plus_one: Vec::new(),
@@ -2435,10 +2502,7 @@ pub collect_interfaces(
     };
     seed_types(&mut output);
     let shell_count = super::scanner::shell_count(declarations);
-    push_zeroes(
-        &mut output.shell_to_callable_plus_one,
-        shell_count
-    );
+    push_missing_callable_ids(&mut output.shell_to_callable, shell_count);
     push_missing_nominal_ids(&mut output.shell_to_nominal, shell_count);
     push_zeroes(&mut output.shell_to_type_plus_one, shell_count);
     push_zeroes(
@@ -2958,22 +3022,19 @@ elaborate_call_arguments(
     map: &ResolutionMap,
     value: &mut BodyBuilder,
     expression: u32,
-    callable: usize,
+    callable: InterfaceCallableId,
     ordinal: u32,
     wrappers: &mut Vec<LetWrapper>,
     operands: &mut Vec<CoreValueId>
 ) -> Result<(), ElaborationError> {
-    let count = interface_callable_parameter_count_at(interfaces, callable);
-    if(ordinal < count) {
-        let parameter = interface_callable_parameter_at(
+    let parameters = interface_callable_parameters(interfaces, callable);
+    if(ordinal < parameters.count) {
+        let parameter = Id::to_u32(callable_parameter_type_at(
             interfaces,
             usize_from_u32(
-                interface_callable_parameter_start_at(
-                    interfaces,
-                    callable
-                ) + ordinal
+                parameters.start + ordinal
             )
-        );
+        ));
         let child = super::bodies::expression_child_at(
             body,
             expression,
@@ -3052,22 +3113,21 @@ elaborate_call(
     let callee = super::bodies::expression_child_at(body, expression, 0);
     handle elaboration_target_at(map, callee) {
         ElaborationTarget::Function(shell) =>
-            handle interface_callable_for_shell(interfaces, shell) {
+            handle interface_callable_for_shell_id(interfaces, shell) {
             Result::Err(_) => Result::Err(error(7, token, token, 0, shell)),
-            Result::Ok(callable_id) => {
-                let callable = usize_from_u32(callable_id);
-                let expected_count = interface_callable_parameter_count_at(
-                    interfaces,
-                    callable
-                );
+            Result::Ok(callable) => {
+                let parameters =
+                    interface_callable_parameters(interfaces, callable);
+                let expected_count = parameters.count;
                 let found_count =
                     super::bodies::expression_child_count_at(body, expression)
                         - u32_value(1);
                 if(expected_count == found_count) {
-                    let result = interface_callable_result_at(
-                        interfaces,
-                        callable
-                    );
+                    let result =
+                        Id::to_u32(interface_callable_result(
+                            interfaces,
+                            callable
+                        ));
                     let wrappers = Vec::new();
                     let arguments = Vec::new();
                     try(elaborate_call_arguments(
@@ -4330,23 +4390,18 @@ elaborate_expression(
 
 seed_parameter_locals(
     interfaces: &TypedInterfaces,
-    callable: usize,
+    callable: InterfaceCallableId,
     output: &mut IndexVec<CoreLocalTag, u32>,
     ordinal: u32
 ) {
-    let count = interface_callable_parameter_count_at(interfaces, callable);
-    if(ordinal < count) {
+    let parameters = interface_callable_parameters(interfaces, callable);
+    if(ordinal < parameters.count) {
         push_local_type(
             &mut *output,
-            interface_callable_parameter_at(
+            Id::to_u32(callable_parameter_type_at(
                 interfaces,
-                usize_from_u32(
-                    interface_callable_parameter_start_at(
-                        interfaces,
-                        callable
-                    ) + ordinal
-                )
-            )
+                usize_from_u32(parameters.start + ordinal)
+            ))
         );
         seed_parameter_locals(
             interfaces,
@@ -4789,7 +4844,7 @@ pub elaborate_function_body(
     resolved: &super::resolution::ResolvedBody
 ) -> Result<TypedBody, ElaborationError> {
     let shell = super::bodies::body_shell(body);
-    handle interface_callable_for_shell(interfaces, shell) {
+    handle interface_callable_for_shell_id(interfaces, shell) {
         Result::Err(_) => Result::Err(error(
             7,
             usize_from_u32(shell),
@@ -4797,9 +4852,9 @@ pub elaborate_function_body(
             0,
             shell
         )),
-        Result::Ok(callable_id) => {
-            let callable = usize_from_u32(callable_id);
-            let result = interface_callable_result_at(interfaces, callable);
+        Result::Ok(callable) => {
+            let result =
+                Id::to_u32(interface_callable_result(interfaces, callable));
             let locals = IndexVec::new();
             seed_parameter_locals(interfaces, callable, &mut locals, 0);
             seed_untyped_locals(
@@ -4810,10 +4865,10 @@ pub elaborate_function_body(
                 Result::Err(found) => Result::Err(found),
                 Result::Ok(map) => {
                     let parameter_count =
-                        interface_callable_parameter_count_at(
+                        interface_callable_parameters(
                             interfaces,
                             callable
-                        );
+                        ).count;
                     let builder = BodyBuilder {
                         parameter_count: parameter_count,
                         next_source_local: 0,
@@ -5516,10 +5571,12 @@ write_parameters(
     headers: &super::headers::HeaderIndex,
     interfaces: &TypedInterfaces,
     callable: &super::headers::CallableHeader,
-    interface_callable: usize,
+    interface_callable: InterfaceCallableId,
     ordinal: u32
 ) {
     let parameters = super::headers::callable_parameters(callable);
+    let interface_parameters =
+        interface_callable_parameters(interfaces, interface_callable);
     if(ordinal < super::headers::range_count(parameters)) {
         let at = super::headers::range_start(parameters) + ordinal;
         handle super::headers::parameter_at(headers, usize_from_u32(at)) {
@@ -5533,15 +5590,12 @@ write_parameters(
                 );
                 write_type_id(
                     &mut *output,
-                    interface_callable_parameter_at(
+                    Id::to_u32(callable_parameter_type_at(
                         interfaces,
                         usize_from_u32(
-                            interface_callable_parameter_start_at(
-                                interfaces,
-                                interface_callable
-                            ) + ordinal
+                            interface_parameters.start + ordinal
                         )
-                    )
+                    ))
                 );
                 write_parameters(
                     output,
@@ -5593,7 +5647,7 @@ write_function(
                 ) {
                     Result::Err(_) => Result::Err(4),
                     Result::Ok(typed) => handle
-                        interface_callable_for_shell(
+                        interface_callable_for_shell_id(
                             interfaces,
                             u32_from_usize(shell)
                         ) {
@@ -5620,7 +5674,7 @@ write_function(
                                 index,
                                 interfaces,
                                 callable,
-                                usize_from_u32(interface_callable),
+                                interface_callable,
                                 0
                             );
                             write_type_id(&mut *output, typed.result_type);
