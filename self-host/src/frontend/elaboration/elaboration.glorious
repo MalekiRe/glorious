@@ -287,7 +287,8 @@ struct ResolutionMap { targets: Vec<ElaborationTarget> }
 struct BodyBuilder {
     parameter_count: u32,
     next_source_local: u32,
-    final_transfer_expressions: Vec<u32>,
+    final_transfer_expressions:
+        IndexVec<super::bodies::ExprTag, Bool>,
     local_types: IndexVec<CoreLocalTag, Option<TypeId>>,
     values: Arena<CoreValueTag, CoreValue>,
     computations: Arena<CoreComputationTag, CoreComputation>,
@@ -3258,9 +3259,9 @@ elaborate_identifier(
     expected: Option<TypeId>
 ) -> Result<Elaborated, ElaborationError> {
     let token = super::bodies::expression_token_start_at(body, expression);
-    let final_transfer = *Vec::index(
+    let final_transfer = *IndexVec::index(
         &value.final_transfer_expressions,
-        usize_from_u32(expression)
+        Id::from_u32(expression)
     );
     handle elaboration_target_at(map, expression) {
         ElaborationTarget::Parameter(id) => elaborate_local(
@@ -3293,7 +3294,7 @@ elaborate_local(
     local: CoreLocalId,
     token: usize,
     expected: Option<TypeId>,
-    final_transfer: u32
+    final_transfer: Bool
 ) -> Result<Elaborated, ElaborationError> {
     if(Id::to_usize(local) < IndexVec::len(&value.local_types)) {
         handle *IndexVec::index(&value.local_types, local) {
@@ -3301,7 +3302,7 @@ elaborate_local(
         Result::Ok(ty_id) => {
             let ty = Id::to_u32(ty_id);
             let access = if(bool_and(
-                final_transfer != 0,
+                final_transfer,
                 type_is_copyable(interfaces, ty_id)
             )) { CoreLocalAccess::Move } else { CoreLocalAccess::Copy };
             let core = push_value(
@@ -5038,7 +5039,7 @@ mark_final_transfer_candidates(
     expression: u32,
     ordinal: u32,
     last_expressions: &Vec<Option<super::bodies::ExprId>>,
-    output: &mut Vec<u32>
+    output: &mut IndexVec<super::bodies::ExprTag, Bool>
 ) {
     handle super::bodies::expression_kind_at(body, expression) {
         1 => {
@@ -5056,12 +5057,10 @@ mark_final_transfer_candidates(
                     ) {
                         Result::Err(_) => (),
                         Result::Ok(last) => if(
-                            Id::to_u32(last) == expression
+                            last == Id::from_u32(expression)
                         ) {
-                            *Vec::index_mut(
-                                &mut *output,
-                                usize_from_u32(expression)
-                            ) = 1;
+                            *IndexVec::index_mut(&mut *output, last) = true;
+                            ()
                         } else { () }
                     }
                 }
@@ -5134,7 +5133,7 @@ mark_root_statement_candidates(
     root: u32,
     ordinal: u32,
     last_expressions: &Vec<Option<super::bodies::ExprId>>,
-    output: &mut Vec<u32>
+    output: &mut IndexVec<super::bodies::ExprTag, Bool>
 ) {
     if(ordinal < super::bodies::expression_child_count_at(body, root)) {
         let expression = super::bodies::expression_child_at(
@@ -5181,12 +5180,29 @@ push_missing_expressions(
     }
 }
 
+push_missing_final_transfers(
+    output: &mut IndexVec<super::bodies::ExprTag, Bool>,
+    remaining: usize
+) {
+    if(remaining == 0) {
+        ()
+    } else {
+        handle IndexVec::push(&mut *output, false) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(_) => push_missing_final_transfers(
+                output,
+                remaining - 1
+            )
+        }
+    }
+}
+
 final_transfer_expressions(
     body: &super::bodies::ParsedBody,
     map: &ResolutionMap,
     parameter_count: u32,
     local_count: usize
-) -> Vec<u32> {
+) -> IndexVec<super::bodies::ExprTag, Bool> {
     let root = super::bodies::body_root_index(body);
     let last_expressions = Vec::new();
     push_missing_expressions(&mut last_expressions, local_count);
@@ -5197,8 +5213,11 @@ final_transfer_expressions(
         root,
         &mut last_expressions
     );
-    let output = Vec::new();
-    push_zeroes(&mut output, super::bodies::expression_count(body));
+    let output = IndexVec::new();
+    push_missing_final_transfers(
+        &mut output,
+        super::bodies::expression_count(body)
+    );
     if(super::bodies::expression_kind_at(body, root) == 8) { mark_root_statement_candidates(
             body,
             map,
