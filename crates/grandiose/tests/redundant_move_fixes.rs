@@ -210,3 +210,45 @@ fn final_use_inference_respects_live_loans_and_custom_drop() {
             .all(|diagnostic| diagnostic.code.as_deref() != Some(REDUNDANT_MOVE_CODE))
     );
 }
+
+#[test]
+fn lazy_if_joins_whole_transfer_with_exhaustive_field_transfers() {
+    let source = r#"
+        struct Pair { left: i64, right: i64 }
+        consume_pair_for_join(value: Pair) -> i64 { value.left + value.right }
+        select(condition: Bool, value: Pair) -> i64 {
+            if(condition) {
+                consume_pair_for_join(move value)
+            } else {
+                let left = move value.left;
+                let right = move value.right;
+                left + right
+            }
+        }
+        main() -> { select(true, Pair { left: 20, right: 22 }); () }
+    "#;
+    compile_source_to_phases("lazy-if-exhaustive-fields.glorious", source).unwrap();
+}
+
+#[test]
+fn lazy_if_joins_whole_transfer_with_droppable_partial_residual() {
+    let source = r#"
+        struct State { selected: i64, cursor: usize, finished: Bool }
+        consume_state_for_join(value: State) -> i64 { value.selected }
+        select_partial(condition: Bool, value: State) -> i64 {
+            if(condition) {
+                consume_state_for_join(move value)
+            } else {
+                move value.selected
+            }
+        }
+        main() -> {
+            select_partial(
+                false,
+                State { selected: 42, cursor: 0, finished: false }
+            );
+            ()
+        }
+    "#;
+    compile_source_to_phases("lazy-if-partial-residual.glorious", source).unwrap();
+}

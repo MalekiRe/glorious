@@ -3152,21 +3152,64 @@ impl<'a> Typer<'a> {
             (path.len() == 1).then_some(path[0].as_ref())
         }
 
-        let mut pending = remaining
-            .iter()
-            .map(|statement| match statement {
-                Stmt::Let { value, .. }
-                | Stmt::Deconstruct { value, .. }
-                | Stmt::Expr(value)
-                | Stmt::Assign { value, .. } => value,
-            })
-            .collect::<Vec<_>>();
-        while let Some(expression) = pending.pop() {
+        fn pattern_binds(pattern: &crate::ast::Pattern, binding: &str) -> bool {
+            match &pattern.kind {
+                PatternKind::Binding(name) => name == binding,
+                PatternKind::Variant { fields, .. } => {
+                    fields.iter().any(|field| pattern_binds(field, binding))
+                }
+                PatternKind::Tuple { elements, .. } => elements
+                    .iter()
+                    .any(|element| pattern_binds(element, binding)),
+                PatternKind::Struct { fields, .. } => fields
+                    .iter()
+                    .any(|field| pattern_binds(&field.pattern, binding)),
+                PatternKind::Wildcard
+                | PatternKind::Unit
+                | PatternKind::Int(_)
+                | PatternKind::Float(_)
+                | PatternKind::String(_)
+                | PatternKind::Char(_)
+                | PatternKind::Byte(_) => false,
+            }
+        }
+
+        fn statements_binding_type(
+            typer: &Typer<'_>,
+            statements: &[Stmt],
+            binding: &str,
+        ) -> Option<ProvisionalType> {
+            for statement in statements {
+                let (value, shadows_after_value) = match statement {
+                    Stmt::Let { name, value, .. } => (value, name == binding),
+                    Stmt::Deconstruct { fields, value, .. } => (
+                        value,
+                        fields
+                            .iter()
+                            .any(|field| field.binding.as_deref() == Some(binding)),
+                    ),
+                    Stmt::Expr(value) | Stmt::Assign { value, .. } => (value, false),
+                };
+                if let Some(ty) = expression_binding_type(typer, value, binding) {
+                    return Some(ty);
+                }
+                if shadows_after_value {
+                    return None;
+                }
+            }
+            None
+        }
+
+        fn expression_binding_type(
+            typer: &Typer<'_>,
+            expression: &Expr,
+            binding: &str,
+        ) -> Option<ProvisionalType> {
             match &expression.kind {
                 ExprKind::Call(callee, arguments) => {
                     if let ExprKind::Variable(path) = &callee.kind
                         && path.len() == 1
-                        && let Some(shape) = self.tables.functions.get(path[0].as_ref())
+                        && let Some(shape) = typer.tables.functions.get(path[0].as_ref())
                     {
                         for (argument, formal) in arguments.iter().zip(&shape.params) {
                             let (candidate, expected) = match (&argument.kind, formal) {
@@ -3191,45 +3234,70 @@ impl<'a> Typer<'a> {
                             }
                         }
                     }
-                    pending.push(callee);
-                    pending.extend(arguments.iter());
+                    expression_binding_type(typer, callee, binding).or_else(|| {
+                        arguments
+                            .iter()
+                            .find_map(|argument| expression_binding_type(typer, argument, binding))
+                    })
                 }
                 ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
-                    pending.extend(statements.iter().map(|statement| match statement {
-                        Stmt::Let { value, .. }
-                        | Stmt::Deconstruct { value, .. }
-                        | Stmt::Expr(value)
-                        | Stmt::Assign { value, .. } => value,
-                    }));
+                    statements_binding_type(typer, statements, binding)
                 }
                 ExprKind::Handle {
                     computation,
                     clauses,
-                } => {
-                    pending.push(computation);
-                    pending.extend(clauses.iter().map(|clause| &clause.body));
-                }
-                ExprKind::List(values) | ExprKind::Tuple(values) => pending.extend(values.iter()),
-                ExprKind::Struct { fields, .. } => {
-                    pending.extend(fields.iter().map(|(_, value)| value));
-                }
+                } => expression_binding_type(typer, computation, binding).or_else(|| {
+                    clauses.iter().find_map(|clause| {
+                        let shadows = clause.resumption.as_deref() == Some(binding)
+                            || clause
+                                .patterns
+                                .iter()
+                                .any(|pattern| pattern_binds(pattern, binding));
+                        (!shadows)
+                            .then(|| expression_binding_type(typer, &clause.body, binding))
+                            .flatten()
+                    })
+                }),
+                ExprKind::List(values) | ExprKind::Tuple(values) => values
+                    .iter()
+                    .find_map(|value| expression_binding_type(typer, value, binding)),
+                ExprKind::Struct { fields, .. } => fields
+                    .iter()
+                    .find_map(|(_, value)| expression_binding_type(typer, value, binding)),
                 ExprKind::Field(subject, _)
                 | ExprKind::Move(subject)
                 | ExprKind::Unary {
                     operand: subject, ..
-                } => pending.push(subject),
-                ExprKind::Binary { lhs, rhs, .. } => pending.extend([lhs.as_ref(), rhs.as_ref()]),
-                ExprKind::Perform { args, .. } => pending.extend(args.iter()),
-                ExprKind::LabelDestination { body, .. } => pending.push(body),
-                ExprKind::Is { subject, .. } => pending.push(subject),
+                } => expression_binding_type(typer, subject, binding),
+                ExprKind::Binary { lhs, rhs, .. } => expression_binding_type(typer, lhs, binding)
+                    .or_else(|| expression_binding_type(typer, rhs, binding)),
+                ExprKind::Perform { args, .. } => args
+                    .iter()
+                    .find_map(|argument| expression_binding_type(typer, argument, binding)),
+                ExprKind::LabelDestination { body, .. } => {
+                    expression_binding_type(typer, body, binding)
+                }
+                ExprKind::Is { subject, .. } => expression_binding_type(typer, subject, binding),
                 ExprKind::Resume { resumption, value }
                 | ExprKind::TailResume { resumption, value } => {
-                    pending.push(resumption);
-                    pending.extend(value.iter().map(AsRef::as_ref));
+                    expression_binding_type(typer, resumption, binding).or_else(|| {
+                        value
+                            .as_deref()
+                            .and_then(|value| expression_binding_type(typer, value, binding))
+                    })
                 }
-                ExprKind::Cancel { resumption } => pending.push(resumption),
-                ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
-                    pending.push(body)
+                ExprKind::Cancel { resumption } => {
+                    expression_binding_type(typer, resumption, binding)
+                }
+                ExprKind::Closure { params, body } => {
+                    (!params.iter().any(|parameter| parameter.as_ref() == binding))
+                        .then(|| expression_binding_type(typer, body, binding))
+                        .flatten()
+                }
+                ExprKind::TypedClosure { params, body, .. } => {
+                    (!params.iter().any(|parameter| parameter.name == binding))
+                        .then(|| expression_binding_type(typer, body, binding))
+                        .flatten()
                 }
                 ExprKind::Unit
                 | ExprKind::Int(_)
@@ -3239,10 +3307,11 @@ impl<'a> Typer<'a> {
                 | ExprKind::ByteString(_)
                 | ExprKind::String(_)
                 | ExprKind::Variable(_)
-                | ExprKind::LabelReference(_) => {}
+                | ExprKind::LabelReference(_) => None,
             }
         }
-        None
+
+        statements_binding_type(self, remaining, binding)
     }
 
     fn block(

@@ -6885,6 +6885,7 @@ impl<'a> Walker<'a> {
                         .or_else(|| self.structural_else_obvious_context(positive, negative))
                         .or_else(|| expected.cloned())
                 {
+                    let enclosing_context = expected.cloned();
                     // The branch condition's concrete Bool representation is
                     // irrelevant to the result island. Still walk it to record
                     // dependencies, but do not abandon branch planning merely
@@ -6902,23 +6903,35 @@ impl<'a> Walker<'a> {
                     let negative_ty = self
                         .expression(negative, Some(&branch_context))
                         .or_else(|| Some(branch_context.clone()));
-                    let branch_result = match (positive_ty, negative_ty) {
-                        (Some(positive), Some(negative)) if positive == negative => Some(positive),
-                        (Some(ProvisionalType::Predefined(name)), Some(negative))
-                            if name == "Never" =>
-                        {
-                            Some(negative)
-                        }
-                        (Some(positive), Some(ProvisionalType::Predefined(name)))
-                            if name == "Never" =>
-                        {
-                            Some(positive)
-                        }
-                        _ => {
-                            self.error(
+                    let branch_result = if enclosing_context.is_some() {
+                        // An enclosing result context is authoritative during
+                        // discovery. Walking both branches above records all
+                        // dependencies and diagnostics; Core lowering performs
+                        // the concrete compatibility check. Re-inferring here
+                        // can default a contextual numeric constructor before
+                        // its `Option`/`Result` type reaches the branch.
+                        Some(branch_context)
+                    } else {
+                        match (positive_ty, negative_ty) {
+                            (Some(positive), Some(negative)) if positive == negative => {
+                                Some(positive)
+                            }
+                            (Some(ProvisionalType::Predefined(name)), Some(negative))
+                                if name == "Never" =>
+                            {
+                                Some(negative)
+                            }
+                            (Some(positive), Some(ProvisionalType::Predefined(name)))
+                                if name == "Never" =>
+                            {
+                                Some(positive)
+                            }
+                            _ => {
+                                self.error(
                                 "structural if/else branches have incompatible Result/Option types",
                             );
-                            None
+                                None
+                            }
                         }
                     };
                     if branch_result.is_some()
@@ -7339,12 +7352,35 @@ impl<'a> Walker<'a> {
                         Stmt::Assign {
                             destination, value, ..
                         } => {
-                            self.expression(value, None);
-                            if let AssignmentPlaceKind::Dereference { reference, .. } =
-                                &destination.kind
-                            {
-                                self.expression(reference, None);
-                            }
+                            // Assignment destinations provide an ordinary
+                            // expected-type edge. Discover a dereferenced
+                            // reference's concrete referent before walking the
+                            // RHS so contextual numeric literals inside lazy
+                            // `if`/`else` branches do not default to i64.
+                            // This is allocation-independent planning only;
+                            // Core retains the language's RHS-before-place
+                            // runtime evaluation order.
+                            let destination_ty = match &destination.kind {
+                                AssignmentPlaceKind::Local { name, .. } => self
+                                    .locals
+                                    .get(name.as_ref())
+                                    .and_then(|binding| match binding {
+                                        LocalBinding::Type(ty) => Some(ty.clone()),
+                                        LocalBinding::Closure(_)
+                                        | LocalBinding::ClosureSet(_)
+                                        | LocalBinding::ClosureTuple(_)
+                                        | LocalBinding::ClosureNominal(_)
+                                        | LocalBinding::RecursiveSelf(_, _)
+                                        | LocalBinding::DeferredFunctionItem(_) => None,
+                                    }),
+                                AssignmentPlaceKind::Dereference { reference, .. } => {
+                                    self.expression(reference, None).and_then(|ty| match ty {
+                                        ProvisionalType::Unique(referent) => Some(*referent),
+                                        _ => None,
+                                    })
+                                }
+                            };
+                            self.expression(value, destination_ty.as_ref());
                             result = Some(ProvisionalType::Predefined("Unit".into()));
                         }
                     }

@@ -76,6 +76,40 @@ fn late_generic_inline_preserves_control_expression_order() {
 }
 
 #[test]
+fn late_generic_inline_distinguishes_block_values_from_callable_blocks() {
+    let source = r#"
+        forward<T, L>(value: T, destination: L) -> !
+            where L: Label<T> {
+            destination(value)
+        }
+        invoke<F, L>(body: F, destination: L) -> !
+            where F: Fn<(), Output=i64>, L: Label<i64> {
+            destination(body())
+        }
+        block_value() -> i64 {
+            forward({ 42 }, @block_value)
+        }
+        callable_block() -> i64 {
+            invoke({ 42 }, @callable_block)
+        }
+        main() -> { () }
+    "#;
+
+    assert_eq!(
+        run("late-inline-block-value.glorious", source, "block_value"),
+        Value::I64(42)
+    );
+    assert_eq!(
+        run(
+            "late-inline-callable-block.glorious",
+            source,
+            "callable_block"
+        ),
+        Value::I64(42)
+    );
+}
+
+#[test]
 fn mandatory_resumption_is_consumed_once_by_a_nontransparent_generic_callee() {
     let source = r#"
         effect Ask { [1,1] ask() -> i64 }

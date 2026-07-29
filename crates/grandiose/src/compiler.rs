@@ -20038,15 +20038,32 @@ fn generated_shapes(
     reserved_callable_types: &BTreeMap<specialization::ClosureRequest, TypeId>,
     reserved_closure_nominal_types: &BTreeMap<specialization::ClosureNominalInstance, TypeId>,
 ) -> Result<GeneratedShapes, Vec<Diagnostic>> {
-    fn explicitly_managed_nominal(program: &Program, name: &str) -> bool {
-        program.drops.iter().any(|drop| drop.target == name)
-            || program.uses.iter().any(|declaration| {
+    fn requires_borrowed_nominal_transport(program: &Program, name: &str) -> bool {
+        if program.drops.iter().any(|drop| drop.target == name) {
+            return true;
+        }
+        program
+            .uses
+            .iter()
+            .filter(|declaration| {
                 declaration.target.simple_name() == Some(name)
                     || matches!(
                         &declaration.target.kind,
                         TypeSyntaxKind::Application { constructor, .. }
                             if constructor.simple_name() == Some(name)
                     )
+            })
+            .any(|declaration| {
+                // An exact unconditional `[0,infinity]` implementation is the
+                // ordinary unrestricted value case. Observing that value in a
+                // lazy source callable must preserve its nominal value type;
+                // only Drop, conditional/generic, or restricted Use evidence
+                // requires borrowed capture transport.
+                declaration.generics.is_some()
+                    || declaration.where_clause.is_some()
+                    || declaration.target.simple_name() != Some(name)
+                    || declaration.quantity.lower != 0
+                    || declaration.quantity.upper.is_some()
             })
     }
 
@@ -20058,7 +20075,7 @@ fn generated_shapes(
             && matches!(
                 &capture.ty,
                 typeck::ProvisionalType::Nominal(instance)
-                    if explicitly_managed_nominal(program, &instance.declaration.0)
+                    if requires_borrowed_nominal_transport(program, &instance.declaration.0)
             )
     }
 
@@ -23130,6 +23147,20 @@ impl<'a> CoreLowerer<'a> {
         }
     }
 
+    fn is_source_bool_type(&self, ty: TypeId) -> bool {
+        self.nominals
+            .values()
+            .find(|info| info.id == ty)
+            .is_some_and(|info| {
+                matches!(
+                    &info.kind,
+                    NominalKind::Enum(variants)
+                        if variants.len() == 2
+                            && variants.iter().all(|(_, fields)| fields == &[UNIT])
+                )
+            })
+    }
+
     /// Resolve an ordinary frozen structural type, or intern a late structural
     /// wrapper whose leaves include a handler-site resumption identity. Handler
     /// resumptions deliberately do not exist when `ReferenceTypes` is frozen,
@@ -23262,78 +23293,97 @@ impl<'a> CoreLowerer<'a> {
                 },
                 ResolvedType::Concrete(_),
             ) => {
+                fn ground_id(
+                    this: &CoreLowerer<'_>,
+                    ty: &typeck::ProvisionalType,
+                ) -> Option<TypeId> {
+                    match ty {
+                        typeck::ProvisionalType::Predefined(name) => scalar_type(name)
+                            .or_else(|| this.nominals.get(name).map(|info| info.id)),
+                        typeck::ProvisionalType::Nominal(instance) => {
+                            let name = if instance.arguments.is_empty() {
+                                instance.declaration.0.clone()
+                            } else {
+                                encode_nominal_instance(instance)
+                            };
+                            this.nominals.get(&name).map(|info| info.id)
+                        }
+                        typeck::ProvisionalType::Tuple(elements) => {
+                            let elements = elements
+                                .iter()
+                                .map(|element| ground_id(this, element).map(ResolvedType::Concrete))
+                                .collect::<Option<Vec<_>>>()?;
+                            this.existing_structural_type_id(&ResolvedType::Tuple(elements))
+                        }
+                        typeck::ProvisionalType::Shared(referent)
+                        | typeck::ProvisionalType::Unique(referent) => {
+                            let referent = ground_id(this, referent)?;
+                            let resolved = if matches!(ty, typeck::ProvisionalType::Shared(_)) {
+                                ResolvedType::Shared(Box::new(ResolvedType::Concrete(referent)))
+                            } else {
+                                ResolvedType::Unique(Box::new(ResolvedType::Concrete(referent)))
+                            };
+                            this.existing_structural_type_id(&resolved)
+                        }
+                        typeck::ProvisionalType::Param(_)
+                        | typeck::ProvisionalType::Const(_)
+                        | typeck::ProvisionalType::Callable(_) => None,
+                    }
+                }
                 let late_arguments = self.effects.late_nominals.get(&actual).and_then(|late| {
                     (constructor.simple_name() == Some(late.declaration.as_str()))
                         .then(|| late.arguments.clone())
                 });
                 let sealed_arguments = self
-                    .closure_nominal_types
+                    .nominals
                     .iter()
-                    .find_map(|(instance, id)| {
-                        (*id == actual
-                            && constructor.simple_name() == Some(instance.declaration.as_str()))
-                        .then_some(instance)
+                    .find_map(|(name, info)| {
+                        (info.id == actual)
+                            .then(|| decode_nominal_instance(name))
+                            .flatten()
+                    })
+                    .filter(|instance| {
+                        constructor.simple_name() == Some(instance.declaration.0.as_str())
                     })
                     .and_then(|instance| {
-                        fn ground_id(
-                            this: &CoreLowerer<'_>,
-                            ty: &typeck::ProvisionalType,
-                        ) -> Option<TypeId> {
-                            match ty {
-                                typeck::ProvisionalType::Predefined(name) => scalar_type(name)
-                                    .or_else(|| this.nominals.get(name).map(|info| info.id)),
-                                typeck::ProvisionalType::Nominal(instance) => {
-                                    let name = if instance.arguments.is_empty() {
-                                        instance.declaration.0.clone()
-                                    } else {
-                                        encode_nominal_instance(instance)
-                                    };
-                                    this.nominals.get(&name).map(|info| info.id)
-                                }
-                                typeck::ProvisionalType::Tuple(elements) => {
-                                    let elements = elements
-                                        .iter()
-                                        .map(|element| {
-                                            ground_id(this, element).map(ResolvedType::Concrete)
-                                        })
-                                        .collect::<Option<Vec<_>>>()?;
-                                    this.existing_structural_type_id(&ResolvedType::Tuple(elements))
-                                }
-                                typeck::ProvisionalType::Shared(referent)
-                                | typeck::ProvisionalType::Unique(referent) => {
-                                    let referent = ground_id(this, referent)?;
-                                    let resolved =
-                                        if matches!(ty, typeck::ProvisionalType::Shared(_)) {
-                                            ResolvedType::Shared(Box::new(ResolvedType::Concrete(
-                                                referent,
-                                            )))
-                                        } else {
-                                            ResolvedType::Unique(Box::new(ResolvedType::Concrete(
-                                                referent,
-                                            )))
-                                        };
-                                    this.existing_structural_type_id(&resolved)
-                                }
-                                typeck::ProvisionalType::Param(_)
-                                | typeck::ProvisionalType::Const(_)
-                                | typeck::ProvisionalType::Callable(_) => None,
-                            }
-                        }
                         instance
                             .arguments
                             .iter()
-                            .map(|argument| match argument {
-                                specialization::ClosureTupleField::Type(ty) => ground_id(self, ty),
-                                specialization::ClosureTupleField::Closure(request) => self
-                                    .closure_runtimes
-                                    .get(request)
-                                    .map(|runtime| runtime.callable_type),
-                                specialization::ClosureTupleField::ClosureSet(requests) => requests
-                                    .first()
-                                    .and_then(|request| self.closure_runtimes.get(request))
-                                    .map(|runtime| runtime.callable_type),
-                            })
+                            .map(|argument| ground_id(self, argument))
                             .collect::<Option<Vec<_>>>()
+                    })
+                    .or_else(|| {
+                        self.closure_nominal_types
+                            .iter()
+                            .find_map(|(instance, id)| {
+                                (*id == actual
+                                    && constructor.simple_name()
+                                        == Some(instance.declaration.as_str()))
+                                .then_some(instance)
+                            })
+                            .and_then(|instance| {
+                                instance
+                                    .arguments
+                                    .iter()
+                                    .map(|argument| match argument {
+                                        specialization::ClosureTupleField::Type(ty) => {
+                                            ground_id(self, ty)
+                                        }
+                                        specialization::ClosureTupleField::Closure(request) => self
+                                            .closure_runtimes
+                                            .get(request)
+                                            .map(|runtime| runtime.callable_type),
+                                        specialization::ClosureTupleField::ClosureSet(requests) => {
+                                            requests
+                                                .first()
+                                                .and_then(|request| {
+                                                    self.closure_runtimes.get(request)
+                                                })
+                                                .map(|runtime| runtime.callable_type)
+                                        }
+                                    })
+                                    .collect::<Option<Vec<_>>>()
+                            })
                     });
                 late_arguments.or(sealed_arguments).is_some_and(|actuals| {
                     arguments.len() == actuals.len()
@@ -25012,6 +25062,7 @@ impl<'a> CoreLowerer<'a> {
                     .collect::<Vec<_>>(),
                 body.as_ref(),
             ),
+            ExprKind::Block(_) | ExprKind::ContextBlock(_) => (vec![], closure),
             _ => {
                 return Err(vec![unsupported(
                     span,
@@ -25332,9 +25383,34 @@ impl<'a> CoreLowerer<'a> {
             .iter()
             .map(|argument| self.static_label_argument(argument))
             .collect::<Vec<_>>();
+        let callable_parameters = function
+            .params
+            .iter()
+            .map(|parameter| {
+                let Some(subject) = parameter.ty.simple_name() else {
+                    return false;
+                };
+                function
+                    .where_clause
+                    .iter()
+                    .flat_map(|clause| &clause.goals)
+                    .any(|goal| {
+                        goal.subject.simple_name() == Some(subject)
+                            && goal.relation.path.len() == 1
+                            && goal.relation.path[0].name == "Fn"
+                    })
+            })
+            .collect::<Vec<_>>();
         let closure_arguments = arguments
             .iter()
-            .map(|argument| self.static_closure_argument(argument))
+            .enumerate()
+            .map(|(index, argument)| match &argument.kind {
+                ExprKind::Closure { .. } | ExprKind::TypedClosure { .. } => Some(argument.clone()),
+                ExprKind::Block(_) | ExprKind::ContextBlock(_) if callable_parameters[index] => {
+                    Some(argument.clone())
+                }
+                _ => self.static_closure_argument(argument),
+            })
             .collect::<Vec<_>>();
         let can_bind_directly = function.params.iter().enumerate().all(|(index, param)| {
             arguments
@@ -25446,6 +25522,74 @@ impl<'a> CoreLowerer<'a> {
             .return_type
             .as_ref()
             .and_then(|result| self.monomorphic_source_type(result))
+            .or(Some(UNIT).filter(|_| function.return_type.is_none()));
+        Some((params, result))
+    }
+
+    fn late_manifest_call_types(
+        &mut self,
+        name: &str,
+        arguments: &[Expr],
+        expected: Option<TypeId>,
+    ) -> Option<(Vec<Option<TypeId>>, Option<TypeId>)> {
+        let function = self
+            .function_templates
+            .iter()
+            .find(|function| function.name == name)?
+            .clone();
+        let generic_names = function
+            .generics
+            .as_ref()
+            .map(|generics| {
+                generics
+                    .params
+                    .iter()
+                    .map(|parameter| parameter.name.clone())
+                    .collect::<BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        let generic_name = |syntax: &TypeSyntax| match &syntax.kind {
+            TypeSyntaxKind::Path(path)
+                if path.len() == 1 && generic_names.contains(&path[0].name) =>
+            {
+                Some(path[0].name.clone())
+            }
+            _ => None,
+        };
+        let mut inferred = BTreeMap::<String, TypeId>::new();
+        if let (Some(result), Some(expected)) = (
+            function.return_type.as_ref().and_then(&generic_name),
+            expected,
+        ) {
+            inferred.insert(result, expected);
+        }
+        for (parameter, argument) in function.params.iter().zip(arguments) {
+            let Some(generic) = generic_name(&parameter.ty) else {
+                continue;
+            };
+            let Some(ty) = self.static_local_expression_type(argument) else {
+                continue;
+            };
+            if inferred
+                .get(&generic)
+                .is_none_or(|inferred| *inferred == ty)
+            {
+                inferred.insert(generic, ty);
+            }
+        }
+        let mut resolve = |syntax: &TypeSyntax| {
+            self.monomorphic_source_type(syntax)
+                .or_else(|| generic_name(syntax).and_then(|name| inferred.get(&name).copied()))
+        };
+        let params = function
+            .params
+            .iter()
+            .map(|parameter| resolve(&parameter.ty))
+            .collect();
+        let result = function
+            .return_type
+            .as_ref()
+            .and_then(&mut resolve)
             .or(Some(UNIT).filter(|_| function.return_type.is_none()));
         Some((params, result))
     }
@@ -26435,69 +26579,168 @@ impl<'a> CoreLowerer<'a> {
             matches!(&expression.kind, ExprKind::Variable(path) if path.len() == 1 && path[0].as_ref() == binding)
         }
 
-        let mut pending = remaining
-            .iter()
-            .map(|statement| match statement {
-                Stmt::Let { value, .. }
-                | Stmt::Deconstruct { value, .. }
-                | Stmt::Expr(value)
-                | Stmt::Assign { value, .. } => value,
-            })
-            .collect::<Vec<_>>();
-        while let Some(expression) = pending.pop() {
+        fn pattern_binds(pattern: &crate::ast::Pattern, binding: &str) -> bool {
+            match &pattern.kind {
+                PatternKind::Binding(name) => name == binding,
+                PatternKind::Variant { fields, .. } => {
+                    fields.iter().any(|field| pattern_binds(field, binding))
+                }
+                PatternKind::Tuple { elements, .. } => elements
+                    .iter()
+                    .any(|element| pattern_binds(element, binding)),
+                PatternKind::Struct { fields, .. } => fields
+                    .iter()
+                    .any(|field| pattern_binds(&field.pattern, binding)),
+                PatternKind::Wildcard
+                | PatternKind::Unit
+                | PatternKind::Int(_)
+                | PatternKind::Float(_)
+                | PatternKind::String(_)
+                | PatternKind::Char(_)
+                | PatternKind::Byte(_) => false,
+            }
+        }
+
+        fn statements_expected_type(
+            lowerer: &CoreLowerer<'_>,
+            statements: &[Stmt],
+            binding: &str,
+        ) -> Option<TypeId> {
+            for statement in statements {
+                let (value, shadows_after_value) = match statement {
+                    Stmt::Let { name, value, .. } => (value, name == binding),
+                    Stmt::Deconstruct { fields, value, .. } => (
+                        value,
+                        fields
+                            .iter()
+                            .any(|field| field.binding.as_deref() == Some(binding)),
+                    ),
+                    Stmt::Expr(value) | Stmt::Assign { value, .. } => (value, false),
+                };
+                if let Some(ty) = expression_expected_type(lowerer, value, binding) {
+                    return Some(ty);
+                }
+                // Initializers are evaluated in the preceding environment, but
+                // a declaration shadows the outer owner for every later
+                // statement in this lexical block.
+                if shadows_after_value {
+                    return None;
+                }
+            }
+            None
+        }
+
+        fn expression_expected_type(
+            lowerer: &CoreLowerer<'_>,
+            expression: &Expr,
+            binding: &str,
+        ) -> Option<TypeId> {
             match &expression.kind {
                 ExprKind::Binary { lhs, rhs, .. } => {
                     if direct_binding(lhs, binding)
-                        && let Some(ty) = self.integer_comparison_operand_type(rhs)
+                        && let Some(ty) = lowerer.integer_comparison_operand_type(rhs)
                     {
                         return Some(ty);
                     }
                     if direct_binding(rhs, binding)
-                        && let Some(ty) = self.integer_comparison_operand_type(lhs)
+                        && let Some(ty) = lowerer.integer_comparison_operand_type(lhs)
                     {
                         return Some(ty);
                     }
-                    pending.extend([lhs.as_ref(), rhs.as_ref()]);
+                    expression_expected_type(lowerer, lhs, binding)
+                        .or_else(|| expression_expected_type(lowerer, rhs, binding))
                 }
                 ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
-                    pending.extend(statements.iter().map(|statement| match statement {
-                        Stmt::Let { value, .. }
-                        | Stmt::Deconstruct { value, .. }
-                        | Stmt::Expr(value)
-                        | Stmt::Assign { value, .. } => value,
-                    }));
+                    statements_expected_type(lowerer, statements, binding)
                 }
                 ExprKind::Call(callee, arguments) => {
-                    pending.push(callee);
-                    pending.extend(arguments.iter());
+                    if let ExprKind::Variable(path) = &callee.kind
+                        && path.len() == 1
+                        && let Some(signature) = lowerer.signatures.get(path[0].as_ref())
+                        && let Some((_, ty)) = arguments
+                            .iter()
+                            .zip(&signature.params)
+                            .find(|(argument, _)| direct_binding(argument, binding))
+                    {
+                        return Some(*ty);
+                    }
+                    if let Some((signature, runtime_arguments, _)) =
+                        lowerer.planned_call(expression)
+                        && let Some(ty) = runtime_arguments.iter().zip(&signature.params).find_map(
+                            |(runtime, ty)| match runtime {
+                                GeneratedArgument::Source(index)
+                                    if arguments.get(*index).is_some_and(|argument| {
+                                        direct_binding(argument, binding)
+                                    }) =>
+                                {
+                                    Some(*ty)
+                                }
+                                GeneratedArgument::Source(_)
+                                | GeneratedArgument::Capture { .. } => None,
+                            },
+                        )
+                    {
+                        return Some(ty);
+                    }
+                    expression_expected_type(lowerer, callee, binding).or_else(|| {
+                        arguments.iter().find_map(|argument| {
+                            expression_expected_type(lowerer, argument, binding)
+                        })
+                    })
                 }
-                ExprKind::Struct { fields, .. } => {
-                    pending.extend(fields.iter().map(|(_, value)| value));
-                }
+                ExprKind::Struct { fields, .. } => fields
+                    .iter()
+                    .find_map(|(_, value)| expression_expected_type(lowerer, value, binding)),
                 ExprKind::Handle {
                     computation,
                     clauses,
-                } => {
-                    pending.push(computation);
-                    pending.extend(clauses.iter().map(|clause| &clause.body));
-                }
-                ExprKind::List(values) | ExprKind::Tuple(values) => pending.extend(values.iter()),
+                } => expression_expected_type(lowerer, computation, binding).or_else(|| {
+                    clauses.iter().find_map(|clause| {
+                        let shadows = clause.resumption.as_deref() == Some(binding)
+                            || clause
+                                .patterns
+                                .iter()
+                                .any(|pattern| pattern_binds(pattern, binding));
+                        (!shadows)
+                            .then(|| expression_expected_type(lowerer, &clause.body, binding))
+                            .flatten()
+                    })
+                }),
+                ExprKind::List(values) | ExprKind::Tuple(values) => values
+                    .iter()
+                    .find_map(|value| expression_expected_type(lowerer, value, binding)),
                 ExprKind::Field(subject, _)
                 | ExprKind::Move(subject)
                 | ExprKind::Unary {
                     operand: subject, ..
-                } => pending.push(subject),
-                ExprKind::Perform { args, .. } => pending.extend(args.iter()),
-                ExprKind::LabelDestination { body, .. } => pending.push(body),
-                ExprKind::Is { subject, .. } => pending.push(subject),
+                } => expression_expected_type(lowerer, subject, binding),
+                ExprKind::Perform { args, .. } => args
+                    .iter()
+                    .find_map(|argument| expression_expected_type(lowerer, argument, binding)),
+                ExprKind::LabelDestination { body, .. } => {
+                    expression_expected_type(lowerer, body, binding)
+                }
+                ExprKind::Is { subject, .. } => expression_expected_type(lowerer, subject, binding),
                 ExprKind::Resume { resumption, value }
                 | ExprKind::TailResume { resumption, value } => {
-                    pending.push(resumption);
-                    pending.extend(value.iter().map(AsRef::as_ref));
+                    expression_expected_type(lowerer, resumption, binding).or_else(|| {
+                        value
+                            .as_deref()
+                            .and_then(|value| expression_expected_type(lowerer, value, binding))
+                    })
                 }
-                ExprKind::Cancel { resumption } => pending.push(resumption),
-                ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
-                    pending.push(body)
+                ExprKind::Cancel { resumption } => {
+                    expression_expected_type(lowerer, resumption, binding)
+                }
+                ExprKind::Closure { params, body } => {
+                    (!params.iter().any(|parameter| parameter.as_ref() == binding))
+                        .then(|| expression_expected_type(lowerer, body, binding))
+                        .flatten()
+                }
+                ExprKind::TypedClosure { params, body, .. } => {
+                    (!params.iter().any(|parameter| parameter.name == binding))
+                        .then(|| expression_expected_type(lowerer, body, binding))
+                        .flatten()
                 }
                 ExprKind::Unit
                 | ExprKind::Int(_)
@@ -26507,10 +26750,11 @@ impl<'a> CoreLowerer<'a> {
                 | ExprKind::ByteString(_)
                 | ExprKind::String(_)
                 | ExprKind::Variable(_)
-                | ExprKind::LabelReference(_) => {}
+                | ExprKind::LabelReference(_) => None,
             }
         }
-        None
+
+        statements_expected_type(self, remaining, binding)
     }
 
     fn planned_signatures_in(&self, root: &Expr) -> BTreeMap<usize, Signature> {
@@ -27241,6 +27485,11 @@ impl<'a> CoreLowerer<'a> {
         } else {
             self.actual_use_lowers.insert(local, lower);
         }
+        // Once every top-level field has transferred, the aggregate has the
+        // same canonical ownership state as a whole-local transfer. Keeping
+        // the now-exhaustive paths makes lazy branch joins distinguish two
+        // equivalent states (`moved` versus `moved` plus every field path).
+        self.moved_paths.remove(&local);
         self.moved.insert(local);
     }
 
@@ -29882,9 +30131,13 @@ impl<'a> CoreLowerer<'a> {
         let planned = self.planned_construction(expression);
         let info = expected
             .and_then(|expected| {
-                self.nominals
-                    .values()
-                    .find(|info| info.id == expected && info.name == enum_name)
+                self.nominals.iter().find_map(|(name, info)| {
+                    (info.id == expected
+                        && (info.name == enum_name
+                            || decode_nominal_instance(name)
+                                .is_some_and(|instance| instance.declaration.0 == enum_name)))
+                    .then_some(info)
+                })
             })
             .or_else(|| {
                 planned.and_then(|planned| self.nominals.values().find(|info| info.id == planned))
@@ -32021,19 +32274,45 @@ impl<'a> CoreLowerer<'a> {
                 {
                     return self.inline_standard_try(arguments, label, span, expected);
                 }
-                if self.function_templates.iter().any(|function| {
+                let structural_else_candidate = source_name == "else"
+                    && matches!(
+                        arguments.first().map(|argument| &argument.kind),
+                        Some(ExprKind::Call(callee, _))
+                            if matches!(
+                                &callee.kind,
+                                ExprKind::Variable(path)
+                                    if path.len() == 1 && path[0].as_ref() == "if"
+                            )
+                    );
+                if !structural_else_candidate
+                    && self.function_templates.iter().any(|function| {
                     function.name == source_name
                         && function.generics.is_some()
                         && function.params.len() == arguments.len()
-                }) && arguments.iter().any(|argument| {
-                    self.static_label_argument(argument).is_some()
-                        || self.static_closure_argument(argument).is_some()
-                }) {
+                    })
+                    && arguments.iter().any(|argument| {
+                        self.static_label_argument(argument).is_some()
+                            || self.static_closure_argument(argument).is_some()
+                    })
+                {
                     return self.inline_late_generic_call(source_name, arguments, span, expected);
                 }
                 let deferred_target =
                     self.deferred_trait_target(source_name, arguments, expected, callee.span)?;
                 let name = deferred_target.as_deref().unwrap_or(source_name);
+                let source_bool_else = if name == "else"
+                    && let [if_expression, _] = arguments.as_slice()
+                    && let ExprKind::Call(if_callee, if_arguments) = &if_expression.kind
+                    && let ExprKind::Variable(if_path) = &if_callee.kind
+                    && if_path.len() == 1
+                    && if_path[0].as_ref() == "if"
+                    && let [condition, _] = if_arguments.as_slice()
+                {
+                    self.provisional_handler_result(condition.span)
+                        .is_some_and(|ty| self.is_source_bool_type(ty))
+                } else {
+                    false
+                };
                 // `if(subject is Pattern) { positive } else { negative }` is
                 // still parsed as the ordinary library composition
                 // `else(if(test, positive), negative)`. Unlike a plain Bool
@@ -32049,7 +32328,8 @@ impl<'a> CoreLowerer<'a> {
                     && if_path[0].as_ref() == "if"
                     && let [condition, positive_source] = if_arguments.as_slice()
                     && (matches!(condition.kind, ExprKind::Is { .. })
-                        || self.planned_structural_else(expression))
+                        || self.planned_structural_else(expression)
+                        || source_bool_else)
                 {
                     let synthetic_pattern;
                     let (subject_source, pattern) =
@@ -32243,22 +32523,6 @@ impl<'a> CoreLowerer<'a> {
                     for binding in baseline_locals.values() {
                         let positive_whole_moved = positive_moved.contains(&binding.local);
                         let negative_whole_moved = self.moved.contains(&binding.local);
-                        if positive_whole_moved != negative_whole_moved {
-                            // A consuming refinement moves the scrutinee on a
-                            // successful edge while a failed test retains it
-                            // for the else arm (and therefore for subsequent
-                            // match arms). Once the branches rejoin, retire the
-                            // still-live edge so the scrutinee is consumed by
-                            // the complete conditional on every path.
-                            retire_at_join.push(binding.local);
-                            positive_moved.insert(binding.local);
-                            self.moved.insert(binding.local);
-                        }
-                        if positive_moved.contains(&binding.local)
-                            || self.moved.contains(&binding.local)
-                        {
-                            continue;
-                        }
                         let positive_paths = positive_moved_paths
                             .get(&binding.local)
                             .cloned()
@@ -32268,6 +32532,58 @@ impl<'a> CoreLowerer<'a> {
                             .get(&binding.local)
                             .cloned()
                             .unwrap_or_default();
+                        if positive_whole_moved != negative_whole_moved {
+                            let residual_paths = if positive_whole_moved {
+                                &negative_paths
+                            } else {
+                                &positive_paths
+                            };
+                            let residual_disposable = residual_paths.is_empty()
+                                || self.residual_shell_is_join_disposable(
+                                    binding.ty,
+                                    residual_paths,
+                                )
+                                || positive_active_variant_proofs
+                                    .get(&binding.local)
+                                    .filter(|_| !positive_whole_moved)
+                                    .is_some_and(|variant| {
+                                        self.enum_variant_residual_shell_is_join_disposable(
+                                            binding.ty,
+                                            *variant,
+                                            residual_paths,
+                                        )
+                                    })
+                                || self
+                                    .active_variant_proofs
+                                    .get(&binding.local)
+                                    .filter(|_| positive_whole_moved)
+                                    .is_some_and(|variant| {
+                                        self.enum_variant_residual_shell_is_join_disposable(
+                                            binding.ty,
+                                            *variant,
+                                            residual_paths,
+                                        )
+                                    });
+                            if residual_disposable {
+                                // A whole transfer on one edge and either an
+                                // untouched disposable owner or a partial
+                                // transfer with a disposable residual shell
+                                // have one canonical join state. Edge cleanup
+                                // retires what remains; no projected paths
+                                // survive after the owner becomes wholly
+                                // unavailable.
+                                retire_at_join.push(binding.local);
+                                positive_moved.insert(binding.local);
+                                self.moved.insert(binding.local);
+                                positive_moved_paths.remove(&binding.local);
+                                self.moved_paths.remove(&binding.local);
+                            }
+                        }
+                        if positive_moved.contains(&binding.local)
+                            || self.moved.contains(&binding.local)
+                        {
+                            continue;
+                        }
                         if positive_paths == negative_paths {
                             let variants = positive_active_variant_proofs
                                 .get(&binding.local)
@@ -33312,9 +33628,18 @@ impl<'a> CoreLowerer<'a> {
                     );
                     return Ok(expression);
                 }
-                if let Some(primitive) = self.runtime_bindings.leaf(name)
-                    && let Some(result) = expected
-                {
+                if let Some(primitive) = self.runtime_bindings.leaf(name) {
+                    let (parameter_types, declared_result) = self
+                        .late_manifest_call_types(name, arguments, expected)
+                        .unwrap_or_else(|| (vec![None; arguments.len()], None));
+                    let Some(result) = expected.or(declared_result) else {
+                        return Err(vec![type_error(
+                            span,
+                            format!(
+                                "cannot infer the result type of manifest-bound primitive `{name}`"
+                            ),
+                        )]);
+                    };
                     if !self
                         .runtime_bindings
                         .call_is_authorized(name, span, self.privacy_domains)
@@ -33324,9 +33649,6 @@ impl<'a> CoreLowerer<'a> {
                             "manifest-bound primitive leaves may be called only from their trusted standard-library source segment",
                         )]);
                     }
-                    let (parameter_types, declared_result) = self
-                        .late_manifest_types(name)
-                        .unwrap_or_else(|| (vec![None; arguments.len()], None));
                     if parameter_types.len() != arguments.len() {
                         return Err(vec![type_error(
                             span,
@@ -36162,7 +36484,15 @@ impl<'a> CoreLowerer<'a> {
                         self.inferred_final_uses.clear();
                         continue;
                     }
-                    let expected = self.later_binding_expected_type(name, &statements[index + 1..]);
+                    // A call initializer's declared/planned result is stronger
+                    // evidence than any later use of the binding. In
+                    // particular, a unique reference may later be accepted by
+                    // both unique and shared-reference consumers; choosing the
+                    // first later consumer would incorrectly weaken the
+                    // initializer itself to a shared reference.
+                    let expected = self.handler_result_hint(value).or_else(|| {
+                        self.later_binding_expected_type(name, &statements[index + 1..])
+                    });
                     let value = self.expression(value, expected)?;
                     let local = self.next_local;
                     self.next_local += 1;
@@ -40474,6 +40804,19 @@ impl MirLowerer {
                             }
                         },
                     );
+                    if !*copy
+                        && self
+                            .partial_aggregates
+                            .get(&src)
+                            .is_some_and(|initialized| initialized.iter().all(|field| !field))
+                    {
+                        // Exhaustive projected transfers and a whole-local
+                        // transfer are the same ownership state. Keep the
+                        // empty residual register available for edge cleanup,
+                        // but do not carry the exhausted source local through
+                        // a lazy branch join.
+                        self.uninitialized_locals.insert(local);
+                    }
                     return MirFlow::Value(Some(dst));
                 }
                 debug_assert!(*copy);

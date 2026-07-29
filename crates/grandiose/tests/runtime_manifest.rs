@@ -1114,6 +1114,73 @@ fn arbitrary_manifest_names_lower_to_core_primitive_identities_behind_a_private_
 }
 
 #[test]
+fn nested_generic_manifest_leaf_infers_its_result_from_arguments() {
+    let manifest = TrustedTraitManifest::trusted_default();
+    let standard_library = r#"
+        __g1_int_bit_xor<T>(left: T, right: T) -> T { () }
+        __g1_int_wrapping_mul<T>(left: T, right: T) -> T { () }
+
+        nested(left: u64, right: u64, factor: u64) -> u64 {
+            __g1_int_wrapping_mul(
+                __g1_int_bit_xor(move left, move right),
+                move factor
+            )
+        }
+    "#;
+    let phases = compile_bundle_to_phases_with_manifest(
+        &bundle(
+            standard_library,
+            "main() { let result = nested(1, 3, 5); result; () }",
+        ),
+        &manifest,
+    )
+    .unwrap();
+    let function = phases
+        .artifact
+        .functions
+        .iter()
+        .find(|function| function.name == "nested")
+        .expect("the trusted nested helper must be emitted");
+    let code = &phases.artifact.code
+        [function.code_start as usize..(function.code_start + function.code_len) as usize];
+    assert!(
+        code.iter().any(|instruction| matches!(
+            instruction,
+            grandiose_vm::Instruction::Primitive {
+                op: Primitive::IntBitXor,
+                ..
+            }
+        )),
+        "{code:?}"
+    );
+    assert!(
+        phases.artifact.code.iter().any(|instruction| matches!(
+            instruction,
+            grandiose_vm::Instruction::Primitive {
+                op: Primitive::IntWrappingMul,
+                ..
+            }
+        )),
+        "{:?}",
+        phases.artifact.code
+    );
+
+    let verified = verify(phases.artifact).unwrap();
+    let nested = verified
+        .artifact()
+        .functions
+        .iter()
+        .position(|function| function.name == "nested")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verified)
+            .run(nested, vec![Value::U64(1), Value::U64(3), Value::U64(5)])
+            .unwrap(),
+        Value::U64(10)
+    );
+}
+
+#[test]
 fn user_code_cannot_project_the_private_storage_behind_a_wrapper() {
     let manifest = manifest(
         vec![array_type(100, "SecretBuffer")],

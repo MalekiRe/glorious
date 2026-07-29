@@ -460,9 +460,7 @@ push_argument_edges(
     arguments: &Vec<u32>,
     index: usize
 ) {
-    handle index < word_count(arguments) {
-        Result::Err(_) => (),
-        Result::Ok(_) => {
+    if(index < word_count(arguments)) {
             Vec::push(
                 &mut value.edges,
                 ExprEdge {
@@ -472,7 +470,8 @@ push_argument_edges(
                 }
             );
             push_argument_edges(value, arguments, index + usize_value(1))
-        }
+    } else {
+        ()
     }
 }
 
@@ -507,9 +506,7 @@ push_expression_edges(
     index: usize,
     position: u8
 ) {
-    handle index < word_count(expressions) {
-        Result::Err(_) => (),
-        Result::Ok(_) => {
+    if(index < word_count(expressions)) {
             Vec::push(
                 &mut value.edges,
                 ExprEdge {
@@ -524,7 +521,8 @@ push_expression_edges(
                 index + usize_value(1),
                 position
             )
-        }
+    } else {
+        ()
     }
 }
 
@@ -557,9 +555,7 @@ push_struct_fields(
     fields: &Vec<u32>,
     index: usize
 ) {
-    handle index < field_count(fields) {
-        Result::Err(_) => (),
-        Result::Ok(_) => {
+    if(index < field_count(fields)) {
             let base = index * usize_value(3);
             push_name(
                 &mut value.names,
@@ -579,7 +575,8 @@ push_struct_fields(
                 }
             );
             push_struct_fields(value, fields, index + usize_value(1))
-        }
+    } else {
+        ()
     }
 }
 
@@ -660,9 +657,7 @@ push_statement_edges(
     statements: &Vec<u32>,
     index: usize
 ) {
-    handle index < statement_count(statements) {
-        Result::Err(_) => (),
-        Result::Ok(_) => {
+    if(index < statement_count(statements)) {
             let base = index * usize_value(3);
             Vec::push(
                 &mut value.edges,
@@ -679,7 +674,8 @@ push_statement_edges(
                 }
             );
             push_statement_edges(value, statements, index + usize_value(1))
-        }
+    } else {
+        ()
     }
 }
 
@@ -728,30 +724,30 @@ operator_range(
     cursor: usize,
     limit: usize
 ) -> Option<BodyTokenRange> {
-    handle cursor < limit {
-        Result::Err(_) => Result::Err(()),
-        Result::Ok(_) => handle super::lexer::token_code_at(source, cursor)
-            == u16_value(1) {
-            Result::Ok(_) => Result::Ok(
+    if(cursor < limit) {
+        if(super::lexer::token_code_at(source, cursor) == u16_value(1)) {
+            Result::Ok(
                 token_range(cursor, cursor + usize_value(1))
-            ),
-            Result::Err(_) => handle super::lexer::operator_symbol_at(
+            )
+        } else {
+            if(super::lexer::operator_symbol_at(
                 source,
                 cursor
-            ) {
-                Result::Err(_) => Result::Err(()),
-                Result::Ok(_) => {
-                    let first = token_span(source, cursor);
-                    let end = super::lexer::operator_end(
-                        source,
-                        cursor + usize_value(1),
-                        limit,
-                        super::lexer::span_end(&first)
-                    );
-                    Result::Ok(token_range(cursor, end))
-                }
+            )) {
+                let first = token_span(source, cursor);
+                let end = super::lexer::operator_end(
+                    source,
+                    cursor + usize_value(1),
+                    limit,
+                    super::lexer::span_end(&first)
+                );
+                Result::Ok(token_range(cursor, end))
+            } else {
+                Result::Err(())
             }
         }
+    } else {
+        Result::Err(())
     }
 }
 
@@ -773,9 +769,10 @@ same_operator(
 }
 
 form_matches(form: u8, prefix: Bool) -> Bool {
-    handle prefix {
-        Result::Ok(_) => form == u8_value(1),
-        Result::Err(_) => form != u8_value(1)
+    if(prefix) {
+        form == u8_value(1)
+    } else {
+        form != u8_value(1)
     }
 }
 
@@ -790,39 +787,25 @@ lookup_scope(
     index: usize,
     selected: Option<u32>
 ) -> Result<Option<u32>, BodyError> {
-    handle index < super::headers::fixity_count(nominal) {
-        Result::Err(_) => Result::Ok(move selected),
-        Result::Ok(_) => handle super::headers::fixity_at(nominal, index) {
+    if(index < super::headers::fixity_count(nominal)) {
+        handle super::headers::fixity_at(nominal, index) {
             Result::Err(_) => Result::Ok(move selected),
             Result::Ok(fixity) => {
                 let form = super::headers::fixity_form_code(fixity);
                 let owner = fixity_owner_plus_one(declarations, fixity);
-                let matches = handle owner == owner_plus_one {
-                    Result::Err(_) => false,
-                    Result::Ok(_) => handle form_matches(form, prefix) {
-                        Result::Err(_) => false,
-                        Result::Ok(_) => same_operator(
+                let matches = owner == owner_plus_one
+                    and { form_matches(form, prefix) }
+                    and {
+                        same_operator(
                             original,
                             source,
                             operator,
                             super::headers::fixity_operator_start(fixity),
                             super::headers::fixity_operator_end(fixity)
                         )
-                    }
-                };
-                handle matches {
-                    Result::Err(_) => lookup_scope(
-                        original,
-                        source,
-                        declarations,
-                        nominal,
-                        operator,
-                        prefix,
-                        owner_plus_one,
-                        index + usize_value(1),
-                        move selected
-                    ),
-                    Result::Ok(_) => handle move selected {
+                    };
+                if(matches) {
+                    handle move selected {
                         Result::Err(_) => lookup_scope(
                             original,
                             source,
@@ -836,33 +819,15 @@ lookup_scope(
                         ),
                         Result::Ok(previous) => {
                             let old_index = usize_from_u32(previous);
-                            handle super::headers::fixity_form_at(
+                            if(super::headers::fixity_form_at(
                                 nominal,
                                 old_index
-                            ) == form {
-                                Result::Err(_) => Result::Err(body_error(
-                                    5,
-                                    operator.start,
-                                    super::headers::fixity_operator_start_at(
-                                        nominal,
-                                        old_index
-                                    )
-                                )),
-                                Result::Ok(_) => handle
-                                    super::headers::fixity_precedence_at(
-                                        nominal,
-                                        old_index
-                                    )
-                                        == super::headers::fixity_precedence(fixity) {
-                                    Result::Err(_) => Result::Err(body_error(
-                                        5,
-                                        operator.start,
-                                        super::headers::fixity_operator_start_at(
-                                            nominal,
-                                            old_index
-                                        )
-                                    )),
-                                    Result::Ok(_) => lookup_scope(
+                            ) == form) {
+                                if(super::headers::fixity_precedence_at(
+                                    nominal,
+                                    old_index
+                                ) == super::headers::fixity_precedence(fixity)) {
+                                    lookup_scope(
                                         original,
                                         source,
                                         declarations,
@@ -873,13 +838,45 @@ lookup_scope(
                                         index + usize_value(1),
                                         Result::Ok(previous)
                                     )
+                                } else {
+                                    Result::Err(body_error(
+                                        5,
+                                        operator.start,
+                                        super::headers::fixity_operator_start_at(
+                                            nominal,
+                                            old_index
+                                        )
+                                    ))
                                 }
+                            } else {
+                                Result::Err(body_error(
+                                    5,
+                                    operator.start,
+                                    super::headers::fixity_operator_start_at(
+                                        nominal,
+                                        old_index
+                                    )
+                                ))
                             }
                         }
                     }
+                } else {
+                    lookup_scope(
+                        original,
+                        source,
+                        declarations,
+                        nominal,
+                        operator,
+                        prefix,
+                        owner_plus_one,
+                        index + usize_value(1),
+                        move selected
+                    )
                 }
             }
         }
+    } else {
+        Result::Ok(move selected)
     }
 }
 
@@ -908,9 +905,10 @@ lookup_fixity(
     );
     handle move found {
         Result::Ok(index) => Result::Ok(Result::Ok(index)),
-        Result::Err(_) => handle owner_plus_one == usize_value(0) {
-            Result::Ok(_) => Result::Ok(Result::Err(())),
-            Result::Err(_) => lookup_scope(
+        Result::Err(_) => if(owner_plus_one == usize_value(0)) {
+            Result::Ok(Result::Err(()))
+        } else {
+            lookup_scope(
                 original,
                 source,
                 declarations,
@@ -981,11 +979,7 @@ parse_primary(
     owner_plus_one: usize,
     depth: u16
 ) -> Result<ExprId, BodyError> {
-    handle depth < u16_value(128) {
-        Result::Err(_) => Result::Err(
-            body_error(6, value.cursor, value.cursor)
-        ),
-        Result::Ok(_) => {
+    if(depth < u16_value(128)) {
             let prefix = try(
                 peek_operator(
                     original,
@@ -1049,7 +1043,8 @@ parse_primary(
                     )
                 }
             }
-        }
+    } else {
+        Result::Err(body_error(6, value.cursor, value.cursor))
     }
 }
 
@@ -1074,33 +1069,13 @@ parse_identifier_tail(
     start: usize,
     name_start: usize
 ) -> Result<ExprId, BodyError> {
-    handle value.cursor < value.limit {
-        Result::Err(_) => Result::Ok(push_named_leaf(
-            value,
-            1,
-            start,
-            value.cursor,
-            name_start
-        )),
-        Result::Ok(_) => handle
-            super::lexer::token_code_at(source, value.cursor)
-                == u16_value(19) {
-            Result::Err(_) => Result::Ok(push_named_leaf(
-                value,
-                1,
-                start,
-                value.cursor,
-                name_start
-            )),
-            Result::Ok(_) => {
-                let separator = value.cursor;
+    if(value.cursor < value.limit) {
+        if(super::lexer::token_code_at(source, value.cursor)
+                == u16_value(19)) {
+            let separator = value.cursor;
                 let token = separator + usize_value(1);
-                handle token < value.limit {
-                    Result::Err(_) => Result::Err(
-                        body_error(13, token, separator)
-                    ),
-                    Result::Ok(_) => {
-                        try(
+                if(token < value.limit) {
+                    try(
                             push_identifier_name(
                                 source,
                                 value,
@@ -1116,10 +1091,28 @@ parse_identifier_tail(
                             start,
                             name_start
                         )
-                    }
+                } else {
+                    Result::Err(
+                        body_error(13, token, separator)
+                    )
                 }
-            }
+        } else {
+            Result::Ok(push_named_leaf(
+                value,
+                1,
+                start,
+                value.cursor,
+                name_start
+            ))
         }
+    } else {
+        Result::Ok(push_named_leaf(
+            value,
+            1,
+            start,
+            value.cursor,
+            name_start
+        ))
     }
 }
 
@@ -1148,22 +1141,18 @@ parse_tuple_tail(
     start: usize,
     elements: &mut Vec<u32>
 ) -> Result<ExprId, BodyError> {
-    handle value.cursor < value.limit {
-        Result::Err(_) => Result::Err(body_error(14, value.cursor, start)),
-        Result::Ok(_) => handle
-            super::lexer::token_code_at(source, value.cursor)
-                == u16_value(12) {
-            Result::Ok(_) => {
-                value.cursor = value.cursor + usize_value(1);
+    if(value.cursor < value.limit) {
+        if(super::lexer::token_code_at(source, value.cursor)
+                == u16_value(12)) {
+            value.cursor = value.cursor + usize_value(1);
                 Result::Ok(push_tuple(
                     value,
                     &*elements,
                     start,
                     value.cursor
                 ))
-            },
-            Result::Err(_) => {
-                let element = try(
+        } else {
+            let element = try(
                     parse_expression(
                         original,
                         source,
@@ -1177,11 +1166,8 @@ parse_tuple_tail(
                     @parse_tuple_tail
                 );
                 push_word(&mut *elements, element.index);
-                handle value.cursor < value.limit {
-                    Result::Err(_) => Result::Err(
-                        body_error(14, value.cursor, start)
-                    ),
-                    Result::Ok(_) => handle
+                if(value.cursor < value.limit) {
+                    handle
                         super::lexer::token_code_at(source, value.cursor) {
                         12 => {
                             value.cursor = value.cursor + usize_value(1);
@@ -1210,9 +1196,14 @@ parse_tuple_tail(
                             body_error(14, value.cursor, start)
                         )
                     }
+                } else {
+                    Result::Err(
+                        body_error(14, value.cursor, start)
+                    )
                 }
-            }
         }
+    } else {
+        Result::Err(body_error(14, value.cursor, start))
     }
 }
 
@@ -1226,26 +1217,22 @@ parse_atom(
     depth: u16
 ) -> Result<ExprId, BodyError> {
     let start = value.cursor;
-    handle start < value.limit {
-        Result::Err(_) => Result::Err(body_error(1, start, start)),
-        Result::Ok(_) => handle super::lexer::token_code_at(source, start) {
+    if(start < value.limit) {
+        handle super::lexer::token_code_at(source, start) {
             1 => parse_identifier(source, value, start),
             4 => {
                 value.cursor = start + usize_value(1);
                 Result::Ok(push_leaf(value, 2, start, value.cursor))
             },
-            11 => handle start + usize_value(1) < value.limit {
-                Result::Err(_) => Result::Err(body_error(2, start, start)),
-                Result::Ok(_) => handle super::lexer::token_code_at(
+            11 => if(start + usize_value(1) < value.limit) {
+                if(super::lexer::token_code_at(
                     source,
                     start + usize_value(1)
-                ) == u16_value(12) {
-                    Result::Ok(_) => {
-                        value.cursor = start + usize_value(2);
+                ) == u16_value(12)) {
+                    value.cursor = start + usize_value(2);
                         Result::Ok(push_leaf(value, 3, start, value.cursor))
-                    },
-                    Result::Err(_) => {
-                        value.cursor = start + usize_value(1);
+                } else {
+                    value.cursor = start + usize_value(1);
                         let child = try(
                             parse_expression(
                                 original,
@@ -1259,11 +1246,8 @@ parse_atom(
                             ),
                             @parse_atom
                         );
-                        handle value.cursor < value.limit {
-                                Result::Err(_) => Result::Err(
-                                    body_error(2, value.cursor, start)
-                                ),
-                                Result::Ok(_) => handle
+                        if(value.cursor < value.limit) {
+                            handle
                                     super::lexer::token_code_at(
                                         source,
                                         value.cursor
@@ -1307,10 +1291,15 @@ parse_atom(
                                         body_error(2, value.cursor, start)
                                     )
                                 }
+                        } else {
+                            Result::Err(
+                                    body_error(2, value.cursor, start)
+                                )
                         }
-                    }
                 }
-                },
+            } else {
+                Result::Err(body_error(2, start, start))
+            },
             13 => {
                 value.cursor = start + usize_value(1);
                 let statements = Vec::new();
@@ -1329,6 +1318,8 @@ parse_atom(
             },
             _ => Result::Err(body_error(1, start, start))
         }
+    } else {
+        Result::Err(body_error(1, start, start))
     }
 }
 
@@ -1343,18 +1334,15 @@ parse_call_arguments(
     arguments: &mut Vec<u32>,
     open: usize
 ) -> Result<(), BodyError> {
-    handle value.cursor < value.limit {
-        Result::Err(_) => Result::Err(body_error(10, value.cursor, open)),
-        Result::Ok(_) => handle super::lexer::token_code_at(
+    if(value.cursor < value.limit) {
+        if(super::lexer::token_code_at(
             source,
             value.cursor
-        ) == u16_value(12) {
-            Result::Ok(_) => {
-                value.cursor = value.cursor + usize_value(1);
+        ) == u16_value(12)) {
+            value.cursor = value.cursor + usize_value(1);
                 Result::Ok(())
-            },
-            Result::Err(_) => {
-                let argument = try(
+        } else {
+            let argument = try(
                     parse_expression(
                         original,
                         source,
@@ -1368,11 +1356,8 @@ parse_call_arguments(
                     @parse_call_arguments
                 );
                 push_word(&mut *arguments, argument.index);
-                handle value.cursor < value.limit {
-                    Result::Err(_) => Result::Err(
-                        body_error(10, value.cursor, open)
-                    ),
-                    Result::Ok(_) => handle
+                if(value.cursor < value.limit) {
+                    handle
                         super::lexer::token_code_at(source, value.cursor) {
                         12 => {
                             value.cursor = value.cursor + usize_value(1);
@@ -1396,9 +1381,14 @@ parse_call_arguments(
                             body_error(10, value.cursor, open)
                         )
                     }
+                } else {
+                    Result::Err(
+                        body_error(10, value.cursor, open)
+                    )
                 }
-            }
         }
+    } else {
+        Result::Err(body_error(10, value.cursor, open))
     }
 }
 
@@ -1415,13 +1405,10 @@ parse_struct_fields(
     open: usize,
     fields: &mut Vec<u32>
 ) -> Result<ExprId, BodyError> {
-    handle value.cursor < value.limit {
-        Result::Err(_) => Result::Err(body_error(15, value.cursor, open)),
-        Result::Ok(_) => handle
-            super::lexer::token_code_at(source, value.cursor)
-                == u16_value(14) {
-            Result::Ok(_) => {
-                value.cursor = value.cursor + usize_value(1);
+    if(value.cursor < value.limit) {
+        if(super::lexer::token_code_at(source, value.cursor)
+                == u16_value(14)) {
+            value.cursor = value.cursor + usize_value(1);
                 Result::Ok(push_struct(
                     value,
                     constructor,
@@ -1429,24 +1416,15 @@ parse_struct_fields(
                     start,
                     value.cursor
                 ))
-            },
-            Result::Err(_) => {
-                let name_token = value.cursor;
+        } else {
+            let name_token = value.cursor;
                 handle super::lexer::token_kind_at(source, name_token) {
                     TokenKind::Ident(name) => {
                         let colon = name_token + usize_value(1);
-                        handle colon < value.limit {
-                            Result::Err(_) => Result::Err(
-                                body_error(15, colon, open)
-                            ),
-                            Result::Ok(_) => handle
-                                super::lexer::token_code_at(source, colon)
-                                    == u16_value(18) {
-                                Result::Err(_) => Result::Err(
-                                    body_error(15, colon, name_token)
-                                ),
-                                Result::Ok(_) => {
-                                    value.cursor = colon + usize_value(1);
+                        if(colon < value.limit) {
+                            if(super::lexer::token_code_at(source, colon)
+                                    == u16_value(18)) {
+                                value.cursor = colon + usize_value(1);
                                     let field = try(
                                         parse_expression(
                                             original,
@@ -1472,15 +1450,8 @@ parse_struct_fields(
                                         &mut *fields,
                                         field.index
                                     );
-                                    handle value.cursor < value.limit {
-                                        Result::Err(_) => Result::Err(
-                                            body_error(
-                                                15,
-                                                value.cursor,
-                                                open
-                                            )
-                                        ),
-                                        Result::Ok(_) => handle
+                                    if(value.cursor < value.limit) {
+                                        handle
                                             super::lexer::token_code_at(
                                                 source,
                                                 value.cursor
@@ -1523,15 +1494,31 @@ parse_struct_fields(
                                                 )
                                             )
                                         }
+                                    } else {
+                                        Result::Err(
+                                            body_error(
+                                                15,
+                                                value.cursor,
+                                                open
+                                            )
+                                        )
                                     }
-                                }
+                            } else {
+                                Result::Err(
+                                    body_error(15, colon, name_token)
+                                )
                             }
+                        } else {
+                            Result::Err(
+                                body_error(15, colon, open)
+                            )
                         }
                     },
                     _ => Result::Err(body_error(15, name_token, open))
                 }
-            }
         }
+    } else {
+        Result::Err(body_error(15, value.cursor, open))
     }
 }
 
@@ -1543,9 +1530,8 @@ parse_projection_name(
     dot: usize
 ) -> Result<ExprId, BodyError> {
     let token = dot + usize_value(1);
-    handle token < value.limit {
-        Result::Err(_) => Result::Err(body_error(16, token, dot)),
-        Result::Ok(_) => handle super::lexer::token_kind_at(source, token) {
+    if(token < value.limit) {
+        handle super::lexer::token_kind_at(source, token) {
             TokenKind::Ident(name) => {
                 value.cursor = token + usize_value(1);
                 Result::Ok(push_projection(
@@ -1557,11 +1543,10 @@ parse_projection_name(
                     value.cursor
                 ))
             },
-            TokenKind::Number(number) => handle
-                super::lexer::number_is_float(&number) {
-                Result::Ok(_) => Result::Err(body_error(16, token, dot)),
-                Result::Err(_) => {
-                    let text = range_text(
+            TokenKind::Number(number) => if(super::lexer::number_is_float(&number)) {
+                Result::Err(body_error(16, token, dot))
+            } else {
+                let text = range_text(
                         original,
                         source,
                         token,
@@ -1570,12 +1555,8 @@ parse_projection_name(
                     handle parse_u64(&text) {
                         Result::Err(_) =>
                             Result::Err(body_error(16, token, dot)),
-                        Result::Ok(field) => handle
-                            field <= 4294967295 {
-                            Result::Err(_) =>
-                                Result::Err(body_error(16, token, dot)),
-                            Result::Ok(_) => {
-                                value.cursor = token + usize_value(1);
+                        Result::Ok(field) => if(field <= 4294967295) {
+                            value.cursor = token + usize_value(1);
                                 Result::Ok(push_projection(
                                     value,
                                     subject,
@@ -1584,13 +1565,15 @@ parse_projection_name(
                                     token,
                                     value.cursor
                                 ))
-                            }
+                        } else {
+                            Result::Err(body_error(16, token, dot))
                         }
                     }
-                }
             },
             _ => Result::Err(body_error(16, token, dot))
         }
+    } else {
+        Result::Err(body_error(16, token, dot))
     }
 }
 
@@ -1604,13 +1587,9 @@ parse_postfix(
     depth: u16,
     callee: ExprId
 ) -> Result<ExprId, BodyError> {
-    handle value.cursor < value.limit {
-        Result::Err(_) => Result::Ok(callee),
-        Result::Ok(_) => handle depth < u16_value(128) {
-            Result::Err(_) => Result::Err(
-                body_error(6, value.cursor, value.cursor)
-            ),
-            Result::Ok(_) => handle
+    if(value.cursor < value.limit) {
+        if(depth < u16_value(128)) {
+            handle
                 super::lexer::token_code_at(source, value.cursor) {
                 11 => {
                     let start = node_tokens(&*value, callee).start;
@@ -1653,13 +1632,9 @@ parse_postfix(
                 13 => {
                     let found_kind = node_kind(&*value, callee);
                     let start = node_tokens(&*value, callee).start;
-                    handle found_kind == u8_value(1) {
-                        Result::Err(_) => Result::Ok(callee),
-                        Result::Ok(_) => handle
-                            node_name_count(&*value, callee)
-                                == u32_value(1) {
-                        Result::Err(_) => Result::Ok(callee),
-                        Result::Ok(_) => {
+                    if(found_kind == u8_value(1)) {
+                        if(node_name_count(&*value, callee)
+                                == u32_value(1)) {
                             let open = value.cursor;
                             let fields = Vec::new();
                             value.cursor = open + usize_value(1);
@@ -1689,8 +1664,11 @@ parse_postfix(
                                 depth + u16_value(1),
                                 found
                             )
+                        } else {
+                            Result::Ok(callee)
                         }
-                        }
+                    } else {
+                        Result::Ok(callee)
                     }
                 },
                 21 => {
@@ -1718,7 +1696,13 @@ parse_postfix(
                 },
                 _ => Result::Ok(callee)
             }
+        } else {
+            Result::Err(
+                body_error(6, value.cursor, value.cursor)
+            )
         }
+    } else {
+        Result::Ok(callee)
     }
 }
 
@@ -1728,18 +1712,15 @@ infix_separated(
     left: ExprId,
     operator: OperatorUse
 ) -> Bool {
-    handle super::lexer::token_code_at(source, operator.start) == u16_value(1) {
-        Result::Ok(_) => true,
-        Result::Err(_) => {
+    super::lexer::token_code_at(source, operator.start) == u16_value(1)
+        or {
             let left_end = node_tokens(value, left).end;
             let left_span = token_span(source, left_end - usize_value(1));
             let operator_span = token_span(source, operator.start);
-            handle super::lexer::span_end(&left_span)
-                == super::lexer::span_start(&operator_span) {
-                Result::Ok(_) => false,
-                Result::Err(_) => handle operator.end < value.limit {
-                    Result::Err(_) => false,
-                    Result::Ok(_) => {
+            super::lexer::span_end(&left_span)
+                != super::lexer::span_start(&operator_span)
+                and { operator.end < value.limit }
+                and {
                         let last = token_span(
                             source,
                             operator.end - usize_value(1)
@@ -1747,11 +1728,8 @@ infix_separated(
                         let next = token_span(source, operator.end);
                         super::lexer::span_end(&last)
                             != super::lexer::span_start(&next)
-                    }
                 }
-            }
         }
-    }
 }
 
 parse_chain(
@@ -1780,14 +1758,12 @@ parse_chain(
     );
     handle move found {
             Result::Err(_) => finish_chain(value, output, pending),
-            Result::Ok(operator) => handle operator.precedence < minimum {
-                Result::Ok(_) => finish_chain(value, output, pending),
-                Result::Err(_) => {
-                    let left = last_expr(output);
-                    handle infix_separated(source, &*value, left, operator) {
-                        Result::Err(_) => finish_chain(value, output, pending),
-                        Result::Ok(_) => {
-                            value.cursor = operator.end;
+            Result::Ok(operator) => if(operator.precedence < minimum) {
+                finish_chain(value, output, pending)
+            } else {
+                let left = last_expr(output);
+                    if(infix_separated(source, &*value, left, operator)) {
+                        value.cursor = operator.end;
                             let operand = try(
                                 parse_primary(
                                     original,
@@ -1829,9 +1805,9 @@ parse_chain(
                                 output,
                                 pending
                             )
-                        }
+                    } else {
+                        finish_chain(value, output, pending)
                     }
-                }
             }
     }
 }
@@ -1865,22 +1841,17 @@ prepare_operator(
     pending: &mut Vec<u32>,
     incoming: OperatorUse
 ) -> Result<(), BodyError> {
-    handle word_count(&*pending) == usize_value(0) {
-        Result::Ok(_) => Result::Ok(()),
-        Result::Err(_) => {
-            let top = last_operator(&*pending);
-            handle top.precedence > incoming.precedence {
-                Result::Ok(_) => {
-                    reduce_once(&mut *value, &mut *output, &mut *pending);
+    if(word_count(&*pending) == usize_value(0)) {
+        Result::Ok(())
+    } else {
+        let top = last_operator(&*pending);
+            if(top.precedence > incoming.precedence) {
+                reduce_once(&mut *value, &mut *output, &mut *pending);
                     prepare_operator(value, output, pending, incoming)
-                },
-                Result::Err(_) => handle top.precedence == incoming.precedence {
-                    Result::Err(_) => Result::Ok(()),
-                    Result::Ok(_) => handle top.form == incoming.form {
-                        Result::Err(_) => Result::Err(
-                            body_error(3, incoming.start, top.start)
-                        ),
-                        Result::Ok(_) => handle incoming.form {
+            } else {
+                if(top.precedence == incoming.precedence) {
+                    if(top.form == incoming.form) {
+                        handle incoming.form {
                             2 => {
                                 reduce_once(
                                     &mut *value,
@@ -1899,10 +1870,15 @@ prepare_operator(
                                 body_error(4, incoming.start, top.start)
                             )
                         }
+                    } else {
+                        Result::Err(
+                            body_error(3, incoming.start, top.start)
+                        )
                     }
+                } else {
+                    Result::Ok(())
                 }
             }
-        }
     }
 }
 
@@ -1911,14 +1887,13 @@ finish_chain(
     output: &mut Vec<u32>,
     pending: &mut Vec<u32>
 ) -> Result<ExprId, BodyError> {
-    handle word_count(&*pending) == usize_value(0) {
-        Result::Ok(_) => Result::Ok(ExprId {
+    if(word_count(&*pending) == usize_value(0)) {
+        Result::Ok(ExprId {
             index: pop_word(&mut *output)
-        }),
-        Result::Err(_) => {
-            reduce_once(&mut *value, &mut *output, &mut *pending);
+        })
+    } else {
+        reduce_once(&mut *value, &mut *output, &mut *pending);
             finish_chain(value, output, pending)
-        }
     }
 }
 
@@ -1975,29 +1950,16 @@ parse_block_statement(
     handle super::lexer::token_kind_at(source, start) {
         TokenKind::Keyword(Keyword::Let) => {
             let name_token = start + usize_value(1);
-            handle name_token < value.limit {
-                Result::Err(_) => Result::Err(body_error(11, name_token, start)),
-                Result::Ok(_) => handle super::lexer::token_code_at(
+            if(name_token < value.limit) {
+                if(super::lexer::token_code_at(
                     source,
                     name_token
-                ) == u16_value(1) {
-                    Result::Err(_) => Result::Err(
-                        body_error(11, name_token, start)
-                    ),
-                    Result::Ok(_) => {
-                        let equals = name_token + usize_value(1);
-                        handle equals < value.limit {
-                            Result::Err(_) => Result::Err(
-                                body_error(11, equals, start)
-                            ),
-                            Result::Ok(_) => handle
-                                super::lexer::token_code_at(source, equals)
-                                    == u16_value(31) {
-                                Result::Err(_) => Result::Err(
-                                    body_error(11, equals, start)
-                                ),
-                                Result::Ok(_) => {
-                                    value.cursor = equals + usize_value(1);
+                ) == u16_value(1)) {
+                    let equals = name_token + usize_value(1);
+                        if(equals < value.limit) {
+                            if(super::lexer::token_code_at(source, equals)
+                                    == u16_value(31)) {
+                                value.cursor = equals + usize_value(1);
                                     let initializer = try(
                                         parse_expression(
                                             original,
@@ -2019,11 +1981,23 @@ parse_block_statement(
                                         initializer
                                     );
                                     Result::Ok(())
-                                }
+                            } else {
+                                Result::Err(
+                                    body_error(11, equals, start)
+                                )
                             }
+                        } else {
+                            Result::Err(
+                                body_error(11, equals, start)
+                            )
                         }
-                    }
+                } else {
+                    Result::Err(
+                        body_error(11, name_token, start)
+                    )
                 }
+            } else {
+                Result::Err(body_error(11, name_token, start))
             }
         },
         _ => {
@@ -2058,20 +2032,8 @@ parse_block_after_statement(
     close_code: u16,
     statements: &mut Vec<u32>
 ) -> Result<ExprId, BodyError> {
-    handle value.cursor < value.limit {
-        Result::Err(_) => parse_block_contents(
-            original,
-            source,
-            declarations,
-            nominal,
-            value,
-            owner_plus_one,
-            depth,
-            start,
-            close_code,
-            statements
-        ),
-        Result::Ok(_) => handle super::lexer::token_code_at(
+    if(value.cursor < value.limit) {
+        handle super::lexer::token_code_at(
             source,
             value.cursor
         ) {
@@ -2090,11 +2052,8 @@ parse_block_after_statement(
                     statements
                 )
             },
-            14 => handle close_code == u16_value(14) {
-                Result::Err(_) => Result::Err(
-                    body_error(12, value.cursor, start)
-                ),
-                Result::Ok(_) => parse_block_contents(
+            14 => if(close_code == u16_value(14)) {
+                parse_block_contents(
                     original,
                     source,
                     declarations,
@@ -2106,9 +2065,26 @@ parse_block_after_statement(
                     close_code,
                     statements
                 )
+            } else {
+                Result::Err(
+                    body_error(12, value.cursor, start)
+                )
             },
             _ => Result::Err(body_error(12, value.cursor, start))
         }
+    } else {
+        parse_block_contents(
+            original,
+            source,
+            declarations,
+            nominal,
+            value,
+            owner_plus_one,
+            depth,
+            start,
+            close_code,
+            statements
+        )
     }
 }
 
@@ -2124,31 +2100,21 @@ parse_block_contents(
     close_code: u16,
     statements: &mut Vec<u32>
 ) -> Result<ExprId, BodyError> {
-    handle value.cursor < value.limit {
-        Result::Err(_) => handle close_code == u16_value(0) {
-            Result::Err(_) => Result::Err(
-                body_error(12, value.cursor, start)
-            ),
-            Result::Ok(_) => Result::Ok(
-                push_block(value, statements, start, value.cursor)
-            )
-        },
-        Result::Ok(_) => handle close_code == u16_value(14) {
-            Result::Ok(_) => handle super::lexer::token_code_at(
+    if(value.cursor < value.limit) {
+        if(close_code == u16_value(14)) {
+            if(super::lexer::token_code_at(
                 source,
                 value.cursor
-            ) == u16_value(14) {
-                Result::Ok(_) => {
-                    value.cursor = value.cursor + usize_value(1);
+            ) == u16_value(14)) {
+                value.cursor = value.cursor + usize_value(1);
                     Result::Ok(push_block(
                         value,
                         statements,
                         start,
                         value.cursor
                     ))
-                },
-                Result::Err(_) => {
-                    try(
+            } else {
+                try(
                         parse_block_statement(
                             original,
                             source,
@@ -2173,10 +2139,9 @@ parse_block_contents(
                         close_code,
                         statements
                     )
-                }
-            },
-            Result::Err(_) => {
-                try(
+            }
+        } else {
+            try(
                     parse_block_statement(
                         original,
                         source,
@@ -2201,7 +2166,16 @@ parse_block_contents(
                     close_code,
                     statements
                 )
-            }
+        }
+    } else {
+        if(close_code == u16_value(0)) {
+            Result::Ok(
+                push_block(value, statements, start, value.cursor)
+            )
+        } else {
+            Result::Err(
+                body_error(12, value.cursor, start)
+            )
         }
     }
 }
@@ -2214,10 +2188,8 @@ pub parse_function_body(
 ) -> Result<ParsedBody, BodyError> {
     handle super::scanner::shell_at(declarations, shell) {
         Result::Err(_) => Result::Err(body_error(7, shell, shell)),
-        Result::Ok(declaration) => handle
-            super::scanner::shell_kind_code(declaration) == u8_value(12) {
-            Result::Err(_) => Result::Err(body_error(7, shell, shell)),
-            Result::Ok(_) => handle
+        Result::Ok(declaration) => if(super::scanner::shell_kind_code(declaration) == u8_value(12)) {
+            handle
                 super::scanner::shell_body_range(declaration) {
                 Result::Err(_) => Result::Err(body_error(7, shell, shell)),
                 Result::Ok(body) => {
@@ -2257,6 +2229,8 @@ pub parse_function_body(
                     })
                 }
             }
+        } else {
+            Result::Err(body_error(7, shell, shell))
         }
     }
 }
@@ -2319,10 +2293,8 @@ write_call_arguments(
     node: &ExprNode,
     index: u32
 ) -> Result<(), BodyError> {
-    handle index < node.children.count {
-        Result::Err(_) => Result::Ok(()),
-        Result::Ok(_) => {
-            try(
+    if(index < node.children.count) {
+        try(
                 write_expression(
                     &mut *output,
                     original,
@@ -2340,7 +2312,8 @@ write_call_arguments(
                 node,
                 index + u32_value(1)
             )
-        }
+    } else {
+        Result::Ok(())
     }
 }
 
@@ -2389,10 +2362,8 @@ write_children(
     node: &ExprNode,
     index: u32
 ) -> Result<(), BodyError> {
-    handle index < node.children.count {
-        Result::Err(_) => Result::Ok(()),
-        Result::Ok(_) => {
-            try(
+    if(index < node.children.count) {
+        try(
                 write_expression(
                     &mut *output,
                     original,
@@ -2410,7 +2381,8 @@ write_children(
                 node,
                 index + u32_value(1)
             )
-        }
+    } else {
+        Result::Ok(())
     }
 }
 
@@ -2422,10 +2394,8 @@ write_struct_fields(
     node: &ExprNode,
     index: u32
 ) -> Result<(), BodyError> {
-    handle index < node.children.count {
-        Result::Err(_) => Result::Ok(()),
-        Result::Ok(_) => {
-            try(
+    if(index < node.children.count) {
+        try(
                 write_node_name(
                     &mut *output,
                     original,
@@ -2454,7 +2424,8 @@ write_struct_fields(
                 node,
                 index + u32_value(1)
             )
-        }
+    } else {
+        Result::Ok(())
     }
 }
 
@@ -2466,10 +2437,8 @@ write_block_statements(
     node: &ExprNode,
     index: u32
 ) -> Result<(), BodyError> {
-    handle index < node.children.count {
-        Result::Err(_) => Result::Ok(()),
-        Result::Ok(_) => {
-            let statement = edge_position_at(value, node, index);
+    if(index < node.children.count) {
+        let statement = edge_position_at(value, node, index);
             handle statement {
                 1 => {
                     ByteBuf::push(&mut *output, 1);
@@ -2523,7 +2492,8 @@ write_block_statements(
                     )
                 }
             }
-        }
+    } else {
+        Result::Ok(())
     }
 }
 
@@ -2725,19 +2695,21 @@ function_count(
     index: usize,
     count: usize
 ) -> usize {
-    handle index < super::scanner::shell_count(declarations) {
-        Result::Err(_) => count,
-        Result::Ok(_) => handle super::scanner::shell_at(declarations, index) {
+    if(index < super::scanner::shell_count(declarations)) {
+        handle super::scanner::shell_at(declarations, index) {
             Result::Err(_) => count,
             Result::Ok(shell) => function_count(
                 declarations,
                 index + usize_value(1),
-                handle super::scanner::shell_kind_code(shell) == u8_value(12) {
-                    Result::Ok(_) => count + usize_value(1),
-                    Result::Err(_) => count
+                if(super::scanner::shell_kind_code(shell) == u8_value(12)) {
+                    count + usize_value(1)
+                } else {
+                    count
                 }
             )
         }
+    } else {
+        count
     }
 }
 
@@ -2762,21 +2734,11 @@ write_functions(
     declarations: &super::scanner::DeclarationIndex,
     index: usize
 ) -> Result<(), BodyError> {
-    handle index < super::scanner::shell_count(declarations) {
-        Result::Err(_) => Result::Ok(()),
-        Result::Ok(_) => handle super::scanner::shell_at(declarations, index) {
+    if(index < super::scanner::shell_count(declarations)) {
+        handle super::scanner::shell_at(declarations, index) {
             Result::Err(_) => Result::Ok(()),
-            Result::Ok(shell) => handle
-                super::scanner::shell_kind_code(shell) == u8_value(12) {
-                Result::Err(_) => write_functions(
-                    output,
-                    original,
-                    headers,
-                    declarations,
-                    index + usize_value(1)
-                ),
-                Result::Ok(_) => {
-                    let body = try(
+            Result::Ok(shell) => if(super::scanner::shell_kind_code(shell) == u8_value(12)) {
+                let body = try(
                         parse_function_body(
                             original,
                             headers,
@@ -2804,9 +2766,18 @@ write_functions(
                         declarations,
                         index + usize_value(1)
                     )
-                }
+            } else {
+                write_functions(
+                    output,
+                    original,
+                    headers,
+                    declarations,
+                    index + usize_value(1)
+                )
             }
         }
+    } else {
+        Result::Ok(())
     }
 }
 
@@ -2856,10 +2827,8 @@ process_inputs(
     index: usize,
     output: &mut ByteBuf
 ) / FileRead {
-    handle index < Vec::len(arguments) {
-        Result::Err(_) => (),
-        Result::Ok(_) => {
-            let path = *Vec::index(arguments, index);
+    if(index < Vec::len(arguments)) {
+        let path = *Vec::index(arguments, index);
             let bytes = read_file(move path);
             handle String::from_utf8(move bytes) {
                 Result::Err(_) => ByteBuf::push(&mut *output, 1),
@@ -2870,19 +2839,20 @@ process_inputs(
                 index + usize_value(1),
                  output
             )
-        }
+    } else {
+        ()
     }
 }
 
 pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
     let arguments = process_args();
     let count = Vec::len(&arguments);
-    handle count < usize_value(2) {
-        Result::Ok(_) => write_diagnostic(
+    if(count < usize_value(2)) {
+        write_diagnostic(
             "usage: grandiose-self-host-bodies <output> <input>..."
-        ),
-        Result::Err(_) => {
-            let output_path = *Vec::index(&arguments, 0);
+        )
+    } else {
+        let output_path = *Vec::index(&arguments, 0);
             let encoded = ByteBuf::new();
             ByteBuf::write_u32_le(
                 &mut encoded,
@@ -2890,7 +2860,6 @@ pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
             );
             process_inputs(&arguments, 1, &mut encoded);
             write_file(move output_path, ByteBuf::finish( encoded))
-        }
     }
 }
 

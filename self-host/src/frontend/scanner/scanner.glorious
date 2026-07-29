@@ -164,13 +164,11 @@ ident_is(
     index: usize,
     expected: &String
 ) -> Bool {
-    handle token_ident(value, index) {
-        Result::Err(_) => false,
-        Result::Ok(name) => handle super::lexer::lexeme(value, move name) {
-            Result::Err(_) => false,
-            Result::Ok(found) => *found == *expected
-        }
-    }
+    if(token_ident(value, index) is Result::Ok(name)) {
+        if(super::lexer::lexeme(value, name) is Result::Ok(found)) {
+            *found == *expected
+        } else { false }
+    } else { false }
 }
 
 token_is_number(value: &super::lexer::LexedSource, index: usize) -> Bool {
@@ -214,61 +212,45 @@ matching_close_walk(
     stack: Vec<OpenDelimiter>
 ) -> Result<usize, ScanError> {
     let count = super::lexer::token_count(value);
-    handle index < count {
-        Result::Err(_) => handle Vec::last(&stack) {
-            Result::Ok(open) => Result::Err(scan_error(3, count, open.token)),
-            Result::Err(_) => Result::Err(scan_error(5, count, count))
-        },
-        Result::Ok(_) => handle token_is_eof(value, index) {
-            Result::Ok(_) => handle Vec::last(&stack) {
+    if(index < count) { if(token_is_eof(value, index)) {
+            handle Vec::last(&stack) {
                 Result::Ok(open) => Result::Err(scan_error(3, index, open.token)),
                 Result::Err(_) => Result::Err(scan_error(5, index, count))
-            },
-            Result::Err(_) => {
+            }
+        } else {
                 let kind = token_kind_at(value, index);
                 let opening = delimiter_open(kind);
                 let closing = delimiter_close(kind);
-                handle u8_equal(opening, 0) {
-                    Result::Err(_) => {
-                        let next =  stack;
-                        Vec::push(
-                            &mut next,
-                            OpenDelimiter { kind: opening, token: index }
-                        );
-                        matching_close_walk(value, index + usize_value(1), next)
-                    },
-                    Result::Ok(_) => handle u8_equal(closing, 0) {
-                        Result::Ok(_) => matching_close_walk(
+                if(u8_equal(opening, 0)) { if(u8_equal(closing, 0)) { matching_close_walk(
                             value,
                             index + usize_value(1),
                              stack
-                        ),
-                        Result::Err(_) => {
-                            let next =  stack;
-                            handle Vec::pop(&mut next) {
-                                Result::Err(_) => Result::Err(
-                                    scan_error(1, index, count)
-                                ),
-                                Result::Ok(open) => handle u8_equal(open.kind, closing) {
-                                    Result::Err(_) => Result::Err(
-                                        scan_error(2, index, open.token)
-                                    ),
-                                    Result::Ok(_) => handle Vec::is_empty(&next) {
-                                        Result::Ok(_) => Result::Ok(index),
-                                        Result::Err(_) => matching_close_walk(
-                                            value,
-                                            index + usize_value(1),
-                                            next
-                                        )
-                                    }
-                                }
-                            }
+                        ) } else {
+                        let next =  stack;
+                        handle Vec::pop(&mut next) {
+                            Result::Err(_) => Result::Err(
+                                scan_error(1, index, count)
+                            ),
+                            Result::Ok(open) => if(u8_equal(open.kind, closing)) { if(Vec::is_empty(&next)) { Result::Ok(index) } else { matching_close_walk(
+                                        value,
+                                        index + usize_value(1),
+                                        next
+                                    ) } } else { Result::Err(
+                                    scan_error(2, index, open.token)
+                                ) }
                         }
-                    }
+                    } } else {
+                    let next =  stack;
+                    Vec::push(
+                        &mut next,
+                        OpenDelimiter { kind: opening, token: index }
+                    );
+                    matching_close_walk(value, index + usize_value(1), next)
                 }
-            }
-        }
-    }
+        } } else { handle Vec::last(&stack) {
+            Result::Ok(open) => Result::Err(scan_error(3, count, open.token)),
+            Result::Err(_) => Result::Err(scan_error(5, count, count))
+        } }
 }
 
 matching_close(
@@ -276,16 +258,13 @@ matching_close(
     open: usize
 ) -> Result<usize, ScanError> {
     let kind = delimiter_open(token_kind_at(value, open));
-    handle u8_equal(kind, 0) {
-        Result::Ok(_) => Result::Err(scan_error(5, open, open)),
-        Result::Err(_) => {
-            let stack = Vec::new();
-            Vec::push(
-                &mut stack,
-                OpenDelimiter { kind: kind, token: open }
-            );
-            matching_close_walk(value, open + usize_value(1),  stack)
-        }
+    if(u8_equal(kind, 0)) { Result::Err(scan_error(5, open, open)) } else {
+        let stack = Vec::new();
+        Vec::push(
+            &mut stack,
+            OpenDelimiter { kind: kind, token: open }
+        );
+        matching_close_walk(value, open + usize_value(1),  stack)
     }
 }
 
@@ -295,49 +274,34 @@ find_semicolon(
     limit: usize,
     start: usize
 ) -> Result<usize, ScanError> {
-    handle index < limit {
-        Result::Err(_) => Result::Err(scan_error(5, limit, start)),
-        Result::Ok(_) => handle token_is_eof(value, index) {
-            Result::Ok(_) => Result::Err(scan_error(5, index, start)),
-            Result::Err(_) => {
-                let kind = token_kind_at(value, index);
-                let opening = delimiter_open(kind);
-                let closing = delimiter_close(kind);
-                handle token_is_semicolon(value, index) {
-                    Result::Ok(_) => Result::Ok(index),
-                    Result::Err(_) => handle u8_equal(opening, 0) {
-                        Result::Err(_) => {
-                            let close = try(
-                                matching_close(value, index),
-                                @find_semicolon
-                            );
-                            find_semicolon(
-                                value,
-                                close + usize_value(1),
-                                limit,
-                                start
+    if(index < limit) { if(token_is_eof(value, index)) { Result::Err(scan_error(5, index, start)) } else {
+            let kind = token_kind_at(value, index);
+            let opening = delimiter_open(kind);
+            let closing = delimiter_close(kind);
+            if(token_is_semicolon(value, index)) { Result::Ok(index) } else { if(u8_equal(opening, 0)) { if(u8_equal(closing, 0)) { find_semicolon(
+                            value,
+                            index + usize_value(1),
+                            limit,
+                            start
+                        ) } else { Result::Err(
+                            scan_error(
+                                1,
+                                index,
+                                super::lexer::token_count(value)
                             )
-                        },
-                        Result::Ok(_) => handle u8_equal(closing, 0) {
-                            Result::Ok(_) => find_semicolon(
-                                value,
-                                index + usize_value(1),
-                                limit,
-                                start
-                            ),
-                            Result::Err(_) => Result::Err(
-                                scan_error(
-                                    1,
-                                    index,
-                                    super::lexer::token_count(value)
-                                )
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
+                        ) } } else {
+                    let close = try(
+                        matching_close(value, index),
+                        @find_semicolon
+                    );
+                    find_semicolon(
+                        value,
+                        close + usize_value(1),
+                        limit,
+                        start
+                    )
+                } }
+        } } else { Result::Err(scan_error(5, limit, start)) }
 }
 
 find_body(
@@ -347,90 +311,68 @@ find_body(
     start: usize,
     function: Bool
 ) -> Result<TokenRange, ScanError> {
-    handle index < limit {
-        Result::Err(_) => Result::Err(scan_error(5, limit, start)),
-        Result::Ok(_) => handle token_is_eof(value, index) {
-            Result::Ok(_) => Result::Err(scan_error(5, index, start)),
-            Result::Err(_) => {
-                let kind = token_kind_at(value, index);
-                let opening = delimiter_open(kind);
-                let closing = delimiter_close(kind);
-                handle u8_equal(opening, 0) {
-                    Result::Ok(_) => handle u8_equal(closing, 0) {
-                        Result::Ok(_) => find_body(
-                            value,
-                            index + usize_value(1),
-                            limit,
-                            start,
-                            function
-                        ),
-                        Result::Err(_) => Result::Err(
-                            scan_error(
-                                1,
-                                index,
-                                super::lexer::token_count(value)
-                            )
+    if(index < limit) { if(token_is_eof(value, index)) { Result::Err(scan_error(5, index, start)) } else {
+            let kind = token_kind_at(value, index);
+            let opening = delimiter_open(kind);
+            let closing = delimiter_close(kind);
+            if(u8_equal(opening, 0)) { if(u8_equal(closing, 0)) { find_body(
+                        value,
+                        index + usize_value(1),
+                        limit,
+                        start,
+                        function
+                    ) } else { Result::Err(
+                        scan_error(
+                            1,
+                            index,
+                            super::lexer::token_count(value)
                         )
-                    },
-                    Result::Err(_) => handle opening != 2 {
-                        Result::Err(_) => handle function {
-                            Result::Ok(_) => handle index > start {
-                                Result::Err(_) => body_range(
+                    ) } } else { if(opening != 2) {
+                    let close = try(
+                        matching_close(value, index),
+                        @find_body
+                    );
+                    find_body(
+                        value,
+                        close + usize_value(1),
+                        limit,
+                        start,
+                        function
+                    )
+                } else {
+                    if(function) { if(index > start) { if(token_is_slash(
+                                value,
+                                index - usize_value(1)
+                            )) {
+                                let close = try(
+                                    matching_close(value, index),
+                                    @find_body
+                                );
+                                find_body(
+                                    value,
+                                    close + usize_value(1),
+                                    limit,
+                                    start,
+                                    function
+                                )
+                            } else { body_range(
                                     value,
                                     index,
                                     limit,
                                     start
-                                ),
-                                Result::Ok(_) => handle token_is_slash(
-                                    value,
-                                    index - usize_value(1)
-                                ) {
-                                    Result::Err(_) => body_range(
-                                        value,
-                                        index,
-                                        limit,
-                                        start
-                                    ),
-                                    Result::Ok(_) => {
-                                        let close = try(
-                                            matching_close(value, index),
-                                            @find_body
-                                        );
-                                        find_body(
-                                            value,
-                                            close + usize_value(1),
-                                            limit,
-                                            start,
-                                            function
-                                        )
-                                    }
-                                }
-                            },
-                            Result::Err(_) => body_range(
+                                ) } } else { body_range(
                                 value,
                                 index,
                                 limit,
                                 start
-                            )
-                        },
-                        Result::Ok(_) => {
-                            let close = try(
-                                matching_close(value, index),
-                                @find_body
-                            );
-                            find_body(
-                                value,
-                                close + usize_value(1),
-                                limit,
-                                start,
-                                function
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
+                            ) } } else { body_range(
+                            value,
+                            index,
+                            limit,
+                            start
+                        ) }
+                } }
+        } } else { Result::Err(scan_error(5, limit, start)) }
 }
 
 body_range(
@@ -440,12 +382,9 @@ body_range(
     start: usize
 ) -> Result<TokenRange, ScanError> {
     let close = try(matching_close(value, open), @body_range);
-    handle close < limit {
-        Result::Err(_) => Result::Err(scan_error(5, limit, start)),
-        Result::Ok(_) => Result::Ok(
+    if(close < limit) { Result::Ok(
             TokenRange { start: open, end: close }
-        )
-    }
+        ) } else { Result::Err(scan_error(5, limit, start)) }
 }
 
 find_top_level_eq(
@@ -453,30 +392,23 @@ find_top_level_eq(
     index: usize,
     end: usize
 ) -> Option<usize> {
-    handle index < end {
-        Result::Err(_) => Result::Err(()),
-        Result::Ok(_) => handle token_is_eq(value, index) {
-            Result::Ok(_) => Result::Ok(index),
-            Result::Err(_) => {
+    if(index < end) { if(token_is_eq(value, index)) {
+            Result::Ok(index)
+        } else {
                 let opening = delimiter_open(token_kind_at(value, index));
-                handle u8_equal(opening, 0) {
-                    Result::Ok(_) => find_top_level_eq(
+                if(u8_equal(opening, 0)) { find_top_level_eq(
                         value,
                         index + usize_value(1),
                         end
-                    ),
-                    Result::Err(_) => handle matching_close(value, index) {
+                    ) } else { handle matching_close(value, index) {
                         Result::Err(_) => Result::Err(()),
                         Result::Ok(close) => find_top_level_eq(
                             value,
                             close + usize_value(1),
                             end
                         )
-                    }
-                }
-            }
-        }
-    }
+                    } }
+        } } else { Result::Err(()) }
 }
 
 name_at(
@@ -600,54 +532,43 @@ classify_ident(
     start: usize,
     name: Id<String>
 ) -> Result<Classification, ScanError> {
-    handle ident_is(value, cursor, &"mod") {
-        Result::Ok(_) => {
-            let found = try(
-                name_at(value, cursor + usize_value(1), start),
-                @classify_ident
-            );
-            Result::Ok(Classification {
-                kind: DeclarationKind::Module,
-                kind_code: 1,
-                name: Result::Ok(move found),
-                style: 4
-            })
-        },
-        Result::Err(_) => handle ident_is(value, cursor, &"use") {
-            Result::Ok(_) => handle import_declaration(value, cursor) {
-                Result::Err(_) => function_classification(move name),
-                Result::Ok(_) => Result::Ok(Classification {
+    if(ident_is(value, cursor, &"mod")) {
+        let found = try(
+            name_at(value, cursor + usize_value(1), start),
+            @classify_ident
+        );
+        Result::Ok(Classification {
+            kind: DeclarationKind::Module,
+            kind_code: 1,
+            name: Result::Ok(move found),
+            style: 4
+        })
+    } else { if(ident_is(value, cursor, &"use")) { if(import_declaration(value, cursor)) {
+                Result::Ok(Classification {
                     kind: DeclarationKind::Import,
                     kind_code: 2,
                     name: token_ident(value, cursor + usize_value(1)),
                     style: 1
                 })
-            },
-            Result::Err(_) => handle ident_is(value, cursor, &"cases") {
-                Result::Ok(_) => {
-                    let found = try(
-                        name_at(value, cursor + usize_value(1), start),
-                        @classify_ident
-                    );
+            } else { function_classification(move name) } } else { if(ident_is(value, cursor, &"cases")) {
+                let found = try(
+                    name_at(value, cursor + usize_value(1), start),
+                    @classify_ident
+                );
+                Result::Ok(Classification {
+                    kind: DeclarationKind::EffectRowAlias,
+                    kind_code: 4,
+                    name: Result::Ok(move found),
+                    style: 1
+                })
+            } else { if(fixity_declaration(value, cursor)) {
                     Result::Ok(Classification {
-                        kind: DeclarationKind::EffectRowAlias,
-                        kind_code: 4,
-                        name: Result::Ok(move found),
-                        style: 1
-                    })
-                },
-                Result::Err(_) => handle fixity_declaration(value, cursor) {
-                    Result::Ok(_) => Result::Ok(Classification {
                         kind: DeclarationKind::Fixity,
                         kind_code: 6,
                         name: token_ident(value, cursor + usize_value(2)),
                         style: 1
-                    }),
-                    Result::Err(_) => function_classification(move name)
-                }
-            }
-        }
-    }
+                    })
+                } else { function_classification(move name) } } } }
 }
 
 function_classification(name: Id<String>) -> Result<Classification, ScanError> {
@@ -668,20 +589,12 @@ import_declaration(value: &super::lexer::LexedSource, cursor: usize) -> Bool {
 }
 
 fixity_declaration(value: &super::lexer::LexedSource, cursor: usize) -> Bool {
-    let word = handle ident_is(value, cursor, &"infixl") {
-        Result::Ok(_) => true,
-        Result::Err(_) => handle ident_is(value, cursor, &"infixr") {
-            Result::Ok(_) => true,
-            Result::Err(_) => handle ident_is(value, cursor, &"infix") {
-                Result::Ok(_) => true,
-                Result::Err(_) => ident_is(value, cursor, &"prefix")
-            }
-        }
-    };
-    handle move word {
-        Result::Err(_) => false,
-        Result::Ok(_) => token_is_number(value, cursor + usize_value(1))
-    }
+    (
+        ident_is(value, cursor, &"infixl")
+            or { ident_is(value, cursor, &"infixr") }
+            or { ident_is(value, cursor, &"infix") }
+            or { ident_is(value, cursor, &"prefix") }
+    ) and { token_is_number(value, cursor + usize_value(1)) }
 }
 
 scan_state_error(
@@ -711,29 +624,7 @@ scan_semicolon_shell(
             move error
         ),
         Result::Ok(end) => {
-            handle u8_equal(kind_code, 5) {
-                Result::Err(_) => {
-                    let whole = TokenRange { start: start, end: end + usize_value(1) };
-                    Result::Ok(ScanStep {
-                        next: end + usize_value(1),
-                        nested_start: Result::Err(()),
-                        nested_end: 0,
-                        declaration: DeclarationShell {
-                            kind: move kind,
-                            kind_code: kind_code,
-                            public: public,
-                            name: move name,
-                            header: TokenRange {
-                                start: whole.start,
-                                end: whole.end
-                            },
-                            body: Result::Err(()),
-                            whole: move whole,
-                            parent: parent
-                        }
-                    })
-                },
-                Result::Ok(_) => handle find_top_level_eq(
+            if(u8_equal(kind_code, 5)) { handle find_top_level_eq(
                     value,
                     cursor,
                     end
@@ -770,7 +661,26 @@ scan_semicolon_shell(
                             }
                         })
                     }
-                }
+                } } else {
+                let whole = TokenRange { start: start, end: end + usize_value(1) };
+                Result::Ok(ScanStep {
+                    next: end + usize_value(1),
+                    nested_start: Result::Err(()),
+                    nested_end: 0,
+                    declaration: DeclarationShell {
+                        kind: move kind,
+                        kind_code: kind_code,
+                        public: public,
+                        name: move name,
+                        header: TokenRange {
+                            start: whole.start,
+                            end: whole.end
+                        },
+                        body: Result::Err(()),
+                        whole: move whole,
+                        parent: parent
+                    }
+                })
             }
         }
     }
@@ -800,10 +710,9 @@ scan_braced_shell(
             let close = bounds.end;
             Result::Ok(ScanStep {
                 next: close + usize_value(1),
-                nested_start: handle u8_equal(kind_code, 1) {
-                    Result::Ok(_) => Result::Ok(open + usize_value(1)),
-                    Result::Err(_) => Result::Err(())
-                },
+                nested_start: if(u8_equal(kind_code, 1)) {
+                    Result::Ok(open + usize_value(1))
+                } else { Result::Err(()) },
                 nested_end: close,
                 declaration: DeclarationShell {
                     kind: move kind,
@@ -833,14 +742,12 @@ scan_one(
     parent: Option<usize>
 ) -> Result<ScanStep, ScanError> {
     let public = ident_is(value, start, &"pub");
-    let cursor = handle public {
-        Result::Ok(_) => start + usize_value(1),
-        Result::Err(_) => start
-    };
+    let cursor = if(public) {
+        start + usize_value(1)
+    } else { start };
     let classification = try(classify(value, cursor, start), @scan_one);
     let style = classification.style;
-    handle u8_equal(style, 1) {
-        Result::Ok(_) => scan_semicolon_shell(
+    if(u8_equal(style, 1)) { scan_semicolon_shell(
             value,
             start,
             cursor + usize_value(1),
@@ -848,36 +755,30 @@ scan_one(
             public,
             move classification,
             parent
-        ),
-        Result::Err(_) => handle u8_equal(style, 4) {
-            Result::Ok(_) => {
-                let style = try(
-                    find_module_style(value, cursor, limit, start),
-                    @scan_one
-                );
-                handle u8_equal(style, 1) {
-                    Result::Ok(_) => scan_semicolon_shell(
-                        value,
-                        start,
-                        cursor + usize_value(1),
-                        limit,
-                        public,
-                        move classification,
-                        parent
-                    ),
-                    Result::Err(_) => scan_braced_shell(
-                        value,
-                        start,
-                        cursor + usize_value(1),
-                        limit,
-                        public,
-                        move classification,
-                        parent,
-                        false
-                    )
-                }
-            },
-            Result::Err(_) => scan_braced_shell(
+        ) } else { if(u8_equal(style, 4)) {
+            let style = try(
+                find_module_style(value, cursor, limit, start),
+                @scan_one
+            );
+            if(u8_equal(style, 1)) { scan_semicolon_shell(
+                    value,
+                    start,
+                    cursor + usize_value(1),
+                    limit,
+                    public,
+                    move classification,
+                    parent
+                ) } else { scan_braced_shell(
+                    value,
+                    start,
+                    cursor + usize_value(1),
+                    limit,
+                    public,
+                    move classification,
+                    parent,
+                    false
+                ) }
+        } else { scan_braced_shell(
                 value,
                 start,
                 cursor + usize_value(1),
@@ -886,9 +787,7 @@ scan_one(
                 move classification,
                 parent,
                 u8_equal(style, 3)
-            )
-        }
-    }
+            ) } }
 }
 
 find_module_style(
@@ -897,34 +796,22 @@ find_module_style(
     limit: usize,
     start: usize
 ) -> Result<u8, ScanError> {
-    handle index < limit {
-        Result::Err(_) => Result::Err(scan_error(5, limit, start)),
-        Result::Ok(_) => handle token_is_semicolon(value, index) {
-            Result::Ok(_) => Result::Ok(1),
-            Result::Err(_) => handle u8_equal(
+    if(index < limit) { if(token_is_semicolon(value, index)) { Result::Ok(1) } else { if(u8_equal(
                 delimiter_open(token_kind_at(value, index)),
                 2
-            ) {
-                Result::Ok(_) => Result::Ok(2),
-                Result::Err(_) => handle u8_equal(
+            )) { Result::Ok(2) } else { if(u8_equal(
                     delimiter_close(token_kind_at(value, index)),
                     0
-                ) {
-                    Result::Ok(_) => find_module_style(
+                )) { find_module_style(
                         value,
                         index + usize_value(1),
                         limit,
                         start
-                    ),
-                    Result::Err(_) => Result::Err(scan_error(
+                    ) } else { Result::Err(scan_error(
                         1,
                         index,
                         super::lexer::token_count(value)
-                    ))
-                }
-            }
-        }
-    }
+                    )) } } } } else { Result::Err(scan_error(5, limit, start)) }
 }
 
 scan_loop_error(
@@ -962,11 +849,7 @@ scan_loop(
     let parent = move state.parent;
     let scopes = move state.scopes;
     let output = move state.output;
-    handle cursor < limit {
-        Result::Err(_) => scan_complete(value,  scopes,  output),
-        Result::Ok(_) => handle token_is_eof(value, cursor) {
-            Result::Ok(_) => scan_complete(value,  scopes,  output),
-            Result::Err(_) => handle scan_one(
+    if(cursor < limit) { if(token_is_eof(value, cursor)) { scan_complete(value,  scopes,  output) } else { handle scan_one(
                 value,
                 cursor,
                 limit,
@@ -1010,9 +893,7 @@ scan_loop(
                         }
                     }
                 }
-            }
-        }
-    }
+            } } } else { scan_complete(value,  scopes,  output) }
 }
 
 pub scan(
@@ -1028,7 +909,7 @@ pub scan(
 }
 
 bool_code(value: Bool) -> u8 {
-    handle move value { Result::Ok(_) => 1, Result::Err(_) => 0 }
+    if(move value) { 1 } else { 0 }
 }
 
 usize_value(value: usize) -> usize {  value }
@@ -1099,9 +980,7 @@ write_shells(
     value: &DeclarationIndex,
     index: usize
 ) {
-    handle index < Vec::len(&value.shells) {
-        Result::Err(_) => (),
-        Result::Ok(_) => {
+    if(index < Vec::len(&value.shells)) {
             let shell = Vec::index(&value.shells, index);
             ByteBuf::push(&mut *output, shell.kind_code);
             ByteBuf::push(&mut *output, bool_code(shell.public));
@@ -1111,8 +990,7 @@ write_shells(
             write_range(&mut *output, &shell.whole);
             write_optional_parent(&mut *output, &shell.parent);
             write_shells( output, lexed, value, index + usize_value(1))
-        }
-    }
+    } else { () }
 }
 
 encode_scan(
@@ -1144,9 +1022,7 @@ encode_scan(
 }
 
 process_inputs(arguments: &Vec<String>, index: usize, output: &mut ByteBuf) / FileRead {
-    handle index < Vec::len(arguments) {
-        Result::Err(_) => (),
-        Result::Ok(_) => {
+    if(index < Vec::len(arguments)) {
             let path = *Vec::index(arguments, index);
             let bytes = read_file(move path);
             handle String::from_utf8(move bytes) {
@@ -1157,26 +1033,24 @@ process_inputs(arguments: &Vec<String>, index: usize, output: &mut ByteBuf) / Fi
                 }
             };
             process_inputs(arguments, index + usize_value(1),  output)
-        }
-    }
+    } else { () }
 }
 
 pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
     let arguments = process_args();
     let argument_count = Vec::len(&arguments);
-    handle argument_count < usize_value(2) {
-        Result::Ok(_) => write_diagnostic(
+    if(argument_count < usize_value(2)) {
+        write_diagnostic(
             "usage: grandiose-self-host-scanner <output> <input>..."
-        ),
-        Result::Err(_) => {
-            let output_path = *Vec::index(&arguments, 0);
-            let encoded = ByteBuf::new();
-            ByteBuf::write_u32_le(
-                &mut encoded,
-                wrapping_convert_to_u32(argument_count - usize_value(1))
-            );
-            process_inputs(&arguments, 1, &mut encoded);
-            write_file(move output_path, ByteBuf::finish( encoded))
-        }
+        )
+    } else {
+        let output_path = *Vec::index(&arguments, 0);
+        let encoded = ByteBuf::new();
+        ByteBuf::write_u32_le(
+            &mut encoded,
+            wrapping_convert_to_u32(argument_count - usize_value(1))
+        );
+        process_inputs(&arguments, 1, &mut encoded);
+        write_file(move output_path, ByteBuf::finish( encoded))
     }
 }

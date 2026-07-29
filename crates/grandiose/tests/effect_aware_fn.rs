@@ -40,6 +40,133 @@ fn assert_rejected(source: &str, required_words: &[&str]) {
 }
 
 #[test]
+fn lazy_boolean_blocks_preserve_nominal_capture_types() {
+    let source = r#"
+        struct ExprId { index: u32 }
+        impl Use<[0,infinity]> for ExprId {}
+
+        index(value: ExprId) -> u32 { value.index }
+        captured(left: ExprId) -> Bool {
+            false or { index(left) == 7 }
+        }
+        main() -> { captured(ExprId { index: 7 }); () }
+    "#;
+    compile_source_to_bytecode("lazy-nominal-capture.glorious", source).unwrap();
+}
+
+#[test]
+fn unrestricted_nominal_observe_captures_keep_value_transport() {
+    let source = r#"
+        struct ExprId { index: u32 }
+        impl Use<[0,infinity]> for ExprId {}
+
+        index(value: ExprId) -> u32 { value.index }
+        apply<F>(body: F) -> u32 where F: Fn<(), Output = u32> { body() }
+        captured(left: ExprId) -> u32 { apply({ => index(left) }) }
+        main() -> { captured(ExprId { index: 7 }); () }
+    "#;
+    compile_source_to_bytecode("nominal-observe-capture.glorious", source).unwrap();
+}
+
+#[test]
+fn structural_if_branches_keep_the_enclosing_result_context() {
+    let source = r#"
+        classify(value: u8) -> Option<u8> {
+            if(value == 0) { Result::Ok(7) } else { Result::Err(()) }
+        }
+        main() -> { classify(0); () }
+    "#;
+    compile_source_to_bytecode("structural-if-context.glorious", source).unwrap();
+}
+
+#[test]
+fn standard_if_over_option_resolves_its_instantiated_result_constructors() {
+    let source = r#"
+        struct Payload { value: u32 }
+        impl Use<[0,infinity]> for Payload {}
+
+        present(value: Option<Payload>) -> Option<u32> {
+            if(value) { 1 }
+        }
+        main() -> {
+            present(Result::Ok(Payload { value: 7 }));
+            ()
+        }
+    "#;
+    compile_source_to_bytecode("if-option-result-construction.glorious", source).unwrap();
+}
+
+#[test]
+fn nested_source_boolean_if_uses_structural_lowering_before_generic_inlining() {
+    let source = r#"
+        choose(outer: Bool, inner: Bool) -> Option<u32> {
+            if(outer) {
+                Result::Ok(1)
+            } else {
+                if(inner) { Result::Ok(2) } else { Result::Err(()) }
+            }
+        }
+        main() -> {
+            choose(false, true);
+            ()
+        }
+    "#;
+    compile_source_to_bytecode("nested-structural-if.glorious", source).unwrap();
+}
+
+#[test]
+fn lazy_structural_if_numeric_literals_use_the_later_binding_context() {
+    let source = r#"
+        consume(value: u32) -> u32 { value }
+        choose(condition: Bool) -> u32 {
+            let copy = if(condition) { 0 } else { 1 };
+            consume(copy)
+        }
+        main() -> { choose(true); () }
+    "#;
+    compile_source_to_bytecode("structural-if-numeric-context.glorious", source).unwrap();
+}
+
+#[test]
+fn later_binding_context_stops_at_a_sequential_shadow() {
+    let source = r#"
+        consume_u32(value: u32) -> u32 { value }
+        consume_u64(value: u64) -> u64 { value }
+        make_u64() -> u64 { 2 }
+        choose(condition: Bool) {
+            let copy = if(condition) { 0 } else { 1 };
+            consume_u32(copy);
+            let copy = make_u64();
+            consume_u64(copy);
+            ()
+        }
+        choose_nested(condition: Bool) {
+            let copy = if(condition) { 0 } else { 1 };
+            {
+                let copy = make_u64();
+                consume_u64(copy);
+                ()
+            };
+            consume_u32(copy);
+            ()
+        }
+        main() -> { choose(true); choose_nested(false); () }
+    "#;
+    compile_source_to_phases("later-binding-sequential-shadow.glorious", source).unwrap();
+}
+
+#[test]
+fn lazy_structural_if_numeric_literals_use_the_assignment_place_type() {
+    let source = r#"
+        assign(values: &mut Vec<u32>, condition: Bool) {
+            *Vec::index_mut(values, 0) = if(condition) { 1 } else { 0 };
+        }
+        main() -> { () }
+    "#;
+    compile_source_to_bytecode("structural-if-assignment-context.glorious", source).unwrap();
+}
+
+#[test]
 fn associated_fn_effect_rows_accept_empty_protocol_and_alias_forms() {
     let source = r#"
         effect Ask { [1,1] ask() -> i64 }

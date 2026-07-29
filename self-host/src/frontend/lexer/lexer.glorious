@@ -153,12 +153,8 @@ pub token_code_at(value: &LexedSource, index: usize) -> u16 {
 
 pub operator_symbol_at(value: &LexedSource, index: usize) -> Bool {
     let code = token_code_at(value, index);
-    handle code == u16_value(10) {
-        Result::Ok(_) => true,
-        Result::Err(_) => handle u16_value(25) <= code {
-            Result::Err(_) => false,
-            Result::Ok(_) => code <= u16_value(39)
-        }
+    code == u16_value(10) or {
+        u16_value(25) <= code and { code <= u16_value(39) }
     }
 }
 
@@ -168,23 +164,25 @@ pub operator_end(
     limit: usize,
     previous_end: usize
 ) -> usize {
-    handle cursor < limit {
-        Result::Err(_) => cursor,
-        Result::Ok(_) => handle operator_symbol_at(value, cursor) {
-            Result::Err(_) => cursor,
-            Result::Ok(_) => {
-                let token = Vec::index(&value.tokens, cursor);
-                handle previous_end == token.span.start {
-                    Result::Err(_) => cursor,
-                    Result::Ok(_) => operator_end(
-                        value,
-                        cursor + usize_value(1),
-                        limit,
-                        token.span.end
-                    )
-                }
-            }
+    if(cursor < limit) {
+        if(operator_symbol_at(value, cursor)) {
+        let token = Vec::index(&value.tokens, cursor);
+        if(previous_end == token.span.start) {
+        operator_end(
+        value,
+        cursor + usize_value(1),
+        limit,
+        token.span.end
+        )
+        } else {
+        cursor
         }
+
+        } else {
+        cursor
+        }
+    } else {
+        cursor
     }
 }
 
@@ -262,7 +260,7 @@ lex_error(kind: LexErrorKind, code: u16, start: usize, end: usize) -> LexError {
 }
 
 bool_value(value: Bool) -> u32 {
-    handle move value { Result::Ok(_) => 1, Result::Err(_) => 0 }
+    if(move value) { 1 } else { 0 }
 }
 
 byte_value(value: u8) -> u8 {  value }
@@ -281,17 +279,15 @@ byte_at_most(value: &u8, upper: u8) -> Bool {
 
 split_byte(value: u8, upper: u8) -> Result<u8, u8> {
     let retained = value;
-    handle byte_at_most(&value, upper) {
-        Result::Ok(_) => Result::Ok(move retained),
-        Result::Err(_) => Result::Err(move retained)
+    if(byte_at_most(&value, upper)) {
+        Result::Ok(move retained)
+    } else {
+        Result::Err(move retained)
     }
 }
 
 byte_is_between(value: u8, low: u8, high: u8) -> Bool {
-    handle low <= value {
-        Result::Ok(_) => value <= high,
-        Result::Err(_) => false
-    }
+    low <= value and { value <= high }
 }
 
 byte_is_digit(value: u8) -> Bool { byte_is_between(value, 48, 57) }
@@ -301,63 +297,30 @@ byte_is_lower(value: u8) -> Bool { byte_is_between(value, 97, 122) }
 byte_is_upper(value: u8) -> Bool { byte_is_between(value, 65, 90) }
 
 byte_is_alpha(value: u8) -> Bool {
-    handle byte_is_lower(value) {
-        Result::Ok(_) => true,
-        Result::Err(_) => byte_is_upper(value)
-    }
+    byte_is_lower(value) or { byte_is_upper(value) }
 }
 
 byte_is_alphanumeric(value: u8) -> Bool {
-    handle byte_is_alpha(value) {
-        Result::Ok(_) => true,
-        Result::Err(_) => byte_is_digit(value)
-    }
+    byte_is_alpha(value) or { byte_is_digit(value) }
 }
 
 byte_is_word_start(value: u8) -> Bool {
-    handle byte_is_alpha(value) {
-        Result::Ok(_) => true,
-        Result::Err(_) => value == 95
-    }
+    byte_is_alpha(value) or { value == 95 }
 }
 
 byte_is_hex(value: u8) -> Bool {
-    handle byte_is_digit(value) {
-        Result::Ok(_) => true,
-        Result::Err(_) => {
-            handle byte_is_between(value, 97, 102) {
-                Result::Ok(_) => true,
-                Result::Err(_) => byte_is_between(value, 65, 70)
-            }
-        }
-    }
+    byte_is_digit(value)
+        or { byte_is_between(value, 97, 102) }
+        or { byte_is_between(value, 65, 70) }
 }
 
 byte_is_whitespace(value: u8) -> Bool {
-    handle value == 32 {
-        Result::Ok(_) => true,
-        Result::Err(_) => {
-            handle value == 9 {
-                Result::Ok(_) => true,
-                Result::Err(_) => {
-                    handle value == 10 {
-                        Result::Ok(_) => true,
-                        Result::Err(_) => {
-                            handle value == 13 {
-                                Result::Ok(_) => true,
-                                Result::Err(_) => {
-                                    handle value == 11 {
-                                        Result::Ok(_) => true,
-                                        Result::Err(_) => value == 12
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    value == 32
+        or { value == 9 }
+        or { value == 10 }
+        or { value == 13 }
+        or { value == 11 }
+        or { value == 12 }
 }
 
 operator_byte_mask() -> u128 {
@@ -365,13 +328,12 @@ operator_byte_mask() -> u128 {
 }
 
 byte_is_operator(value: u8) -> Bool {
-    handle value <= 126 {
-        Result::Ok(_) => bit_and(
+    if(value <= 126) {
+        bit_and(
             shift_right(operator_byte_mask(), wrapping_convert_to_u32(value)),
             1
-        ) != 0,
-        Result::Err(_) => false
-    }
+        ) != 0
+    } else { false }
 }
 
 peek(value: &Lexer, offset: usize) -> Option<u8> {
@@ -479,9 +441,10 @@ keyword_named(
     found: Keyword,
     code: u8
 ) -> Option<RecognizedKeyword> {
-    handle String::eq(value, spelling) {
-        Result::Ok(_) => Option::Some(recognized_keyword(move found, move code)),
-        Result::Err(_) => None
+    if(String::eq(value, spelling)) {
+        Option::Some(recognized_keyword(move found, move code))
+    } else {
+        None
     }
 }
 
@@ -489,26 +452,30 @@ keyword(value: &String) -> Option<RecognizedKeyword> {
     let bytes = String::as_bytes(value);
     handle Bytes::get(&bytes, 0) {
         Result::Ok(99) => keyword_named(value, &"cancel", Keyword::Cancel, 1),
-        Result::Ok(101) => handle String::eq(value, &"enum") {
-            Result::Ok(_) => Option::Some(recognized_keyword(Keyword::Enum, 3)),
-            Result::Err(_) => keyword_named(value, &"effect", Keyword::Effect, 2)
-        },
+        Result::Ok(101) => if(String::eq(value, &"enum")) {
+                               Option::Some(recognized_keyword(Keyword::Enum, 3))
+                           } else {
+                               keyword_named(value, &"effect", Keyword::Effect, 2)
+                           },
         Result::Ok(104) => keyword_named(value, &"handle", Keyword::Handle, 4),
-        Result::Ok(105) => handle String::eq(value, &"is") {
-            Result::Ok(_) => Option::Some(recognized_keyword(Keyword::Is, 6)),
-            Result::Err(_) => keyword_named(value, &"impl", Keyword::Impl, 5)
-        },
+        Result::Ok(105) => if(String::eq(value, &"is")) {
+                               Option::Some(recognized_keyword(Keyword::Is, 6))
+                           } else {
+                               keyword_named(value, &"impl", Keyword::Impl, 5)
+                           },
         Result::Ok(108) => keyword_named(value, &"let", Keyword::Let, 7),
         Result::Ok(112) => keyword_named(value, &"perform", Keyword::Perform, 8),
         Result::Ok(114) => keyword_named(value, &"resume", Keyword::Resume, 9),
         Result::Ok(115) => keyword_named(value, &"struct", Keyword::Struct, 10),
-        Result::Ok(116) => handle String::eq(value, &"tail") {
-            Result::Ok(_) => Option::Some(recognized_keyword(Keyword::Tail, 11)),
-            Result::Err(_) => handle String::eq(value, &"trait") {
-                Result::Ok(_) => Option::Some(recognized_keyword(Keyword::Trait, 12)),
-                Result::Err(_) => keyword_named(value, &"type", Keyword::Type, 13)
-            }
-        },
+        Result::Ok(116) => if(String::eq(value, &"tail")) {
+                               Option::Some(recognized_keyword(Keyword::Tail, 11))
+                           } else {
+                               if(String::eq(value, &"trait")) {
+                               Option::Some(recognized_keyword(Keyword::Trait, 12))
+                               } else {
+                               keyword_named(value, &"type", Keyword::Type, 13)
+                               }
+                           },
         Result::Ok(119) => keyword_named(value, &"where", Keyword::Where, 14),
         _ => None
     }
@@ -533,46 +500,43 @@ scan_word(value: &mut Lexer) {
 scan_word_tail(value: &mut Lexer) {
     handle peek(&*value, 0) {
         Result::Ok(byte) => {
-            handle byte_is_alphanumeric(byte) {
-                Result::Ok(_) => {
+            if(byte_is_alphanumeric(byte)) {
                     advance(&mut *value, 1);
                     scan_word_tail( value)
-                },
-                Result::Err(_) => {
-                    handle byte == byte_value(95) {
-                        Result::Ok(_) => {
+
+            } else {
+                    if(byte == byte_value(95)) {
                             advance(&mut *value, 1);
                             scan_word_tail( value)
-                        },
-                        Result::Err(_) => {
-                            handle byte == byte_value(45) {
-                                Result::Ok(_) => {
+
+                    } else {
+                            if(byte == byte_value(45)) {
                                     handle peek(&*value, 1) {
                                         Result::Ok(next) => {
-                                            handle byte_is_alphanumeric(next) {
-                                                Result::Ok(_) => {
+                                            if(byte_is_alphanumeric(next)) {
                                                     advance(&mut *value, 2);
                                                     scan_word_tail( value)
-                                                },
-                                                Result::Err(_) => {
-                                                    handle next == byte_value(95) {
-                                                        Result::Ok(_) => {
+
+                                            } else {
+                                                    if(next == byte_value(95)) {
                                                             advance(&mut *value, 2);
                                                             scan_word_tail( value)
-                                                        },
-                                                        Result::Err(_) => ()
+
+                                                    } else {
+                                                        ()
                                                     }
-                                                }
+
                                             }
                                         },
                                         Result::Err(_) => ()
                                     }
-                                },
-                                Result::Err(_) => ()
+
+                            } else {
+                                ()
                             }
-                        }
+
                     }
-                }
+
             }
         },
         Result::Err(_) => ()
@@ -582,12 +546,12 @@ scan_word_tail(value: &mut Lexer) {
 scan_line_comment(value: &mut Lexer) {
     handle peek(&*value, 0) {
         Result::Ok(byte) => {
-            handle byte == byte_value(10) {
-                Result::Ok(_) => (),
-                Result::Err(_) => {
+            if(byte == byte_value(10)) {
+                ()
+            } else {
                     advance(&mut *value, 1);
                     scan_line_comment( value)
-                }
+
             }
         },
         Result::Err(_) => ()
@@ -595,62 +559,61 @@ scan_line_comment(value: &mut Lexer) {
 }
 
 scan_block_comment(value: &mut Lexer, start: usize, depth: usize) -> Result<(), LexError> {
-    handle depth == 0 {
-        Result::Ok(_) => Result::Ok(()),
-        Result::Err(_) => {
-            handle value.cursor < Bytes::len(&value.bytes) {
-                Result::Ok(_) => {
-                    handle peek_is(&*value, 0, 47) {
-                        Result::Ok(_) => handle peek_is(&*value, 1, 42) {
-                            Result::Ok(_) => {
-                                advance(&mut *value, 2);
-                                scan_block_comment( value, start, depth + 1)
-                            },
-                            Result::Err(_) => {
-                                advance(&mut *value, 1);
-                                scan_block_comment( value, start, move depth)
-                            }
-                        },
-                        Result::Err(_) => handle peek_is(&*value, 0, 42) {
-                            Result::Ok(_) => handle peek_is(&*value, 1, 47) {
-                                Result::Ok(_) => {
-                                    advance(&mut *value, 2);
-                                    scan_block_comment( value, start, depth - 1)
-                                },
-                                Result::Err(_) => {
-                                    advance(&mut *value, 1);
-                                    scan_block_comment( value, start, move depth)
-                                }
-                            },
-                            Result::Err(_) => {
-                                advance(&mut *value, 1);
-                                scan_block_comment( value, start, move depth)
-                            }
+    if(depth == 0) {
+        Result::Ok(())
+    } else {
+            if(value.cursor < Bytes::len(&value.bytes)) {
+                    if(peek_is(&*value, 0, 47)) {
+                        if(peek_is(&*value, 1, 42)) {
+                        advance(&mut *value, 2);
+                        scan_block_comment( value, start, depth + 1)
+
+                        } else {
+                        advance(&mut *value, 1);
+                        scan_block_comment( value, start, move depth)
+
+                        }
+                    } else {
+                        if(peek_is(&*value, 0, 42)) {
+                        if(peek_is(&*value, 1, 47)) {
+                        advance(&mut *value, 2);
+                        scan_block_comment( value, start, depth - 1)
+
+                        } else {
+                        advance(&mut *value, 1);
+                        scan_block_comment( value, start, move depth)
+
+                        }
+                        } else {
+                        advance(&mut *value, 1);
+                        scan_block_comment( value, start, move depth)
+
                         }
                     }
-                },
-                Result::Err(_) => Result::Err(
-                    lex_error(LexErrorKind::UnfinishedComment, 2, start, Bytes::len(&value.bytes))
+
+            } else {
+                Result::Err(
+                lex_error(LexErrorKind::UnfinishedComment, 2, start, Bytes::len(&value.bytes))
                 )
             }
-        }
+
     }
 }
 
 scan_label_tail(value: &mut Lexer) {
     handle peek(&*value, 0) {
         Result::Ok(byte) => {
-            handle byte_is_alphanumeric(byte) {
-                Result::Ok(_) => {
+            if(byte_is_alphanumeric(byte)) {
                     advance(&mut *value, 1);
                     scan_label_tail( value)
-                },
-                Result::Err(_) => handle byte == byte_value(95) {
-                    Result::Ok(_) => {
-                        advance(&mut *value, 1);
-                        scan_label_tail( value)
-                    },
-                    Result::Err(_) => ()
+
+            } else {
+                if(byte == byte_value(95)) {
+                advance(&mut *value, 1);
+                scan_label_tail( value)
+
+                } else {
+                ()
                 }
             }
         },
@@ -663,8 +626,7 @@ scan_label(value: &mut Lexer) -> Result<(), LexError> {
     advance(&mut *value, 1);
     handle peek(&*value, 0) {
         Result::Ok(byte) => {
-            handle byte_is_word_start(byte) {
-                Result::Ok(_) => {
+            if(byte_is_word_start(byte)) {
                     let name_start = value.cursor;
                     advance(&mut *value, 1);
                     scan_label_tail(&mut *value);
@@ -672,9 +634,10 @@ scan_label(value: &mut Lexer) -> Result<(), LexError> {
                     let id = intern_slice(&mut *value, name_start, move name_end);
                     push( value, TokenKind::Label(move id), 9, start);
                     Result::Ok(())
-                },
-                Result::Err(_) => Result::Err(
-                    lex_error(LexErrorKind::InvalidLabel, 3, start, value.cursor)
+
+            } else {
+                Result::Err(
+                lex_error(LexErrorKind::InvalidLabel, 3, start, value.cursor)
                 )
             }
         },
@@ -686,12 +649,11 @@ scan_label(value: &mut Lexer) -> Result<(), LexError> {
 
 structural_two(first: u8, second: u8) -> Option<CodedTokenKind> {
     handle first {
-        45 => handle second == byte_value(62) {
-            Result::Ok(_) => Option::Some(
+        45 => if(second == byte_value(62)) {
+            Option::Some(
                 CodedTokenKind { kind: TokenKind::Arrow, code: 23 }
-            ),
-            Result::Err(_) => None
-        },
+            )
+        } else { None },
         61 => handle second {
             62 => Option::Some(
                 CodedTokenKind { kind: TokenKind::FatArrow, code: 24 }
@@ -701,30 +663,26 @@ structural_two(first: u8, second: u8) -> Option<CodedTokenKind> {
             ),
             _ => None
         },
-        46 => handle second == byte_value(46) {
-            Result::Ok(_) => Option::Some(
+        46 => if(second == byte_value(46)) {
+            Option::Some(
                 CodedTokenKind { kind: TokenKind::DotDot, code: 20 }
-            ),
-            Result::Err(_) => None
-        },
-        33 => handle second == byte_value(61) {
-            Result::Ok(_) => Option::Some(
+            )
+        } else { None },
+        33 => if(second == byte_value(61)) {
+            Option::Some(
                 CodedTokenKind { kind: TokenKind::BangEq, code: 33 }
-            ),
-            Result::Err(_) => None
-        },
-        60 => handle second == byte_value(61) {
-            Result::Ok(_) => Option::Some(
+            )
+        } else { None },
+        60 => if(second == byte_value(61)) {
+            Option::Some(
                 CodedTokenKind { kind: TokenKind::LtEq, code: 35 }
-            ),
-            Result::Err(_) => None
-        },
-        62 => handle second == byte_value(61) {
-            Result::Ok(_) => Option::Some(
+            )
+        } else { None },
+        62 => if(second == byte_value(61)) {
+            Option::Some(
                 CodedTokenKind { kind: TokenKind::GtEq, code: 37 }
-            ),
-            Result::Err(_) => None
-        },
+            )
+        } else { None },
         _ => None
     }
 }
@@ -769,11 +727,10 @@ structural_two_exists(first: u8, second: u8) -> Bool {
 scan_operator_tail(value: &mut Lexer) {
     handle peek(&*value, 0) {
         Result::Ok(first) => {
-            handle byte_is_operator(first) {
-                Result::Ok(_) => {
-                    handle structural_one(first) {
-                        Result::Ok(_) => (),
-                        Result::Err(_) => {
+            if(byte_is_operator(first)) {
+                    if(structural_one(first)) {
+                        ()
+                    } else {
                             let pair_structural = handle peek(&*value, 1) {
                                 Result::Ok(second) => structural_two_exists(
                                     first,
@@ -781,17 +738,18 @@ scan_operator_tail(value: &mut Lexer) {
                                 ),
                                 Result::Err(_) => false
                             };
-                            handle move pair_structural {
-                                Result::Ok(_) => (),
-                                Result::Err(_) => {
+                            if(move pair_structural) {
+                                ()
+                            } else {
                                     advance(&mut *value, 1);
                                     scan_operator_tail( value)
-                                }
+
                             }
-                        }
+
                     }
-                },
-                Result::Err(_) => ()
+
+            } else {
+                ()
             }
         },
         Result::Err(_) => ()
@@ -845,29 +803,29 @@ scan_digit_tail(
 ) -> Result<Option<usize>, LexError> {
     handle peek(&*value, 0) {
         Result::Ok(byte) => {
-            handle byte == byte_value(95) {
-                Result::Ok(_) => {
+            if(byte == byte_value(95)) {
                     let separator = value.cursor;
                     advance(&mut *value, 1);
                     scan_digit_tail( value, base_code, Option::Some(move separator))
-                },
-                Result::Err(_) => handle digit_valid(byte, base_code) {
-                    Result::Ok(_) => {
-                        advance(&mut *value, 1);
-                        scan_digit_tail( value, base_code, None)
-                    },
-                    Result::Err(_) => {
-                        handle byte_is_digit(byte) {
-                            Result::Ok(_) => Result::Err(
-                                lex_error(
-                                    LexErrorKind::InvalidDigit, 4,
-                                    value.cursor,
-                                    value.cursor + usize_value(1)
-                                )
-                            ),
-                            Result::Err(_) => Result::Ok(move last_separator)
-                        }
-                    }
+
+            } else {
+                if(digit_valid(byte, base_code)) {
+                advance(&mut *value, 1);
+                scan_digit_tail( value, base_code, None)
+
+                } else {
+                if(byte_is_digit(byte)) {
+                Result::Err(
+                lex_error(
+                LexErrorKind::InvalidDigit, 4,
+                value.cursor,
+                value.cursor + usize_value(1)
+                )
+                )
+                } else {
+                Result::Ok(move last_separator)
+                }
+
                 }
             }
         },
@@ -892,26 +850,27 @@ scan_digits(
                 position + usize_value(1)
             )
         ),
-        Result::Err(_) => handle value.cursor == component_start {
-            Result::Ok(_) => Result::Err(
-                lex_error(
-                    LexErrorKind::ExpectedDigits, 6,
-                    component_start,
-                    component_start
-                )
-            ),
-            Result::Err(_) => Result::Ok(span(component_start, value.cursor))
-        }
+        Result::Err(_) => if(value.cursor == component_start) {
+                              Result::Err(
+                              lex_error(
+                              LexErrorKind::ExpectedDigits, 6,
+                              component_start,
+                              component_start
+                              )
+                              )
+                          } else {
+                              Result::Ok(span(component_start, value.cursor))
+                          }
     }
 }
 
 skip_underscores(value: &mut Lexer) {
-    handle peek_is(&*value, 0, 95) {
-        Result::Ok(_) => {
+    if(peek_is(&*value, 0, 95)) {
             advance(&mut *value, 1);
             skip_underscores( value)
-        },
-        Result::Err(_) => ()
+
+    } else {
+        ()
     }
 }
 
@@ -934,25 +893,26 @@ scan_number(value: &mut Lexer) -> Result<(), LexError> {
         _ => NumberBase::Hex
     };
     let non_decimal = base_code != byte_value(3);
-    let digits = handle move non_decimal {
-        Result::Ok(_) => {
+    let digits = if(move non_decimal) {
             advance(&mut *value, 2);
             skip_underscores(&mut *value);
             let digits_start = value.cursor;
             handle peek(&*value, 0) {
-                Result::Ok(byte) => handle digit_valid(byte, base_code) {
-                    Result::Ok(_) => scan_digits(&mut *value, base_code, digits_start),
-                    Result::Err(_) => Result::Err(
-                        lex_error(LexErrorKind::ExpectedDigits, 6, start, value.cursor)
-                    )
-                },
+                Result::Ok(byte) => if(digit_valid(byte, base_code)) {
+                                        scan_digits(&mut *value, base_code, digits_start)
+                                    } else {
+                                        Result::Err(
+                                        lex_error(LexErrorKind::ExpectedDigits, 6, start, value.cursor)
+                                        )
+                                    },
                 Result::Err(_) => Result::Err(
                     lex_error(LexErrorKind::ExpectedDigits, 6, start, value.cursor)
                 )
             }
-        },
-        Result::Err(_) => scan_digits(&mut *value, base_code, start)
-    };
+
+                 } else {
+                     scan_digits(&mut *value, base_code, start)
+                 };
     let digit_span = try(move digits, @scan_number);
     let fraction_span = try(
         scan_fraction(&mut *value, base_code, move after_projection_dot),
@@ -965,31 +925,33 @@ scan_number(value: &mut Lexer) -> Result<(), LexError> {
     {
                             handle peek(&*value, 0) {
                                 Result::Ok(byte) => {
-                                    handle byte_is_alphanumeric(byte) {
-                                        Result::Ok(_) => Result::Err(
-                                            lex_error(
-                                                LexErrorKind::InvalidDigit, 4,
-                                                value.cursor,
-                                                value.cursor + usize_value(1)
-                                            )
-                                        ),
-                                        Result::Err(_) => handle byte == byte_value(95) {
-                                            Result::Ok(_) => Result::Err(
-                                                lex_error(
-                                                    LexErrorKind::InvalidDigit, 4,
-                                                    value.cursor,
-                                                    value.cursor + usize_value(1)
-                                                )
-                                            ),
-                                            Result::Err(_) => finish_number(
-                                                 value,
-                                                start,
-                                                move base,
-                                                base_code,
-                                                move digit_span,
-                                                move fraction_span,
-                                                move exponent_span
-                                            )
+                                    if(byte_is_alphanumeric(byte)) {
+                                        Result::Err(
+                                        lex_error(
+                                        LexErrorKind::InvalidDigit, 4,
+                                        value.cursor,
+                                        value.cursor + usize_value(1)
+                                        )
+                                        )
+                                    } else {
+                                        if(byte == byte_value(95)) {
+                                        Result::Err(
+                                        lex_error(
+                                        LexErrorKind::InvalidDigit, 4,
+                                        value.cursor,
+                                        value.cursor + usize_value(1)
+                                        )
+                                        )
+                                        } else {
+                                        finish_number(
+                                        value,
+                                        start,
+                                        move base,
+                                        base_code,
+                                        move digit_span,
+                                        move fraction_span,
+                                        move exponent_span
+                                        )
                                         }
                                     }
                                 },
@@ -1012,29 +974,32 @@ scan_fraction(
     after_projection_dot: Bool
 ) -> Result<Option<Span>, LexError> {
     let decimal = base_code == byte_value(3);
-    handle move decimal {
-        Result::Err(_) => Result::Ok(None),
-        Result::Ok(_) => handle move after_projection_dot {
-            Result::Ok(_) => Result::Ok(None),
-            Result::Err(_) => handle peek_is(&*value, 0, 46) {
-                Result::Ok(_) => handle peek(&*value, 1) {
-                    Result::Ok(next) => handle byte_is_digit(move next) {
-                        Result::Ok(_) => {
-                            advance(&mut *value, 1);
-                            let start = value.cursor;
-                            let found = try(
-                                scan_digits( value, base_code, start),
-                                @scan_fraction
-                            );
-                            Result::Ok(Option::Some(move found))
-                        },
-                        Result::Err(_) => Result::Ok(None)
-                    },
-                    Result::Err(_) => Result::Ok(None)
-                },
-                Result::Err(_) => Result::Ok(None)
-            }
+    if(move decimal) {
+        if(move after_projection_dot) {
+        Result::Ok(None)
+        } else {
+        if(peek_is(&*value, 0, 46)) {
+        handle peek(&*value, 1) {
+        Result::Ok(next) => if(byte_is_digit(move next)) {
+        advance(&mut *value, 1);
+        let start = value.cursor;
+        let found = try(
+        scan_digits( value, base_code, start),
+        @scan_fraction
+        );
+        Result::Ok(Option::Some(move found))
+
+        } else {
+        Result::Ok(None)
+        },
+        Result::Err(_) => Result::Ok(None)
         }
+        } else {
+        Result::Ok(None)
+        }
+        }
+    } else {
+        Result::Ok(None)
     }
 }
 
@@ -1043,16 +1008,17 @@ scan_exponent(
     base_code: u8
 ) -> Result<Option<NumberExponent>, LexError> {
     let decimal = base_code == byte_value(3);
-    handle move decimal {
-        Result::Err(_) => Result::Ok(None),
-        Result::Ok(_) => handle peek(&*value, 0) {
-            Result::Ok(marker) => handle marker {
-                101 => scan_exponent_after_marker( value),
-                69 => scan_exponent_after_marker( value),
-                _ => Result::Ok(None)
-            },
-            Result::Err(_) => Result::Ok(None)
+    if(move decimal) {
+        handle peek(&*value, 0) {
+        Result::Ok(marker) => handle marker {
+        101 => scan_exponent_after_marker( value),
+        69 => scan_exponent_after_marker( value),
+        _ => Result::Ok(None)
+        },
+        Result::Err(_) => Result::Ok(None)
         }
+    } else {
+        Result::Ok(None)
     }
 }
 
@@ -1067,26 +1033,13 @@ scan_exponent_after_marker(value: &mut Lexer) -> Result<Option<NumberExponent>, 
         Result::Err(_) => usize_value(0)
     };
     let candidate = handle peek(&*value, usize_value(1) + sign) {
-        Result::Ok(byte) => handle byte_is_digit(byte) {
-            Result::Ok(_) => true,
-            Result::Err(_) => byte == byte_value(95)
-        },
+        Result::Ok(byte) =>
+            byte_is_digit(byte) or { byte == byte_value(95) },
         Result::Err(_) => false
     };
-    handle move candidate {
-        Result::Err(_) => Result::Err(
-            lex_error(
-                LexErrorKind::MalformedFloatExponent, 7,
-                marker,
-                marker + usize_value(1) + sign
-            )
-        ),
-        Result::Ok(_) => {
+    if(move candidate) {
             advance(&mut *value, 1);
-            let negative = handle peek_is(&*value, 0, 45) {
-                Result::Ok(_) => true,
-                Result::Err(_) => false
-            };
+            let negative = peek_is(&*value, 0, 45);
             advance(&mut *value, move sign);
             let start = value.cursor;
             let found = try(
@@ -1099,7 +1052,15 @@ scan_exponent_after_marker(value: &mut Lexer) -> Result<Option<NumberExponent>, 
                     digits: move found
                 })
             )
-        }
+
+    } else {
+        Result::Err(
+        lex_error(
+        LexErrorKind::MalformedFloatExponent, 7,
+        marker,
+        marker + usize_value(1) + sign
+        )
+        )
     }
 }
 
@@ -1129,52 +1090,55 @@ finish_number(
     Result::Ok(())
 }
 hex_value(value: u8) -> u32 {
-    handle byte_is_digit(value) {
-        Result::Ok(_) => wrapping_convert_to_u32(value - 48),
-        Result::Err(_) => handle byte_is_lower(value) {
-            Result::Ok(_) => wrapping_convert_to_u32(value - 97) + u32_value(10),
-            Result::Err(_) => wrapping_convert_to_u32(value - 65) + u32_value(10)
+    if(byte_is_digit(value)) {
+        wrapping_convert_to_u32(value - 48)
+    } else {
+        if(byte_is_lower(value)) {
+        wrapping_convert_to_u32(value - 97) + u32_value(10)
+        } else {
+        wrapping_convert_to_u32(value - 65) + u32_value(10)
         }
     }
 }
 
 hex_pair(value: &mut Lexer, backslash: usize) -> Result<u8, LexError> {
     handle peek(&*value, 0) {
-        Result::Ok(first) => handle byte_is_hex(first) {
-            Result::Ok(_) => handle peek(&*value, 1) {
-                Result::Ok(second) => handle byte_is_hex(second) {
-                    Result::Ok(_) => {
-                        advance( value, 2);
-                        Result::Ok(
-                            wrapping_convert_to_u8(
-                                hex_value(first) * u32_value(16) + hex_value(second)
-                            )
-                        )
-                    },
-                    Result::Err(_) => Result::Err(
-                        lex_error(
-                            LexErrorKind::MalformedHexEscape, 11,
-                            backslash,
-                            value.cursor + usize_value(1)
-                        )
-                    )
-                },
-                Result::Err(_) => Result::Err(
-                    lex_error(
-                        LexErrorKind::MalformedHexEscape, 11,
-                        backslash,
-                        value.cursor
-                    )
-                )
-            },
-            Result::Err(_) => Result::Err(
-                lex_error(
-                    LexErrorKind::MalformedHexEscape, 11,
-                    backslash,
-                    value.cursor
-                )
-            )
-        },
+        Result::Ok(first) => if(byte_is_hex(first)) {
+                                 handle peek(&*value, 1) {
+                                 Result::Ok(second) => if(byte_is_hex(second)) {
+                                 advance( value, 2);
+                                 Result::Ok(
+                                 wrapping_convert_to_u8(
+                                 hex_value(first) * u32_value(16) + hex_value(second)
+                                 )
+                                 )
+
+                                 } else {
+                                 Result::Err(
+                                 lex_error(
+                                 LexErrorKind::MalformedHexEscape, 11,
+                                 backslash,
+                                 value.cursor + usize_value(1)
+                                 )
+                                 )
+                                 },
+                                 Result::Err(_) => Result::Err(
+                                 lex_error(
+                                 LexErrorKind::MalformedHexEscape, 11,
+                                 backslash,
+                                 value.cursor
+                                 )
+                                 )
+                                 }
+                             } else {
+                                 Result::Err(
+                                 lex_error(
+                                 LexErrorKind::MalformedHexEscape, 11,
+                                 backslash,
+                                 value.cursor
+                                 )
+                                 )
+                             },
         Result::Err(_) => Result::Err(
             lex_error(LexErrorKind::MalformedHexEscape, 11, backslash, value.cursor)
         )
@@ -1190,53 +1154,55 @@ unicode_digits(
     handle peek(&*value, 0) {
         Result::Ok(125) => {
             advance(&mut *value, 1);
-            handle digits == 0 {
-                Result::Ok(_) => Result::Err(
-                    lex_error(
-                        LexErrorKind::MalformedUnicodeEscape, 12,
-                        backslash,
-                        value.cursor
-                    )
-                ),
-                Result::Err(_) => handle char_from_u32(move scalar) {
-                    Result::Ok(character) => scalar_ok(move character),
-                    Result::Err(_) => Result::Err(
-                        lex_error(
-                            LexErrorKind::InvalidUnicodeScalar, 14,
-                            backslash,
-                            value.cursor
-                        )
-                    )
+            if(digits == 0) {
+                Result::Err(
+                lex_error(
+                LexErrorKind::MalformedUnicodeEscape, 12,
+                backslash,
+                value.cursor
+                )
+                )
+            } else {
+                handle char_from_u32(move scalar) {
+                Result::Ok(character) => scalar_ok(move character),
+                Result::Err(_) => Result::Err(
+                lex_error(
+                LexErrorKind::InvalidUnicodeScalar, 14,
+                backslash,
+                value.cursor
+                )
+                )
                 }
             }
         },
-        Result::Ok(byte) => handle byte_is_hex(byte) {
-            Result::Ok(_) => handle digits == 6 {
-                Result::Ok(_) => Result::Err(
-                    lex_error(
-                        LexErrorKind::MalformedUnicodeEscape, 12,
-                        backslash,
-                        value.cursor + usize_value(1)
-                    )
-                ),
-                Result::Err(_) => {
-                    advance(&mut *value, 1);
-                    unicode_digits(
-                         value,
-                        backslash,
-                        scalar * 16 + hex_value(byte),
-                        digits + 1
-                    )
-                }
-            },
-            Result::Err(_) => Result::Err(
-                lex_error(
-                    LexErrorKind::MalformedUnicodeEscape, 12,
-                    value.cursor,
-                    value.cursor + usize_value(1)
-                )
-            )
-        },
+        Result::Ok(byte) => if(byte_is_hex(byte)) {
+                                if(digits == 6) {
+                                Result::Err(
+                                lex_error(
+                                LexErrorKind::MalformedUnicodeEscape, 12,
+                                backslash,
+                                value.cursor + usize_value(1)
+                                )
+                                )
+                                } else {
+                                advance(&mut *value, 1);
+                                unicode_digits(
+                                value,
+                                backslash,
+                                scalar * 16 + hex_value(byte),
+                                digits + 1
+                                )
+
+                                }
+                            } else {
+                                Result::Err(
+                                lex_error(
+                                LexErrorKind::MalformedUnicodeEscape, 12,
+                                value.cursor,
+                                value.cursor + usize_value(1)
+                                )
+                                )
+                            },
         Result::Err(_) => Result::Err(
             lex_error(
                 LexErrorKind::UnfinishedUnicodeEscape, 13,
@@ -1248,17 +1214,17 @@ unicode_digits(
 }
 
 unicode_escape(value: &mut Lexer, backslash: usize) -> Result<char, LexError> {
-    handle peek_is(&*value, 0, 123) {
-        Result::Ok(_) => {
+    if(peek_is(&*value, 0, 123)) {
             advance(&mut *value, 1);
             unicode_digits( value, backslash, 0, 0)
-        },
-        Result::Err(_) => Result::Err(
-            lex_error(
-                LexErrorKind::MalformedUnicodeEscape, 12,
-                backslash,
-                value.cursor
-            )
+
+    } else {
+        Result::Err(
+        lex_error(
+        LexErrorKind::MalformedUnicodeEscape, 12,
+        backslash,
+        value.cursor
+        )
         )
     }
 }
@@ -1543,18 +1509,18 @@ scan_byte_literal(value: &mut Lexer) -> Result<(), LexError> {
         }
     };
     let byte = try(move decoded, @scan_byte_literal);
-    handle peek_is(&*value, 0, 39) {
-        Result::Ok(_) => {
+    if(peek_is(&*value, 0, 39)) {
             advance(&mut *value, 1);
             push( value, TokenKind::Byte(move byte), 7, start);
             Result::Ok(())
-        },
-        Result::Err(_) => Result::Err(
-            lex_error(
-                LexErrorKind::UnfinishedByteLiteral, 21,
-                start,
-                value.cursor
-            )
+
+    } else {
+        Result::Err(
+        lex_error(
+        LexErrorKind::UnfinishedByteLiteral, 21,
+        start,
+        value.cursor
+        )
         )
     }
 }
@@ -1575,18 +1541,18 @@ scan_char_or_lifetime(value: &mut Lexer) -> Result<(), LexError> {
                 scalar_escape(&mut *value, start + usize_value(1)),
                 @scan_char_or_lifetime
             );
-            handle peek_is(&*value, 0, 39) {
-                Result::Ok(_) => {
+            if(peek_is(&*value, 0, 39)) {
                     advance(&mut *value, 1);
                     push( value, TokenKind::Char(move character), 6, start);
                     Result::Ok(())
-                },
-                Result::Err(_) => Result::Err(
-                    lex_error(
-                        LexErrorKind::UnfinishedCharacterLiteral, 22,
-                        start,
-                        value.cursor
-                    )
+
+            } else {
+                Result::Err(
+                lex_error(
+                LexErrorKind::UnfinishedCharacterLiteral, 22,
+                start,
+                value.cursor
+                )
                 )
             }
         },
@@ -1622,19 +1588,19 @@ scan_char_or_lifetime(value: &mut Lexer) -> Result<(), LexError> {
 
 scan_lifetime_tail(value: &mut Lexer) {
     handle peek(&*value, 0) {
-        Result::Ok(byte) => handle byte_is_alphanumeric(byte) {
-            Result::Ok(_) => {
+        Result::Ok(byte) => if(byte_is_alphanumeric(byte)) {
                 advance(&mut *value, 1);
                 scan_lifetime_tail( value)
-            },
-            Result::Err(_) => handle byte == byte_value(95) {
-                Result::Ok(_) => {
-                    advance(&mut *value, 1);
-                    scan_lifetime_tail( value)
-                },
-                Result::Err(_) => ()
-            }
-        },
+
+                            } else {
+                                if(byte == byte_value(95)) {
+                                advance(&mut *value, 1);
+                                scan_lifetime_tail( value)
+
+                                } else {
+                                ()
+                                }
+                            },
         Result::Err(_) => ()
     }
 }
@@ -1642,34 +1608,34 @@ scan_lifetime_tail(value: &mut Lexer) {
 scan_lifetime(value: &mut Lexer, start: usize) -> Result<(), LexError> {
     (*value).cursor = start + usize_value(1);
     handle peek(&*value, 0) {
-        Result::Ok(byte) => handle byte_is_word_start(byte) {
-            Result::Ok(_) => {
+        Result::Ok(byte) => if(byte_is_word_start(byte)) {
                 advance(&mut *value, 1);
                 scan_lifetime_tail(&mut *value);
-                handle peek_is(&*value, 0, 39) {
-                    Result::Ok(_) => Result::Err(
-                        lex_error(
-                            LexErrorKind::InvalidCharacterLiteral, 25,
-                            start,
-                            value.cursor + usize_value(1)
-                        )
-                    ),
-                    Result::Err(_) => {
+                if(peek_is(&*value, 0, 39)) {
+                    Result::Err(
+                    lex_error(
+                    LexErrorKind::InvalidCharacterLiteral, 25,
+                    start,
+                    value.cursor + usize_value(1)
+                    )
+                    )
+                } else {
                         let end = value.cursor;
                         let id = intern_slice(&mut *value, start, move end);
                         push( value, TokenKind::Lifetime(move id), 3, start);
                         Result::Ok(())
-                    }
+
                 }
-            },
-            Result::Err(_) => Result::Err(
-                lex_error(
-                    LexErrorKind::InvalidLifetimeIdentifier, 24,
-                    start,
-                    value.cursor
-                )
-            )
-        },
+
+                            } else {
+                                Result::Err(
+                                lex_error(
+                                LexErrorKind::InvalidLifetimeIdentifier, 24,
+                                start,
+                                value.cursor
+                                )
+                                )
+                            },
         Result::Err(_) => Result::Err(
             lex_error(
                 LexErrorKind::InvalidLifetimeIdentifier, 24,
@@ -1709,9 +1675,9 @@ pub lex(source: &String) -> Result<LexedSource, LexError> {
 
 run(value: Lexer) -> Result<LexedSource, LexError> {
     let length = Bytes::len(&value.bytes);
-    handle value.cursor < length {
-        Result::Ok(_) => run_one( value),
-        Result::Err(_) => {
+    if(value.cursor < length) {
+        run_one( value)
+    } else {
             let eof = Token {
                 kind: TokenKind::Eof,
                 code: 41,
@@ -1726,19 +1692,19 @@ run(value: Lexer) -> Result<LexedSource, LexError> {
                 tokens: move value.tokens,
                 lexemes: move value.lexemes
             })
-        }
+
     }
 }
 
 run_one(value: Lexer) -> Result<LexedSource, LexError> {
     let start = value.cursor;
     let byte = present_byte(peek(&value, 0));
-    handle byte_is_whitespace(byte) {
-        Result::Ok(_) => {
+    if(byte_is_whitespace(byte)) {
             advance(&mut value, 1);
             run( value)
-        },
-        Result::Err(_) => run_byte( value, move byte, move start)
+
+    } else {
+        run_byte( value, move byte, move start)
     }
 }
 
@@ -1855,26 +1821,26 @@ run_byte_above_93(
 }
 
 run_slash_token(value: Lexer, start: usize) -> Result<LexedSource, LexError> {
-    handle peek_is(&value, 1, 47) {
-        Result::Ok(_) => {
+    if(peek_is(&value, 1, 47)) {
             scan_line_comment(&mut value);
             run( value)
-        },
-        Result::Err(_) => handle peek_is(&value, 1, 42) {
-            Result::Ok(_) => {
-                advance(&mut value, 2);
-                try(
-                    scan_block_comment(&mut value, move start, 1),
-                    @run_slash_token
-                );
-                run( value)
-            },
-            Result::Err(_) => run_structural(
-                 value,
-                TokenKind::Slash,
-                25,
-                move start
-            )
+
+    } else {
+        if(peek_is(&value, 1, 42)) {
+        advance(&mut value, 2);
+        try(
+        scan_block_comment(&mut value, move start, 1),
+        @run_slash_token
+        );
+        run( value)
+
+        } else {
+        run_structural(
+        value,
+        TokenKind::Slash,
+        25,
+        move start
+        )
         }
     }
 }
@@ -1885,12 +1851,12 @@ run_dollar_token(value: Lexer, start: usize) -> Result<LexedSource, LexError> {
 
 run_colon_token(value: Lexer, start: usize) -> Result<LexedSource, LexError> {
     advance(&mut value, 1);
-    handle peek_is(&value, 0, 58) {
-        Result::Ok(_) => {
+    if(peek_is(&value, 0, 58)) {
             advance(&mut value, 1);
             push(&mut value, TokenKind::DoubleColon, 19, move start)
-        },
-        Result::Err(_) => push(&mut value, TokenKind::Colon, 18, move start)
+
+    } else {
+        push(&mut value, TokenKind::Colon, 18, move start)
     };
     run( value)
 }
@@ -1935,38 +1901,38 @@ run_general_byte(
     byte: u8,
     start: usize
 ) -> Result<LexedSource, LexError> {
-    handle byte_is_digit(byte) {
-        Result::Ok(_) => {
+    if(byte_is_digit(byte)) {
             try(scan_number(&mut value), @run_general_byte);
             run( value)
-        },
-        Result::Err(_) => handle byte_is_word_start(byte) {
-            Result::Ok(_) => {
-                scan_word(&mut value);
-                run( value)
-            },
-            Result::Err(_) => handle byte_is_operator(byte) {
-                Result::Ok(_) => {
-                    scan_operator(&mut value);
-                    run( value)
-                },
-                Result::Err(_) => handle char_decode_utf8(&value.bytes, start) {
-                    Result::Ok(character) => Result::Err(
-                        lex_error(
-                            LexErrorKind::UnexpectedCharacter, 1,
-                            start,
-                            character.next
-                        )
-                    ),
-                    Result::Err(_) => Result::Err(
-                        lex_error(
-                            LexErrorKind::UnexpectedCharacter, 1,
-                            start,
-                            start + usize_value(1)
-                        )
-                    )
-                }
-            }
+
+    } else {
+        if(byte_is_word_start(byte)) {
+        scan_word(&mut value);
+        run( value)
+
+        } else {
+        if(byte_is_operator(byte)) {
+        scan_operator(&mut value);
+        run( value)
+
+        } else {
+        handle char_decode_utf8(&value.bytes, start) {
+        Result::Ok(character) => Result::Err(
+        lex_error(
+        LexErrorKind::UnexpectedCharacter, 1,
+        start,
+        character.next
+        )
+        ),
+        Result::Err(_) => Result::Err(
+        lex_error(
+        LexErrorKind::UnexpectedCharacter, 1,
+        start,
+        start + usize_value(1)
+        )
+        )
+        }
+        }
         }
     }
 }
@@ -2001,19 +1967,20 @@ write_source_span(output: &mut ByteBuf, source: &String, value: &Span) {
 }
 
 normalized_span_len(bytes: &Bytes, cursor: usize, end: usize, count: usize) -> usize {
-    handle cursor < end {
-        Result::Ok(_) => {
+    if(cursor < end) {
             let byte = handle Bytes::get(bytes, cursor) {
                 Result::Ok(found) => byte_value(move found),
                 Result::Err(_) => unreachable()
             };
-            let next = handle byte == byte_value(95) {
-                Result::Ok(_) => move count,
-                Result::Err(_) => count + usize_value(1)
-            };
+            let next = if(byte == byte_value(95)) {
+                           move count
+                       } else {
+                           count + usize_value(1)
+                       };
             normalized_span_len(bytes, cursor + usize_value(1), end, move next)
-        },
-        Result::Err(_) => move count
+
+    } else {
+        move count
     }
 }
 
@@ -2023,15 +1990,15 @@ write_normalized_span_bytes(
     cursor: usize,
     end: usize
 ) {
-    handle cursor < end {
-        Result::Ok(_) => {
+    if(cursor < end) {
             let byte = handle Bytes::get(bytes, cursor) {
                 Result::Ok(found) => byte_value(move found),
                 Result::Err(_) => unreachable()
             };
-            handle byte == byte_value(95) {
-                Result::Ok(_) => (),
-                Result::Err(_) => ByteBuf::push(&mut *output, move byte)
+            if(byte == byte_value(95)) {
+                ()
+            } else {
+                ByteBuf::push(&mut *output, move byte)
             };
             write_normalized_span_bytes(
                  output,
@@ -2039,8 +2006,9 @@ write_normalized_span_bytes(
                 cursor + usize_value(1),
                 end
             )
-        },
-        Result::Err(_) => ()
+
+    } else {
+        ()
     }
 }
 
@@ -2110,28 +2078,30 @@ write_token_payload(
     lexed: &LexedSource,
     token: &Token
 ) {
-    handle token.code <= 9 {
-        Result::Ok(_) => handle *token_kind(token) {
-            TokenKind::Ident(id) => write_lexeme( output, lexed, &id),
-            TokenKind::Keyword(_) => ByteBuf::push( output, token.keyword_code),
-            TokenKind::Lifetime(id) => write_lexeme( output, lexed, &id),
-            TokenKind::Number(number) => write_number( output, source, &number),
-            TokenKind::String(id) => write_lexeme( output, lexed, &id),
-            TokenKind::Char(character) => ByteBuf::write_u32_le(
-                 output,
-                char_to_u32(move character)
-            ),
-            TokenKind::Byte(byte) => ByteBuf::push( output, move byte),
-            TokenKind::ByteString(bytes) => write_bytes( output, &bytes),
-            TokenKind::Label(id) => write_lexeme( output, lexed, &id),
-            _ => unreachable()
-        },
-        Result::Err(_) => handle token.code == 10 {
-            Result::Ok(_) => handle *token_kind(token) {
-                TokenKind::Operator(id) => write_lexeme( output, lexed, &id),
-                _ => unreachable()
-            },
-            Result::Err(_) => ()
+    if(token.code <= 9) {
+        handle *token_kind(token) {
+        TokenKind::Ident(id) => write_lexeme( output, lexed, &id),
+        TokenKind::Keyword(_) => ByteBuf::push( output, token.keyword_code),
+        TokenKind::Lifetime(id) => write_lexeme( output, lexed, &id),
+        TokenKind::Number(number) => write_number( output, source, &number),
+        TokenKind::String(id) => write_lexeme( output, lexed, &id),
+        TokenKind::Char(character) => ByteBuf::write_u32_le(
+        output,
+        char_to_u32(move character)
+        ),
+        TokenKind::Byte(byte) => ByteBuf::push( output, move byte),
+        TokenKind::ByteString(bytes) => write_bytes( output, &bytes),
+        TokenKind::Label(id) => write_lexeme( output, lexed, &id),
+        _ => unreachable()
+        }
+    } else {
+        if(token.code == 10) {
+        handle *token_kind(token) {
+        TokenKind::Operator(id) => write_lexeme( output, lexed, &id),
+        _ => unreachable()
+        }
+        } else {
+        ()
         }
     }
 }
@@ -2142,8 +2112,7 @@ write_tokens(
     value: &LexedSource,
     index: usize
 ) {
-    handle index < Vec::len(&value.tokens) {
-        Result::Ok(_) => {
+    if(index < Vec::len(&value.tokens)) {
             let token = Vec::index(&value.tokens, index);
             ByteBuf::write_u16_le(&mut *output, token.code);
             ByteBuf::write_u64_le(
@@ -2156,8 +2125,9 @@ write_tokens(
             );
             write_token_payload(&mut *output, source, value, move token);
             write_tokens( output, source, value, index + usize_value(1))
-        },
-        Result::Err(_) => ()
+
+    } else {
+        ()
     }
 }
 
@@ -2185,8 +2155,7 @@ encode_result(
 }
 
 process_inputs(arguments: &Vec<String>, index: usize, output: &mut ByteBuf) / FileRead {
-    handle index < Vec::len(arguments) {
-        Result::Ok(_) => {
+    if(index < Vec::len(arguments)) {
             let path = *Vec::index(arguments, index);
             let bytes = read_file(move path);
             handle String::from_utf8(move bytes) {
@@ -2200,8 +2169,9 @@ process_inputs(arguments: &Vec<String>, index: usize, output: &mut ByteBuf) / Fi
                 }
             };
             process_inputs(arguments, index + usize_value(1),  output)
-        },
-        Result::Err(_) => ()
+
+    } else {
+        ()
     }
 }
 
@@ -2212,11 +2182,11 @@ usize_value(value: usize) -> usize {
 pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
     let arguments = process_args();
     let argument_count = Vec::len(&arguments);
-    handle argument_count < usize_value(2) {
-        Result::Ok(_) => write_diagnostic(
-            "usage: grandiose-self-host <output> <input>..."
-        ),
-        Result::Err(_) => {
+    if(argument_count < usize_value(2)) {
+        write_diagnostic(
+        "usage: grandiose-self-host <output> <input>..."
+        )
+    } else {
             let output_path = *Vec::index(&arguments, 0);
             let encoded = ByteBuf::new();
             ByteBuf::write_u32_le(
@@ -2227,6 +2197,6 @@ pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
             );
             process_inputs(&arguments, 1, &mut encoded);
             write_file(move output_path, ByteBuf::finish( encoded))
-        }
+
     }
 }
