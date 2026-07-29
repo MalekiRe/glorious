@@ -2491,6 +2491,297 @@ fn split_critical_switch_edges(
     Ok(changed)
 }
 
+/// Thread the exact constant-test diamonds emitted by refutable pattern
+/// lowering before they reach the structural bytecode verifier.
+///
+/// The source shape moves one locally constructed scalar into an empty
+/// dispatcher block, copies that block parameter into a Switch, and moves
+/// into an arm whose first action consumes the parameter.  Keeping the
+/// dispatcher merges the unrelated constant/tag proofs of its predecessors;
+/// structural flow can then combine arms which source semantics proved
+/// mutually exclusive.  Threading each known predecessor directly to its
+/// selected arm preserves the original scalar move and Drop while removing
+/// only that impossible cross-product.
+///
+/// This deliberately recognizes no general jump-threading case.  Every
+/// ownership, parameter, predecessor, and target invariant must have the
+/// generated pattern shape or the candidate is left untouched.
+fn thread_one_constant_switch_parameter_diamond(
+    function: &mut Function,
+    budget: u64,
+    work: &mut u64,
+) -> Result<bool, ()> {
+    #[derive(Clone)]
+    struct Incoming {
+        source: u32,
+        argument: Operand,
+        selected: Edge,
+    }
+
+    let mut candidates = function
+        .blocks
+        .iter()
+        .filter(|block| {
+            let [parameter] = block.params.as_slice() else {
+                return false;
+            };
+            parameter.role == BlockParamRole::ProtectedExitValue
+                && predefined_no_drop_scalar(parameter.ty)
+                && block.statements.is_empty()
+                && matches!(
+                    &block.terminator,
+                    Terminator::Switch { discr, .. }
+                        if discr.register == parameter.register && discr.mode == UseMode::Copy
+                )
+        })
+        .map(|block| block.id)
+        .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return Ok(false);
+    }
+    candidates.sort_unstable();
+    let label_targets = function
+        .flow
+        .labels
+        .iter()
+        .map(|label| label.destination)
+        .collect::<BTreeSet<_>>();
+    let block_indices = function
+        .blocks
+        .iter()
+        .enumerate()
+        .map(|(index, block)| (block.id, index))
+        .collect::<BTreeMap<_, _>>();
+    let mut predecessor_sources = BTreeMap::<u32, BTreeSet<u32>>::new();
+    let mut analysis_work = function.blocks.len() as u64;
+    for source in &function.blocks {
+        analysis_work = analysis_work.saturating_add(source.statements.len() as u64);
+        for_each_edge(&source.terminator, |edge| {
+            analysis_work = analysis_work.saturating_add(1);
+            predecessor_sources
+                .entry(edge.target)
+                .or_default()
+                .insert(source.id);
+        });
+    }
+    *work = work.saturating_add(analysis_work);
+    if *work > budget {
+        return Err(());
+    }
+    // Candidate inspection is transactional: the function is unchanged until
+    // one candidate commits, at which point this helper returns immediately.
+    // Compute whole-function use counts once rather than once per dispatcher.
+    let uses = register_uses(function);
+
+    for dispatcher_id in candidates {
+        *work = work.saturating_add(1);
+        if *work > budget {
+            return Err(());
+        }
+        if dispatcher_id == function.entry || label_targets.contains(&dispatcher_id) {
+            continue;
+        }
+        let Some(&dispatcher_index) = block_indices.get(&dispatcher_id) else {
+            continue;
+        };
+        let dispatcher = &function.blocks[dispatcher_index];
+        let [parameter] = dispatcher.params.as_slice() else {
+            continue;
+        };
+        if parameter.role != BlockParamRole::ProtectedExitValue
+            || !predefined_no_drop_scalar(parameter.ty)
+            || !dispatcher.statements.is_empty()
+        {
+            continue;
+        }
+        let Terminator::Switch {
+            discr,
+            cases,
+            otherwise,
+        } = &dispatcher.terminator
+        else {
+            continue;
+        };
+        if discr.register != parameter.register || discr.mode != UseMode::Copy {
+            continue;
+        }
+        let parameter = parameter.clone();
+        let cases = cases.clone();
+        let otherwise = otherwise.clone();
+        let outgoing = cases
+            .iter()
+            .map(|(_, edge)| edge.clone())
+            .chain(std::iter::once(otherwise.clone()))
+            .collect::<Vec<_>>();
+        // Generated pattern dispatch carries no values to its arms. Requiring
+        // that exact shape also prevents appending a second move of an
+        // incoming predecessor-local constant to an existing arm argument.
+        if outgoing.iter().any(|edge| !edge.args.is_empty()) {
+            continue;
+        }
+        let successors = outgoing
+            .iter()
+            .map(|edge| edge.target)
+            .collect::<BTreeSet<_>>();
+        if successors.is_empty()
+            || successors
+                .iter()
+                .any(|target| *target == function.entry || label_targets.contains(target))
+        {
+            continue;
+        }
+
+        // Every arm must be private to this dispatcher.  Its only use of the
+        // transferred test owner is the leading Drop which pattern lowering
+        // emits after selecting the arm.
+        if successors
+            .iter()
+            .any(|target| predecessor_sources.get(target) != Some(&BTreeSet::from([dispatcher_id])))
+        {
+            continue;
+        }
+        let arms_have_exact_drop = successors.iter().all(|target| {
+            block_indices
+                .get(target)
+                .and_then(|index| function.blocks.get(*index))
+                .is_some_and(|block| {
+                    matches!(
+                        block.statements.first().map(|statement| &statement.kind),
+                        Some(InstructionKind::Drop {
+                            owner: Operand {
+                                register,
+                                mode: UseMode::Move
+                            }
+                        }) if *register == parameter.register
+                    )
+                })
+        });
+        if !arms_have_exact_drop
+            || uses[parameter.register as usize] != 1_u32.saturating_add(successors.len() as u32)
+        {
+            continue;
+        }
+
+        let mut incoming = Vec::new();
+        let mut invalid_incoming = false;
+        for source_id in predecessor_sources
+            .get(&dispatcher_id)
+            .into_iter()
+            .flatten()
+        {
+            let Some(&source_index) = block_indices.get(source_id) else {
+                invalid_incoming = true;
+                break;
+            };
+            let source = &function.blocks[source_index];
+            let Terminator::Goto(edge) = &source.terminator else {
+                invalid_incoming = true;
+                break;
+            };
+            let [argument] = edge.args.as_slice() else {
+                invalid_incoming = true;
+                break;
+            };
+            if edge.target != dispatcher_id
+                || argument.mode != UseMode::Move
+                || function
+                    .register_types
+                    .get(argument.register as usize)
+                    .copied()
+                    != Some(parameter.ty)
+            {
+                invalid_incoming = true;
+                break;
+            }
+            let Some(Instruction {
+                kind:
+                    InstructionKind::Const {
+                        dst,
+                        value: constant,
+                    },
+                ..
+            }) = source.statements.last()
+            else {
+                invalid_incoming = true;
+                break;
+            };
+            if *dst != argument.register {
+                invalid_incoming = true;
+                break;
+            }
+            let selected = cases
+                .iter()
+                .find_map(|(candidate, edge)| {
+                    frozen_constant_eq(candidate, constant).then(|| edge.clone())
+                })
+                .unwrap_or_else(|| otherwise.clone());
+            incoming.push(Incoming {
+                source: source.id,
+                argument: *argument,
+                selected,
+            });
+        }
+        if invalid_incoming || incoming.is_empty() {
+            continue;
+        }
+
+        let first_register = function.register_types.len();
+        let Some(register_end) = first_register.checked_add(successors.len()) else {
+            return Err(());
+        };
+        if register_end > u32::MAX as usize {
+            return Err(());
+        }
+        let fresh_by_target = successors
+            .iter()
+            .copied()
+            .enumerate()
+            .map(|(offset, target)| (target, (first_register + offset) as Register))
+            .collect::<BTreeMap<_, _>>();
+
+        // All proof has completed. Commit the candidate atomically.
+        function
+            .register_types
+            .extend(std::iter::repeat_n(parameter.ty, successors.len()));
+        for target in &successors {
+            let fresh = fresh_by_target[target];
+            let arm = function
+                .blocks
+                .get_mut(*block_indices.get(target).ok_or(())?)
+                .ok_or(())?;
+            arm.params.push(BlockParam {
+                register: fresh,
+                ty: parameter.ty,
+                role: BlockParamRole::Ordinary,
+            });
+            let Some(InstructionKind::Drop { owner }) = arm
+                .statements
+                .first_mut()
+                .map(|statement| &mut statement.kind)
+            else {
+                return Err(());
+            };
+            owner.register = fresh;
+        }
+        for incoming in incoming {
+            let target = incoming.selected.target;
+            let mut args = incoming.selected.args;
+            args.push(Operand {
+                register: incoming.argument.register,
+                mode: UseMode::Move,
+            });
+            let source = function
+                .blocks
+                .get_mut(*block_indices.get(&incoming.source).ok_or(())?)
+                .ok_or(())?;
+            source.terminator = Terminator::Goto(Edge { target, args });
+        }
+        function.blocks.retain(|block| block.id != dispatcher_id);
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 fn normalize_cfg(function: &mut Function, budget: u64) -> (PassOutcome, u64) {
     let mut scratch = function.clone();
     // Reserve IDs from the original arena before deleting unreachable or
@@ -2555,6 +2846,78 @@ fn normalize_cfg(function: &mut Function, budget: u64) -> (PassOutcome, u64) {
         editor
             .commit(&mut scratch)
             .expect("unreachable deletion cannot leave a live dangling edge");
+    }
+
+    let mut threaded_any = false;
+    loop {
+        match thread_one_constant_switch_parameter_diamond(&mut scratch, budget, &mut work) {
+            Ok(true) => {
+                changed = true;
+                threaded_any = true;
+            }
+            Ok(false) => break,
+            Err(()) => return (PassOutcome::BudgetExhausted, work),
+        }
+    }
+    // Threading selects one constant successor per predecessor and can make
+    // the other generated arm unreachable. Re-run structural reachability
+    // before later normalization so those dead arms cannot survive merely
+    // because they were reachable through the dispatcher we just removed.
+    if threaded_any {
+        let threaded_block_indices = scratch
+            .blocks
+            .iter()
+            .enumerate()
+            .map(|(index, block)| (block.id, index))
+            .collect::<BTreeMap<_, _>>();
+        let mut threaded_reachable = BTreeSet::new();
+        let mut threaded_queue = VecDeque::from([scratch.entry]);
+        while let Some(block) = threaded_queue.pop_front() {
+            work = work.saturating_add(1);
+            if work > budget {
+                return (PassOutcome::BudgetExhausted, work);
+            }
+            if !threaded_reachable.insert(block) {
+                continue;
+            }
+            if let Some(body) = threaded_block_indices
+                .get(&block)
+                .and_then(|index| scratch.blocks.get(*index))
+            {
+                let body_successors = successors(&body.terminator);
+                work = work
+                    .saturating_add(body.statements.len() as u64)
+                    .saturating_add(body_successors.len() as u64);
+                if work > budget {
+                    return (PassOutcome::BudgetExhausted, work);
+                }
+                for statement in &body.statements {
+                    if let InstructionKind::LabelPush { target, .. } = statement.kind {
+                        threaded_queue.push_back(target);
+                    }
+                }
+                for successor in body_successors {
+                    threaded_queue.push_back(successor);
+                }
+            }
+        }
+        let threaded_unreachable = scratch
+            .blocks
+            .iter()
+            .filter(|block| !threaded_reachable.contains(&block.id))
+            .map(|block| super::BlockId(block.id))
+            .collect::<Vec<_>>();
+        if !threaded_unreachable.is_empty() {
+            let mut editor = CheckedCfg::new(&scratch, ResourceLimits::default())
+                .expect("threaded validated MIR must open in the checked CFG editor");
+            editor
+                .tombstone_many(threaded_unreachable.iter().copied())
+                .expect("threading reachability never removes the entry block");
+            editor
+                .commit(&mut scratch)
+                .expect("threaded reachability cannot leave a live dangling edge");
+            changed = true;
+        }
     }
 
     // Fold only ownership-preserving Move aliases. The compact MIR has no
@@ -12854,6 +13217,172 @@ mod tests {
             Terminator::Goto(Edge { target: 1, .. })
         ));
         assert_eq!(body.blocks[1].params[0].role, BlockParamRole::Ordinary);
+    }
+
+    fn constant_switch_parameter_diamond(second_is_constant: bool) -> Function {
+        let entry = block(
+            0,
+            Terminator::Switch {
+                discr: operand(1),
+                cases: vec![(
+                    Constant::U32(1),
+                    Edge {
+                        target: 1,
+                        args: vec![],
+                    },
+                )],
+                otherwise: Edge {
+                    target: 2,
+                    args: vec![],
+                },
+            },
+        );
+        let mut truthy = block(
+            1,
+            Terminator::Goto(Edge {
+                target: 3,
+                args: vec![move_operand(2)],
+            }),
+        );
+        truthy.statements.push(instruction(InstructionKind::Const {
+            dst: 2,
+            value: Constant::U32(1),
+        }));
+        let mut falsy = block(
+            2,
+            Terminator::Goto(Edge {
+                target: 3,
+                args: vec![move_operand(3)],
+            }),
+        );
+        if second_is_constant {
+            falsy.statements.push(instruction(InstructionKind::Const {
+                dst: 3,
+                value: Constant::U32(0),
+            }));
+        }
+        let mut dispatcher = block(
+            3,
+            Terminator::Switch {
+                discr: operand(4),
+                cases: vec![(
+                    Constant::U32(1),
+                    Edge {
+                        target: 4,
+                        args: vec![],
+                    },
+                )],
+                otherwise: Edge {
+                    target: 5,
+                    args: vec![],
+                },
+            },
+        );
+        dispatcher.params.push(BlockParam {
+            register: 4,
+            ty: U32,
+            role: BlockParamRole::ProtectedExitValue,
+        });
+        let mut yes = block(4, Terminator::Return { value: None });
+        yes.statements.push(instruction(InstructionKind::Drop {
+            owner: move_operand(4),
+        }));
+        let mut no = block(5, Terminator::Return { value: None });
+        no.statements.push(instruction(InstructionKind::Drop {
+            owner: move_operand(4),
+        }));
+        let mut body = function(
+            vec![entry, truthy, falsy, dispatcher, yes, no],
+            vec![UNIT, U32, U32, U32, U32],
+        );
+        body.params = vec![U32];
+        body
+    }
+
+    #[test]
+    fn normalize_cfg_threads_constant_switch_parameter_diamonds_with_exact_ownership() {
+        let types = Type::predefined();
+        let mut optimized = program(constant_switch_parameter_diamond(true));
+        optimize_program(&mut optimized, &types, OptimizationLevel::O0).unwrap();
+        assert!(
+            optimized.functions[0]
+                .blocks
+                .iter()
+                .all(|block| block.id != 3),
+            "mandatory O0 normalization must remove the dispatcher"
+        );
+
+        let mut body = constant_switch_parameter_diamond(true);
+        let mut work = 0;
+
+        assert!(
+            thread_one_constant_switch_parameter_diamond(&mut body, u64::MAX, &mut work).unwrap()
+        );
+        assert!(body.blocks.iter().all(|block| block.id != 3));
+        assert_eq!(body.register_types.len(), 7);
+
+        let truthy = body.blocks.iter().find(|block| block.id == 1).unwrap();
+        let falsy = body.blocks.iter().find(|block| block.id == 2).unwrap();
+        assert!(matches!(
+            &truthy.terminator,
+            Terminator::Goto(Edge { target: 4, args })
+                if args == &vec![move_operand(2)]
+        ));
+        assert!(matches!(
+            &falsy.terminator,
+            Terminator::Goto(Edge { target: 5, args })
+                if args == &vec![move_operand(3)]
+        ));
+        for (target, fresh) in [(4, 5), (5, 6)] {
+            let arm = body.blocks.iter().find(|block| block.id == target).unwrap();
+            assert_eq!(
+                arm.params,
+                [BlockParam {
+                    register: fresh,
+                    ty: U32,
+                    role: BlockParamRole::Ordinary,
+                }]
+            );
+            assert!(matches!(
+                arm.statements[0].kind,
+                InstructionKind::Drop {
+                    owner: Operand {
+                        register,
+                        mode: UseMode::Move
+                    }
+                } if register == fresh
+            ));
+        }
+        assert_eq!(register_uses(&body)[4], 0);
+    }
+
+    #[test]
+    fn normalize_cfg_does_not_partially_thread_a_nonconstant_diamond() {
+        let mut body = constant_switch_parameter_diamond(false);
+        let original = body.clone();
+        let mut work = 0;
+
+        assert!(
+            !thread_one_constant_switch_parameter_diamond(&mut body, u64::MAX, &mut work).unwrap()
+        );
+        assert_eq!(body, original);
+    }
+
+    #[test]
+    fn normalize_cfg_does_not_thread_a_diamond_with_existing_arm_arguments() {
+        let mut body = constant_switch_parameter_diamond(true);
+        let dispatcher = body.blocks.iter_mut().find(|block| block.id == 3).unwrap();
+        let Terminator::Switch { cases, .. } = &mut dispatcher.terminator else {
+            unreachable!();
+        };
+        cases[0].1.args.push(move_operand(2));
+        let original = body.clone();
+        let mut work = 0;
+
+        assert!(
+            !thread_one_constant_switch_parameter_diamond(&mut body, u64::MAX, &mut work).unwrap()
+        );
+        assert_eq!(body, original);
     }
 
     #[test]

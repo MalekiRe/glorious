@@ -6910,6 +6910,45 @@ fn invalid_straight_line_loans_report_source_errors_before_artifact_verification
 }
 
 #[test]
+fn cleanup_maps_follow_encoded_enum_arms_after_semantic_refinement() {
+    let source = r#"
+        enum Target {
+            Missing,
+            Parameter(u32),
+            Local(u32),
+            Function(u32),
+            Struct(u32),
+            Variant(u32)
+        }
+
+        impl Use<[0, *]> for Target {}
+
+        kind(target: Target) -> u32 {
+            handle target {
+                Target::Missing => 0,
+                Target::Parameter(_) => 1,
+                Target::Local(_) => 2,
+                Target::Function(_) => 3,
+                Target::Struct(_) => 4,
+                Target::Variant(_) => 5
+            }
+        }
+
+        select(target: Target) -> u32 {
+            handle target {
+                Target::Function(shell) => shell,
+                Target::Variant(variant) => variant,
+                remaining => kind(remaining)
+            }
+        }
+
+        main() -> { select(Target::Function(1)); () }
+    "#;
+    let artifact = compile_source_to_bytecode("structural-enum-cleanup.glorious", source).unwrap();
+    verify(artifact).unwrap();
+}
+
+#[test]
 fn stored_reference_can_escape_an_owned_carrier() {
     let source = r#"
         struct Holder { value: &i64 }

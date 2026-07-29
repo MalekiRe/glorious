@@ -2,6 +2,7 @@
 // All persistent identities and arena references are compact u32 words.
 
 use super::lexer::TokenKind;
+use super::resolution::ResolvedTarget;
 
 pub struct TypedInterfaces {
     // [tag, a, b, c]
@@ -55,10 +56,18 @@ pub struct ElaborationError {
     found: u32
 }
 
-struct ResolutionMap {
-    kinds: Vec<u32>,
-    indices: Vec<u32>
+enum ElaborationTarget {
+    Missing,
+    Parameter(super::resolution::ParameterId),
+    Local(super::resolution::LocalId),
+    Function(u32),
+    Struct(u32),
+    Variant(u32)
 }
+
+impl Use<[0, *]> for ElaborationTarget {}
+
+struct ResolutionMap { targets: Vec<ElaborationTarget> }
 
 struct BodyBuilder {
     parameter_count: u32,
@@ -540,7 +549,7 @@ type_name_target(
         1,
         0
     ) {
-        Result::Ok(found) => Result::Ok(move found),
+        Result::Ok(found) => Result::Ok(found),
         Result::Err(_) => handle type_name_target_in(
             headers,
             declarations,
@@ -549,7 +558,7 @@ type_name_target(
             2,
             0
         ) {
-            Result::Ok(found) => Result::Ok(move found),
+            Result::Ok(found) => Result::Ok(found),
             Result::Err(_) => handle type_name_target_in(
                 headers,
                 declarations,
@@ -558,7 +567,7 @@ type_name_target(
                 3,
                 0
             ) {
-                Result::Ok(found) => Result::Ok(move found),
+                Result::Ok(found) => Result::Ok(found),
                 Result::Err(_) => if(module_plus_one == usize_value(0)) { Result::Err(()) } else { type_name_target(
                         headers,
                         declarations,
@@ -763,7 +772,7 @@ resolve_alias_type(
                                 ),
                                 super::scanner::shell_parent_plus_one(owner)
                             ) {
-                                Result::Err(found) => Result::Err(move found),
+                                Result::Err(found) => Result::Err(found),
                                 Result::Ok(ty) => {
                                     *Vec::index_mut(
                                         &mut output.alias_type_plus_one,
@@ -1752,7 +1761,7 @@ nominal_copyable(
                 )
             };
             handle move copy {
-                Result::Err(found) => Result::Err(move found),
+                Result::Err(found) => Result::Err(found),
                 Result::Ok(flag) => {
                     let shell = *Vec::index(&output.nominals, base);
                     let ty = *Vec::index(
@@ -1868,6 +1877,51 @@ pub collect_interfaces(
     Result::Ok( output)
 }
 
+push_missing_targets(
+    values: &mut Vec<ElaborationTarget>,
+    count: usize
+) {
+    if(Vec::len(&*values) < count) {
+        Vec::push(&mut *values, ElaborationTarget::Missing);
+        push_missing_targets(values, count)
+    } else { () }
+}
+
+elaboration_target_at(
+    map: &ResolutionMap,
+    expression: u32
+) -> ElaborationTarget {
+    *Vec::index(&map.targets, usize_from_u32(expression))
+}
+
+elaboration_target_kind(target: ElaborationTarget) -> u32 {
+    handle target {
+        ElaborationTarget::Missing => 0,
+        ElaborationTarget::Parameter(_) => 1,
+        ElaborationTarget::Local(_) => 2,
+        ElaborationTarget::Function(_) => 3,
+        ElaborationTarget::Struct(_) => 4,
+        ElaborationTarget::Variant(_) => 5
+    }
+}
+
+elaboration_target(
+    target: ResolvedTarget
+) -> ElaborationTarget {
+    handle target {
+        ResolvedTarget::Parameter(_, id) =>
+            ElaborationTarget::Parameter(id),
+        ResolvedTarget::Local(_, id) =>
+            ElaborationTarget::Local(id),
+        ResolvedTarget::Function(_, shell) =>
+            ElaborationTarget::Function(shell),
+        ResolvedTarget::Struct(_, header) =>
+            ElaborationTarget::Struct(header),
+        ResolvedTarget::Variant(_, variant) =>
+            ElaborationTarget::Variant(variant)
+    }
+}
+
 build_resolution_map(
     resolved: &super::resolution::ResolvedBody,
     expression_count: usize,
@@ -1875,26 +1929,20 @@ build_resolution_map(
     output: &mut ResolutionMap
 ) -> Result<(), ElaborationError> {
     if(occurrence < super::resolution::resolved_name_count(resolved)) {
-        let expression = super::resolution::resolved_name_expression_at(
+        let expression = super::resolution::resolved_name_expression_id_at(
             resolved,
             occurrence
         );
-        if(usize_from_u32(expression) < expression_count) {
+        let expression_index = Id::to_usize(expression);
+        if(expression_index < expression_count) {
             *Vec::index_mut(
-                &mut output.kinds,
-                usize_from_u32(expression)
-            ) = u32_from_u8(
-                super::resolution::resolved_name_kind_at(
+                &mut output.targets,
+                expression_index
+            ) = elaboration_target(
+                super::resolution::resolved_name_target_at(
                     resolved,
                     occurrence
                 )
-            );
-            *Vec::index_mut(
-                &mut output.indices,
-                usize_from_u32(expression)
-            ) = super::resolution::resolved_name_index_at(
-                resolved,
-                occurrence
             );
             build_resolution_map(
                 resolved,
@@ -1904,7 +1952,7 @@ build_resolution_map(
             )
         } else { Result::Err(error(
                 7,
-                usize_from_u32(expression),
+                expression_index,
                 occurrence,
                 0,
                 0
@@ -1918,11 +1966,9 @@ resolution_map(
 ) -> Result<ResolutionMap, ElaborationError> {
     let count = super::bodies::expression_count(body);
     let output = ResolutionMap {
-        kinds: Vec::new(),
-        indices: Vec::new()
+        targets: Vec::new()
     };
-    push_zeroes(&mut output.kinds, count);
-    push_zeroes(&mut output.indices, count);
+    push_missing_targets(&mut output.targets, count);
     try(
         build_resolution_map(resolved, count, 0, &mut output),
         @resolution_map
@@ -2202,27 +2248,26 @@ elaborate_identifier(
     expected_plus_one: u32
 ) -> Result<Elaborated, ElaborationError> {
     let token = super::bodies::expression_token_start_at(body, expression);
-    let kind = *Vec::index(&map.kinds, usize_from_u32(expression));
-    let index = *Vec::index(&map.indices, usize_from_u32(expression));
     let final_transfer = *Vec::index(
         &value.final_transfer_expressions,
         usize_from_u32(expression)
     );
-    handle kind {
-        1 => elaborate_local(
+    handle elaboration_target_at(map, expression) {
+        ElaborationTarget::Parameter(id) => elaborate_local(
             interfaces,
-            value, index, token, expected_plus_one,
+            value, Id::to_u32(id), token, expected_plus_one,
             final_transfer
         ),
-        2 => elaborate_local(
+        ElaborationTarget::Local(id) => elaborate_local(
             interfaces,
             value,
-            value.parameter_count + index,
+            value.parameter_count + Id::to_u32(id),
             token,
             expected_plus_one,
             final_transfer
         ),
-        3 => Result::Err(error(2, token, token, 0, 0)),
+        ElaborationTarget::Function(_) =>
+            Result::Err(error(2, token, token, 0, 0)),
         _ => Result::Err(error(7, token, token, 0, 0))
     }
 }
@@ -2361,10 +2406,9 @@ elaborate_call(
 ) -> Result<Elaborated, ElaborationError> {
     let token = super::bodies::expression_token_start_at(body, expression);
     let callee = super::bodies::expression_child_at(body, expression, 0);
-    let kind = *Vec::index(&map.kinds, usize_from_u32(callee));
-    if(kind == u32_value(3)) {
-        let shell = *Vec::index(&map.indices, usize_from_u32(callee));
-        handle interface_callable_for_shell(interfaces, shell) {
+    handle elaboration_target_at(map, callee) {
+        ElaborationTarget::Function(shell) =>
+            handle interface_callable_for_shell(interfaces, shell) {
             Result::Err(_) => Result::Err(error(7, token, token, 0, shell)),
             Result::Ok(callable_id) => {
                 let callable = usize_from_u32(callable_id);
@@ -2441,19 +2485,27 @@ elaborate_call(
                         found_count
                     )) }
             }
-        }
-    } else { if(kind == u32_value(5)) { elaborate_enum_construct(
-                original,
-                headers,
-                declarations,
-                interfaces,
-                body,
-                map,
-                value,
-                expression,
-                callee,
-                expected_plus_one
-            ) } else { Result::Err(error(6, token, token, 0, kind)) } }
+        },
+        ElaborationTarget::Variant(variant) => elaborate_enum_construct(
+            original,
+            headers,
+            declarations,
+            interfaces,
+            body,
+            map,
+            value,
+            expression,
+            variant,
+            expected_plus_one
+        ),
+        target => Result::Err(error(
+            6,
+            token,
+            token,
+            0,
+            elaboration_target_kind(target)
+        ))
+    }
 }
 
 elaborate_block_statements(
@@ -3032,9 +3084,9 @@ elaborate_struct(
     expected_plus_one: u32
 ) -> Result<Elaborated, ElaborationError> {
     let token = super::bodies::expression_token_start_at(body, expression);
-    let kind = *Vec::index(&map.kinds, usize_from_u32(expression));
-    let header_index = *Vec::index(&map.indices, usize_from_u32(expression));
-    if(kind == u32_value(4)) { handle super::headers::struct_at(
+    handle elaboration_target_at(map, expression) {
+        ElaborationTarget::Struct(header_index) =>
+            handle super::headers::struct_at(
             super::headers::nominal_index(headers),
             usize_from_u32(header_index)
         ) {
@@ -3111,7 +3163,15 @@ elaborate_struct(
                         )) }
                 } else { Result::Err(error(3, token, token, ty, ty)) }
             }
-        } } else { Result::Err(error(6, token, token, 4, kind)) }
+        },
+        target => Result::Err(error(
+            6,
+            token,
+            token,
+            4,
+            elaboration_target_kind(target)
+        ))
+    }
 }
 
 elaborate_enum_payloads(
@@ -3179,14 +3239,10 @@ elaborate_enum_construct(
     map: &ResolutionMap,
     value: &mut BodyBuilder,
     expression: u32,
-    callee: u32,
+    variant_index: u32,
     expected_plus_one: u32
 ) -> Result<Elaborated, ElaborationError> {
     let token = super::bodies::expression_token_start_at(body, expression);
-    let variant_index = *Vec::index(
-        &map.indices,
-        usize_from_u32(callee)
-    );
     if(usize_from_u32(variant_index)
         < interface_variant_count(&*interfaces)) {
         let base = usize_from_u32(variant_index) * usize_value(5);
@@ -3261,16 +3317,12 @@ elaborate_enum_construct(
 elaborate_enum_bare(
     interfaces: &mut TypedInterfaces,
     body: &super::bodies::ParsedBody,
-    map: &ResolutionMap,
     value: &mut BodyBuilder,
     expression: u32,
+    variant_index: u32,
     expected_plus_one: u32
 ) -> Result<Elaborated, ElaborationError> {
     let token = super::bodies::expression_token_start_at(body, expression);
-    let variant_index = *Vec::index(
-        &map.indices,
-        usize_from_u32(expression)
-    );
     if(usize_from_u32(variant_index)
         < interface_variant_count(&*interfaces)) {
         let base = usize_from_u32(variant_index) * usize_value(5);
@@ -3483,24 +3535,24 @@ elaborate_expression(
     expected_plus_one: u32
 ) -> Result<Elaborated, ElaborationError> {
     handle super::bodies::expression_kind_at(body, expression) {
-        1 => if(*Vec::index(
-            &map.kinds,
-            usize_from_u32(expression)
-        ) == u32_value(5)) { elaborate_enum_bare(
+        1 => handle elaboration_target_at(map, expression) {
+            ElaborationTarget::Variant(variant) => elaborate_enum_bare(
                 interfaces,
                 body,
-                map,
                 value,
                 expression,
+                variant,
                 expected_plus_one
-            ) } else { elaborate_identifier(
+            ),
+            _ => elaborate_identifier(
                 &*interfaces,
                 body,
                 map,
                 value,
                 expression,
                 expected_plus_one
-            ) },
+            )
+        },
         2 => elaborate_integer(
             original,
             headers,
@@ -3649,11 +3701,11 @@ resolved_local_plus_one(
     parameter_count: u32,
     expression: u32
 ) -> u32 {
-    let kind = *Vec::index(&map.kinds, usize_from_u32(expression));
-    let index = *Vec::index(&map.indices, usize_from_u32(expression));
-    handle kind {
-        1 => index + u32_value(1),
-        2 => parameter_count + index + u32_value(1),
+    handle elaboration_target_at(map, expression) {
+        ElaborationTarget::Parameter(id) =>
+            Id::to_u32(id) + u32_value(1),
+        ElaborationTarget::Local(id) =>
+            parameter_count + Id::to_u32(id) + u32_value(1),
         _ => 0
     }
 }
@@ -4082,7 +4134,7 @@ pub elaborate_function_body(
                 super::resolution::local_count(resolved)
             );
             handle resolution_map(body, resolved) {
-                Result::Err(found) => Result::Err(move found),
+                Result::Err(found) => Result::Err(found),
                 Result::Ok(map) => {
                     let parameter_count =
                         interface_callable_parameter_count_at(
@@ -4117,7 +4169,7 @@ pub elaborate_function_body(
                     super::bodies::body_root_index(body),
                     result + u32_value(1)
                 ) {
-                    Result::Err(found) => Result::Err(move found),
+                    Result::Err(found) => Result::Err(found),
                     Result::Ok(root) => {
                         let computation = as_computation(&mut builder, root);
                         Result::Ok(TypedBody {
@@ -4163,7 +4215,7 @@ write_name_token(
     token: usize
 ) {
     handle super::lexer::token_kind_at(source, token) {
-        TokenKind::Ident(name) => write_name_id( output, source, move name),
+        TokenKind::Ident(name) => write_name_id( output, source, name),
         _ => unreachable()
     }
 }
@@ -4524,7 +4576,7 @@ write_construct_fields(
             ),
             source_local_limit
         ) {
-            Result::Err(found) => Result::Err(move found),
+            Result::Err(found) => Result::Err(found),
             Result::Ok(_) => write_construct_fields(
                 output,
                 source,
@@ -4563,7 +4615,7 @@ write_call_operands(
             ),
             source_local_limit
         ) {
-            Result::Err(found) => Result::Err(move found),
+            Result::Err(found) => Result::Err(found),
             Result::Ok(_) => write_call_operands(
                 output,
                 source,
@@ -4759,7 +4811,7 @@ write_block_statements(
                 source_local_limit,
                 false
             ) {
-                Result::Err(found) => Result::Err(move found),
+                Result::Err(found) => Result::Err(found),
                 Result::Ok(_) => write_block_statements(
                     output,
                     source,
@@ -4793,7 +4845,7 @@ write_block_statements(
                     source_local_limit,
                     false
                 ) {
-                    Result::Err(found) => Result::Err(move found),
+                    Result::Err(found) => Result::Err(found),
                     Result::Ok(_) => write_block_statements(
                         output,
                         source,
@@ -5022,7 +5074,7 @@ write_functions(
                     interfaces,
                     index
                 ) {
-                    Result::Err(status) => Result::Err(move status),
+                    Result::Err(status) => Result::Err(status),
                     Result::Ok(_) => write_functions(
                         output,
                         original,
@@ -5073,7 +5125,7 @@ encode_source(output: &mut ByteBuf, original: String) {
                             0
                         ) {
                             Result::Err(status) =>
-                                ByteBuf::push( output, move status),
+                                ByteBuf::push( output, status),
                             Result::Ok(_) => {
                                 ByteBuf::push(&mut *output, 0);
                                 ByteBuf::append_bytes(
@@ -5099,7 +5151,7 @@ process_inputs(
         let bytes = read_file(move path);
         handle String::from_utf8(move bytes) {
             Result::Err(_) => ByteBuf::push(&mut *output, 1),
-            Result::Ok(source) => encode_source(&mut *output, move source)
+            Result::Ok(source) => encode_source(&mut *output, source)
         };
         process_inputs(
             arguments,

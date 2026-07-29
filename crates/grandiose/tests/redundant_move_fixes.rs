@@ -171,6 +171,69 @@ fn final_use_inference_does_not_cross_completion_match_branches() {
 }
 
 #[test]
+fn pattern_binding_final_use_transfers_within_its_own_arm() {
+    let source = r#"
+        enum Target {
+            Missing,
+            Function(u32),
+            Variant(u32)
+        }
+        impl Use<[0,infinity]> for Target {}
+
+        kind(target: Target) -> u32 {
+            handle target {
+                Target::Missing => 0,
+                Target::Function(_) => 1,
+                Target::Variant(_) => 2
+            }
+        }
+
+        select(target: Target) -> u32 {
+            handle target {
+                Target::Function(shell) => shell,
+                remaining => kind(remaining)
+            }
+        }
+        main() -> { () }
+    "#;
+    let phases = compile_source_to_phases("final-use-pattern-arm.glorious", source).unwrap();
+    let kind = phases
+        .mir
+        .functions
+        .iter()
+        .position(|function| function.name == "kind")
+        .unwrap() as u32;
+    let select = phases
+        .mir
+        .functions
+        .iter()
+        .find(|function| function.name == "select")
+        .unwrap();
+    assert!(
+        select.blocks.iter().any(|block| matches!(
+            &block.terminator,
+            grandiose::compiler_mir::Terminator::Call {
+                function,
+                args,
+                ..
+            } | grandiose::compiler_mir::Terminator::TailCall {
+                function,
+                args,
+            } if *function == kind
+                && matches!(
+                    args.as_slice(),
+                    [grandiose::compiler_mir::Operand {
+                        mode: grandiose::compiler_mir::UseMode::Move,
+                        ..
+                    }]
+                )
+        )),
+        "{}",
+        phases.mir.canonical_text()
+    );
+}
+
+#[test]
 fn nested_block_liveness_does_not_consume_an_outer_local() {
     let source = r#"
         preserve(value: i64) -> i64 {

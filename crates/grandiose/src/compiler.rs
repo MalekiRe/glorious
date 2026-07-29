@@ -1408,6 +1408,11 @@ struct CoreLowerer<'a> {
     final_use_control_spans: BTreeSet<(usize, usize)>,
     final_use_barrier_depth: usize,
     final_use_block_depth: usize,
+    /// Pattern bindings exist on exactly one refinement edge. Each entry
+    /// authorizes ordinary straight-line final-use inference only at the
+    /// arm's immediate block depth; nested blocks remain conservative because
+    /// their liveness does not include statements after the nested block.
+    branch_final_use_scopes: Vec<(BTreeSet<String>, usize)>,
     effects: &'a mut EffectLowering,
     allow_terminal_perform: Option<BTreeSet<(u32, u32)>>,
     outward_protocols: BTreeSet<u32>,
@@ -23578,6 +23583,7 @@ impl<'a> CoreLowerer<'a> {
                 final_use_control_spans,
                 final_use_barrier_depth: 0,
                 final_use_block_depth: 0,
+                branch_final_use_scopes: Vec::new(),
                 effects,
                 allow_terminal_perform: allowance.terminal_performs,
                 outward_protocols: allowance.outward_protocols,
@@ -23775,6 +23781,7 @@ impl<'a> CoreLowerer<'a> {
                 final_use_control_spans: BTreeSet::new(),
                 final_use_barrier_depth: 0,
                 final_use_block_depth: 0,
+                branch_final_use_scopes: Vec::new(),
                 effects,
                 allow_terminal_perform: allowance.terminal_performs,
                 outward_protocols: allowance.outward_protocols,
@@ -27073,20 +27080,25 @@ impl<'a> CoreLowerer<'a> {
     }
 
     fn inferred_final_transfer(&self, name: &str, span: Span, local: &CoreLocal) -> bool {
-        self.direct_source_body
-            && self.final_use_barrier_depth == 0
+        let occurrence = (name.to_string(), span.start, span.end);
+        let ordinary_straight_line = self.final_use_barrier_depth == 0
             && self.final_use_block_depth == 1
+            && !self
+                .final_use_control_spans
+                .iter()
+                .any(|(start, end)| *start <= span.start && span.end <= *end);
+        let branch_local = self
+            .branch_final_use_scopes
+            .iter()
+            .rev()
+            .any(|(names, depth)| *depth == self.final_use_block_depth && names.contains(name));
+        self.direct_source_body
             && !matches!(
                 &self.body_instance,
                 Some(specialization::BodyInstanceKey::Closure(_))
             )
-            && self
-                .inferred_final_uses
-                .contains(&(name.to_string(), span.start, span.end))
-            && !self
-                .final_use_control_spans
-                .iter()
-                .any(|(start, end)| *start <= span.start && span.end <= *end)
+            && self.inferred_final_uses.contains(&occurrence)
+            && (ordinary_straight_line || branch_local)
             && self.is_copy(local.ty)
             && {
                 let interval = self.use_interval(local.ty);
@@ -32491,8 +32503,21 @@ impl<'a> CoreLowerer<'a> {
                     }
                     let branch_expected =
                         expected.or_else(|| self.provisional_handler_result(span));
+                    let branch_binding_names = bindings
+                        .iter()
+                        .map(|binding| binding.name.clone())
+                        .collect::<BTreeSet<_>>();
+                    let branch_block_depth = self.final_use_block_depth
+                        + usize::from(matches!(
+                            positive_source.kind,
+                            ExprKind::Block(_) | ExprKind::ContextBlock(_)
+                        ));
+                    self.branch_final_use_scopes
+                        .push((branch_binding_names, branch_block_depth));
                     self.defer_branch_region_ends += 1;
-                    let positive = self.expression(positive_source, branch_expected)?;
+                    let positive = self.expression(positive_source, branch_expected);
+                    self.branch_final_use_scopes.pop();
+                    let positive = positive?;
                     let mut positive_moved = self.moved.clone();
                     let mut positive_moved_paths = self.moved_paths.clone();
                     let positive_empty_referents = self.empty_referents.clone();
@@ -42683,7 +42708,7 @@ fn serialize_mir_cleanup_plans(
             .map_err(|error| error.to_string())?;
     for (fid, function) in mir_program.functions.iter().enumerate() {
         let lists = &cleanup_lists[fid];
-        let leave_anchors = mir::optimizer::derive_leave_cleanup_anchors(function, &lists)
+        let leave_anchors = mir::optimizer::derive_leave_cleanup_anchors(function, lists)
             .map_err(|error| error.to_string())?;
         let mut offsets = BTreeMap::new();
         let mut old_len = 0_u32;
