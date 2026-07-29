@@ -45,11 +45,18 @@ pub enum StageInstruction {
     Return(Option<RegisterId>)
 }
 
+pub struct StageVariant {
+    name_index: u32,
+    field_names: Vec<u32>,
+    fields: Vec<ArtifactTypeId>
+}
+
 pub struct StageType {
     tag: u8,
     name_index: u32,
     field_names: Vec<u32>,
     fields: Vec<ArtifactTypeId>,
+    variants: Vec<StageVariant>,
     copy_flag: u32
 }
 
@@ -86,7 +93,9 @@ pub enum LoweringError {
     UnknownCallable(u32),
     InvalidConstructionType(TypeId),
     ConstructionFieldCount(TypeId, u32, u32),
-    UnsupportedVariant(TypeId, u32),
+    UnexpectedVariant(TypeId, u32),
+    MissingVariant(TypeId),
+    VariantOutOfRange(TypeId, u32),
     ConstructionFieldOrder(u32, u32),
     MissingResult(TypeId)
 }
@@ -215,6 +224,30 @@ pub stage_program_type_field_name_index_at(
     )
 }
 
+pub stage_program_type_variant_count_at(
+    value: &StageProgram,
+    type_index: usize
+) -> usize {
+    stage_type_variant_count(stage_program_type_at(
+        value,
+        stage_type_id_from_usize(type_index)
+    ))
+}
+
+pub stage_program_type_variant_at<'a>(
+    value: &'a StageProgram,
+    type_index: usize,
+    variant_index: usize
+) -> &'a StageVariant {
+    stage_type_variant_at(
+        stage_program_type_at(
+            value,
+            stage_type_id_from_usize(type_index)
+        ),
+        variant_index
+    )
+}
+
 pub tuple_type(
     fields: Vec<ArtifactTypeId>,
     copy_flag: u32
@@ -224,6 +257,7 @@ pub tuple_type(
         name_index: 4294967295,
         field_names: Vec::new(),
         fields: fields,
+        variants: Vec::new(),
         copy_flag: copy_flag
     }
 }
@@ -239,6 +273,34 @@ pub struct_type(
         name_index: name_index,
         field_names: field_names,
         fields: fields,
+        variants: Vec::new(),
+        copy_flag: copy_flag
+    }
+}
+
+pub enum_variant(
+    name_index: u32,
+    field_names: Vec<u32>,
+    fields: Vec<ArtifactTypeId>
+) -> StageVariant {
+    StageVariant {
+        name_index: name_index,
+        field_names: field_names,
+        fields: fields
+    }
+}
+
+pub enum_type(
+    name_index: u32,
+    variants: Vec<StageVariant>,
+    copy_flag: u32
+) -> StageType {
+    StageType {
+        tag: 2,
+        name_index: name_index,
+        field_names: Vec::new(),
+        fields: Vec::new(),
+        variants: variants,
         copy_flag: copy_flag
     }
 }
@@ -270,11 +332,54 @@ pub stage_type_field_name_count(value: &StageType) -> usize {
     Vec::len(&value.field_names)
 }
 
+pub stage_type_variant_count(value: &StageType) -> usize {
+    Vec::len(&value.variants)
+}
+
+pub stage_type_variant_at<'a>(
+    value: &'a StageType,
+    index: usize
+) -> &'a StageVariant {
+    Vec::index(&value.variants, index)
+}
+
 pub stage_type_field_name_index_at(
     value: &StageType,
     index: usize
 ) -> u32 {
     *Vec::index(&value.field_names, index)
+}
+
+pub stage_variant_name_index(value: &StageVariant) -> u32 {
+    value.name_index
+}
+
+pub stage_variant_field_count(value: &StageVariant) -> usize {
+    Vec::len(&value.fields)
+}
+
+pub stage_variant_field_name_count(value: &StageVariant) -> usize {
+    Vec::len(&value.field_names)
+}
+
+pub stage_variant_field_name_index_at(
+    value: &StageVariant,
+    index: usize
+) -> u32 {
+    *Vec::index(&value.field_names, index)
+}
+
+pub stage_variant_field_type_at(
+    value: &StageVariant,
+    index: usize
+) -> ArtifactTypeId {
+    *Vec::index(&value.fields, index)
+}
+
+pub stage_variant_fields(
+    value: &StageVariant
+) -> &Vec<ArtifactTypeId> {
+    &value.fields
 }
 
 pub stage_function_name(value: &StageFunction) -> &String { &value.name }
@@ -902,16 +1007,23 @@ lower_computation(
                 interfaces,
                 Id::to_usize(type_id)
             ) {
-                InterfaceTypeView::Tuple(elements) => {
-                    lower_product(
+                InterfaceTypeView::Tuple(elements) => handle flavor {
+                    ConstructionFlavor::Product => lower_aggregate(
                         interfaces,
                         body,
                         value,
                         type_id,
-                        flavor,
+                        None,
                         fields,
                         checked_u32(Slice::len(elements))
-                    )
+                    ),
+                    ConstructionFlavor::Variant(ordinal) =>
+                        Result::Err(
+                            LoweringError::UnexpectedVariant(
+                                type_id,
+                                ordinal
+                            )
+                        )
                 },
                 InterfaceTypeView::Nominal(nominal) => handle
                     super::super::frontend::elaboration::
@@ -920,18 +1032,59 @@ lower_computation(
                             usize_from_u32(nominal)
                         ) {
                     InterfaceNominalView::Struct(_, _, expected) =>
-                        lower_product(
-                            interfaces,
-                            body,
-                            value,
-                            type_id,
-                            flavor,
-                            fields,
-                            expected
-                        ),
-                    _ => Result::Err(
-                        LoweringError::InvalidConstructionType(type_id)
-                    )
+                        handle flavor {
+                            ConstructionFlavor::Product =>
+                                lower_aggregate(
+                                    interfaces,
+                                    body,
+                                    value,
+                                    type_id,
+                                    None,
+                                    fields,
+                                    expected
+                                ),
+                            ConstructionFlavor::Variant(ordinal) =>
+                                Result::Err(
+                                    LoweringError::UnexpectedVariant(
+                                        type_id,
+                                        ordinal
+                                    )
+                                )
+                        },
+                    InterfaceNominalView::Enum(_, start, count) =>
+                        handle flavor {
+                            ConstructionFlavor::Product =>
+                                Result::Err(
+                                    LoweringError::MissingVariant(type_id)
+                                ),
+                            ConstructionFlavor::Variant(ordinal) =>
+                                if(ordinal < count) {
+                                    let payloads =
+                                        super::super::frontend::elaboration::
+                                            interface_variant_payloads_at(
+                                                interfaces,
+                                                usize_from_u32(
+                                                    start + ordinal
+                                                )
+                                            );
+                                    lower_aggregate(
+                                        interfaces,
+                                        body,
+                                        value,
+                                        type_id,
+                                        Option::Some(ordinal),
+                                        fields,
+                                        checked_u32(Slice::len(payloads))
+                                    )
+                                } else {
+                                    Result::Err(
+                                        LoweringError::VariantOutOfRange(
+                                            type_id,
+                                            ordinal
+                                        )
+                                    )
+                                }
+                },
                 },
                 _ => Result::Err(
                     LoweringError::InvalidConstructionType(type_id)
@@ -941,19 +1094,17 @@ lower_computation(
     }
 }
 
-lower_product<'a>(
+lower_aggregate<'a>(
     interfaces:
         &super::super::frontend::elaboration::TypedInterfaces,
     body: &super::super::frontend::elaboration::TypedBody,
     value: &mut FunctionBuilder,
     type_id: TypeId,
-    flavor: ConstructionFlavor,
+    variant: Option<u32>,
     fields: Slice<'a, ConstructionField>,
     expected: u32
 ) -> Result<Option<RegisterId>, LoweringError> {
-    handle flavor {
-        ConstructionFlavor::Product => {
-        if(checked_u32(Slice::len(fields)) == expected) {
+    if(checked_u32(Slice::len(fields)) == expected) {
             let registers = Vec::new();
             try(lower_product_fields(
                 interfaces,
@@ -961,13 +1112,13 @@ lower_product<'a>(
                 value,
                 fields,
                 &mut registers
-            ), @lower_product);
+            ), @lower_aggregate);
             let target = alloc_register(value);
             emit_construct(
                 value,
                 target,
                 artifact_type_id(Id::to_u32(type_id)),
-                None,
+                variant,
                 registers
             );
             Result::Ok(Option::Some(target))
@@ -978,13 +1129,6 @@ lower_product<'a>(
                 checked_u32(Slice::len(fields))
             ))
         }
-        },
-        ConstructionFlavor::Variant(ordinal) =>
-            Result::Err(LoweringError::UnsupportedVariant(
-                type_id,
-                ordinal
-            ))
-    }
 }
 
 lower_product_fields<'a>(

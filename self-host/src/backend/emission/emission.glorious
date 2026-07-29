@@ -151,6 +151,78 @@ collect_stage_field_names(
     } else { () }
 }
 
+collect_stage_variant_field_names(
+    program: &super::lowering::StageProgram,
+    variant: &super::lowering::StageVariant,
+    index: usize,
+    output: &mut Vec<String>
+) {
+    if(index <
+        super::lowering::stage_variant_field_name_count(variant)
+    ) {
+        Vec::push(
+            &mut *output,
+            *super::lowering::stage_program_type_name_at(
+                program,
+                usize_from_u32(
+                    super::lowering::stage_variant_field_name_index_at(
+                        variant,
+                        index
+                    )
+                )
+            )
+        );
+        collect_stage_variant_field_names(
+            program,
+            variant,
+            index + 1,
+            output
+        )
+    } else { () }
+}
+
+collect_stage_variant_names(
+    program: &super::lowering::StageProgram,
+    type_index: usize,
+    index: usize,
+    output: &mut Vec<String>
+) {
+    if(index <
+        super::lowering::stage_program_type_variant_count_at(
+            program,
+            type_index
+        )
+    ) {
+        let variant =
+            super::lowering::stage_program_type_variant_at(
+                program,
+                type_index,
+                index
+            );
+        Vec::push(
+            &mut *output,
+            *super::lowering::stage_program_type_name_at(
+                program,
+                usize_from_u32(
+                    super::lowering::stage_variant_name_index(variant)
+                )
+            )
+        );
+        collect_stage_variant_field_names(
+            program,
+            variant,
+            0,
+            output
+        );
+        collect_stage_variant_names(
+            program,
+            type_index,
+            index + 1,
+            output
+        )
+    } else { () }
+}
+
 collect_type_names(
     program: &super::lowering::StageProgram,
     index: usize,
@@ -162,7 +234,8 @@ collect_type_names(
                 program,
                 super::lowering::stage_type_id_from_usize(index)
             );
-        if(super::lowering::stage_type_tag(stage_type) == 1) {
+        let tag = super::lowering::stage_type_tag(stage_type);
+        if(tag == 1 or { tag == 2 }) {
             Vec::push(
                 &mut *output,
                 *super::lowering::stage_program_type_name_at(
@@ -172,7 +245,11 @@ collect_type_names(
                     )
                 )
             );
-            collect_stage_field_names(program, stage_type, 0, output)
+            if(tag == 1) {
+                collect_stage_field_names(program, stage_type, 0, output)
+            } else {
+                collect_stage_variant_names(program, index, 0, output)
+            }
         } else {
             ()
         };
@@ -203,6 +280,28 @@ aggregate_zero_sized_flag(
     } else { 2 }
 }
 
+enum_variants_zero_sized_flag(
+    program: &super::lowering::StageProgram,
+    stage_type: &super::lowering::StageType,
+    index: usize
+) -> u32 {
+    if(index < super::lowering::stage_type_variant_count(stage_type)) {
+        if(aggregate_zero_sized_flag(
+            program,
+            super::lowering::stage_variant_fields(
+                super::lowering::stage_type_variant_at(stage_type, index)
+            ),
+            0
+        ) == 2) {
+            enum_variants_zero_sized_flag(
+                program,
+                stage_type,
+                index + 1
+            )
+        } else { 0 }
+    } else { 2 }
+}
+
 type_zero_sized_flag(
     program: &super::lowering::StageProgram,
     type_id: super::lowering::ArtifactTypeId
@@ -215,18 +314,24 @@ type_zero_sized_flag(
             if(raw == 1) { 2 } else { 0 }
         }
     } else {
-        aggregate_zero_sized_flag(
-            program,
-            super::lowering::stage_type_fields(
-                super::lowering::stage_program_type_at(
-                    program,
-                    super::lowering::stage_type_id_from_usize(
-                        usize_from_u32(raw - 19)
-                    )
+        let stage_type =
+            super::lowering::stage_program_type_at(
+                program,
+                super::lowering::stage_type_id_from_usize(
+                    usize_from_u32(raw - 19)
                 )
-            ),
-            0
-        )
+            );
+        if(super::lowering::stage_type_tag(stage_type) == 2) {
+            if(super::lowering::stage_type_variant_count(stage_type) <= 1) {
+                enum_variants_zero_sized_flag(program, stage_type, 0)
+            } else { 0 }
+        } else {
+            aggregate_zero_sized_flag(
+                program,
+                super::lowering::stage_type_fields(stage_type),
+                0
+            )
+        }
     }
 }
 
@@ -249,6 +354,28 @@ aggregate_zero_use_flag(
     } else { 16 }
 }
 
+enum_variants_zero_use_flag(
+    program: &super::lowering::StageProgram,
+    stage_type: &super::lowering::StageType,
+    index: usize
+) -> u32 {
+    if(index < super::lowering::stage_type_variant_count(stage_type)) {
+        if(aggregate_zero_use_flag(
+            program,
+            super::lowering::stage_variant_fields(
+                super::lowering::stage_type_variant_at(stage_type, index)
+            ),
+            0
+        ) == 16) {
+            enum_variants_zero_use_flag(
+                program,
+                stage_type,
+                index + 1
+            )
+        } else { 0 }
+    } else { 16 }
+}
+
 type_zero_use_flag(
     program: &super::lowering::StageProgram,
     type_id: super::lowering::ArtifactTypeId
@@ -257,18 +384,22 @@ type_zero_use_flag(
     if(raw < 19) {
         if(raw == 1) { 0 } else { 16 }
     } else {
-        aggregate_zero_use_flag(
-            program,
-            super::lowering::stage_type_fields(
-                super::lowering::stage_program_type_at(
-                    program,
-                    super::lowering::stage_type_id_from_usize(
-                        usize_from_u32(raw - 19)
-                    )
+        let stage_type =
+            super::lowering::stage_program_type_at(
+                program,
+                super::lowering::stage_type_id_from_usize(
+                    usize_from_u32(raw - 19)
                 )
-            ),
-            0
-        )
+            );
+        if(super::lowering::stage_type_tag(stage_type) == 2) {
+            enum_variants_zero_use_flag(program, stage_type, 0)
+        } else {
+            aggregate_zero_use_flag(
+                program,
+                super::lowering::stage_type_fields(stage_type),
+                0
+            )
+        }
     }
 }
 
@@ -429,6 +560,142 @@ struct_type_record(
     }
 }
 
+write_enum_variant_fields(
+    program: &super::lowering::StageProgram,
+    names: &Vec<String>,
+    variant: &super::lowering::StageVariant,
+    index: usize,
+    output: &mut ByteBuf
+) -> Result<(), EmissionError> {
+    let end = super::lowering::stage_variant_field_count(variant);
+    try_for_range(Range::new(index, end), { current =>
+        handle require_program_name(
+            program,
+            names,
+            super::lowering::stage_variant_field_name_index_at(
+                variant,
+                current
+            ),
+            checked_u32(current)
+        ) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(field_name) => {
+                ByteBuf::write_u32_le(&mut *output, field_name);
+                ByteBuf::write_u32_le(
+                    &mut *output,
+                    super::lowering::artifact_type_raw(
+                        super::lowering::stage_variant_field_type_at(
+                            variant,
+                            current
+                        )
+                    )
+                );
+                Result::Ok(())
+            }
+        }
+    })
+}
+
+write_enum_variants(
+    program: &super::lowering::StageProgram,
+    names: &Vec<String>,
+    type_index: usize,
+    index: usize,
+    output: &mut ByteBuf
+) -> Result<(), EmissionError> {
+    if(index <
+        super::lowering::stage_program_type_variant_count_at(
+            program,
+            type_index
+        )
+    ) {
+        let variant =
+            super::lowering::stage_program_type_variant_at(
+                program,
+                type_index,
+                index
+            );
+        if(
+            super::lowering::stage_variant_field_name_count(variant)
+                == super::lowering::stage_variant_field_count(variant)
+        ) {
+            let variant_name = try(require_program_name(
+                program,
+                names,
+                super::lowering::stage_variant_name_index(variant),
+                checked_u32(index)
+            ), @write_enum_variants);
+            ByteBuf::write_u32_le(&mut *output, variant_name);
+            ByteBuf::write_u32_le(
+                &mut *output,
+                checked_u32(
+                    super::lowering::stage_variant_field_count(variant)
+                )
+            );
+            try(write_enum_variant_fields(
+                program,
+                names,
+                variant,
+                0,
+                output
+            ), @write_enum_variants);
+            write_enum_variants(
+                program,
+                names,
+                type_index,
+                index + 1,
+                output
+            )
+        } else {
+            Result::Err(error(6, checked_u32(type_index) + 19))
+        }
+    } else {
+        Result::Ok(())
+    }
+}
+
+enum_type_record(
+    program: &super::lowering::StageProgram,
+    names: &Vec<String>,
+    index: usize
+) -> Result<super::artifact::Record, EmissionError> {
+    let type_id = super::lowering::stage_type_artifact_id(
+        super::lowering::stage_type_id_from_usize(index)
+    );
+    let type_name = try(require_program_name(
+        program,
+        names,
+        super::lowering::stage_program_type_name_index_at(
+            program,
+            index
+        ),
+        super::lowering::artifact_type_raw(type_id)
+    ), @enum_type_record);
+    let payload = ByteBuf::new();
+    ByteBuf::write_u32_le(&mut payload, type_name);
+    ByteBuf::write_u32_le(
+        &mut payload,
+        checked_u32(
+            super::lowering::stage_program_type_variant_count_at(
+                program,
+                index
+            )
+        )
+    );
+    try(write_enum_variants(
+        program,
+        names,
+        index,
+        0,
+        &mut payload
+    ), @enum_type_record);
+    Result::Ok(super::artifact::record(
+        35,
+        wrapping_convert_to_u8(custom_type_flags(program, index)),
+        ByteBuf::finish(payload)
+    ))
+}
+
 custom_type_record(
     program: &super::lowering::StageProgram,
     names: &Vec<String>,
@@ -437,6 +704,7 @@ custom_type_record(
     handle super::lowering::stage_program_type_tag_at(program, index) {
         0 => Result::Ok(tuple_type_record(program, index)),
         1 => struct_type_record(program, names, index),
+        2 => enum_type_record(program, names, index),
         _ => Result::Err(error(6, checked_u32(index)))
     }
 }

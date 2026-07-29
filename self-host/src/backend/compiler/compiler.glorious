@@ -258,6 +258,93 @@ collect_struct_fields(
     }
 }
 
+ordinal_name(value: usize) -> String {
+    let output = Formatter::new();
+    Formatter::append_u64(
+        &mut output,
+        wrapping_convert_to_u64(value)
+    );
+    handle Formatter::finish(output) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+collect_variant_payloads<'a>(
+    payloads:
+        Slice<'a, super::super::frontend::elaboration::TypeId>,
+    type_names: &mut Vec<String>,
+    names: &mut Vec<u32>,
+    types: &mut Vec<super::lowering::ArtifactTypeId>
+) {
+    Slice::for_each(payloads, { payload => {
+        Vec::push(
+            &mut *names,
+            checked_u32(Vec::len(&*type_names))
+        );
+        Vec::push(
+            &mut *type_names,
+            ordinal_name(Vec::len(&*types))
+        );
+        Vec::push(
+            &mut *types,
+            super::lowering::artifact_type_id(Id::to_u32(*payload))
+        )
+    } })
+}
+
+collect_enum_variants(
+    headers:
+        &super::super::frontend::headers::ParsedHeaders,
+    interfaces:
+        &super::super::frontend::elaboration::TypedInterfaces,
+    start: u32,
+    count: u32,
+    ordinal: u32,
+    type_names: &mut Vec<String>,
+    output: &mut Vec<super::lowering::StageVariant>
+) -> Result<(), CompileError> {
+    if(ordinal < count) {
+        let variant = usize_from_u32(start + ordinal);
+        let name = try(interface_name(
+            headers,
+            super::super::frontend::elaboration::
+                interface_variant_name_at(interfaces, variant),
+            start + ordinal
+        ), @collect_enum_variants);
+        let name_index = checked_u32(Vec::len(&*type_names));
+        Vec::push(&mut *type_names, name);
+        let field_names = Vec::new();
+        let field_types = Vec::new();
+        collect_variant_payloads(
+            super::super::frontend::elaboration::
+                interface_variant_payloads_at(interfaces, variant),
+            type_names,
+            &mut field_names,
+            &mut field_types
+        );
+        Vec::push(
+            &mut *output,
+            super::lowering::enum_variant(
+                name_index,
+                field_names,
+                field_types
+            )
+        );
+        collect_enum_variants(
+            headers,
+            interfaces,
+            start,
+            count,
+            ordinal + 1,
+            type_names,
+            output
+        )
+    } else {
+        Result::Ok(())
+    }
+}
+
 collect_types(
     headers:
         &super::super::frontend::headers::ParsedHeaders,
@@ -364,10 +451,49 @@ collect_types(
                         type_names
                     )
                 },
-                InterfaceNominalView::Enum(_, _, _) =>
-                    Result::Err(
-                        CompileError::UnsupportedInterfaceType(index)
+                InterfaceNominalView::Enum(shell, start, count) => {
+                    let name = try(
+                        function_name(headers, declarations, shell),
+                        @collect_types
+                    );
+                    let name_index = checked_u32(Vec::len(&*type_names));
+                    Vec::push(&mut *type_names, name);
+                    let variants = Vec::new();
+                    try(collect_enum_variants(
+                        headers,
+                        interfaces,
+                        start,
+                        count,
+                        0,
+                        type_names,
+                        &mut variants
+                    ), @collect_types);
+                    handle Arena::alloc(
+                        &mut *output,
+                        super::lowering::enum_type(
+                            name_index,
+                            variants,
+                            if(
+                                super::super::frontend::elaboration::
+                                    interface_type_flags_at(
+                                        interfaces,
+                                        index
+                                    ) % 2 == 1
+                            ) { 1 } else { 0 }
+                        )
+                    ) {
+                        Result::Err(_) => unreachable(),
+                        Result::Ok(_) => ()
+                    };
+                    collect_types(
+                        headers,
+                        declarations,
+                        interfaces,
+                        index + 1,
+                        output,
+                        type_names
                     )
+                }
             },
             _ => Result::Err(
                 CompileError::UnsupportedInterfaceType(index)

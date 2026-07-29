@@ -8,12 +8,22 @@ use grandiose::{
     CompileOptions, LlvmOptions, OptimizationLevel,
     source_bundle::{Segment, SourceBundle},
 };
-use grandiose_vm::{Artifact, SystemHost, Type, Value, Vm, verify::load_verified};
+use grandiose_vm::{
+    Artifact, SystemHost, Type, Value, Vm,
+    bytecode::{I64, U64},
+    verify::load_verified,
+};
 
 const FIXTURE: &str = r#"
     struct Pair {
         first: i64,
         second: i64
+    }
+
+    enum Choice {
+        Empty,
+        Number(i64),
+        Pair(i64, u64)
     }
 
     identity(value: i64) -> i64 { value }
@@ -30,6 +40,9 @@ const FIXTURE: &str = r#"
         let pair = Pair { second: value, first: value };
         pair.first
     }
+    empty_choice() -> Choice { Choice::Empty }
+    number_choice() -> Choice { Choice::Number(13) }
+    pair_choice() -> Choice { Choice::Pair(7, 9) }
     main() { () }
 "#;
 
@@ -116,6 +129,9 @@ fn assert_compiled_artifact(bytes: &[u8]) {
     let answer = function_id(&decoded, "answer");
     let first = function_id(&decoded, "first");
     let struct_answer = function_id(&decoded, "struct_answer");
+    let empty_choice = function_id(&decoded, "empty_choice");
+    let number_choice = function_id(&decoded, "number_choice");
+    let pair_choice = function_id(&decoded, "pair_choice");
     let main = function_id(&decoded, "main");
     assert!(decoded.types.iter().any(|ty| matches!(
         ty.representation(),
@@ -125,6 +141,35 @@ fn assert_compiled_artifact(bytes: &[u8]) {
                 && fields[0].name == "first"
                 && fields[1].name == "second"
     )));
+    let choice = decoded
+        .types
+        .iter()
+        .position(|ty| {
+            matches!(
+                ty.representation(),
+                Type::Enum { name, .. } if name == "Choice"
+            )
+        })
+        .expect("self-hosted artifact must contain Choice") as u32;
+    let Type::Enum { variants, .. } = decoded.types[choice as usize].representation() else {
+        unreachable!()
+    };
+    assert_eq!(
+        variants
+            .iter()
+            .map(|variant| variant.name.as_str())
+            .collect::<Vec<_>>(),
+        ["Empty", "Number", "Pair"]
+    );
+    assert!(variants[0].fields.is_empty());
+    assert_eq!(variants[1].fields.len(), 1);
+    assert_eq!(variants[1].fields[0].name, "0");
+    assert_eq!(variants[1].fields[0].ty, I64);
+    assert_eq!(variants[2].fields.len(), 2);
+    assert_eq!(variants[2].fields[0].name, "0");
+    assert_eq!(variants[2].fields[0].ty, I64);
+    assert_eq!(variants[2].fields[1].name, "1");
+    assert_eq!(variants[2].fields[1].ty, U64);
     let verified = load_verified(bytes).expect("self-hosted GRBC must verify");
     assert_eq!(
         Vm::new(verified.clone()).run(answer, vec![]).unwrap(),
@@ -139,6 +184,20 @@ fn assert_compiled_artifact(bytes: &[u8]) {
             .run(struct_answer, vec![])
             .unwrap(),
         Value::I64(11)
+    );
+    assert_eq!(
+        Vm::new(verified.clone()).run(empty_choice, vec![]).unwrap(),
+        Value::aggregate_with_variant(choice, Some(0), [])
+    );
+    assert_eq!(
+        Vm::new(verified.clone())
+            .run(number_choice, vec![])
+            .unwrap(),
+        Value::aggregate_with_variant(choice, Some(1), [Value::I64(13)])
+    );
+    assert_eq!(
+        Vm::new(verified.clone()).run(pair_choice, vec![]).unwrap(),
+        Value::aggregate_with_variant(choice, Some(2), [Value::I64(7), Value::U64(9)])
     );
     assert_eq!(Vm::new(verified).run(main, vec![]).unwrap(), Value::Unit);
 }

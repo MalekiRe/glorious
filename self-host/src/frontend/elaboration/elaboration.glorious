@@ -822,29 +822,33 @@ pub interface_variant_count(value: &TypedInterfaces) -> usize {
     Arena::len(&value.variants)
 }
 
-pub interface_variant_word_at(
+pub interface_variant_name_at(
     value: &TypedInterfaces,
-    index: usize,
-    word: usize
+    index: usize
 ) -> u32 {
     let variant = interface_variant_at(
         value,
         interface_variant_id_from_usize(index)
     );
-    handle word {
-        0 => Id::to_u32(variant.owner),
-        1 => variant.name,
-        2 => variant.payloads.start,
-        3 => variant.payloads.count,
-        _ => u32_from_usize(variant.name_token)
-    }
+    variant.name
 }
 
-pub interface_variant_payload_at(
-    value: &TypedInterfaces,
+pub interface_variant_payloads_at<'a>(
+    value: &'a TypedInterfaces,
     index: usize
-) -> u32 {
-    Id::to_u32(*Vec::index(&value.variant_payloads, index))
+) -> Slice<'a, TypeId> {
+    let variant = interface_variant_at(
+        value,
+        interface_variant_id_from_usize(index)
+    );
+    handle Slice::subslice(
+        Vec::as_slice(&value.variant_payloads),
+        usize_from_u32(variant.payloads.start),
+        usize_from_u32(variant.payloads.count)
+    ) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
 }
 
 pub interface_callable_count(value: &TypedInterfaces) -> usize {
