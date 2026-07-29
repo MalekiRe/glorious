@@ -897,10 +897,10 @@ pub interface_callable_for_shell(
     value: &TypedInterfaces,
     shell: u32
 ) -> Option<u32> {
-    handle interface_callable_for_shell_id(value, shell) {
-        Result::Err(_) => None,
-        Result::Ok(found) => Option::Some(Id::to_u32(found))
-    }
+    Option::map(
+        interface_callable_for_shell_id(value, shell),
+        { found => Id::to_u32(found) }
+    )
 }
 
 pub typed_body_shell(value: &TypedBody) -> u32 { value.shell }
@@ -3028,17 +3028,11 @@ check_expected_type(
 }
 
 expected_matches(expected: Option<TypeId>, found: TypeId) -> Bool {
-    handle expected {
-        Result::Err(_) => true,
-        Result::Ok(ty) => ty == found
-    }
+    Option::map(expected, { ty => ty == found }) else { true }
 }
 
 expected_word_or(expected: Option<TypeId>, fallback: TypeId) -> u32 {
-    handle expected {
-        Result::Err(_) => Id::to_u32(fallback),
-        Result::Ok(ty) => Id::to_u32(ty)
-    }
+    Id::to_u32(expected else { fallback })
 }
 
 scalar_bits(kind: u8) -> u32 {
@@ -3168,10 +3162,7 @@ elaborate_integer(
         token
     ) {
         TokenKind::Number(number) => if(super::lexer::number_is_float(&number)) { Result::Err(error(2, token, token, 0, 0)) } else {
-            let ty_id = handle expected {
-                Result::Err(_) => type_id_from_u32(10),
-                Result::Ok(found) => found
-            };
+            let ty_id = expected else { type_id_from_u32(10) };
             let ty = Id::to_u32(ty_id);
             if(bool_and(
                 u32_value(2) <= ty,
