@@ -15,14 +15,23 @@ pub type RegisterId = Id<RegisterTag>;
 pub struct RegisterPackTag {}
 pub type RegisterPackId = Id<RegisterPackTag>;
 
+pub struct StageFunctionTag {}
+pub type StageFunctionId = Id<StageFunctionTag>;
+
+pub struct StageTypeTag {}
+pub type StageTypeId = Id<StageTypeTag>;
+
+pub struct ArtifactTypeTag {}
+pub type ArtifactTypeId = Id<ArtifactTypeTag>;
+
 pub enum StageInstruction {
     Const(RegisterId, Bytes),
     Move(RegisterId, RegisterId),
     Copy(RegisterId, RegisterId),
-    Construct(RegisterId, u32, Option<u32>, RegisterPackId),
+    Construct(RegisterId, ArtifactTypeId, Option<u32>, RegisterPackId),
     ProjectCopy(RegisterId, RegisterId, u32),
     Drop(RegisterId),
-    Call(Option<RegisterId>, u32, RegisterPackId),
+    Call(Option<RegisterId>, StageFunctionId, RegisterPackId),
     Return(Option<RegisterId>)
 }
 
@@ -30,7 +39,7 @@ pub struct StageType {
     tag: u8,
     name_index: u32,
     field_names: Vec<u32>,
-    fields: Vec<u32>,
+    fields: Vec<ArtifactTypeId>,
     copy_flag: u32
 }
 
@@ -44,8 +53,8 @@ pub struct StageCleanup {
 
 pub struct StageFunction {
     name: String,
-    parameters: Vec<u32>,
-    result: u32,
+    parameters: Vec<ArtifactTypeId>,
+    result: ArtifactTypeId,
     register_count: u32,
     instructions: Vec<StageInstruction>,
     cleanups: Vec<StageCleanup>,
@@ -53,9 +62,9 @@ pub struct StageFunction {
 }
 
 pub struct StageProgram {
-    functions: Vec<StageFunction>,
+    functions: Arena<StageFunctionTag, StageFunction>,
     constants: Vec<Vec<u8>>,
-    types: Vec<StageType>,
+    types: Arena<StageTypeTag, StageType>,
     type_names: Vec<String>
 }
 
@@ -75,14 +84,14 @@ pub lowering_error_code(value: &LoweringError) -> u8 { value.code }
 pub lowering_error_detail(value: &LoweringError) -> u32 { value.detail }
 
 pub stage_program_function_count(value: &StageProgram) -> usize {
-    Vec::len(&value.functions)
+    Arena::len(&value.functions)
 }
 
 pub stage_program_function_at<'a>(
     value: &'a StageProgram,
-    index: usize
+    id: StageFunctionId
 ) -> &'a StageFunction {
-    Vec::index(&value.functions, index)
+    Arena::index(&value.functions, id)
 }
 
 pub stage_program_constant_count(value: &StageProgram) -> usize {
@@ -97,14 +106,14 @@ pub stage_program_constant_at<'a>(
 }
 
 pub stage_program_type_count(value: &StageProgram) -> usize {
-    Vec::len(&value.types)
+    Arena::len(&value.types)
 }
 
 pub stage_program_type_at<'a>(
     value: &'a StageProgram,
-    index: usize
+    id: StageTypeId
 ) -> &'a StageType {
-    Vec::index(&value.types, index)
+    Arena::index(&value.types, id)
 }
 
 pub stage_program_type_name_at(
@@ -115,37 +124,52 @@ pub stage_program_type_name_at(
 }
 
 pub stage_program_type_tag_at(value: &StageProgram, index: usize) -> u8 {
-    stage_type_tag(stage_program_type_at(value, index))
+    stage_type_tag(stage_program_type_at(
+        value,
+        stage_type_id_from_usize(index)
+    ))
 }
 
 pub stage_program_type_copy_flag_at(
     value: &StageProgram,
     index: usize
 ) -> u32 {
-    stage_type_copy_flag(stage_program_type_at(value, index))
+    stage_type_copy_flag(stage_program_type_at(
+        value,
+        stage_type_id_from_usize(index)
+    ))
 }
 
 pub stage_program_type_field_count_at(
     value: &StageProgram,
     index: usize
 ) -> usize {
-    stage_type_field_count(stage_program_type_at(value, index))
+    stage_type_field_count(stage_program_type_at(
+        value,
+        stage_type_id_from_usize(index)
+    ))
 }
 
 pub stage_program_type_field_name_count_at(
     value: &StageProgram,
     index: usize
 ) -> usize {
-    stage_type_field_name_count(stage_program_type_at(value, index))
+    stage_type_field_name_count(stage_program_type_at(
+        value,
+        stage_type_id_from_usize(index)
+    ))
 }
 
 pub stage_program_type_field_type_at(
     value: &StageProgram,
     type_index: usize,
     field_index: usize
-) -> u32 {
+) -> ArtifactTypeId {
     stage_type_field_type_at(
-        stage_program_type_at(value, type_index),
+        stage_program_type_at(
+            value,
+            stage_type_id_from_usize(type_index)
+        ),
         field_index
     )
 }
@@ -154,7 +178,10 @@ pub stage_program_type_name_index_at(
     value: &StageProgram,
     index: usize
 ) -> u32 {
-    stage_type_name_index(stage_program_type_at(value, index))
+    stage_type_name_index(stage_program_type_at(
+        value,
+        stage_type_id_from_usize(index)
+    ))
 }
 
 pub stage_program_type_field_name_index_at(
@@ -163,12 +190,18 @@ pub stage_program_type_field_name_index_at(
     field_index: usize
 ) -> u32 {
     stage_type_field_name_index_at(
-        stage_program_type_at(value, type_index),
+        stage_program_type_at(
+            value,
+            stage_type_id_from_usize(type_index)
+        ),
         field_index
     )
 }
 
-pub tuple_type(fields: Vec<u32>, copy_flag: u32) -> StageType {
+pub tuple_type(
+    fields: Vec<ArtifactTypeId>,
+    copy_flag: u32
+) -> StageType {
     StageType {
         tag: 0,
         name_index: 4294967295,
@@ -181,7 +214,7 @@ pub tuple_type(fields: Vec<u32>, copy_flag: u32) -> StageType {
 pub struct_type(
     name_index: u32,
     field_names: Vec<u32>,
-    fields: Vec<u32>,
+    fields: Vec<ArtifactTypeId>,
     copy_flag: u32
 ) -> StageType {
     StageType {
@@ -193,7 +226,7 @@ pub struct_type(
     }
 }
 
-pub stage_type_fields(value: &StageType) -> &Vec<u32> {
+pub stage_type_fields(value: &StageType) -> &Vec<ArtifactTypeId> {
     &value.fields
 }
 
@@ -201,7 +234,10 @@ pub stage_type_field_count(value: &StageType) -> usize {
     Vec::len(&value.fields)
 }
 
-pub stage_type_field_type_at(value: &StageType, index: usize) -> u32 {
+pub stage_type_field_type_at(
+    value: &StageType,
+    index: usize
+) -> ArtifactTypeId {
     *Vec::index(&value.fields, index)
 }
 
@@ -230,11 +266,16 @@ pub stage_function_parameter_count(value: &StageFunction) -> usize {
     Vec::len(&value.parameters)
 }
 
-pub stage_function_parameter_at(value: &StageFunction, index: usize) -> u32 {
+pub stage_function_parameter_at(
+    value: &StageFunction,
+    index: usize
+) -> ArtifactTypeId {
     *Vec::index(&value.parameters, index)
 }
 
-pub stage_function_result(value: &StageFunction) -> u32 { value.result }
+pub stage_function_result(value: &StageFunction) -> ArtifactTypeId {
+    value.result
+}
 
 pub stage_function_register_count(value: &StageFunction) -> u32 {
     value.register_count
@@ -313,12 +354,40 @@ usize_from_u32(value: u32) -> usize {
     wrapping_convert_to_usize(value)
 }
 
-pub artifact_type_id(value: u32) -> u32 {
-    if(value < 14) {
+pub stage_function_id_from_usize(value: usize) -> StageFunctionId {
+    handle Id::from_usize(value) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
+pub stage_type_id_from_usize(value: usize) -> StageTypeId {
+    handle Id::from_usize(value) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
+pub stage_function_raw(value: StageFunctionId) -> u32 {
+    Id::to_u32(value)
+}
+
+pub artifact_type_raw(value: ArtifactTypeId) -> u32 {
+    Id::to_u32(value)
+}
+
+pub artifact_type_id(value: u32) -> ArtifactTypeId {
+    Id::from_u32(if(value < 14) {
         value
     } else {
         value + 5
-    }
+    })
+}
+
+pub stage_type_artifact_id(value: StageTypeId) -> ArtifactTypeId {
+    Id::from_u32(
+        Id::to_u32(value) + wrapping_convert_to_u32(19)
+    )
 }
 
 append_u32_bytes(output: &mut Vec<u8>, value: u32, count: usize) {
@@ -390,7 +459,7 @@ constant_key(
         Result::Ok(width) => {
             let output = Vec::new();
             Vec::push(&mut output, wrapping_convert_to_u8(
-                artifact_type_id(type_id)
+                artifact_type_raw(artifact_type_id(type_id))
             ));
             let words =
                 super::super::frontend::elaboration::
@@ -565,7 +634,7 @@ emit_copy(
 emit_construct(
     value: &mut FunctionBuilder,
     target: RegisterId,
-    ty: u32,
+    ty: ArtifactTypeId,
     variant: Option<u32>,
     fields: Vec<RegisterId>
 ) {
@@ -616,7 +685,7 @@ consume_arguments(
 emit_call(
     value: &mut FunctionBuilder,
     target: Option<RegisterId>,
-    function: u32,
+    function: StageFunctionId,
     arguments: Vec<RegisterId>
 ) {
     record_cleanup(value);
@@ -803,7 +872,12 @@ lower_computation(
                 Result::Err(_) => Result::Err(error(5, shell)),
                 Result::Ok(function) => {
                     let target = Option::Some(alloc_register(value));
-                    emit_call(value, target, function, arguments);
+                    emit_call(
+                        value,
+                        target,
+                        Id::from_u32(function),
+                        arguments
+                    );
                     Result::Ok(target)
                 }
             }
@@ -942,7 +1016,7 @@ parameter_types(
     function: usize,
     index: u32,
     count: u32,
-    output: &mut Vec<u32>
+    output: &mut Vec<ArtifactTypeId>
 ) {
     if(index < count) {
         let start =
@@ -1019,7 +1093,10 @@ pub lower_function(
         super::super::frontend::elaboration::typed_body_result_type(body)
     );
     handle result {
-        Result::Err(_) => Result::Err(error(7, result_type)),
+        Result::Err(_) => Result::Err(error(
+            7,
+            artifact_type_raw(result_type)
+        )),
         Result::Ok(register) => {
             emit_return(&mut builder, Option::Some(register));
             Result::Ok(StageFunction {
@@ -1055,12 +1132,15 @@ collect_instruction_constants(
 }
 
 collect_function_constants(
-    functions: &Vec<StageFunction>,
+    functions: &Arena<StageFunctionTag, StageFunction>,
     index: usize,
     output: &mut Vec<Vec<u8>>
 ) {
-    if(index < Vec::len(functions)) {
-        let function = Vec::index(functions, index);
+    if(index < Arena::len(functions)) {
+        let function = Arena::index(
+            functions,
+            stage_function_id_from_usize(index)
+        );
         collect_instruction_constants(
             &function.instructions,
             0,
@@ -1075,8 +1155,8 @@ collect_function_constants(
 }
 
 pub finish_program(
-    functions: Vec<StageFunction>,
-    types: Vec<StageType>,
+    functions: Arena<StageFunctionTag, StageFunction>,
+    types: Arena<StageTypeTag, StageType>,
     type_names: Vec<String>
 ) -> StageProgram {
     let constants = Vec::new();

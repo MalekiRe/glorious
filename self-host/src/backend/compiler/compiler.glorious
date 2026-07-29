@@ -63,7 +63,10 @@ lower_functions(
     interfaces:
         &mut super::super::frontend::elaboration::TypedInterfaces,
     index: usize,
-    output: &mut Vec<super::lowering::StageFunction>
+    output: &mut Arena<
+        super::lowering::StageFunctionTag,
+        super::lowering::StageFunction
+    >
 ) -> Result<(), CompileError> {
     if(index <
         super::super::frontend::elaboration::
@@ -116,7 +119,10 @@ lower_functions(
                             super::lowering::lowering_error_detail(&found)
                         )),
                         Result::Ok(function) => {
-                            Vec::push(&mut *output, function);
+                            handle Arena::alloc(&mut *output, function) {
+                                Result::Err(_) => unreachable(),
+                                Result::Ok(_) => ()
+                            };
                             lower_functions(
                                 original,
                                 headers,
@@ -137,11 +143,14 @@ lower_functions(
 find_entry(
     program: &super::lowering::StageProgram,
     index: usize
-) -> Option<u32> {
+) -> Option<super::lowering::StageFunctionId> {
     let count = super::lowering::stage_program_function_count(program);
     handle find_range(Range::new(index, count), { current => {
         let function =
-            super::lowering::stage_program_function_at(program, current);
+            super::lowering::stage_program_function_at(
+                program,
+                super::lowering::stage_function_id_from_usize(current)
+            );
         String::eq(
             super::lowering::stage_function_name(function),
             &"main"
@@ -149,10 +158,14 @@ find_entry(
             super::lowering::stage_function_parameter_count(function)
                 == 0
         } and {
-            super::lowering::stage_function_result(function) == 0
+            super::lowering::artifact_type_raw(
+                super::lowering::stage_function_result(function)
+            ) == 0
         }
     } }) {
-        Option::Some(found) => Option::Some(checked_u32(found)),
+        Option::Some(found) => Option::Some(
+            super::lowering::stage_function_id_from_usize(found)
+        ),
         None => None
     }
 }
@@ -163,7 +176,7 @@ collect_tuple_elements(
     start: u32,
     count: u32,
     ordinal: u32,
-    output: &mut Vec<u32>
+    output: &mut Vec<super::lowering::ArtifactTypeId>
 ) {
     if(ordinal < count) {
         Vec::push(
@@ -211,7 +224,7 @@ collect_struct_fields(
     ordinal: u32,
     type_names: &mut Vec<String>,
     names: &mut Vec<u32>,
-    types: &mut Vec<u32>
+    types: &mut Vec<super::lowering::ArtifactTypeId>
 ) -> Result<(), CompileError> {
     if(ordinal < count) {
         let field =
@@ -260,7 +273,10 @@ collect_types(
     interfaces:
         &super::super::frontend::elaboration::TypedInterfaces,
     index: usize,
-    output: &mut Vec<super::lowering::StageType>,
+    output: &mut Arena<
+        super::lowering::StageTypeTag,
+        super::lowering::StageType
+    >,
     type_names: &mut Vec<String>
 ) -> Result<(), CompileError> {
     if(index <
@@ -279,7 +295,7 @@ collect_types(
                     0,
                     &mut fields
                 );
-                Vec::push(
+                handle Arena::alloc(
                     &mut *output,
                     super::lowering::tuple_type(
                         fields,
@@ -289,7 +305,10 @@ collect_types(
                                     % 2 == 1
                         ) { 1 } else { 0 }
                     )
-                );
+                ) {
+                    Result::Err(_) => unreachable(),
+                    Result::Ok(_) => ()
+                };
                 collect_types(
                     headers,
                     declarations,
@@ -324,7 +343,7 @@ collect_types(
                         &mut field_names,
                         &mut field_types
                     ), @collect_types);
-                    Vec::push(
+                    handle Arena::alloc(
                         &mut *output,
                         super::lowering::struct_type(
                             name_index,
@@ -338,7 +357,10 @@ collect_types(
                                     ) % 2 == 1
                             ) { 1 } else { 0 }
                         )
-                    );
+                    ) {
+                        Result::Err(_) => unreachable(),
+                        Result::Ok(_) => ()
+                    };
                     collect_types(
                         headers,
                         declarations,
@@ -369,8 +391,8 @@ compile_interfaces(
     interfaces:
         super::super::frontend::elaboration::TypedInterfaces
 ) -> Result<Bytes, CompileError> {
-    let functions = Vec::new();
-    let types = Vec::new();
+    let functions = Arena::new();
+    let types = Arena::new();
     let type_names = Vec::new();
     try(lower_functions(
         original,

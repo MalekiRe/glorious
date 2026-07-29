@@ -106,7 +106,7 @@ collect_names(
             *super::lowering::stage_function_name(
                 super::lowering::stage_program_function_at(
                     program,
-                    current
+                    super::lowering::stage_function_id_from_usize(current)
                 )
             )
         )
@@ -150,7 +150,10 @@ collect_type_names(
 ) {
     if(index < super::lowering::stage_program_type_count(program)) {
         let stage_type =
-            super::lowering::stage_program_type_at(program, index);
+            super::lowering::stage_program_type_at(
+                program,
+                super::lowering::stage_type_id_from_usize(index)
+            );
         if(super::lowering::stage_type_tag(stage_type) == 1) {
             Vec::push(
                 &mut *output,
@@ -175,7 +178,7 @@ collect_type_names(
 
 aggregate_zero_sized_flag(
     program: &super::lowering::StageProgram,
-    fields: &Vec<u32>,
+    fields: &Vec<super::lowering::ArtifactTypeId>,
     index: usize
 ) -> u32 {
     if(index < Vec::len(fields)) {
@@ -194,13 +197,14 @@ aggregate_zero_sized_flag(
 
 type_zero_sized_flag(
     program: &super::lowering::StageProgram,
-    type_id: u32
+    type_id: super::lowering::ArtifactTypeId
 ) -> u32 {
-    if(type_id < 19) {
-        if(type_id == 0) {
+    let raw = super::lowering::artifact_type_raw(type_id);
+    if(raw < 19) {
+        if(raw == 0) {
             2
         } else {
-            if(type_id == 1) { 2 } else { 0 }
+            if(raw == 1) { 2 } else { 0 }
         }
     } else {
         aggregate_zero_sized_flag(
@@ -208,7 +212,9 @@ type_zero_sized_flag(
             super::lowering::stage_type_fields(
                 super::lowering::stage_program_type_at(
                     program,
-                    usize_from_u32(type_id - 19)
+                    super::lowering::stage_type_id_from_usize(
+                        usize_from_u32(raw - 19)
+                    )
                 )
             ),
             0
@@ -218,7 +224,7 @@ type_zero_sized_flag(
 
 aggregate_zero_use_flag(
     program: &super::lowering::StageProgram,
-    fields: &Vec<u32>,
+    fields: &Vec<super::lowering::ArtifactTypeId>,
     index: usize
 ) -> u32 {
     if(index < Vec::len(fields)) {
@@ -237,17 +243,20 @@ aggregate_zero_use_flag(
 
 type_zero_use_flag(
     program: &super::lowering::StageProgram,
-    type_id: u32
+    type_id: super::lowering::ArtifactTypeId
 ) -> u32 {
-    if(type_id < 19) {
-        if(type_id == 1) { 0 } else { 16 }
+    let raw = super::lowering::artifact_type_raw(type_id);
+    if(raw < 19) {
+        if(raw == 1) { 0 } else { 16 }
     } else {
         aggregate_zero_use_flag(
             program,
             super::lowering::stage_type_fields(
                 super::lowering::stage_program_type_at(
                     program,
-                    usize_from_u32(type_id - 19)
+                    super::lowering::stage_type_id_from_usize(
+                        usize_from_u32(raw - 19)
+                    )
                 )
             ),
             0
@@ -266,10 +275,12 @@ write_type_fields(
     for_range(Range::new(field_index, end), { current =>
         ByteBuf::write_u32_le(
             &mut *output,
-            super::lowering::stage_program_type_field_type_at(
-                program,
-                type_index,
-                current
+            super::lowering::artifact_type_raw(
+                super::lowering::stage_program_type_field_type_at(
+                    program,
+                    type_index,
+                    current
+                )
             )
         )
     })
@@ -300,10 +311,12 @@ write_named_type_fields(
                 ByteBuf::write_u32_le(&mut *output, field_name);
                 ByteBuf::write_u32_le(
                     &mut *output,
-                    super::lowering::stage_program_type_field_type_at(
-                        program,
-                        type_index,
-                        current
+                    super::lowering::artifact_type_raw(
+                        super::lowering::stage_program_type_field_type_at(
+                            program,
+                            type_index,
+                            current
+                        )
                     )
                 );
                 Result::Ok(())
@@ -316,7 +329,9 @@ custom_type_flags(
     program: &super::lowering::StageProgram,
     index: usize
 ) -> u32 {
-    let type_id = checked_u32(index) + 19;
+    let type_id = super::lowering::stage_type_artifact_id(
+        super::lowering::stage_type_id_from_usize(index)
+    );
     super::lowering::stage_program_type_copy_flag_at(program, index)
         + type_zero_sized_flag(program, type_id)
         + type_zero_use_flag(program, type_id)
@@ -347,7 +362,9 @@ valid_struct_type_record(
     names: &Vec<String>,
     index: usize
 ) -> Result<super::artifact::Record, EmissionError> {
-    let type_id = checked_u32(index) + 19;
+    let type_id = super::lowering::stage_type_artifact_id(
+        super::lowering::stage_type_id_from_usize(index)
+    );
     let type_name = try(require_program_name(
         program,
         names,
@@ -355,7 +372,7 @@ valid_struct_type_record(
             program,
             index
         ),
-        type_id
+        super::lowering::artifact_type_raw(type_id)
     ), @valid_struct_type_record);
     let payload = ByteBuf::new();
     ByteBuf::write_u32_le(&mut payload, type_name);
@@ -507,7 +524,9 @@ signature_key(
     );
     Vec::push(
         &mut output,
-        super::lowering::stage_function_result(function)
+        super::lowering::artifact_type_raw(
+            super::lowering::stage_function_result(function)
+        )
     );
     Vec::push(&mut output, 0);
     append_parameter_types(function, 0, &mut output);
@@ -523,9 +542,11 @@ append_parameter_types(
     for_range(Range::new(index, end), { current =>
         Vec::push(
             &mut *output,
-            super::lowering::stage_function_parameter_at(
-                function,
-                current
+            super::lowering::artifact_type_raw(
+                super::lowering::stage_function_parameter_at(
+                    function,
+                    current
+                )
             )
         )
     })
@@ -563,7 +584,10 @@ collect_signatures(
 ) {
     if(index < super::lowering::stage_program_function_count(program)) {
         let key = signature_key(
-            super::lowering::stage_program_function_at(program, index)
+            super::lowering::stage_program_function_at(
+                program,
+                super::lowering::stage_function_id_from_usize(index)
+            )
         );
         handle find_signature(output, &key, 0) {
             Result::Err(_) => Vec::push(&mut *output, key),
@@ -703,7 +727,10 @@ write_instruction(
             &mut *code,
             super::lowering::register_raw(target)
         );
-        ByteBuf::write_u32_le(&mut *code, ty);
+        ByteBuf::write_u32_le(
+            &mut *code,
+            super::lowering::artifact_type_raw(ty)
+        );
         ByteBuf::write_u32_le(
             &mut *code,
             handle variant {
@@ -760,7 +787,10 @@ write_instruction(
                     super::lowering::register_raw(found)
             }
         );
-        ByteBuf::write_u32_le(&mut *code, function);
+        ByteBuf::write_u32_le(
+            &mut *code,
+            super::lowering::stage_function_raw(function)
+        );
         ByteBuf::write_u32_le(&mut *code, start);
         ByteBuf::write_u32_le(
             code,
@@ -814,7 +844,10 @@ write_all_code(
 ) -> Result<(), EmissionError> {
     if(index < super::lowering::stage_program_function_count(program)) {
         let function =
-            super::lowering::stage_program_function_at(program, index);
+            super::lowering::stage_program_function_at(
+                program,
+                super::lowering::stage_function_id_from_usize(index)
+            );
         let start = checked_u32(ByteBuf::len(&*code) / 4);
         try(write_function_code(
             program,
@@ -907,7 +940,10 @@ write_all_cleanups(
 ) {
     if(index < super::lowering::stage_program_function_count(program)) {
         let function =
-            super::lowering::stage_program_function_at(program, index);
+            super::lowering::stage_program_function_at(
+                program,
+                super::lowering::stage_function_id_from_usize(index)
+            );
         let start = checked_u32(ByteBuf::len(&*output) / 24);
         write_function_cleanups(
             function,
@@ -960,7 +996,10 @@ write_functions(
 ) -> Result<(), EmissionError> {
     if(index < super::lowering::stage_program_function_count(program)) {
         let function =
-            super::lowering::stage_program_function_at(program, index);
+            super::lowering::stage_program_function_at(
+                program,
+                super::lowering::stage_function_id_from_usize(index)
+            );
         let signature = signature_key(function);
         let name = try(require_name(
             names,
@@ -1008,7 +1047,7 @@ write_functions(
 
 pub encode(
     program: &super::lowering::StageProgram,
-    entry: Option<u32>
+    entry: Option<super::lowering::StageFunctionId>
 ) -> Result<Bytes, EmissionError> {
     let names = Vec::new();
     collect_names(program, 0, &mut names);
@@ -1116,7 +1155,10 @@ pub encode(
             cleanup_count
         )
     );
-    handle super::artifact::encode_writer(&writer, entry, 1) {
+    let raw_entry = Option::map(entry, {
+        found => super::lowering::stage_function_raw(found)
+    });
+    handle super::artifact::encode_writer(&writer, raw_entry, 1) {
         Result::Err(_) => Result::Err(error(5, 0)),
         Result::Ok(bytes) => Result::Ok(bytes)
     }
