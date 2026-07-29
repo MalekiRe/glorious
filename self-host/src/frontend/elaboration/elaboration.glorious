@@ -32,20 +32,86 @@ pub struct TypedInterfaces {
     nominal_states: Vec<u32>
 }
 
+pub struct CoreValueTag {}
+pub type CoreValueId = Id<CoreValueTag>;
+
+pub struct CoreComputationTag {}
+pub type CoreComputationId = Id<CoreComputationTag>;
+
+pub struct CoreLocalTag {}
+pub type CoreLocalId = Id<CoreLocalTag>;
+
+pub struct IntegerConstantTag {}
+pub type IntegerConstantId = Id<IntegerConstantTag>;
+
+enum CoreLocalAccess { Move, Copy }
+
+impl Use<[0, *]> for CoreLocalAccess {}
+
+enum CoreValueKind {
+    Unit,
+    Integer(IntegerConstantId),
+    Local(CoreLocalId, CoreLocalAccess),
+    Projection(CoreValueId, u32),
+    Embedded(CoreComputationId)
+}
+
+impl Use<[0, *]> for CoreValueKind {}
+
+struct CoreValue { ty: u32, kind: CoreValueKind }
+
+impl Use<[0, *]> for CoreValue {}
+
+struct OperandRange { start: u32, count: u32 }
+
+impl Use<[0, *]> for OperandRange {}
+
+struct ConstructionFieldRange { start: u32, count: u32 }
+
+impl Use<[0, *]> for ConstructionFieldRange {}
+
+struct CheckedRangeWords { start: u32, count: u32 }
+
+impl Use<[0, *]> for CheckedRangeWords {}
+
+enum ConstructionFlavor {
+    Product,
+    Variant(u32)
+}
+
+impl Use<[0, *]> for ConstructionFlavor {}
+
+enum CoreComputationKind {
+    Pure(CoreValueId),
+    Let(CoreLocalId, CoreComputationId, CoreComputationId),
+    Call(u32, OperandRange),
+    Construct(ConstructionFlavor, ConstructionFieldRange)
+}
+
+impl Use<[0, *]> for CoreComputationKind {}
+
+struct CoreComputation { ty: u32, kind: CoreComputationKind }
+
+impl Use<[0, *]> for CoreComputation {}
+
+struct ConstructionField { field: u32, value: CoreValueId }
+
+impl Use<[0, *]> for ConstructionField {}
+
+struct IntegerConstant { low0: u32, low1: u32, high0: u32, high1: u32 }
+
+impl Use<[0, *]> for IntegerConstant {}
+
 pub struct TypedBody {
     shell: u32,
     result_type: u32,
-    root: u32,
-    local_types: Vec<u32>,
-    // [tag, type, a, b]
-    values: Vec<u32>,
-    // [tag, type, a, b, c]
-    computations: Vec<u32>,
-    operands: Vec<u32>,
-    // Repeating [declaration-order field, value].
-    construction_fields: Vec<u32>,
-    // Four little-endian u32 words for each exact magnitude.
-    integer_constants: Vec<u32>
+    root: CoreComputationId,
+    local_types: IndexVec<CoreLocalTag, u32>,
+    values: Arena<CoreValueTag, CoreValue>,
+    computations: Arena<CoreComputationTag, CoreComputation>,
+    operands: Vec<CoreValueId>,
+    construction_fields: Vec<ConstructionField>,
+    integer_constants: Arena<IntegerConstantTag, IntegerConstant>
 }
 
 pub struct ElaborationError {
@@ -73,21 +139,115 @@ struct BodyBuilder {
     parameter_count: u32,
     next_source_local: u32,
     final_transfer_expressions: Vec<u32>,
-    local_types: Vec<u32>,
-    values: Vec<u32>,
-    computations: Vec<u32>,
-    operands: Vec<u32>,
-    construction_fields: Vec<u32>,
-    integer_constants: Vec<u32>
+    local_types: IndexVec<CoreLocalTag, u32>,
+    values: Arena<CoreValueTag, CoreValue>,
+    computations: Arena<CoreComputationTag, CoreComputation>,
+    operands: Vec<CoreValueId>,
+    construction_fields: Vec<ConstructionField>,
+    integer_constants: Arena<IntegerConstantTag, IntegerConstant>
 }
+
+enum ElaboratedForm {
+    Value(CoreValueId),
+    Computation(CoreComputationId)
+}
+
+impl Use<[0, *]> for ElaboratedForm {}
 
 struct Elaborated {
     type_id: u32,
-    value_plus_one: u32,
-    computation_plus_one: u32
+    form: ElaboratedForm
 }
 
+impl Use<[0, *]> for Elaborated {}
+
+struct LetWrapper {
+    local: CoreLocalId,
+    initializer: CoreComputationId
+}
+
+impl Use<[0, *]> for LetWrapper {}
+
 struct TypeNameTarget { kind: u8, index: u32 }
+
+core_value_id_from_usize(value: usize) -> CoreValueId {
+    handle Id::from_usize(value) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
+core_computation_id_from_usize(value: usize) -> CoreComputationId {
+    handle Id::from_usize(value) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
+core_local_id_from_usize(value: usize) -> CoreLocalId {
+    handle Id::from_usize(value) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
+core_local_id_from_u32(value: u32) -> CoreLocalId {
+    Id::from_u32(value)
+}
+
+integer_constant_id_from_usize(value: usize) -> IntegerConstantId {
+    handle Id::from_usize(value) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
+core_value_at<'a>(
+    values: &'a Arena<CoreValueTag, CoreValue>,
+    id: CoreValueId
+) -> &'a CoreValue {
+    Arena::index(values, id)
+}
+
+core_computation_at<'a>(
+    computations: &'a Arena<CoreComputationTag, CoreComputation>,
+    id: CoreComputationId
+) -> &'a CoreComputation {
+    Arena::index(computations, id)
+}
+
+integer_constant_at<'a>(
+    constants: &'a Arena<IntegerConstantTag, IntegerConstant>,
+    id: IntegerConstantId
+) -> &'a IntegerConstant {
+    Arena::index(constants, id)
+}
+
+construction_field_at<'a>(
+    fields: &'a Vec<ConstructionField>,
+    index: usize
+) -> &'a ConstructionField {
+    Vec::index(fields, index)
+}
+
+let_wrapper_at(value: &Vec<LetWrapper>, index: usize) -> LetWrapper {
+    *Vec::index(value, index)
+}
+
+optional_core_value_at(
+    value: &Vec<Option<CoreValueId>>,
+    index: usize
+) -> Option<CoreValueId> {
+    *Vec::index(value, index)
+}
+
+construction_flavor_word(value: ConstructionFlavor) -> u32 {
+    handle value {
+        ConstructionFlavor::Product => 0,
+        ConstructionFlavor::Variant(ordinal) =>
+            ordinal + u32_value(1)
+    }
+}
 
 pub elaboration_error_code(value: &ElaborationError) -> u8 { value.code }
 
@@ -252,18 +412,21 @@ pub typed_body_shell(value: &TypedBody) -> u32 { value.shell }
 
 pub typed_body_result_type(value: &TypedBody) -> u32 { value.result_type }
 
-pub typed_body_root(value: &TypedBody) -> u32 { value.root }
+pub typed_body_root(value: &TypedBody) -> u32 { Id::to_u32(value.root) }
 
 pub typed_body_local_count(value: &TypedBody) -> usize {
-    Vec::len(&value.local_types)
+    IndexVec::len(&value.local_types)
 }
 
 pub typed_body_local_type_at(value: &TypedBody, index: usize) -> u32 {
-    *Vec::index(&value.local_types, index)
+    *IndexVec::index(
+        &value.local_types,
+        core_local_id_from_usize(index)
+    )
 }
 
 pub typed_body_value_count(value: &TypedBody) -> usize {
-    Vec::len(&value.values) / usize_value(4)
+    Arena::len(&value.values)
 }
 
 pub typed_body_value_word_at(
@@ -271,11 +434,38 @@ pub typed_body_value_word_at(
     index: usize,
     word: usize
 ) -> u32 {
-    *Vec::index(&value.values, index * usize_value(4) + word)
+    let id = core_value_id_from_usize(index);
+    let node = core_value_at(&value.values, id);
+    handle word {
+        0 => handle node.kind {
+            CoreValueKind::Unit => 1,
+            CoreValueKind::Integer(_) => 2,
+            CoreValueKind::Local(_, _) => 3,
+            CoreValueKind::Projection(_, _) => 4,
+            CoreValueKind::Embedded(_) => 5
+        },
+        1 => node.ty,
+        2 => handle node.kind {
+            CoreValueKind::Unit => 0,
+            CoreValueKind::Integer(found) => Id::to_u32(found),
+            CoreValueKind::Local(found, _) => Id::to_u32(found),
+            CoreValueKind::Projection(found, _) => Id::to_u32(found),
+            CoreValueKind::Embedded(found) => Id::to_u32(found)
+        },
+        3 => handle node.kind {
+            CoreValueKind::Local(_, access) => handle access {
+                CoreLocalAccess::Move => 0,
+                CoreLocalAccess::Copy => 1
+            },
+            CoreValueKind::Projection(_, field) => field,
+            _ => 0
+        },
+        _ => unreachable()
+    }
 }
 
 pub typed_body_computation_count(value: &TypedBody) -> usize {
-    Vec::len(&value.computations) / usize_value(5)
+    Arena::len(&value.computations)
 }
 
 pub typed_body_computation_word_at(
@@ -283,7 +473,37 @@ pub typed_body_computation_word_at(
     index: usize,
     word: usize
 ) -> u32 {
-    *Vec::index(&value.computations, index * usize_value(5) + word)
+    let id = core_computation_id_from_usize(index);
+    let node = core_computation_at(&value.computations, id);
+    handle word {
+        0 => handle node.kind {
+            CoreComputationKind::Pure(_) => 1,
+            CoreComputationKind::Let(_, _, _) => 2,
+            CoreComputationKind::Call(_, _) => 3,
+            CoreComputationKind::Construct(_, _) => 4
+        },
+        1 => node.ty,
+        2 => handle node.kind {
+            CoreComputationKind::Pure(found) => Id::to_u32(found),
+            CoreComputationKind::Let(found, _, _) => Id::to_u32(found),
+            CoreComputationKind::Call(shell, _) => shell,
+            CoreComputationKind::Construct(flavor, _) =>
+                construction_flavor_word(flavor)
+        },
+        3 => handle node.kind {
+            CoreComputationKind::Let(_, found, _) => Id::to_u32(found),
+            CoreComputationKind::Call(_, range) => range.start,
+            CoreComputationKind::Construct(_, range) => range.start,
+            _ => 0
+        },
+        4 => handle node.kind {
+            CoreComputationKind::Let(_, _, found) => Id::to_u32(found),
+            CoreComputationKind::Call(_, range) => range.count,
+            CoreComputationKind::Construct(_, range) => range.count,
+            _ => 0
+        },
+        _ => unreachable()
+    }
 }
 
 pub typed_body_operand_count(value: &TypedBody) -> usize {
@@ -291,11 +511,11 @@ pub typed_body_operand_count(value: &TypedBody) -> usize {
 }
 
 pub typed_body_operand_at(value: &TypedBody, index: usize) -> u32 {
-    *Vec::index(&value.operands, index)
+    Id::to_u32(*Vec::index(&value.operands, index))
 }
 
 pub typed_body_construction_field_count(value: &TypedBody) -> usize {
-    Vec::len(&value.construction_fields) / usize_value(2)
+    Vec::len(&value.construction_fields)
 }
 
 pub typed_body_construction_field_word_at(
@@ -303,14 +523,16 @@ pub typed_body_construction_field_word_at(
     index: usize,
     word: usize
 ) -> u32 {
-    *Vec::index(
-        &value.construction_fields,
-        index * usize_value(2) + word
-    )
+    let found = construction_field_at(&value.construction_fields, index);
+    handle word {
+        0 => found.field,
+        1 => Id::to_u32(found.value),
+        _ => unreachable()
+    }
 }
 
 pub typed_body_integer_constant_count(value: &TypedBody) -> usize {
-    Vec::len(&value.integer_constants) / usize_value(4)
+    Arena::len(&value.integer_constants)
 }
 
 pub typed_body_integer_constant_word_at(
@@ -318,10 +540,15 @@ pub typed_body_integer_constant_word_at(
     index: usize,
     word: usize
 ) -> u32 {
-    *Vec::index(
-        &value.integer_constants,
-        index * usize_value(4) + word
-    )
+    let id = integer_constant_id_from_usize(index);
+    let found = integer_constant_at(&value.integer_constants, id);
+    handle word {
+        0 => found.low0,
+        1 => found.low1,
+        2 => found.high0,
+        3 => found.high1,
+        _ => unreachable()
+    }
 }
 
 error(
@@ -384,6 +611,61 @@ append_words(output: &mut Vec<u32>, source: &Vec<u32>, index: usize) {
         push_word(&mut *output, *Vec::index(source, index));
         append_words(output, source, index + usize_value(1))
     } else { () }
+}
+
+append_core_values(
+    output: &mut Vec<CoreValueId>,
+    source: &Vec<CoreValueId>,
+    index: usize
+) {
+    if(index < Vec::len(source)) {
+        Vec::push(&mut *output, *Vec::index(source, index));
+        append_core_values(output, source, index + usize_value(1))
+    } else { () }
+}
+
+append_construction_fields(
+    output: &mut Vec<ConstructionField>,
+    source: &Vec<ConstructionField>,
+    index: usize
+) {
+    if(index < Vec::len(source)) {
+        Vec::push(&mut *output, *Vec::index(source, index));
+        append_construction_fields(output, source, index + usize_value(1))
+    } else { () }
+}
+
+checked_range_words(start: usize, count: usize) -> CheckedRangeWords {
+    let end = handle checked_usize_add(start, count) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    };
+    handle checked_usize_to_u32(end) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(_) => CheckedRangeWords {
+            start: handle checked_usize_to_u32(start) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            },
+            count: handle checked_usize_to_u32(count) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            }
+        }
+    }
+}
+
+operand_range(start: usize, count: usize) -> OperandRange {
+    let words = checked_range_words(start, count);
+    OperandRange { start: words.start, count: words.count }
+}
+
+construction_field_range(
+    start: usize,
+    count: usize
+) -> ConstructionFieldRange {
+    let words = checked_range_words(start, count);
+    ConstructionFieldRange { start: words.start, count: words.count }
 }
 
 type_to_scalar_kind(type_id: u32) -> u8 {
@@ -1978,68 +2260,94 @@ resolution_map(
 
 push_value(
     value: &mut BodyBuilder,
-    tag: u32,
     ty: u32,
-    a: u32,
-    b: u32
-) -> u32 {
-    let index = u32_from_usize(Vec::len(&value.values) / usize_value(4));
-    push_words4(&mut value.values, tag, ty, a, b);
-    index
+    kind: CoreValueKind
+) -> CoreValueId {
+    handle Arena::alloc(&mut value.values, CoreValue {
+        ty: ty,
+        kind: kind
+    }) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
 }
 
 push_computation(
     value: &mut BodyBuilder,
-    tag: u32,
     ty: u32,
-    a: u32,
-    b: u32,
-    c: u32
-) -> u32 {
-    let index = u32_from_usize(
-        Vec::len(&value.computations) / usize_value(5)
-    );
-    push_words5(&mut value.computations, tag, ty, a, b, c);
-    index
+    kind: CoreComputationKind
+) -> CoreComputationId {
+    handle Arena::alloc(&mut value.computations, CoreComputation {
+        ty: ty,
+        kind: kind
+    }) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
 }
 
-pure(value: &mut BodyBuilder, ty: u32, core_value: u32) -> u32 {
-    push_computation(value, 1, ty, core_value, 0, 0)
+pure(
+    value: &mut BodyBuilder,
+    ty: u32,
+    core_value: CoreValueId
+) -> CoreComputationId {
+    push_computation(value, ty, CoreComputationKind::Pure(core_value))
 }
 
-as_computation(value: &mut BodyBuilder, found: Elaborated) -> u32 {
-    if(found.computation_plus_one == u32_value(0)) { pure(
-            value,
-            found.type_id,
-            found.value_plus_one - u32_value(1)
-        ) } else { found.computation_plus_one - u32_value(1) }
+push_local_type(
+    value: &mut IndexVec<CoreLocalTag, u32>,
+    ty: u32
+) -> CoreLocalId {
+    handle IndexVec::push(value, ty) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
+as_computation(
+    value: &mut BodyBuilder,
+    found: Elaborated
+) -> CoreComputationId {
+    handle found.form {
+        ElaboratedForm::Value(core) => pure(value, found.type_id, core),
+        ElaboratedForm::Computation(core) => core
+    }
 }
 
 materialize_operand(
     value: &mut BodyBuilder,
     found: Elaborated,
-    wrappers: &mut Vec<u32>
-) -> u32 {
-    if(found.computation_plus_one == u32_value(0)) { found.value_plus_one - u32_value(1) } else {
-        let local = u32_from_usize(Vec::len(&value.local_types));
-        push_word(&mut value.local_types, found.type_id);
-        push_word(&mut *wrappers, local);
-        push_word(
-            &mut *wrappers,
-            found.computation_plus_one - u32_value(1)
-        );
-        push_value(value, 3, found.type_id, local, 0)
+    wrappers: &mut Vec<LetWrapper>
+) -> CoreValueId {
+    handle found.form {
+        ElaboratedForm::Value(core) => core,
+        ElaboratedForm::Computation(computation) => {
+            let local = push_local_type(
+                &mut value.local_types,
+                found.type_id
+            );
+            Vec::push(&mut *wrappers, LetWrapper {
+                local: local,
+                initializer: computation
+            });
+            push_value(
+                value,
+                found.type_id,
+                CoreValueKind::Local(local, CoreLocalAccess::Move)
+            )
+        }
     }
 }
 
-embed_operand(value: &mut BodyBuilder, found: Elaborated) -> u32 {
-    if(found.computation_plus_one == u32_value(0)) { found.value_plus_one - u32_value(1) } else { push_value(
+embed_operand(value: &mut BodyBuilder, found: Elaborated) -> CoreValueId {
+    handle found.form {
+        ElaboratedForm::Value(core) => core,
+        ElaboratedForm::Computation(computation) => push_value(
             value,
-            5,
             found.type_id,
-            found.computation_plus_one - u32_value(1),
-            0
-        ) }
+            CoreValueKind::Embedded(computation)
+        )
+    }
 }
 
 check_expected(
@@ -2056,6 +2364,23 @@ check_expected(
                 expected,
                 found.type_id
             )) }
+    }
+}
+
+check_expected_type(
+    found: u32,
+    expected_plus_one: u32,
+    token: usize
+) -> Result<(), ElaborationError> {
+    if(expected_plus_one == u32_value(0)) {
+        Result::Ok(())
+    } else {
+        let expected = expected_plus_one - u32_value(1);
+        if(found == expected) {
+            Result::Ok(())
+        } else {
+            Result::Err(error(3, token, token, expected, found))
+        }
     }
 }
 
@@ -2148,27 +2473,28 @@ parse_digits(
         } } else { Result::Ok(accumulator) }
 }
 
-push_integer_constant(value: &mut BodyBuilder, magnitude: u128) -> u32 {
-    let index = u32_from_usize(
-        Vec::len(&value.integer_constants) / usize_value(4)
-    );
-    push_word(
+push_integer_constant(
+    value: &mut BodyBuilder,
+    magnitude: u128
+) -> IntegerConstantId {
+    handle Arena::alloc(
         &mut value.integer_constants,
-        wrapping_convert_to_u32(magnitude)
-    );
-    push_word(
-        &mut value.integer_constants,
-        wrapping_convert_to_u32(shift_right(magnitude, u32_value(32)))
-    );
-    push_word(
-        &mut value.integer_constants,
-        wrapping_convert_to_u32(shift_right(magnitude, u32_value(64)))
-    );
-    push_word(
-        &mut value.integer_constants,
-        wrapping_convert_to_u32(shift_right(magnitude, u32_value(96)))
-    );
-    index
+        IntegerConstant {
+            low0: wrapping_convert_to_u32(magnitude),
+            low1: wrapping_convert_to_u32(
+                shift_right(magnitude, u32_value(32))
+            ),
+            high0: wrapping_convert_to_u32(
+                shift_right(magnitude, u32_value(64))
+            ),
+            high1: wrapping_convert_to_u32(
+                shift_right(magnitude, u32_value(96))
+            )
+        }
+    ) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
 }
 
 elaborate_integer(
@@ -2214,15 +2540,12 @@ elaborate_integer(
                             );
                             let core = push_value(
                                 value,
-                                2,
                                 ty,
-                                constant,
-                                0
+                                CoreValueKind::Integer(constant)
                             );
                             Result::Ok(Elaborated {
                                 type_id: ty,
-                                value_plus_one: core + u32_value(1),
-                                computation_plus_one: 0
+                                form: ElaboratedForm::Value(core)
                             })
                         } else { Result::Err(error(
                                 5,
@@ -2255,13 +2578,18 @@ elaborate_identifier(
     handle elaboration_target_at(map, expression) {
         ElaborationTarget::Parameter(id) => elaborate_local(
             interfaces,
-            value, Id::to_u32(id), token, expected_plus_one,
+            value,
+            core_local_id_from_u32(Id::to_u32(id)),
+            token,
+            expected_plus_one,
             final_transfer
         ),
         ElaborationTarget::Local(id) => elaborate_local(
             interfaces,
             value,
-            value.parameter_count + Id::to_u32(id),
+            core_local_id_from_u32(
+                value.parameter_count + Id::to_u32(id)
+            ),
             token,
             expected_plus_one,
             final_transfer
@@ -2275,27 +2603,30 @@ elaborate_identifier(
 elaborate_local(
     interfaces: &TypedInterfaces,
     value: &mut BodyBuilder,
-    local: u32,
+    local: CoreLocalId,
     token: usize,
     expected_plus_one: u32,
     final_transfer: u32
 ) -> Result<Elaborated, ElaborationError> {
-    if(usize_from_u32(local) < Vec::len(&value.local_types)) {
-        let ty = *Vec::index(&value.local_types, usize_from_u32(local));
+    if(Id::to_usize(local) < IndexVec::len(&value.local_types)) {
+        let ty = *IndexVec::index(&value.local_types, local);
         if(ty == u32_value(0)) { Result::Err(error(7, token, token, 0, 0)) } else {
-            let copy = if(bool_and(
+            let access = if(bool_and(
                 final_transfer != u32_value(0),
                 *Vec::index(
                     &interfaces.type_flags,
                     usize_from_u32(ty)
                 ) == u32_value(1)
-            )) { 0 } else { 1 };
-            let core = push_value(value, 3, ty, local, copy);
+            )) { CoreLocalAccess::Move } else { CoreLocalAccess::Copy };
+            let core = push_value(
+                value,
+                ty,
+                CoreValueKind::Local(local, access)
+            );
             check_expected(
                 Elaborated {
                     type_id: ty,
-                    value_plus_one: core + u32_value(1),
-                    computation_plus_one: 0
+                    form: ElaboratedForm::Value(core)
                 },
                 expected_plus_one,
                 token
@@ -2315,8 +2646,8 @@ elaborate_call_arguments(
     expression: u32,
     callable: usize,
     ordinal: u32,
-    wrappers: &mut Vec<u32>,
-    operands: &mut Vec<u32>
+    wrappers: &mut Vec<LetWrapper>,
+    operands: &mut Vec<CoreValueId>
 ) -> Result<(), ElaborationError> {
     let count = interface_callable_parameter_count_at(interfaces, callable);
     if(ordinal < count) {
@@ -2346,7 +2677,7 @@ elaborate_call_arguments(
             parameter + u32_value(1)
         ), @elaborate_call_arguments);
         let operand = embed_operand(value, argument);
-        push_word(&mut *operands, operand);
+        Vec::push(&mut *operands, operand);
         elaborate_call_arguments(
             original,
             headers,
@@ -2366,22 +2697,21 @@ elaborate_call_arguments(
 
 wrap_lets_reverse(
     value: &mut BodyBuilder,
-    lets: &Vec<u32>,
+    lets: &Vec<LetWrapper>,
     count: usize,
-    body: u32,
+    body: CoreComputationId,
     result_type: u32
-) -> u32 {
+) -> CoreComputationId {
     if(count == usize_value(0)) { body } else {
-        let base = (count - usize_value(1)) * usize_value(2);
-        let local = *Vec::index(lets, base);
-        let initializer = *Vec::index(lets, base + usize_value(1));
+        let wrapper = let_wrapper_at(lets, count - usize_value(1));
         let wrapped = push_computation(
             value,
-            2,
             result_type,
-            local,
-            initializer,
-            body
+            CoreComputationKind::Let(
+                wrapper.local,
+                wrapper.initializer,
+                body
+            )
         );
         wrap_lets_reverse(
             value,
@@ -2440,42 +2770,36 @@ elaborate_call(
                         &mut wrappers,
                         &mut arguments
                     ), @elaborate_call);
-                    try(check_expected(
-                        Elaborated {
-                            type_id: result,
-                            value_plus_one: 0,
-                            computation_plus_one: 1
-                        },
+                    try(check_expected_type(
+                        result,
                         expected_plus_one,
                         token
                     ), @elaborate_call);
-                    let operand_start = u32_from_usize(
-                        Vec::len(&value.operands)
-                    );
-                    append_words(
+                    let operand_start = Vec::len(&value.operands);
+                    let operand_count = Vec::len(&arguments);
+                    append_core_values(
                         &mut value.operands,
                         &arguments,
                         0
                     );
                     let call = push_computation(
                         value,
-                        3,
                         result,
-                        shell,
-                        operand_start,
-                        found_count
+                        CoreComputationKind::Call(
+                            shell,
+                            operand_range(operand_start, operand_count)
+                        )
                     );
                     let root = wrap_lets_reverse(
                         value,
                         &wrappers,
-                        Vec::len(&wrappers) / usize_value(2),
+                        Vec::len(&wrappers),
                         call,
                         result
                     );
                     Result::Ok(Elaborated {
                         type_id: result,
-                        value_plus_one: 0,
-                        computation_plus_one: root + u32_value(1)
+                        form: ElaboratedForm::Computation(root)
                     })
                 } else { Result::Err(error(
                         4,
@@ -2519,7 +2843,7 @@ elaborate_block_statements(
     expression: u32,
     expected_plus_one: u32,
     ordinal: u32,
-    lets: &mut Vec<u32>
+    lets: &mut Vec<LetWrapper>
 ) -> Result<Elaborated, ElaborationError> {
     let count = super::bodies::expression_child_count_at(body, expression);
     if(ordinal < count) {
@@ -2535,7 +2859,9 @@ elaborate_block_statements(
         );
         handle position {
             1 => {
-                let local = value.parameter_count + value.next_source_local;
+                let local = core_local_id_from_u32(
+                    value.parameter_count + value.next_source_local
+                );
                 value.next_source_local =
                     value.next_source_local + u32_value(1);
                 let initializer = try(elaborate_expression(
@@ -2549,26 +2875,28 @@ elaborate_block_statements(
                     child,
                     0
                 ), @elaborate_block_statements);
-                        *Vec::index_mut(
-                            &mut value.local_types,
-                            usize_from_u32(local)
-                        ) = initializer.type_id;
-                        let computation = as_computation(value, initializer);
-                        push_word(&mut *lets, local);
-                        push_word(&mut *lets, computation);
-                        elaborate_block_statements(
-                            original,
-                            headers,
-                            declarations,
-                            interfaces,
-                            body,
-                            map,
-                            value,
-                            expression,
-                            expected_plus_one,
-                            ordinal + u32_value(1),
-                            lets
-                        )
+                *IndexVec::index_mut(
+                    &mut value.local_types,
+                    local
+                ) = initializer.type_id;
+                let computation = as_computation(value, initializer);
+                Vec::push(&mut *lets, LetWrapper {
+                    local: local,
+                    initializer: computation
+                });
+                elaborate_block_statements(
+                    original,
+                    headers,
+                    declarations,
+                    interfaces,
+                    body,
+                    map,
+                    value,
+                    expression,
+                    expected_plus_one,
+                    ordinal + u32_value(1),
+                    lets
+                )
             },
             2 => {
                 let is_final = ordinal + u32_value(1) == count;
@@ -2584,36 +2912,33 @@ elaborate_block_statements(
                     if(is_final) { expected_plus_one } else { 0 }
                 ), @elaborate_block_statements);
                 if(is_final) { Result::Ok(move found) } else {
-                        if(found.computation_plus_one
-                            == u32_value(0)) { () } else {
-                            let local = u32_from_usize(
-                                Vec::len(&value.local_types)
-                            );
-                            push_word(
+                    handle found.form {
+                        ElaboratedForm::Value(_) => (),
+                        ElaboratedForm::Computation(computation) => {
+                            let local = push_local_type(
                                 &mut value.local_types,
                                 found.type_id
                             );
-                            push_word(&mut *lets, local);
-                            push_word(
-                                &mut *lets,
-                                found.computation_plus_one
-                                    - u32_value(1)
-                            )
-                        };
-                        elaborate_block_statements(
-                            original,
-                            headers,
-                            declarations,
-                            interfaces,
-                            body,
-                            map,
-                            value,
-                            expression,
-                            expected_plus_one,
-                            ordinal + u32_value(1),
-                            lets
-                        )
-                    }
+                            Vec::push(&mut *lets, LetWrapper {
+                                local: local,
+                                initializer: computation
+                            })
+                        }
+                    };
+                    elaborate_block_statements(
+                        original,
+                        headers,
+                        declarations,
+                        interfaces,
+                        body,
+                        map,
+                        value,
+                        expression,
+                        expected_plus_one,
+                        ordinal + u32_value(1),
+                        lets
+                    )
+                }
             },
             _ => Result::Err(error(
                 7,
@@ -2625,12 +2950,11 @@ elaborate_block_statements(
         }
     } else {
         let token = super::bodies::expression_token_end_at(body, expression);
-        let unit = push_value(value, 1, 0, 0, 0);
+        let unit = push_value(value, 0, CoreValueKind::Unit);
         check_expected(
             Elaborated {
                 type_id: 0,
-                value_plus_one: unit + u32_value(1),
-                computation_plus_one: 0
+                form: ElaboratedForm::Value(unit)
             },
             expected_plus_one,
             token
@@ -2668,47 +2992,44 @@ elaborate_block(
     let wrapped = wrap_lets_reverse(
         value,
         &lets,
-        Vec::len(&lets) / usize_value(2),
+        Vec::len(&lets),
         root,
         final_type
     );
     Result::Ok(Elaborated {
         type_id: final_type,
-        value_plus_one: 0,
-        computation_plus_one: wrapped + u32_value(1)
+        form: ElaboratedForm::Computation(wrapped)
     })
 }
 
 finish_construct(
     value: &mut BodyBuilder,
     ty: u32,
-    variant_plus_one: u32,
-    fields: &Vec<u32>,
-    wrappers: &Vec<u32>
+    flavor: ConstructionFlavor,
+    fields: &Vec<ConstructionField>,
+    wrappers: &Vec<LetWrapper>
 ) -> Elaborated {
-    let start = u32_from_usize(
-        Vec::len(&value.construction_fields) / usize_value(2)
-    );
-    append_words(&mut value.construction_fields, fields, 0);
+    let start = Vec::len(&value.construction_fields);
+    let count = Vec::len(fields);
+    append_construction_fields(&mut value.construction_fields, fields, 0);
     let construct = push_computation(
         value,
-        4,
         ty,
-        variant_plus_one,
-        start,
-        u32_from_usize(Vec::len(fields) / usize_value(2))
+        CoreComputationKind::Construct(
+            flavor,
+            construction_field_range(start, count)
+        )
     );
     let root = wrap_lets_reverse(
         value,
         wrappers,
-        Vec::len(wrappers) / usize_value(2),
+        Vec::len(wrappers),
         construct,
         ty
     );
     Elaborated {
         type_id: ty,
-        value_plus_one: 0,
-        computation_plus_one: root + u32_value(1)
+        form: ElaboratedForm::Computation(root)
     }
 }
 
@@ -2737,9 +3058,9 @@ elaborate_tuple_elements(
     expression: u32,
     expected_plus_one: u32,
     ordinal: u32,
-    wrappers: &mut Vec<u32>,
+    wrappers: &mut Vec<LetWrapper>,
     types: &mut Vec<u32>,
-    fields: &mut Vec<u32>
+    fields: &mut Vec<ConstructionField>
 ) -> Result<(), ElaborationError> {
     let count = super::bodies::expression_child_count_at(body, expression);
     if(ordinal < count) {
@@ -2762,8 +3083,10 @@ elaborate_tuple_elements(
         let ty = element.type_id;
         let operand = embed_operand(value, element);
         push_word(&mut *types, ty);
-        push_word(&mut *fields, ordinal);
-        push_word(&mut *fields, operand);
+        Vec::push(&mut *fields, ConstructionField {
+            field: ordinal,
+            value: operand
+        });
         elaborate_tuple_elements(
             original,
             headers,
@@ -2871,7 +3194,7 @@ elaborate_tuple_checked(
     if(copy) { Result::Ok(finish_construct(
             value,
             ty,
-            0,
+            ConstructionFlavor::Product,
             &fields,
             &wrappers
         )) } else { Result::Err(error(1, token, token, ty, ty)) }
@@ -2966,14 +3289,30 @@ ordered_fields_complete(
 }
 
 append_ordered_fields(
-    output: &mut Vec<u32>,
-    values: &Vec<u32>,
+    output: &mut Vec<ConstructionField>,
+    values: &Vec<Option<CoreValueId>>,
     ordinal: usize
 ) {
     if(ordinal < Vec::len(values)) {
-        push_word(&mut *output, u32_from_usize(ordinal));
-        push_word(&mut *output, *Vec::index(values, ordinal));
+        let value = handle optional_core_value_at(values, ordinal) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        Vec::push(&mut *output, ConstructionField {
+            field: u32_from_usize(ordinal),
+            value: value
+        });
         append_ordered_fields(output, values, ordinal + usize_value(1))
+    } else { () }
+}
+
+push_missing_core_values(
+    values: &mut Vec<Option<CoreValueId>>,
+    count: usize
+) {
+    if(Vec::len(&*values) < count) {
+        Vec::push(&mut *values, None);
+        push_missing_core_values(values, count)
     } else { () }
 }
 
@@ -2988,9 +3327,9 @@ elaborate_struct_fields(
     expression: u32,
     nominal: u32,
     ordinal: u32,
-    wrappers: &mut Vec<u32>,
+    wrappers: &mut Vec<LetWrapper>,
     seen: &mut Vec<u32>,
-    values: &mut Vec<u32>
+    values: &mut Vec<Option<CoreValueId>>
 ) -> Result<(), ElaborationError> {
     let count = super::bodies::expression_child_count_at(body, expression);
     if(ordinal < count) {
@@ -3051,7 +3390,7 @@ elaborate_struct_fields(
                 *Vec::index_mut(
                     &mut *values,
                     usize_from_u32(field)
-                ) = operand;
+                ) = Option::Some(operand);
                 elaborate_struct_fields(
                     original,
                     headers,
@@ -3120,7 +3459,10 @@ elaborate_struct(
                     let seen = Vec::new();
                     let values = Vec::new();
                     push_zeroes(&mut seen, usize_from_u32(count));
-                    push_zeroes(&mut values, usize_from_u32(count));
+                    push_missing_core_values(
+                        &mut values,
+                        usize_from_u32(count)
+                    );
                     let wrappers = Vec::new();
                     try(elaborate_struct_fields(
                         original,
@@ -3147,7 +3489,7 @@ elaborate_struct(
                         Result::Ok(finish_construct(
                             value,
                             ty,
-                            0,
+                            ConstructionFlavor::Product,
                             &fields,
                             &wrappers
                         ))
@@ -3186,8 +3528,8 @@ elaborate_enum_payloads(
     payload_start: u32,
     payload_count: u32,
     ordinal: u32,
-    wrappers: &mut Vec<u32>,
-    fields: &mut Vec<u32>
+    wrappers: &mut Vec<LetWrapper>,
+    fields: &mut Vec<ConstructionField>
 ) -> Result<(), ElaborationError> {
     if(ordinal < payload_count) {
         let expected = *Vec::index(
@@ -3210,8 +3552,10 @@ elaborate_enum_payloads(
             expected + u32_value(1)
         ), @elaborate_enum_payloads);
         let operand = embed_operand(value, payload);
-        push_word(&mut *fields, ordinal);
-        push_word(&mut *fields, operand);
+        Vec::push(&mut *fields, ConstructionField {
+            field: ordinal,
+            value: operand
+        });
         elaborate_enum_payloads(
             original,
             headers,
@@ -3302,7 +3646,7 @@ elaborate_enum_construct(
             Result::Ok(finish_construct(
                 value,
                 ty,
-                variant_ordinal + u32_value(1),
+                ConstructionFlavor::Variant(variant_ordinal),
                 &fields,
                 &wrappers
             ))
@@ -3359,7 +3703,7 @@ elaborate_enum_bare(
             Result::Ok(finish_construct(
                 value,
                 ty,
-                variant_ordinal + u32_value(1),
+                ConstructionFlavor::Variant(variant_ordinal),
                 &fields,
                 &wrappers
             ))
@@ -3481,16 +3825,12 @@ elaborate_projection(
                         );
                         let projected = push_value(
                             value,
-                            4,
                             result_type,
-                            operand,
-                            field_index
+                            CoreValueKind::Projection(operand, field_index)
                         );
                         if(Vec::len(&wrappers) == usize_value(0)) { Result::Ok(Elaborated {
                                 type_id: result_type,
-                                value_plus_one:
-                                    projected + u32_value(1),
-                                computation_plus_one: 0
+                                form: ElaboratedForm::Value(projected)
                             }) } else {
                             let pure_projection = pure(
                                 value,
@@ -3500,16 +3840,13 @@ elaborate_projection(
                             let root = wrap_lets_reverse(
                                 value,
                                 &wrappers,
-                                Vec::len(&wrappers)
-                                    / usize_value(2),
+                                Vec::len(&wrappers),
                                 pure_projection,
                                 result_type
                             );
                             Result::Ok(Elaborated {
                                 type_id: result_type,
-                                value_plus_one: 0,
-                                computation_plus_one:
-                                    root + u32_value(1)
+                                form: ElaboratedForm::Computation(root)
                             })
                         }
                     } else { Result::Err(error(
@@ -3566,12 +3903,11 @@ elaborate_expression(
                 body,
                 expression
             );
-            let unit = push_value(value, 1, 0, 0, 0);
+            let unit = push_value(value, 0, CoreValueKind::Unit);
             check_expected(
                 Elaborated {
                     type_id: 0,
-                    value_plus_one: unit + u32_value(1),
-                    computation_plus_one: 0
+                    form: ElaboratedForm::Value(unit)
                 },
                 expected_plus_one,
                 token
@@ -3670,12 +4006,12 @@ elaborate_expression(
 seed_parameter_locals(
     interfaces: &TypedInterfaces,
     callable: usize,
-    output: &mut Vec<u32>,
+    output: &mut IndexVec<CoreLocalTag, u32>,
     ordinal: u32
 ) {
     let count = interface_callable_parameter_count_at(interfaces, callable);
     if(ordinal < count) {
-        push_word(
+        push_local_type(
             &mut *output,
             interface_callable_parameter_at(
                 interfaces,
@@ -3694,6 +4030,18 @@ seed_parameter_locals(
             ordinal + u32_value(1)
         )
     } else { () }
+}
+
+seed_untyped_locals(
+    output: &mut IndexVec<CoreLocalTag, u32>,
+    remaining: usize
+) {
+    if(remaining == usize_value(0)) {
+        ()
+    } else {
+        push_local_type(&mut *output, 0);
+        seed_untyped_locals(output, remaining - usize_value(1))
+    }
 }
 
 resolved_local_plus_one(
@@ -4127,9 +4475,9 @@ pub elaborate_function_body(
         Result::Ok(callable_id) => {
             let callable = usize_from_u32(callable_id);
             let result = interface_callable_result_at(interfaces, callable);
-            let locals = Vec::new();
+            let locals = IndexVec::new();
             seed_parameter_locals(interfaces, callable, &mut locals, 0);
-            push_zeroes(
+            seed_untyped_locals(
                 &mut locals,
                 super::resolution::local_count(resolved)
             );
@@ -4142,48 +4490,50 @@ pub elaborate_function_body(
                             callable
                         );
                     let builder = BodyBuilder {
-                parameter_count: parameter_count,
-                next_source_local: 0,
+                        parameter_count: parameter_count,
+                        next_source_local: 0,
                         final_transfer_expressions:
                             final_transfer_expressions(
                                 body,
                                 &map,
                                 parameter_count,
-                                Vec::len(&locals)
+                                IndexVec::len(&locals)
                             ),
-                local_types:  locals,
-                values: Vec::new(),
-                computations: Vec::new(),
-                operands: Vec::new(),
-                construction_fields: Vec::new(),
-                integer_constants: Vec::new()
-            };
+                        local_types: locals,
+                        values: Arena::new(),
+                        computations: Arena::new(),
+                        operands: Vec::new(),
+                        construction_fields: Vec::new(),
+                        integer_constants: Arena::new()
+                    };
                     handle elaborate_expression(
-                    original,
-                    headers,
-                    declarations,
-                    interfaces,
-                    body,
-                    &map,
-                    &mut builder,
-                    super::bodies::body_root_index(body),
-                    result + u32_value(1)
-                ) {
-                    Result::Err(found) => Result::Err(found),
-                    Result::Ok(root) => {
-                        let computation = as_computation(&mut builder, root);
-                        Result::Ok(TypedBody {
-                            shell: shell,
-                            result_type: result,
-                            root: computation,
-                            local_types: move builder.local_types,
-                            values: move builder.values,
-                            computations: move builder.computations,
-                            operands: move builder.operands,
-                            construction_fields:
-                                move builder.construction_fields,
-                            integer_constants: move builder.integer_constants
-                        })
+                        original,
+                        headers,
+                        declarations,
+                        interfaces,
+                        body,
+                        &map,
+                        &mut builder,
+                        super::bodies::body_root_index(body),
+                        result + u32_value(1)
+                    ) {
+                        Result::Err(found) => Result::Err(found),
+                        Result::Ok(root) => {
+                            let computation =
+                                as_computation(&mut builder, root);
+                            Result::Ok(TypedBody {
+                                shell: shell,
+                                result_type: result,
+                                root: computation,
+                                local_types: move builder.local_types,
+                                values: move builder.values,
+                                computations: move builder.computations,
+                                operands: move builder.operands,
+                                construction_fields:
+                                    move builder.construction_fields,
+                                integer_constants:
+                                    move builder.integer_constants
+                            })
                         }
                     }
                 }
@@ -4306,21 +4656,17 @@ find_callable<'a>(
         } } else { Result::Err(()) }
 }
 
-value_uses_local(body: &TypedBody, value: u32, local: u32) -> Bool {
-    let base = usize_from_u32(value) * usize_value(4);
-    handle *Vec::index(&body.values, base) {
-        3 =>
-            *Vec::index(&body.values, base + usize_value(2)) == local,
-        4 => value_uses_local(
-            body,
-            *Vec::index(&body.values, base + usize_value(2)),
-            local
-        ),
-        5 => computation_uses_local(
-            body,
-            *Vec::index(&body.values, base + usize_value(2)),
-            local
-        ),
+value_uses_local(
+    body: &TypedBody,
+    value: CoreValueId,
+    local: CoreLocalId
+) -> Bool {
+    handle core_value_at(&body.values, value).kind {
+        CoreValueKind::Local(found, _) => found == local,
+        CoreValueKind::Projection(subject, _) =>
+            value_uses_local(body, subject, local),
+        CoreValueKind::Embedded(computation) =>
+            computation_uses_local(body, computation, local),
         _ => false
     }
 }
@@ -4330,16 +4676,14 @@ construction_fields_use_local(
     start: u32,
     count: u32,
     ordinal: u32,
-    local: u32
+    local: CoreLocalId
 ) -> Bool {
     if(ordinal < count) { if(value_uses_local(
             body,
-            *Vec::index(
+            construction_field_at(
                 &body.construction_fields,
-                usize_from_u32(
-                    (start + ordinal) * u32_value(2) + u32_value(1)
-                )
-            ),
+                usize_from_u32(start + ordinal)
+            ).value,
             local
         )) { true } else { construction_fields_use_local(
                 body,
@@ -4355,7 +4699,7 @@ operands_use_local(
     start: u32,
     count: u32,
     ordinal: u32,
-    local: u32
+    local: CoreLocalId
 ) -> Bool {
     if(ordinal < count) { if(value_uses_local(
             body,
@@ -4375,40 +4719,33 @@ operands_use_local(
 
 computation_uses_local(
     body: &TypedBody,
-    computation: u32,
-    local: u32
+    computation: CoreComputationId,
+    local: CoreLocalId
 ) -> Bool {
-    let base = usize_from_u32(computation) * usize_value(5);
-    handle *Vec::index(&body.computations, base) {
-        1 => value_uses_local(
+    handle core_computation_at(&body.computations, computation).kind {
+        CoreComputationKind::Pure(value) =>
+            value_uses_local(body, value, local),
+        CoreComputationKind::Let(_, initializer, remainder) =>
+            if(computation_uses_local(body, initializer, local)) {
+                true
+            } else {
+                computation_uses_local(body, remainder, local)
+            },
+        CoreComputationKind::Call(_, range) => operands_use_local(
             body,
-            *Vec::index(&body.computations, base + usize_value(2)),
-            local
-        ),
-        2 => if(computation_uses_local(
-            body,
-            *Vec::index(&body.computations, base + usize_value(3)),
-            local
-        )) { true } else { computation_uses_local(
-                body,
-                *Vec::index(&body.computations, base + usize_value(4)),
-                local
-            ) },
-        3 => operands_use_local(
-            body,
-            *Vec::index(&body.computations, base + usize_value(3)),
-            *Vec::index(&body.computations, base + usize_value(4)),
+            range.start,
+            range.count,
             0,
             local
         ),
-        4 => construction_fields_use_local(
+        CoreComputationKind::Construct(_, range) =>
+            construction_fields_use_local(
             body,
-            *Vec::index(&body.computations, base + usize_value(3)),
-            *Vec::index(&body.computations, base + usize_value(4)),
+            range.start,
+            range.count,
             0,
             local
-        ),
-        _ => false
+        )
     }
 }
 
@@ -4425,67 +4762,52 @@ write_value_expression(
     source: &super::lexer::LexedSource,
     declarations: &super::scanner::DeclarationIndex,
     body: &TypedBody,
-    value: u32,
+    value: CoreValueId,
     source_local_limit: u32
 ) -> Result<(), ElaborationError> {
-    let base = usize_from_u32(value) * usize_value(4);
-    let tag = *Vec::index(&body.values, base);
-    let ty = *Vec::index(&body.values, base + usize_value(1));
-    handle tag {
-        1 => {
+    let node = core_value_at(&body.values, value);
+    let ty = node.ty;
+    handle node.kind {
+        CoreValueKind::Unit => {
             ByteBuf::push(&mut *output, 0);
             write_type_id( output, ty);
             Result::Ok(())
         },
-        2 => {
-            let constant = *Vec::index(
-                &body.values,
-                base + usize_value(2)
-            );
-            let at = usize_from_u32(constant) * usize_value(4);
-            let high2 = *Vec::index(
+        CoreValueKind::Integer(constant_id) => {
+            let constant = integer_constant_at(
                 &body.integer_constants,
-                at + usize_value(2)
+                constant_id
             );
-            let high3 = *Vec::index(
-                &body.integer_constants,
-                at + usize_value(3)
-            );
+            let at = Id::to_usize(constant_id) * usize_value(4);
             if(bool_or(
-                high2 != u32_value(0),
-                high3 != u32_value(0)
+                constant.high0 != u32_value(0),
+                constant.high1 != u32_value(0)
             )) { Result::Err(error(7, at, at, 0, ty)) } else {
-                let low = *Vec::index(&body.integer_constants, at);
-                let high = *Vec::index(
-                    &body.integer_constants,
-                    at + usize_value(1)
-                );
                 ByteBuf::push(&mut *output, 1);
                 write_type_id(&mut *output, ty);
                 ByteBuf::write_u64_le(
                      output,
-                    wrapping_convert_to_u64(low)
+                    wrapping_convert_to_u64(constant.low0)
                         + shift_left(
-                            wrapping_convert_to_u64(high),
+                            wrapping_convert_to_u64(constant.low1),
                             u32_value(32)
                         )
                 );
                 Result::Ok(())
             }
         },
-        3 => {
-            let local = *Vec::index(&body.values, base + usize_value(2));
+        CoreValueKind::Local(local_id, access) => {
+            let local = Id::to_u32(local_id);
             if(local < source_local_limit) {
                 ByteBuf::push(&mut *output, 2);
                 write_type_id(&mut *output, ty);
                 ByteBuf::write_u32_le(&mut *output, local);
-                ByteBuf::push( output,
-                    wrapping_convert_to_u8(
-                        *Vec::index(
-                            &body.values,
-                            base + usize_value(3)
-                        )
-                    )
+                ByteBuf::push(
+                    output,
+                    handle access {
+                        CoreLocalAccess::Move => 0,
+                        CoreLocalAccess::Copy => 1
+                    }
                 );
                 Result::Ok(())
             } else { Result::Err(error(
@@ -4496,13 +4818,10 @@ write_value_expression(
                     local
                 )) }
         },
-        4 => {
+        CoreValueKind::Projection(subject, field) => {
             ByteBuf::push(&mut *output, 7);
             write_type_id(&mut *output, ty);
-            ByteBuf::write_u32_le(
-                &mut *output,
-                *Vec::index(&body.values, base + usize_value(3))
-            );
+            ByteBuf::write_u32_le(&mut *output, field);
             ByteBuf::push(&mut *output, 1);
             ByteBuf::write_u32_le(&mut *output, 0);
             write_value_expression(
@@ -4510,11 +4829,17 @@ write_value_expression(
                 source,
                 declarations,
                 body,
-                *Vec::index(&body.values, base + usize_value(2)),
+                subject,
                 source_local_limit
             )
         },
-        _ => Result::Err(error(7, base, base, 0, tag))
+        CoreValueKind::Embedded(_) => Result::Err(error(
+            7,
+            Id::to_usize(value),
+            Id::to_usize(value),
+            0,
+            5
+        ))
     }
 }
 
@@ -4524,27 +4849,29 @@ write_operand_expression(
     declarations: &super::scanner::DeclarationIndex,
     resolved: &super::resolution::ResolvedBody,
     body: &TypedBody,
-    value: u32,
+    value: CoreValueId,
     source_local_limit: u32
 ) -> Result<(), ElaborationError> {
-    let base = usize_from_u32(value) * usize_value(4);
-    if(*Vec::index(&body.values, base) == u32_value(5)) { write_computation_expression(
+    handle core_value_at(&body.values, value).kind {
+        CoreValueKind::Embedded(computation) => write_computation_expression(
             output,
             source,
             declarations,
             resolved,
             body,
-            *Vec::index(&body.values, base + usize_value(2)),
+            computation,
             source_local_limit,
             false
-        ) } else { write_value_expression(
+        ),
+        _ => write_value_expression(
             output,
             source,
             declarations,
             body,
             value,
             source_local_limit
-        ) }
+        )
+    }
 }
 
 write_construct_fields(
@@ -4559,21 +4886,18 @@ write_construct_fields(
     ordinal: u32
 ) -> Result<(), ElaborationError> {
     if(ordinal < count) {
-        let base = usize_from_u32(start + ordinal) * usize_value(2);
-        ByteBuf::write_u32_le(
-            &mut *output,
-            *Vec::index(&body.construction_fields, base)
+        let field = construction_field_at(
+            &body.construction_fields,
+            usize_from_u32(start + ordinal)
         );
+        ByteBuf::write_u32_le(&mut *output, field.field);
         handle write_operand_expression(
             output,
             source,
             declarations,
             resolved,
             body,
-            *Vec::index(
-                &body.construction_fields,
-                base + usize_value(1)
-            ),
+            field.value,
             source_local_limit
         ) {
             Result::Err(found) => Result::Err(found),
@@ -4632,15 +4956,14 @@ write_call_operands(
 
 leading_let_count(
     body: &TypedBody,
-    computation: u32,
+    computation: CoreComputationId,
     count: u32
 ) -> u32 {
-    let base = usize_from_u32(computation) * usize_value(5);
-    if(*Vec::index(&body.computations, base) == u32_value(2)) { leading_let_count(
-            body,
-            *Vec::index(&body.computations, base + usize_value(4)),
-            count + u32_value(1)
-        ) } else { count }
+    handle core_computation_at(&body.computations, computation).kind {
+        CoreComputationKind::Let(_, _, remainder) =>
+            leading_let_count(body, remainder, count + u32_value(1)),
+        _ => count
+    }
 }
 
 write_computation_expression(
@@ -4649,22 +4972,22 @@ write_computation_expression(
     declarations: &super::scanner::DeclarationIndex,
     resolved: &super::resolution::ResolvedBody,
     body: &TypedBody,
-    computation: u32,
+    computation: CoreComputationId,
     source_local_limit: u32,
     tail_position: Bool
 ) -> Result<(), ElaborationError> {
-    let base = usize_from_u32(computation) * usize_value(5);
-    let tag = *Vec::index(&body.computations, base);
-    handle tag {
-        1 => write_value_expression(
+    let node = core_computation_at(&body.computations, computation);
+    let ty = node.ty;
+    handle node.kind {
+        CoreComputationKind::Pure(value) => write_value_expression(
             output,
             source,
             declarations,
             body,
-            *Vec::index(&body.computations, base + usize_value(2)),
+            value,
             source_local_limit
         ),
-        2 => write_block_expression(
+        CoreComputationKind::Let(_, _, _) => write_block_expression(
             output,
             source,
             declarations,
@@ -4674,23 +4997,7 @@ write_computation_expression(
             source_local_limit,
             tail_position
         ),
-        3 => {
-            let ty = *Vec::index(
-                &body.computations,
-                base + usize_value(1)
-            );
-            let shell = *Vec::index(
-                &body.computations,
-                base + usize_value(2)
-            );
-            let start = *Vec::index(
-                &body.computations,
-                base + usize_value(3)
-            );
-            let count = *Vec::index(
-                &body.computations,
-                base + usize_value(4)
-            );
+        CoreComputationKind::Call(shell, range) => {
             ByteBuf::push(
                 &mut *output,
                 if(tail_position) { 4 } else { 3 }
@@ -4702,7 +5009,7 @@ write_computation_expression(
                 declarations,
                 usize_from_u32(shell)
             );
-            ByteBuf::write_u32_le(&mut *output, count);
+            ByteBuf::write_u32_le(&mut *output, range.count);
             write_call_operands(
                 output,
                 source,
@@ -4710,33 +5017,20 @@ write_computation_expression(
                 resolved,
                 body,
                 source_local_limit,
-                start,
-                count,
+                range.start,
+                range.count,
                 0
             )
         },
-        4 => {
-            let ty = *Vec::index(
-                &body.computations,
-                base + usize_value(1)
-            );
-            let variant_plus_one = *Vec::index(
-                &body.computations,
-                base + usize_value(2)
-            );
-            let start = *Vec::index(
-                &body.computations,
-                base + usize_value(3)
-            );
-            let count = *Vec::index(
-                &body.computations,
-                base + usize_value(4)
-            );
+        CoreComputationKind::Construct(flavor, range) => {
             ByteBuf::push(&mut *output, 6);
             write_type_id(&mut *output, ty);
             write_type_id(&mut *output, ty);
-            ByteBuf::write_u32_le(&mut *output, variant_plus_one);
-            ByteBuf::write_u32_le(&mut *output, count);
+            ByteBuf::write_u32_le(
+                &mut *output,
+                construction_flavor_word(flavor)
+            );
+            ByteBuf::write_u32_le(&mut *output, range.count);
             write_construct_fields(
                 output,
                 source,
@@ -4744,12 +5038,11 @@ write_computation_expression(
                 resolved,
                 body,
                 source_local_limit,
-                start,
-                count,
+                range.start,
+                range.count,
                 0
             )
-        },
-        _ => Result::Err(error(7, base, base, 0, tag))
+        }
     }
 }
 
@@ -4759,82 +5052,37 @@ write_block_statements(
     declarations: &super::scanner::DeclarationIndex,
     resolved: &super::resolution::ResolvedBody,
     body: &TypedBody,
-    computation: u32,
+    computation: CoreComputationId,
     source_local_limit: u32,
     tail_position: Bool
 ) -> Result<(), ElaborationError> {
-    let base = usize_from_u32(computation) * usize_value(5);
-    if(*Vec::index(&body.computations, base) == u32_value(2)) {
-        let local = *Vec::index(
-            &body.computations,
-            base + usize_value(2)
-        );
-        let initializer = *Vec::index(
-            &body.computations,
-            base + usize_value(3)
-        );
-        let remainder = *Vec::index(
-            &body.computations,
-            base + usize_value(4)
-        );
-        if(local < source_local_limit) {
-            ByteBuf::push(&mut *output, 1);
-            ByteBuf::write_u32_le(&mut *output, local);
-            write_name_token(
-                &mut *output,
-                source,
-                super::resolution::local_name_token_at(
-                    resolved,
-                    usize_from_u32(
-                        local - (
-                            source_local_limit - u32_from_usize(
-                                super::resolution::local_count(resolved)
+    handle core_computation_at(&body.computations, computation).kind {
+        CoreComputationKind::Let(local_id, initializer, remainder) => {
+            let local = Id::to_u32(local_id);
+            if(local < source_local_limit) {
+                ByteBuf::push(&mut *output, 1);
+                ByteBuf::write_u32_le(&mut *output, local);
+                write_name_token(
+                    &mut *output,
+                    source,
+                    super::resolution::local_name_token_at(
+                        resolved,
+                        usize_from_u32(
+                            local - (
+                                source_local_limit - u32_from_usize(
+                                    super::resolution::local_count(resolved)
+                                )
                             )
                         )
                     )
-                )
-            );
-            write_type_id(
-                &mut *output,
-                *Vec::index(
-                    &body.local_types,
-                    usize_from_u32(local)
-                )
-            );
-            handle write_computation_expression(
-                output,
-                source,
-                declarations,
-                resolved,
-                body,
-                initializer,
-                source_local_limit,
-                false
-            ) {
-                Result::Err(found) => Result::Err(found),
-                Result::Ok(_) => write_block_statements(
-                    output,
-                    source,
-                    declarations,
-                    resolved,
-                    body,
-                    remainder,
-                    source_local_limit,
-                    tail_position
-                )
-            }
-        } else { if(computation_uses_local(
-                body,
-                remainder,
-                local
-            )) { Result::Err(error(
-                    7,
-                    usize_from_u32(local),
-                    usize_from_u32(local),
-                    source_local_limit,
-                    local
-                )) } else {
-                ByteBuf::push(&mut *output, 2);
+                );
+                write_type_id(
+                    &mut *output,
+                    *IndexVec::index(
+                        &body.local_types,
+                        local_id
+                    )
+                );
                 handle write_computation_expression(
                     output,
                     source,
@@ -4857,8 +5105,43 @@ write_block_statements(
                         tail_position
                     )
                 }
-            } }
-    } else { write_computation_expression(
+            } else { if(computation_uses_local(
+                    body,
+                    remainder,
+                    local_id
+                )) { Result::Err(error(
+                        7,
+                        usize_from_u32(local),
+                        usize_from_u32(local),
+                        source_local_limit,
+                        local
+                    )) } else {
+                    ByteBuf::push(&mut *output, 2);
+                    handle write_computation_expression(
+                        output,
+                        source,
+                        declarations,
+                        resolved,
+                        body,
+                        initializer,
+                        source_local_limit,
+                        false
+                    ) {
+                        Result::Err(found) => Result::Err(found),
+                        Result::Ok(_) => write_block_statements(
+                            output,
+                            source,
+                            declarations,
+                            resolved,
+                            body,
+                            remainder,
+                            source_local_limit,
+                            tail_position
+                        )
+                    }
+                } }
+        },
+        _ => write_computation_expression(
             output,
             source,
             declarations,
@@ -4867,7 +5150,8 @@ write_block_statements(
             computation,
             source_local_limit,
             tail_position
-        ) }
+        )
+    }
 }
 
 write_block_expression(
@@ -4876,15 +5160,14 @@ write_block_expression(
     declarations: &super::scanner::DeclarationIndex,
     resolved: &super::resolution::ResolvedBody,
     body: &TypedBody,
-    computation: u32,
+    computation: CoreComputationId,
     source_local_limit: u32,
     tail_position: Bool
 ) -> Result<(), ElaborationError> {
-    let base = usize_from_u32(computation) * usize_value(5);
     ByteBuf::push(&mut *output, 5);
     write_type_id(
         &mut *output,
-        *Vec::index(&body.computations, base + usize_value(1))
+        core_computation_at(&body.computations, computation).ty
     );
     ByteBuf::write_u32_le(
         &mut *output,

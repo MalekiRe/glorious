@@ -3684,6 +3684,31 @@ impl<'a> Walker<'a> {
         pattern: &crate::ast::Pattern,
         positive: &Expr,
     ) -> Option<ProvisionalType> {
+        let PatternKind::Variant { fields, .. } = &pattern.kind else {
+            return None;
+        };
+        let payload_binding = fields.iter().find_map(|field| {
+            let PatternKind::Binding(binding) = &field.kind else {
+                return None;
+            };
+            Some(binding.as_str())
+        })?;
+        let payload = self.expression_binding_expected(positive, payload_binding)?;
+        self.structural_pattern_initializer_expected_for_payload(
+            initializer,
+            pattern,
+            payload_binding,
+            &payload,
+        )
+    }
+
+    fn structural_pattern_initializer_expected_for_payload(
+        &self,
+        initializer: &Expr,
+        pattern: &crate::ast::Pattern,
+        payload_binding: &str,
+        payload: &ProvisionalType,
+    ) -> Option<ProvisionalType> {
         let PatternKind::Variant {
             path, fields, rest, ..
         } = &pattern.kind
@@ -3693,15 +3718,10 @@ impl<'a> Walker<'a> {
         let [owner, variant] = path.as_slice() else {
             return None;
         };
-        let (payload_binding, payload_position) =
-            fields.iter().enumerate().find_map(|(position, field)| {
-                let PatternKind::Binding(binding) = &field.kind else {
-                    return None;
-                };
-                Some((binding.as_str(), position))
-            })?;
+        let payload_position = fields.iter().position(
+            |field| matches!(&field.kind, PatternKind::Binding(binding) if binding == payload_binding),
+        )?;
         let pattern_field_count = fields.len();
-        let payload = self.expression_binding_expected(positive, payload_binding)?;
         let initializer = match &initializer.kind {
             ExprKind::Move(value) => value.as_ref(),
             _ => initializer,
@@ -3752,11 +3772,99 @@ impl<'a> Walker<'a> {
             .cloned()
             .collect::<BTreeSet<_>>();
         let mut substitutions = BTreeMap::new();
-        if !unify_inference(&produced_payload, &payload, &mutable, &mut substitutions) {
+        if !unify_inference(&produced_payload, payload, &mutable, &mut substitutions) {
             return None;
         }
         let expected = substitute(&producer.result, &substitutions)?;
         ground(&expected).then_some(expected)
+    }
+
+    fn completion_binding(expression: &Expr) -> Option<&str> {
+        match &expression.kind {
+            ExprKind::Move(value) => Self::completion_binding(value),
+            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                let Stmt::Expr(value) = statements.last()? else {
+                    return None;
+                };
+                Self::completion_binding(value)
+            }
+            _ => Self::moved_binding_name(expression),
+        }
+    }
+
+    /// Handles are structurally lowered before specialization discovery into
+    /// a temporary initializer followed by a nested `if`/`else` pattern-test
+    /// chain. Recover the initializer's complete generic nominal result from
+    /// an enclosing expected type when a matching branch returns its payload.
+    fn lowered_handle_initializer_expected(
+        &self,
+        expression: &Expr,
+        initializer: &Expr,
+        temporary: &str,
+        expected: &ProvisionalType,
+    ) -> Option<ProvisionalType> {
+        let mut candidates = BTreeSet::new();
+        fn visit(
+            walker: &Walker<'_>,
+            expression: &Expr,
+            initializer: &Expr,
+            temporary: &str,
+            expected: &ProvisionalType,
+            candidates: &mut BTreeSet<ProvisionalType>,
+        ) {
+            match &expression.kind {
+                ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                    for statement in statements.iter() {
+                        if let Stmt::Expr(value) = statement {
+                            visit(walker, value, initializer, temporary, expected, candidates);
+                        }
+                    }
+                }
+                ExprKind::Call(callee, arguments)
+                    if matches!(&callee.kind, ExprKind::Variable(path)
+                        if path.len() == 1 && path[0].as_ref() == "else")
+                        && arguments.len() == 2 =>
+                {
+                    let positive_if = &arguments[0];
+                    if let ExprKind::Call(if_callee, if_arguments) = &positive_if.kind
+                        && matches!(&if_callee.kind, ExprKind::Variable(path)
+                            if path.len() == 1 && path[0].as_ref() == "if")
+                        && let [condition, positive] = if_arguments.as_slice()
+                        && let ExprKind::Is { subject, pattern } = &condition.kind
+                        && Walker::moved_binding_name(subject).is_some_and(|name| name == temporary)
+                        && let Some(returned) = Walker::completion_binding(positive)
+                        && Walker::pattern_binds_name(pattern, returned)
+                        && let Some(candidate) = walker
+                            .structural_pattern_initializer_expected_for_payload(
+                                initializer,
+                                pattern,
+                                returned,
+                                expected,
+                            )
+                    {
+                        candidates.insert(candidate);
+                    }
+                    visit(
+                        walker,
+                        &arguments[1],
+                        initializer,
+                        temporary,
+                        expected,
+                        candidates,
+                    );
+                }
+                _ => {}
+            }
+        }
+        visit(
+            self,
+            expression,
+            initializer,
+            temporary,
+            expected,
+            &mut candidates,
+        );
+        (candidates.len() == 1).then(|| candidates.pop_first().unwrap())
     }
 
     fn block_binding_expected_type(
@@ -3768,6 +3876,20 @@ impl<'a> Walker<'a> {
     ) -> Option<ProvisionalType> {
         let live = BTreeSet::from([binding.to_owned()]);
         let mut candidates = BTreeSet::new();
+        if let Some(block_expected) = block_expected {
+            for statement in remaining {
+                if let Stmt::Expr(expression) = statement
+                    && let Some(expected) = self.lowered_handle_initializer_expected(
+                        expression,
+                        initializer,
+                        binding,
+                        block_expected,
+                    )
+                {
+                    candidates.insert(expected);
+                }
+            }
+        }
         self.collect_statement_expectations(
             remaining,
             &live,

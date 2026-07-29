@@ -123,6 +123,26 @@ fn id_from_usize_specialization_survives_reference_result_pattern_handling() {
 }
 
 #[test]
+fn generic_handle_scrutinee_is_inferred_from_the_result_payload() {
+    let source = r#"
+        struct NodeTag {}
+
+        node_id(index: usize) -> Id<NodeTag> {
+            handle Id::from_usize(index) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(id) => id
+            }
+        }
+
+        main() -> () {
+            Id::to_u32(node_id(0));
+            ()
+        }
+    "#;
+    compile_source_to_bytecode("generic-handle-scrutinee-result.glorious", source).unwrap();
+}
+
+#[test]
 fn shadowed_pattern_payload_does_not_constrain_a_generic_initializer() {
     let source = r#"
         struct NodeTag {}
