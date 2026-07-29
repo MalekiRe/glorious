@@ -12,7 +12,7 @@ use grandiose::{
     modules::{ModuleResolution, ResolvedProgram},
     source_bundle::{Segment, SourceBundle},
 };
-use grandiose_vm::{Constant, I64, SystemHost, U64, UNIT, Value, Vm, verify};
+use grandiose_vm::{Constant, I64, SystemHost, Type, TypeId, U64, UNIT, Value, Vm, verify};
 
 const INPUT_NAME: &str = "typed-core-input.glorious";
 const WRAPPER: &str = "\nmain() { () }\n";
@@ -138,23 +138,198 @@ fn source_functions<'a>(
     Ok(functions)
 }
 
-fn check_type(ty: u32) -> Result<(), String> {
-    match ty {
-        UNIT | U64 | I64 => Ok(()),
-        _ => Err(format!(
-            "typed-Core fixture escaped scalar contract with type t{ty}"
-        )),
+const NORMALIZED_AGGREGATE_TYPE_BASE: u32 = 0x8000_0000;
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum NormalizedType {
+    Unit,
+    U64,
+    I64,
+    Tuple(Vec<NormalizedType>),
+    Struct(String),
+    Enum(String),
+}
+
+struct TypeEncoder<'a> {
+    types: &'a [Type],
+    aggregate_ids: BTreeMap<NormalizedType, u32>,
+}
+
+impl<'a> TypeEncoder<'a> {
+    fn new(types: &'a [Type], functions: &[&core::Function]) -> Result<Self, String> {
+        let mut keys = BTreeSet::new();
+        for function in functions {
+            for parameter in &function.params {
+                Self::collect_type(types, parameter.ty, &mut keys)?;
+            }
+            Self::collect_type(types, function.result, &mut keys)?;
+            Self::collect_expression(types, &function.body, &mut keys)?;
+        }
+        let aggregate_ids = keys
+            .into_iter()
+            .enumerate()
+            .map(|(index, key)| {
+                let index = u32::try_from(index)
+                    .map_err(|_| "normalized aggregate type identity overflow".to_owned())?;
+                let id = NORMALIZED_AGGREGATE_TYPE_BASE
+                    .checked_add(index)
+                    .ok_or_else(|| "normalized aggregate type identity overflow".to_owned())?;
+                Ok((key, id))
+            })
+            .collect::<Result<_, String>>()?;
+        Ok(Self {
+            types,
+            aggregate_ids,
+        })
+    }
+
+    fn descriptor(types: &[Type], ty: TypeId) -> Result<&Type, String> {
+        types
+            .get(ty as usize)
+            .ok_or_else(|| format!("Core references unknown type t{ty}"))
+    }
+
+    fn key(types: &[Type], ty: TypeId) -> Result<NormalizedType, String> {
+        match ty {
+            UNIT => return Ok(NormalizedType::Unit),
+            U64 => return Ok(NormalizedType::U64),
+            I64 => return Ok(NormalizedType::I64),
+            _ => {}
+        }
+        let descriptor = Self::descriptor(types, ty)?;
+        if !descriptor.claimed_duplicable() {
+            return Err(format!(
+                "Stage A typed-Core fixture escaped copy-only contract with type t{ty}"
+            ));
+        }
+        match descriptor.representation() {
+            Type::Tuple { fields, .. } => Ok(NormalizedType::Tuple(
+                fields
+                    .iter()
+                    .map(|field| Self::key(types, *field))
+                    .collect::<Result<Vec<_>, _>>()?,
+            )),
+            Type::Struct { name, .. } => {
+                if name.contains('<') {
+                    return Err(format!(
+                        "Stage A typed-Core fixture escaped monomorphic nominal contract with `{name}`"
+                    ));
+                }
+                Ok(NormalizedType::Struct(name.clone()))
+            }
+            Type::Enum { name, .. } => {
+                if name.contains('<') {
+                    return Err(format!(
+                        "Stage A typed-Core fixture escaped monomorphic nominal contract with `{name}`"
+                    ));
+                }
+                Ok(NormalizedType::Enum(name.clone()))
+            }
+            other => Err(format!(
+                "Stage A typed-Core fixture escaped aggregate contract with type t{ty} `{other:?}`"
+            )),
+        }
+    }
+
+    fn collect_type(
+        types: &[Type],
+        ty: TypeId,
+        output: &mut BTreeSet<NormalizedType>,
+    ) -> Result<(), String> {
+        if matches!(ty, UNIT | U64 | I64) {
+            return Ok(());
+        }
+        let key = Self::key(types, ty)?;
+        if let Type::Tuple { fields, .. } = Self::descriptor(types, ty)?.representation() {
+            for field in fields {
+                Self::collect_type(types, *field, output)?;
+            }
+        }
+        output.insert(key);
+        Ok(())
+    }
+
+    fn collect_expression(
+        types: &[Type],
+        expression: &core::Expr,
+        output: &mut BTreeSet<NormalizedType>,
+    ) -> Result<(), String> {
+        Self::collect_type(types, expression.ty, output)?;
+        match &expression.kind {
+            ExprKind::Unit | ExprKind::Constant(_) | ExprKind::Local { .. } => {}
+            ExprKind::Call { args, .. }
+            | ExprKind::TailCall { args, .. }
+            | ExprKind::CallSelf { args }
+            | ExprKind::TailCallSelf { args } => {
+                for argument in args {
+                    Self::collect_expression(types, argument, output)?;
+                }
+            }
+            ExprKind::Block { statements, tail } => {
+                for statement in statements {
+                    match statement {
+                        Stmt::Let { ty, value, .. } => {
+                            Self::collect_type(types, *ty, output)?;
+                            Self::collect_expression(types, value, output)?;
+                        }
+                        Stmt::Expr(expression) => {
+                            Self::collect_expression(types, expression, output)?;
+                        }
+                        other => {
+                            return Err(format!(
+                                "unsupported statement in Stage A typed-Core oracle: {other:?}"
+                            ));
+                        }
+                    }
+                }
+                Self::collect_expression(types, tail, output)?;
+            }
+            ExprKind::Construct {
+                nominal, fields, ..
+            } => {
+                Self::collect_type(types, *nominal, output)?;
+                for field in fields {
+                    Self::collect_expression(types, &field.value, output)?;
+                }
+            }
+            ExprKind::Project { subject, .. } => {
+                Self::collect_expression(types, subject, output)?;
+            }
+            other => {
+                return Err(format!(
+                    "unsupported wrapper in Stage A typed-Core oracle: {other:?}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn id(&self, ty: TypeId) -> Result<u32, String> {
+        if matches!(ty, UNIT | U64 | I64) {
+            return Ok(ty);
+        }
+        let key = Self::key(self.types, ty)?;
+        self.aggregate_ids
+            .get(&key)
+            .copied()
+            .ok_or_else(|| format!("aggregate type t{ty} was not collected before encoding"))
     }
 }
 
 struct Encoder<'a> {
     declaration_identities: &'a BTreeMap<u32, FunctionIdentity>,
     current_function: &'a FunctionIdentity,
+    type_encoder: &'a TypeEncoder<'a>,
     locals: BTreeMap<u32, u32>,
     next_local: u32,
 }
 
 impl Encoder<'_> {
+    fn write_type(&self, output: &mut Vec<u8>, ty: TypeId) -> Result<(), String> {
+        push_u32(output, self.type_encoder.id(ty)?);
+        Ok(())
+    }
+
     fn bind(&mut self, local: u32) -> Result<u32, String> {
         let normalized = self.next_local;
         self.next_local = self
@@ -181,21 +356,21 @@ impl Encoder<'_> {
     }
 
     fn expression(&mut self, output: &mut Vec<u8>, expression: &core::Expr) -> Result<(), String> {
-        check_type(expression.ty)?;
+        self.type_encoder.id(expression.ty)?;
         if expression.reference.is_some() || !expression.reference_fields.is_empty() {
             return Err(
-                "scalar typed-Core fixture unexpectedly retained reference evidence".into(),
+                "Stage A typed-Core fixture unexpectedly retained reference evidence".into(),
             );
         }
 
         match &expression.kind {
             ExprKind::Unit => {
                 output.push(0);
-                push_u32(output, expression.ty);
+                self.write_type(output, expression.ty)?;
             }
             ExprKind::Constant(value) => {
                 output.push(1);
-                push_u32(output, expression.ty);
+                self.write_type(output, expression.ty)?;
                 match value {
                     Constant::U64(value) if expression.ty == U64 => push_u64(output, *value),
                     Constant::I64(value) if expression.ty == I64 => {
@@ -211,13 +386,13 @@ impl Encoder<'_> {
             }
             ExprKind::Local { local, copy } => {
                 output.push(2);
-                push_u32(output, expression.ty);
+                self.write_type(output, expression.ty)?;
                 push_u32(output, self.local(*local)?);
                 output.push(u8::from(*copy));
             }
             ExprKind::Call { declaration, args } => {
                 output.push(3);
-                push_u32(output, expression.ty);
+                self.write_type(output, expression.ty)?;
                 encode_identity(output, self.target(*declaration)?);
                 push_u32(output, args.len().try_into().unwrap());
                 for argument in args {
@@ -226,7 +401,7 @@ impl Encoder<'_> {
             }
             ExprKind::TailCall { declaration, args } => {
                 output.push(4);
-                push_u32(output, expression.ty);
+                self.write_type(output, expression.ty)?;
                 encode_identity(output, self.target(*declaration)?);
                 push_u32(output, args.len().try_into().unwrap());
                 for argument in args {
@@ -235,7 +410,7 @@ impl Encoder<'_> {
             }
             ExprKind::CallSelf { args } => {
                 output.push(3);
-                push_u32(output, expression.ty);
+                self.write_type(output, expression.ty)?;
                 encode_identity(output, self.current_function);
                 push_u32(output, args.len().try_into().unwrap());
                 for argument in args {
@@ -244,7 +419,7 @@ impl Encoder<'_> {
             }
             ExprKind::TailCallSelf { args } => {
                 output.push(4);
-                push_u32(output, expression.ty);
+                self.write_type(output, expression.ty)?;
                 encode_identity(output, self.current_function);
                 push_u32(output, args.len().try_into().unwrap());
                 for argument in args {
@@ -253,12 +428,158 @@ impl Encoder<'_> {
             }
             ExprKind::Block { statements, tail } => {
                 output.push(5);
-                push_u32(output, expression.ty);
+                self.write_type(output, expression.ty)?;
                 push_u32(output, statements.len().try_into().unwrap());
                 for statement in statements {
                     self.statement(output, statement)?;
                 }
                 self.expression(output, tail)?;
+            }
+            ExprKind::Construct {
+                nominal,
+                variant,
+                fields,
+            } => {
+                if *nominal != expression.ty {
+                    return Err(format!(
+                        "construction type t{} disagrees with nominal t{nominal}",
+                        expression.ty
+                    ));
+                }
+                let expected_fields = match self
+                    .type_encoder
+                    .types
+                    .get(*nominal as usize)
+                    .map(Type::representation)
+                {
+                    Some(Type::Tuple {
+                        fields: expected, ..
+                    }) => {
+                        if variant.is_some() {
+                            return Err("tuple construction unexpectedly names a variant".into());
+                        }
+                        expected.clone()
+                    }
+                    Some(Type::Struct {
+                        fields: expected, ..
+                    }) => {
+                        if variant.is_some() {
+                            return Err("struct construction unexpectedly names a variant".into());
+                        }
+                        expected.iter().map(|field| field.ty).collect()
+                    }
+                    Some(Type::Enum {
+                        variants: expected, ..
+                    }) => {
+                        let variant = variant.ok_or_else(|| {
+                            "enum construction omitted its resolved variant ordinal".to_owned()
+                        })?;
+                        expected
+                            .get(variant as usize)
+                            .ok_or_else(|| {
+                                format!("enum construction names unknown variant {variant}")
+                            })?
+                            .fields
+                            .iter()
+                            .map(|field| field.ty)
+                            .collect()
+                    }
+                    other => {
+                        return Err(format!(
+                            "construction names non-aggregate nominal t{nominal}: {other:?}"
+                        ));
+                    }
+                };
+                if fields.len() != expected_fields.len() {
+                    return Err(format!(
+                        "construction has {} Core fields, expected {}",
+                        fields.len(),
+                        expected_fields.len()
+                    ));
+                }
+                output.push(6);
+                self.write_type(output, expression.ty)?;
+                self.write_type(output, *nominal)?;
+                push_u32(output, variant.map_or(0, |variant| variant + 1));
+                push_u32(output, fields.len().try_into().unwrap());
+                for (index, (field, expected)) in fields.iter().zip(expected_fields).enumerate() {
+                    if field.field != index as u32 {
+                        return Err(format!(
+                            "construction fields are not in canonical declaration order: expected field {index}, found {}",
+                            field.field
+                        ));
+                    }
+                    if field.value.ty != expected {
+                        return Err(format!(
+                            "construction field {index} has type t{}, expected t{expected}",
+                            field.value.ty
+                        ));
+                    }
+                    push_u32(output, field.field);
+                    self.expression(output, &field.value)?;
+                }
+            }
+            ExprKind::Project {
+                subject,
+                field,
+                copy,
+                variant,
+            } => {
+                if !copy {
+                    return Err("Stage A projection unexpectedly consumes a noncopy field".into());
+                }
+                let expected = match self
+                    .type_encoder
+                    .types
+                    .get(subject.ty as usize)
+                    .map(Type::representation)
+                {
+                    Some(Type::Tuple { fields, .. }) => {
+                        if variant.is_some() {
+                            return Err("tuple projection unexpectedly names a variant".into());
+                        }
+                        fields.get(*field as usize).copied()
+                    }
+                    Some(Type::Struct { fields, .. }) => {
+                        if variant.is_some() {
+                            return Err("struct projection unexpectedly names a variant".into());
+                        }
+                        fields.get(*field as usize).map(|field| field.ty)
+                    }
+                    Some(Type::Enum { variants, .. }) => {
+                        let variant = variant.ok_or_else(|| {
+                            "enum payload projection lacks a dominating variant proof".to_owned()
+                        })?;
+                        variants
+                            .get(variant as usize)
+                            .and_then(|variant| variant.fields.get(*field as usize))
+                            .map(|field| field.ty)
+                    }
+                    other => {
+                        return Err(format!(
+                            "projection subject t{} is not an aggregate: {other:?}",
+                            subject.ty
+                        ));
+                    }
+                }
+                .ok_or_else(|| {
+                    format!(
+                        "projection names missing field {field} of subject t{}",
+                        subject.ty
+                    )
+                })?;
+                if expression.ty != expected {
+                    return Err(format!(
+                        "projection result has type t{}, expected t{expected}",
+                        expression.ty
+                    ));
+                }
+                output.push(7);
+                self.write_type(output, expression.ty)?;
+                push_u32(output, *field);
+                output.push(u8::from(*copy));
+                push_u32(output, variant.map_or(0, |variant| variant + 1));
+                self.expression(output, subject)?;
             }
             other => {
                 return Err(format!(
@@ -278,12 +599,12 @@ impl Encoder<'_> {
                 value,
                 ..
             } => {
-                check_type(*ty)?;
+                self.type_encoder.id(*ty)?;
                 let normalized = self.bind(*local)?;
                 output.push(1);
                 push_u32(output, normalized);
                 push_string(output, name);
-                push_u32(output, *ty);
+                self.write_type(output, *ty)?;
                 self.expression(output, value)
             }
             Stmt::Expr(expression) => {
@@ -302,6 +623,7 @@ fn encode_success(
     bundle: &SourceBundle,
     resolved: &ResolvedProgram,
     original_len: usize,
+    types: &[Type],
     core: &core::Program,
 ) -> Result<(), String> {
     let sources = source_functions(resolved, bundle, original_len)?;
@@ -335,6 +657,11 @@ fn encode_success(
             ));
         }
     }
+    let source_core_functions = sources
+        .iter()
+        .map(|source| by_backend[source.backend_name.as_str()])
+        .collect::<Vec<_>>();
+    let type_encoder = TypeEncoder::new(types, &source_core_functions)?;
 
     push_u32(output, sources.len().try_into().unwrap());
     for source in &sources {
@@ -351,24 +678,25 @@ fn encode_success(
                 "focused source function acquired unsupported Core ABI state: {function:?}"
             ));
         }
-        check_type(function.result)?;
+        type_encoder.id(function.result)?;
 
         encode_identity(output, &source.identity);
         push_u32(output, function.params.len().try_into().unwrap());
         let mut encoder = Encoder {
             declaration_identities: &declarations,
             current_function: &source.identity,
+            type_encoder: &type_encoder,
             locals: BTreeMap::new(),
             next_local: 0,
         };
         for parameter in &function.params {
-            check_type(parameter.ty)?;
+            type_encoder.id(parameter.ty)?;
             let normalized = encoder.bind(parameter.local)?;
             push_u32(output, normalized);
             push_string(output, &parameter.name);
-            push_u32(output, parameter.ty);
+            encoder.write_type(output, parameter.ty)?;
         }
-        push_u32(output, function.result);
+        encoder.write_type(output, function.result)?;
         encoder.expression(output, &function.body)?;
     }
     Ok(())
@@ -401,8 +729,15 @@ fn encode_rust_core(output: &mut Vec<u8>, source: &str) {
     };
 
     let mut encoded = Vec::new();
-    encode_success(&mut encoded, &bundle, &resolved, source.len(), &phases.core)
-        .unwrap_or_else(|error| panic!("Rust Core projection failed for {source:?}: {error}"));
+    encode_success(
+        &mut encoded,
+        &bundle,
+        &resolved,
+        source.len(),
+        &phases.artifact.types,
+        &phases.core,
+    )
+    .unwrap_or_else(|error| panic!("Rust Core projection failed for {source:?}: {error}"));
     output.push(0);
     output.extend(encoded);
 }
@@ -446,6 +781,61 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
     paths
 }
 
+fn stage_a_corpus(directory: &Path) -> Vec<PathBuf> {
+    let valid = [
+        "singleton(value: i64) -> (i64,) { (value,) }",
+        "pair(left: i64, right: u64) -> (i64, u64) { (left, right) } \
+         second(value: (i64, u64)) -> u64 { value.1 }",
+        "inferred(value: i64) -> i64 { let pair = (value, 2); pair.0 }",
+        "struct Pair { left: i64, right: u64 } \
+         make(left: i64, right: u64) -> Pair { Pair { right: right, left: left } } \
+         read(value: Pair) -> u64 { value.right }",
+        "struct Inner { value: i64 } struct Outer { inner: Inner, marker: u64 } \
+         make(value: i64) -> Outer { \
+             Outer { marker: 7, inner: Inner { value: value } } \
+         } \
+         read(value: Outer) -> i64 { value.inner.value }",
+        "enum Choice { Empty, Number(i64), Pair(i64, u64) } \
+         empty() -> Choice { Choice::Empty } \
+         unary(value: i64) -> Choice { Choice::Number(value) } \
+         multiple(left: i64, right: u64) -> Choice { Choice::Pair(left, right) }",
+        "struct Pair { left: i64, right: u64 } \
+         pair_passthrough(value: Pair) -> Pair { value } \
+         forward(left: i64, right: u64) -> Pair { \
+             pair_passthrough(Pair { left: left, right: right }) \
+         }",
+        "tuple_identity(value: (i64, u64)) -> (i64, u64) { value } \
+         tuple_forward(left: i64, right: u64) -> (i64, u64) { \
+             tuple_identity((left, right)) \
+         }",
+    ];
+    let errors = [
+        "struct Pair { left: i64 } bad() -> Pair { Pair { nope: 1 } }",
+        "struct Pair { left: i64 } bad() -> Pair { Pair { left: 1, left: 2 } }",
+        "struct Pair { left: i64, right: i64 } bad() -> Pair { Pair { left: 1 } }",
+        "mod hidden { pub struct Vault { private value: i64 } } \
+         bad() -> hidden::Vault { hidden::Vault { value: 1 } }",
+        "bad(value: (i64, u64)) -> i64 { value.2 }",
+        "enum Choice { Number(i64) } bad() -> Choice { Choice::Number() }",
+        "enum Choice { Number(i64) } bad() -> Choice { Choice::Number(()) }",
+        "enum Choice { Empty } bad() -> Choice { Choice::Missing }",
+        "struct A { b: B } struct B { a: A } bad() { () }",
+    ];
+
+    let mut paths = Vec::new();
+    for (index, source) in valid.into_iter().enumerate() {
+        let path = directory.join(format!("aggregate-valid-{index}.glorious"));
+        fs::write(&path, source).unwrap();
+        paths.push(path);
+    }
+    for (index, source) in errors.into_iter().enumerate() {
+        let path = directory.join(format!("aggregate-error-{index}.glorious"));
+        fs::write(&path, source).unwrap();
+        paths.push(path);
+    }
+    paths
+}
+
 #[test]
 fn rust_typed_core_oracle_classifies_the_focused_corpus() {
     let directory = tempfile::tempdir().unwrap();
@@ -466,6 +856,29 @@ fn rust_typed_core_oracle_classifies_the_focused_corpus() {
             encoded.first().copied(),
             Some(expected),
             "unexpected Rust-oracle status for input {}: {encoded:?}",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn rust_typed_core_oracle_classifies_stage_a_aggregates() {
+    let directory = tempfile::tempdir().unwrap();
+    for path in stage_a_corpus(directory.path()) {
+        let mut encoded = Vec::new();
+        encode_rust_core(&mut encoded, &fs::read_to_string(&path).unwrap());
+        let name = path.file_name().unwrap().to_string_lossy();
+        let expected = if name.starts_with("aggregate-valid-") {
+            0
+        } else if name == "aggregate-error-3.glorious" {
+            3
+        } else {
+            4
+        };
+        assert_eq!(
+            encoded.first().copied(),
+            Some(expected),
+            "unexpected Stage A Rust-oracle status for input {}: {encoded:?}",
             path.display()
         );
     }
@@ -507,7 +920,8 @@ fn self_hosted_typed_core_matches_rust_in_vm_and_native_execution() {
             }
 
             let directory = tempfile::tempdir().unwrap();
-            let corpus = corpus(directory.path());
+            let mut corpus = corpus(directory.path());
+            corpus.extend(stage_a_corpus(directory.path()));
             let mut expected = Vec::new();
             push_u32(&mut expected, corpus.len().try_into().unwrap());
             for path in &corpus {

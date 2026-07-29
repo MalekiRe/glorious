@@ -3569,6 +3569,17 @@ impl<'a> Walker<'a> {
                 };
                 self.obvious_argument_type(tail)
             }
+            ExprKind::Tuple(values) => {
+                let values = values
+                    .iter()
+                    .map(|value| self.obvious_argument_type(value))
+                    .collect::<Option<Vec<_>>>()?;
+                let defaulted = values.iter().all(|(_, defaulted)| *defaulted);
+                Some((
+                    ProvisionalType::Tuple(values.into_iter().map(|(ty, _)| ty).collect()),
+                    defaulted,
+                ))
+            }
             // These unary forms preserve or structurally wrap an already
             // synthesizable operand type. In particular, an exact borrowed
             // local must constrain `T` before a sibling numeric literal is
@@ -3679,7 +3690,30 @@ impl<'a> Walker<'a> {
                 let [name] = path.as_ref() else {
                     return None;
                 };
-                let template = self.templates.get(name.as_ref())?;
+                let Some(template) = self.templates.get(name.as_ref()) else {
+                    let function = self
+                        .program
+                        .functions
+                        .iter()
+                        .find(|function| function.name == name.as_ref())?;
+                    if arguments.len() != function.params.len()
+                        || function.generics.as_ref().is_some_and(|generics| {
+                            generics.params.iter().any(|parameter| {
+                                matches!(
+                                    parameter.kind,
+                                    GenericParamKind::Type | GenericParamKind::Const(_)
+                                )
+                            })
+                        })
+                    {
+                        return None;
+                    }
+                    let result = function.return_type.as_ref().map_or_else(
+                        || Some(ProvisionalType::Predefined("Unit".into())),
+                        |result| symbolic_type(result, &BTreeMap::new(), &BTreeMap::new()),
+                    )?;
+                    return ground(&result).then_some((result, false));
+                };
                 if arguments.len() != template.params.len() {
                     return None;
                 }
@@ -5144,6 +5178,110 @@ impl<'a> Walker<'a> {
         positive: &Expr,
         negative: &Expr,
     ) -> Option<ProvisionalType> {
+        fn leaf(expression: &Expr) -> &Expr {
+            match &expression.kind {
+                ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                    match statements.last() {
+                        Some(Stmt::Expr(value)) => leaf(value),
+                        _ => expression,
+                    }
+                }
+                ExprKind::Move(value) => leaf(value),
+                _ => expression,
+            }
+        }
+
+        fn collect_completion_leaves<'a>(expression: &'a Expr, leaves: &mut Vec<&'a Expr>) {
+            let expression = leaf(expression);
+            if let ExprKind::Call(callee, arguments) = &expression.kind
+                && let ExprKind::Variable(path) = &callee.kind
+                && path.len() == 1
+                && path[0].as_ref() == "else"
+                && let [conditional, negative] = arguments.as_slice()
+                && let ExprKind::Call(if_callee, if_arguments) = &conditional.kind
+                && let ExprKind::Variable(if_path) = &if_callee.kind
+                && if_path.len() == 1
+                && if_path[0].as_ref() == "if"
+                && let [_, positive] = if_arguments.as_slice()
+            {
+                collect_completion_leaves(positive, leaves);
+                collect_completion_leaves(negative, leaves);
+                return;
+            }
+            if matches!(&expression.kind,
+                ExprKind::Call(callee, arguments)
+                    if arguments.is_empty()
+                        && matches!(&callee.kind,
+                            ExprKind::Variable(path)
+                                if path.len() == 1 && path[0].as_ref() == "unreachable"))
+            {
+                return;
+            }
+            leaves.push(expression);
+        }
+
+        let mut branches = Vec::new();
+        collect_completion_leaves(positive, &mut branches);
+        collect_completion_leaves(negative, &mut branches);
+        self.structural_nominal_context(&branches)
+    }
+
+    fn structural_else_obvious_context(
+        &self,
+        positive: &Expr,
+        negative: &Expr,
+    ) -> Option<ProvisionalType> {
+        fn leaf(expression: &Expr) -> &Expr {
+            match &expression.kind {
+                ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                    match statements.last() {
+                        Some(Stmt::Expr(value)) => leaf(value),
+                        _ => expression,
+                    }
+                }
+                ExprKind::Move(value) => leaf(value),
+                _ => expression,
+            }
+        }
+
+        fn collect_completion_leaves<'a>(expression: &'a Expr, leaves: &mut Vec<&'a Expr>) {
+            let expression = leaf(expression);
+            if let ExprKind::Call(callee, arguments) = &expression.kind
+                && let ExprKind::Variable(path) = &callee.kind
+                && path.len() == 1
+                && path[0].as_ref() == "else"
+                && let [conditional, negative] = arguments.as_slice()
+                && let ExprKind::Call(if_callee, if_arguments) = &conditional.kind
+                && let ExprKind::Variable(if_path) = &if_callee.kind
+                && if_path.len() == 1
+                && if_path[0].as_ref() == "if"
+                && let [_, positive] = if_arguments.as_slice()
+            {
+                collect_completion_leaves(positive, leaves);
+                collect_completion_leaves(negative, leaves);
+                return;
+            }
+            leaves.push(expression);
+        }
+
+        let mut leaves = Vec::new();
+        collect_completion_leaves(positive, &mut leaves);
+        collect_completion_leaves(negative, &mut leaves);
+        let mut known = leaves.into_iter().filter_map(|leaf| {
+            self.obvious_argument_type(leaf)
+                .filter(|(_, defaulted)| !defaulted)
+                .map(|(ty, _)| ty)
+                .filter(|ty| ty != &ProvisionalType::Predefined("Never".into()))
+        });
+        let first = known.next()?;
+        known.all(|candidate| candidate == first).then_some(first)
+    }
+
+    /// Infer one complete generic nominal result from complementary
+    /// constructor branches. Each branch may fix only part of the nominal:
+    /// for example `Result::Ok(value)` fixes `T`, while `Result::Err(error)`
+    /// fixes `E`.
+    fn structural_nominal_context(&self, branches: &[&Expr]) -> Option<ProvisionalType> {
         fn leaf(expression: &Expr) -> Option<&Expr> {
             match &expression.kind {
                 ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
@@ -5156,6 +5294,7 @@ impl<'a> Walker<'a> {
                 _ => Some(expression),
             }
         }
+
         fn constructor(expression: &Expr) -> Option<(&str, &str, &[Expr], bool)> {
             let expression = leaf(expression)?;
             let (callee, arguments) = match &expression.kind {
@@ -5178,48 +5317,42 @@ impl<'a> Walker<'a> {
             }
         }
 
-        let (positive_head, positive_variant, positive_args, positive_unit) =
-            constructor(positive)?;
-        let (negative_head, negative_variant, negative_args, negative_unit) =
-            constructor(negative)?;
-        if positive_head != negative_head || !matches!(positive_head, "Result" | "Option") {
-            return None;
-        }
-        let template = self.nominal_templates.get(positive_head)?;
-        let positive_fields = template.variants.get(positive_variant)?;
-        let negative_fields = template.variants.get(negative_variant)?;
-        if (!positive_unit && positive_fields.len() != positive_args.len())
-            || (!negative_unit && negative_fields.len() != negative_args.len())
-            || (positive_unit && positive_fields.len() != 1)
-            || (negative_unit && negative_fields.len() != 1)
+        let constructors = branches
+            .iter()
+            .map(|branch| constructor(branch))
+            .collect::<Option<Vec<_>>>()?;
+        let head = constructors.first()?.0;
+        if !matches!(head, "Result" | "Option")
+            || constructors
+                .iter()
+                .any(|(candidate, ..)| *candidate != head)
         {
             return None;
         }
+        let template = self.nominal_templates.get(head)?;
         let mutable = template.params.iter().cloned().collect::<BTreeSet<_>>();
         let mut substitutions = BTreeMap::new();
-        for (argument, formal) in positive_args
-            .iter()
-            .zip(positive_fields)
-            .chain(negative_args.iter().zip(negative_fields))
-        {
-            let (actual, _) = self.obvious_argument_type(argument)?;
-            if !unify_inference(formal, &actual, &mutable, &mut substitutions) {
+        for (_, variant, arguments, unit_payload) in constructors {
+            let fields = template.variants.get(variant)?;
+            if (!unit_payload && fields.len() != arguments.len())
+                || (unit_payload && fields.len() != 1)
+            {
                 return None;
             }
-        }
-        for fields in [
-            positive_unit.then_some(positive_fields),
-            negative_unit.then_some(negative_fields),
-        ]
-        .into_iter()
-        .flatten()
-        {
-            if !unify_inference(
-                &fields[0],
-                &ProvisionalType::Predefined("Unit".into()),
-                &mutable,
-                &mut substitutions,
-            ) {
+            for (argument, formal) in arguments.iter().zip(fields) {
+                let (actual, _) = self.obvious_argument_type(argument)?;
+                if !unify_inference(formal, &actual, &mutable, &mut substitutions) {
+                    return None;
+                }
+            }
+            if unit_payload
+                && !unify_inference(
+                    &fields[0],
+                    &ProvisionalType::Predefined("Unit".into()),
+                    &mutable,
+                    &mut substitutions,
+                )
+            {
                 return None;
             }
         }
@@ -5235,7 +5368,7 @@ impl<'a> Walker<'a> {
             })
             .collect::<Option<Vec<_>>>()?;
         Some(ProvisionalType::Nominal(NominalInstanceKey {
-            declaration: NominalKey(positive_head.to_owned()),
+            declaration: NominalKey(head.to_owned()),
             arguments,
         }))
     }
@@ -6573,7 +6706,19 @@ impl<'a> Walker<'a> {
                             .map(|shape| ProvisionalType::Callable(Box::new(shape)))
                     });
                     let sibling_context = sibling_context.flatten();
-                    let branch_expected = expected.or(sibling_context.as_ref());
+                    let nominal_context = self.structural_else_nominal_context(positive, negative);
+                    let obvious_context = self.structural_else_obvious_context(positive, negative);
+                    let branch_expected = if self.symbolic_validation
+                        && expected.is_some_and(|expected| !ground(expected))
+                    {
+                        expected
+                    } else {
+                        sibling_context
+                            .as_ref()
+                            .or(nominal_context.as_ref())
+                            .or(obvious_context.as_ref())
+                            .or(expected)
+                    };
                     let saved_locals = self.locals.clone();
                     let saved_bindings = self.bindings.clone();
                     let saved_active_variants = self.active_variants.clone();
@@ -6734,22 +6879,11 @@ impl<'a> Walker<'a> {
                     && if_path[0].as_ref() == "if"
                     && let [condition, positive] = if_args.as_slice()
                     && let Some(branch_context) = expected
+                        .filter(|expected| ground(expected))
                         .cloned()
                         .or_else(|| self.structural_else_nominal_context(positive, negative))
-                        .or_else(|| {
-                            match (
-                                self.obvious_argument_type(positive),
-                                self.obvious_argument_type(negative),
-                            ) {
-                                (Some((positive, _)), Some((negative, _)))
-                                    if positive == negative =>
-                                {
-                                    Some(positive)
-                                }
-                                (Some((known, _)), None) | (None, Some((known, _))) => Some(known),
-                                _ => None,
-                            }
-                        })
+                        .or_else(|| self.structural_else_obvious_context(positive, negative))
+                        .or_else(|| expected.cloned())
                 {
                     // The branch condition's concrete Bool representation is
                     // irrelevant to the result island. Still walk it to record
@@ -7533,11 +7667,17 @@ impl<'a> Walker<'a> {
                 self.locals = outer_locals.clone();
                 self.bindings = outer_bindings.clone();
                 self.active_variants = outer_active_variants.clone();
-                let mut handler_result = expected.cloned().or_else(|| {
-                    computation_result.filter(|candidate| {
-                        candidate != &ProvisionalType::Predefined("Never".into())
-                    })
-                });
+                let branches = clauses
+                    .iter()
+                    .map(|clause| &clause.body)
+                    .collect::<Vec<_>>();
+                let structural_handler_result = self.structural_nominal_context(&branches);
+                let mut handler_result =
+                    expected.cloned().or(structural_handler_result).or_else(|| {
+                        computation_result.filter(|candidate| {
+                            candidate != &ProvisionalType::Predefined("Never".into())
+                        })
+                    });
                 if handler_result.is_none() {
                     for defaulting in [false, true] {
                         if let Some((candidate, _)) = clauses.iter().find_map(|clause| {

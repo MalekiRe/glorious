@@ -313,6 +313,57 @@ pub type_child_count_at(value: &HeaderIndex, index: u32) -> u32 {
     node.children.count
 }
 
+pub type_child_index_at(
+    value: &HeaderIndex,
+    index: u32,
+    ordinal: u32
+) -> u32 {
+    let node = Vec::index(&value.types, wrapping_convert_to_usize(index));
+    type_edge_index_at(value, node.children.start + ordinal)
+}
+
+pub type_edge_index_at(value: &HeaderIndex, index: u32) -> u32 {
+    Vec::index(
+        &value.type_edges,
+        wrapping_convert_to_usize(index)
+    ).value.index
+}
+
+pub type_constructor_index_plus_one_at(
+    value: &HeaderIndex,
+    index: u32
+) -> u32 {
+    let node = Vec::index(&value.types, wrapping_convert_to_usize(index));
+    handle Option::as_ref(&node.constructor) {
+        Result::Err(_) => 0,
+        Result::Ok(found) =>
+            found.index + wrapping_convert_to_u32(1)
+    }
+}
+
+pub type_lifetime_name_raw_plus_one_at(
+    value: &HeaderIndex,
+    index: u32
+) -> u32 {
+    let node = Vec::index(&value.types, wrapping_convert_to_usize(index));
+    handle Option::as_ref(&node.lifetime) {
+        Result::Err(_) => 0,
+        Result::Ok(found) =>
+            Id::to_u32(found.name) + wrapping_convert_to_u32(1)
+    }
+}
+
+pub type_lifetime_token_plus_one_at(
+    value: &HeaderIndex,
+    index: u32
+) -> usize {
+    let node = Vec::index(&value.types, wrapping_convert_to_usize(index));
+    handle Option::as_ref(&node.lifetime) {
+        Result::Err(_) => 0,
+        Result::Ok(found) => found.token + usize_value(1)
+    }
+}
+
 pub type_name_count_at(value: &HeaderIndex, index: u32) -> u32 {
     let node = Vec::index(&value.types, wrapping_convert_to_usize(index));
     node.names.count
@@ -366,19 +417,43 @@ pub type_at<'a>(value: &'a HeaderIndex, index: usize) -> Option<&'a TypeNode> {
 
 pub alias_generics(value: &TypeAliasHeader) -> &HeaderRange { &value.generics }
 
+pub alias_shell(value: &TypeAliasHeader) -> u32 { value.shell }
+
+pub alias_name_raw(value: &TypeAliasHeader) -> u32 { Id::to_u32(value.name) }
+
 pub alias_target(value: &TypeAliasHeader) -> &TypeId { &value.target }
+
+pub struct_shell(value: &StructHeader) -> u32 { value.shell }
+
+pub struct_name_raw(value: &StructHeader) -> u32 { Id::to_u32(value.name) }
+
+pub struct_is_public(value: &StructHeader) -> Bool { value.public }
 
 pub struct_generics(value: &StructHeader) -> &HeaderRange { &value.generics }
 
 pub struct_fields(value: &StructHeader) -> &HeaderRange { &value.fields }
 
+pub field_name_raw(value: &FieldHeader) -> u32 { Id::to_u32(value.name) }
+
+pub field_name_token(value: &FieldHeader) -> usize { value.name_token }
+
 pub field_type(value: &FieldHeader) -> &TypeId { &value.ty }
 
 pub field_is_private(value: &FieldHeader) -> Bool { value.private }
 
+pub enum_shell(value: &EnumHeader) -> u32 { value.shell }
+
+pub enum_name_raw(value: &EnumHeader) -> u32 { Id::to_u32(value.name) }
+
+pub enum_is_public(value: &EnumHeader) -> Bool { value.public }
+
 pub enum_generics(value: &EnumHeader) -> &HeaderRange { &value.generics }
 
 pub enum_variants(value: &EnumHeader) -> &HeaderRange { &value.variants }
+
+pub variant_name_raw(value: &VariantHeader) -> u32 { Id::to_u32(value.name) }
+
+pub variant_name_token(value: &VariantHeader) -> usize { value.name_token }
 
 pub variant_fields(value: &VariantHeader) -> &HeaderRange { &value.fields }
 

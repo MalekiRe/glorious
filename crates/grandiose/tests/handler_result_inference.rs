@@ -96,6 +96,138 @@ fn inferred_handlers_nest_inside_captured_callable_computations() {
 }
 
 #[test]
+fn complementary_generic_constructors_infer_a_let_bound_handler_result() {
+    let source = r#"
+        u32_value(value: u32) -> u32 { value }
+
+        selected(kind: u8) -> Bool {
+            let inferred = handle kind {
+                0 => Result::Ok((u32_value(1), u32_value(2))),
+                _ => Result::Err(())
+            };
+            handle move inferred {
+                Result::Ok(found) => found.0 == u32_value(1),
+                Result::Err(_) => false
+            }
+        }
+
+        main() -> () { () }
+    "#;
+    grandiose::compile_source_to_bytecode("handler-complementary-generic-result.glorious", source)
+        .unwrap();
+}
+
+#[test]
+fn planned_generic_control_shape_contextualizes_a_sibling_literal() {
+    let source = r#"
+        mod helper {
+            pub usize_value(value: usize) -> usize { value }
+        }
+
+        selected(flag: Bool) -> () {
+            let inferred = handle flag {
+                Result::Err(_) => 0,
+                Result::Ok(_) => helper::usize_value(1)
+            };
+            inferred;
+            ()
+        }
+
+        main() -> () { () }
+    "#;
+    grandiose::compile_source_to_bytecode(
+        "handler-generic-control-sibling-literal.glorious",
+        source,
+    )
+    .unwrap();
+}
+
+#[test]
+fn recursive_nondefault_handler_branch_contextualizes_outer_literal() {
+    let source = r#"
+        usize_value(value: usize) -> usize { value }
+
+        depth(flag: Bool) -> usize {
+            handle flag {
+                Result::Ok(_) => 0,
+                Result::Err(_) => handle flag {
+                    Result::Err(_) => unreachable(),
+                    Result::Ok(_) => usize_value(1) + depth(flag)
+                }
+            }
+        }
+
+        main() -> () { () }
+    "#;
+    grandiose::compile_source_to_bytecode("handler-recursive-nondefault-sibling.glorious", source)
+        .unwrap();
+}
+
+#[test]
+fn annotated_result_contextualizes_a_constructor_payload_literal() {
+    let source = r#"
+        write_function(flag: Bool) -> Result<(), u8> {
+            handle flag {
+                Result::Ok(_) => Result::Ok(()),
+                Result::Err(_) => Result::Err(3)
+            }
+        }
+
+        main() -> () { () }
+    "#;
+    grandiose::compile_source_to_bytecode(
+        "handler-annotated-result-constructor-payload.glorious",
+        source,
+    )
+    .unwrap();
+}
+
+#[test]
+fn shared_projection_local_survives_nested_handler_control_flow() {
+    let source = r#"
+        struct HeaderRange { count: u32 }
+        struct CallableHeader { parameters: HeaderRange }
+
+        callable_parameters(value: &CallableHeader) -> &HeaderRange {
+            &value.parameters
+        }
+
+        range_count(value: &HeaderRange) -> u32 { value.count }
+
+        combine(value: &CallableHeader, range: &HeaderRange) -> u32 {
+            range_count(&value.parameters) + range_count(range)
+        }
+
+        shared_reborrows_can_overlap(value: &mut CallableHeader) -> u32 {
+            combine(&*value, &value.parameters)
+        }
+
+        collect_callable(callable: &CallableHeader, flag: Bool) -> Result<(), u8> {
+            let parameters = callable_parameters(callable);
+            let module_plus_one = handle flag {
+                Result::Err(_) => 0,
+                Result::Ok(_) => 1
+            };
+            handle flag {
+                Result::Err(_) => Result::Err(3),
+                Result::Ok(_) => {
+                    module_plus_one;
+                    range_count(parameters);
+                    Result::Ok(())
+                }
+            }
+        }
+
+        main() -> () { () }
+    "#;
+    grandiose::compile_source_to_bytecode(
+        "handler-shared-projection-local-identity.glorious",
+        source,
+    )
+    .unwrap();
+}
+
+#[test]
 fn incompatible_normal_and_clause_results_are_rejected_at_every_level() {
     let source = r#"
         effect Maybe { [0,1] get() -> i64 }

@@ -1441,6 +1441,7 @@ struct CoreLowerer<'a> {
     /// Variant facts available only on the successful edge of a refinement.
     active_variant_proofs: BTreeMap<core::LocalId, u32>,
     suspended: BTreeSet<core::LocalId>,
+    uniquely_suspended: BTreeSet<core::LocalId>,
     regions: BTreeMap<core::RegionId, core::RegionFact>,
     next_region: core::RegionId,
     next_point: core::PointId,
@@ -4456,10 +4457,10 @@ fn compile_program_with_phases(
     let initial_trait_db = TraitDb::build_with_manifest(&lifetime_erased_program, manifest)?;
     let source_projection_normalized_program =
         normalize_ground_projections(&lifetime_erased_program, &initial_trait_db)?;
-    let trait_method_normalized_program = normalize_ground_trait_methods(
-        &source_projection_normalized_program,
-        trusted_standard_range,
-    )?;
+    let two_phase_normalized_program =
+        normalize_two_phase_unique_call_arguments(&source_projection_normalized_program);
+    let trait_method_normalized_program =
+        normalize_ground_trait_methods(&two_phase_normalized_program, trusted_standard_range)?;
     let trait_method_projection_normalized_program =
         normalize_ground_projections(&trait_method_normalized_program, &initial_trait_db)?;
     let constructor_alias_normalized_program =
@@ -4964,14 +4965,46 @@ fn compile_program_with_phases(
             | specialization::BodyInstanceKey::Closure(_) => None,
         })
         .collect();
+    let call_shapes = discovery
+        .graph
+        .direct_calls
+        .iter()
+        .filter_map(|(site, key)| {
+            let specialization::BodyInstanceKey::Root(owner) = &site.body else {
+                return None;
+            };
+            let template = discovery.graph.templates.get(&key.template)?;
+            let substitutions = specialization::substitutions_for_key(template, key);
+            let params = template
+                .params
+                .iter()
+                .map(|param| specialization::substitute(param, &substitutions))
+                .collect::<Option<Vec<_>>>()?;
+            let result = specialization::substitute(&template.result, &substitutions)?;
+            Some((
+                (owner.clone(), site.expression_ordinal),
+                typeck::FunctionShape {
+                    declaration: key.template.clone(),
+                    params,
+                    result,
+                },
+            ))
+        })
+        .collect();
     let provisional = match incremental {
         Some((cache, fingerprints)) => typeck::type_program_incremental(
             program,
             &provisional_tables,
             &construction_types,
+            &call_shapes,
             Some((cache, fingerprints.context, &fingerprints.bodies)),
         ),
-        None => typeck::type_program(program, &provisional_tables, &construction_types),
+        None => typeck::type_program(
+            program,
+            &provisional_tables,
+            &construction_types,
+            &call_shapes,
+        ),
     };
     let provisional_text = provisional.canonical_text();
     let provisional_fingerprint = provisional.fingerprint() ^ trait_db.fingerprint().rotate_left(1);
@@ -10048,6 +10081,7 @@ pub(crate) fn normalize_ground_trait_methods(
     fn structural_call_result(
         program: &Program,
         callee: &Expr,
+        arguments: &[Expr],
         argument_types: &[Option<ReceiverType>],
         expected: Option<&ReceiverType>,
         call_span: Span,
@@ -10061,13 +10095,27 @@ pub(crate) fn normalize_ground_trait_methods(
         let ExprKind::Variable(path) = &callee.kind else {
             return None;
         };
-        let [name] = path.as_ref() else {
-            return None;
+        let name = match path.as_ref() {
+            [name] => name.as_ref(),
+            [owner, item] => {
+                let binding = program.globals.iter().find(|binding| {
+                    binding.owner.as_deref() == Some(owner.as_ref())
+                        && binding.name == item.as_ref()
+                })?;
+                let ExprKind::Variable(target) = &binding.value.kind else {
+                    return None;
+                };
+                let [target] = target.as_ref() else {
+                    return None;
+                };
+                target.as_ref()
+            }
+            _ => return None,
         };
         let function = program
             .functions
             .iter()
-            .find(|function| function.name == name.as_ref())?;
+            .find(|function| function.name == name)?;
         let binders = function
             .generics
             .iter()
@@ -10089,11 +10137,38 @@ pub(crate) fn normalize_ground_trait_methods(
             return Some(result);
         }
         let mut substitutions = BTreeMap::new();
-        for (parameter, actual) in function.params.iter().zip(argument_types) {
+        for ((parameter, argument), actual) in
+            function.params.iter().zip(arguments).zip(argument_types)
+        {
             let Some(actual) = actual else {
                 continue;
             };
             let pattern = source_receiver_type(program, &parameter.ty)?;
+            let defaulted_literal = matches!(argument.kind, ExprKind::Int(_) | ExprKind::Float(_));
+            if defaulted_literal {
+                continue;
+            }
+            if !matches_receiver(&pattern, actual, &binders, &mut substitutions) {
+                return None;
+            }
+        }
+        for ((parameter, argument), actual) in
+            function.params.iter().zip(arguments).zip(argument_types)
+        {
+            if !matches!(argument.kind, ExprKind::Int(_) | ExprKind::Float(_)) {
+                continue;
+            }
+            let Some(actual) = actual else {
+                continue;
+            };
+            let pattern = source_receiver_type(program, &parameter.ty)?;
+            let specialized = substitute_receiver(&pattern, &substitutions);
+            if !receiver_mentions_binder(&specialized, &binders) {
+                // Numeric literals take their parameter's already-ground
+                // context; their i64/f64 fallback must not invalidate an
+                // otherwise-ground generic call such as `Vec::index(v, 0)`.
+                continue;
+            }
             if !matches_receiver(&pattern, actual, &binders, &mut substitutions) {
                 return None;
             }
@@ -10708,6 +10783,7 @@ pub(crate) fn normalize_ground_trait_methods(
                     structural_call_result(
                         program,
                         callee,
+                        args,
                         &argument_types,
                         expected,
                         expression_span,
@@ -13234,6 +13310,364 @@ fn normalize_value_restricted_globals(program: &Program) -> Program {
             &values,
             &BTreeSet::from(["self".to_owned()]),
         );
+    }
+    normalized
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum TwoPhaseRootRead {
+    None,
+    Value,
+    SharedReference,
+}
+
+fn two_phase_scalar_type(ty: &TypeSyntax) -> bool {
+    ty.simple_name().is_some_and(|name| {
+        matches!(
+            name,
+            "Bool"
+                | "char"
+                | "u8"
+                | "u16"
+                | "u32"
+                | "u64"
+                | "u128"
+                | "usize"
+                | "i8"
+                | "i16"
+                | "i32"
+                | "i64"
+                | "i128"
+                | "isize"
+                | "f32"
+                | "f64"
+        )
+    })
+}
+
+fn two_phase_read_only_use_of_root(
+    expression: &Expr,
+    root: &str,
+    functions: &BTreeMap<String, crate::ast::Function>,
+) -> Option<TwoPhaseRootRead> {
+    if !expression_mentions_name(expression, root) {
+        return Some(TwoPhaseRootRead::None);
+    }
+    match &expression.kind {
+        ExprKind::Variable(path) if path.len() == 1 && path[0].as_ref() == root => {
+            Some(TwoPhaseRootRead::Value)
+        }
+        ExprKind::Field(subject, _) => two_phase_read_only_use_of_root(subject, root, functions)
+            .filter(|use_kind| *use_kind != TwoPhaseRootRead::SharedReference),
+        ExprKind::Unary {
+            op: UnaryOp::BorrowShared,
+            operand,
+        } => two_phase_read_only_use_of_root(operand, root, functions)
+            .filter(|use_kind| *use_kind == TwoPhaseRootRead::Value)
+            .map(|_| TwoPhaseRootRead::SharedReference),
+        ExprKind::Unary {
+            op: UnaryOp::Dereference,
+            operand,
+        } => two_phase_read_only_use_of_root(operand, root, functions)
+            .filter(|use_kind| *use_kind != TwoPhaseRootRead::None)
+            .map(|_| TwoPhaseRootRead::Value),
+        ExprKind::Unary {
+            op: UnaryOp::Negate,
+            operand,
+        } => two_phase_read_only_use_of_root(operand, root, functions)
+            .filter(|use_kind| *use_kind == TwoPhaseRootRead::Value),
+        ExprKind::Binary { lhs, rhs, .. } => {
+            let left = two_phase_read_only_use_of_root(lhs, root, functions)?;
+            let right = two_phase_read_only_use_of_root(rhs, root, functions)?;
+            (left != TwoPhaseRootRead::SharedReference
+                && right != TwoPhaseRootRead::SharedReference)
+                .then_some(TwoPhaseRootRead::Value)
+        }
+        ExprKind::Call(callee, arguments) => {
+            let ExprKind::Variable(path) = &callee.kind else {
+                return None;
+            };
+            if path.is_empty() {
+                return None;
+            }
+            let name = path
+                .iter()
+                .map(|segment| segment.as_ref())
+                .collect::<Vec<_>>()
+                .join("::");
+            let function = functions.get(&name)?;
+            if function.effectful
+                || function.outward_effects.is_some()
+                || arguments.len() != function.params.len()
+            {
+                return None;
+            }
+            for (argument, parameter) in arguments.iter().zip(&function.params) {
+                let use_kind = two_phase_read_only_use_of_root(argument, root, functions)?;
+                if use_kind != TwoPhaseRootRead::None
+                    && !matches!(parameter.ty.kind, TypeSyntaxKind::SharedReference { .. })
+                {
+                    return None;
+                }
+            }
+            match function.return_type.as_ref().map(|ty| &ty.kind) {
+                Some(TypeSyntaxKind::UniqueReference { .. }) => None,
+                Some(TypeSyntaxKind::SharedReference { .. }) => {
+                    Some(TwoPhaseRootRead::SharedReference)
+                }
+                _ => Some(TwoPhaseRootRead::Value),
+            }
+        }
+        ExprKind::Is { subject, .. } => two_phase_read_only_use_of_root(subject, root, functions)
+            .filter(|use_kind| *use_kind == TwoPhaseRootRead::Value),
+        ExprKind::Unit
+        | ExprKind::Int(_)
+        | ExprKind::Float(_)
+        | ExprKind::Char(_)
+        | ExprKind::Byte(_)
+        | ExprKind::ByteString(_)
+        | ExprKind::String(_)
+        | ExprKind::Variable(_) => Some(TwoPhaseRootRead::None),
+        ExprKind::Move(_)
+        | ExprKind::Unary {
+            op: UnaryOp::BorrowUnique,
+            ..
+        }
+        | ExprKind::List(_)
+        | ExprKind::Tuple(_)
+        | ExprKind::Struct { .. }
+        | ExprKind::Block(_)
+        | ExprKind::ContextBlock(_)
+        | ExprKind::Closure { .. }
+        | ExprKind::TypedClosure { .. }
+        | ExprKind::Perform { .. }
+        | ExprKind::Handle { .. }
+        | ExprKind::LabelDestination { .. }
+        | ExprKind::LabelReference(_)
+        | ExprKind::Resume { .. }
+        | ExprKind::Cancel { .. }
+        | ExprKind::TailResume { .. } => None,
+    }
+}
+
+fn normalize_two_phase_unique_call_arguments(program: &Program) -> Program {
+    let mut callables = program
+        .functions
+        .iter()
+        .map(|function| (function.name.clone(), function.clone()))
+        .collect::<BTreeMap<_, _>>();
+    for global in &program.globals {
+        let ExprKind::Variable(path) = &global.value.kind else {
+            continue;
+        };
+        if path.is_empty() {
+            continue;
+        }
+        let target = path
+            .iter()
+            .map(|segment| segment.as_ref())
+            .collect::<Vec<_>>()
+            .join("::");
+        if let Some(function) = callables.get(&target).cloned() {
+            let alias = global.owner.as_ref().map_or_else(
+                || global.name.clone(),
+                |owner| format!("{owner}::{}", global.name),
+            );
+            callables.insert(alias, function);
+        }
+    }
+
+    fn rewrite(expression: &mut Expr, callables: &BTreeMap<String, crate::ast::Function>) {
+        match &mut expression.kind {
+            ExprKind::Move(value) | ExprKind::Field(value, _) => {
+                rewrite(Rc::make_mut(value), callables)
+            }
+            ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
+                rewrite(Rc::make_mut(body), callables)
+            }
+            ExprKind::List(values) | ExprKind::Tuple(values) => {
+                for value in Rc::make_mut(values) {
+                    rewrite(value, callables);
+                }
+            }
+            ExprKind::Struct { fields, .. } => {
+                for (_, value) in Rc::make_mut(fields) {
+                    rewrite(value, callables);
+                }
+            }
+            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                for statement in Rc::make_mut(statements) {
+                    match statement {
+                        Stmt::Let { value, .. }
+                        | Stmt::Deconstruct { value, .. }
+                        | Stmt::Expr(value) => rewrite(value, callables),
+                        Stmt::Assign {
+                            destination, value, ..
+                        } => {
+                            rewrite(value, callables);
+                            if let AssignmentPlaceKind::Dereference { reference, .. } =
+                                &mut destination.kind
+                            {
+                                rewrite(Rc::make_mut(reference), callables);
+                            }
+                        }
+                    }
+                }
+            }
+            ExprKind::Call(callee, arguments) => {
+                rewrite(Rc::make_mut(callee), callables);
+                for argument in Rc::make_mut(arguments) {
+                    rewrite(argument, callables);
+                }
+                let replacement = (|| {
+                    let ExprKind::Variable(path) = &callee.kind else {
+                        return None;
+                    };
+                    if path.is_empty() {
+                        return None;
+                    }
+                    let name = path
+                        .iter()
+                        .map(|segment| segment.as_ref())
+                        .collect::<Vec<_>>()
+                        .join("::");
+                    let function = callables.get(&name)?;
+                    if function.effectful
+                        || function.outward_effects.is_some()
+                        || arguments.len() != function.params.len()
+                    {
+                        return None;
+                    }
+                    let unique_roots = arguments
+                        .iter()
+                        .zip(&function.params)
+                        .map(|(argument, parameter)| {
+                            if !matches!(parameter.ty.kind, TypeSyntaxKind::UniqueReference { .. })
+                            {
+                                return None;
+                            }
+                            match &argument.kind {
+                                ExprKind::Variable(path) if path.len() == 1 => {
+                                    Some(path[0].clone())
+                                }
+                                ExprKind::Unary {
+                                    op: UnaryOp::BorrowUnique,
+                                    operand,
+                                } => match &operand.kind {
+                                    ExprKind::Variable(path) if path.len() == 1 => {
+                                        Some(path[0].clone())
+                                    }
+                                    _ => None,
+                                },
+                                _ => None,
+                            }
+                        })
+                        .collect::<Vec<_>>();
+                    let mut last_read = None;
+                    for (reservation, root) in unique_roots.iter().enumerate() {
+                        let Some(root) = root.as_deref() else {
+                            continue;
+                        };
+                        for (index, argument) in arguments.iter().enumerate().skip(reservation + 1)
+                        {
+                            match two_phase_read_only_use_of_root(argument, root, callables) {
+                                Some(TwoPhaseRootRead::None) => {}
+                                Some(TwoPhaseRootRead::Value) => last_read = Some(index),
+                                Some(TwoPhaseRootRead::SharedReference) | None => return None,
+                            }
+                        }
+                    }
+                    let last_read = last_read?;
+                    if (0..=last_read).any(|index| {
+                        unique_roots[index].is_none()
+                            && !two_phase_scalar_type(&function.params[index].ty)
+                    }) {
+                        return None;
+                    }
+                    let mut rewritten = arguments.as_ref().clone();
+                    let mut statements = Vec::with_capacity(last_read + 2);
+                    for index in 0..=last_read {
+                        if unique_roots[index].is_some() {
+                            continue;
+                        }
+                        let temporary =
+                            format!("$two_phase_arg_{}_{}", expression.span.start, index);
+                        statements.push(Stmt::Let {
+                            name: temporary.clone(),
+                            value: arguments[index].clone(),
+                            span: arguments[index].span,
+                        });
+                        rewritten[index] = Expr {
+                            kind: ExprKind::Variable(Rc::from([Rc::<str>::from(temporary)])),
+                            span: arguments[index].span,
+                        };
+                    }
+                    statements.push(Stmt::Expr(Expr {
+                        kind: ExprKind::Call(callee.clone(), Rc::new(rewritten)),
+                        span: expression.span,
+                    }));
+                    Some(ExprKind::Block(Rc::new(statements)))
+                })();
+                if let Some(replacement) = replacement {
+                    expression.kind = replacement;
+                }
+            }
+            ExprKind::Perform { args, .. } => {
+                for argument in Rc::make_mut(args) {
+                    rewrite(argument, callables);
+                }
+            }
+            ExprKind::Handle {
+                computation,
+                clauses,
+            } => {
+                rewrite(Rc::make_mut(computation), callables);
+                for clause in Rc::make_mut(clauses) {
+                    rewrite(&mut clause.body, callables);
+                }
+            }
+            ExprKind::Unary { operand, .. } => rewrite(Rc::make_mut(operand), callables),
+            ExprKind::Binary { lhs, rhs, .. } => {
+                rewrite(Rc::make_mut(lhs), callables);
+                rewrite(Rc::make_mut(rhs), callables);
+            }
+            ExprKind::LabelDestination { body, .. } => rewrite(Rc::make_mut(body), callables),
+            ExprKind::Is { subject, .. } => rewrite(Rc::make_mut(subject), callables),
+            ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
+                rewrite(Rc::make_mut(resumption), callables);
+                if let Some(value) = value {
+                    rewrite(Rc::make_mut(value), callables);
+                }
+            }
+            ExprKind::Cancel { resumption } => rewrite(Rc::make_mut(resumption), callables),
+            ExprKind::Unit
+            | ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::Char(_)
+            | ExprKind::Byte(_)
+            | ExprKind::ByteString(_)
+            | ExprKind::String(_)
+            | ExprKind::Variable(_)
+            | ExprKind::LabelReference(_) => {}
+        }
+    }
+
+    let mut normalized = program.clone();
+    for global in &mut normalized.globals {
+        rewrite(&mut global.value, &callables);
+    }
+    for function in &mut normalized.functions {
+        rewrite(&mut function.body, &callables);
+    }
+    for implementation in &mut normalized.impls {
+        for method in &mut implementation.methods {
+            if let Some(body) = &mut method.body {
+                rewrite(body, &callables);
+            }
+        }
+    }
+    for drop in &mut normalized.drops {
+        rewrite(&mut drop.body, &callables);
     }
     normalized
 }
@@ -22751,6 +23185,7 @@ impl<'a> CoreLowerer<'a> {
                 projected_loans: BTreeMap::new(),
                 active_variant_proofs: BTreeMap::new(),
                 suspended: BTreeSet::new(),
+                uniquely_suspended: BTreeSet::new(),
                 regions: parameter_contract
                     .regions
                     .universal_facts
@@ -22941,6 +23376,7 @@ impl<'a> CoreLowerer<'a> {
                 projected_loans: BTreeMap::new(),
                 active_variant_proofs: BTreeMap::new(),
                 suspended: BTreeSet::new(),
+                uniquely_suspended: BTreeSet::new(),
                 regions: BTreeMap::new(),
                 next_region: 1,
                 next_point: 1,
@@ -23243,6 +23679,7 @@ impl<'a> CoreLowerer<'a> {
             self.loans.clear();
             self.projected_loans.clear();
             self.suspended.clear();
+            self.uniquely_suspended.clear();
 
             let mut created = Vec::new();
             let mut patterns = Vec::with_capacity(payload_count);
@@ -27212,6 +27649,9 @@ impl<'a> CoreLowerer<'a> {
         if origin.external {
             if let Some(parent) = origin.parent {
                 self.suspended.insert(parent);
+                if origin.unique {
+                    self.uniquely_suspended.insert(parent);
+                }
             }
             return;
         }
@@ -27231,6 +27671,9 @@ impl<'a> CoreLowerer<'a> {
         }
         if let Some(parent) = origin.parent {
             self.suspended.insert(parent);
+            if origin.unique {
+                self.uniquely_suspended.insert(parent);
+            }
         }
     }
 
@@ -27265,6 +27708,9 @@ impl<'a> CoreLowerer<'a> {
         }
         if let Some(parent) = origin.parent {
             self.suspended.remove(&parent);
+            if origin.unique {
+                self.uniquely_suspended.remove(&parent);
+            }
         }
         self.end_region(origin.region);
     }
@@ -27744,7 +28190,10 @@ impl<'a> CoreLowerer<'a> {
                             format!("local `{}` is not a reference", base_path[0]),
                         ));
                     };
-                    if self.moved.contains(&local.local) || self.suspended.contains(&local.local) {
+                    if self.moved.contains(&local.local)
+                        || unique && self.suspended.contains(&local.local)
+                        || !unique && self.uniquely_suspended.contains(&local.local)
+                    {
                         return Err(self.borrow_error(
                             operand.span,
                             format!("reference `{}` is moved or suspended", base_path[0]),
@@ -27878,7 +28327,10 @@ impl<'a> CoreLowerer<'a> {
                         format!("local `{}` is not a reference", path[0]),
                     ));
                 };
-                if self.moved.contains(&local.local) || self.suspended.contains(&local.local) {
+                if self.moved.contains(&local.local)
+                    || unique && self.suspended.contains(&local.local)
+                    || !unique && self.uniquely_suspended.contains(&local.local)
+                {
                     return Err(self.borrow_error(
                         operand.span,
                         format!("reference `{}` is moved or suspended", path[0]),
@@ -28181,6 +28633,7 @@ impl<'a> CoreLowerer<'a> {
             let unique = matches!(expected_shape, ResolvedType::Unique(_));
             let compatible = match (&expected_shape, &actual_shape) {
                 (ResolvedType::Unique(expected), ResolvedType::Unique(actual))
+                | (ResolvedType::Shared(expected), ResolvedType::Shared(actual))
                 | (ResolvedType::Shared(expected), ResolvedType::Unique(actual)) => {
                     self.structural_id(expected) == self.structural_id(actual)
                 }
@@ -29026,14 +29479,14 @@ impl<'a> CoreLowerer<'a> {
         let enum_name = path[0].as_ref();
         let variant_name = path[1].as_ref();
         let planned = self.planned_construction(expression);
-        let info = planned
-            .and_then(|planned| self.nominals.values().find(|info| info.id == planned))
+        let info = expected
+            .and_then(|expected| {
+                self.nominals
+                    .values()
+                    .find(|info| info.id == expected && info.name == enum_name)
+            })
             .or_else(|| {
-                expected.and_then(|expected| {
-                    self.nominals
-                        .values()
-                        .find(|info| info.id == expected && info.name == enum_name)
-                })
+                planned.and_then(|planned| self.nominals.values().find(|info| info.id == planned))
             })
             .or_else(|| self.nominals.get(enum_name))
             .cloned();
@@ -31264,6 +31717,7 @@ impl<'a> CoreLowerer<'a> {
                     let baseline_loans = self.loans.clone();
                     let baseline_projected_loans = self.projected_loans.clone();
                     let baseline_suspended = self.suspended.clone();
+                    let baseline_uniquely_suspended = self.uniquely_suspended.clone();
                     let baseline_actual_uses = self.actual_uses.clone();
                     let baseline_actual_use_lowers = self.actual_use_lowers.clone();
                     let baseline_active_variant_proofs = self.active_variant_proofs.clone();
@@ -31292,14 +31746,17 @@ impl<'a> CoreLowerer<'a> {
                     if let Some((local, variant)) = refined_variant {
                         self.active_variant_proofs.insert(local, variant);
                     }
+                    let branch_expected =
+                        expected.or_else(|| self.provisional_handler_result(span));
                     self.defer_branch_region_ends += 1;
-                    let positive = self.expression(positive_source, expected)?;
+                    let positive = self.expression(positive_source, branch_expected)?;
                     let mut positive_moved = self.moved.clone();
                     let mut positive_moved_paths = self.moved_paths.clone();
                     let positive_empty_referents = self.empty_referents.clone();
                     let positive_loans = self.loans.clone();
                     let positive_projected_loans = self.projected_loans.clone();
                     let positive_suspended = self.suspended.clone();
+                    let positive_uniquely_suspended = self.uniquely_suspended.clone();
                     let positive_active_variant_proofs = self.active_variant_proofs.clone();
                     let mut positive_actual_uses = self.actual_uses.clone();
                     let mut positive_actual_use_lowers = self.actual_use_lowers.clone();
@@ -31311,6 +31768,7 @@ impl<'a> CoreLowerer<'a> {
                     self.loans = baseline_loans.clone();
                     self.projected_loans = baseline_projected_loans.clone();
                     self.suspended = baseline_suspended.clone();
+                    self.uniquely_suspended = baseline_uniquely_suspended.clone();
                     self.actual_uses = negative_actual_uses;
                     self.actual_use_lowers = negative_actual_use_lowers;
                     self.active_variant_proofs = baseline_active_variant_proofs.clone();
@@ -31331,7 +31789,7 @@ impl<'a> CoreLowerer<'a> {
                         negative_variant = Some(complement);
                     }
                     let negative_expected =
-                        expected.or_else(|| (positive.ty != NEVER).then_some(positive.ty));
+                        branch_expected.or_else(|| (positive.ty != NEVER).then_some(positive.ty));
                     let negative = self.expression(negative_source, negative_expected)?;
                     self.defer_branch_region_ends -= 1;
 
@@ -31519,8 +31977,11 @@ impl<'a> CoreLowerer<'a> {
                     let suspended_shape_matches = positive_suspended
                         .symmetric_difference(&self.suspended)
                         .all(|local| result_parents.contains(local));
+                    let unique_suspended_shape_matches =
+                        positive_uniquely_suspended == self.uniquely_suspended;
                     let ownership_shape_matches = !result_reference_conflict
                         && suspended_shape_matches
+                        && unique_suspended_shape_matches
                         && self
                             .moved
                             .iter()
@@ -31586,6 +32047,8 @@ impl<'a> CoreLowerer<'a> {
                         binding.owns_loan = false;
                     }
                     self.suspended.extend(positive_suspended.iter().copied());
+                    self.uniquely_suspended
+                        .extend(positive_uniquely_suspended.iter().copied());
                     let binding_locals = bindings
                         .iter()
                         .map(|binding| binding.local)
@@ -34561,6 +35024,7 @@ impl<'a> CoreLowerer<'a> {
     fn end_dead_regions(
         &mut self,
         live_after: &BTreeSet<String>,
+        block_locals: &[core::LocalId],
         span: Span,
         lowered: &mut Vec<core::Stmt>,
     ) {
@@ -34571,7 +35035,7 @@ impl<'a> CoreLowerer<'a> {
             let candidates = self
                 .locals
                 .values()
-                .filter(|local| local.owns_loan)
+                .filter(|local| local.owns_loan && block_locals.contains(&local.local))
                 .flat_map(|local| {
                     Self::local_reference_fields(local)
                         .into_values()
@@ -34581,6 +35045,15 @@ impl<'a> CoreLowerer<'a> {
                 .collect::<BTreeSet<_>>();
             let mut progressed = false;
             for region in candidates {
+                if self.locals.values().any(|local| {
+                    local.owns_loan
+                        && !block_locals.contains(&local.local)
+                        && Self::local_reference_fields(local)
+                            .values()
+                            .any(|origin| origin.region == region)
+                }) {
+                    continue;
+                }
                 let mut aliases = self
                     .locals
                     .iter()
@@ -34684,6 +35157,15 @@ impl<'a> CoreLowerer<'a> {
                     )]
                 }),
             AssignmentPlaceKind::Dereference { reference, .. } => {
+                if let Some((signature, _, _)) = self.planned_call(reference) {
+                    return Ok(match self.resolved_type(signature.result) {
+                        ResolvedType::Unique(referent) => Some(self.structural_id(&referent)),
+                        ResolvedType::Shared(_)
+                        | ResolvedType::Concrete(_)
+                        | ResolvedType::Tuple(_)
+                        | ResolvedType::Array(_) => None,
+                    });
+                }
                 let ExprKind::Variable(path) = &reference.kind else {
                     return Ok(None);
                 };
@@ -35645,6 +36127,7 @@ impl<'a> CoreLowerer<'a> {
             if !last && !closure_barrier {
                 self.end_dead_regions(
                     &liveness.live_out[&points[index]],
+                    &introduced,
                     match statement {
                         Stmt::Let { span, .. }
                         | Stmt::Deconstruct { span, .. }

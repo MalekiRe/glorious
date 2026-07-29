@@ -1828,14 +1828,16 @@ pub(crate) fn type_program(
     program: &Program,
     tables: &Tables,
     constructions: &BTreeMap<(DeclarationKey, u32), NominalInstanceKey>,
+    call_shapes: &BTreeMap<(DeclarationKey, u32), FunctionShape>,
 ) -> TypedProgram {
-    type_program_incremental(program, tables, constructions, None)
+    type_program_incremental(program, tables, constructions, call_shapes, None)
 }
 
 pub(crate) fn type_program_incremental(
     program: &Program,
     tables: &Tables,
     constructions: &BTreeMap<(DeclarationKey, u32), NominalInstanceKey>,
+    call_shapes: &BTreeMap<(DeclarationKey, u32), FunctionShape>,
     incremental: Option<(
         &mut IncrementalTypeCache,
         u64,
@@ -1877,7 +1879,13 @@ pub(crate) fn type_program_incremental(
                 continue;
             }
             let key = DeclarationKey::Global(global.name.clone());
-            let mut typer = Typer::new(key.clone(), &tables, constructions, &global.value);
+            let mut typer = Typer::new(
+                key.clone(),
+                &tables,
+                constructions,
+                call_shapes,
+                &global.value,
+            );
             let body = typer.expression(&global.value, None);
             if let Some(ty) = body.ty.clone() {
                 let global_reference_requirements = typer.assignment_reference_requirements.clone();
@@ -1922,6 +1930,7 @@ pub(crate) fn type_program_incremental(
             shape.declaration.clone(),
             &tables,
             constructions,
+            call_shapes,
             &labeled_body,
         );
         for (param, ty) in function.params.iter().zip(&shape.params) {
@@ -1963,6 +1972,7 @@ struct Typer<'a> {
     locals: BTreeMap<String, (LocalKey, ProvisionalType)>,
     next_local: u32,
     constructions: &'a BTreeMap<(DeclarationKey, u32), NominalInstanceKey>,
+    call_shapes: &'a BTreeMap<(DeclarationKey, u32), FunctionShape>,
     expression_ordinals: BTreeMap<usize, u32>,
     assignment_reference_requirements: BTreeSet<ProvisionalType>,
     active_labels: BTreeMap<String, Option<ProvisionalType>>,
@@ -2291,6 +2301,7 @@ impl<'a> Typer<'a> {
         owner: DeclarationKey,
         tables: &'a Tables,
         constructions: &'a BTreeMap<(DeclarationKey, u32), NominalInstanceKey>,
+        call_shapes: &'a BTreeMap<(DeclarationKey, u32), FunctionShape>,
         root: &Expr,
     ) -> Self {
         Self {
@@ -2299,6 +2310,7 @@ impl<'a> Typer<'a> {
             locals: BTreeMap::new(),
             next_local: 0,
             constructions,
+            call_shapes,
             expression_ordinals: crate::compiler_specialization::expression_ordinals(root),
             assignment_reference_requirements: BTreeSet::new(),
             active_labels: BTreeMap::new(),
@@ -2313,6 +2325,94 @@ impl<'a> Typer<'a> {
         self.constructions
             .get(&(self.owner.clone(), *ordinal))
             .cloned()
+    }
+
+    fn planned_call_shape(&self, source: &Expr) -> Option<FunctionShape> {
+        let ordinal = self
+            .expression_ordinals
+            .get(&(std::ptr::from_ref(source) as usize))?;
+        self.call_shapes
+            .get(&(self.owner.clone(), *ordinal))
+            .cloned()
+    }
+
+    fn obvious_non_never_context_type(&self, source: &Expr) -> Option<ProvisionalType> {
+        self.obvious_context_type(source)
+            .filter(|ty| !matches!(ty, ProvisionalType::Predefined(name) if name == "Never"))
+    }
+
+    fn obvious_context_type(&self, source: &Expr) -> Option<ProvisionalType> {
+        match &source.kind {
+            ExprKind::Move(value) => self.obvious_context_type(value),
+            ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                let Stmt::Expr(tail) = statements.last()? else {
+                    return None;
+                };
+                self.obvious_context_type(tail)
+            }
+            ExprKind::Variable(path) if path.len() == 1 => self
+                .locals
+                .get(path[0].as_ref())
+                .map(|(_, ty)| ty.clone())
+                .or_else(|| self.tables.globals.get(path[0].as_ref()).cloned()),
+            ExprKind::Call(callee, arguments) => {
+                if let Some(nominal) = self.planned_construction(source) {
+                    return Some(ProvisionalType::Nominal(nominal));
+                }
+                if let ExprKind::Variable(path) = &callee.kind
+                    && path.len() == 1
+                    && path[0].as_ref() == "else"
+                    && let [conditional, negative] = arguments.as_slice()
+                    && let ExprKind::Call(if_callee, if_arguments) = &conditional.kind
+                    && let ExprKind::Variable(if_path) = &if_callee.kind
+                    && if_path.len() == 1
+                    && if_path[0].as_ref() == "if"
+                    && let [_, positive] = if_arguments.as_slice()
+                {
+                    return self
+                        .obvious_non_never_context_type(positive)
+                        .or_else(|| self.obvious_non_never_context_type(negative));
+                }
+                self.planned_call_shape(source)
+                    .map(|shape| shape.result)
+                    .or_else(|| {
+                        let ExprKind::Variable(path) = &callee.kind else {
+                            return None;
+                        };
+                        let [name] = path.as_ref() else {
+                            return None;
+                        };
+                        self.tables
+                            .functions
+                            .get(name.as_ref())
+                            .map(|shape| shape.result.clone())
+                    })
+            }
+            ExprKind::Unit => Some(predefined(UNIT)),
+            ExprKind::String(_) => Some(ProvisionalType::Predefined("Text".into())),
+            ExprKind::Char(_) => Some(ProvisionalType::Predefined("Char".into())),
+            ExprKind::Byte(_) => Some(ProvisionalType::Predefined("u8".into())),
+            ExprKind::ByteString(_) => Some(ProvisionalType::Predefined("Bytes".into())),
+            ExprKind::Int(_)
+            | ExprKind::Float(_)
+            | ExprKind::List(_)
+            | ExprKind::Tuple(_)
+            | ExprKind::Struct { .. }
+            | ExprKind::Field(_, _)
+            | ExprKind::Perform { .. }
+            | ExprKind::Handle { .. }
+            | ExprKind::Unary { .. }
+            | ExprKind::Binary { .. }
+            | ExprKind::Closure { .. }
+            | ExprKind::TypedClosure { .. }
+            | ExprKind::LabelDestination { .. }
+            | ExprKind::LabelReference(_)
+            | ExprKind::Is { .. }
+            | ExprKind::Resume { .. }
+            | ExprKind::Cancel { .. }
+            | ExprKind::TailResume { .. }
+            | ExprKind::Variable(_) => None,
+        }
     }
 
     fn bind(&mut self, name: String, ty: ProvisionalType) -> LocalKey {
@@ -2824,17 +2924,63 @@ impl<'a> Typer<'a> {
                 },
             );
         }
+        if path.len() == 1
+            && path[0].as_ref() == "else"
+            && let [conditional, negative] = args
+            && let ExprKind::Call(if_callee, if_arguments) = &conditional.kind
+            && let ExprKind::Variable(if_path) = &if_callee.kind
+            && if_path.len() == 1
+            && if_path[0].as_ref() == "if"
+            && let [condition, positive] = if_arguments.as_slice()
+            && matches!(condition.kind, ExprKind::Is { .. })
+        {
+            // A planned generic control specialization may itself contain a
+            // numeric fallback chosen before a sibling branch was known.
+            // Prefer either branch's independently synthesized non-default
+            // type, then use the enclosing expectation as the fallback.
+            let branch_expected = expected.cloned().or_else(|| {
+                self.obvious_non_never_context_type(positive)
+                .or_else(|| self.obvious_non_never_context_type(negative))
+            });
+            let condition = self.expression(condition, None);
+            self.next_local += self
+                .refinements
+                .last()
+                .map(|refinement| refinement.positive_bindings.len() as u32)
+                .unwrap_or(0);
+            let positive = self.expression(positive, branch_expected.as_ref());
+            let conditional = self.node(
+                conditional,
+                None,
+                TypedExprKind::Unsupported(vec![condition, positive]),
+            );
+            let negative = self.expression(negative, branch_expected.as_ref());
+            return self.node(
+                source,
+                branch_expected,
+                TypedExprKind::Unsupported(vec![conditional, negative]),
+            );
+        }
+        if let Some(shape) = self.planned_call_shape(source) {
+            let mut children = vec![self.expression(callee, None)];
+            children.extend(args.iter().enumerate().map(|(index, argument)| {
+                self.call_argument_in(argument, shape.params.get(index), args, index)
+            }));
+            return self.node(
+                source,
+                Some(shape.result),
+                TypedExprKind::Unsupported(children),
+            );
+        }
         if path.len() == 2 {
-            let key = self
-                .planned_construction(source)
-                .or_else(|| {
-                    expected.and_then(|ty| match ty {
+            let key = expected
+                .and_then(|ty| match ty {
                         ProvisionalType::Nominal(key) if key.declaration.0 == path[0].as_ref() => {
                             Some(key.clone())
                         }
                         _ => None,
-                    })
                 })
+                .or_else(|| self.planned_construction(source))
                 .unwrap_or_else(|| NominalInstanceKey::monomorphic(path[0].to_string()));
             if let Some(NominalShape::Enum(variants)) = self.tables.nominals.get(&key) {
                 let selected = variants
@@ -2896,6 +3042,7 @@ impl<'a> Typer<'a> {
             let unique = matches!(expected, ProvisionalType::Unique(_));
             let compatible = match (expected, &actual) {
                 (ProvisionalType::Unique(expected), ProvisionalType::Unique(actual))
+                | (ProvisionalType::Shared(expected), ProvisionalType::Shared(actual))
                 | (ProvisionalType::Shared(expected), ProvisionalType::Unique(actual)) => {
                     expected == actual
                 }
@@ -3349,7 +3496,7 @@ mod tests {
             )]),
             ..Tables::default()
         };
-        let typed = type_program(&program, &tables, &BTreeMap::new());
+        let typed = type_program(&program, &tables, &BTreeMap::new(), &BTreeMap::new());
         let body = &typed.bodies[&owner];
 
         fn contains_self_local(expression: &TypedExpr, owner: &DeclarationKey) -> bool {
@@ -3468,7 +3615,7 @@ mod tests {
             ]),
             ..Tables::default()
         };
-        let typed = type_program(&program, &tables, &BTreeMap::new());
+        let typed = type_program(&program, &tables, &BTreeMap::new(), &BTreeMap::new());
 
         let nested = &typed.refinements[&DeclarationKey::Function("nested".into())][0];
         assert_eq!(nested.positive_bindings.len(), 1);

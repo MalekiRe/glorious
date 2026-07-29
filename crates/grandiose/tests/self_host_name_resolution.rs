@@ -74,6 +74,8 @@ struct Binding {
 enum Target {
     Local(u32),
     Function(FunctionIdentity),
+    Struct(u32),
+    Variant(u32),
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -130,6 +132,8 @@ fn function_table(
 struct Resolver<'a> {
     current_module: ModuleId,
     functions: &'a BTreeMap<(ModuleId, String), FunctionIdentity>,
+    structs: &'a BTreeMap<String, u32>,
+    variants: &'a BTreeMap<(String, String), u32>,
     result: FunctionResolution,
 }
 
@@ -159,14 +163,24 @@ impl Resolver<'_> {
         path: &[std::rc::Rc<str>],
         locals: &BTreeMap<String, u32>,
     ) -> Result<(), ()> {
-        let [name] = path else {
-            return Err(());
-        };
-        let spelling = name.to_string();
-        let target = if let Some(local) = locals.get(&spelling) {
-            Target::Local(*local)
-        } else {
-            Target::Function(self.function(&spelling).ok_or(())?)
+        let (spelling, target) = match path {
+            [name] => {
+                let spelling = name.to_string();
+                let target = if let Some(local) = locals.get(&spelling) {
+                    Target::Local(*local)
+                } else {
+                    Target::Function(self.function(&spelling).ok_or(())?)
+                };
+                (spelling, target)
+            }
+            [nominal, variant] => {
+                let target = *self
+                    .variants
+                    .get(&(nominal.to_string(), variant.to_string()))
+                    .ok_or(())?;
+                (nominal.to_string(), Target::Variant(target))
+            }
+            _ => return Err(()),
         };
         self.result
             .occurrences
@@ -194,6 +208,24 @@ impl Resolver<'_> {
                 self.expression(lhs, locals)?;
                 self.expression(rhs, locals)
             }
+            ExprKind::Tuple(elements) => {
+                for element in elements.iter() {
+                    self.expression(element, locals)?;
+                }
+                Ok(())
+            }
+            ExprKind::Struct { name, fields } => {
+                let target = *self.structs.get(name.as_ref()).ok_or(())?;
+                self.result.occurrences.push(Occurrence {
+                    spelling: name.to_string(),
+                    target: Target::Struct(target),
+                });
+                for (_, value) in fields.iter() {
+                    self.expression(value, locals)?;
+                }
+                Ok(())
+            }
+            ExprKind::Field(subject, _) => self.expression(subject, locals),
             _ => Err(()),
         }
     }
@@ -224,12 +256,16 @@ fn resolve_function(
     graph: &ModuleResolution,
     bundle: &SourceBundle,
     functions: &BTreeMap<(ModuleId, String), FunctionIdentity>,
+    structs: &BTreeMap<String, u32>,
+    variants: &BTreeMap<(String, String), u32>,
     function: &Function,
 ) -> Result<FunctionResolution, ()> {
     let current_module = graph.owner(bundle, function.span).ok_or(())?;
     let mut resolver = Resolver {
         current_module,
         functions,
+        structs,
+        variants,
         result: FunctionResolution::default(),
     };
     let mut locals = BTreeMap::new();
@@ -275,6 +311,23 @@ fn encode_rust_resolution(output: &mut Vec<u8>, source: &str) {
         output.push(3);
         return;
     };
+    let structs = program
+        .structs
+        .iter()
+        .enumerate()
+        .map(|(index, declaration)| (declaration.name.clone(), index as u32))
+        .collect::<BTreeMap<_, _>>();
+    let mut variants = BTreeMap::new();
+    let mut variant_index = 0u32;
+    for declaration in &program.enums {
+        for variant in &declaration.variants {
+            variants.insert(
+                (declaration.name.clone(), variant.name.clone()),
+                variant_index,
+            );
+            variant_index += 1;
+        }
+    }
     let mut declarations = program.functions.iter().collect::<Vec<_>>();
     declarations.sort_by_key(|function| function.span.start);
 
@@ -285,7 +338,9 @@ fn encode_rust_resolution(output: &mut Vec<u8>, source: &str) {
             output.push(3);
             return;
         };
-        let Ok(resolved) = resolve_function(&graph, &bundle, &functions, function) else {
+        let Ok(resolved) =
+            resolve_function(&graph, &bundle, &functions, &structs, &variants, function)
+        else {
             output.push(3);
             return;
         };
@@ -306,6 +361,14 @@ fn encode_rust_resolution(output: &mut Vec<u8>, source: &str) {
                 Target::Function(identity) => {
                     encoded.push(2);
                     encode_function_identity(&mut encoded, &identity);
+                }
+                Target::Struct(index) => {
+                    encoded.push(3);
+                    push_u32(&mut encoded, index);
+                }
+                Target::Variant(index) => {
+                    encoded.push(4);
+                    push_u32(&mut encoded, index);
                 }
             }
         }
@@ -334,6 +397,11 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
          mod inner { probe_pick() { 2 } probe_local_item() { probe_pick() } }",
         "probe_root() { 1 } \
          mod inner { probe_root_fallback() { probe_root() } }",
+        "struct Pair { left: u64, right: u64 } \
+         probe_struct(left: u64, right: u64) { \
+         Pair { right: right, left: left }.left }",
+        "enum Choice { None(), Some(u64) } \
+         probe_variant(value: u64) { Choice::Some(value) }",
     ];
     let malformed = [
         "probe_before_let() { x; let x = 1; x }",
@@ -342,6 +410,9 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "mod outer { probe_parent() { 1 } \
          mod child { probe_no_parent_fallback() { probe_parent() } } }",
         "probe_duplicate(x: u64, x: u64) { x }",
+        "probe_unknown_struct() { Missing {} }",
+        "enum Choice { Some(u64) } \
+         probe_unknown_variant(value: u64) { Choice::Missing(value) }",
     ];
 
     let mut paths = Vec::new();

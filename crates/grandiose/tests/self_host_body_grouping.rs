@@ -148,9 +148,12 @@ fn encode_expression(
     expression: &Expr,
 ) -> Result<(), ()> {
     match &expression.kind {
-        ExprKind::Variable(path) if path.len() == 1 => {
+        ExprKind::Variable(path) => {
             output.push(1);
-            push_string(output, &path[0]);
+            push_string(
+                output,
+                &path.iter().map(|part| part.as_ref()).collect::<Vec<_>>().join("::"),
+            );
         }
         ExprKind::Int(_) => {
             let literal = program.numeric_literal(expression.span).ok_or(())?;
@@ -204,6 +207,27 @@ fn encode_expression(
             for statement in statements.iter() {
                 encode_statement(output, program, source, statement)?;
             }
+        }
+        ExprKind::Tuple(elements) => {
+            output.push(9);
+            push_u32(output, elements.len().try_into().map_err(|_| ())?);
+            for element in elements.iter() {
+                encode_expression(output, program, source, element)?;
+            }
+        }
+        ExprKind::Struct { name, fields } => {
+            output.push(10);
+            push_string(output, name);
+            push_u32(output, fields.len().try_into().map_err(|_| ())?);
+            for (field, value) in fields.iter() {
+                push_string(output, field);
+                encode_expression(output, program, source, value)?;
+            }
+        }
+        ExprKind::Field(subject, field) => {
+            output.push(11);
+            encode_expression(output, program, source, subject)?;
+            push_string(output, field);
         }
         _ => return Err(()),
     }
@@ -272,6 +296,11 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "probe_statements() { prepare(); work(1); done }",
         "probe_nested_block() { let x = { let y = 1; y }; x }",
         "probe_block_argument() { consume({ let x = 1; x }) }",
+        "probe_single_tuple() { (value,) }",
+        "probe_tuple() { (first, second, third) }",
+        "probe_struct() { Pair { right: second, left: first } }",
+        "probe_projection() { value.field.0 }",
+        "probe_variant_path() { Choice::Some(value) }",
     ];
     let malformed = [
         "infixl 10 op; probe_missing_operand() { a op }",
@@ -284,6 +313,11 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "probe_bad_call_separator() { f(a; b) }",
         "probe_bad_let_name() { let = 1; () }",
         "probe_bad_let_value() { let x = ; x }",
+        "probe_bad_tuple() { (first, ; second) }",
+        "probe_bad_struct_field() { Pair { : first } }",
+        "probe_bad_struct_colon() { Pair { left first } }",
+        "probe_bad_projection() { value. }",
+        "probe_bad_path() { Choice::(value) }",
     ];
 
     let mut paths = Vec::new();

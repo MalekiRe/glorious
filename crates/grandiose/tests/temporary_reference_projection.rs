@@ -128,6 +128,37 @@ fn public_generic_associated_call_remains_callable_inside_comparison() {
 }
 
 #[test]
+fn generic_index_results_select_a_direct_equality_implementation() {
+    let source = r#"
+        struct Interfaces { variants: Vec<u32> }
+
+        usize_value(value: usize) -> usize { value }
+        u32_value(value: u32) -> u32 { value }
+
+        same(values: &Vec<u32>) -> Bool {
+            *Vec::index(values, 0) == *Vec::index(values, 1)
+        }
+
+        nested(
+            interfaces: &Interfaces,
+            base: usize,
+            child_count: u32
+        ) -> Bool {
+            let payload_count = *Vec::index(
+                &interfaces.variants,
+                base + usize_value(3)
+            );
+            let found_count = child_count - u32_value(1);
+            payload_count == found_count
+        }
+
+        main() -> () { () }
+    "#;
+    grandiose::compile_source_to_bytecode("generic-index-direct-equality.glorious", source)
+        .unwrap();
+}
+
+#[test]
 fn generic_array_len_wrapper_remains_manifest_lowered() {
     let source = r#"
         generic_len<T>(value: &Vec<T>) -> usize {
@@ -141,6 +172,71 @@ fn generic_array_len_wrapper_remains_manifest_lowered() {
         main() -> () { () }
     "#;
     grandiose::compile_source_to_bytecode("late-generic-array-len.glorious", source).unwrap();
+}
+
+#[test]
+fn later_shared_scalar_argument_is_materialized_before_unique_argument_activation() {
+    let source = r#"
+        read(value: &i64) -> i64 { *value }
+
+        update(value: &mut i64, observed: i64) -> i64 {
+            *value = observed + 1;
+            *value
+        }
+
+        selected() -> i64 {
+            let value = 41;
+            update(&mut value, read(&value))
+        }
+
+        main() -> () { () }
+    "#;
+    let artifact =
+        grandiose::compile_source_to_bytecode("two-phase-unique-call-argument.glorious", source)
+            .unwrap();
+    let selected = artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "selected")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(artifact).unwrap())
+            .run(selected, vec![])
+            .unwrap(),
+        Value::I64(42)
+    );
+}
+
+#[test]
+fn later_copy_result_with_unique_root_access_is_not_two_phase_materialized() {
+    let source = r#"
+        mutate(value: &mut i64) -> i64 {
+            *value = *value + 1;
+            *value
+        }
+
+        update(value: &mut i64, observed: i64) -> i64 { observed }
+
+        rejected() -> i64 {
+            let value = 41;
+            update(&mut value, mutate(&mut value))
+        }
+
+        main() -> () { () }
+    "#;
+    let errors = grandiose::compile_source_to_bytecode(
+        "two-phase-unique-call-argument-rejected.glorious",
+        source,
+    )
+    .unwrap_err();
+    assert!(
+        errors.iter().any(|error| {
+            error.message.contains("borrow")
+                || error.message.contains("suspended")
+                || error.message.contains("already")
+        }),
+        "{errors:#?}"
+    );
 }
 
 #[test]
@@ -178,11 +274,15 @@ fn assignment_accepts_temporary_unique_reference_from_generic_associated_call() 
             ()
         }
 
+        write_literal(value: &mut Values) -> () {
+            *Vec::index_mut(&mut value.items, wrapping_convert_to_usize(0)) = 1;
+            ()
+        }
+
         write_on_one_branch(value: &mut Values, flag: Bool) -> () {
             handle flag {
                 Result::Ok(_) => {
-                    *Vec::index_mut(&mut value.items, wrapping_convert_to_usize(0)) =
-                        wrapping_convert_to_u32(42);
+                    *Vec::index_mut(&mut value.items, wrapping_convert_to_usize(0)) = 1;
                     ()
                 },
                 Result::Err(_) => ()
