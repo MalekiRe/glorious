@@ -10298,7 +10298,8 @@ pub(crate) fn normalize_ground_trait_methods(
         errors: &mut Vec<Diagnostic>,
     ) -> Option<ReceiverType> {
         let expression_span = expression.span;
-        match &mut expression.kind {
+        let mut scalar_comparison = None;
+        let result = match &mut expression.kind {
             ExprKind::Variable(path) if path.len() == 1 => locals.get(path[0].as_ref()).cloned(),
             ExprKind::Struct { name, fields } => {
                 for (_, value) in Rc::make_mut(fields) {
@@ -10619,6 +10620,18 @@ pub(crate) fn normalize_ground_trait_methods(
                     }
                     _ => None,
                 };
+                let arithmetic_argument_expected = match &callee.kind {
+                    ExprKind::Variable(path)
+                        if path.len() == 2
+                            && matches!(
+                                path[0].as_ref(),
+                                "Add" | "Subtract" | "Multiply" | "Divide" | "Remainder"
+                            ) =>
+                    {
+                        expected
+                    }
+                    _ => None,
+                };
                 let argument_types = Rc::make_mut(args)
                     .iter_mut()
                     .enumerate()
@@ -10635,7 +10648,8 @@ pub(crate) fn normalize_ground_trait_methods(
                             trusted_standard_range,
                             enum_argument_expectations
                                 .as_ref()
-                                .and_then(|expectations| expectations.get(index)),
+                                .and_then(|expectations| expectations.get(index))
+                                .or(arithmetic_argument_expected),
                             errors,
                         )
                     })
@@ -10665,10 +10679,29 @@ pub(crate) fn normalize_ground_trait_methods(
                     // Homogeneous operator traits can still be selected when
                     // a refinement/deconstruction leaves the left operand
                     // temporarily opaque but the right operand is concrete.
-                    let receiver = argument_types.iter().enumerate().find_map(|(index, ty)| {
-                        ty.clone().or_else(|| {
-                            concrete_call_result(program, &args[index], trusted_standard_range)
-                        })
+                    fn default_numeric_argument(expression: &Expr) -> bool {
+                        match &expression.kind {
+                            ExprKind::Int(_) | ExprKind::Float(_) => true,
+                            ExprKind::Move(value) => default_numeric_argument(value),
+                            _ => false,
+                        }
+                    }
+                    let receiver = [false, true].into_iter().find_map(|defaulting| {
+                        argument_types
+                            .iter()
+                            .enumerate()
+                            .filter(|(index, _)| {
+                                default_numeric_argument(&args[*index]) == defaulting
+                            })
+                            .find_map(|(index, ty)| {
+                                ty.clone().or_else(|| {
+                                    concrete_call_result(
+                                        program,
+                                        &args[index],
+                                        trusted_standard_range,
+                                    )
+                                })
+                            })
                     });
                     let deferred_receiver = receiver
                         .as_ref()
@@ -10731,6 +10764,35 @@ pub(crate) fn normalize_ground_trait_methods(
                             (matches.len() == 1).then(|| matches.pop_first().unwrap())
                         });
                     if let Some(target) = target {
+                        if comparison_trait_call
+                            && receiver.as_ref().map(receiver_subject_type).is_some_and(
+                                |receiver| {
+                                    matches!(
+                                        receiver,
+                                        ReceiverType::Name(name)
+                                            if matches!(
+                                                name.as_str(),
+                                                "i8" | "i16" | "i32" | "i64" | "i128"
+                                                    | "isize" | "u8" | "u16" | "u32" | "u64"
+                                                    | "u128" | "usize"
+                                            )
+                                    )
+                                },
+                            )
+                            && let [lhs, rhs] = args.as_slice()
+                        {
+                            let op = match trait_name.as_str() {
+                                "Equal" => BinaryOp::Eq,
+                                "Less" => BinaryOp::Lt,
+                                "Greater" => BinaryOp::Gt,
+                                _ => unreachable!("comparison trait was classified above"),
+                            };
+                            scalar_comparison = Some(ExprKind::Binary {
+                                op,
+                                lhs: Rc::new(lhs.clone()),
+                                rhs: Rc::new(rhs.clone()),
+                            });
+                        }
                         Rc::make_mut(callee).kind =
                             ExprKind::Variable(Rc::from([Rc::<str>::from(target)]));
                     } else if let Some(ReceiverType::Name(binder)) =
@@ -11143,32 +11205,59 @@ pub(crate) fn normalize_ground_trait_methods(
                 result.or_else(|| expected.cloned())
             }
             ExprKind::Binary { op, lhs, rhs } => {
-                let lhs = rewrite(
-                    Rc::make_mut(lhs),
-                    locals,
-                    program,
-                    methods,
-                    receiverless_methods,
-                    generic_methods,
-                    dot_methods,
-                    deferred_evidence,
-                    trusted_standard_range,
-                    None,
-                    errors,
-                );
-                let rhs = rewrite(
-                    Rc::make_mut(rhs),
-                    locals,
-                    program,
-                    methods,
-                    receiverless_methods,
-                    generic_methods,
-                    dot_methods,
-                    deferred_evidence,
-                    trusted_standard_range,
-                    None,
-                    errors,
-                );
+                fn numeric_literal(expression: &Expr) -> bool {
+                    match &expression.kind {
+                        ExprKind::Int(_) | ExprKind::Float(_) => true,
+                        ExprKind::Move(value) => numeric_literal(value),
+                        _ => false,
+                    }
+                }
+                let left_literal = numeric_literal(lhs);
+                let right_literal = numeric_literal(rhs);
+                let operand_expected = matches!(
+                    op,
+                    BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem
+                )
+                .then_some(expected)
+                .flatten();
+                let rewrite_operand =
+                    |expression: &mut Expr,
+                     expected: Option<&ReceiverType>,
+                     locals: &mut BTreeMap<String, ReceiverType>,
+                     errors: &mut Vec<Diagnostic>| {
+                        rewrite(
+                            expression,
+                            locals,
+                            program,
+                            methods,
+                            receiverless_methods,
+                            generic_methods,
+                            dot_methods,
+                            deferred_evidence,
+                            trusted_standard_range,
+                            expected,
+                            errors,
+                        )
+                    };
+                let (lhs, rhs) = if left_literal && !right_literal {
+                    let rhs = rewrite_operand(Rc::make_mut(rhs), None, locals, errors);
+                    let lhs = rewrite_operand(
+                        Rc::make_mut(lhs),
+                        rhs.as_ref().or(operand_expected),
+                        locals,
+                        errors,
+                    );
+                    (lhs, rhs)
+                } else {
+                    let lhs = rewrite_operand(Rc::make_mut(lhs), operand_expected, locals, errors);
+                    let rhs = rewrite_operand(
+                        Rc::make_mut(rhs),
+                        lhs.as_ref().or(operand_expected),
+                        locals,
+                        errors,
+                    );
+                    (lhs, rhs)
+                };
                 match op {
                     BinaryOp::Eq
                     | BinaryOp::NotEq
@@ -11267,14 +11356,43 @@ pub(crate) fn normalize_ground_trait_methods(
                 errors,
             ),
             ExprKind::Unit => Some(ReceiverType::Name("Unit".into())),
-            ExprKind::Int(_) => Some(ReceiverType::Name("i64".into())),
-            ExprKind::Float(_) => Some(ReceiverType::Name("f64".into())),
+            ExprKind::Int(_) => Some(
+                expected
+                    .filter(|expected| {
+                        matches!(
+                            expected,
+                            ReceiverType::Name(name)
+                                if matches!(
+                                    name.as_str(),
+                                    "i8" | "i16" | "i32" | "i64" | "i128" | "isize"
+                                        | "u8" | "u16" | "u32" | "u64" | "u128" | "usize"
+                                )
+                        )
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| ReceiverType::Name("i64".into())),
+            ),
+            ExprKind::Float(_) => Some(
+                expected
+                    .filter(|expected| {
+                        matches!(
+                            expected,
+                            ReceiverType::Name(name) if matches!(name.as_str(), "f32" | "f64")
+                        )
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| ReceiverType::Name("f64".into())),
+            ),
             ExprKind::Char(_) => Some(ReceiverType::Name("Char".into())),
             ExprKind::Byte(_) => Some(ReceiverType::Name("u8".into())),
             ExprKind::ByteString(_) => Some(ReceiverType::Name("Bytes".into())),
             ExprKind::String(_) => Some(ReceiverType::Name("Text".into())),
             ExprKind::Variable(_) | ExprKind::LabelReference(_) => None,
+        };
+        if let Some(replacement) = scalar_comparison {
+            expression.kind = replacement;
         }
+        result
     }
 
     normalized.functions.extend(generated);
@@ -13184,6 +13302,28 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
                     &operation_bound,
                     &mut BTreeSet::new(),
                 );
+            }
+        }
+    }
+    for function in &mut normalized.functions {
+        let bound = function
+            .generics
+            .iter()
+            .flat_map(|generics| &generics.params)
+            .map(|parameter| parameter.name.clone())
+            .collect::<BTreeSet<_>>();
+        let mut expand = |syntax: &mut TypeSyntax| {
+            *syntax = expand_monomorphic_alias(
+                syntax,
+                &monomorphic_aliases,
+                &bound,
+                &mut BTreeSet::new(),
+            );
+        };
+        rewrite_where_types(function.where_clause.as_mut(), &mut expand);
+        if let Some(row) = &mut function.outward_effects {
+            for effect in &mut row.effects {
+                expand(effect);
             }
         }
     }
@@ -24972,6 +25112,21 @@ impl<'a> CoreLowerer<'a> {
             })?
     }
 
+    fn planned_direct_call_result(&self, expression: &Expr) -> Option<TypeId> {
+        let body = self.body_instance.clone()?;
+        let expression_ordinal = self.expression_ordinal(expression)?;
+        let target = self
+            .specialization_graph
+            .direct_calls
+            .get(&specialization::CallSiteKey {
+                body,
+                expression_ordinal,
+            })?;
+        self.generated_signatures
+            .get(&specialization::EmissionKey::Specialization(target.clone()))
+            .map(|signature| signature.result)
+    }
+
     fn static_label_argument(&self, expression: &Expr) -> Option<crate::ast::LabelSyntax> {
         match &expression.kind {
             ExprKind::LabelReference(label)
@@ -33362,7 +33517,23 @@ impl<'a> CoreLowerer<'a> {
                     return Ok(expression);
                 }
                 if let Some(template) = self.planned_late_generic_call(expression) {
-                    return self.inline_late_generic_call(&template, arguments, span, expected);
+                    // The callable argument must be control-inlined because
+                    // its late environment has no standalone artifact type,
+                    // but specialization has already selected the call's
+                    // concrete result. Preserve that result as context for
+                    // generic constructors in the cloned template body.
+                    let planned_result = self
+                        .planned_direct_call_result(expression)
+                        .or(expected);
+                    if let Some(planned_result) = planned_result {
+                        self.check(span, expected, planned_result)?;
+                    }
+                    return self.inline_late_generic_call(
+                        &template,
+                        arguments,
+                        span,
+                        planned_result,
+                    );
                 }
                 if let Some((signature, runtime_arguments, template)) =
                     self.planned_call(expression)
@@ -33608,7 +33779,6 @@ impl<'a> CoreLowerer<'a> {
                 if let Some(
                     primitive @ (Primitive::ArrayGetBorrowShared | Primitive::ArrayGetBorrowUnique),
                 ) = self.runtime_bindings.leaf(name)
-                    && let Some(result) = expected
                 {
                     if !self
                         .runtime_bindings
@@ -33619,17 +33789,6 @@ impl<'a> CoreLowerer<'a> {
                             "manifest-bound primitive leaves may be called only from their trusted standard-library source segment",
                         )]);
                     }
-                    let unique = primitive == Primitive::ArrayGetBorrowUnique;
-                    let resolved_result = self.resolved_type(result);
-                    if !matches!(
-                        resolved_result,
-                        ResolvedType::Unique(_) if unique
-                    ) && !matches!(
-                        resolved_result,
-                        ResolvedType::Shared(_) if !unique
-                    ) {
-                        return Err(vec![self.mismatch(span, result, UNIT)]);
-                    }
                     if arguments.len() != 2 {
                         return Err(vec![type_error(
                             span,
@@ -33639,13 +33798,56 @@ impl<'a> CoreLowerer<'a> {
                     let (parameter_types, declared_result) = self
                         .late_manifest_types(name)
                         .unwrap_or_else(|| (vec![None; arguments.len()], None));
+                    let unique = primitive == Primitive::ArrayGetBorrowUnique;
+                    let first = self.expression(
+                        &arguments[0],
+                        parameter_types.first().copied().flatten(),
+                    )?;
+                    let element = match self.resolved_type(first.ty) {
+                        ResolvedType::Unique(referent) if unique => match *referent {
+                            ResolvedType::Array(element) => Some(element),
+                            _ => None,
+                        },
+                        ResolvedType::Shared(referent) if !unique => match *referent {
+                            ResolvedType::Array(element) => Some(element),
+                            _ => None,
+                        },
+                        _ => None,
+                    }
+                    .ok_or_else(|| {
+                        vec![type_error(
+                            arguments[0].span,
+                            if unique {
+                                "an Array unique-element borrow requires `&mut Array<T>`"
+                            } else {
+                                "an Array shared-element borrow requires `&Array<T>`"
+                            },
+                        )]
+                    })?;
+                    let inferred_result = if unique {
+                        ResolvedType::Unique(element)
+                    } else {
+                        ResolvedType::Shared(element)
+                    };
+                    let inferred_result = self.structural_type_id(&inferred_result);
+                    let result = expected.unwrap_or(inferred_result);
+                    self.check(span, Some(result), inferred_result)?;
                     if let Some(declared_result) = declared_result {
                         self.check(span, Some(result), declared_result)?;
                     }
-                    let mut args = Vec::with_capacity(arguments.len());
-                    for (index, argument) in arguments.iter().enumerate() {
-                        let argument = self
-                            .expression(argument, parameter_types.get(index).copied().flatten())?;
+                    self.validate_anonymous_use(
+                        &first,
+                        1,
+                        "late primitive call argument temporary",
+                    )?;
+                    self.register_temporary_reference(&first);
+                    let mut args = Vec::with_capacity(2);
+                    args.push(first);
+                    for (index, argument) in arguments.iter().enumerate().skip(1) {
+                        let argument = self.expression(
+                            argument,
+                            parameter_types.get(index).copied().flatten(),
+                        )?;
                         self.validate_anonymous_use(
                             &argument,
                             1,

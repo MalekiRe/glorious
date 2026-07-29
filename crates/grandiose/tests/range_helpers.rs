@@ -6,10 +6,7 @@ const SOURCE: &str = r#"
         Range { start: move start, end: move end }
     }
     bool_as_usize(value: Bool) -> usize {
-        handle perform __ScalarBoolCase::inspect(value) {
-            __ScalarBoolCase::inspect(Result::Ok(_)) => 1,
-            __ScalarBoolCase::inspect(Result::Err(_)) => 0
-        }
+        if(value) { 1 } else { 0 }
     }
     range_contains(value: &Range<usize>, candidate: usize) -> Bool {
         Range::contains(value, move candidate)
@@ -104,6 +101,108 @@ const SOURCE: &str = r#"
         Option::unwrap_or(Range::checked_offset(&range, 2), 94)
     }
 
+    add_index(total: usize, index: usize) -> usize { total + index }
+    zero() -> usize { 0 }
+    seven() -> usize { 7 }
+    checked_add_index(total: usize, index: usize) -> Result<usize, usize> {
+        if(index == 3) { Result::Err(total) } else { Result::Ok(total + index) }
+    }
+    accept_index(index: usize) -> Result<(), usize> {
+        if(index == 3) { Result::Err(index) } else { Result::Ok(()) }
+    }
+    is_three(index: usize) -> Bool { index == 3 }
+    ignore_index(index: usize) -> () { index; () }
+
+    range_for_each() -> usize {
+        for_range(usize_range(0, 5), ignore_index);
+        10
+    }
+    range_fold() -> usize {
+        fold_range(usize_range(0, 5), 0, add_index)
+    }
+    range_try_for_each() -> usize {
+        handle try_for_range(usize_range(0, 6), accept_index) {
+            Result::Err(index) => index,
+            Result::Ok(_) => 90
+        }
+    }
+    range_try_fold() -> usize {
+        handle try_fold_range(usize_range(0, 6), 0, checked_add_index) {
+            Result::Err(total) => total,
+            Result::Ok(total) => total
+        }
+    }
+    range_find() -> usize {
+        Option::unwrap_or(find_range(usize_range(0, 6), is_three), 90)
+    }
+    range_reversed_for_each() -> usize {
+        for_range(usize_range(6, 2), ignore_index);
+        seven()
+    }
+
+    effect AskIndex { [1,1] ask(index: usize) -> usize }
+    effect_add_index(total: usize, index: usize) -> usize / {AskIndex} {
+        total + perform AskIndex::ask(index)
+    }
+    range_effect_fold() -> usize {
+        handle fold_range(usize_range(0, 5), 0, effect_add_index) {
+            AskIndex::ask(index) with continuation => resume(continuation, index)
+        }
+    }
+
+    values() -> Vec<usize> {
+        let output = Vec::new();
+        Vec::push(&mut output, 2);
+        Vec::push(&mut output, 3);
+        Vec::push(&mut output, 5);
+        Vec::push(&mut output, 7);
+        output
+    }
+    add_item(total: usize, item: &usize) -> usize { total + *item }
+    checked_add_item(total: usize, item: &usize) -> Result<usize, usize> {
+        if(*item == 5) { Result::Err(total) } else { Result::Ok(total + *item) }
+    }
+    accept_item(item: &usize) -> Result<(), usize> {
+        if(*item == 5) { Result::Err(*item) } else { Result::Ok(()) }
+    }
+    is_five(item: &usize) -> Bool { *item == 5 }
+    ignore_item(item: &usize) -> () { *item; () }
+
+    slice_for_each() -> usize {
+        let source = values();
+        Slice::for_each(Vec::as_slice(&source), ignore_item);
+        17
+    }
+    slice_fold() -> usize {
+        let source = values();
+        Slice::fold(Vec::as_slice(&source), 0, add_item)
+    }
+    slice_try_for_each() -> usize {
+        let source = values();
+        handle Slice::try_for_each(Vec::as_slice(&source), accept_item) {
+            Result::Err(item) => item,
+            Result::Ok(_) => 90
+        }
+    }
+    slice_try_fold() -> usize {
+        let source = values();
+        handle Slice::try_fold(Vec::as_slice(&source), 0, checked_add_item) {
+            Result::Err(total) => total,
+            Result::Ok(total) => total
+        }
+    }
+    slice_find_index() -> usize {
+        let source = values();
+        Option::unwrap_or(Slice::find_index(Vec::as_slice(&source), is_five), 90)
+    }
+    slice_find() -> usize {
+        let source = values();
+        handle Slice::find(Vec::as_slice(&source), is_five) {
+            Option::Some(item) => *item,
+            None => 90
+        }
+    }
+
     main() -> () { () }
 "#;
 
@@ -127,6 +226,19 @@ fn distributed_range_helpers_execute_with_o0_o3_boundary_parity() {
         ("offset_last", 7),
         ("offset_at_end", 93),
         ("offset_overflow", 94),
+        ("range_for_each", 10),
+        ("range_fold", 10),
+        ("range_try_for_each", 3),
+        ("range_try_fold", 3),
+        ("range_find", 3),
+        ("range_reversed_for_each", 7),
+        ("range_effect_fold", 10),
+        ("slice_for_each", 17),
+        ("slice_fold", 17),
+        ("slice_try_for_each", 5),
+        ("slice_try_fold", 5),
+        ("slice_find_index", 2),
+        ("slice_find", 5),
     ];
 
     for optimization_level in [

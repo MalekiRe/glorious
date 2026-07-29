@@ -2392,6 +2392,135 @@ let Range::is_empty = __g1_range_is_empty;
 let Range::contains = __g1_range_contains;
 let Range::intersection = __g1_range_intersection;
 let Range::checked_offset = __g1_range_checked_offset;
+
+// Effect-polymorphic traversal over half-open usize ranges. The open effect
+// row is inferred from the callback and forwarded unchanged by each
+// specialization. These helpers deliberately recurse over scalar cursors:
+// optimized compiler code can inline the callback and turn the tail step into
+// a direct loop without allocating an iterator or erasing its effects.
+__g1_for_range_step<F, e: EffectRow>(current: usize, end: usize, body: F)
+where F: Fn<(usize), Output=(), Effects={| e}>,
+F: Use<[0, 0]> {
+    if(current < end) {
+        body(current);
+        __g1_for_range_step(current + 1, end, body)
+    } else {
+        ()
+    }
+}
+
+for_range<F, e: EffectRow>(range: Range<usize>, body: F)
+where F: Fn<(usize), Output=(), Effects={| e}>,
+F: Use<[0, 0]> {
+    __g1_for_range_step(range.start, range.end, body)
+}
+
+__g1_try_for_range_step<E, F, e: EffectRow>(
+    current: usize,
+    end: usize,
+    body: F
+) -> Result<(), E>
+where F: Fn<(usize), Output=Result<(), E>, Effects={| e}>,
+F: Use<[0, 0]> {
+    if(current < end) {
+        handle body(current) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(_) => __g1_try_for_range_step(current + 1, end, body)
+        }
+    } else {
+        Result::Ok(())
+    }
+}
+
+try_for_range<E, F, e: EffectRow>(
+    range: Range<usize>,
+    body: F
+) -> Result<(), E>
+where F: Fn<(usize), Output=Result<(), E>, Effects={| e}>,
+F: Use<[0, 0]> {
+    __g1_try_for_range_step(range.start, range.end, body)
+}
+
+__g1_fold_range_step<A, F, e: EffectRow>(
+    current: usize,
+    end: usize,
+    accumulator: A,
+    body: F
+) -> A
+where F: Fn<(A, usize), Output=A, Effects={| e}>,
+F: Use<[0, 0]> {
+    if(current < end) {
+        __g1_fold_range_step(current + 1, end, body(accumulator, current), body)
+    } else {
+        accumulator
+    }
+}
+
+fold_range<A, F, e: EffectRow>(
+    range: Range<usize>,
+    seed: A,
+    body: F
+) -> A
+where F: Fn<(A, usize), Output=A, Effects={| e}>,
+F: Use<[0, 0]> {
+    __g1_fold_range_step(range.start, range.end, seed, body)
+}
+
+__g1_try_fold_range_step<A, E, F, e: EffectRow>(
+    current: usize,
+    end: usize,
+    accumulator: A,
+    body: F
+) -> Result<A, E>
+where F: Fn<(A, usize), Output=Result<A, E>, Effects={| e}>,
+F: Use<[0, 0]> {
+    if(current < end) {
+        handle body(accumulator, current) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(next) => __g1_try_fold_range_step(current + 1, end, next, body)
+        }
+    } else {
+        Result::Ok(accumulator)
+    }
+}
+
+try_fold_range<A, E, F, e: EffectRow>(
+    range: Range<usize>,
+    seed: A,
+    body: F
+) -> Result<A, E>
+where F: Fn<(A, usize), Output=Result<A, E>, Effects={| e}>,
+F: Use<[0, 0]> {
+    __g1_try_fold_range_step(range.start, range.end, seed, body)
+}
+
+__g1_find_range_step<F, e: EffectRow>(
+    current: usize,
+    end: usize,
+    predicate: F
+) -> Option<usize>
+where F: Fn<(usize), Output=Bool, Effects={| e}>,
+F: Use<[0, 0]> {
+    if(current < end) {
+        if(predicate(current)) {
+            Option::Some(current)
+        } else {
+            __g1_find_range_step(current + 1, end, predicate)
+        }
+    } else {
+        None
+    }
+}
+
+find_range<F, e: EffectRow>(
+    range: Range<usize>,
+    predicate: F
+) -> Option<usize>
+where F: Fn<(usize), Output=Bool, Effects={| e}>,
+F: Use<[0, 0]> {
+    __g1_find_range_step(range.start, range.end, predicate)
+}
+
 __g1_utf8_valid() -> Result<(), Utf8Error> { Result::Ok(()) }
 
 __g1_utf8_invalid(valid_up_to: usize) -> Result<(), Utf8Error> {
@@ -3278,6 +3407,202 @@ __g1_slice_iter_next<'a, T>(value: &mut SliceIter<'a, T>) -> Option<usize> {
     }
 }
 
+// Borrowed traversal mirrors the range family without manufacturing reference
+// carrying iterator states. Each helper keeps the one backing Array loan and
+// derives an element reference only after its scalar cursor proves in-bounds.
+__g1_slice_for_each_step<'a, T, F, e: EffectRow>(
+    base: &'a Array<T>,
+    start: usize,
+    index: usize,
+    length: usize,
+    body: F
+)
+where F: Fn<(&'a T), Output=(), Effects={| e}>,
+F: Use<[0, 0]> {
+    if(index < length) {
+        body(__g1_array_get_borrow_shared(base, start + index));
+        __g1_slice_for_each_step(base, start, index + 1, length, body)
+    } else {
+        ()
+    }
+}
+
+__g1_slice_for_each<'a, T, F, e: EffectRow>(value: Slice<'a, T>, body: F)
+where F: Fn<(&'a T), Output=(), Effects={| e}>,
+F: Use<[0, 0]> {
+    let Slice { base, start, length } = value;
+    __g1_slice_for_each_step(base, start, 0, length, body)
+}
+
+__g1_slice_try_for_each_step<'a, T, E, F, e: EffectRow>(
+    base: &'a Array<T>,
+    start: usize,
+    index: usize,
+    length: usize,
+    body: F
+) -> Result<(), E>
+where F: Fn<(&'a T), Output=Result<(), E>, Effects={| e}>,
+F: Use<[0, 0]> {
+    if(index < length) {
+        handle body(__g1_array_get_borrow_shared(base, start + index)) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(_) => __g1_slice_try_for_each_step(
+                base,
+                start,
+                index + 1,
+                length,
+                body
+            )
+        }
+    } else {
+        Result::Ok(())
+    }
+}
+
+__g1_slice_try_for_each<'a, T, E, F, e: EffectRow>(
+    value: Slice<'a, T>,
+    body: F
+) -> Result<(), E>
+where F: Fn<(&'a T), Output=Result<(), E>, Effects={| e}>,
+F: Use<[0, 0]> {
+    let Slice { base, start, length } = value;
+    __g1_slice_try_for_each_step(base, start, 0, length, body)
+}
+
+__g1_slice_fold_step<'a, T, A, F, e: EffectRow>(
+    base: &'a Array<T>,
+    start: usize,
+    index: usize,
+    length: usize,
+    accumulator: A,
+    body: F
+) -> A
+where F: Fn<(A, &'a T), Output=A, Effects={| e}>,
+F: Use<[0, 0]> {
+    if(index < length) {
+        __g1_slice_fold_step(
+            base,
+            start,
+            index + 1,
+            length,
+            body(accumulator, __g1_array_get_borrow_shared(base, start + index)),
+            body
+        )
+    } else {
+        accumulator
+    }
+}
+
+__g1_slice_fold<'a, T, A, F, e: EffectRow>(
+    value: Slice<'a, T>,
+    seed: A,
+    body: F
+) -> A
+where F: Fn<(A, &'a T), Output=A, Effects={| e}>,
+F: Use<[0, 0]> {
+    let Slice { base, start, length } = value;
+    __g1_slice_fold_step(base, start, 0, length, seed, body)
+}
+
+__g1_slice_try_fold_step<'a, T, A, E, F, e: EffectRow>(
+    base: &'a Array<T>,
+    start: usize,
+    index: usize,
+    length: usize,
+    accumulator: A,
+    body: F
+) -> Result<A, E>
+where F: Fn<(A, &'a T), Output=Result<A, E>, Effects={| e}>,
+F: Use<[0, 0]> {
+    if(index < length) {
+        handle body(accumulator, __g1_array_get_borrow_shared(base, start + index)) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(next) => __g1_slice_try_fold_step(
+                base,
+                start,
+                index + 1,
+                length,
+                next,
+                body
+            )
+        }
+    } else {
+        Result::Ok(accumulator)
+    }
+}
+
+__g1_slice_try_fold<'a, T, A, E, F, e: EffectRow>(
+    value: Slice<'a, T>,
+    seed: A,
+    body: F
+) -> Result<A, E>
+where F: Fn<(A, &'a T), Output=Result<A, E>, Effects={| e}>,
+F: Use<[0, 0]> {
+    let Slice { base, start, length } = value;
+    __g1_slice_try_fold_step(base, start, 0, length, seed, body)
+}
+
+__g1_slice_find_index_step<'a, T, F, e: EffectRow>(
+    base: &'a Array<T>,
+    start: usize,
+    index: usize,
+    length: usize,
+    predicate: F
+) -> Option<usize>
+where F: Fn<(&'a T), Output=Bool, Effects={| e}>,
+F: Use<[0, 0]> {
+    if(index < length) {
+        if(predicate(__g1_array_get_borrow_shared(base, start + index))) {
+            Option::Some(index)
+        } else {
+            __g1_slice_find_index_step(base, start, index + 1, length, predicate)
+        }
+    } else {
+        None
+    }
+}
+
+__g1_slice_find_index<'a, T, F, e: EffectRow>(
+    value: Slice<'a, T>,
+    predicate: F
+) -> Option<usize>
+where F: Fn<(&'a T), Output=Bool, Effects={| e}>,
+F: Use<[0, 0]> {
+    let Slice { base, start, length } = value;
+    __g1_slice_find_index_step(base, start, 0, length, predicate)
+}
+
+__g1_slice_find_step<'a, T, F, e: EffectRow>(
+    base: &'a Array<T>,
+    start: usize,
+    index: usize,
+    length: usize,
+    predicate: F
+) -> Option<&'a T>
+where F: Fn<(&'a T), Output=Bool, Effects={| e}>,
+F: Use<[0, 0]> {
+    if(index < length) {
+        let item = __g1_array_get_borrow_shared(base, start + index);
+        if(predicate(item)) {
+            Option::Some(item)
+        } else {
+            __g1_slice_find_step(base, start, index + 1, length, predicate)
+        }
+    } else {
+        None
+    }
+}
+
+__g1_slice_find<'a, T, F, e: EffectRow>(
+    value: Slice<'a, T>,
+    predicate: F
+) -> Option<&'a T>
+where F: Fn<(&'a T), Output=Bool, Effects={| e}>,
+F: Use<[0, 0]> {
+    let Slice { base, start, length } = value;
+    __g1_slice_find_step(base, start, 0, length, predicate)
+}
+
 __g1_slice_mut_len<'a, T>(value: &SliceMut<'a, T>) -> usize { value.length }
 
 __g1_slice_mut_is_empty<'a, T>(value: &SliceMut<'a, T>) -> Bool {
@@ -4016,6 +4341,12 @@ let Slice::get = __g1_slice_get;
 let Slice::first = __g1_slice_first;
 let Slice::subslice = __g1_slice_subslice;
 let Slice::iter = __g1_slice_iter;
+let Slice::for_each = __g1_slice_for_each;
+let Slice::try_for_each = __g1_slice_try_for_each;
+let Slice::fold = __g1_slice_fold;
+let Slice::try_fold = __g1_slice_try_fold;
+let Slice::find_index = __g1_slice_find_index;
+let Slice::find = __g1_slice_find;
 let SliceIter::len = __g1_slice_iter_len;
 let SliceIter::is_empty = __g1_slice_iter_is_empty;
 let SliceIter::next = __g1_slice_iter_next;

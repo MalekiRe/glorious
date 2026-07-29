@@ -204,7 +204,16 @@ fn integer_comparisons_lower_to_each_frozen_primitive_and_source_bool() {
 
 #[test]
 fn comparison_operands_remain_left_to_right() {
-    let artifact = compile_source_to_bytecode("ordered-comparison.glorious", SOURCE).unwrap();
+    // O2 may inline these pure helpers completely. O1 retains the calls so
+    // their instruction order directly tests the lowering order.
+    let artifact = compile_source_to_bytecode_with_options(
+        "ordered-comparison.glorious",
+        SOURCE,
+        CompileOptions {
+            optimization_level: OptimizationLevel::O1,
+        },
+    )
+    .unwrap();
     let ordered = &artifact.functions[function(&artifact, "ordered") as usize];
     let ordered_code = code(&artifact, ordered);
     let calls = ordered_code

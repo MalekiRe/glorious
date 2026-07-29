@@ -2459,6 +2459,51 @@ impl<'a> Typer<'a> {
                             .map(|shape| shape.result.clone())
                     })
             }
+            ExprKind::Field(subject, field) => match self.obvious_context_type(subject)? {
+                ProvisionalType::Shared(referent) | ProvisionalType::Unique(referent) => {
+                    match *referent {
+                        ProvisionalType::Tuple(elements) => {
+                            elements.get(field.parse::<usize>().ok()?).cloned()
+                        }
+                        ProvisionalType::Nominal(key) => {
+                            self.tables
+                                .nominals
+                                .get(&key)
+                                .and_then(|shape| match shape {
+                                    NominalShape::Struct(fields) => fields
+                                        .iter()
+                                        .find(|(name, _)| name == field)
+                                        .map(|(_, ty)| ty.clone()),
+                                    NominalShape::Enum(_) => None,
+                                })
+                        }
+                        _ => None,
+                    }
+                }
+                ProvisionalType::Tuple(elements) => {
+                    elements.get(field.parse::<usize>().ok()?).cloned()
+                }
+                ProvisionalType::Nominal(key) => {
+                    self.tables
+                        .nominals
+                        .get(&key)
+                        .and_then(|shape| match shape {
+                            NominalShape::Struct(fields) => fields
+                                .iter()
+                                .find(|(name, _)| name == field)
+                                .map(|(_, ty)| ty.clone()),
+                            NominalShape::Enum(_) => None,
+                        })
+                }
+                _ => None,
+            },
+            ExprKind::Binary {
+                lhs,
+                rhs,
+                op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem,
+            } => self
+                .obvious_context_type(lhs)
+                .or_else(|| self.obvious_context_type(rhs)),
             ExprKind::Unit => Some(predefined(UNIT)),
             ExprKind::String(_) => Some(ProvisionalType::Predefined("Text".into())),
             ExprKind::Char(_) => Some(ProvisionalType::Predefined("Char".into())),
@@ -2469,7 +2514,6 @@ impl<'a> Typer<'a> {
             | ExprKind::List(_)
             | ExprKind::Tuple(_)
             | ExprKind::Struct { .. }
-            | ExprKind::Field(_, _)
             | ExprKind::Perform { .. }
             | ExprKind::Handle { .. }
             | ExprKind::Unary { .. }
@@ -2546,7 +2590,12 @@ impl<'a> Typer<'a> {
             }
             ExprKind::Field(subject, field) => {
                 let subject = self.expression(subject, None);
-                let selection = match subject.ty.as_ref() {
+                let (projected, through_reference) = match subject.ty.as_ref() {
+                    Some(ProvisionalType::Shared(referent))
+                    | Some(ProvisionalType::Unique(referent)) => (Some(referent.as_ref()), true),
+                    ty => (ty, false),
+                };
+                let selection = match projected {
                     Some(ProvisionalType::Tuple(elements)) => {
                         field.parse::<usize>().ok().and_then(|index| {
                             elements.get(index).cloned().map(|ty| (index as u32, ty))
@@ -2567,6 +2616,9 @@ impl<'a> Typer<'a> {
                 let Some((field, ty)) = selection else {
                     return self.node(source, None, TypedExprKind::Unsupported(vec![subject]));
                 };
+                if through_reference {
+                    return self.node(source, Some(ty), TypedExprKind::Unsupported(vec![subject]));
+                }
                 self.node(
                     source,
                     Some(ty),
@@ -2601,6 +2653,18 @@ impl<'a> Typer<'a> {
             {
                 self.borrow(source, operand, *op == UnaryOp::BorrowUnique)
             }
+            ExprKind::Unary {
+                op: UnaryOp::Dereference,
+                operand,
+            } => {
+                let operand = self.expression(operand, None);
+                let ty = match operand.ty.as_ref() {
+                    Some(ProvisionalType::Shared(referent))
+                    | Some(ProvisionalType::Unique(referent)) => Some(referent.as_ref().clone()),
+                    _ => None,
+                };
+                self.node(source, ty, TypedExprKind::Unsupported(vec![operand]))
+            }
             ExprKind::Unary { operand, .. } => {
                 let operand = self.expression(operand, None);
                 self.node(source, None, TypedExprKind::Unsupported(vec![operand]))
@@ -2610,10 +2674,63 @@ impl<'a> Typer<'a> {
                 rhs,
                 op: BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem,
             } => {
-                let ty = expected.cloned().unwrap_or_else(|| predefined(I64));
+                let ty = expected
+                    .cloned()
+                    .or_else(|| self.obvious_context_type(lhs))
+                    .or_else(|| self.obvious_context_type(rhs))
+                    .unwrap_or_else(|| predefined(I64));
                 let lhs = self.expression(lhs, Some(&ty));
                 let rhs = self.expression(rhs, Some(&ty));
                 self.node(source, Some(ty), TypedExprKind::Primitive(vec![lhs, rhs]))
+            }
+            ExprKind::Binary {
+                lhs,
+                rhs,
+                op:
+                    BinaryOp::Eq
+                    | BinaryOp::NotEq
+                    | BinaryOp::Lt
+                    | BinaryOp::LtEq
+                    | BinaryOp::Gt
+                    | BinaryOp::GtEq,
+            } => {
+                fn numeric_literal(expression: &Expr) -> bool {
+                    match &expression.kind {
+                        ExprKind::Int(_) | ExprKind::Float(_) => true,
+                        ExprKind::Move(value) => numeric_literal(value),
+                        _ => false,
+                    }
+                }
+                let (lhs, rhs) = if numeric_literal(lhs) && !numeric_literal(rhs) {
+                    let rhs = self.expression(rhs, None);
+                    let operand = rhs.ty.clone().unwrap_or_else(|| predefined(I64));
+                    let lhs = self.expression(lhs, Some(&operand));
+                    (lhs, rhs)
+                } else {
+                    let lhs = self.expression(lhs, None);
+                    let operand = lhs.ty.clone().unwrap_or_else(|| predefined(I64));
+                    let rhs = self.expression(rhs, Some(&operand));
+                    (lhs, rhs)
+                };
+                let raw = self.node(
+                    source,
+                    Some(predefined_named("u32")),
+                    TypedExprKind::Primitive(vec![lhs, rhs]),
+                );
+                let declaration = DeclarationKey::Function("__g1_bool_from_u32".into());
+                let result = self
+                    .tables
+                    .functions
+                    .get("__g1_bool_from_u32")
+                    .map(|shape| shape.result.clone());
+                self.node(
+                    source,
+                    result,
+                    TypedExprKind::Call {
+                        declaration,
+                        args: vec![raw],
+                    },
+                )
             }
             ExprKind::Block(statements) => self.block(source, statements, expected),
             ExprKind::Perform {
@@ -2721,15 +2838,6 @@ impl<'a> Typer<'a> {
                     source,
                     handler_result,
                     TypedExprKind::EffectBoundary(children),
-                )
-            }
-            ExprKind::Binary { lhs, rhs, .. } => {
-                let lhs = self.expression(lhs, None);
-                let rhs = self.expression(rhs, None);
-                self.node(
-                    source,
-                    expected.cloned(),
-                    TypedExprKind::Unsupported(vec![lhs, rhs]),
                 )
             }
             // Closures (inferred and explicitly typed) receive their real

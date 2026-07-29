@@ -2260,6 +2260,79 @@ fn contains_unique_reference_shape(ty: &ProvisionalType) -> bool {
     provisional_signature_type_any(ty, &mut |ty| matches!(ty, ProvisionalType::Unique(_)))
 }
 
+fn bind_callable_effects(
+    formal: &CallableShape,
+    actual: &CallableShape,
+    substitutions: &mut BTreeMap<GenericParamKey, SpecializationArgument>,
+) -> bool {
+    if formal.infer_effects {
+        return true;
+    }
+    if actual.infer_effects {
+        return false;
+    }
+    let mut actual_effects = actual.effects.clone();
+    let actual_open = if let Some(tail) = &actual.effect_tail {
+        match substitutions.get(tail) {
+            Some(SpecializationArgument::EffectRow(residual)) => {
+                actual_effects.extend(residual.iter().cloned());
+                false
+            }
+            Some(_) => return false,
+            None => true,
+        }
+    } else {
+        false
+    };
+    actual_effects.sort();
+    actual_effects.dedup();
+    let mut unmatched = (0..actual_effects.len()).collect::<BTreeSet<_>>();
+    for expected in &formal.effects {
+        let mut matched = None;
+        for index in unmatched.iter().copied() {
+            let found = &actual_effects[index];
+            if expected.declaration != found.declaration
+                || expected.arguments.len() != found.arguments.len()
+            {
+                continue;
+            }
+            let mut trial = substitutions.clone();
+            if expected
+                .arguments
+                .iter()
+                .zip(&found.arguments)
+                .all(|(expected, found)| bind(expected, found, &mut trial))
+            {
+                matched = Some((index, trial));
+                break;
+            }
+        }
+        let Some((index, trial)) = matched else {
+            return false;
+        };
+        *substitutions = trial;
+        unmatched.remove(&index);
+    }
+    let residual = unmatched
+        .into_iter()
+        .map(|index| actual_effects[index].clone())
+        .collect::<Vec<_>>();
+    let Some(tail) = &formal.effect_tail else {
+        return !actual_open && residual.is_empty();
+    };
+    if actual_open {
+        return true;
+    }
+    match substitutions.get(tail) {
+        Some(SpecializationArgument::EffectRow(existing)) => existing == &residual,
+        Some(_) => false,
+        None => {
+            substitutions.insert(tail.clone(), SpecializationArgument::EffectRow(residual));
+            true
+        }
+    }
+}
+
 fn bind(
     formal: &ProvisionalType,
     actual: &ProvisionalType,
@@ -2285,16 +2358,9 @@ fn bind(
         }
         ProvisionalType::Callable(left) => matches!(actual, ProvisionalType::Callable(right)
         if left.params.len() == right.params.len()
-            && (left.infer_effects || (!right.infer_effects && left.effects.len() == right.effects.len()))
             && left.params.iter().zip(&right.params).all(|(left, right)| bind(left, right, substitutions))
             && bind(&left.result, &right.result, substitutions)
-            && (left.infer_effects || left.effects.iter().zip(&right.effects).all(|(left, right)| {
-                left.declaration == right.declaration
-                    && left.arguments.len() == right.arguments.len()
-                    && left.arguments.iter().zip(&right.arguments).all(|(left, right)| {
-                        bind(left, right, substitutions)
-                    })
-            }))),
+            && bind_callable_effects(left, right, substitutions)),
         ProvisionalType::Nominal(left) => matches!(actual, ProvisionalType::Nominal(right)
             if left.declaration == right.declaration
                 && left.arguments.len() == right.arguments.len()
@@ -5399,7 +5465,7 @@ impl<'a> Walker<'a> {
         }
         let inferred_effects =
             direct_closure_effects(body, &|site, effect| self.effect_instance(site, effect));
-        if let Some(declared) = &declared {
+        let actual_effects = if let Some(declared) = &declared {
             let declared_effects = declared.effects.iter().cloned().collect::<BTreeSet<_>>();
             if !inferred_effects.is_subset(&declared_effects) {
                 let missing = inferred_effects
@@ -5412,7 +5478,10 @@ impl<'a> Walker<'a> {
                 ));
                 return None;
             }
-        }
+            declared_effects
+        } else {
+            inferred_effects
+        };
         let expected_effects = expected
             .effects
             .iter()
@@ -5429,9 +5498,9 @@ impl<'a> Walker<'a> {
             .collect::<Option<BTreeSet<_>>>()?;
         if !expected.infer_effects
             && expected.effect_tail.is_none()
-            && !inferred_effects.is_subset(&expected_effects)
+            && !actual_effects.is_subset(&expected_effects)
         {
-            let missing = inferred_effects
+            let missing = actual_effects
                 .difference(&expected_effects)
                 .map(|effect| effect.declaration.0.as_str())
                 .collect::<Vec<_>>()
@@ -5442,7 +5511,7 @@ impl<'a> Walker<'a> {
             return None;
         }
         let effects = if let Some(tail) = &expected.effect_tail {
-            let residual = inferred_effects
+            let residual = actual_effects
                 .difference(&expected_effects)
                 .cloned()
                 .collect::<Vec<_>>();
@@ -5462,9 +5531,9 @@ impl<'a> Walker<'a> {
                     substitutions.insert(tail.clone(), SpecializationArgument::EffectRow(residual));
                 }
             }
-            expected_effects.union(&inferred_effects).cloned().collect()
+            expected_effects.union(&actual_effects).cloned().collect()
         } else if expected.infer_effects {
-            inferred_effects.into_iter().collect()
+            actual_effects.into_iter().collect()
         } else {
             expected.effects.clone()
         };
@@ -6582,9 +6651,16 @@ impl<'a> Walker<'a> {
         // records every discovery edge exactly once.
         for defaulting in [false, true] {
             for (argument, formal) in args.iter().zip(&template.params) {
-                if matches!(formal, ProvisionalType::Callable(_))
-                    || substitute(formal, &substitutions).is_some_and(|ty| ground(&ty))
-                {
+                if matches!(formal, ProvisionalType::Callable(_)) {
+                    if !defaulting && let Some(actual) = self.typed_closure_shape(argument) {
+                        let mut trial = substitutions.clone();
+                        if bind(formal, &ProvisionalType::Callable(actual), &mut trial) {
+                            substitutions = trial;
+                        }
+                    }
+                    continue;
+                }
+                if substitute(formal, &substitutions).is_some_and(|ty| ground(&ty)) {
                     continue;
                 }
                 if let Some((actual, is_default)) = self.obvious_argument_type(argument)
