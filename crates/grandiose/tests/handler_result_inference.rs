@@ -118,6 +118,28 @@ fn complementary_generic_constructors_infer_a_let_bound_handler_result() {
 }
 
 #[test]
+fn nested_generic_handler_refines_payload_types_for_comparison() {
+    let source = r#"
+        same(left: Option<usize>, right: Option<usize>) -> Bool {
+            handle left {
+                Result::Err(_) => false,
+                Result::Ok(left_index) => handle right {
+                    Result::Err(_) => false,
+                    Result::Ok(right_index) => left_index == right_index
+                }
+            }
+        }
+
+        main() -> () { () }
+    "#;
+    grandiose::compile_source_to_bytecode(
+        "handler-nested-generic-payload-comparison.glorious",
+        source,
+    )
+    .unwrap();
+}
+
+#[test]
 fn planned_generic_control_shape_contextualizes_a_sibling_literal() {
     let source = r#"
         mod helper {

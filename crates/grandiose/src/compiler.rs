@@ -9686,7 +9686,8 @@ pub(crate) fn normalize_ground_trait_methods(
         ty: &ReceiverType,
         locals: &mut BTreeMap<String, ReceiverType>,
     ) {
-        if let ReceiverType::Shared(referent) | ReceiverType::Unique(referent) = ty {
+        let ty = expand_receiver_alias(program, ty, &mut BTreeSet::new());
+        if let ReceiverType::Shared(referent) | ReceiverType::Unique(referent) = &ty {
             let mut borrowed = BTreeMap::new();
             bind_refinement_pattern(program, pattern, referent, &mut borrowed);
             locals.extend(
@@ -9701,7 +9702,7 @@ pub(crate) fn normalize_ground_trait_methods(
                 locals.insert(name.clone(), ty.clone());
             }
             PatternKind::Tuple { elements, rest } => {
-                let ReceiverType::Tuple(types) = ty else {
+                let ReceiverType::Tuple(types) = &ty else {
                     return;
                 };
                 for (position, element) in elements.iter().enumerate() {
@@ -9712,7 +9713,7 @@ pub(crate) fn normalize_ground_trait_methods(
                 }
             }
             PatternKind::Variant { path, fields, rest } if path.len() == 2 => {
-                let (declaration, arguments) = match ty {
+                let (declaration, arguments) = match &ty {
                     ReceiverType::Name(name) => (name.as_str(), &[][..]),
                     ReceiverType::Application(constructor, arguments) => {
                         let ReceiverType::Name(name) = constructor.as_ref() else {
