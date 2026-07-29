@@ -4732,17 +4732,19 @@ finalize_local_types(
     } else { () }
 }
 
-resolved_local_plus_one(
+resolved_core_local(
     map: &ResolutionMap,
     parameter_count: u32,
     expression: u32
-) -> u32 {
+) -> Option<CoreLocalId> {
     handle elaboration_target_at(map, expression) {
         ElaborationTarget::Parameter(id) =>
-            Id::to_u32(id) + 1,
+            Option::Some(core_local_id_from_u32(Id::to_u32(id))),
         ElaborationTarget::Local(id) =>
-            parameter_count + Id::to_u32(id) + 1,
-        _ => 0
+            Option::Some(core_local_id_from_u32(
+                parameter_count + Id::to_u32(id)
+            )),
+        _ => None
     }
 }
 
@@ -4755,16 +4757,19 @@ record_last_local_expressions(
 ) {
     handle super::bodies::expression_kind_at(body, expression) {
         1 => {
-            let local_plus_one = resolved_local_plus_one(
+            let local = resolved_core_local(
                 map,
                 parameter_count,
                 expression
             );
-            if(local_plus_one == 0) { () } else {
-                *Vec::index_mut(
-                    &mut *last_expressions,
-                    usize_from_u32(local_plus_one - 1)
-                ) = Option::Some(Id::from_u32(expression));
+            handle local {
+                Result::Err(_) => (),
+                Result::Ok(id) => {
+                    *Vec::index_mut(
+                        &mut *last_expressions,
+                        Id::to_usize(id)
+                    ) = Option::Some(Id::from_u32(expression));
+                }
             }
         },
         _ => record_last_local_expression_children(
@@ -4861,21 +4866,25 @@ local_occurrences_in_expression(
     map: &ResolutionMap,
     parameter_count: u32,
     expression: u32,
-    local_plus_one: u32
+    local: CoreLocalId
 ) -> u32 {
     handle super::bodies::expression_kind_at(body, expression) {
-        1 => if(resolved_local_plus_one(
+        1 => handle resolved_core_local(
             map,
             parameter_count,
             expression
-        ) == local_plus_one) { 1 } else { 0 },
+        ) {
+            Result::Err(_) => 0,
+            Result::Ok(found) =>
+                if(found == local) { 1 } else { 0 }
+        },
         _ => local_occurrences_in_children(
             body,
             map,
             parameter_count,
             expression,
             0,
-            local_plus_one
+            local
         )
     }
 }
@@ -4886,7 +4895,7 @@ local_occurrences_in_children(
     parameter_count: u32,
     expression: u32,
     ordinal: u32,
-    local_plus_one: u32
+    local: CoreLocalId
 ) -> u32 {
     if(ordinal < super::bodies::expression_child_count_at(
         body,
@@ -4896,14 +4905,14 @@ local_occurrences_in_children(
             map,
             parameter_count,
             super::bodies::expression_child_at(body, expression, ordinal),
-            local_plus_one
+            local
         ) + local_occurrences_in_children(
             body,
             map,
             parameter_count,
             expression,
             ordinal + 1,
-            local_plus_one
+            local
         ) } else { 0 }
 }
 
@@ -4920,7 +4929,7 @@ struct_has_repeated_local(
             map,
             parameter_count,
             expression,
-            u32_from_usize(local) + 1
+            core_local_id_from_usize(local)
         ) > 1) { true } else { struct_has_repeated_local(
                 body,
                 map,
@@ -4996,25 +5005,28 @@ mark_final_transfer_candidates(
 ) {
     handle super::bodies::expression_kind_at(body, expression) {
         1 => {
-            let local_plus_one = resolved_local_plus_one(
+            let local = resolved_core_local(
                 map,
                 parameter_count,
                 expression
             );
-            if(local_plus_one == 0) { () } else {
-                handle *Vec::index(
-                    last_expressions,
-                    usize_from_u32(local_plus_one - 1)
-                ) {
-                    Result::Err(_) => (),
-                    Result::Ok(last) => if(
-                        Id::to_u32(last) == expression
+            handle local {
+                Result::Err(_) => (),
+                Result::Ok(id) => {
+                    handle *Vec::index(
+                        last_expressions,
+                        Id::to_usize(id)
                     ) {
-                        *Vec::index_mut(
-                            &mut *output,
-                            usize_from_u32(expression)
-                        ) = 1;
-                    } else { () }
+                        Result::Err(_) => (),
+                        Result::Ok(last) => if(
+                            Id::to_u32(last) == expression
+                        ) {
+                            *Vec::index_mut(
+                                &mut *output,
+                                usize_from_u32(expression)
+                            ) = 1;
+                        } else { () }
+                    }
                 }
             }
         },

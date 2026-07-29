@@ -37,7 +37,7 @@ pub struct ResolvedBody {
 pub struct ResolutionError { code: u8, token: usize, related: usize }
 
 struct FunctionSearch { first: Option<u32>, count: u32 }
-struct NominalSearch { first_plus_one: u32, count: u32 }
+struct NominalSearch { first: Option<u32>, count: u32 }
 struct Binding { name: Id<String>, target: ResolvedTarget }
 pub struct ResolutionIndex {
     functions: HashMap<(usize, u32), FunctionSearch>,
@@ -368,11 +368,10 @@ search_structs(
                             }) {
                         Result::Ok(
                             NominalSearch {
-                                first_plus_one:
-                                    if(found.count == 0) {
-                                        u32_from_usize(current) + 1
+                                first: if(found.count == 0) {
+                                        Result::Ok(u32_from_usize(current))
                                     } else {
-                                        found.first_plus_one
+                                        found.first
                                     },
                                 count: found.count + 1
                             }
@@ -393,26 +392,31 @@ finish_struct_name(
 ) -> Result<ResolvedTarget, ResolutionError> {
     handle found.count {
         0 => Result::Err(resolution_error(1, token, token)),
-        1 => {
-            let index = found.first_plus_one - 1;
-            handle super::headers::struct_at(
-                nominal,
-                usize_from_u32(index)
-            ) {
-                Result::Err(_) => Result::Err(
-                    resolution_error(3, token, usize_from_u32(index))
-                ),
-                Result::Ok(header) => Result::Ok(ResolvedTarget::Struct(
-                    super::headers::struct_shell(header),
-                    index
-                ))
+        1 => handle found.first {
+            Result::Err(_) => Result::Err(resolution_error(3, token, token)),
+            Result::Ok(index) => {
+                handle super::headers::struct_at(
+                    nominal,
+                    usize_from_u32(index)
+                ) {
+                    Result::Err(_) => Result::Err(
+                        resolution_error(3, token, usize_from_u32(index))
+                    ),
+                    Result::Ok(header) => Result::Ok(ResolvedTarget::Struct(
+                        super::headers::struct_shell(header),
+                        index
+                    ))
+                }
             }
         },
-        _ => Result::Err(resolution_error(
-            2,
-            token,
-            usize_from_u32(found.first_plus_one - 1)
-        ))
+        _ => handle found.first {
+            Result::Err(_) => Result::Err(resolution_error(3, token, token)),
+            Result::Ok(index) => Result::Err(resolution_error(
+                2,
+                token,
+                usize_from_u32(index)
+            ))
+        }
     }
 }
 
@@ -430,7 +434,7 @@ resolve_struct_name_in(
         module_plus_one,
         token,
         0,
-        NominalSearch { first_plus_one: 0, count: 0 }
+        NominalSearch { first: Result::Err(()), count: 0 }
     )
 }
 
@@ -498,10 +502,10 @@ search_enums(
                             }) {
                         Result::Ok(
                             NominalSearch {
-                                first_plus_one: if(found.count == 0) {
-                                    u32_from_usize(current) + 1
+                                first: if(found.count == 0) {
+                                    Result::Ok(u32_from_usize(current))
                                 } else {
-                                    found.first_plus_one
+                                    found.first
                                 },
                                 count: found.count + 1
                             }
@@ -564,42 +568,49 @@ finish_variant_name(
 ) -> Result<ResolvedTarget, ResolutionError> {
     handle found.count {
         0 => Result::Err(resolution_error(1, enum_token, enum_token)),
-        1 => {
-            let enum_index = found.first_plus_one - 1;
-            handle super::headers::enum_at(
-                nominal,
-                usize_from_u32(enum_index)
-            ) {
-                Result::Err(_) => Result::Err(resolution_error(
-                    3,
-                    enum_token,
+        1 => handle found.first {
+            Result::Err(_) =>
+                Result::Err(resolution_error(3, enum_token, enum_token)),
+            Result::Ok(enum_index) => {
+                handle super::headers::enum_at(
+                    nominal,
                     usize_from_u32(enum_index)
-                )),
-                Result::Ok(header) => {
-                    let variants = super::headers::enum_variants(header);
-                    let variant = try(
-                        find_variant(
-                            nominal,
-                            super::headers::range_start(variants),
-                            super::headers::range_count(variants),
-                            variant_name,
-                            variant_token,
-                            0
-                        ),
-                        @finish_variant_name
-                    );
-                    Result::Ok(ResolvedTarget::Variant(
-                        super::headers::enum_shell(header),
-                        variant
-                    ))
+                ) {
+                    Result::Err(_) => Result::Err(resolution_error(
+                        3,
+                        enum_token,
+                        usize_from_u32(enum_index)
+                    )),
+                    Result::Ok(header) => {
+                        let variants = super::headers::enum_variants(header);
+                        let variant = try(
+                            find_variant(
+                                nominal,
+                                super::headers::range_start(variants),
+                                super::headers::range_count(variants),
+                                variant_name,
+                                variant_token,
+                                0
+                            ),
+                            @finish_variant_name
+                        );
+                        Result::Ok(ResolvedTarget::Variant(
+                            super::headers::enum_shell(header),
+                            variant
+                        ))
+                    }
                 }
             }
         },
-        _ => Result::Err(resolution_error(
-            2,
-            enum_token,
-            usize_from_u32(found.first_plus_one - 1)
-        ))
+        _ => handle found.first {
+            Result::Err(_) =>
+                Result::Err(resolution_error(3, enum_token, enum_token)),
+            Result::Ok(enum_index) => Result::Err(resolution_error(
+                2,
+                enum_token,
+                usize_from_u32(enum_index)
+            ))
+        }
     }
 }
 
@@ -619,7 +630,7 @@ resolve_variant_name(
         module_plus_one,
         enum_token,
         0,
-        NominalSearch { first_plus_one: 0, count: 0 }
+        NominalSearch { first: Result::Err(()), count: 0 }
     ), @resolve_variant_name);
     if(found.count == 0
         and { module_plus_one != 0 }) {
@@ -630,7 +641,7 @@ resolve_variant_name(
             0,
             enum_token,
             0,
-            NominalSearch { first_plus_one: 0, count: 0 }
+            NominalSearch { first: Result::Err(()), count: 0 }
         ), @resolve_variant_name);
         finish_variant_name(
             nominal,
