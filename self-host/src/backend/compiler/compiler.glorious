@@ -2,6 +2,7 @@
 // ownership lowering, and canonical verified-bytecode emission.
 
 use super::super::frontend::elaboration::InterfaceTypeView;
+use super::super::frontend::elaboration::InterfaceNominalView;
 
 pub struct CompileError { code: u8, detail: u32 }
 
@@ -184,11 +185,82 @@ collect_tuple_elements(
     } else { () }
 }
 
+interface_name(
+    headers:
+        &super::super::frontend::headers::ParsedHeaders,
+    raw: u32,
+    detail: u32
+) -> Result<String, CompileError> {
+    handle super::super::frontend::lexer::lexeme(
+        super::super::frontend::headers::parsed_source(headers),
+        Id::from_u32(raw)
+    ) {
+        Result::Err(_) => Result::Err(error(10, detail)),
+        Result::Ok(found) => Result::Ok(*found)
+    }
+}
+
+collect_struct_fields(
+    headers:
+        &super::super::frontend::headers::ParsedHeaders,
+    interfaces:
+        &super::super::frontend::elaboration::TypedInterfaces,
+    start: u32,
+    count: u32,
+    ordinal: u32,
+    type_names: &mut Vec<String>,
+    names: &mut Vec<u32>,
+    types: &mut Vec<u32>
+) -> Result<(), CompileError> {
+    if(ordinal < count) {
+        let field =
+            super::super::frontend::elaboration::interface_field_at_view(
+                interfaces,
+                usize_from_u32(start + ordinal)
+            );
+        let name = try(interface_name(
+                headers,
+                super::super::frontend::elaboration::
+                    interface_field_view_name(&field),
+                start + ordinal
+            ), @collect_struct_fields);
+        Vec::push(
+            &mut *names,
+            checked_u32(Vec::len(&*type_names))
+        );
+        Vec::push(&mut *type_names, name);
+        Vec::push(
+            &mut *types,
+            super::lowering::artifact_type_id(
+                super::super::frontend::elaboration::
+                    interface_field_view_type(&field)
+            )
+        );
+        collect_struct_fields(
+            headers,
+            interfaces,
+            start,
+            count,
+            ordinal + u32_value(1),
+            type_names,
+            names,
+            types
+        )
+    } else {
+        Result::Ok(())
+    }
+}
+
 collect_types(
+    headers:
+        &super::super::frontend::headers::ParsedHeaders,
+    declarations:
+        &super::super::frontend::scanner::DeclarationIndex,
     interfaces:
         &super::super::frontend::elaboration::TypedInterfaces,
     index: usize,
-    output: &mut Vec<super::lowering::StageType>
+    output: &mut Vec<super::lowering::StageType>,
+    type_names: &mut Vec<String>
 ) -> Result<(), CompileError> {
     if(index <
         super::super::frontend::elaboration::interface_type_count(interfaces)
@@ -217,7 +289,66 @@ collect_types(
                         ) { 1 } else { 0 }
                     )
                 );
-                collect_types(interfaces, index + usize_value(1), output)
+                collect_types(
+                    headers,
+                    declarations,
+                    interfaces,
+                    index + usize_value(1),
+                    output,
+                    type_names
+                )
+            },
+            InterfaceTypeView::Nominal(nominal) => handle
+                super::super::frontend::elaboration::
+                    interface_nominal_at_view(
+                        interfaces,
+                        usize_from_u32(nominal)
+                    ) {
+                InterfaceNominalView::Struct(shell, start, count) => {
+                    let name = try(
+                        function_name(headers, declarations, shell),
+                        @collect_types
+                    );
+                    let name_index = checked_u32(Vec::len(&*type_names));
+                    Vec::push(&mut *type_names, name);
+                    let field_names = Vec::new();
+                    let field_types = Vec::new();
+                    try(collect_struct_fields(
+                        headers,
+                        interfaces,
+                        start,
+                        count,
+                        0,
+                        type_names,
+                        &mut field_names,
+                        &mut field_types
+                    ), @collect_types);
+                    Vec::push(
+                        &mut *output,
+                        super::lowering::struct_type(
+                            name_index,
+                            field_names,
+                            field_types,
+                            if(
+                                super::super::frontend::elaboration::
+                                    interface_type_flags_at(
+                                        interfaces,
+                                        index
+                                    ) % u32_value(2) == u32_value(1)
+                            ) { 1 } else { 0 }
+                        )
+                    );
+                    collect_types(
+                        headers,
+                        declarations,
+                        interfaces,
+                        index + usize_value(1),
+                        output,
+                        type_names
+                    )
+                },
+                InterfaceNominalView::Enum(_, _, _) =>
+                    Result::Err(error(10, checked_u32(index)))
             },
             _ => Result::Err(error(10, checked_u32(index)))
         }
@@ -237,6 +368,7 @@ compile_interfaces(
 ) -> Result<Bytes, CompileError> {
     let functions = Vec::new();
     let types = Vec::new();
+    let type_names = Vec::new();
     try(lower_functions(
         original,
         headers,
@@ -248,11 +380,18 @@ compile_interfaces(
     // Body elaboration interns structural types into the shared interface
     // arena, so freeze the emitted type table only after every body is typed.
     try(collect_types(
+        headers,
+        declarations,
         &interfaces,
         usize_value(14),
-        &mut types
+        &mut types,
+        &mut type_names
     ), @compile_interfaces);
-    let program = super::lowering::finish_program(functions, types);
+    let program = super::lowering::finish_program(
+        functions,
+        types,
+        type_names
+    );
     let entry = find_entry(&program, 0);
     handle super::emission::encode(&program, entry) {
         Result::Err(found) => Result::Err(error(

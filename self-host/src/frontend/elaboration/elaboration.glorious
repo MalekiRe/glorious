@@ -232,6 +232,17 @@ pub enum InterfaceTypeView {
 
 impl Use<[0, *]> for InterfaceTypeView {}
 
+pub enum InterfaceNominalView {
+    Struct(u32, u32, u32),
+    Enum(u32, u32, u32)
+}
+
+impl Use<[0, *]> for InterfaceNominalView {}
+
+pub struct InterfaceFieldView { name: u32, ty: u32 }
+
+impl Use<[0, *]> for InterfaceFieldView {}
+
 pub enum CoreValueView {
     Unit(u32),
     Integer(u32, u32),
@@ -708,6 +719,30 @@ pub interface_nominal_count(value: &TypedInterfaces) -> usize {
     Arena::len(&value.nominals)
 }
 
+pub interface_nominal_at_view(
+    value: &TypedInterfaces,
+    index: usize
+) -> InterfaceNominalView {
+    let nominal = interface_nominal_at(
+        value,
+        interface_nominal_id_from_usize(index)
+    );
+    handle nominal.kind {
+        InterfaceNominalKind::Struct(range) =>
+            InterfaceNominalView::Struct(
+                nominal.shell,
+                range.start,
+                range.count
+            ),
+        InterfaceNominalKind::Enum(range) =>
+            InterfaceNominalView::Enum(
+                nominal.shell,
+                range.start,
+                range.count
+            )
+    }
+}
+
 pub interface_nominal_word_at(
     value: &TypedInterfaces,
     index: usize,
@@ -736,6 +771,28 @@ pub interface_nominal_word_at(
 
 pub interface_field_count(value: &TypedInterfaces) -> usize {
     Arena::len(&value.fields)
+}
+
+pub interface_field_at_view(
+    value: &TypedInterfaces,
+    index: usize
+) -> InterfaceFieldView {
+    let field = interface_field_at(
+        value,
+        interface_field_id_from_usize(index)
+    );
+    InterfaceFieldView {
+        name: field.name,
+        ty: Id::to_u32(field.ty)
+    }
+}
+
+pub interface_field_view_name(value: &InterfaceFieldView) -> u32 {
+    value.name
+}
+
+pub interface_field_view_type(value: &InterfaceFieldView) -> u32 {
+    value.ty
 }
 
 pub interface_field_word_at(
@@ -2915,6 +2972,28 @@ materialize_operand(
     }
 }
 
+materialize_ordered_operand(
+    value: &mut BodyBuilder,
+    found: Elaborated,
+    wrappers: &mut Vec<LetWrapper>
+) -> CoreValueId {
+    let ty = found.type_id;
+    let computation = as_computation(value, found);
+    let local = push_local_type(
+        &mut value.local_types,
+        Option::Some(ty)
+    );
+    Vec::push(&mut *wrappers, LetWrapper {
+        local: local,
+        initializer: computation
+    });
+    push_value(
+        value,
+        ty,
+        CoreValueKind::Local(local, CoreLocalAccess::Move)
+    )
+}
+
 embed_operand(value: &mut BodyBuilder, found: Elaborated) -> CoreValueId {
     handle found.form {
         ElaboratedForm::Value(core) => core,
@@ -3996,7 +4075,14 @@ elaborate_struct_fields(
                     ),
                     Option::Some(type_id_from_u32(field_type))
                 ), @elaborate_struct_fields);
-                let operand = embed_operand(value, field_value);
+                // Evaluate named initializers in source order.  Only the
+                // resulting local moves are reordered into declaration order
+                // for the aggregate ABI.
+                let operand = materialize_ordered_operand(
+                    value,
+                    field_value,
+                    wrappers
+                );
                 *Vec::index_mut(
                     &mut *seen,
                     usize_from_u32(field)

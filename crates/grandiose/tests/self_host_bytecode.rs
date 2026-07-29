@@ -8,9 +8,14 @@ use grandiose::{
     CompileOptions, LlvmOptions, OptimizationLevel,
     source_bundle::{Segment, SourceBundle},
 };
-use grandiose_vm::{Artifact, SystemHost, Value, Vm, verify::load_verified};
+use grandiose_vm::{Artifact, SystemHost, Type, Value, Vm, verify::load_verified};
 
 const FIXTURE: &str = r#"
+    struct Pair {
+        first: i64,
+        second: i64
+    }
+
     identity(value: i64) -> i64 { value }
     answer() -> i64 {
         let value = 7;
@@ -19,6 +24,11 @@ const FIXTURE: &str = r#"
     first() -> i64 {
         let pair = (7, 9);
         pair.0
+    }
+    struct_answer() -> i64 {
+        let value = 11;
+        let pair = Pair { second: value, first: value };
+        pair.first
     }
     main() { () }
 "#;
@@ -78,7 +88,16 @@ fn assert_compiled_artifact(bytes: &[u8]) {
     );
     let answer = function_id(&decoded, "answer");
     let first = function_id(&decoded, "first");
+    let struct_answer = function_id(&decoded, "struct_answer");
     let main = function_id(&decoded, "main");
+    assert!(decoded.types.iter().any(|ty| matches!(
+        ty.representation(),
+        Type::Struct { name, fields, .. }
+            if name == "Pair"
+                && fields.len() == 2
+                && fields[0].name == "first"
+                && fields[1].name == "second"
+    )));
     let verified = load_verified(bytes).expect("self-hosted GRBC must verify");
     assert_eq!(
         Vm::new(verified.clone()).run(answer, vec![]).unwrap(),
@@ -87,6 +106,12 @@ fn assert_compiled_artifact(bytes: &[u8]) {
     assert_eq!(
         Vm::new(verified.clone()).run(first, vec![]).unwrap(),
         Value::I64(7)
+    );
+    assert_eq!(
+        Vm::new(verified.clone())
+            .run(struct_answer, vec![])
+            .unwrap(),
+        Value::I64(11)
     );
     assert_eq!(Vm::new(verified).run(main, vec![]).unwrap(), Value::Unit);
 }

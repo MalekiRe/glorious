@@ -19,6 +19,22 @@ error(code: u8, detail: u32) -> EmissionError {
     EmissionError { code: code, detail: detail }
 }
 
+require_program_name(
+    program: &super::lowering::StageProgram,
+    names: &Vec<String>,
+    name_index: u32,
+    detail: u32
+) -> Result<u32, EmissionError> {
+    require_name_value(
+        names,
+        *super::lowering::stage_program_type_name_at(
+            program,
+            usize_from_u32(name_index)
+        ),
+        detail
+    )
+}
+
 checked_u32(value: usize) -> u32 {
     handle checked_usize_to_u32(value) {
         Result::Err(_) => unreachable(),
@@ -92,6 +108,66 @@ collect_names(
             )
         );
         collect_names(program, index + usize_value(1), output)
+    } else { () }
+}
+
+collect_stage_field_names(
+    program: &super::lowering::StageProgram,
+    stage_type: &super::lowering::StageType,
+    index: usize,
+    output: &mut Vec<String>
+) {
+    if(index <
+        super::lowering::stage_type_field_name_count(stage_type)
+    ) {
+        Vec::push(
+            &mut *output,
+            *super::lowering::stage_program_type_name_at(
+                program,
+                usize_from_u32(
+                    super::lowering::stage_type_field_name_index_at(
+                        stage_type,
+                        index
+                    )
+                )
+            )
+        );
+        collect_stage_field_names(
+            program,
+            stage_type,
+            index + usize_value(1),
+            output
+        )
+    } else { () }
+}
+
+collect_type_names(
+    program: &super::lowering::StageProgram,
+    index: usize,
+    output: &mut Vec<String>
+) {
+    if(index < super::lowering::stage_program_type_count(program)) {
+        let stage_type =
+            super::lowering::stage_program_type_at(program, index);
+        if(super::lowering::stage_type_tag(stage_type) == u8_value(1)) {
+            Vec::push(
+                &mut *output,
+                *super::lowering::stage_program_type_name_at(
+                    program,
+                    usize_from_u32(
+                        super::lowering::stage_type_name_index(stage_type)
+                    )
+                )
+            );
+            collect_stage_field_names(program, stage_type, 0, output)
+        } else {
+            ()
+        };
+        collect_type_names(
+            program,
+            index + usize_value(1),
+            output
+        )
     } else { () }
 }
 
@@ -179,61 +255,219 @@ type_zero_use_flag(
 
 write_type_fields(
     output: &mut ByteBuf,
-    fields: &Vec<u32>,
-    index: usize
-) {
-    if(index < Vec::len(fields)) {
-        ByteBuf::write_u32_le(
-            &mut *output,
-            *Vec::index(fields, index)
-        );
-        write_type_fields(output, fields, index + usize_value(1))
-    } else { () }
-}
-
-custom_type_records(
     program: &super::lowering::StageProgram,
-    index: usize,
-    output: &mut Vec<super::artifact::Record>
+    type_index: usize,
+    field_index: usize
 ) {
-    if(index < super::lowering::stage_program_type_count(program)) {
-        let type_id = checked_u32(index) + u32_value(19);
-        let stage_type =
-            super::lowering::stage_program_type_at(program, index);
-        let fields = super::lowering::stage_type_fields(stage_type);
-        let payload = ByteBuf::new();
+    if(field_index <
+        super::lowering::stage_program_type_field_count_at(
+            program,
+            type_index
+        )
+    ) {
         ByteBuf::write_u32_le(
-            &mut payload,
-            checked_u32(Vec::len(fields))
-        );
-        write_type_fields(&mut payload, fields, 0);
-        let flags =
-            super::lowering::stage_type_copy_flag(stage_type)
-            + type_zero_sized_flag(program, type_id)
-            + type_zero_use_flag(program, type_id);
-        Vec::push(
             &mut *output,
-            super::artifact::record(
-                32,
-                wrapping_convert_to_u8(flags),
-                ByteBuf::finish(payload)
+            super::lowering::stage_program_type_field_type_at(
+                program,
+                type_index,
+                field_index
             )
         );
-        custom_type_records(
+        write_type_fields(
+            output,
             program,
-            index + usize_value(1),
-            output
+            type_index,
+            field_index + usize_value(1)
         )
     } else { () }
 }
 
+write_named_type_fields(
+    program: &super::lowering::StageProgram,
+    names: &Vec<String>,
+    type_index: usize,
+    field_index: usize,
+    output: &mut ByteBuf
+) -> Result<(), EmissionError> {
+    if(field_index <
+        super::lowering::stage_program_type_field_count_at(
+            program,
+            type_index
+        )
+    ) {
+        let field_name = try(require_program_name(
+            program,
+            names,
+            super::lowering::
+                stage_program_type_field_name_index_at(
+                    program,
+                    type_index,
+                    field_index
+                ),
+            checked_u32(field_index)
+        ), @write_named_type_fields);
+        ByteBuf::write_u32_le(&mut *output, field_name);
+        ByteBuf::write_u32_le(
+            &mut *output,
+            super::lowering::stage_program_type_field_type_at(
+                program,
+                type_index,
+                field_index
+            )
+        );
+        write_named_type_fields(
+            program,
+            names,
+            type_index,
+            field_index + usize_value(1),
+            output
+        )
+    } else {
+        Result::Ok(())
+    }
+}
+
+custom_type_flags(
+    program: &super::lowering::StageProgram,
+    index: usize
+) -> u32 {
+    let type_id = checked_u32(index) + u32_value(19);
+    super::lowering::stage_program_type_copy_flag_at(program, index)
+        + type_zero_sized_flag(program, type_id)
+        + type_zero_use_flag(program, type_id)
+}
+
+tuple_type_record(
+    program: &super::lowering::StageProgram,
+    index: usize
+) -> super::artifact::Record {
+    let payload = ByteBuf::new();
+    ByteBuf::write_u32_le(
+        &mut payload,
+        checked_u32(
+            super::lowering::
+                stage_program_type_field_count_at(program, index)
+        )
+    );
+    write_type_fields(&mut payload, program, index, 0);
+    super::artifact::record(
+        32,
+        wrapping_convert_to_u8(custom_type_flags(program, index)),
+        ByteBuf::finish(payload)
+    )
+}
+
+valid_struct_type_record(
+    program: &super::lowering::StageProgram,
+    names: &Vec<String>,
+    index: usize
+) -> Result<super::artifact::Record, EmissionError> {
+    let type_id = checked_u32(index) + u32_value(19);
+    let type_name = try(require_program_name(
+        program,
+        names,
+        super::lowering::stage_program_type_name_index_at(
+            program,
+            index
+        ),
+        type_id
+    ), @valid_struct_type_record);
+    let payload = ByteBuf::new();
+    ByteBuf::write_u32_le(&mut payload, type_name);
+    ByteBuf::write_u32_le(
+        &mut payload,
+        checked_u32(
+            super::lowering::
+                stage_program_type_field_count_at(program, index)
+        )
+    );
+    try(write_named_type_fields(
+        program,
+        names,
+        index,
+        0,
+        &mut payload
+    ), @valid_struct_type_record);
+    let payload_bytes = ByteBuf::finish(move payload);
+    Result::Ok(super::artifact::record(
+        34,
+        wrapping_convert_to_u8(custom_type_flags(program, index)),
+        payload_bytes
+    ))
+}
+
+struct_type_record(
+    program: &super::lowering::StageProgram,
+    names: &Vec<String>,
+    index: usize
+) -> Result<super::artifact::Record, EmissionError> {
+    if(
+        super::lowering::stage_program_type_field_name_count_at(
+            program,
+            index
+        ) == super::lowering::stage_program_type_field_count_at(
+            program,
+            index
+        )
+    ) {
+        valid_struct_type_record(program, names, index)
+    } else {
+        Result::Err(error(
+            6,
+            checked_u32(index) + u32_value(19)
+        ))
+    }
+}
+
+custom_type_record(
+    program: &super::lowering::StageProgram,
+    names: &Vec<String>,
+    index: usize
+) -> Result<super::artifact::Record, EmissionError> {
+    handle super::lowering::stage_program_type_tag_at(program, index) {
+        0 => Result::Ok(tuple_type_record(program, index)),
+        1 => struct_type_record(program, names, index),
+        _ => Result::Err(error(6, checked_u32(index)))
+    }
+}
+
+custom_type_records(
+    program: &super::lowering::StageProgram,
+    names: &Vec<String>,
+    index: usize,
+    output: &mut Vec<super::artifact::Record>
+) -> Result<(), EmissionError> {
+    if(index < super::lowering::stage_program_type_count(program)) {
+        Vec::push(
+            &mut *output,
+            try(custom_type_record(
+                program,
+                names,
+                index
+            ), @custom_type_records)
+        );
+        custom_type_records(
+            program,
+            names,
+            index + usize_value(1),
+            output
+        )
+    } else { Result::Ok(()) }
+}
+
 type_section(
-    program: &super::lowering::StageProgram
-) -> super::artifact::Section {
+    program: &super::lowering::StageProgram,
+    names: &Vec<String>
+) -> Result<super::artifact::Section, EmissionError> {
     let records = Vec::new();
     super::artifact::append_predefined_scalar_records(&mut records);
-    custom_type_records(program, 0, &mut records);
-    super::artifact::variable_section(&records)
+    try(custom_type_records(
+        program,
+        names,
+        0,
+        &mut records
+    ), @type_section);
+    Result::Ok(super::artifact::variable_section(&records))
 }
 
 find_name(names: &Vec<String>, name: &String, index: usize) -> Option<u32> {
@@ -252,6 +486,31 @@ require_name(
     detail: u32
 ) -> Result<u32, EmissionError> {
     handle find_name(names, name, 0) {
+        Result::Err(_) => Result::Err(error(3, detail)),
+        Result::Ok(found) => Result::Ok(found)
+    }
+}
+
+find_name_value(
+    names: &Vec<String>,
+    name: String,
+    index: usize
+) -> Option<u32> {
+    if(index < Vec::len(names)) {
+        if(String::eq(Vec::index(names, index), &name)) {
+            Option::Some(checked_u32(index))
+        } else {
+            find_name_value(names, name, index + usize_value(1))
+        }
+    } else { None }
+}
+
+require_name_value(
+    names: &Vec<String>,
+    name: String,
+    detail: u32
+) -> Result<u32, EmissionError> {
+    handle find_name_value(names, name, 0) {
         Result::Err(_) => Result::Err(error(3, detail)),
         Result::Ok(found) => Result::Ok(found)
     }
@@ -750,6 +1009,7 @@ pub encode(
 ) -> Result<Bytes, EmissionError> {
     let names = Vec::new();
     collect_names(program, 0, &mut names);
+    collect_type_names(program, 0, &mut names);
     Vec::sort(&mut names);
     Vec::dedup(&mut names);
 
@@ -796,6 +1056,7 @@ pub encode(
     let cleanup_count =
         checked_u32(ByteBuf::len(&cleanups) / usize_value(24));
     let cleanup_bytes = ByteBuf::finish(cleanups);
+    let types = try(type_section(program, &names), @encode);
 
     let writer = super::artifact::new_writer();
     super::artifact::set_section(
@@ -811,7 +1072,7 @@ pub encode(
     super::artifact::set_section(
         &mut writer,
         super::artifact::SectionId::Types,
-        type_section(program)
+        types
     );
     super::artifact::set_section(
         &mut writer,
@@ -861,3 +1122,5 @@ pub encode(
 usize_value(value: usize) -> usize { value }
 
 u32_value(value: u32) -> u32 { value }
+
+u8_value(value: u8) -> u8 { value }
