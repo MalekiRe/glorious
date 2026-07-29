@@ -3560,6 +3560,95 @@ fn lower_impl(
     };
     let mut used = BTreeSet::new();
     collect_goal_binders(&head, &mut used);
+    // Nominal and reference lifetimes are erased from `Pattern` because they
+    // do not contribute to runtime type identity. They still constrain an
+    // implementation binder at the source impl head. Preserve that distinction
+    // here instead of either retaining regions in runtime patterns or treating
+    // every declared lifetime as constrained.
+    fn collect_impl_head_lifetime_binders(
+        syntax: &TypeSyntax,
+        binders: &BTreeMap<&str, Binder>,
+        found: &mut BTreeSet<u32>,
+    ) {
+        fn record(name: &str, binders: &BTreeMap<&str, Binder>, found: &mut BTreeSet<u32>) {
+            if let Some(binder) = binders.get(name)
+                && binder.kind == GenericParameterKind::Lifetime
+                && !binder.higher_ranked
+            {
+                found.insert(binder.index);
+            }
+        }
+        match &syntax.kind {
+            TypeSyntaxKind::Application {
+                constructor,
+                arguments,
+                lifetime_arguments,
+            } => {
+                for argument in lifetime_arguments {
+                    record(&argument.lifetime.name, binders, found);
+                }
+                collect_impl_head_lifetime_binders(constructor, binders, found);
+                for argument in arguments {
+                    collect_impl_head_lifetime_binders(argument, binders, found);
+                }
+            }
+            TypeSyntaxKind::SharedReference { lifetime, referent }
+            | TypeSyntaxKind::UniqueReference { lifetime, referent } => {
+                if let Some(lifetime) = lifetime {
+                    record(&lifetime.name, binders, found);
+                }
+                collect_impl_head_lifetime_binders(referent, binders, found);
+            }
+            TypeSyntaxKind::Tuple(elements) => {
+                for element in elements {
+                    collect_impl_head_lifetime_binders(element, binders, found);
+                }
+            }
+            TypeSyntaxKind::Projection {
+                subject,
+                trait_ref,
+                arguments,
+                ..
+            } => {
+                collect_impl_head_lifetime_binders(subject, binders, found);
+                for argument in &trait_ref.arguments {
+                    match argument {
+                        GoalArgument::Type(ty) => {
+                            collect_impl_head_lifetime_binders(ty, binders, found)
+                        }
+                        GoalArgument::Lifetime { name, .. } => record(name, binders, found),
+                        GoalArgument::Quantity(_) | GoalArgument::U32 { .. } => {}
+                    }
+                }
+                for argument in arguments {
+                    match argument {
+                        AssociatedArgumentSyntax::Type(ty) => {
+                            collect_impl_head_lifetime_binders(ty, binders, found)
+                        }
+                        AssociatedArgumentSyntax::Lifetime { name, .. } => {
+                            record(name, binders, found)
+                        }
+                    }
+                }
+            }
+            TypeSyntaxKind::Path(_) | TypeSyntaxKind::Never => {}
+        }
+    }
+    collect_impl_head_lifetime_binders(&self_ty, &binders, &mut used);
+    for argument in relation_arguments {
+        match argument {
+            GoalArgument::Type(ty) => collect_impl_head_lifetime_binders(ty, &binders, &mut used),
+            GoalArgument::Lifetime { name, .. } => {
+                if let Some(binder) = binders.get(name.as_str())
+                    && binder.kind == GenericParameterKind::Lifetime
+                    && !binder.higher_ranked
+                {
+                    used.insert(binder.index);
+                }
+            }
+            GoalArgument::Quantity(_) | GoalArgument::U32 { .. } => {}
+        }
+    }
     if used.len() != binders.len() {
         return Err(error(
             declaration.span,
@@ -7150,6 +7239,36 @@ mod tests {
                 .result,
             SolveResult::Proven
         );
+    }
+
+    #[test]
+    fn nominal_lifetime_argument_constrains_its_impl_binder() {
+        let source = "trait Marker{} struct View<'a>{value:&'a Text} impl<'a> Marker for View<'a>{} main()->{()}";
+        let program = crate::parser::parse(crate::lexer::lex(source).unwrap()).unwrap();
+        let db = TraitDb::build(&program).unwrap();
+        assert_eq!(
+            db.solve(
+                "Marker",
+                &ProvisionalType::Nominal(NominalInstanceKey {
+                    declaration: NominalKey("View".into()),
+                    arguments: vec![],
+                }),
+            ),
+            SolveResult::Proven,
+        );
+
+        let unconstrained = "trait Marker{} struct View<'a>{value:&'a Text} impl<'a,'b> Marker for View<'a>{} main()->{()}";
+        let program = crate::parser::parse(crate::lexer::lex(unconstrained).unwrap()).unwrap();
+        let errors = TraitDb::build(&program).unwrap_err();
+        assert!(errors.iter().any(|error| {
+            error
+                .message
+                .contains("every impl binder must be constrained by the impl head")
+        }));
+
+        let trait_argument = "trait Marker<'a>{} impl<'a> Marker<'a> for Text{} main()->{()}";
+        let program = crate::parser::parse(crate::lexer::lex(trait_argument).unwrap()).unwrap();
+        TraitDb::build(&program).unwrap();
     }
 
     #[test]

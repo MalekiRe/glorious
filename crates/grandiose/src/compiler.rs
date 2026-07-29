@@ -8086,8 +8086,12 @@ fn compile_program_with_phases(
                                 ))
                             })
                             .collect::<Vec<_>>();
+                        let reference_return_contract = artifact_for_diagnostics
+                            .reference_return_contracts
+                            .iter()
+                            .find(|contract| contract.function == *function);
                         format!(
-                            " in `{}` (receiver={:?}, registers={:?}, params={:?}, result={}, outward={:?}, code={code:?}, callees={callees:?})",
+                            " in `{}` (receiver={:?}, registers={:?}, params={:?}, result={}, outward={:?}, reference_return_contract={reference_return_contract:?}, code={code:?}, callees={callees:?})",
                             item.name,
                             item.receiver_mode,
                             item.register_types,
@@ -13618,36 +13622,36 @@ fn normalize_generic_type_aliases(program: &Program) -> Result<Program, Vec<Diag
             );
         }
     }
-    for declaration in normalized
-        .structs
-        .iter_mut()
-        .filter(|declaration| declaration.generics.is_none())
-    {
+    for declaration in &mut normalized.structs {
+        let bound = declaration
+            .generics
+            .iter()
+            .flat_map(|generics| &generics.params)
+            .map(|parameter| parameter.name.clone())
+            .collect::<BTreeSet<_>>();
         for field in &mut declaration.fields {
             field.ty = expand_monomorphic_alias(
                 &field.ty,
                 &monomorphic_aliases,
-                &BTreeSet::new(),
+                &bound,
                 &mut BTreeSet::new(),
             );
         }
     }
-    for declaration in normalized
-        .enums
-        .iter_mut()
-        .filter(|declaration| declaration.generics.is_none())
-    {
+    for declaration in &mut normalized.enums {
+        let bound = declaration
+            .generics
+            .iter()
+            .flat_map(|generics| &generics.params)
+            .map(|parameter| parameter.name.clone())
+            .collect::<BTreeSet<_>>();
         for field in declaration
             .variants
             .iter_mut()
             .flat_map(|variant| &mut variant.fields)
         {
-            *field = expand_monomorphic_alias(
-                field,
-                &monomorphic_aliases,
-                &BTreeSet::new(),
-                &mut BTreeSet::new(),
-            );
+            *field =
+                expand_monomorphic_alias(field, &monomorphic_aliases, &bound, &mut BTreeSet::new());
         }
     }
     for effect in &mut normalized.effects {
@@ -16014,6 +16018,69 @@ fn instantiate_ground_nominals(
         }
     }
 
+    fn collect_ownership_head_lifetimes<'a>(syntax: &'a TypeSyntax, found: &mut BTreeSet<&'a str>) {
+        match &syntax.kind {
+            TypeSyntaxKind::Application {
+                constructor,
+                arguments,
+                lifetime_arguments,
+            } => {
+                found.extend(
+                    lifetime_arguments
+                        .iter()
+                        .map(|argument| argument.lifetime.name.as_str()),
+                );
+                collect_ownership_head_lifetimes(constructor, found);
+                for argument in arguments {
+                    collect_ownership_head_lifetimes(argument, found);
+                }
+            }
+            TypeSyntaxKind::SharedReference { lifetime, referent }
+            | TypeSyntaxKind::UniqueReference { lifetime, referent } => {
+                if let Some(lifetime) = lifetime {
+                    found.insert(lifetime.name.as_str());
+                }
+                collect_ownership_head_lifetimes(referent, found);
+            }
+            TypeSyntaxKind::Tuple(elements) => {
+                for element in elements {
+                    collect_ownership_head_lifetimes(element, found);
+                }
+            }
+            TypeSyntaxKind::Projection {
+                subject,
+                trait_ref,
+                arguments,
+                ..
+            } => {
+                collect_ownership_head_lifetimes(subject, found);
+                for argument in &trait_ref.arguments {
+                    match argument {
+                        crate::ast::GoalArgument::Type(ty) => {
+                            collect_ownership_head_lifetimes(ty, found)
+                        }
+                        crate::ast::GoalArgument::Lifetime { name, .. } => {
+                            found.insert(name.as_str());
+                        }
+                        crate::ast::GoalArgument::Quantity(_)
+                        | crate::ast::GoalArgument::U32 { .. } => {}
+                    }
+                }
+                for argument in arguments {
+                    match argument {
+                        crate::ast::AssociatedArgumentSyntax::Type(ty) => {
+                            collect_ownership_head_lifetimes(ty, found)
+                        }
+                        crate::ast::AssociatedArgumentSyntax::Lifetime { name, .. } => {
+                            found.insert(name.as_str());
+                        }
+                    }
+                }
+            }
+            TypeSyntaxKind::Never | TypeSyntaxKind::Path(_) => {}
+        }
+    }
+
     fn resolve_ownership_pattern(
         pattern: OwnershipHeadPattern,
         substitutions: &BTreeMap<u64, OwnershipHeadPattern>,
@@ -16482,17 +16549,194 @@ fn instantiate_ground_nominals(
         }
     }
 
-    fn universally_unrestricted_use_field(syntax: &TypeSyntax) -> bool {
-        match &syntax.kind {
-            TypeSyntaxKind::Path(path) if path.len() == 1 => scalar_type(&path[0].name).is_some(),
-            TypeSyntaxKind::SharedReference { referent: _, .. } => true,
-            TypeSyntaxKind::Tuple(elements) => {
-                elements.iter().all(universally_unrestricted_use_field)
+    fn universally_unrestricted_use_field(
+        syntax: &TypeSyntax,
+        program: &Program,
+        structs: &BTreeMap<&str, &crate::ast::StructDecl>,
+        enums: &BTreeMap<&str, &crate::ast::EnumDecl>,
+        visiting: &mut BTreeSet<String>,
+    ) -> bool {
+        fn use_target_head(declaration: &crate::ast::UseDecl) -> Option<&str> {
+            match &declaration.target.kind {
+                TypeSyntaxKind::Path(_) => declaration.target.simple_name(),
+                TypeSyntaxKind::Application { constructor, .. } => constructor.simple_name(),
+                _ => None,
             }
+        }
+
+        fn substitute(
+            syntax: &TypeSyntax,
+            substitutions: &BTreeMap<&str, TypeSyntax>,
+        ) -> TypeSyntax {
+            struct Substitute<'a, 'b>(&'a BTreeMap<&'b str, TypeSyntax>);
+            impl TypeSyntaxFolder for Substitute<'_, '_> {
+                type Error = std::convert::Infallible;
+
+                fn fold_type(&mut self, syntax: TypeSyntax) -> Result<TypeSyntax, Self::Error> {
+                    if let Some(replacement) =
+                        syntax.simple_name().and_then(|name| self.0.get(name))
+                    {
+                        Ok(replacement.clone())
+                    } else {
+                        crate::ast_visit::fold_type(self, syntax)
+                    }
+                }
+            }
+            Substitute(substitutions)
+                .fold_type(syntax.clone())
+                .expect("unrestricted-field substitution is infallible")
+        }
+
+        fn nominal_is_unrestricted(
+            name: &str,
+            arguments: &[TypeSyntax],
+            program: &Program,
+            structs: &BTreeMap<&str, &crate::ast::StructDecl>,
+            enums: &BTreeMap<&str, &crate::ast::EnumDecl>,
+            visiting: &mut BTreeSet<String>,
+        ) -> bool {
+            let explicit_uses = program
+                .uses
+                .iter()
+                .filter(|declaration| use_target_head(declaration) == Some(name))
+                .collect::<Vec<_>>();
+            if !explicit_uses.is_empty() {
+                // An unconditional identity-shaped `[0, *]` implementation
+                // proves every instantiation unrestricted. More specialized
+                // or conditional contracts remain authoritative and are not
+                // guessed from the representation.
+                return explicit_uses.into_iter().any(|declaration| {
+                    if declaration.where_clause.is_some()
+                        || !matches!(
+                            quantity_use_interval(&declaration.quantity),
+                            Ok(interval) if interval == UseInterval::UNRESTRICTED
+                        )
+                    {
+                        return false;
+                    }
+                    let (target_arguments, target_lifetimes) = match &declaration.target.kind {
+                        TypeSyntaxKind::Path(_) => (&[][..], &[][..]),
+                        TypeSyntaxKind::Application {
+                            arguments,
+                            lifetime_arguments,
+                            ..
+                        } => (arguments.as_slice(), lifetime_arguments.as_slice()),
+                        _ => return false,
+                    };
+                    let Some(generics) = &declaration.generics else {
+                        return target_arguments.is_empty() && target_lifetimes.is_empty();
+                    };
+                    let runtime_binders = generics
+                        .params
+                        .iter()
+                        .filter(|parameter| parameter.kind != GenericParamKind::Lifetime)
+                        .map(|parameter| parameter.name.as_str())
+                        .collect::<BTreeSet<_>>();
+                    let lifetime_binders = generics
+                        .params
+                        .iter()
+                        .filter(|parameter| parameter.kind == GenericParamKind::Lifetime)
+                        .map(|parameter| parameter.name.as_str())
+                        .collect::<BTreeSet<_>>();
+                    target_arguments.len() == runtime_binders.len()
+                        && target_arguments
+                            .iter()
+                            .filter_map(TypeSyntax::simple_name)
+                            .collect::<BTreeSet<_>>()
+                            == runtime_binders
+                        && target_lifetimes.len() == lifetime_binders.len()
+                        && target_lifetimes
+                            .iter()
+                            .map(|argument| argument.lifetime.name.as_str())
+                            .collect::<BTreeSet<_>>()
+                            == lifetime_binders
+                });
+            }
+            if !visiting.insert(name.to_owned()) {
+                return false;
+            }
+            let declaration = structs
+                .get(name)
+                .map(|declaration| {
+                    (
+                        declaration.generics.as_ref(),
+                        declaration
+                            .fields
+                            .iter()
+                            .map(|field| &field.ty)
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .or_else(|| {
+                    enums.get(name).map(|declaration| {
+                        (
+                            declaration.generics.as_ref(),
+                            declaration
+                                .variants
+                                .iter()
+                                .flat_map(|variant| &variant.fields)
+                                .collect::<Vec<_>>(),
+                        )
+                    })
+                });
+            let Some((generics, fields)) = declaration else {
+                visiting.remove(name);
+                return false;
+            };
+            let runtime_params = generics
+                .into_iter()
+                .flat_map(|generics| &generics.params)
+                .filter(|parameter| parameter.kind != GenericParamKind::Lifetime)
+                .collect::<Vec<_>>();
+            if runtime_params.len() != arguments.len() {
+                visiting.remove(name);
+                return false;
+            }
+            let substitutions = runtime_params
+                .into_iter()
+                .zip(arguments)
+                .filter(|(parameter, _)| parameter.kind == GenericParamKind::Type)
+                .map(|(parameter, argument)| (parameter.name.as_str(), argument.clone()))
+                .collect::<BTreeMap<_, _>>();
+            let unrestricted = fields.into_iter().all(|field| {
+                universally_unrestricted_use_field(
+                    &substitute(field, &substitutions),
+                    program,
+                    structs,
+                    enums,
+                    visiting,
+                )
+            });
+            visiting.remove(name);
+            unrestricted
+        }
+
+        match &syntax.kind {
+            TypeSyntaxKind::Path(path) if path.len() == 1 => {
+                scalar_type(&path[0].name).is_some()
+                    || nominal_is_unrestricted(
+                        &path[0].name,
+                        &[],
+                        program,
+                        structs,
+                        enums,
+                        visiting,
+                    )
+            }
+            TypeSyntaxKind::SharedReference { referent: _, .. } => true,
+            TypeSyntaxKind::Tuple(elements) => elements.iter().all(|element| {
+                universally_unrestricted_use_field(element, program, structs, enums, visiting)
+            }),
+            TypeSyntaxKind::Application {
+                constructor,
+                arguments,
+                ..
+            } => constructor.simple_name().is_some_and(|name| {
+                nominal_is_unrestricted(name, arguments, program, structs, enums, visiting)
+            }),
             TypeSyntaxKind::Never => true,
             TypeSyntaxKind::Path(_)
             | TypeSyntaxKind::UniqueReference { referent: _, .. }
-            | TypeSyntaxKind::Application { .. }
             | TypeSyntaxKind::Projection { .. } => false,
         }
     }
@@ -16640,7 +16884,7 @@ fn instantiate_ground_nominals(
             let TypeSyntaxKind::Application {
                 constructor,
                 arguments,
-                ..
+                lifetime_arguments,
             } = &declaration.target.kind
             else {
                 errors.push(type_error(
@@ -16676,8 +16920,20 @@ fn instantiate_ground_nominals(
                 .iter()
                 .map(|param| param.name.as_str())
                 .collect::<Vec<_>>();
+            let runtime_binders = generics
+                .params
+                .iter()
+                .filter(|param| param.kind != GenericParamKind::Lifetime)
+                .map(|param| param.name.as_str())
+                .collect::<Vec<_>>();
+            let lifetime_binders = generics
+                .params
+                .iter()
+                .filter(|param| param.kind == GenericParamKind::Lifetime)
+                .map(|param| param.name.as_str())
+                .collect::<BTreeSet<_>>();
             let namespace = (generic_uses.len() as u64 + 1) << 32;
-            let pattern_binders = expected
+            let pattern_binders = runtime_binders
                 .iter()
                 .enumerate()
                 .map(|(index, binder)| (*binder, namespace | index as u64))
@@ -16689,7 +16945,21 @@ fn instantiate_ground_nominals(
                 &monomorphic,
                 &application_heads,
             );
-            if arguments.len() != template_generics.params.len()
+            let template_runtime_arity = template_generics
+                .params
+                .iter()
+                .filter(|param| param.kind != GenericParamKind::Lifetime)
+                .count();
+            let template_lifetime_arity = template_generics
+                .params
+                .iter()
+                .filter(|param| param.kind == GenericParamKind::Lifetime)
+                .count();
+            let mut used_lifetimes = BTreeSet::new();
+            collect_ownership_head_lifetimes(&declaration.target, &mut used_lifetimes);
+            if arguments.len() != template_runtime_arity
+                || lifetime_arguments.len() != template_lifetime_arity
+                || !lifetime_binders.is_subset(&used_lifetimes)
                 || head_pattern.as_ref().is_none_or(|pattern| {
                     pattern_binders
                         .values()
@@ -16771,7 +17041,13 @@ fn instantiate_ground_nominals(
             }
             let mut layout_valid = true;
             for field in &fields {
-                if universally_unrestricted_use_field(field) {
+                if universally_unrestricted_use_field(
+                    field,
+                    program,
+                    &struct_templates,
+                    &enum_templates,
+                    &mut BTreeSet::new(),
+                ) {
                     continue;
                 }
                 let covered = declared_interval.is_some_and(|declared| {
@@ -16993,7 +17269,7 @@ fn instantiate_ground_nominals(
         let TypeSyntaxKind::Application {
             constructor,
             arguments,
-            ..
+            lifetime_arguments,
         } = &declaration.target_type.kind
         else {
             errors.push(type_error(
@@ -17024,13 +17300,20 @@ fn instantiate_ground_nominals(
             ));
             continue;
         };
-        let expected = generics
+        let runtime_binders = generics
             .params
             .iter()
+            .filter(|param| param.kind != GenericParamKind::Lifetime)
             .map(|param| param.name.as_str())
             .collect::<Vec<_>>();
+        let lifetime_binders = generics
+            .params
+            .iter()
+            .filter(|param| param.kind == GenericParamKind::Lifetime)
+            .map(|param| param.name.as_str())
+            .collect::<BTreeSet<_>>();
         let namespace = (generic_drops.len() as u64 + 1) << 48;
-        let pattern_binders = expected
+        let pattern_binders = runtime_binders
             .iter()
             .enumerate()
             .map(|(index, binder)| (*binder, namespace | index as u64))
@@ -17042,7 +17325,21 @@ fn instantiate_ground_nominals(
             &monomorphic,
             &application_heads,
         );
-        if arguments.len() != template_generics.params.len()
+        let template_runtime_arity = template_generics
+            .params
+            .iter()
+            .filter(|param| param.kind != GenericParamKind::Lifetime)
+            .count();
+        let template_lifetime_arity = template_generics
+            .params
+            .iter()
+            .filter(|param| param.kind == GenericParamKind::Lifetime)
+            .count();
+        let mut used_lifetimes = BTreeSet::new();
+        collect_ownership_head_lifetimes(&declaration.target_type, &mut used_lifetimes);
+        if arguments.len() != template_runtime_arity
+            || lifetime_arguments.len() != template_lifetime_arity
+            || !lifetime_binders.is_subset(&used_lifetimes)
             || head_pattern.as_ref().is_none_or(|pattern| {
                 pattern_binders
                     .values()

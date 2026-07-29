@@ -8588,6 +8588,35 @@ fn aggregate_reference_return_origins(
     )
 }
 
+fn carrier_contract_covers(broad: &CarrierOrigins, exact: &CarrierOrigins) -> bool {
+    broad.len() == exact.len()
+        && broad.iter().zip(exact).all(
+            |((broad_result, broad_origin), (exact_result, exact_origin))| {
+                broad_result == exact_result
+                    && match (broad_origin, exact_origin) {
+                        (
+                            CarrierOrigin::Parameter {
+                                parameter: broad_parameter,
+                                path: broad_path,
+                            },
+                            CarrierOrigin::Parameter {
+                                parameter: exact_parameter,
+                                path: exact_path,
+                            },
+                        ) => {
+                            broad_parameter == exact_parameter && exact_path.starts_with(broad_path)
+                        }
+                        (
+                            CarrierOrigin::Receiver { path: broad_path },
+                            CarrierOrigin::Receiver { path: exact_path },
+                        ) => exact_path.starts_with(broad_path),
+                        (CarrierOrigin::Local, CarrierOrigin::Local) => true,
+                        _ => false,
+                    }
+            },
+        )
+}
+
 fn aggregate_reference_return_origins_with(
     a: &Artifact,
     fid: u32,
@@ -8761,7 +8790,9 @@ fn aggregate_reference_return_origins_with(
                 !*unique || unique_carrier_occurrences_are_exclusive(candidate, index)
             })
     });
-    if let Some(declared) = declared_carrier_contract(a, fid)? {
+    let declared = declared_carrier_contract(a, fid)?;
+    let has_declared_contract = declared.is_some();
+    if let Some(declared) = declared {
         // A projected borrow can create a reference to a non-reference field
         // inside a parameter referent. Such a route is intentionally absent
         // from the coarse candidate set above, which enumerates reference
@@ -8778,9 +8809,14 @@ fn aggregate_reference_return_origins_with(
         visiting.pop();
         provisional.remove(&fid);
         if let Ok(result) = result
-            && result == candidate
+            && (result == candidate
+                || has_declared_contract && carrier_contract_covers(&candidate, &result))
             && !fixed_points.contains(&result)
         {
+            // Region metadata may deliberately name a whole parameter root
+            // when several identical structural projections exist. The body
+            // must derive every returned leaf from a descendant of that root;
+            // retain the exact body result so callers keep precise loans.
             fixed_points.push(result);
         }
     }
@@ -8824,6 +8860,7 @@ fn aggregate_reference_return_origins_inner(
     states[0] = Some(entry);
     let mut work = VecDeque::from([0u32]);
     let mut returned = None::<CarrierOrigins>;
+    let mut returned_from_empty_alternative = false;
     let start = f.code_start as usize;
     while let Some(pc) = work.pop_front() {
         let mut state = states[pc as usize].clone().unwrap();
@@ -9209,14 +9246,28 @@ fn aggregate_reference_return_origins_inner(
                 let contract = carrier_return_contract_with(a, *function, visiting, provisional)?;
                 let origins =
                     instantiate_carrier_contract(&contract, None, args, &state, *function)?;
-                record_carrier_return(fid, origins.into(), &mut returned)?;
+                record_carrier_return(
+                    fid,
+                    origins.into(),
+                    false,
+                    provisional.get(&fid),
+                    &mut returned,
+                    &mut returned_from_empty_alternative,
+                )?;
             }
             Instruction::TailCallSelf { args }
                 if !reference_leaves(a, f.return_type).is_empty() =>
             {
                 let contract = carrier_return_contract_with(a, fid, visiting, provisional)?;
                 let origins = instantiate_carrier_contract(&contract, Some(0), args, &state, fid)?;
-                record_carrier_return(fid, origins.into(), &mut returned)?;
+                record_carrier_return(
+                    fid,
+                    origins.into(),
+                    false,
+                    provisional.get(&fid),
+                    &mut returned,
+                    &mut returned_from_empty_alternative,
+                )?;
             }
             Instruction::TailCallKnownReceiver {
                 function,
@@ -9245,7 +9296,14 @@ fn aggregate_reference_return_origins_inner(
                     .ok_or(VerifyError::InvalidFunction(*function))?;
                     origins.push((result_path, source));
                 }
-                record_carrier_return(fid, origins.into(), &mut returned)?;
+                record_carrier_return(
+                    fid,
+                    origins.into(),
+                    false,
+                    provisional.get(&fid),
+                    &mut returned,
+                    &mut returned_from_empty_alternative,
+                )?;
             }
             Instruction::TailCallIndirect { callable, args, .. }
                 if !reference_leaves(a, f.return_type).is_empty() =>
@@ -9256,9 +9314,17 @@ fn aggregate_reference_return_origins_inner(
                         .map_err(|_| VerifyError::InvalidFunction(fid))?;
                 let origins =
                     instantiate_carrier_contract(&contract, Some(*callable), args, &state, fid)?;
-                record_carrier_return(fid, origins.into(), &mut returned)?;
+                record_carrier_return(
+                    fid,
+                    origins.into(),
+                    false,
+                    provisional.get(&fid),
+                    &mut returned,
+                    &mut returned_from_empty_alternative,
+                )?;
             }
             Instruction::Return { src: Some(src) } => {
+                let empty_alternative = state[*src as usize].is_empty();
                 let remapped = remap_carrier_origins_with_expected(
                     a,
                     f.return_type,
@@ -9267,7 +9333,14 @@ fn aggregate_reference_return_origins_inner(
                     fid,
                 );
                 let origins = remapped?;
-                record_carrier_return(fid, origins.into(), &mut returned)?;
+                record_carrier_return(
+                    fid,
+                    origins.into(),
+                    empty_alternative,
+                    provisional.get(&fid),
+                    &mut returned,
+                    &mut returned_from_empty_alternative,
+                )?;
             }
             Instruction::Leave { slot, value } => {
                 let entry = label_states[pc as usize]
@@ -9815,19 +9888,44 @@ fn instantiate_carrier_contract(
 fn record_carrier_return(
     fid: u32,
     origins: CarrierOrigins,
+    empty_alternative: bool,
+    expected: Option<&CarrierOrigins>,
     returned: &mut Option<CarrierOrigins>,
+    returned_from_empty_alternative: &mut bool,
 ) -> Result<(), VerifyError> {
     if origins
         .iter()
         .any(|(_, origin)| matches!(origin, CarrierOrigin::Local))
-        || returned
-            .as_ref()
-            .is_some_and(|existing| existing != &origins)
     {
         return Err(VerifyError::InvalidFunction(fid));
     }
-    if returned.is_none() {
-        *returned = Some(origins);
+    match returned {
+        None => {
+            *returned = Some(origins);
+            *returned_from_empty_alternative = empty_alternative;
+        }
+        Some(existing) if *existing == origins => {
+            *returned_from_empty_alternative &= empty_alternative;
+        }
+        Some(existing)
+            if *returned_from_empty_alternative
+                && !empty_alternative
+                && expected.is_some_and(|expected| {
+                    carrier_contract_covers(expected, existing)
+                        && carrier_contract_covers(expected, &origins)
+                }) =>
+        {
+            *existing = origins;
+            *returned_from_empty_alternative = false;
+        }
+        Some(existing)
+            if empty_alternative
+                && !*returned_from_empty_alternative
+                && expected.is_some_and(|expected| {
+                    carrier_contract_covers(expected, existing)
+                        && carrier_contract_covers(expected, &origins)
+                }) => {}
+        Some(_) => return Err(VerifyError::InvalidFunction(fid)),
     }
     Ok(())
 }

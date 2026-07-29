@@ -18,6 +18,21 @@ fn assert_compiles_all_modes(source: &str) {
 }
 
 #[test]
+fn stored_lifetime_binders_are_valid_in_generic_use_and_drop_heads() {
+    let source = r#"
+        struct Borrowed<'a> { value: &'a i64 }
+
+        impl<'a> Use<[0, 1]> for Borrowed<'a> {}
+        impl<'a> Drop for Borrowed<'a> {
+            drop(&mut self) -> { () }
+        }
+
+        main() -> () { () }
+    "#;
+    assert_compiles_all_modes(source);
+}
+
+#[test]
 fn enclosing_expected_nominal_fixes_payload_free_generic_variant() {
     let source = r#"
         enum Storage<K, V> { Empty, Ready(HashMap<K, Vec<V>>) }

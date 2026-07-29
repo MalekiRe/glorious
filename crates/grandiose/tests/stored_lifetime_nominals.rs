@@ -94,7 +94,14 @@ fn lifetime_parameterized_enum_carries_and_iterates_a_borrowed_slice() {
         borrow_items<'a, T>(
             values: &'a Vec<T>
         ) -> BorrowedItems<'a, T> {
-            BorrowedItems::Items(Vec::as_slice(values))
+            handle Slice::subslice(
+                Vec::as_slice(values),
+                0,
+                Vec::len(values)
+            ) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(items) => BorrowedItems::Items(items)
+            }
         }
 
         add_item(total: usize, item: &usize) -> usize {
@@ -145,6 +152,27 @@ fn lifetime_parameterized_enum_carries_and_iterates_a_borrowed_slice() {
             "{optimization_level:?}"
         );
     }
+}
+
+#[test]
+fn generic_borrowed_payload_accepts_a_monomorphic_alias_argument() {
+    let source = r#"
+        struct ItemTag {}
+        type ItemId = Id<ItemTag>;
+
+        enum BorrowedIds<'a> {
+            Items(Slice<'a, ItemId>)
+        }
+
+        borrow_ids<'a>(values: &'a Vec<ItemId>) -> BorrowedIds<'a> {
+            BorrowedIds::Items(Vec::as_slice(values))
+        }
+
+        main() -> () { () }
+    "#;
+
+    compile_source_to_bytecode("borrowed-alias-payload.glorious", source)
+        .unwrap_or_else(|errors| panic!("{errors:#?}"));
 }
 
 #[test]
