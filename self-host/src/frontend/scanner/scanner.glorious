@@ -106,7 +106,7 @@ pub shell_parent(value: &DeclarationShell) -> &Option<usize> { &value.parent }
 pub shell_parent_plus_one(value: &DeclarationShell) -> usize {
     handle Option::as_ref(&value.parent) {
         Result::Err(_) => 0,
-        Result::Ok(parent) => *parent + usize_value(1)
+        Result::Ok(parent) => *parent + 1
     }
 }
 
@@ -221,7 +221,7 @@ matching_close_walk(
                 let closing = delimiter_close(kind);
                 if(u8_equal(opening, 0)) { if(u8_equal(closing, 0)) { matching_close_walk(
                             value,
-                            index + usize_value(1),
+                            index + 1,
                              stack
                         ) } else {
                         let next =  stack;
@@ -231,7 +231,7 @@ matching_close_walk(
                             ),
                             Result::Ok(open) => if(u8_equal(open.kind, closing)) { if(Vec::is_empty(&next)) { Result::Ok(index) } else { matching_close_walk(
                                         value,
-                                        index + usize_value(1),
+                                        index + 1,
                                         next
                                     ) } } else { Result::Err(
                                     scan_error(2, index, open.token)
@@ -243,7 +243,7 @@ matching_close_walk(
                         &mut next,
                         OpenDelimiter { kind: opening, token: index }
                     );
-                    matching_close_walk(value, index + usize_value(1), next)
+                    matching_close_walk(value, index + 1, next)
                 }
         } } else { handle Vec::last(&stack) {
             Result::Ok(open) => Result::Err(scan_error(3, count, open.token)),
@@ -262,7 +262,7 @@ matching_close(
             &mut stack,
             OpenDelimiter { kind: kind, token: open }
         );
-        matching_close_walk(value, open + usize_value(1),  stack)
+        matching_close_walk(value, open + 1,  stack)
     }
 }
 
@@ -278,7 +278,7 @@ find_semicolon(
             let closing = delimiter_close(kind);
             if(token_is_semicolon(value, index)) { Result::Ok(index) } else { if(u8_equal(opening, 0)) { if(u8_equal(closing, 0)) { find_semicolon(
                             value,
-                            index + usize_value(1),
+                            index + 1,
                             limit,
                             start
                         ) } else { Result::Err(
@@ -294,7 +294,7 @@ find_semicolon(
                     );
                     find_semicolon(
                         value,
-                        close + usize_value(1),
+                        close + 1,
                         limit,
                         start
                     )
@@ -315,7 +315,7 @@ find_body(
             let closing = delimiter_close(kind);
             if(u8_equal(opening, 0)) { if(u8_equal(closing, 0)) { find_body(
                         value,
-                        index + usize_value(1),
+                        index + 1,
                         limit,
                         start,
                         function
@@ -332,7 +332,7 @@ find_body(
                     );
                     find_body(
                         value,
-                        close + usize_value(1),
+                        close + 1,
                         limit,
                         start,
                         function
@@ -340,7 +340,7 @@ find_body(
                 } else {
                     if(function) { if(index > start) { if(token_is_slash(
                                 value,
-                                index - usize_value(1)
+                                index - 1
                             )) {
                                 let close = try(
                                     matching_close(value, index),
@@ -348,7 +348,7 @@ find_body(
                                 );
                                 find_body(
                                     value,
-                                    close + usize_value(1),
+                                    close + 1,
                                     limit,
                                     start,
                                     function
@@ -396,13 +396,13 @@ find_top_level_eq(
                 let opening = delimiter_open(token_kind_at(value, index));
                 if(u8_equal(opening, 0)) { find_top_level_eq(
                         value,
-                        index + usize_value(1),
+                        index + 1,
                         end
                     ) } else { handle matching_close(value, index) {
                         Result::Err(_) => Result::Err(()),
                         Result::Ok(close) => find_top_level_eq(
                             value,
-                            close + usize_value(1),
+                            close + 1,
                             end
                         )
                     } }
@@ -428,7 +428,7 @@ classify(
     handle token_kind_at(value, cursor) {
         TokenKind::Keyword(Keyword::Type) => {
             let name = try(
-                name_at(value, cursor + usize_value(1), start),
+                name_at(value, cursor + 1, start),
                 @classify
             );
             Result::Ok(Classification {
@@ -440,7 +440,7 @@ classify(
         },
         TokenKind::Keyword(Keyword::Let) => {
             let name = try(
-                name_at(value, cursor + usize_value(1), start),
+                name_at(value, cursor + 1, start),
                 @classify
             );
             Result::Ok(Classification {
@@ -453,7 +453,7 @@ classify(
         TokenKind::Keyword(Keyword::Effect) => {
             named_braced(
                 value,
-                cursor + usize_value(1),
+                cursor + 1,
                 start,
                 DeclarationKind::Effect,
                 7
@@ -462,7 +462,7 @@ classify(
         TokenKind::Keyword(Keyword::Struct) => {
             named_braced(
                 value,
-                cursor + usize_value(1),
+                cursor + 1,
                 start,
                 DeclarationKind::Struct,
                 8
@@ -471,7 +471,7 @@ classify(
         TokenKind::Keyword(Keyword::Enum) => {
             named_braced(
                 value,
-                cursor + usize_value(1),
+                cursor + 1,
                 start,
                 DeclarationKind::Enum,
                 9
@@ -480,7 +480,7 @@ classify(
         TokenKind::Keyword(Keyword::Trait) => {
             named_braced(
                 value,
-                cursor + usize_value(1),
+                cursor + 1,
                 start,
                 DeclarationKind::Trait,
                 10
@@ -532,7 +532,7 @@ classify_ident(
 ) -> Result<Classification, ScanError> {
     if(ident_is(value, cursor, &"mod")) {
         let found = try(
-            name_at(value, cursor + usize_value(1), start),
+            name_at(value, cursor + 1, start),
             @classify_ident
         );
         Result::Ok(Classification {
@@ -545,12 +545,12 @@ classify_ident(
                 Result::Ok(Classification {
                     kind: DeclarationKind::Import,
                     kind_code: 2,
-                    name: token_ident(value, cursor + usize_value(1)),
+                    name: token_ident(value, cursor + 1),
                     style: 1
                 })
             } else { function_classification(move name) } } else { if(ident_is(value, cursor, &"cases")) {
                 let found = try(
-                    name_at(value, cursor + usize_value(1), start),
+                    name_at(value, cursor + 1, start),
                     @classify_ident
                 );
                 Result::Ok(Classification {
@@ -563,7 +563,7 @@ classify_ident(
                     Result::Ok(Classification {
                         kind: DeclarationKind::Fixity,
                         kind_code: 6,
-                        name: token_ident(value, cursor + usize_value(2)),
+                        name: token_ident(value, cursor + 2),
                         style: 1
                     })
                 } else { function_classification(move name) } } } }
@@ -579,7 +579,7 @@ function_classification(name: Id<String>) -> Result<Classification, ScanError> {
 }
 
 import_declaration(value: &super::lexer::LexedSource, cursor: usize) -> Bool {
-    handle token_kind_at(value, cursor + usize_value(1)) {
+    handle token_kind_at(value, cursor + 1) {
         TokenKind::LParen => false,
         TokenKind::Lt => false,
         _ => true
@@ -592,7 +592,7 @@ fixity_declaration(value: &super::lexer::LexedSource, cursor: usize) -> Bool {
             or { ident_is(value, cursor, &"infixr") }
             or { ident_is(value, cursor, &"infix") }
             or { ident_is(value, cursor, &"prefix") }
-    ) and { token_is_number(value, cursor + usize_value(1)) }
+    ) and { token_is_number(value, cursor + 1) }
 }
 
 scan_state_error(
@@ -635,10 +635,10 @@ scan_semicolon_shell(
                     Result::Ok(equal) => {
                         let whole = TokenRange {
                             start: start,
-                            end: end + usize_value(1)
+                            end: end + 1
                         };
                         Result::Ok(ScanStep {
-                            next: end + usize_value(1),
+                            next: end + 1,
                             nested_start: Result::Err(()),
                             nested_end: 0,
                             declaration: DeclarationShell {
@@ -648,10 +648,10 @@ scan_semicolon_shell(
                                 name: move name,
                                 header: TokenRange {
                                     start: start,
-                                    end: equal + usize_value(1)
+                                    end: equal + 1
                                 },
                                 body: Result::Ok(TokenRange {
-                                    start: equal + usize_value(1),
+                                    start: equal + 1,
                                     end: end
                                 }),
                                 whole: move whole,
@@ -660,9 +660,9 @@ scan_semicolon_shell(
                         })
                     }
                 } } else {
-                let whole = TokenRange { start: start, end: end + usize_value(1) };
+                let whole = TokenRange { start: start, end: end + 1 };
                 Result::Ok(ScanStep {
-                    next: end + usize_value(1),
+                    next: end + 1,
                     nested_start: Result::Err(()),
                     nested_end: 0,
                     declaration: DeclarationShell {
@@ -707,9 +707,9 @@ scan_braced_shell(
             let open = bounds.start;
             let close = bounds.end;
             Result::Ok(ScanStep {
-                next: close + usize_value(1),
+                next: close + 1,
                 nested_start: if(u8_equal(kind_code, 1)) {
-                    Result::Ok(open + usize_value(1))
+                    Result::Ok(open + 1)
                 } else { Result::Err(()) },
                 nested_end: close,
                 declaration: DeclarationShell {
@@ -719,12 +719,12 @@ scan_braced_shell(
                     name: move name,
                     header: TokenRange { start: start, end: open },
                     body: Result::Ok(TokenRange {
-                        start: open + usize_value(1),
+                        start: open + 1,
                         end: close
                     }),
                     whole: TokenRange {
                         start: start,
-                        end: close + usize_value(1)
+                        end: close + 1
                     },
                     parent: parent
                 }
@@ -741,14 +741,14 @@ scan_one(
 ) -> Result<ScanStep, ScanError> {
     let public = ident_is(value, start, &"pub");
     let cursor = if(public) {
-        start + usize_value(1)
+        start + 1
     } else { start };
     let classification = try(classify(value, cursor, start), @scan_one);
     let style = classification.style;
     if(u8_equal(style, 1)) { scan_semicolon_shell(
             value,
             start,
-            cursor + usize_value(1),
+            cursor + 1,
             limit,
             public,
             move classification,
@@ -761,7 +761,7 @@ scan_one(
             if(u8_equal(style, 1)) { scan_semicolon_shell(
                     value,
                     start,
-                    cursor + usize_value(1),
+                    cursor + 1,
                     limit,
                     public,
                     move classification,
@@ -769,7 +769,7 @@ scan_one(
                 ) } else { scan_braced_shell(
                     value,
                     start,
-                    cursor + usize_value(1),
+                    cursor + 1,
                     limit,
                     public,
                     move classification,
@@ -779,7 +779,7 @@ scan_one(
         } else { scan_braced_shell(
                 value,
                 start,
-                cursor + usize_value(1),
+                cursor + 1,
                 limit,
                 public,
                 move classification,
@@ -802,7 +802,7 @@ find_module_style(
                     0
                 )) { find_module_style(
                         value,
-                        index + usize_value(1),
+                        index + 1,
                         limit,
                         start
                     ) } else { Result::Err(scan_error(
@@ -910,8 +910,6 @@ bool_code(value: Bool) -> u8 {
     if(move value) { 1 } else { 0 }
 }
 
-usize_value(value: usize) -> usize {  value }
-
 write_string(output: &mut ByteBuf, value: &String) {
     let bytes = String::as_bytes(value);
     ByteBuf::write_u32_le(
@@ -987,7 +985,7 @@ write_shells(
             write_optional_range(&mut *output, &shell.body);
             write_range(&mut *output, &shell.whole);
             write_optional_parent(&mut *output, &shell.parent);
-            write_shells( output, lexed, value, index + usize_value(1))
+            write_shells( output, lexed, value, index + 1)
     } else { () }
 }
 
@@ -1030,14 +1028,14 @@ process_inputs(arguments: &Vec<String>, index: usize, output: &mut ByteBuf) / Fi
                     Result::Ok(lexed) => encode_scan(&mut *output,  lexed)
                 }
             };
-            process_inputs(arguments, index + usize_value(1),  output)
+            process_inputs(arguments, index + 1,  output)
     } else { () }
 }
 
 pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
     let arguments = process_args();
     let argument_count = Vec::len(&arguments);
-    if(argument_count < usize_value(2)) {
+    if(argument_count < 2) {
         write_diagnostic(
             "usage: grandiose-self-host-scanner <output> <input>..."
         )
@@ -1046,7 +1044,7 @@ pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
         let encoded = ByteBuf::new();
         ByteBuf::write_u32_le(
             &mut encoded,
-            wrapping_convert_to_u32(argument_count - usize_value(1))
+            wrapping_convert_to_u32(argument_count - 1)
         );
         process_inputs(&arguments, 1, &mut encoded);
         write_file(move output_path, ByteBuf::finish( encoded))

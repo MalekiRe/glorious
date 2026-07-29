@@ -619,7 +619,7 @@ construction_flavor_word(value: ConstructionFlavor) -> u32 {
     handle value {
         ConstructionFlavor::Product => 0,
         ConstructionFlavor::Variant(ordinal) =>
-            ordinal + u32_value(1)
+            ordinal + 1
     }
 }
 
@@ -1166,9 +1166,9 @@ push_word(value: &mut Vec<u32>, word: u32) {
 }
 
 push_zeroes(value: &mut Vec<u32>, remaining: usize) {
-    if(remaining == usize_value(0)) { () } else {
+    if(remaining == 0) { () } else {
         push_word(&mut *value, 0);
-        push_zeroes( value, remaining - usize_value(1))
+        push_zeroes( value, remaining - 1)
     }
 }
 
@@ -1176,11 +1176,11 @@ push_missing_nominal_ids(
     value: &mut Vec<Option<InterfaceNominalId>>,
     remaining: usize
 ) {
-    if(remaining == usize_value(0)) {
+    if(remaining == 0) {
         ()
     } else {
         Vec::push(&mut *value, None);
-        push_missing_nominal_ids(value, remaining - usize_value(1))
+        push_missing_nominal_ids(value, remaining - 1)
     }
 }
 
@@ -1188,11 +1188,11 @@ push_missing_callable_ids(
     value: &mut Vec<Option<InterfaceCallableId>>,
     remaining: usize
 ) {
-    if(remaining == usize_value(0)) {
+    if(remaining == 0) {
         ()
     } else {
         Vec::push(&mut *value, None);
-        push_missing_callable_ids(value, remaining - usize_value(1))
+        push_missing_callable_ids(value, remaining - 1)
     }
 }
 
@@ -1200,11 +1200,11 @@ push_missing_type_ids(
     value: &mut Vec<Option<TypeId>>,
     remaining: usize
 ) {
-    if(remaining == usize_value(0)) {
+    if(remaining == 0) {
         ()
     } else {
         Vec::push(&mut *value, None);
-        push_missing_type_ids(value, remaining - usize_value(1))
+        push_missing_type_ids(value, remaining - 1)
     }
 }
 
@@ -1212,11 +1212,11 @@ push_unresolved_aliases(
     value: &mut Vec<AliasResolutionState>,
     remaining: usize
 ) {
-    if(remaining == usize_value(0)) {
+    if(remaining == 0) {
         ()
     } else {
         Vec::push(&mut *value, AliasResolutionState::Unresolved);
-        push_unresolved_aliases(value, remaining - usize_value(1))
+        push_unresolved_aliases(value, remaining - 1)
     }
 }
 
@@ -1227,7 +1227,7 @@ append_core_values(
 ) {
     if(index < Vec::len(source)) {
         Vec::push(&mut *output, *Vec::index(source, index));
-        append_core_values(output, source, index + usize_value(1))
+        append_core_values(output, source, index + 1)
     } else { () }
 }
 
@@ -1238,7 +1238,7 @@ append_construction_fields(
 ) {
     if(index < Vec::len(source)) {
         Vec::push(&mut *output, *Vec::index(source, index));
-        append_construction_fields(output, source, index + usize_value(1))
+        append_construction_fields(output, source, index + 1)
     } else { () }
 }
 
@@ -1310,12 +1310,12 @@ scalar_kind_to_type(kind: u8) -> u32 {
 }
 
 seed_scalar_types(value: &mut TypedInterfaces, type_id: u32) {
-    if(type_id <= u32_value(13)) {
+    if(type_id <= 13) {
         alloc_type(value, TypeNode {
             kind: TypeKind::Scalar(type_to_scalar_kind(type_id)),
             copyable: true
         });
-        seed_scalar_types( value, type_id + u32_value(1))
+        seed_scalar_types( value, type_id + 1)
     } else { () }
 }
 
@@ -1384,7 +1384,7 @@ type_name_target_in(
                 name,
                 module_plus_one,
                 kind,
-                index + usize_value(1)
+                index + 1
             ),
             Result::Ok(found) => {
                 let shell = try(super::scanner::shell_at(
@@ -1404,7 +1404,7 @@ type_name_target_in(
                         name,
                         module_plus_one,
                         kind,
-                        index + usize_value(1)
+                        index + 1
                     )
                 }
             }
@@ -1445,7 +1445,7 @@ type_name_target(
                 0
             ) {
                 Result::Ok(found) => Result::Ok(found),
-                Result::Err(_) => if(module_plus_one == usize_value(0)) { Result::Err(()) } else { type_name_target(
+                Result::Err(_) => if(module_plus_one == 0) { Result::Err(()) } else { type_name_target(
                         headers,
                         declarations,
                         name,
@@ -1515,7 +1515,7 @@ find_record_type(
         if(matches) { Result::Ok(u32_from_usize(index)) } else { find_record_type(
             output,
             kind,
-            index + usize_value(1)
+            index + 1
         ) }
     } else { Result::Err(()) }
 }
@@ -1544,7 +1544,7 @@ tuple_elements_equal(
                 output,
                 start,
                 elements,
-                ordinal + usize_value(1)
+                ordinal + 1
             ) } else { false } } else { true }
 }
 
@@ -1573,7 +1573,7 @@ find_tuple_type(
         if(matches) { Result::Ok(u32_from_usize(index)) } else { find_tuple_type(
                 output,
                 elements,
-                index + usize_value(1)
+                index + 1
             ) }
     } else { Result::Err(()) }
 }
@@ -1588,7 +1588,7 @@ append_type_ids(
             &mut *output,
             type_id_from_u32(*Vec::index(source, index))
         );
-        append_type_ids(output, source, index + usize_value(1))
+        append_type_ids(output, source, index + 1)
     } else { () }
 }
 
@@ -1635,7 +1635,7 @@ resolve_type_children(
             output,
             type_index,
             module_plus_one,
-            ordinal + u32_value(1),
+            ordinal + 1,
             elements
         )
     } else { Result::Ok(()) }
@@ -1666,7 +1666,7 @@ resolve_alias_type(
                     let shell = super::headers::alias_shell(alias);
                     let generics = super::headers::alias_generics(alias);
                     if(super::headers::range_count(generics)
-                        == u32_value(0)) { handle super::scanner::shell_at(
+                        == 0) { handle super::scanner::shell_at(
                             declarations,
                             usize_from_u32(shell)
                         ) {
@@ -1709,7 +1709,7 @@ module_named_in(
             @module_named_in
         );
         if(bool_and(
-                super::scanner::shell_kind_code(shell) == u8_value(1),
+                super::scanner::shell_kind_code(shell) == 1,
                 super::scanner::shell_parent_plus_one(shell)
                     == parent_plus_one
             )) { handle Option::as_ref(
@@ -1719,19 +1719,19 @@ module_named_in(
                         declarations,
                         name,
                         parent_plus_one,
-                        index + usize_value(1)
+                        index + 1
                     ),
-                    Result::Ok(found) => if(Id::to_u32(*found) == name) { Result::Ok(index + usize_value(1)) } else { module_named_in(
+                    Result::Ok(found) => if(Id::to_u32(*found) == name) { Result::Ok(index + 1) } else { module_named_in(
                             declarations,
                             name,
                             parent_plus_one,
-                            index + usize_value(1)
+                            index + 1
                         ) }
                 } } else { module_named_in(
                     declarations,
                     name,
                     parent_plus_one,
-                    index + usize_value(1)
+                    index + 1
                 )
         }
     } else { Result::Err(()) }
@@ -1744,7 +1744,7 @@ module_named(
 ) -> Option<usize> {
     handle module_named_in(declarations, name, parent_plus_one, 0) {
         Result::Ok(found) => Result::Ok(found),
-        Result::Err(_) => if(parent_plus_one == usize_value(0)) { Result::Err(()) } else { module_named_in(declarations, name, 0, 0) }
+        Result::Err(_) => if(parent_plus_one == 0) { Result::Err(()) } else { module_named_in(declarations, name, 0, 0) }
     }
 }
 
@@ -1799,9 +1799,9 @@ resolve_signature_type(
     let index = super::headers::parsed_index(headers);
     let kind = super::headers::type_kind_code_at(index, type_index);
     let count = super::headers::type_name_count_at(index, type_index);
-    let token = if(count == u32_value(0)) { usize_from_u32(type_index) } else { super::headers::type_name_token_at(index, type_index, 0) };
+    let token = if(count == 0) { usize_from_u32(type_index) } else { super::headers::type_name_token_at(index, type_index, 0) };
     handle kind {
-        1 => if(count == u32_value(1)) {
+        1 => if(count == 1) {
             let raw =
                 super::headers::type_name_raw_at(index, type_index, 0);
             handle super::lexer::lexeme(
@@ -1875,7 +1875,7 @@ resolve_signature_type(
                         )
                     } }
             }
-        } else { if(count == u32_value(2)) { handle module_named(
+        } else { if(count == 2) { handle module_named(
                     declarations,
                     super::headers::type_name_raw_at(
                         index,
@@ -1910,7 +1910,7 @@ resolve_signature_type(
         2 => if(super::headers::type_lifetime_name_raw_plus_one_at(
                 index,
                 type_index
-            ) == u32_value(0)) {
+            ) == 0) {
             let referent = try(resolve_signature_type(
                 headers,
                 declarations,
@@ -1927,7 +1927,7 @@ resolve_signature_type(
         3 => if(super::headers::type_lifetime_name_raw_plus_one_at(
                 index,
                 type_index
-            ) == u32_value(0)) {
+            ) == 0) {
             let referent = try(resolve_signature_type(
                 headers,
                 declarations,
@@ -1942,7 +1942,7 @@ resolve_signature_type(
             ))
         } else { Result::Err(error(1, token, token, 0, 0)) },
         4 => if(super::headers::type_child_count_at(index, type_index)
-            == u32_value(0)) { Result::Ok(0) } else {
+            == 0) { Result::Ok(0) } else {
             let elements = Vec::new();
             try(resolve_type_children(
                 headers,
@@ -2000,7 +2000,7 @@ collect_parameter_types(
                     callable,
                     output,
                     module_plus_one,
-                    ordinal + u32_value(1)
+                    ordinal + 1
                 )
             }
         }
@@ -2018,7 +2018,7 @@ collect_callables(
             Result::Err(_) => Result::Err(error(7, index, index, 0, 0)),
             Result::Ok(callable) => {
                 let unsupported = bool_or(
-                    u32_value(0)
+                    0
                         < super::headers::callable_generic_count(callable),
                     super::headers::callable_has_effects(callable)
                 );
@@ -2036,7 +2036,7 @@ collect_callables(
                         super::headers::callable_result_index_plus_one(
                             callable
                         );
-                    if(result_plus_one == u32_value(0)) { collect_callable(
+                    if(result_plus_one == 0) { collect_callable(
                             headers,
                             declarations,
                             output,
@@ -2048,7 +2048,7 @@ collect_callables(
                             headers,
                             declarations,
                             output,
-                            result_plus_one - u32_value(1),
+                            result_plus_one - 1,
                             handle super::scanner::shell_at(
                                 declarations,
                                 usize_from_u32(
@@ -2123,7 +2123,7 @@ collect_callable(
                     headers,
                     declarations,
                     output,
-                    index + usize_value(1)
+                    index + 1
                 )
             } else { Result::Err(error(
                     7,
@@ -2150,31 +2150,31 @@ predeclare_nominals(
                 Result::Err(_) => Result::Err(()),
                 Result::Ok(found) => if(super::headers::range_count(
                     super::headers::struct_generics(found)
-                ) == u32_value(0)) { Result::Ok((
+                ) == 0) { Result::Ok((
                         super::headers::struct_shell(found),
-                        u32_value(1)
+                        1
                     )) } else { Result::Err(()) }
             },
             9 => handle super::headers::enum_at(nominal, index) {
                 Result::Err(_) => Result::Err(()),
                 Result::Ok(found) => if(super::headers::range_count(
                     super::headers::enum_generics(found)
-                ) == u32_value(0)) { Result::Ok((
+                ) == 0) { Result::Ok((
                         super::headers::enum_shell(found),
-                        u32_value(2)
+                        2
                     )) } else { Result::Err(()) }
             },
-            _ => Result::Ok((u32_value(0), u32_value(0)))
+            _ => Result::Ok((0, 0))
         };
         handle move declaration {
             Result::Err(_) => Result::Err(error(1, ordinal, ordinal, 0, 0)),
             Result::Ok(found) => {
-                if(found.1 == u32_value(0)) { () } else {
+                if(found.1 == 0) { () } else {
                     let nominal_id = alloc_interface_nominal(
                         output,
                         InterfaceNominal {
                             shell: found.0,
-                            kind: if(found.1 == u32_value(1)) {
+                            kind: if(found.1 == 1) {
                                 InterfaceNominalKind::Struct(
                                     InterfaceFieldRange {
                                         start: 0,
@@ -2206,7 +2206,7 @@ predeclare_nominals(
                         usize_from_u32(found.0)
                     ) = Option::Some(type_id_from_u32(type_id));
                 };
-                predeclare_nominals(headers, output, ordinal + usize_value(1))
+                predeclare_nominals(headers, output, ordinal + 1)
             }
         }
     } else { Result::Ok(()) }
@@ -2225,7 +2225,7 @@ find_struct_shell<'a>(
         if(super::headers::struct_shell(found) == shell) {
             Result::Ok(found)
         } else {
-            find_struct_shell(nominal, shell, index + usize_value(1))
+            find_struct_shell(nominal, shell, index + 1)
         }
     } else { Result::Err(()) }
 }
@@ -2243,7 +2243,7 @@ find_enum_shell<'a>(
         if(super::headers::enum_shell(found) == shell) {
             Result::Ok(found)
         } else {
-            find_enum_shell(nominal, shell, index + usize_value(1))
+            find_enum_shell(nominal, shell, index + 1)
         }
     } else { Result::Err(()) }
 }
@@ -2294,7 +2294,7 @@ collect_struct_fields(
                     owner,
                     fields,
                     module_plus_one,
-                    ordinal + u32_value(1)
+                    ordinal + 1
                 )
             }
         }
@@ -2330,7 +2330,7 @@ collect_variant_payloads(
             output,
             fields,
             module_plus_one,
-            ordinal + u32_value(1)
+            ordinal + 1
         )
     } else { Result::Ok(()) }
 }
@@ -2386,7 +2386,7 @@ collect_enum_variants(
                     owner,
                     variants,
                     module_plus_one,
-                    ordinal + u32_value(1)
+                    ordinal + 1
                 )
             }
         }
@@ -2451,7 +2451,7 @@ collect_nominal_definitions(
                         headers,
                         declarations,
                         output,
-                        nominal_id + usize_value(1)
+                        nominal_id + 1
                     )
                 }
             },
@@ -2495,7 +2495,7 @@ collect_nominal_definitions(
                         headers,
                         declarations,
                         output,
-                        nominal_id + usize_value(1)
+                        nominal_id + 1
                     )
                 }
             }
@@ -2551,7 +2551,7 @@ tuple_copyable(
                 output,
                 start,
                 count,
-                ordinal + u32_value(1),
+                ordinal + 1,
                 token,
                 ty
             ) } else { Result::Ok(false) }
@@ -2581,7 +2581,7 @@ struct_fields_copyable(
                 output,
                 start,
                 count,
-                ordinal + u32_value(1),
+                ordinal + 1,
                 token
             ) } else { Result::Ok(false) }
     } else { Result::Ok(true) }
@@ -2608,7 +2608,7 @@ variant_payloads_copyable(
                 output,
                 start,
                 count,
-                ordinal + u32_value(1),
+                ordinal + 1,
                 token
             ) } else { Result::Ok(false) }
     } else { Result::Ok(true) }
@@ -2637,7 +2637,7 @@ enum_variants_copyable(
                 output,
                 start,
                 count,
-                ordinal + u32_value(1),
+                ordinal + 1,
                 token
             ) } else { Result::Ok(false) }
     } else { Result::Ok(true) }
@@ -2721,7 +2721,7 @@ compute_nominal_flags(
         ), @compute_nominal_flags);
         compute_nominal_flags(
             output,
-            index + usize_value(1)
+            index + 1
         )
     } else { Result::Ok(()) }
 }
@@ -2738,7 +2738,7 @@ compute_type_flags(
         ), @compute_type_flags);
         compute_type_flags(
             output,
-            index + usize_value(1)
+            index + 1
         )
     } else { Result::Ok(()) }
 }
@@ -2867,7 +2867,7 @@ build_resolution_map(
             build_resolution_map(
                 resolved,
                 expression_count,
-                occurrence + usize_value(1),
+                occurrence + 1,
                 output
             )
         } else { Result::Err(error(
@@ -3052,10 +3052,10 @@ scalar_bits(kind: u8) -> u32 {
     }
 }
 
-scalar_is_signed(kind: u8) -> Bool { u8_value(7) <= kind }
+scalar_is_signed(kind: u8) -> Bool { 7 <= kind }
 
 unsigned_max(bits: u32) -> u128 {
-    if(bits == u32_value(128)) { bit_not(wrapping_convert_to_u128(0)) } else { shift_left(
+    if(bits == 128) { bit_not(wrapping_convert_to_u128(0)) } else { shift_left(
             wrapping_convert_to_u128(1),
             bits
         ) - wrapping_convert_to_u128(1) }
@@ -3063,21 +3063,21 @@ unsigned_max(bits: u32) -> u128 {
 
 scalar_max(kind: u8) -> u128 {
     let bits = scalar_bits(kind);
-    if(scalar_is_signed(kind)) { unsigned_max(bits - u32_value(1)) } else { unsigned_max(bits) }
+    if(scalar_is_signed(kind)) { unsigned_max(bits - 1) } else { unsigned_max(bits) }
 }
 
 digit_value(byte: u8) -> Option<u32> {
-    if(u8_value(48) <= byte) { if(byte <= u8_value(57)) { Result::Ok(
-                wrapping_convert_to_u32(byte - u8_value(48))
-            ) } else { if(u8_value(65) <= byte) { if(byte <= u8_value(70)) { Result::Ok(
-                        wrapping_convert_to_u32(byte - u8_value(65))
-                            + u32_value(10)
+    if(48 <= byte) { if(byte <= 57) { Result::Ok(
+                wrapping_convert_to_u32(byte - 48)
+            ) } else { if(65 <= byte) { if(byte <= 70) { Result::Ok(
+                        wrapping_convert_to_u32(byte - 65)
+                            + 10
                     ) } else { lower_digit_value(byte) } } else { lower_digit_value(byte) } } } else { Result::Err(()) }
 }
 
 lower_digit_value(byte: u8) -> Option<u32> {
-    if(u8_value(97) <= byte) { if(byte <= u8_value(102)) { Result::Ok(
-                wrapping_convert_to_u32(byte - u8_value(97)) + u32_value(10)
+    if(97 <= byte) { if(byte <= 102) { Result::Ok(
+                wrapping_convert_to_u32(byte - 97) + 10
             ) } else { Result::Err(()) } } else { Result::Err(()) }
 }
 
@@ -3099,9 +3099,9 @@ parse_digits(
 ) -> Option<u128> {
     if(cursor < end) { handle Bytes::get(&bytes, cursor) {
             Result::Err(_) => Result::Err(()),
-            Result::Ok(byte) => if(byte == u8_value(95)) { parse_digits(
+            Result::Ok(byte) => if(byte == 95) { parse_digits(
                     move bytes,
-                    cursor + usize_value(1),
+                    cursor + 1,
                     end,
                     base,
                     accumulator
@@ -3114,7 +3114,7 @@ parse_digits(
                         if(accumulator
                             <= (maximum - wide_digit) / wide_base) { parse_digits(
                                 move bytes,
-                                cursor + usize_value(1),
+                                cursor + 1,
                                 end,
                                 base,
                                 accumulator * wide_base + wide_digit
@@ -3133,13 +3133,13 @@ push_integer_constant(
         IntegerConstant {
             low0: wrapping_convert_to_u32(magnitude),
             low1: wrapping_convert_to_u32(
-                shift_right(magnitude, u32_value(32))
+                shift_right(magnitude, 32)
             ),
             high0: wrapping_convert_to_u32(
-                shift_right(magnitude, u32_value(64))
+                shift_right(magnitude, 64)
             ),
             high1: wrapping_convert_to_u32(
-                shift_right(magnitude, u32_value(96))
+                shift_right(magnitude, 96)
             )
         }
     ) {
@@ -3165,8 +3165,8 @@ elaborate_integer(
             let ty_id = expected else { type_id_from_u32(10) };
             let ty = Id::to_u32(ty_id);
             if(bool_and(
-                u32_value(2) <= ty,
-                ty <= u32_value(13)
+                2 <= ty,
+                ty <= 13
             )) {
                 let digits = super::lexer::number_digits(&number);
                 handle parse_digits(
@@ -3266,7 +3266,7 @@ elaborate_local(
         Result::Ok(ty_id) => {
             let ty = Id::to_u32(ty_id);
             let access = if(bool_and(
-                final_transfer != u32_value(0),
+                final_transfer != 0,
                 type_is_copyable(interfaces, ty_id)
             )) { CoreLocalAccess::Move } else { CoreLocalAccess::Copy };
             let core = push_value(
@@ -3311,7 +3311,7 @@ elaborate_call_arguments(
         let child = super::bodies::expression_child_at(
             body,
             expression,
-            ordinal + u32_value(1)
+            ordinal + 1
         );
         let argument = try(elaborate_expression(
             original,
@@ -3336,7 +3336,7 @@ elaborate_call_arguments(
             value,
             expression,
             callable,
-            ordinal + u32_value(1),
+            ordinal + 1,
             wrappers,
             operands
         )
@@ -3350,8 +3350,8 @@ wrap_lets_reverse(
     body: CoreComputationId,
     result_type: TypeId
 ) -> CoreComputationId {
-    if(count == usize_value(0)) { body } else {
-        let wrapper = let_wrapper_at(lets, count - usize_value(1));
+    if(count == 0) { body } else {
+        let wrapper = let_wrapper_at(lets, count - 1);
         let wrapped = push_computation(
             value,
             result_type,
@@ -3364,7 +3364,7 @@ wrap_lets_reverse(
         wrap_lets_reverse(
             value,
             lets,
-            count - usize_value(1),
+            count - 1,
             wrapped,
             result_type
         )
@@ -3394,7 +3394,7 @@ elaborate_call(
                 let expected_count = parameters.count;
                 let found_count =
                     super::bodies::expression_child_count_at(body, expression)
-                        - u32_value(1);
+                        - 1;
                 if(expected_count == found_count) {
                     let result =
                         interface_callable_result(interfaces, callable);
@@ -3507,7 +3507,7 @@ elaborate_block_statements(
                     value.parameter_count + value.next_source_local
                 );
                 value.next_source_local =
-                    value.next_source_local + u32_value(1);
+                    value.next_source_local + 1;
                 let initializer = try(elaborate_expression(
                     original,
                     headers,
@@ -3538,12 +3538,12 @@ elaborate_block_statements(
                     value,
                     expression,
                     expected,
-                    ordinal + u32_value(1),
+                    ordinal + 1,
                     lets
                 )
             },
             2 => {
-                let is_final = ordinal + u32_value(1) == count;
+                let is_final = ordinal + 1 == count;
                 let found = try(elaborate_expression(
                     original,
                     headers,
@@ -3579,7 +3579,7 @@ elaborate_block_statements(
                         value,
                         expression,
                         expected,
-                        ordinal + u32_value(1),
+                        ordinal + 1,
                         lets
                     )
                 }
@@ -3748,7 +3748,7 @@ elaborate_tuple_elements(
             value,
             expression,
             expected,
-            ordinal + u32_value(1),
+            ordinal + 1,
             wrappers,
             types,
             fields
@@ -3882,7 +3882,7 @@ field_ordinal_by_name(
                 interfaces,
                 nominal,
                 name,
-                ordinal + u32_value(1)
+                ordinal + 1
             ) }
     } else { Result::Err(()) }
 }
@@ -3949,9 +3949,9 @@ ordered_fields_complete(
     seen: &Vec<u32>,
     ordinal: usize
 ) -> Bool {
-    if(ordinal < Vec::len(seen)) { if(*Vec::index(seen, ordinal) == u32_value(0)) { false } else { ordered_fields_complete(
+    if(ordinal < Vec::len(seen)) { if(*Vec::index(seen, ordinal) == 0) { false } else { ordered_fields_complete(
                 seen,
-                ordinal + usize_value(1)
+                ordinal + 1
             ) } } else { true }
 }
 
@@ -3969,7 +3969,7 @@ append_ordered_fields(
             field: u32_from_usize(ordinal),
             value: value
         });
-        append_ordered_fields(output, values, ordinal + usize_value(1))
+        append_ordered_fields(output, values, ordinal + 1)
     } else { () }
 }
 
@@ -4002,12 +4002,12 @@ elaborate_struct_fields(
         let name = super::bodies::expression_name_value_at(
             body,
             expression,
-            ordinal + u32_value(1)
+            ordinal + 1
         );
         let token = super::bodies::expression_name_token_at(
             body,
             expression,
-            ordinal + u32_value(1)
+            ordinal + 1
         );
         handle field_ordinal_by_name(
             &*interfaces,
@@ -4019,7 +4019,7 @@ elaborate_struct_fields(
                 Result::Err(error(6, token, token, 0, name)),
             Result::Ok(field) => if(bool_and(
                 *Vec::index(&*seen, usize_from_u32(field))
-                    == u32_value(0),
+                    == 0,
                 struct_field_accessible(
                     declarations,
                     &*interfaces,
@@ -4070,7 +4070,7 @@ elaborate_struct_fields(
                     value,
                     expression,
                     nominal,
-                    ordinal + u32_value(1),
+                    ordinal + 1,
                     seen,
                     values
                 )
@@ -4224,7 +4224,7 @@ elaborate_enum_payloads(
             super::bodies::expression_child_at(
                 body,
                 expression,
-                ordinal + u32_value(1)
+                ordinal + 1
             ),
             Option::Some(payload_type)
         ), @elaborate_enum_payloads);
@@ -4244,7 +4244,7 @@ elaborate_enum_payloads(
             expression,
             payload_start,
             payload_count,
-            ordinal + u32_value(1),
+            ordinal + 1,
             wrappers,
             fields
         )
@@ -4289,7 +4289,7 @@ elaborate_enum_construct(
         let ty = Id::to_u32(ty_id);
         let found_count =
             super::bodies::expression_child_count_at(body, expression)
-                - u32_value(1);
+                - 1;
         if(bool_and(
             payload_count == found_count,
             bool_and(
@@ -4360,7 +4360,7 @@ elaborate_enum_bare(
         };
         let ty = Id::to_u32(ty_id);
         if(bool_and(
-            payload_count == u32_value(0),
+            payload_count == 0,
             bool_and(
                 type_is_copyable(interfaces, ty_id),
                 expected_matches(expected, ty_id)
@@ -4420,13 +4420,13 @@ elaborate_projection(
     );
     let field = handle subject_kind {
                 TypeKind::Tuple(range) =>
-                    if(name_kind == u8_value(2)) {
+                    if(name_kind == 2) {
                         if(name < range.count) {
                             Result::Ok(name)
                         } else { Result::Err(()) }
                     } else { Result::Err(()) },
                 TypeKind::Nominal(nominal_id) =>
-                  if(name_kind == u8_value(1)) {
+                  if(name_kind == 1) {
                     let nominal = Id::to_u32(nominal_id);
                     if(interface_nominal_is_struct(
                         interfaces,
@@ -4495,7 +4495,7 @@ elaborate_projection(
                             result_type,
                             CoreValueKind::Projection(operand, field_index)
                         );
-                        if(Vec::len(&wrappers) == usize_value(0)) { Result::Ok(Elaborated {
+                        if(Vec::len(&wrappers) == 0) { Result::Ok(Elaborated {
                                 type_id: result_type,
                                 form: ElaboratedForm::Value(projected)
                             }) } else {
@@ -4693,7 +4693,7 @@ seed_parameter_locals(
             interfaces,
             callable,
             output,
-            ordinal + u32_value(1)
+            ordinal + 1
         )
     } else { () }
 }
@@ -4702,11 +4702,11 @@ seed_untyped_locals(
     output: &mut IndexVec<CoreLocalTag, Option<TypeId>>,
     remaining: usize
 ) {
-    if(remaining == usize_value(0)) {
+    if(remaining == 0) {
         ()
     } else {
         push_local_type(&mut *output, None);
-        seed_untyped_locals(output, remaining - usize_value(1))
+        seed_untyped_locals(output, remaining - 1)
     }
 }
 
@@ -4726,7 +4726,7 @@ finalize_local_types(
             Result::Ok(_) => finalize_local_types(
                 source,
                 output,
-                index + usize_value(1)
+                index + 1
             )
         }
     } else { () }
@@ -4739,9 +4739,9 @@ resolved_local_plus_one(
 ) -> u32 {
     handle elaboration_target_at(map, expression) {
         ElaborationTarget::Parameter(id) =>
-            Id::to_u32(id) + u32_value(1),
+            Id::to_u32(id) + 1,
         ElaborationTarget::Local(id) =>
-            parameter_count + Id::to_u32(id) + u32_value(1),
+            parameter_count + Id::to_u32(id) + 1,
         _ => 0
     }
 }
@@ -4760,11 +4760,11 @@ record_last_local_expressions(
                 parameter_count,
                 expression
             );
-            if(local_plus_one == u32_value(0)) { () } else {
+            if(local_plus_one == 0) { () } else {
                 *Vec::index_mut(
                     &mut *last_expressions_plus_one,
-                    usize_from_u32(local_plus_one - u32_value(1))
-                ) = expression + u32_value(1);
+                    usize_from_u32(local_plus_one - 1)
+                ) = expression + 1;
             }
         },
         _ => record_last_local_expression_children(
@@ -4806,7 +4806,7 @@ record_last_local_expression_children(
             map,
             parameter_count,
             expression,
-            ordinal + u32_value(1),
+            ordinal + 1,
             last_expressions_plus_one
         )
     } else { () }
@@ -4826,7 +4826,7 @@ straight_line_children(
         )) { straight_line_children(
                 body,
                 expression,
-                ordinal + u32_value(1)
+                ordinal + 1
             ) } else { false } } else { true }
 }
 
@@ -4902,7 +4902,7 @@ local_occurrences_in_children(
             map,
             parameter_count,
             expression,
-            ordinal + u32_value(1),
+            ordinal + 1,
             local_plus_one
         ) } else { 0 }
 }
@@ -4920,13 +4920,13 @@ struct_has_repeated_local(
             map,
             parameter_count,
             expression,
-            u32_from_usize(local) + u32_value(1)
-        ) > u32_value(1)) { true } else { struct_has_repeated_local(
+            u32_from_usize(local) + 1
+        ) > 1) { true } else { struct_has_repeated_local(
                 body,
                 map,
                 parameter_count,
                 expression,
-                local + usize_value(1),
+                local + 1,
                 local_count
             ) } } else { false }
 }
@@ -4939,7 +4939,7 @@ expression_contains_repeated_struct_local(
     local_count: usize
 ) -> Bool {
     if(bool_and(
-        super::bodies::expression_kind_at(body, expression) == u8_value(10),
+        super::bodies::expression_kind_at(body, expression) == 10,
         struct_has_repeated_local(
             body,
             map,
@@ -4980,7 +4980,7 @@ expression_children_contain_repeated_struct_local(
                     map,
                     parameter_count,
                     expression,
-                    ordinal + u32_value(1),
+                    ordinal + 1,
                     local_count
                 ) } } else { false }
 }
@@ -5001,10 +5001,10 @@ mark_final_transfer_candidates(
                 parameter_count,
                 expression
             );
-            if(local_plus_one == u32_value(0)) { () } else { if(*Vec::index(
+            if(local_plus_one == 0) { () } else { if(*Vec::index(
                     last_expressions_plus_one,
-                    usize_from_u32(local_plus_one - u32_value(1))
-                ) == expression + u32_value(1)) {
+                    usize_from_u32(local_plus_one - 1)
+                ) == expression + 1) {
                     *Vec::index_mut(
                         &mut *output,
                         usize_from_u32(expression)
@@ -5012,7 +5012,7 @@ mark_final_transfer_candidates(
                 } else { () } }
         },
         7 => {
-            let argument = if(ordinal < u32_value(1)) { u32_value(1) } else { ordinal };
+            let argument = if(ordinal < 1) { 1 } else { ordinal };
             if(argument < super::bodies::expression_child_count_at(
                 body,
                 expression
@@ -5035,7 +5035,7 @@ mark_final_transfer_candidates(
                     map,
                     parameter_count,
                     expression,
-                    argument + u32_value(1),
+                    argument + 1,
                     last_expressions_plus_one,
                     output
                 )
@@ -5063,7 +5063,7 @@ mark_final_transfer_candidates(
                 map,
                 parameter_count,
                 expression,
-                ordinal + u32_value(1),
+                ordinal + 1,
                 last_expressions_plus_one,
                 output
             )
@@ -5106,7 +5106,7 @@ mark_root_statement_candidates(
             map,
             parameter_count,
             root,
-            ordinal + u32_value(1),
+            ordinal + 1,
             last_expressions_plus_one,
             output
         )
@@ -5131,7 +5131,7 @@ final_transfer_expressions(
     );
     let output = Vec::new();
     push_zeroes(&mut output, super::bodies::expression_count(body));
-    if(super::bodies::expression_kind_at(body, root) == u8_value(8)) { mark_root_statement_candidates(
+    if(super::bodies::expression_kind_at(body, root) == 8) { mark_root_statement_candidates(
             body,
             map,
             parameter_count,
@@ -5270,12 +5270,12 @@ module_depth(
     declarations: &super::scanner::DeclarationIndex,
     module_plus_one: usize
 ) -> usize {
-    if(module_plus_one == usize_value(0)) { 0 } else { handle super::scanner::shell_at(
+    if(module_plus_one == 0) { 0 } else { handle super::scanner::shell_at(
             declarations,
-            module_plus_one - usize_value(1)
+            module_plus_one - 1
         ) {
             Result::Err(_) => unreachable(),
-            Result::Ok(shell) => usize_value(1) + module_depth(
+            Result::Ok(shell) => 1 + module_depth(
                 declarations,
                 super::scanner::shell_parent_plus_one(shell)
             )
@@ -5288,9 +5288,9 @@ write_module_components(
     declarations: &super::scanner::DeclarationIndex,
     module_plus_one: usize
 ) {
-    if(module_plus_one == usize_value(0)) { () } else { handle super::scanner::shell_at(
+    if(module_plus_one == 0) { () } else { handle super::scanner::shell_at(
             declarations,
-            module_plus_one - usize_value(1)
+            module_plus_one - 1
         ) {
             Result::Err(_) => unreachable(),
             Result::Ok(shell) => {
@@ -5343,7 +5343,7 @@ find_callable<'a>(
         if(super::headers::callable_shell(callable) == shell) {
             Result::Ok(callable)
         } else {
-            find_callable(headers, shell, index + usize_value(1))
+            find_callable(headers, shell, index + 1)
         }
     } else { Result::Err(()) }
 }
@@ -5381,7 +5381,7 @@ construction_fields_use_local(
                 body,
                 start,
                 count,
-                ordinal + u32_value(1),
+                ordinal + 1,
                 local
             ) } } else { false }
 }
@@ -5404,7 +5404,7 @@ operands_use_local(
                 body,
                 start,
                 count,
-                ordinal + u32_value(1),
+                ordinal + 1,
                 local
             ) } } else { false }
 }
@@ -5442,7 +5442,7 @@ computation_uses_local(
 }
 
 serialized_type_id(ty: u32) -> u32 {
-    if(ty < u32_value(14)) { ty } else { u32_value(2147483648) + (ty - u32_value(14)) }
+    if(ty < 14) { ty } else { 2147483648 + (ty - 14) }
 }
 
 write_type_id(output: &mut ByteBuf, ty: u32) {
@@ -5470,10 +5470,10 @@ write_value_expression(
                 &body.integer_constants,
                 constant_id
             );
-            let at = Id::to_usize(constant_id) * usize_value(4);
+            let at = Id::to_usize(constant_id) * 4;
             if(bool_or(
-                constant.high0 != u32_value(0),
-                constant.high1 != u32_value(0)
+                constant.high0 != 0,
+                constant.high1 != 0
             )) { Result::Err(error(7, at, at, 0, ty)) } else {
                 ByteBuf::push(&mut *output, 1);
                 write_type_id(&mut *output, ty);
@@ -5482,7 +5482,7 @@ write_value_expression(
                     wrapping_convert_to_u64(constant.low0)
                         + shift_left(
                             wrapping_convert_to_u64(constant.low1),
-                            u32_value(32)
+                            32
                         )
                 );
                 Result::Ok(())
@@ -5601,7 +5601,7 @@ write_construct_fields(
             source_local_limit,
             start,
             count,
-            ordinal + u32_value(1)
+            ordinal + 1
         )
     } else { Result::Ok(()) }
 }
@@ -5639,7 +5639,7 @@ write_call_operands(
             source_local_limit,
             start,
             count,
-            ordinal + u32_value(1)
+            ordinal + 1
         )
     } else { Result::Ok(()) }
 }
@@ -5651,7 +5651,7 @@ leading_let_count(
 ) -> u32 {
     handle core_computation_at(&body.computations, computation).kind {
         CoreComputationKind::Let(_, _, remainder) =>
-            leading_let_count(body, remainder, count + u32_value(1)),
+            leading_let_count(body, remainder, count + 1),
         _ => count
     }
 }
@@ -5913,7 +5913,7 @@ write_parameters(
                     interfaces,
                     callable,
                     interface_callable,
-                    ordinal + u32_value(1)
+                    ordinal + 1
                 )
             }
         }
@@ -5945,7 +5945,7 @@ write_function(
                     &parsed
                 ) {
                 Result::Err(found) => if(super::resolution::resolution_error_code(&found)
-                        == u8_value(4)) { Result::Err(4) } else { Result::Err(3) },
+                        == 4) { Result::Err(4) } else { Result::Err(3) },
                 Result::Ok(resolved) => handle elaborate_function_body(
                     original,
                     headers,
@@ -6024,8 +6024,8 @@ function_count(
             Result::Err(_) => count,
             Result::Ok(shell) => function_count(
                 declarations,
-                index + usize_value(1),
-                if(super::scanner::shell_kind_code(shell) == u8_value(12)) { count + usize_value(1) } else { count }
+                index + 1,
+                if(super::scanner::shell_kind_code(shell) == 12) { count + 1 } else { count }
             )
         } } else { count }
 }
@@ -6040,7 +6040,7 @@ write_functions(
 ) -> Result<(), u8> {
     if(index < super::scanner::shell_count(declarations)) { handle super::scanner::shell_at(declarations, index) {
             Result::Err(_) => Result::Err(3),
-            Result::Ok(shell) => if(super::scanner::shell_kind_code(shell) == u8_value(12)) {
+            Result::Ok(shell) => if(super::scanner::shell_kind_code(shell) == 12) {
                 try(write_function(
                     output,
                     original,
@@ -6055,7 +6055,7 @@ write_functions(
                     headers,
                     declarations,
                     interfaces,
-                    index + usize_value(1)
+                    index + 1
                 )
             } else { write_functions(
                     output,
@@ -6063,7 +6063,7 @@ write_functions(
                     headers,
                     declarations,
                     interfaces,
-                    index + usize_value(1)
+                    index + 1
                 ) }
         } } else { Result::Ok(()) }
 }
@@ -6129,7 +6129,7 @@ process_inputs(
         };
         process_inputs(
             arguments,
-            index + usize_value(1),
+            index + 1,
              output
         )
     } else { () }
@@ -6138,25 +6138,19 @@ process_inputs(
 pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
     let arguments = process_args();
     let count = Vec::len(&arguments);
-    if(count < usize_value(2)) { write_diagnostic(
+    if(count < 2) { write_diagnostic(
             "usage: grandiose-self-host-elaboration <output> <input>..."
         ) } else {
         let output_path = *Vec::index(&arguments, 0);
         let encoded = ByteBuf::new();
         ByteBuf::write_u32_le(
             &mut encoded,
-            u32_from_usize(count - usize_value(1))
+            u32_from_usize(count - 1)
         );
         process_inputs(&arguments, 1, &mut encoded);
         write_file(move output_path, ByteBuf::finish( encoded))
     }
 }
-
-usize_value(value: usize) -> usize {  value }
-
-u8_value(value: u8) -> u8 {  value }
-
-u32_value(value: u32) -> u32 {  value }
 
 u32_from_usize(value: usize) -> u32 { wrapping_convert_to_u32( value) }
 

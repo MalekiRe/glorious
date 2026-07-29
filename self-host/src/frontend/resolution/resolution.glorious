@@ -112,17 +112,17 @@ binding_lookup(
     name: Id<String>,
     count: usize
 ) -> Option<ResolvedTarget> {
-    if(count == usize_value(0)) {
+    if(count == 0) {
         Result::Err(())
     } else {
-            let binding = Vec::index(bindings, count - usize_value(1));
+            let binding = Vec::index(bindings, count - 1);
             if(binding.name == name) {
                 Result::Ok(binding.target)
             } else {
                 binding_lookup(
                     bindings,
                     name,
-                    count - usize_value(1)
+                    count - 1
                 )
             }
     }
@@ -166,12 +166,12 @@ search_functions(
                             Result::Ok(
                                 FunctionSearch {
                                     first_plus_one:
-                                        if(found.count == u32_value(0)) {
-                                            shell_index + u32_value(1)
+                                        if(found.count == 0) {
+                                            shell_index + 1
                                         } else {
                                             found.first_plus_one
                                     },
-                                    count: found.count + u32_value(1)
+                                    count: found.count + 1
                                 }
                             )
                         } else {
@@ -210,7 +210,7 @@ finish_function_name(
     handle found.count {
         0 => Result::Err(resolution_error(1, token, token)),
         1 => {
-            let shell_index = found.first_plus_one - u32_value(1);
+            let shell_index = found.first_plus_one - 1;
             handle super::scanner::shell_at(
                 declarations,
                 usize_from_u32(shell_index)
@@ -231,7 +231,7 @@ finish_function_name(
         _ => Result::Err(resolution_error(
             2,
             token,
-            usize_from_u32(found.first_plus_one - u32_value(1))
+            usize_from_u32(found.first_plus_one - 1)
         ))
     }
 }
@@ -250,8 +250,8 @@ resolve_function_name(
         module_plus_one,
         token
     ), @resolve_function_name);
-    if(found.count == u32_value(0)
-        and { module_plus_one != usize_value(0) }) {
+    if(found.count == 0
+        and { module_plus_one != 0 }) {
         let root = try(resolve_function_name_in(
             headers,
             declarations,
@@ -309,12 +309,12 @@ search_structs(
                         Result::Ok(
                             NominalSearch {
                                 first_plus_one:
-                                    if(found.count == u32_value(0)) {
-                                        u32_from_usize(current) + u32_value(1)
+                                    if(found.count == 0) {
+                                        u32_from_usize(current) + 1
                                     } else {
                                         found.first_plus_one
                                     },
-                                count: found.count + u32_value(1)
+                                count: found.count + 1
                             }
                         )
                     } else {
@@ -334,7 +334,7 @@ finish_struct_name(
     handle found.count {
         0 => Result::Err(resolution_error(1, token, token)),
         1 => {
-            let index = found.first_plus_one - u32_value(1);
+            let index = found.first_plus_one - 1;
             handle super::headers::struct_at(
                 nominal,
                 usize_from_u32(index)
@@ -351,7 +351,7 @@ finish_struct_name(
         _ => Result::Err(resolution_error(
             2,
             token,
-            usize_from_u32(found.first_plus_one - u32_value(1))
+            usize_from_u32(found.first_plus_one - 1)
         ))
     }
 }
@@ -388,8 +388,8 @@ resolve_struct_name(
         module_plus_one,
         token
     ), @resolve_struct_name);
-    if(found.count == u32_value(0)
-        and { module_plus_one != usize_value(0) }) {
+    if(found.count == 0
+        and { module_plus_one != 0 }) {
         let root = try(resolve_struct_name_in(
             nominal,
             declarations,
@@ -438,12 +438,12 @@ search_enums(
                             }) {
                         Result::Ok(
                             NominalSearch {
-                                first_plus_one: if(found.count == u32_value(0)) {
-                                    u32_from_usize(current) + u32_value(1)
+                                first_plus_one: if(found.count == 0) {
+                                    u32_from_usize(current) + 1
                                 } else {
                                     found.first_plus_one
                                 },
-                                count: found.count + u32_value(1)
+                                count: found.count + 1
                             }
                         )
                     } else {
@@ -483,7 +483,7 @@ find_variant(
                     count,
                     name,
                     token,
-                    ordinal + u32_value(1)
+                    ordinal + 1
                 )
             }
         }
@@ -505,7 +505,7 @@ finish_variant_name(
     handle found.count {
         0 => Result::Err(resolution_error(1, enum_token, enum_token)),
         1 => {
-            let enum_index = found.first_plus_one - u32_value(1);
+            let enum_index = found.first_plus_one - 1;
             handle super::headers::enum_at(
                 nominal,
                 usize_from_u32(enum_index)
@@ -538,7 +538,7 @@ finish_variant_name(
         _ => Result::Err(resolution_error(
             2,
             enum_token,
-            usize_from_u32(found.first_plus_one - u32_value(1))
+            usize_from_u32(found.first_plus_one - 1)
         ))
     }
 }
@@ -561,8 +561,8 @@ resolve_variant_name(
         0,
         NominalSearch { first_plus_one: 0, count: 0 }
     ), @resolve_variant_name);
-    if(found.count == u32_value(0)
-        and { module_plus_one != usize_value(0) }) {
+    if(found.count == 0
+        and { module_plus_one != 0 }) {
         let root = try(search_enums(
             nominal,
             declarations,
@@ -720,7 +720,7 @@ resolve_children(
                 output,
                 expression,
                 module_plus_one,
-                child + u32_value(1)
+                child + 1
             )
     } else {
         Result::Ok(())
@@ -754,14 +754,14 @@ resolve_block_children(
                 child
             );
             handle position {
-                1 => if(metadata == u32_value(0)) {
+                1 => if(metadata == 0) {
                     Result::Err(resolution_error(
                         3,
                         super::bodies::expression_token_start_at(body, value),
                         usize_from_u32(metadata)
                     ))
                 } else {
-                    let token = usize_from_u32(metadata - u32_value(1));
+                    let token = usize_from_u32(metadata - 1);
                         handle super::lexer::token_kind_at(
                             super::headers::parsed_source(headers),
                             token
@@ -819,7 +819,7 @@ resolve_block_children(
                                             output,
                                             expression,
                                             module_plus_one,
-                                            child + u32_value(1)
+                                            child + 1
                                         )
                                     }
                                 }
@@ -827,7 +827,7 @@ resolve_block_children(
                             _ => Result::Err(resolution_error(3, token, token))
                         }
                 },
-                2 => if(metadata == u32_value(0)) {
+                2 => if(metadata == 0) {
                     try(
                             resolve_expression(
                                 headers,
@@ -848,7 +848,7 @@ resolve_block_children(
                             output,
                             expression,
                             module_plus_one,
-                            child + u32_value(1)
+                            child + 1
                         )
                 } else {
                     Result::Err(resolution_error(
@@ -992,7 +992,7 @@ add_parameters(
                             callable,
                             owner,
                             bindings,
-                            ordinal + u32_value(1)
+                            ordinal + 1
                         )
                     }
                 }
@@ -1008,10 +1008,10 @@ duplicate_parameter_token(
     name: u32,
     count: u32
 ) -> Option<usize> {
-    if(count == u32_value(0)) {
+    if(count == 0) {
         Result::Err(())
     } else {
-        let index = start + count - u32_value(1);
+        let index = start + count - 1;
         let parameter = try(
             super::headers::parameter_at(headers, usize_from_u32(index)),
             @duplicate_parameter_token
@@ -1025,7 +1025,7 @@ duplicate_parameter_token(
                 headers,
                 start,
                 name,
-                count - u32_value(1)
+                count - 1
             )
         }
     }
@@ -1047,7 +1047,7 @@ find_body_callable<'a>(
             find_body_callable(
                 headers,
                 shell,
-                index + usize_value(1)
+                index + 1
             )
         }
     } else {
@@ -1150,15 +1150,15 @@ module_depth(
     declarations: &super::scanner::DeclarationIndex,
     module_plus_one: usize
 ) -> usize {
-    if(module_plus_one == usize_value(0)) {
+    if(module_plus_one == 0) {
         0
     } else {
         handle super::scanner::shell_at(
             declarations,
-            module_plus_one - usize_value(1)
+            module_plus_one - 1
         ) {
             Result::Err(_) => unreachable(),
-            Result::Ok(shell) => usize_value(1) + module_depth(
+            Result::Ok(shell) => 1 + module_depth(
                 declarations,
                 super::scanner::shell_parent_plus_one(shell)
             )
@@ -1172,12 +1172,12 @@ write_module_components(
     declarations: &super::scanner::DeclarationIndex,
     module_plus_one: usize
 ) {
-    if(module_plus_one == usize_value(0)) {
+    if(module_plus_one == 0) {
         ()
     } else {
         handle super::scanner::shell_at(
             declarations,
-            module_plus_one - usize_value(1)
+            module_plus_one - 1
         ) {
             Result::Err(_) => unreachable(),
             Result::Ok(shell) => {
@@ -1258,7 +1258,7 @@ find_parameter_range(
             find_parameter_range(
                 index,
                 shell,
-                at + usize_value(1)
+                at + 1
             )
         }
     } else {
@@ -1291,7 +1291,7 @@ write_parameters(
                         index,
                         start,
                         count,
-                        ordinal + u32_value(1)
+                        ordinal + 1
                     )
                 }
             }
@@ -1471,9 +1471,9 @@ function_count(
             Result::Err(_) => count,
             Result::Ok(shell) => function_count(
                 declarations,
-                index + usize_value(1),
-                if(super::scanner::shell_kind_code(shell) == u8_value(12)) {
-                    count + usize_value(1)
+                index + 1,
+                if(super::scanner::shell_kind_code(shell) == 12) {
+                    count + 1
                 } else {
                     count
                 }
@@ -1494,7 +1494,7 @@ write_functions(
     if(index < super::scanner::shell_count(declarations)) {
         handle super::scanner::shell_at(declarations, index) {
             Result::Err(_) => Result::Ok(()),
-            Result::Ok(shell) => if(super::scanner::shell_kind_code(shell) == u8_value(12)) {
+            Result::Ok(shell) => if(super::scanner::shell_kind_code(shell) == 12) {
                 try(
                         write_resolved_function(
                             &mut *output,
@@ -1510,7 +1510,7 @@ write_functions(
                         original,
                         headers,
                         declarations,
-                        index + usize_value(1)
+                        index + 1
                     )
             } else {
                 write_functions(
@@ -1518,7 +1518,7 @@ write_functions(
                     original,
                     headers,
                     declarations,
-                    index + usize_value(1)
+                    index + 1
                 )
             }
         }
@@ -1580,7 +1580,7 @@ process_inputs(
             };
             process_inputs(
                 arguments,
-                index + usize_value(1),
+                index + 1,
                  output
             )
     } else {
@@ -1591,7 +1591,7 @@ process_inputs(
 pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
     let arguments = process_args();
     let count = Vec::len(&arguments);
-    if(count < usize_value(2)) {
+    if(count < 2) {
         write_diagnostic(
             "usage: grandiose-self-host-resolution <output> <input>..."
         )
@@ -1600,7 +1600,7 @@ pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
             let encoded = ByteBuf::new();
             ByteBuf::write_u32_le(
                 &mut encoded,
-                u32_from_usize(count - usize_value(1))
+                u32_from_usize(count - 1)
             );
             process_inputs(&arguments, 1, &mut encoded);
             write_file(move output_path, ByteBuf::finish( encoded))
@@ -1614,9 +1614,3 @@ usize_from_u32(value: u32) -> usize { wrapping_convert_to_usize( value) }
 u32_from_u8(value: u8) -> u32 { wrapping_convert_to_u32( value) }
 
 u8_from_u32(value: u32) -> u8 { wrapping_convert_to_u8( value) }
-
-u8_value(value: u8) -> u8 {  value }
-
-usize_value(value: usize) -> usize {  value }
-
-u32_value(value: u32) -> u32 {  value }

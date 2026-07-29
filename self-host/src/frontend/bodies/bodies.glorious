@@ -122,7 +122,7 @@ pub expression_name_kind_at(
     u8_from_u32(*Vec::index(
         &value.names,
         usize_from_u32(
-            (node.names.start + ordinal) * u32_value(3)
+            (node.names.start + ordinal) * 3
         )
     ))
 }
@@ -136,7 +136,7 @@ pub expression_name_value_at(
     *Vec::index(
         &value.names,
         usize_from_u32(
-            (node.names.start + ordinal) * u32_value(3) + u32_value(1)
+            (node.names.start + ordinal) * 3 + 1
         )
     )
 }
@@ -150,7 +150,7 @@ pub expression_name_token_at(
     usize_from_u32(*Vec::index(
         &value.names,
         usize_from_u32(
-            (node.names.start + ordinal) * u32_value(3) + u32_value(2)
+            (node.names.start + ordinal) * 3 + 2
         )
     ))
 }
@@ -204,7 +204,7 @@ expression_range(start: usize, end: usize) -> ExprRange {
 }
 
 name_count(value: &Vec<u32>) -> usize {
-    Vec::len(value) / usize_value(3)
+    Vec::len(value) / 3
 }
 
 push_name(value: &mut Vec<u32>, kind: u8, found: u32, token: usize) {
@@ -243,24 +243,24 @@ operator_push(value: &mut Vec<u32>, operator: OperatorUse) {
 }
 
 operator_at(value: &Vec<u32>, index: usize) -> OperatorUse {
-    let base = index * usize_value(5);
+    let base = index * 5;
     OperatorUse {
         fixity: word_at(value, base),
         start: usize_from_u32(word_at(
             value,
-            base + usize_value(1)
+            base + 1
         )),
         end: usize_from_u32(word_at(
             value,
-            base + usize_value(2)
+            base + 2
         )),
         form: u8_from_u32(word_at(
             value,
-            base + usize_value(3)
+            base + 3
         )),
         precedence: u8_from_u32(word_at(
             value,
-            base + usize_value(4)
+            base + 4
         ))
     }
 }
@@ -268,12 +268,12 @@ operator_at(value: &Vec<u32>, index: usize) -> OperatorUse {
 last_operator(value: &Vec<u32>) -> OperatorUse {
     operator_at(
         value,
-        word_count(value) / usize_value(5) - usize_value(1)
+        word_count(value) / 5 - 1
     )
 }
 
 last_expr(value: &Vec<u32>) -> ExprId {
-    expr_id_at(value, word_count(value) - usize_value(1))
+    expr_id_at(value, word_count(value) - 1)
 }
 
 source_text(value: &String, start: usize, end: usize) -> String {
@@ -300,7 +300,7 @@ range_text(
     end: usize
 ) -> String {
     let first = token_span(source, start);
-    let last = token_span(source, end - usize_value(1));
+    let last = token_span(source, end - 1);
     source_text(
         original,
         super::lexer::span_start(&first),
@@ -384,7 +384,7 @@ node_name_kind_at(value: &BodyParser, id: ExprId, ordinal: u32) -> u8 {
     u8_from_u32(*Vec::index(
         &value.names,
         usize_from_u32(
-            (node.names.start + ordinal) * u32_value(3)
+            (node.names.start + ordinal) * 3
         )
     ))
 }
@@ -394,7 +394,7 @@ node_name_value_at(value: &BodyParser, id: ExprId, ordinal: u32) -> u32 {
     *Vec::index(
         &value.names,
         usize_from_u32(
-            (node.names.start + ordinal) * u32_value(3) + u32_value(1)
+            (node.names.start + ordinal) * 3 + 1
         )
     )
 }
@@ -404,7 +404,7 @@ node_name_token_at(value: &BodyParser, id: ExprId, ordinal: u32) -> usize {
     usize_from_u32(*Vec::index(
         &value.names,
         usize_from_u32(
-            (node.names.start + ordinal) * u32_value(3) + u32_value(2)
+            (node.names.start + ordinal) * 3 + 2
         )
     ))
 }
@@ -432,7 +432,7 @@ push_unary(
         kind_code,
         token_range(start, end),
         token_range(operator.start, operator.end),
-        operator.fixity + u32_value(1),
+        operator.fixity + 1,
         name_start,
         edge_start
     )
@@ -461,7 +461,7 @@ push_binary(
         6,
         token_range(start, end),
         token_range(operator.start, operator.end),
-        operator.fixity + u32_value(1),
+        operator.fixity + 1,
         name_start,
         edge_start
     )
@@ -481,7 +481,7 @@ push_argument_edges(
                     metadata: 0
                 }
             );
-            push_argument_edges(value, arguments, index + usize_value(1))
+            push_argument_edges(value, arguments, index + 1)
     } else {
         ()
     }
@@ -530,7 +530,7 @@ push_expression_edges(
             push_expression_edges(
                 value,
                 expressions,
-                index + usize_value(1),
+                index + 1,
                 position
             )
     } else {
@@ -559,7 +559,7 @@ push_tuple(
 }
 
 field_count(value: &Vec<u32>) -> usize {
-    word_count(value) / usize_value(3)
+    word_count(value) / 3
 }
 
 push_struct_fields(
@@ -568,26 +568,26 @@ push_struct_fields(
     index: usize
 ) {
     if(index < field_count(fields)) {
-            let base = index * usize_value(3);
+            let base = index * 3;
             push_name(
                 &mut value.names,
                 1,
                 word_at(fields, base),
-                usize_from_u32(word_at(fields, base + usize_value(1)))
+                usize_from_u32(word_at(fields, base + 1))
             );
             Vec::push(
                 &mut value.edges,
                 ExprEdge {
                     value: Id::from_u32(word_at(
                         fields,
-                        base + usize_value(2)
+                        base + 2
                     )),
                     position: 1,
                     // Name zero is the constructed nominal.
-                    metadata: u32_from_usize(index) + u32_value(1)
+                    metadata: u32_from_usize(index) + 1
                 }
             );
-            push_struct_fields(value, fields, index + usize_value(1))
+            push_struct_fields(value, fields, index + 1)
     } else {
         ()
     }
@@ -651,7 +651,7 @@ push_projection(
 }
 
 statement_count(value: &Vec<u32>) -> usize {
-    word_count(value) / usize_value(3)
+    word_count(value) / 3
 }
 
 push_statement(
@@ -671,22 +671,22 @@ push_statement_edges(
     index: usize
 ) {
     if(index < statement_count(statements)) {
-            let base = index * usize_value(3);
+            let base = index * 3;
             Vec::push(
                 &mut value.edges,
                 ExprEdge {
                     value: Id::from_u32(word_at(
                         statements,
-                        base + usize_value(2)
+                        base + 2
                     )),
                     position: u8_from_u32(word_at(statements, base)),
                     metadata: word_at(
                         statements,
-                        base + usize_value(1)
+                        base + 1
                     )
                 }
             );
-            push_statement_edges(value, statements, index + usize_value(1))
+            push_statement_edges(value, statements, index + 1)
     } else {
         ()
     }
@@ -738,9 +738,9 @@ operator_range(
     limit: usize
 ) -> Option<BodyTokenRange> {
     if(cursor < limit) {
-        if(super::lexer::token_code_at(source, cursor) == u16_value(1)) {
+        if(super::lexer::token_code_at(source, cursor) == 1) {
             Result::Ok(
-                token_range(cursor, cursor + usize_value(1))
+                token_range(cursor, cursor + 1)
             )
         } else {
             if(super::lexer::operator_symbol_at(
@@ -750,7 +750,7 @@ operator_range(
                 let first = token_span(source, cursor);
                 let end = super::lexer::operator_end(
                     source,
-                    cursor + usize_value(1),
+                    cursor + 1,
                     limit,
                     super::lexer::span_end(&first)
                 );
@@ -783,9 +783,9 @@ same_operator(
 
 form_matches(form: u8, prefix: Bool) -> Bool {
     if(prefix) {
-        form == u8_value(1)
+        form == 1
     } else {
-        form != u8_value(1)
+        form != 1
     }
 }
 
@@ -827,7 +827,7 @@ lookup_scope(
                             operator,
                             prefix,
                             owner_plus_one,
-                            index + usize_value(1),
+                            index + 1,
                             Result::Ok(u32_from_usize(index))
                         ),
                         Result::Ok(previous) => {
@@ -848,7 +848,7 @@ lookup_scope(
                                         operator,
                                         prefix,
                                         owner_plus_one,
-                                        index + usize_value(1),
+                                        index + 1,
                                         Result::Ok(previous)
                                     )
                                 } else {
@@ -882,7 +882,7 @@ lookup_scope(
                         operator,
                         prefix,
                         owner_plus_one,
-                        index + usize_value(1),
+                        index + 1,
                         move selected
                     )
                 }
@@ -918,7 +918,7 @@ lookup_fixity(
     );
     handle move found {
         Result::Ok(index) => Result::Ok(Result::Ok(index)),
-        Result::Err(_) => if(owner_plus_one == usize_value(0)) {
+        Result::Err(_) => if(owner_plus_one == 0) {
             Result::Ok(Result::Err(()))
         } else {
             lookup_scope(
@@ -992,7 +992,7 @@ parse_primary(
     owner_plus_one: usize,
     depth: u16
 ) -> Result<ExprId, BodyError> {
-    if(depth < u16_value(128)) {
+    if(depth < 128) {
             let prefix = try(
                 peek_operator(
                     original,
@@ -1017,7 +1017,7 @@ parse_primary(
                             value,
                             owner_plus_one,
                             operator.precedence,
-                            depth + u16_value(1)
+                            depth + 1
                         ),
                         @parse_primary
                     );
@@ -1084,9 +1084,9 @@ parse_identifier_tail(
 ) -> Result<ExprId, BodyError> {
     if(value.cursor < value.limit) {
         if(super::lexer::token_code_at(source, value.cursor)
-                == u16_value(19)) {
+                == 19) {
             let separator = value.cursor;
-                let token = separator + usize_value(1);
+                let token = separator + 1;
                 if(token < value.limit) {
                     try(
                             push_identifier_name(
@@ -1097,7 +1097,7 @@ parse_identifier_tail(
                             ),
                             @parse_identifier_tail
                         );
-                        value.cursor = token + usize_value(1);
+                        value.cursor = token + 1;
                         parse_identifier_tail(
                             source,
                             value,
@@ -1139,7 +1139,7 @@ parse_identifier(
         push_identifier_name(source, value, start, start),
         @parse_identifier
     );
-    value.cursor = start + usize_value(1);
+    value.cursor = start + 1;
     parse_identifier_tail(source, value, start, name_start)
 }
 
@@ -1156,8 +1156,8 @@ parse_tuple_tail(
 ) -> Result<ExprId, BodyError> {
     if(value.cursor < value.limit) {
         if(super::lexer::token_code_at(source, value.cursor)
-                == u16_value(12)) {
-            value.cursor = value.cursor + usize_value(1);
+                == 12) {
+            value.cursor = value.cursor + 1;
                 Result::Ok(push_tuple(
                     value,
                     &*elements,
@@ -1183,7 +1183,7 @@ parse_tuple_tail(
                     handle
                         super::lexer::token_code_at(source, value.cursor) {
                         12 => {
-                            value.cursor = value.cursor + usize_value(1);
+                            value.cursor = value.cursor + 1;
                             Result::Ok(push_tuple(
                                 value,
                                 &*elements,
@@ -1192,7 +1192,7 @@ parse_tuple_tail(
                             ))
                         },
                         17 => {
-                            value.cursor = value.cursor + usize_value(1);
+                            value.cursor = value.cursor + 1;
                             parse_tuple_tail(
                                 original,
                                 source,
@@ -1234,18 +1234,18 @@ parse_atom(
         handle super::lexer::token_code_at(source, start) {
             1 => parse_identifier(source, value, start),
             4 => {
-                value.cursor = start + usize_value(1);
+                value.cursor = start + 1;
                 Result::Ok(push_leaf(value, 2, start, value.cursor))
             },
-            11 => if(start + usize_value(1) < value.limit) {
+            11 => if(start + 1 < value.limit) {
                 if(super::lexer::token_code_at(
                     source,
-                    start + usize_value(1)
-                ) == u16_value(12)) {
-                    value.cursor = start + usize_value(2);
+                    start + 1
+                ) == 12) {
+                    value.cursor = start + 2;
                         Result::Ok(push_leaf(value, 3, start, value.cursor))
                 } else {
-                    value.cursor = start + usize_value(1);
+                    value.cursor = start + 1;
                         let child = try(
                             parse_expression(
                                 original,
@@ -1255,7 +1255,7 @@ parse_atom(
                                 value,
                                 owner_plus_one,
                                 0,
-                                depth + u16_value(1)
+                                depth + 1
                             ),
                             @parse_atom
                         );
@@ -1267,7 +1267,7 @@ parse_atom(
                                     ) {
                                     12 => {
                                         value.cursor = value.cursor
-                                            + usize_value(1);
+                                            + 1;
                                         Result::Ok(push_unary(
                                             value,
                                             4,
@@ -1290,7 +1290,7 @@ parse_atom(
                                             Id::to_u32(child)
                                         );
                                         value.cursor = value.cursor
-                                            + usize_value(1);
+                                            + 1;
                                         parse_tuple_tail(
                                             original,
                                             source,
@@ -1298,7 +1298,7 @@ parse_atom(
                                             nominal,
                                             value,
                                             owner_plus_one,
-                                            depth + u16_value(1),
+                                            depth + 1,
                                             start,
                                             &mut elements
                                         )
@@ -1317,7 +1317,7 @@ parse_atom(
                 Result::Err(body_error(2, start, start))
             },
             13 => {
-                value.cursor = start + usize_value(1);
+                value.cursor = start + 1;
                 let statements = Vec::new();
                 parse_block_contents(
                     original,
@@ -1326,9 +1326,9 @@ parse_atom(
                     nominal,
                     value,
                     owner_plus_one,
-                    depth + u16_value(1),
+                    depth + 1,
                     start,
-                    u16_value(14),
+                    14,
                     &mut statements
                 )
             },
@@ -1354,8 +1354,8 @@ parse_call_arguments(
         if(super::lexer::token_code_at(
             source,
             value.cursor
-        ) == u16_value(12)) {
-            value.cursor = value.cursor + usize_value(1);
+        ) == 12) {
+            value.cursor = value.cursor + 1;
                 Result::Ok(())
         } else {
             let argument = try(
@@ -1376,11 +1376,11 @@ parse_call_arguments(
                     handle
                         super::lexer::token_code_at(source, value.cursor) {
                         12 => {
-                            value.cursor = value.cursor + usize_value(1);
+                            value.cursor = value.cursor + 1;
                             Result::Ok(())
                         },
                         17 => {
-                            value.cursor = value.cursor + usize_value(1);
+                            value.cursor = value.cursor + 1;
                             parse_call_arguments(
                                 original,
                                 source,
@@ -1423,8 +1423,8 @@ parse_struct_fields(
 ) -> Result<ExprId, BodyError> {
     if(value.cursor < value.limit) {
         if(super::lexer::token_code_at(source, value.cursor)
-                == u16_value(14)) {
-            value.cursor = value.cursor + usize_value(1);
+                == 14) {
+            value.cursor = value.cursor + 1;
                 Result::Ok(push_struct(
                     value,
                     constructor,
@@ -1436,11 +1436,11 @@ parse_struct_fields(
             let name_token = value.cursor;
                 handle super::lexer::token_kind_at(source, name_token) {
                     TokenKind::Ident(name) => {
-                        let colon = name_token + usize_value(1);
+                        let colon = name_token + 1;
                         if(colon < value.limit) {
                             if(super::lexer::token_code_at(source, colon)
-                                    == u16_value(18)) {
-                                value.cursor = colon + usize_value(1);
+                                    == 18) {
+                                value.cursor = colon + 1;
                                     let field = try(
                                         parse_expression(
                                             original,
@@ -1475,7 +1475,7 @@ parse_struct_fields(
                                             14 => {
                                                 value.cursor =
                                                     value.cursor
-                                                    + usize_value(1);
+                                                    + 1;
                                                 Result::Ok(push_struct(
                                                     value,
                                                     constructor,
@@ -1487,7 +1487,7 @@ parse_struct_fields(
                                             17 => {
                                                 value.cursor =
                                                     value.cursor
-                                                    + usize_value(1);
+                                                    + 1;
                                                 parse_struct_fields(
                                                     original,
                                                     source,
@@ -1545,11 +1545,11 @@ parse_projection_name(
     subject: ExprId,
     dot: usize
 ) -> Result<ExprId, BodyError> {
-    let token = dot + usize_value(1);
+    let token = dot + 1;
     if(token < value.limit) {
         handle super::lexer::token_kind_at(source, token) {
             TokenKind::Ident(name) => {
-                value.cursor = token + usize_value(1);
+                value.cursor = token + 1;
                 Result::Ok(push_projection(
                     value,
                     subject,
@@ -1566,13 +1566,13 @@ parse_projection_name(
                         original,
                         source,
                         token,
-                        token + usize_value(1)
+                        token + 1
                     );
                     handle parse_u64(&text) {
                         Result::Err(_) =>
                             Result::Err(body_error(16, token, dot)),
                         Result::Ok(field) => if(field <= 4294967295) {
-                            value.cursor = token + usize_value(1);
+                            value.cursor = token + 1;
                                 Result::Ok(push_projection(
                                     value,
                                     subject,
@@ -1604,14 +1604,14 @@ parse_postfix(
     callee: ExprId
 ) -> Result<ExprId, BodyError> {
     if(value.cursor < value.limit) {
-        if(depth < u16_value(128)) {
+        if(depth < 128) {
             handle
                 super::lexer::token_code_at(source, value.cursor) {
                 11 => {
                     let start = node_tokens(&*value, callee).start;
                     let open = value.cursor;
                     let arguments = Vec::new();
-                    value.cursor = open + usize_value(1);
+                    value.cursor = open + 1;
                     try(
                         parse_call_arguments(
                             original,
@@ -1620,7 +1620,7 @@ parse_postfix(
                             nominal,
                             value,
                             owner_plus_one,
-                            depth + u16_value(1),
+                            depth + 1,
                             &mut arguments,
                             open
                         ),
@@ -1641,19 +1641,19 @@ parse_postfix(
                         nominal,
                         value,
                         owner_plus_one,
-                        depth + u16_value(1),
+                        depth + 1,
                         call
                     )
                 },
                 13 => {
                     let found_kind = node_kind(&*value, callee);
                     let start = node_tokens(&*value, callee).start;
-                    if(found_kind == u8_value(1)) {
+                    if(found_kind == 1) {
                         if(node_name_count(&*value, callee)
-                                == u32_value(1)) {
+                                == 1) {
                             let open = value.cursor;
                             let fields = Vec::new();
-                            value.cursor = open + usize_value(1);
+                            value.cursor = open + 1;
                             let found = try(
                                 parse_struct_fields(
                                     original,
@@ -1662,7 +1662,7 @@ parse_postfix(
                                     nominal,
                                     value,
                                     owner_plus_one,
-                                    depth + u16_value(1),
+                                    depth + 1,
                                     callee,
                                     start,
                                     open,
@@ -1677,7 +1677,7 @@ parse_postfix(
                                 nominal,
                                 value,
                                 owner_plus_one,
-                                depth + u16_value(1),
+                                depth + 1,
                                 found
                             )
                         } else {
@@ -1706,7 +1706,7 @@ parse_postfix(
                         nominal,
                         value,
                         owner_plus_one,
-                        depth + u16_value(1),
+                        depth + 1,
                         found
                     )
                 },
@@ -1728,10 +1728,10 @@ infix_separated(
     left: ExprId,
     operator: OperatorUse
 ) -> Bool {
-    super::lexer::token_code_at(source, operator.start) == u16_value(1)
+    super::lexer::token_code_at(source, operator.start) == 1
         or {
             let left_end = node_tokens(value, left).end;
-            let left_span = token_span(source, left_end - usize_value(1));
+            let left_span = token_span(source, left_end - 1);
             let operator_span = token_span(source, operator.start);
             super::lexer::span_end(&left_span)
                 != super::lexer::span_start(&operator_span)
@@ -1739,7 +1739,7 @@ infix_separated(
                 and {
                         let last = token_span(
                             source,
-                            operator.end - usize_value(1)
+                            operator.end - 1
                         );
                         let next = token_span(source, operator.end);
                         super::lexer::span_end(&last)
@@ -1857,7 +1857,7 @@ prepare_operator(
     pending: &mut Vec<u32>,
     incoming: OperatorUse
 ) -> Result<(), BodyError> {
-    if(word_count(&*pending) == usize_value(0)) {
+    if(word_count(&*pending) == 0) {
         Result::Ok(())
     } else {
         let top = last_operator(&*pending);
@@ -1903,7 +1903,7 @@ finish_chain(
     output: &mut Vec<u32>,
     pending: &mut Vec<u32>
 ) -> Result<ExprId, BodyError> {
-    if(word_count(&*pending) == usize_value(0)) {
+    if(word_count(&*pending) == 0) {
         Result::Ok(Id::from_u32(pop_word(&mut *output)))
     } else {
         reduce_once(&mut *value, &mut *output, &mut *pending);
@@ -1963,17 +1963,17 @@ parse_block_statement(
     let start = value.cursor;
     handle super::lexer::token_kind_at(source, start) {
         TokenKind::Keyword(Keyword::Let) => {
-            let name_token = start + usize_value(1);
+            let name_token = start + 1;
             if(name_token < value.limit) {
                 if(super::lexer::token_code_at(
                     source,
                     name_token
-                ) == u16_value(1)) {
-                    let equals = name_token + usize_value(1);
+                ) == 1) {
+                    let equals = name_token + 1;
                         if(equals < value.limit) {
                             if(super::lexer::token_code_at(source, equals)
-                                    == u16_value(31)) {
-                                value.cursor = equals + usize_value(1);
+                                    == 31) {
+                                value.cursor = equals + 1;
                                     let initializer = try(
                                         parse_expression(
                                             original,
@@ -1991,7 +1991,7 @@ parse_block_statement(
                                         &mut *statements,
                                         1,
                                         u32_from_usize(name_token)
-                                            + u32_value(1),
+                                            + 1,
                                         initializer
                                     );
                                     Result::Ok(())
@@ -2052,7 +2052,7 @@ parse_block_after_statement(
             value.cursor
         ) {
             22 => {
-                value.cursor = value.cursor + usize_value(1);
+                value.cursor = value.cursor + 1;
                 parse_block_contents(
                     original,
                     source,
@@ -2066,7 +2066,7 @@ parse_block_after_statement(
                     statements
                 )
             },
-            14 => if(close_code == u16_value(14)) {
+            14 => if(close_code == 14) {
                 parse_block_contents(
                     original,
                     source,
@@ -2115,12 +2115,12 @@ parse_block_contents(
     statements: &mut Vec<u32>
 ) -> Result<ExprId, BodyError> {
     if(value.cursor < value.limit) {
-        if(close_code == u16_value(14)) {
+        if(close_code == 14) {
             if(super::lexer::token_code_at(
                 source,
                 value.cursor
-            ) == u16_value(14)) {
-                value.cursor = value.cursor + usize_value(1);
+            ) == 14) {
+                value.cursor = value.cursor + 1;
                     Result::Ok(push_block(
                         value,
                         statements,
@@ -2182,7 +2182,7 @@ parse_block_contents(
                 )
         }
     } else {
-        if(close_code == u16_value(0)) {
+        if(close_code == 0) {
             Result::Ok(
                 push_block(value, statements, start, value.cursor)
             )
@@ -2202,7 +2202,7 @@ pub parse_function_body(
 ) -> Result<ParsedBody, BodyError> {
     handle super::scanner::shell_at(declarations, shell) {
         Result::Err(_) => Result::Err(body_error(7, shell, shell)),
-        Result::Ok(declaration) => if(super::scanner::shell_kind_code(declaration) == u8_value(12)) {
+        Result::Ok(declaration) => if(super::scanner::shell_kind_code(declaration) == 12) {
             handle
                 super::scanner::shell_body_range(declaration) {
                 Result::Err(_) => Result::Err(body_error(7, shell, shell)),
@@ -2324,7 +2324,7 @@ write_call_arguments(
                 source,
                 value,
                 node,
-                index + u32_value(1)
+                index + 1
             )
     } else {
         Result::Ok(())
@@ -2340,11 +2340,11 @@ write_node_name(
     ordinal: u32
 ) -> Result<(), BodyError> {
     let at = node.names.start + ordinal;
-    let base = usize_from_u32(at * u32_value(3));
+    let base = usize_from_u32(at * 3);
     let kind = u8_from_u32(*Vec::index(&value.names, base));
-    let found = *Vec::index(&value.names, base + usize_value(1));
+    let found = *Vec::index(&value.names, base + 1);
     let token = usize_from_u32(
-        *Vec::index(&value.names, base + usize_value(2))
+        *Vec::index(&value.names, base + 2)
     );
     handle kind {
         1 => handle super::lexer::lexeme(source, Id::from_u32(found)) {
@@ -2359,7 +2359,7 @@ write_node_name(
                 original,
                 source,
                 token,
-                token + usize_value(1)
+                token + 1
             );
             write_string( output, &text);
             Result::Ok(())
@@ -2393,7 +2393,7 @@ write_children(
                 source,
                 value,
                 node,
-                index + u32_value(1)
+                index + 1
             )
     } else {
         Result::Ok(())
@@ -2436,7 +2436,7 @@ write_struct_fields(
                 source,
                 value,
                 node,
-                index + u32_value(1)
+                index + 1
             )
     } else {
         Result::Ok(())
@@ -2461,7 +2461,7 @@ write_block_statements(
                         write_name_token(
                             &mut *output,
                             source,
-                            usize_from_u32(metadata - u32_value(1))
+                            usize_from_u32(metadata - 1)
                         ),
                         @write_block_statements
                     );
@@ -2481,7 +2481,7 @@ write_block_statements(
                         source,
                         value,
                         node,
-                        index + u32_value(1)
+                        index + 1
                     )
                 },
                 _ => {
@@ -2502,7 +2502,7 @@ write_block_statements(
                         source,
                         value,
                         node,
-                        index + u32_value(1)
+                        index + 1
                     )
                 }
             }
@@ -2618,7 +2618,7 @@ write_expression(
             );
             ByteBuf::write_u32_le(
                 &mut *output,
-                node.children.count - u32_value(1)
+                node.children.count - 1
             );
             write_call_arguments(
                  output,
@@ -2711,9 +2711,9 @@ function_count(
             Result::Err(_) => count,
             Result::Ok(shell) => function_count(
                 declarations,
-                index + usize_value(1),
-                if(super::scanner::shell_kind_code(shell) == u8_value(12)) {
-                    count + usize_value(1)
+                index + 1,
+                if(super::scanner::shell_kind_code(shell) == 12) {
+                    count + 1
                 } else {
                     count
                 }
@@ -2748,7 +2748,7 @@ write_functions(
     if(index < super::scanner::shell_count(declarations)) {
         handle super::scanner::shell_at(declarations, index) {
             Result::Err(_) => Result::Ok(()),
-            Result::Ok(shell) => if(super::scanner::shell_kind_code(shell) == u8_value(12)) {
+            Result::Ok(shell) => if(super::scanner::shell_kind_code(shell) == 12) {
                 let body = try(
                         parse_function_body(
                             original,
@@ -2775,7 +2775,7 @@ write_functions(
                         original,
                         headers,
                         declarations,
-                        index + usize_value(1)
+                        index + 1
                     )
             } else {
                 write_functions(
@@ -2783,7 +2783,7 @@ write_functions(
                     original,
                     headers,
                     declarations,
-                    index + usize_value(1)
+                    index + 1
                 )
             }
         }
@@ -2847,7 +2847,7 @@ process_inputs(
             };
             process_inputs(
                 arguments,
-                index + usize_value(1),
+                index + 1,
                  output
             )
     } else {
@@ -2858,7 +2858,7 @@ process_inputs(
 pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
     let arguments = process_args();
     let count = Vec::len(&arguments);
-    if(count < usize_value(2)) {
+    if(count < 2) {
         write_diagnostic(
             "usage: grandiose-self-host-bodies <output> <input>..."
         )
@@ -2867,20 +2867,12 @@ pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
             let encoded = ByteBuf::new();
             ByteBuf::write_u32_le(
                 &mut encoded,
-                u32_from_usize(count - usize_value(1))
+                u32_from_usize(count - 1)
             );
             process_inputs(&arguments, 1, &mut encoded);
             write_file(move output_path, ByteBuf::finish( encoded))
     }
 }
-
-usize_value(value: usize) -> usize {  value }
-
-u8_value(value: u8) -> u8 {  value }
-
-u16_value(value: u16) -> u16 {  value }
-
-u32_value(value: u32) -> u32 {  value }
 
 u32_from_usize(value: usize) -> u32 { wrapping_convert_to_u32( value) }
 

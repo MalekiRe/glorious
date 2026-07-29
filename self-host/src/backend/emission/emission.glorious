@@ -73,7 +73,7 @@ constant_records(
                 Bytes::from_vec(payload)
             )
         );
-        constant_records(program, index + usize_value(1), output)
+        constant_records(program, index + 1, output)
     } else { () }
 }
 
@@ -89,7 +89,7 @@ find_constant(
         )) {
             Option::Some(checked_u32(index))
         } else {
-            find_constant(program, key, index + usize_value(1))
+            find_constant(program, key, index + 1)
         }
     } else { None }
 }
@@ -137,7 +137,7 @@ collect_stage_field_names(
         collect_stage_field_names(
             program,
             stage_type,
-            index + usize_value(1),
+            index + 1,
             output
         )
     } else { () }
@@ -151,7 +151,7 @@ collect_type_names(
     if(index < super::lowering::stage_program_type_count(program)) {
         let stage_type =
             super::lowering::stage_program_type_at(program, index);
-        if(super::lowering::stage_type_tag(stage_type) == u8_value(1)) {
+        if(super::lowering::stage_type_tag(stage_type) == 1) {
             Vec::push(
                 &mut *output,
                 *super::lowering::stage_program_type_name_at(
@@ -167,7 +167,7 @@ collect_type_names(
         };
         collect_type_names(
             program,
-            index + usize_value(1),
+            index + 1,
             output
         )
     } else { () }
@@ -182,11 +182,11 @@ aggregate_zero_sized_flag(
         if(type_zero_sized_flag(
             program,
             *Vec::index(fields, index)
-        ) == u32_value(2)) {
+        ) == 2) {
             aggregate_zero_sized_flag(
                 program,
                 fields,
-                index + usize_value(1)
+                index + 1
             )
         } else { 0 }
     } else { 2 }
@@ -196,11 +196,11 @@ type_zero_sized_flag(
     program: &super::lowering::StageProgram,
     type_id: u32
 ) -> u32 {
-    if(type_id < u32_value(19)) {
-        if(type_id == u32_value(0)) {
+    if(type_id < 19) {
+        if(type_id == 0) {
             2
         } else {
-            if(type_id == u32_value(1)) { 2 } else { 0 }
+            if(type_id == 1) { 2 } else { 0 }
         }
     } else {
         aggregate_zero_sized_flag(
@@ -208,7 +208,7 @@ type_zero_sized_flag(
             super::lowering::stage_type_fields(
                 super::lowering::stage_program_type_at(
                     program,
-                    usize_from_u32(type_id - u32_value(19))
+                    usize_from_u32(type_id - 19)
                 )
             ),
             0
@@ -225,11 +225,11 @@ aggregate_zero_use_flag(
         if(type_zero_use_flag(
             program,
             *Vec::index(fields, index)
-        ) == u32_value(16)) {
+        ) == 16) {
             aggregate_zero_use_flag(
                 program,
                 fields,
-                index + usize_value(1)
+                index + 1
             )
         } else { 0 }
     } else { 16 }
@@ -239,15 +239,15 @@ type_zero_use_flag(
     program: &super::lowering::StageProgram,
     type_id: u32
 ) -> u32 {
-    if(type_id < u32_value(19)) {
-        if(type_id == u32_value(1)) { 0 } else { 16 }
+    if(type_id < 19) {
+        if(type_id == 1) { 0 } else { 16 }
     } else {
         aggregate_zero_use_flag(
             program,
             super::lowering::stage_type_fields(
                 super::lowering::stage_program_type_at(
                     program,
-                    usize_from_u32(type_id - u32_value(19))
+                    usize_from_u32(type_id - 19)
                 )
             ),
             0
@@ -316,7 +316,7 @@ custom_type_flags(
     program: &super::lowering::StageProgram,
     index: usize
 ) -> u32 {
-    let type_id = checked_u32(index) + u32_value(19);
+    let type_id = checked_u32(index) + 19;
     super::lowering::stage_program_type_copy_flag_at(program, index)
         + type_zero_sized_flag(program, type_id)
         + type_zero_use_flag(program, type_id)
@@ -347,7 +347,7 @@ valid_struct_type_record(
     names: &Vec<String>,
     index: usize
 ) -> Result<super::artifact::Record, EmissionError> {
-    let type_id = checked_u32(index) + u32_value(19);
+    let type_id = checked_u32(index) + 19;
     let type_name = try(require_program_name(
         program,
         names,
@@ -399,7 +399,7 @@ struct_type_record(
     } else {
         Result::Err(error(
             6,
-            checked_u32(index) + u32_value(19)
+            checked_u32(index) + 19
         ))
     }
 }
@@ -454,7 +454,7 @@ find_name(names: &Vec<String>, name: &String, index: usize) -> Option<u32> {
         if(String::eq(Vec::index(names, index), name)) {
             Option::Some(checked_u32(index))
         } else {
-            find_name(names, name, index + usize_value(1))
+            find_name(names, name, index + 1)
         }
     } else { None }
 }
@@ -479,7 +479,7 @@ find_name_value(
         if(String::eq(Vec::index(names, index), &name)) {
             Option::Some(checked_u32(index))
         } else {
-            find_name_value(names, name, index + usize_value(1))
+            find_name_value(names, name, index + 1)
         }
     } else { None }
 }
@@ -540,7 +540,7 @@ find_signature(
         if(Eq::eq(Vec::index(signatures, index), key)) {
             Option::Some(checked_u32(index))
         } else {
-            find_signature(signatures, key, index + usize_value(1))
+            find_signature(signatures, key, index + 1)
         }
     } else { None }
 }
@@ -572,7 +572,7 @@ collect_signatures(
                 ()
             }
         };
-        collect_signatures(program, index + usize_value(1), output)
+        collect_signatures(program, index + 1, output)
     } else { () }
 }
 
@@ -608,7 +608,7 @@ signature_records(
         );
         signature_records(
             signatures,
-            index + usize_value(1),
+            index + 1,
             output
         )
     } else { () }
@@ -622,11 +622,11 @@ byte_at(bytes: &Bytes, index: usize) -> u32 {
 }
 
 argument_at(bytes: &Bytes, ordinal: u32) -> u32 {
-    let start = usize_from_u32(ordinal) * usize_value(4);
+    let start = usize_from_u32(ordinal) * 4;
     byte_at(bytes, start)
-        + shift_left(byte_at(bytes, start + usize_value(1)), 8)
-        + shift_left(byte_at(bytes, start + usize_value(2)), 16)
-        + shift_left(byte_at(bytes, start + usize_value(3)), 24)
+        + shift_left(byte_at(bytes, start + 1), 8)
+        + shift_left(byte_at(bytes, start + 2), 16)
+        + shift_left(byte_at(bytes, start + 3), 24)
 }
 
 append_arguments(
@@ -640,7 +640,7 @@ append_arguments(
         Vec::push(&mut *output, argument_at(&bytes, ordinal));
         append_arguments(
             arguments,
-            ordinal + u32_value(1),
+            ordinal + 1,
             output
         )
     } else { () }
@@ -779,7 +779,7 @@ write_all_code(
     if(index < super::lowering::stage_program_function_count(program)) {
         let function =
             super::lowering::stage_program_function_at(program, index);
-        let start = checked_u32(ByteBuf::len(&*code) / usize_value(4));
+        let start = checked_u32(ByteBuf::len(&*code) / 4);
         try(write_function_code(
             program,
             function,
@@ -787,7 +787,7 @@ write_all_code(
             code,
             operands
         ), @write_all_code);
-        let end = checked_u32(ByteBuf::len(&*code) / usize_value(4));
+        let end = checked_u32(ByteBuf::len(&*code) / 4);
         Vec::push(&mut *spans, FunctionSpans {
             code_start: start,
             code_length: end - start,
@@ -796,7 +796,7 @@ write_all_code(
         });
         write_all_code(
             program,
-            index + usize_value(1),
+            index + 1,
             code,
             operands,
             spans
@@ -850,7 +850,7 @@ write_function_cleanups(
         write_function_cleanups(
             function,
             function_id,
-            index + usize_value(1),
+            index + 1,
             output,
             operands
         )
@@ -867,7 +867,7 @@ write_all_cleanups(
     if(index < super::lowering::stage_program_function_count(program)) {
         let function =
             super::lowering::stage_program_function_at(program, index);
-        let start = checked_u32(ByteBuf::len(&*output) / usize_value(24));
+        let start = checked_u32(ByteBuf::len(&*output) / 24);
         write_function_cleanups(
             function,
             checked_u32(index),
@@ -875,11 +875,11 @@ write_all_cleanups(
             output,
             operands
         );
-        let end = checked_u32(ByteBuf::len(&*output) / usize_value(24));
+        let end = checked_u32(ByteBuf::len(&*output) / 24);
         set_cleanup_span(spans, index, start, end - start);
         write_all_cleanups(
             program,
-            index + usize_value(1),
+            index + 1,
             output,
             operands,
             spans
@@ -959,7 +959,7 @@ write_functions(
             names,
             signatures,
             spans,
-            index + usize_value(1),
+            index + 1,
             output
         )
     } else { Result::Ok(()) }
@@ -1013,10 +1013,10 @@ pub encode(
         0,
         &mut functions
     ), @encode);
-    let code_count = checked_u32(ByteBuf::len(&code) / usize_value(4));
+    let code_count = checked_u32(ByteBuf::len(&code) / 4);
     let code_bytes = ByteBuf::finish(code);
     let cleanup_count =
-        checked_u32(ByteBuf::len(&cleanups) / usize_value(24));
+        checked_u32(ByteBuf::len(&cleanups) / 24);
     let cleanup_bytes = ByteBuf::finish(cleanups);
     let types = try(type_section(program, &names), @encode);
 
@@ -1080,9 +1080,3 @@ pub encode(
         Result::Ok(bytes) => Result::Ok(bytes)
     }
 }
-
-usize_value(value: usize) -> usize { value }
-
-u32_value(value: u32) -> u32 { value }
-
-u8_value(value: u8) -> u8 { value }

@@ -119,7 +119,7 @@ lower_functions(
                                 headers,
                                 declarations,
                                 interfaces,
-                                index + usize_value(1),
+                                index + 1,
                                 output
                             )
                         }
@@ -143,9 +143,9 @@ find_entry(
             &"main"
         ) and {
             super::lowering::stage_function_parameter_count(function)
-                == usize_value(0)
+                == 0
         } and {
-            super::lowering::stage_function_result(function) == u32_value(0)
+            super::lowering::stage_function_result(function) == 0
         }
     } }) {
         Option::Some(found) => Option::Some(checked_u32(found)),
@@ -176,7 +176,7 @@ collect_tuple_elements(
             interfaces,
             start,
             count,
-            ordinal + u32_value(1),
+            ordinal + 1,
             output
         )
     } else { () }
@@ -238,7 +238,7 @@ collect_struct_fields(
             interfaces,
             start,
             count,
-            ordinal + u32_value(1),
+            ordinal + 1,
             type_names,
             names,
             types
@@ -282,7 +282,7 @@ collect_types(
                         if(
                             super::super::frontend::elaboration::
                                 interface_type_flags_at(interfaces, index)
-                                    % u32_value(2) == u32_value(1)
+                                    % 2 == 1
                         ) { 1 } else { 0 }
                     )
                 );
@@ -290,7 +290,7 @@ collect_types(
                     headers,
                     declarations,
                     interfaces,
-                    index + usize_value(1),
+                    index + 1,
                     output,
                     type_names
                 )
@@ -331,7 +331,7 @@ collect_types(
                                     interface_type_flags_at(
                                         interfaces,
                                         index
-                                    ) % u32_value(2) == u32_value(1)
+                                    ) % 2 == 1
                             ) { 1 } else { 0 }
                         )
                     );
@@ -339,7 +339,7 @@ collect_types(
                         headers,
                         declarations,
                         interfaces,
-                        index + usize_value(1),
+                        index + 1,
                         output,
                         type_names
                     )
@@ -380,7 +380,7 @@ compile_interfaces(
         headers,
         declarations,
         &interfaces,
-        usize_value(14),
+        14,
         &mut types,
         &mut type_names
     ), @compile_interfaces);
@@ -458,7 +458,7 @@ pub compile_source(original: &String) -> Result<Bytes, CompileError> {
 
 pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
     let arguments = process_args();
-    if(Vec::len(&arguments) < usize_value(2)) {
+    if(Vec::len(&arguments) < 2) {
         write_diagnostic(
             "usage: grandiose-self-host-compiler <output.grbc> <input.glorious>"
         )
@@ -478,7 +478,3 @@ pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
         }
     }
 }
-
-usize_value(value: usize) -> usize { value }
-
-u32_value(value: u32) -> u32 { value }

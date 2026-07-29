@@ -292,22 +292,22 @@ usize_from_u32(value: u32) -> usize {
 }
 
 pub artifact_type_id(value: u32) -> u32 {
-    if(value < u32_value(14)) {
+    if(value < 14) {
         value
     } else {
-        value + u32_value(5)
+        value + 5
     }
 }
 
 append_u32_bytes(output: &mut Vec<u8>, value: u32, count: usize) {
-    if(count == usize_value(0)) {
+    if(count == 0) {
         ()
     } else {
         Vec::push(&mut *output, wrapping_convert_to_u8(value));
         append_u32_bytes(
             output,
             shift_right(value, 8),
-            count - usize_value(1)
+            count - 1
         )
     }
 }
@@ -318,10 +318,10 @@ append_constant_words(
     word: usize,
     bytes: usize
 ) {
-    if(bytes == usize_value(0)) {
+    if(bytes == 0) {
         ()
     } else {
-        let take = if(bytes < usize_value(4)) { bytes } else { 4 };
+        let take = if(bytes < 4) { bytes } else { 4 };
         append_u32_bytes(
             output,
             super::super::frontend::elaboration::integer_constant_view_word(
@@ -333,7 +333,7 @@ append_constant_words(
         append_constant_words(
             output,
             value,
-            word + usize_value(1),
+            word + 1,
             bytes - take
         )
     }
@@ -386,11 +386,11 @@ push_missing_locals(
     output: &mut Vec<Option<u32>>,
     remaining: usize
 ) {
-    if(remaining == usize_value(0)) {
+    if(remaining == 0) {
         ()
     } else {
         Vec::push(&mut *output, None);
-        push_missing_locals(output, remaining - usize_value(1))
+        push_missing_locals(output, remaining - 1)
     }
 }
 
@@ -401,13 +401,13 @@ push_parameter_locals(
     count: u32
 ) {
     if(index < count) {
-        let register = index + u32_value(1);
+        let register = index + 1;
         Vec::push(&mut *output, Option::Some(register));
         Vec::push(&mut *live, register);
         push_parameter_locals(
             output,
             live,
-            index + u32_value(1),
+            index + 1,
             count
         )
     } else { () }
@@ -418,17 +418,17 @@ reverse_registers(
     output: &mut Vec<u32>,
     remaining: usize
 ) {
-    if(remaining == usize_value(0)) {
+    if(remaining == 0) {
         ()
     } else {
         Vec::push(
             &mut *output,
-            *Vec::index(source, remaining - usize_value(1))
+            *Vec::index(source, remaining - 1)
         );
         reverse_registers(
             source,
             output,
-            remaining - usize_value(1)
+            remaining - 1
         )
     }
 }
@@ -443,14 +443,14 @@ record_cleanup(value: &mut FunctionBuilder) {
     );
     Vec::push(&mut value.cleanups, StageCleanup {
         first_instruction: instruction,
-        end_instruction: instruction + u32_value(1),
+        end_instruction: instruction + 1,
         registers: registers
     })
 }
 
 alloc_register(value: &mut FunctionBuilder) -> u32 {
     let found = value.register_count;
-    value.register_count = found + u32_value(1);
+    value.register_count = found + 1;
     found
 }
 
@@ -459,7 +459,7 @@ find_live(value: &Vec<u32>, register: u32, index: usize) -> Option<usize> {
         if(*Vec::index(value, index) == register) {
             Option::Some(index)
         } else {
-            find_live(value, register, index + usize_value(1))
+            find_live(value, register, index + 1)
         }
     } else { None }
 }
@@ -562,7 +562,7 @@ consume_arguments(
 ) {
     if(index < Vec::len(arguments)) {
         consume_live(value, *Vec::index(arguments, index));
-        consume_arguments(value, arguments, index + usize_value(1))
+        consume_arguments(value, arguments, index + 1)
     } else { () }
 }
 
@@ -578,7 +578,7 @@ write_argument_registers(
         );
         write_argument_registers(
             arguments,
-            index + usize_value(1),
+            index + 1,
             output
         )
     } else { () }
@@ -719,7 +719,7 @@ lower_arguments(
                     value,
                     start,
                     count,
-                    ordinal + u32_value(1),
+                    ordinal + 1,
                     output
                 )
             }
@@ -829,7 +829,7 @@ lower_product(
     count: u32,
     expected: u32
 ) -> Result<Option<u32>, LoweringError> {
-    if(flavor == u32_value(0)) {
+    if(flavor == 0) {
         if(count == expected) {
             let fields = Vec::new();
             try(lower_product_fields(
@@ -891,7 +891,7 @@ lower_product_fields(
                         value,
                         start,
                         count,
-                        ordinal + u32_value(1),
+                        ordinal + 1,
                         output
                     )
                 }
@@ -932,7 +932,7 @@ parameter_types(
         parameter_types(
             interfaces,
             function,
-            index + u32_value(1),
+            index + 1,
             count,
             output
         )
@@ -962,7 +962,7 @@ pub lower_function(
         live_order: Vec::new(),
         instructions: Vec::new(),
         cleanups: Vec::new(),
-        register_count: parameter_count + u32_value(1)
+        register_count: parameter_count + 1
     };
     push_parameter_locals(
         &mut builder.locals,
@@ -1014,7 +1014,7 @@ collect_instruction_constants(
         };
         collect_instruction_constants(
             instructions,
-            index + usize_value(1),
+            index + 1,
             output
         )
     } else { () }
@@ -1034,7 +1034,7 @@ collect_function_constants(
         );
         collect_function_constants(
             functions,
-            index + usize_value(1),
+            index + 1,
             output
         )
     } else { () }
@@ -1056,7 +1056,3 @@ pub finish_program(
         type_names: type_names
     }
 }
-
-usize_value(value: usize) -> usize { value }
-
-u32_value(value: u32) -> u32 { value }
