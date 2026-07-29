@@ -9,21 +9,39 @@ struct FunctionSpans {
     cleanup_count: u32
 }
 
-pub struct EmissionError { code: u8, detail: u32 }
+pub enum EmissionError {
+    MissingConstant(super::lowering::RegisterId),
+    UnsupportedInstruction,
+    MissingName(EmissionName),
+    MissingSignature(super::lowering::StageFunctionId),
+    StructFieldNameCount(
+        super::lowering::StageTypeId,
+        usize,
+        usize
+    ),
+    VariantFieldNameCount(
+        super::lowering::StageTypeId,
+        usize,
+        usize,
+        usize
+    ),
+    UnsupportedType(super::lowering::StageTypeId, u8),
+    ArtifactWrite(super::artifact::ArtifactWriteError)
+}
 
-pub emission_error_code(value: &EmissionError) -> u8 { value.code }
-
-pub emission_error_detail(value: &EmissionError) -> u32 { value.detail }
-
-error(code: u8, detail: u32) -> EmissionError {
-    EmissionError { code: code, detail: detail }
+pub enum EmissionName {
+    Type(super::lowering::StageTypeId),
+    StructField(super::lowering::StageTypeId, usize),
+    Variant(super::lowering::StageTypeId, usize),
+    VariantField(super::lowering::StageTypeId, usize, usize),
+    Function(super::lowering::StageFunctionId)
 }
 
 require_program_name(
     program: &super::lowering::StageProgram,
     names: &Vec<String>,
     name_index: u32,
-    detail: u32
+    origin: EmissionName
 ) -> Result<u32, EmissionError> {
     require_name_value(
         names,
@@ -31,7 +49,7 @@ require_program_name(
             program,
             usize_from_u32(name_index)
         ),
-        detail
+        origin
     )
 }
 
@@ -434,6 +452,8 @@ write_named_type_fields(
 ) -> Result<(), EmissionError> {
     let end =
         super::lowering::stage_program_type_field_count_at(program, type_index);
+    let type_id =
+        super::lowering::stage_type_id_from_usize(type_index);
     try_for_range(Range::new(field_index, end), { current =>
         handle require_program_name(
             program,
@@ -443,7 +463,7 @@ write_named_type_fields(
                 type_index,
                 current
             ),
-            checked_u32(current)
+            EmissionName::StructField(type_id, current)
         ) {
             Result::Err(error) => Result::Err(error),
             Result::Ok(field_name) => {
@@ -511,7 +531,9 @@ valid_struct_type_record(
             program,
             index
         ),
-        super::lowering::artifact_type_raw(type_id)
+        EmissionName::Type(
+            super::lowering::stage_type_id_from_usize(index)
+        )
     ), @valid_struct_type_record);
     let payload = ByteBuf::new();
     ByteBuf::write_u32_le(&mut payload, type_name);
@@ -553,9 +575,16 @@ struct_type_record(
     ) {
         valid_struct_type_record(program, names, index)
     } else {
-        Result::Err(error(
-            6,
-            checked_u32(index) + 19
+        Result::Err(EmissionError::StructFieldNameCount(
+            super::lowering::stage_type_id_from_usize(index),
+            super::lowering::stage_program_type_field_count_at(
+                program,
+                index
+            ),
+            super::lowering::stage_program_type_field_name_count_at(
+                program,
+                index
+            )
         ))
     }
 }
@@ -564,6 +593,8 @@ write_enum_variant_fields(
     program: &super::lowering::StageProgram,
     names: &Vec<String>,
     variant: &super::lowering::StageVariant,
+    type_id: super::lowering::StageTypeId,
+    variant_index: usize,
     index: usize,
     output: &mut ByteBuf
 ) -> Result<(), EmissionError> {
@@ -576,7 +607,11 @@ write_enum_variant_fields(
                 variant,
                 current
             ),
-            checked_u32(current)
+            EmissionName::VariantField(
+                type_id,
+                variant_index,
+                current
+            )
         ) {
             Result::Err(error) => Result::Err(error),
             Result::Ok(field_name) => {
@@ -609,6 +644,8 @@ write_enum_variants(
             type_index
         )
     ) {
+        let type_id =
+            super::lowering::stage_type_id_from_usize(type_index);
         let variant =
             super::lowering::stage_program_type_variant_at(
                 program,
@@ -623,7 +660,7 @@ write_enum_variants(
                 program,
                 names,
                 super::lowering::stage_variant_name_index(variant),
-                checked_u32(index)
+                EmissionName::Variant(type_id, index)
             ), @write_enum_variants);
             ByteBuf::write_u32_le(&mut *output, variant_name);
             ByteBuf::write_u32_le(
@@ -636,6 +673,8 @@ write_enum_variants(
                 program,
                 names,
                 variant,
+                type_id,
+                index,
                 0,
                 output
             ), @write_enum_variants);
@@ -647,7 +686,12 @@ write_enum_variants(
                 output
             )
         } else {
-            Result::Err(error(6, checked_u32(type_index) + 19))
+            Result::Err(EmissionError::VariantFieldNameCount(
+                type_id,
+                index,
+                super::lowering::stage_variant_field_count(variant),
+                super::lowering::stage_variant_field_name_count(variant)
+            ))
         }
     } else {
         Result::Ok(())
@@ -669,7 +713,9 @@ enum_type_record(
             program,
             index
         ),
-        super::lowering::artifact_type_raw(type_id)
+        EmissionName::Type(
+            super::lowering::stage_type_id_from_usize(index)
+        )
     ), @enum_type_record);
     let payload = ByteBuf::new();
     ByteBuf::write_u32_le(&mut payload, type_name);
@@ -701,11 +747,15 @@ custom_type_record(
     names: &Vec<String>,
     index: usize
 ) -> Result<super::artifact::Record, EmissionError> {
-    handle super::lowering::stage_program_type_tag_at(program, index) {
+    let tag = super::lowering::stage_program_type_tag_at(program, index);
+    handle tag {
         0 => Result::Ok(tuple_type_record(program, index)),
         1 => struct_type_record(program, names, index),
         2 => enum_type_record(program, names, index),
-        _ => Result::Err(error(6, checked_u32(index)))
+        _ => Result::Err(EmissionError::UnsupportedType(
+            super::lowering::stage_type_id_from_usize(index),
+            tag
+        ))
     }
 }
 
@@ -755,10 +805,11 @@ find_name(names: &Vec<String>, name: &String, index: usize) -> Option<u32> {
 require_name(
     names: &Vec<String>,
     name: &String,
-    detail: u32
+    origin: EmissionName
 ) -> Result<u32, EmissionError> {
     handle find_name(names, name, 0) {
-        Result::Err(_) => Result::Err(error(3, detail)),
+        Result::Err(_) =>
+            Result::Err(EmissionError::MissingName(origin)),
         Result::Ok(found) => Result::Ok(found)
     }
 }
@@ -780,10 +831,11 @@ find_name_value(
 require_name_value(
     names: &Vec<String>,
     name: String,
-    detail: u32
+    origin: EmissionName
 ) -> Result<u32, EmissionError> {
     handle find_name_value(names, name, 0) {
-        Result::Err(_) => Result::Err(error(3, detail)),
+        Result::Err(_) =>
+            Result::Err(EmissionError::MissingName(origin)),
         Result::Ok(found) => Result::Ok(found)
     }
 }
@@ -845,10 +897,11 @@ find_signature(
 require_signature(
     signatures: &Vec<Vec<u32>>,
     key: &Vec<u32>,
-    detail: u32
+    function: super::lowering::StageFunctionId
 ) -> Result<u32, EmissionError> {
     handle find_signature(signatures, key, 0) {
-        Result::Err(_) => Result::Err(error(4, detail)),
+        Result::Err(_) =>
+            Result::Err(EmissionError::MissingSignature(function)),
         Result::Ok(found) => Result::Ok(found)
     }
 }
@@ -956,7 +1009,8 @@ write_instruction(
         let target_raw = super::lowering::register_raw(target);
         let words = Bytes::to_vec(key);
         handle find_constant(program, &words, 0) {
-            Result::Err(_) => Result::Err(error(1, target_raw)),
+            Result::Err(_) =>
+                Result::Err(EmissionError::MissingConstant(target)),
             Result::Ok(constant) => {
                 ByteBuf::write_u32_le(&mut *code, 8193);
                 ByteBuf::write_u32_le(&mut *code, target_raw);
@@ -1088,7 +1142,7 @@ write_instruction(
         );
         Result::Ok(())
     } else {
-        Result::Err(error(2, 0))
+        Result::Err(EmissionError::UnsupportedInstruction)
     }
 }
 
@@ -1280,15 +1334,17 @@ write_functions(
                 super::lowering::stage_function_id_from_usize(index)
             );
         let signature = signature_key(function);
+        let function_id =
+            super::lowering::stage_function_id_from_usize(index);
         let name = try(require_name(
             names,
             super::lowering::stage_function_name(function),
-            checked_u32(index)
+            EmissionName::Function(function_id)
         ), @write_functions);
         let signature_id = try(require_signature(
             signatures,
             &signature,
-            checked_u32(index)
+            function_id
         ), @write_functions);
         let span = Vec::index(spans, index);
         ByteBuf::write_u32_le(&mut *output, name);
@@ -1438,7 +1494,8 @@ pub encode(
         found => super::lowering::stage_function_raw(found)
     });
     handle super::artifact::encode_writer(&writer, raw_entry, 1) {
-        Result::Err(_) => Result::Err(error(5, 0)),
+        Result::Err(error) =>
+            Result::Err(EmissionError::ArtifactWrite(error)),
         Result::Ok(bytes) => Result::Ok(bytes)
     }
 }
