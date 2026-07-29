@@ -1114,15 +1114,15 @@ resolve_signature_type(
                 type_index
             ) == u32_value(0) {
             Result::Err(_) => Result::Err(error(1, token, token, 0, 0)),
-            Result::Ok(_) => handle resolve_signature_type(
-                headers,
-                declarations,
-                output,
-                super::headers::type_child_index_at(index, type_index, 0),
-                module_plus_one
-            ) {
-                Result::Err(found) => Result::Err(move found),
-                Result::Ok(referent) => Result::Ok(intern_record_type(
+            Result::Ok(_) => {
+                let referent = try(resolve_signature_type(
+                    headers,
+                    declarations,
+                    output,
+                    super::headers::type_child_index_at(index, type_index, 0),
+                    module_plus_one
+                ), @resolve_signature_type);
+                Result::Ok(intern_record_type(
                     output,
                     6,
                     referent,
@@ -1138,15 +1138,15 @@ resolve_signature_type(
                 type_index
             ) == u32_value(0) {
             Result::Err(_) => Result::Err(error(1, token, token, 0, 0)),
-            Result::Ok(_) => handle resolve_signature_type(
-                headers,
-                declarations,
-                output,
-                super::headers::type_child_index_at(index, type_index, 0),
-                module_plus_one
-            ) {
-                Result::Err(found) => Result::Err(move found),
-                Result::Ok(referent) => Result::Ok(intern_record_type(
+            Result::Ok(_) => {
+                let referent = try(resolve_signature_type(
+                    headers,
+                    declarations,
+                    output,
+                    super::headers::type_child_index_at(index, type_index, 0),
+                    module_plus_one
+                ), @resolve_signature_type);
+                Result::Ok(intern_record_type(
                     output,
                     7,
                     referent,
@@ -1161,7 +1161,7 @@ resolve_signature_type(
             Result::Ok(_) => Result::Ok(0),
             Result::Err(_) => {
                 let elements = Vec::new();
-                handle resolve_type_children(
+                try(resolve_type_children(
                     headers,
                     declarations,
                     output,
@@ -1169,12 +1169,8 @@ resolve_signature_type(
                     module_plus_one,
                     0,
                     &mut elements
-                ) {
-                    Result::Err(found) => Result::Err(move found),
-                    Result::Ok(_) => Result::Ok(
-                        intern_tuple_type(output, &elements)
-                    )
-                }
+                ), @resolve_signature_type);
+                Result::Ok(intern_tuple_type(output, &elements))
             }
         },
         6 => Result::Ok(1),
@@ -1206,25 +1202,23 @@ collect_parameter_types(
                     0,
                     0
                 )),
-                Result::Ok(parameter) => handle resolve_signature_type(
-                    headers,
-                    declarations,
-                    output,
-                    super::headers::parameter_type_index(parameter),
-                    module_plus_one
-                ) {
-                    Result::Err(found) => Result::Err(move found),
-                    Result::Ok(ty) => {
-                        push_word(&mut output.callable_parameters, ty);
-                        collect_parameter_types(
-                            headers,
-                            declarations,
-                            callable,
-                            output,
-                            module_plus_one,
-                            ordinal + u32_value(1)
-                        )
-                    }
+                Result::Ok(parameter) => {
+                    let ty = try(resolve_signature_type(
+                        headers,
+                        declarations,
+                        output,
+                        super::headers::parameter_type_index(parameter),
+                        module_plus_one
+                    ), @collect_parameter_types);
+                    push_word(&mut output.callable_parameters, ty);
+                    collect_parameter_types(
+                        headers,
+                        declarations,
+                        callable,
+                        output,
+                        module_plus_one,
+                        ordinal + u32_value(1)
+                    )
                 }
             }
         }
@@ -1273,26 +1267,26 @@ collect_callables(
                                 index,
                                 0
                             ),
-                            Result::Err(_) => handle resolve_signature_type(
-                                headers,
-                                declarations,
-                                output,
-                                result_plus_one - u32_value(1),
-                                handle super::scanner::shell_at(
+                            Result::Err(_) => {
+                                let result = try(resolve_signature_type(
+                                    headers,
                                     declarations,
-                                    usize_from_u32(
-                                        super::headers::callable_shell(callable)
-                                    )
-                                ) {
-                                    Result::Err(_) => 0,
-                                    Result::Ok(owner) =>
-                                        super::scanner::shell_parent_plus_one(
-                                            owner
+                                    output,
+                                    result_plus_one - u32_value(1),
+                                    handle super::scanner::shell_at(
+                                        declarations,
+                                        usize_from_u32(
+                                            super::headers::callable_shell(callable)
                                         )
-                                }
-                            ) {
-                                Result::Err(found) => Result::Err(move found),
-                                Result::Ok(result) => collect_callable(
+                                    ) {
+                                        Result::Err(_) => 0,
+                                        Result::Ok(owner) =>
+                                            super::scanner::shell_parent_plus_one(
+                                                owner
+                                            )
+                                    }
+                                ), @collect_callables);
+                                collect_callable(
                                     headers,
                                     declarations,
                                     output,
@@ -1515,40 +1509,38 @@ collect_struct_fields(
                     0,
                     0
                 )),
-                Result::Ok(field) => handle resolve_signature_type(
-                    headers,
-                    declarations,
-                    output,
-                    super::headers::type_index(
-                        super::headers::field_type(field)
-                    ),
-                    module_plus_one
-                ) {
-                    Result::Err(found) => Result::Err(move found),
-                    Result::Ok(ty) => {
-                        push_words5(
-                            &mut output.fields,
-                            owner,
-                            super::headers::field_name_raw(field),
-                            ty,
-                            handle super::headers::field_is_private(field) {
-                                Result::Ok(_) => 1,
-                                Result::Err(_) => 0
-                            },
-                            u32_from_usize(
-                                super::headers::field_name_token(field)
-                            )
-                        );
-                        collect_struct_fields(
-                            headers,
-                            declarations,
-                            output,
-                            owner,
-                            fields,
-                            module_plus_one,
-                            ordinal + u32_value(1)
+                Result::Ok(field) => {
+                    let ty = try(resolve_signature_type(
+                        headers,
+                        declarations,
+                        output,
+                        super::headers::type_index(
+                            super::headers::field_type(field)
+                        ),
+                        module_plus_one
+                    ), @collect_struct_fields);
+                    push_words5(
+                        &mut output.fields,
+                        owner,
+                        super::headers::field_name_raw(field),
+                        ty,
+                        handle super::headers::field_is_private(field) {
+                            Result::Ok(_) => 1,
+                            Result::Err(_) => 0
+                        },
+                        u32_from_usize(
+                            super::headers::field_name_token(field)
                         )
-                    }
+                    );
+                    collect_struct_fields(
+                        headers,
+                        declarations,
+                        output,
+                        owner,
+                        fields,
+                        module_plus_one,
+                        ordinal + u32_value(1)
+                    )
                 }
             }
         }
@@ -1565,28 +1557,26 @@ collect_variant_payloads(
 ) -> Result<(), ElaborationError> {
     handle ordinal < super::headers::range_count(fields) {
         Result::Err(_) => Result::Ok(()),
-        Result::Ok(_) => handle resolve_signature_type(
-            headers,
-            declarations,
-            output,
-            super::headers::type_edge_index_at(
-                super::headers::parsed_index(headers),
-                super::headers::range_start(fields) + ordinal
-            ),
-            module_plus_one
-        ) {
-            Result::Err(found) => Result::Err(move found),
-            Result::Ok(ty) => {
-                push_word(&mut output.variant_payloads, ty);
-                collect_variant_payloads(
-                    headers,
-                    declarations,
-                    output,
-                    fields,
-                    module_plus_one,
-                    ordinal + u32_value(1)
-                )
-            }
+        Result::Ok(_) => {
+            let ty = try(resolve_signature_type(
+                headers,
+                declarations,
+                output,
+                super::headers::type_edge_index_at(
+                    super::headers::parsed_index(headers),
+                    super::headers::range_start(fields) + ordinal
+                ),
+                module_plus_one
+            ), @collect_variant_payloads);
+            push_word(&mut output.variant_payloads, ty);
+            collect_variant_payloads(
+                headers,
+                declarations,
+                output,
+                fields,
+                module_plus_one,
+                ordinal + u32_value(1)
+            )
         }
     }
 }
@@ -1619,37 +1609,33 @@ collect_enum_variants(
                     let payloads = super::headers::variant_fields(variant);
                     let start =
                         u32_from_usize(Vec::len(&output.variant_payloads));
-                    handle collect_variant_payloads(
+                    try(collect_variant_payloads(
                         headers,
                         declarations,
                         output,
                         payloads,
                         module_plus_one,
                         0
-                    ) {
-                        Result::Err(found) => Result::Err(move found),
-                        Result::Ok(_) => {
-                            push_words5(
-                                &mut output.variants,
-                                owner,
-                                super::headers::variant_name_raw(variant),
-                                start,
-                                super::headers::range_count(payloads),
-                                u32_from_usize(
-                                    super::headers::variant_name_token(variant)
-                                )
-                            );
-                            collect_enum_variants(
-                                headers,
-                                declarations,
-                                output,
-                                owner,
-                                variants,
-                                module_plus_one,
-                                ordinal + u32_value(1)
-                            )
-                        }
-                    }
+                    ), @collect_enum_variants);
+                    push_words5(
+                        &mut output.variants,
+                        owner,
+                        super::headers::variant_name_raw(variant),
+                        start,
+                        super::headers::range_count(payloads),
+                        u32_from_usize(
+                            super::headers::variant_name_token(variant)
+                        )
+                    );
+                    collect_enum_variants(
+                        headers,
+                        declarations,
+                        output,
+                        owner,
+                        variants,
+                        module_plus_one,
+                        ordinal + u32_value(1)
+                    )
                 }
             }
         }
@@ -1691,7 +1677,7 @@ collect_nominal_definitions(
                     Result::Ok(found) => {
                         let fields = super::headers::struct_fields(found);
                         let start = u32_from_usize(interface_field_count(&*output));
-                        handle collect_struct_fields(
+                        try(collect_struct_fields(
                             headers,
                             declarations,
                             output,
@@ -1699,25 +1685,21 @@ collect_nominal_definitions(
                             fields,
                             module_plus_one,
                             0
-                        ) {
-                            Result::Err(error) => Result::Err(move error),
-                            Result::Ok(_) => {
-                                *Vec::index_mut(
-                                    &mut output.nominals,
-                                    base + usize_value(2)
-                                ) = start;
-                                *Vec::index_mut(
-                                    &mut output.nominals,
-                                    base + usize_value(3)
-                                ) = super::headers::range_count(fields);
-                                collect_nominal_definitions(
-                                    headers,
-                                    declarations,
-                                    output,
-                                    nominal_id + usize_value(1)
-                                )
-                            }
-                        }
+                        ), @collect_nominal_definitions);
+                        *Vec::index_mut(
+                            &mut output.nominals,
+                            base + usize_value(2)
+                        ) = start;
+                        *Vec::index_mut(
+                            &mut output.nominals,
+                            base + usize_value(3)
+                        ) = super::headers::range_count(fields);
+                        collect_nominal_definitions(
+                            headers,
+                            declarations,
+                            output,
+                            nominal_id + usize_value(1)
+                        )
                     }
                 },
                 _ => handle find_enum_shell(
@@ -1736,7 +1718,7 @@ collect_nominal_definitions(
                         let variants = super::headers::enum_variants(found);
                         let start =
                             u32_from_usize(interface_variant_count(&*output));
-                        handle collect_enum_variants(
+                        try(collect_enum_variants(
                             headers,
                             declarations,
                             output,
@@ -1744,25 +1726,21 @@ collect_nominal_definitions(
                             variants,
                             module_plus_one,
                             0
-                        ) {
-                            Result::Err(error) => Result::Err(move error),
-                            Result::Ok(_) => {
-                                *Vec::index_mut(
-                                    &mut output.nominals,
-                                    base + usize_value(2)
-                                ) = start;
-                                *Vec::index_mut(
-                                    &mut output.nominals,
-                                    base + usize_value(3)
-                                ) = super::headers::range_count(variants);
-                                collect_nominal_definitions(
-                                    headers,
-                                    declarations,
-                                    output,
-                                    nominal_id + usize_value(1)
-                                )
-                            }
-                        }
+                        ), @collect_nominal_definitions);
+                        *Vec::index_mut(
+                            &mut output.nominals,
+                            base + usize_value(2)
+                        ) = start;
+                        *Vec::index_mut(
+                            &mut output.nominals,
+                            base + usize_value(3)
+                        ) = super::headers::range_count(variants);
+                        collect_nominal_definitions(
+                            headers,
+                            declarations,
+                            output,
+                            nominal_id + usize_value(1)
+                        )
                     }
                 }
             }
@@ -2586,7 +2564,7 @@ elaborate_call_arguments(
                 expression,
                 ordinal + u32_value(1)
             );
-            handle elaborate_expression(
+            let argument = try(elaborate_expression(
                 original,
                 headers,
                 declarations,
@@ -2596,27 +2574,23 @@ elaborate_call_arguments(
                 value,
                 child,
                 parameter + u32_value(1)
-            ) {
-                Result::Err(found) => Result::Err(move found),
-                Result::Ok(argument) => {
-                    let operand = embed_operand(value, argument);
-                    push_word(&mut *operands, operand);
-                    elaborate_call_arguments(
-                        original,
-                        headers,
-                        declarations,
-                        interfaces,
-                        body,
-                        map,
-                        value,
-                        expression,
-                        callable,
-                        ordinal + u32_value(1),
-                        wrappers,
-                        operands
-                    )
-                }
-            }
+            ), @elaborate_call_arguments);
+            let operand = embed_operand(value, argument);
+            push_word(&mut *operands, operand);
+            elaborate_call_arguments(
+                original,
+                headers,
+                declarations,
+                interfaces,
+                body,
+                map,
+                value,
+                expression,
+                callable,
+                ordinal + u32_value(1),
+                wrappers,
+                operands
+            )
         }
     }
 }
@@ -2712,7 +2686,7 @@ elaborate_call(
                             );
                             let wrappers = Vec::new();
                             let arguments = Vec::new();
-                            handle elaborate_call_arguments(
+                            try(elaborate_call_arguments(
                                 original,
                                 headers,
                                 declarations,
@@ -2725,53 +2699,44 @@ elaborate_call(
                                 0,
                                 &mut wrappers,
                                 &mut arguments
-                            ) {
-                                Result::Err(found) => Result::Err(move found),
-                                Result::Ok(_) => handle check_expected(
-                                    Elaborated {
-                                        type_id: result,
-                                        value_plus_one: 0,
-                                        computation_plus_one: 1
-                                    },
-                                    expected_plus_one,
-                                    token
-                                ) {
-                                    Result::Err(found) =>
-                                        Result::Err(move found),
-                                    Result::Ok(_) => {
-                                            let operand_start = u32_from_usize(
-                                                Vec::len(&value.operands)
-                                            );
-                                            append_words(
-                                                &mut value.operands,
-                                                &arguments,
-                                                0
-                                            );
-                                            let call = push_computation(
-                                                value,
-                                                3,
-                                                result,
-                                                shell,
-                                                operand_start,
-                                                found_count
-                                            );
-                                            let root = wrap_lets_reverse(
-                                                value,
-                                                &wrappers,
-                                                Vec::len(&wrappers)
-                                                    / usize_value(2),
-                                                call,
-                                                result
-                                            );
-                                            Result::Ok(Elaborated {
-                                                type_id: result,
-                                                value_plus_one: 0,
-                                                computation_plus_one:
-                                                    root + u32_value(1)
-                                            })
-                                    }
-                                }
-                            }
+                            ), @elaborate_call);
+                            try(check_expected(
+                                Elaborated {
+                                    type_id: result,
+                                    value_plus_one: 0,
+                                    computation_plus_one: 1
+                                },
+                                expected_plus_one,
+                                token
+                            ), @elaborate_call);
+                            let operand_start = u32_from_usize(
+                                Vec::len(&value.operands)
+                            );
+                            append_words(
+                                &mut value.operands,
+                                &arguments,
+                                0
+                            );
+                            let call = push_computation(
+                                value,
+                                3,
+                                result,
+                                shell,
+                                operand_start,
+                                found_count
+                            );
+                            let root = wrap_lets_reverse(
+                                value,
+                                &wrappers,
+                                Vec::len(&wrappers) / usize_value(2),
+                                call,
+                                result
+                            );
+                            Result::Ok(Elaborated {
+                                type_id: result,
+                                value_plus_one: 0,
+                                computation_plus_one: root + u32_value(1)
+                            })
                         }
                     }
                 }
@@ -2824,7 +2789,7 @@ elaborate_block_statements(
                     let local = value.parameter_count + value.next_source_local;
                     value.next_source_local =
                         value.next_source_local + u32_value(1);
-                    handle elaborate_expression(
+                    let initializer = try(elaborate_expression(
                         original,
                         headers,
                         declarations,
@@ -2834,9 +2799,7 @@ elaborate_block_statements(
                         value,
                         child,
                         0
-                    ) {
-                        Result::Err(found) => Result::Err(move found),
-                        Result::Ok(initializer) => {
+                    ), @elaborate_block_statements);
                             *Vec::index_mut(
                                 &mut value.local_types,
                                 usize_from_u32(local)
@@ -2857,12 +2820,10 @@ elaborate_block_statements(
                                 ordinal + u32_value(1),
                                 lets
                             )
-                        }
-                    }
                 },
                 2 => {
                     let is_final = ordinal + u32_value(1) == count;
-                    handle elaborate_expression(
+                    let found = try(elaborate_expression(
                         original,
                         headers,
                         declarations,
@@ -2875,9 +2836,8 @@ elaborate_block_statements(
                             Result::Ok(_) => expected_plus_one,
                             Result::Err(_) => 0
                         }
-                    ) {
-                        Result::Err(found) => Result::Err(move found),
-                        Result::Ok(found) => handle is_final {
+                    ), @elaborate_block_statements);
+                    handle is_final {
                             Result::Ok(_) => Result::Ok(move found),
                             Result::Err(_) => {
                                 handle found.computation_plus_one
@@ -2913,7 +2873,6 @@ elaborate_block_statements(
                                     lets
                                 )
                             }
-                        }
                     }
                 },
                 _ => Result::Err(error(
@@ -2940,7 +2899,7 @@ elaborate_block(
     expected_plus_one: u32
 ) -> Result<Elaborated, ElaborationError> {
     let lets = Vec::new();
-    handle elaborate_block_statements(
+    let final_value = try(elaborate_block_statements(
         original,
         headers,
         declarations,
@@ -2952,25 +2911,21 @@ elaborate_block(
         expected_plus_one,
         0,
         &mut lets
-    ) {
-        Result::Err(found) => Result::Err(move found),
-        Result::Ok(final_value) => {
-            let final_type = final_value.type_id;
-            let root = as_computation(value, final_value);
-            let wrapped = wrap_lets_reverse(
-                value,
-                &lets,
-                Vec::len(&lets) / usize_value(2),
-                root,
-                final_type
-            );
-            Result::Ok(Elaborated {
-                type_id: final_type,
-                value_plus_one: 0,
-                computation_plus_one: wrapped + u32_value(1)
-            })
-        }
-    }
+    ), @elaborate_block);
+    let final_type = final_value.type_id;
+    let root = as_computation(value, final_value);
+    let wrapped = wrap_lets_reverse(
+        value,
+        &lets,
+        Vec::len(&lets) / usize_value(2),
+        root,
+        final_type
+    );
+    Result::Ok(Elaborated {
+        type_id: final_type,
+        value_plus_one: 0,
+        computation_plus_one: wrapped + u32_value(1)
+    })
 }
 
 finish_construct(
@@ -3047,7 +3002,7 @@ elaborate_tuple_elements(
                     ordinal
                 ) + u32_value(1)
             };
-            handle elaborate_expression(
+            let element = try(elaborate_expression(
                 original,
                 headers,
                 declarations,
@@ -3057,31 +3012,27 @@ elaborate_tuple_elements(
                 value,
                 super::bodies::expression_child_at(body, expression, ordinal),
                 expected
-            ) {
-                Result::Err(found) => Result::Err(move found),
-                Result::Ok(element) => {
-                    let ty = element.type_id;
-                    let operand = embed_operand(value, element);
-                    push_word(&mut *types, ty);
-                    push_word(&mut *fields, ordinal);
-                    push_word(&mut *fields, operand);
-                    elaborate_tuple_elements(
-                        original,
-                        headers,
-                        declarations,
-                        interfaces,
-                        body,
-                        map,
-                        value,
-                        expression,
-                        expected_plus_one,
-                        ordinal + u32_value(1),
-                        wrappers,
-                        types,
-                        fields
-                    )
-                }
-            }
+            ), @elaborate_tuple_elements);
+            let ty = element.type_id;
+            let operand = embed_operand(value, element);
+            push_word(&mut *types, ty);
+            push_word(&mut *fields, ordinal);
+            push_word(&mut *fields, operand);
+            elaborate_tuple_elements(
+                original,
+                headers,
+                declarations,
+                interfaces,
+                body,
+                map,
+                value,
+                expression,
+                expected_plus_one,
+                ordinal + u32_value(1),
+                wrappers,
+                types,
+                fields
+            )
         }
     }
 }
@@ -3157,7 +3108,7 @@ elaborate_tuple_checked(
     let wrappers = Vec::new();
     let types = Vec::new();
     let fields = Vec::new();
-    handle elaborate_tuple_elements(
+    try(elaborate_tuple_elements(
         original,
         headers,
         declarations,
@@ -3171,28 +3122,25 @@ elaborate_tuple_checked(
         &mut wrappers,
         &mut types,
         &mut fields
-    ) {
-        Result::Err(found) => Result::Err(move found),
-        Result::Ok(_) => {
-            let ty = handle expected_plus_one == u32_value(0) {
-                Result::Ok(_) => intern_tuple_type(interfaces, &types),
-                Result::Err(_) => expected_type
-            };
-            handle type_copyable(interfaces, ty, token) {
-                Result::Err(found) => Result::Err(move found),
-                Result::Ok(copy) => handle copy {
-                    Result::Err(_) =>
-                        Result::Err(error(1, token, token, ty, ty)),
-                    Result::Ok(_) => Result::Ok(finish_construct(
-                        value,
-                        ty,
-                        0,
-                        &fields,
-                        &wrappers
-                    ))
-                }
-            }
-        }
+    ), @elaborate_tuple_checked);
+    let ty = handle expected_plus_one == u32_value(0) {
+        Result::Ok(_) => intern_tuple_type(interfaces, &types),
+        Result::Err(_) => expected_type
+    };
+    let copy = try(type_copyable(
+        interfaces,
+        ty,
+        token
+    ), @elaborate_tuple_checked);
+    handle copy {
+        Result::Err(_) => Result::Err(error(1, token, token, ty, ty)),
+        Result::Ok(_) => Result::Ok(finish_construct(
+            value,
+            ty,
+            0,
+            &fields,
+            &wrappers
+        ))
     }
 }
 
@@ -3370,7 +3318,7 @@ elaborate_struct_fields(
                             nominal,
                             field
                         );
-                        handle elaborate_expression(
+                        let field_value = try(elaborate_expression(
                             original,
                             headers,
                             declarations,
@@ -3384,35 +3332,31 @@ elaborate_struct_fields(
                                 ordinal
                             ),
                             field_type + u32_value(1)
-                        ) {
-                            Result::Err(found) => Result::Err(move found),
-                            Result::Ok(field_value) => {
-                                let operand = embed_operand(value, field_value);
-                                *Vec::index_mut(
-                                    &mut *seen,
-                                    usize_from_u32(field)
-                                ) = 1;
-                                *Vec::index_mut(
-                                    &mut *values,
-                                    usize_from_u32(field)
-                                ) = operand;
-                                elaborate_struct_fields(
-                                    original,
-                                    headers,
-                                    declarations,
-                                    interfaces,
-                                    body,
-                                    map,
-                                    value,
-                                    expression,
-                                    nominal,
-                                    ordinal + u32_value(1),
-                                    wrappers,
-                                    seen,
-                                    values
-                                )
-                            }
-                        }
+                        ), @elaborate_struct_fields);
+                        let operand = embed_operand(value, field_value);
+                        *Vec::index_mut(
+                            &mut *seen,
+                            usize_from_u32(field)
+                        ) = 1;
+                        *Vec::index_mut(
+                            &mut *values,
+                            usize_from_u32(field)
+                        ) = operand;
+                        elaborate_struct_fields(
+                            original,
+                            headers,
+                            declarations,
+                            interfaces,
+                            body,
+                            map,
+                            value,
+                            expression,
+                            nominal,
+                            ordinal + u32_value(1),
+                            wrappers,
+                            seen,
+                            values
+                        )
                     }
                 }
             }
@@ -3475,7 +3419,7 @@ elaborate_struct(
                         push_zeroes(&mut seen, usize_from_u32(count));
                         push_zeroes(&mut values, usize_from_u32(count));
                         let wrappers = Vec::new();
-                        handle elaborate_struct_fields(
+                        try(elaborate_struct_fields(
                             original,
                             headers,
                             declarations,
@@ -3489,39 +3433,32 @@ elaborate_struct(
                             &mut wrappers,
                             &mut seen,
                             &mut values
-                        ) {
-                            Result::Err(found) => Result::Err(move found),
-                            Result::Ok(_) => handle ordered_fields_complete(
-                                &seen,
-                                0
-                            ) {
-                                Result::Err(_) => Result::Err(
-                                    error(
-                                        4,
-                                        token,
-                                        token,
-                                        count,
-                                        super::bodies::expression_child_count_at(
-                                            body,
-                                            expression
-                                        )
-                                    )
-                                ),
-                                Result::Ok(_) => {
-                                    let fields = Vec::new();
-                                    append_ordered_fields(
-                                        &mut fields,
-                                        &values,
-                                        0
-                                    );
-                                    Result::Ok(finish_construct(
-                                        value,
-                                        ty,
-                                        0,
-                                        &fields,
-                                        &wrappers
-                                    ))
-                                }
+                        ), @elaborate_struct);
+                        handle ordered_fields_complete(&seen, 0) {
+                            Result::Err(_) => Result::Err(error(
+                                4,
+                                token,
+                                token,
+                                count,
+                                super::bodies::expression_child_count_at(
+                                    body,
+                                    expression
+                                )
+                            )),
+                            Result::Ok(_) => {
+                                let fields = Vec::new();
+                                append_ordered_fields(
+                                    &mut fields,
+                                    &values,
+                                    0
+                                );
+                                Result::Ok(finish_construct(
+                                    value,
+                                    ty,
+                                    0,
+                                    &fields,
+                                    &wrappers
+                                ))
                             }
                         }
                     }
@@ -3553,7 +3490,7 @@ elaborate_enum_payloads(
                 &interfaces.variant_payloads,
                 usize_from_u32(payload_start + ordinal)
             );
-            handle elaborate_expression(
+            let payload = try(elaborate_expression(
                 original,
                 headers,
                 declarations,
@@ -3567,29 +3504,25 @@ elaborate_enum_payloads(
                     ordinal + u32_value(1)
                 ),
                 expected + u32_value(1)
-            ) {
-                Result::Err(found) => Result::Err(move found),
-                Result::Ok(payload) => {
-                    let operand = embed_operand(value, payload);
-                    push_word(&mut *fields, ordinal);
-                    push_word(&mut *fields, operand);
-                    elaborate_enum_payloads(
-                        original,
-                        headers,
-                        declarations,
-                        interfaces,
-                        body,
-                        map,
-                        value,
-                        expression,
-                        payload_start,
-                        payload_count,
-                        ordinal + u32_value(1),
-                        wrappers,
-                        fields
-                    )
-                }
-            }
+            ), @elaborate_enum_payloads);
+            let operand = embed_operand(value, payload);
+            push_word(&mut *fields, ordinal);
+            push_word(&mut *fields, operand);
+            elaborate_enum_payloads(
+                original,
+                headers,
+                declarations,
+                interfaces,
+                body,
+                map,
+                value,
+                expression,
+                payload_start,
+                payload_count,
+                ordinal + u32_value(1),
+                wrappers,
+                fields
+            )
         }
     }
 }
@@ -3660,7 +3593,7 @@ elaborate_enum_construct(
                 Result::Ok(_) => {
                     let wrappers = Vec::new();
                     let fields = Vec::new();
-                    handle elaborate_enum_payloads(
+                    try(elaborate_enum_payloads(
                         original,
                         headers,
                         declarations,
@@ -3674,16 +3607,14 @@ elaborate_enum_construct(
                         0,
                         &mut wrappers,
                         &mut fields
-                    ) {
-                        Result::Err(found) => Result::Err(move found),
-                        Result::Ok(_) => Result::Ok(finish_construct(
-                            value,
-                            ty,
-                            variant_ordinal + u32_value(1),
-                            &fields,
-                            &wrappers
-                        ))
-                    }
+                    ), @elaborate_enum_construct);
+                    Result::Ok(finish_construct(
+                        value,
+                        ty,
+                        variant_ordinal + u32_value(1),
+                        &fields,
+                        &wrappers
+                    ))
                 }
             }
         }
@@ -3777,7 +3708,7 @@ elaborate_projection(
         expression,
         0
     );
-    handle elaborate_expression(
+    let subject = try(elaborate_expression(
         original,
         headers,
         declarations,
@@ -3787,13 +3718,11 @@ elaborate_projection(
         value,
         super::bodies::expression_child_at(body, expression, 0),
         0
-    ) {
-        Result::Err(found) => Result::Err(move found),
-        Result::Ok(subject) => {
-            let subject_type = subject.type_id;
-            let base = usize_from_u32(subject_type) * usize_value(4);
-            let tag = *Vec::index(&interfaces.types, base);
-            let field = handle tag {
+    ), @elaborate_projection);
+    let subject_type = subject.type_id;
+    let base = usize_from_u32(subject_type) * usize_value(4);
+    let tag = *Vec::index(&interfaces.types, base);
+    let field = handle tag {
                 4 => handle name_kind == u8_value(2) {
                     Result::Err(_) => Result::Err(()),
                     Result::Ok(_) => handle name < *Vec::index(
@@ -3841,8 +3770,8 @@ elaborate_projection(
                     }
                 },
                 _ => Result::Err(())
-            };
-            handle move field {
+    };
+    handle move field {
                 Result::Err(_) => Result::Err(
                     error(6, token, token, subject_type, name)
                 ),
@@ -3936,8 +3865,6 @@ elaborate_projection(
                         }
                     }
                 }
-            }
-        }
     }
 }
 

@@ -40097,6 +40097,10 @@ impl MirLowerer {
                     Primitive::ArrayGetBorrowShared | Primitive::ArrayGetBorrowUnique
                 )
                 .then(|| args[0].register);
+                let argument_registers = args
+                    .iter()
+                    .map(|argument| argument.register)
+                    .collect::<Vec<_>>();
                 let dst = self.allocate(expression.ty);
                 self.push(
                     expression.span,
@@ -40106,6 +40110,18 @@ impl MirLowerer {
                         args,
                     },
                 );
+                for source in argument_registers {
+                    self.transfer_owner(source);
+                    if Some(source) == borrow_source {
+                        continue;
+                    }
+                    if self.borrowed.remove(&source) {
+                        self.loan_of.remove(&source);
+                        if let Some(parent) = self.borrow_parents.remove(&source) {
+                            self.release_borrow_parent(parent, expression.span);
+                        }
+                    }
+                }
                 if let Some(source) = borrow_source {
                     // The primitive consumes its reference operand and
                     // transfers that loan into a dynamically projected result.

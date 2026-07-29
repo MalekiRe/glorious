@@ -892,34 +892,35 @@ lookup_fixity(
     prefix: Bool,
     owner_plus_one: usize
 ) -> Result<Option<u32>, BodyError> {
-    handle lookup_scope(
-        original,
-        source,
-        declarations,
-        nominal,
-        operator,
-        prefix,
-        owner_plus_one,
-        0,
-        Result::Err(())
-    ) {
-        Result::Err(error) => Result::Err(move error),
-        Result::Ok(found) => handle move found {
-            Result::Ok(index) => Result::Ok(Result::Ok(index)),
-            Result::Err(_) => handle owner_plus_one == usize_value(0) {
-                Result::Ok(_) => Result::Ok(Result::Err(())),
-                Result::Err(_) => lookup_scope(
-                    original,
-                    source,
-                    declarations,
-                    nominal,
-                    operator,
-                    prefix,
-                    0,
-                    0,
-                    Result::Err(())
-                )
-            }
+    let found = try(
+        lookup_scope(
+            original,
+            source,
+            declarations,
+            nominal,
+            operator,
+            prefix,
+            owner_plus_one,
+            0,
+            Result::Err(())
+        ),
+        @lookup_fixity
+    );
+    handle move found {
+        Result::Ok(index) => Result::Ok(Result::Ok(index)),
+        Result::Err(_) => handle owner_plus_one == usize_value(0) {
+            Result::Ok(_) => Result::Ok(Result::Err(())),
+            Result::Err(_) => lookup_scope(
+                original,
+                source,
+                declarations,
+                nominal,
+                operator,
+                prefix,
+                0,
+                0,
+                Result::Err(())
+            )
         }
     }
 }
@@ -935,17 +936,20 @@ peek_operator(
 ) -> Result<Option<OperatorUse>, BodyError> {
     handle operator_range(source, value.cursor, value.limit) {
         Result::Err(_) => Result::Ok(Result::Err(())),
-        Result::Ok(range) => handle lookup_fixity(
-            original,
-            source,
-            declarations,
-            nominal,
-            &range,
-            prefix,
-            owner_plus_one
-        ) {
-            Result::Err(error) => Result::Err(move error),
-            Result::Ok(found) => handle move found {
+        Result::Ok(range) => {
+            let found = try(
+                lookup_fixity(
+                    original,
+                    source,
+                    declarations,
+                    nominal,
+                    &range,
+                    prefix,
+                    owner_plus_one
+                ),
+                @peek_operator
+            );
+            handle move found {
                 Result::Err(_) => Result::Ok(Result::Err(())),
                 Result::Ok(index) => {
                     let header_index = usize_from_u32(index);
@@ -981,54 +985,59 @@ parse_primary(
         Result::Err(_) => Result::Err(
             body_error(6, value.cursor, value.cursor)
         ),
-        Result::Ok(_) => handle peek_operator(
-            original,
-            source,
-            declarations,
-            nominal,
-            &*value,
-            true,
-            owner_plus_one
-        ) {
-            Result::Err(error) => Result::Err(move error),
-            Result::Ok(prefix) => handle move prefix {
-                Result::Ok(operator) => {
-                    value.cursor = operator.end;
-                    handle parse_expression(
-                        original,
-                        source,
-                        declarations,
-                        nominal,
-                        value,
-                        owner_plus_one,
-                        operator.precedence,
-                        depth + u16_value(1)
-                    ) {
-                        Result::Err(error) => Result::Err(move error),
-                        Result::Ok(child) => {
-                            let end = node_tokens(&*value, child).end;
-                            Result::Ok(push_unary(
-                                value,
-                                5,
-                                operator,
-                                child,
-                                operator.start,
-                                end
-                            ))
-                        }
-                    }
-                },
-                Result::Err(_) => handle parse_atom(
+        Result::Ok(_) => {
+            let prefix = try(
+                peek_operator(
                     original,
                     source,
                     declarations,
                     nominal,
-                    value,
-                    owner_plus_one,
-                    depth
-                ) {
-                    Result::Err(error) => Result::Err(move error),
-                    Result::Ok(atom) => parse_postfix(
+                    &*value,
+                    true,
+                    owner_plus_one
+                ),
+                @parse_primary
+            );
+            handle move prefix {
+                Result::Ok(operator) => {
+                    value.cursor = operator.end;
+                    let child = try(
+                        parse_expression(
+                            original,
+                            source,
+                            declarations,
+                            nominal,
+                            value,
+                            owner_plus_one,
+                            operator.precedence,
+                            depth + u16_value(1)
+                        ),
+                        @parse_primary
+                    );
+                    let end = node_tokens(&*value, child).end;
+                    Result::Ok(push_unary(
+                        value,
+                        5,
+                        operator,
+                        child,
+                        operator.start,
+                        end
+                    ))
+                },
+                Result::Err(_) => {
+                    let atom = try(
+                        parse_atom(
+                            original,
+                            source,
+                            declarations,
+                            nominal,
+                            value,
+                            owner_plus_one,
+                            depth
+                        ),
+                        @parse_primary
+                    );
+                    parse_postfix(
                         original,
                         source,
                         declarations,
@@ -1153,52 +1162,53 @@ parse_tuple_tail(
                     value.cursor
                 ))
             },
-            Result::Err(_) => handle parse_expression(
-                original,
-                source,
-                declarations,
-                nominal,
-                value,
-                owner_plus_one,
-                0,
-                depth
-            ) {
-                Result::Err(error) => Result::Err(move error),
-                Result::Ok(element) => {
-                    push_word(&mut *elements, element.index);
-                    handle value.cursor < value.limit {
-                        Result::Err(_) => Result::Err(
-                            body_error(14, value.cursor, start)
-                        ),
-                        Result::Ok(_) => handle
-                            super::lexer::token_code_at(source, value.cursor) {
-                            12 => {
-                                value.cursor = value.cursor + usize_value(1);
-                                Result::Ok(push_tuple(
-                                    value,
-                                    &*elements,
-                                    start,
-                                    value.cursor
-                                ))
-                            },
-                            17 => {
-                                value.cursor = value.cursor + usize_value(1);
-                                parse_tuple_tail(
-                                    original,
-                                    source,
-                                    declarations,
-                                    nominal,
-                                    value,
-                                    owner_plus_one,
-                                    depth,
-                                    start,
-                                    elements
-                                )
-                            },
-                            _ => Result::Err(
-                                body_error(14, value.cursor, start)
+            Result::Err(_) => {
+                let element = try(
+                    parse_expression(
+                        original,
+                        source,
+                        declarations,
+                        nominal,
+                        value,
+                        owner_plus_one,
+                        0,
+                        depth
+                    ),
+                    @parse_tuple_tail
+                );
+                push_word(&mut *elements, element.index);
+                handle value.cursor < value.limit {
+                    Result::Err(_) => Result::Err(
+                        body_error(14, value.cursor, start)
+                    ),
+                    Result::Ok(_) => handle
+                        super::lexer::token_code_at(source, value.cursor) {
+                        12 => {
+                            value.cursor = value.cursor + usize_value(1);
+                            Result::Ok(push_tuple(
+                                value,
+                                &*elements,
+                                start,
+                                value.cursor
+                            ))
+                        },
+                        17 => {
+                            value.cursor = value.cursor + usize_value(1);
+                            parse_tuple_tail(
+                                original,
+                                source,
+                                declarations,
+                                nominal,
+                                value,
+                                owner_plus_one,
+                                depth,
+                                start,
+                                elements
                             )
-                        }
+                        },
+                        _ => Result::Err(
+                            body_error(14, value.cursor, start)
+                        )
                     }
                 }
             }
@@ -1236,18 +1246,20 @@ parse_atom(
                     },
                     Result::Err(_) => {
                         value.cursor = start + usize_value(1);
-                        handle parse_expression(
-                            original,
-                            source,
-                            declarations,
-                            nominal,
-                            value,
-                            owner_plus_one,
-                            0,
-                            depth + u16_value(1)
-                        ) {
-                            Result::Err(error) => Result::Err(move error),
-                            Result::Ok(child) => handle value.cursor < value.limit {
+                        let child = try(
+                            parse_expression(
+                                original,
+                                source,
+                                declarations,
+                                nominal,
+                                value,
+                                owner_plus_one,
+                                0,
+                                depth + u16_value(1)
+                            ),
+                            @parse_atom
+                        );
+                        handle value.cursor < value.limit {
                                 Result::Err(_) => Result::Err(
                                     body_error(2, value.cursor, start)
                                 ),
@@ -1294,11 +1306,10 @@ parse_atom(
                                     _ => Result::Err(
                                         body_error(2, value.cursor, start)
                                     )
-                                    }
                                 }
-                            }
                         }
                     }
+                }
                 },
             13 => {
                 value.cursor = start + usize_value(1);
@@ -1342,47 +1353,48 @@ parse_call_arguments(
                 value.cursor = value.cursor + usize_value(1);
                 Result::Ok(())
             },
-            Result::Err(_) => handle parse_expression(
-                original,
-                source,
-                declarations,
-                nominal,
-                value,
-                owner_plus_one,
-                0,
-                depth
-            ) {
-                Result::Err(error) => Result::Err(move error),
-                Result::Ok(argument) => {
-                    push_word(&mut *arguments, argument.index);
-                    handle value.cursor < value.limit {
-                        Result::Err(_) => Result::Err(
-                            body_error(10, value.cursor, open)
-                        ),
-                        Result::Ok(_) => handle
-                            super::lexer::token_code_at(source, value.cursor) {
-                            12 => {
-                                value.cursor = value.cursor + usize_value(1);
-                                Result::Ok(())
-                            },
-                            17 => {
-                                value.cursor = value.cursor + usize_value(1);
-                                parse_call_arguments(
-                                    original,
-                                    source,
-                                    declarations,
-                                    nominal,
-                                    value,
-                                    owner_plus_one,
-                                    depth,
-                                    arguments,
-                                    open
-                                )
-                            },
-                            _ => Result::Err(
-                                body_error(10, value.cursor, open)
+            Result::Err(_) => {
+                let argument = try(
+                    parse_expression(
+                        original,
+                        source,
+                        declarations,
+                        nominal,
+                        value,
+                        owner_plus_one,
+                        0,
+                        depth
+                    ),
+                    @parse_call_arguments
+                );
+                push_word(&mut *arguments, argument.index);
+                handle value.cursor < value.limit {
+                    Result::Err(_) => Result::Err(
+                        body_error(10, value.cursor, open)
+                    ),
+                    Result::Ok(_) => handle
+                        super::lexer::token_code_at(source, value.cursor) {
+                        12 => {
+                            value.cursor = value.cursor + usize_value(1);
+                            Result::Ok(())
+                        },
+                        17 => {
+                            value.cursor = value.cursor + usize_value(1);
+                            parse_call_arguments(
+                                original,
+                                source,
+                                declarations,
+                                nominal,
+                                value,
+                                owner_plus_one,
+                                depth,
+                                arguments,
+                                open
                             )
-                        }
+                        },
+                        _ => Result::Err(
+                            body_error(10, value.cursor, open)
+                        )
                     }
                 }
             }
@@ -1435,83 +1447,81 @@ parse_struct_fields(
                                 ),
                                 Result::Ok(_) => {
                                     value.cursor = colon + usize_value(1);
-                                    handle parse_expression(
-                                        original,
-                                        source,
-                                        declarations,
-                                        nominal,
-                                        value,
-                                        owner_plus_one,
-                                        0,
-                                        depth
-                                    ) {
-                                        Result::Err(error) =>
-                                            Result::Err(move error),
-                                        Result::Ok(field) => {
-                                            push_word(
-                                                &mut *fields,
-                                                Id::to_u32(move name)
-                                            );
-                                            push_word(
-                                                &mut *fields,
-                                                u32_from_usize(name_token)
-                                            );
-                                            push_word(
-                                                &mut *fields,
-                                                field.index
-                                            );
-                                            handle value.cursor < value.limit {
-                                                Result::Err(_) => Result::Err(
-                                                    body_error(
-                                                        15,
-                                                        value.cursor,
-                                                        open
-                                                    )
-                                                ),
-                                                Result::Ok(_) => handle
-                                                    super::lexer::token_code_at(
-                                                        source,
-                                                        value.cursor
-                                                    ) {
-                                                    14 => {
-                                                        value.cursor =
-                                                            value.cursor
-                                                            + usize_value(1);
-                                                        Result::Ok(push_struct(
-                                                            value,
-                                                            constructor,
-                                                            &*fields,
-                                                            start,
-                                                            value.cursor
-                                                        ))
-                                                    },
-                                                    17 => {
-                                                        value.cursor =
-                                                            value.cursor
-                                                            + usize_value(1);
-                                                        parse_struct_fields(
-                                                            original,
-                                                            source,
-                                                            declarations,
-                                                            nominal,
-                                                            value,
-                                                            owner_plus_one,
-                                                            depth,
-                                                            constructor,
-                                                            start,
-                                                            open,
-                                                            fields
-                                                        )
-                                                    },
-                                                    _ => Result::Err(
-                                                        body_error(
-                                                            15,
-                                                            value.cursor,
-                                                            open
-                                                        )
-                                                    )
-                                                }
-                                            }
+                                    let field = try(
+                                        parse_expression(
+                                            original,
+                                            source,
+                                            declarations,
+                                            nominal,
+                                            value,
+                                            owner_plus_one,
+                                            0,
+                                            depth
+                                        ),
+                                        @parse_struct_fields
+                                    );
+                                    push_word(
+                                        &mut *fields,
+                                        Id::to_u32(move name)
+                                    );
+                                    push_word(
+                                        &mut *fields,
+                                        u32_from_usize(name_token)
+                                    );
+                                    push_word(
+                                        &mut *fields,
+                                        field.index
+                                    );
+                                    handle value.cursor < value.limit {
+                                        Result::Err(_) => Result::Err(
+                                            body_error(
+                                                15,
+                                                value.cursor,
+                                                open
+                                            )
+                                        ),
+                                        Result::Ok(_) => handle
+                                            super::lexer::token_code_at(
+                                                source,
+                                                value.cursor
+                                            ) {
+                                            14 => {
+                                                value.cursor =
+                                                    value.cursor
+                                                    + usize_value(1);
+                                                Result::Ok(push_struct(
+                                                    value,
+                                                    constructor,
+                                                    &*fields,
+                                                    start,
+                                                    value.cursor
+                                                ))
+                                            },
+                                            17 => {
+                                                value.cursor =
+                                                    value.cursor
+                                                    + usize_value(1);
+                                                parse_struct_fields(
+                                                    original,
+                                                    source,
+                                                    declarations,
+                                                    nominal,
+                                                    value,
+                                                    owner_plus_one,
+                                                    depth,
+                                                    constructor,
+                                                    start,
+                                                    open,
+                                                    fields
+                                                )
+                                            },
+                                            _ => Result::Err(
+                                                body_error(
+                                                    15,
+                                                    value.cursor,
+                                                    open
+                                                )
+                                            )
                                         }
                                     }
                                 }
@@ -1607,7 +1617,29 @@ parse_postfix(
                     let open = value.cursor;
                     let arguments = Vec::new();
                     value.cursor = open + usize_value(1);
-                    handle parse_call_arguments(
+                    try(
+                        parse_call_arguments(
+                            original,
+                            source,
+                            declarations,
+                            nominal,
+                            value,
+                            owner_plus_one,
+                            depth + u16_value(1),
+                            &mut arguments,
+                            open
+                        ),
+                        @parse_postfix
+                    );
+                    let end = value.cursor;
+                    let call = push_call(
+                        value,
+                        callee,
+                        &arguments,
+                        start,
+                        end
+                    );
+                    parse_postfix(
                         original,
                         source,
                         declarations,
@@ -1615,31 +1647,8 @@ parse_postfix(
                         value,
                         owner_plus_one,
                         depth + u16_value(1),
-                        &mut arguments,
-                        open
-                    ) {
-                        Result::Err(error) => Result::Err(move error),
-                        Result::Ok(_) => {
-                            let end = value.cursor;
-                            let call = push_call(
-                                value,
-                                callee,
-                                &arguments,
-                                start,
-                                end
-                            );
-                            parse_postfix(
-                                original,
-                                source,
-                                declarations,
-                                nominal,
-                                value,
-                                owner_plus_one,
-                                depth + u16_value(1),
-                                call
-                            )
-                        }
-                    }
+                        call
+                    )
                 },
                 13 => {
                     let found_kind = node_kind(&*value, callee);
@@ -1654,21 +1663,8 @@ parse_postfix(
                             let open = value.cursor;
                             let fields = Vec::new();
                             value.cursor = open + usize_value(1);
-                            handle parse_struct_fields(
-                                original,
-                                source,
-                                declarations,
-                                nominal,
-                                value,
-                                owner_plus_one,
-                                depth + u16_value(1),
-                                callee,
-                                start,
-                                open,
-                                &mut fields
-                            ) {
-                                Result::Err(error) => Result::Err(move error),
-                                Result::Ok(found) => parse_postfix(
+                            let found = try(
+                                parse_struct_fields(
                                     original,
                                     source,
                                     declarations,
@@ -1676,34 +1672,49 @@ parse_postfix(
                                     value,
                                     owner_plus_one,
                                     depth + u16_value(1),
-                                    found
-                                )
-                            }
+                                    callee,
+                                    start,
+                                    open,
+                                    &mut fields
+                                ),
+                                @parse_postfix
+                            );
+                            parse_postfix(
+                                original,
+                                source,
+                                declarations,
+                                nominal,
+                                value,
+                                owner_plus_one,
+                                depth + u16_value(1),
+                                found
+                            )
                         }
                         }
                     }
                 },
                 21 => {
                     let dot = value.cursor;
-                    handle parse_projection_name(
-                        original,
-                        source,
-                        value,
-                        callee,
-                        dot
-                    ) {
-                        Result::Err(error) => Result::Err(move error),
-                        Result::Ok(found) => parse_postfix(
+                    let found = try(
+                        parse_projection_name(
                             original,
                             source,
-                            declarations,
-                            nominal,
                             value,
-                            owner_plus_one,
-                            depth + u16_value(1),
-                            found
-                        )
-                    }
+                            callee,
+                            dot
+                        ),
+                        @parse_postfix
+                    );
+                    parse_postfix(
+                        original,
+                        source,
+                        declarations,
+                        nominal,
+                        value,
+                        owner_plus_one,
+                        depth + u16_value(1),
+                        found
+                    )
                 },
                 _ => Result::Ok(callee)
             }
@@ -1755,17 +1766,19 @@ parse_chain(
     output: &mut Vec<u32>,
     pending: &mut Vec<u32>
 ) -> Result<ExprId, BodyError> {
-    handle peek_operator(
-        original,
-        source,
-        declarations,
-        nominal,
-        &*value,
-        false,
-        owner_plus_one
-    ) {
-        Result::Err(error) => Result::Err(move error),
-        Result::Ok(found) => handle move found {
+    let found = try(
+        peek_operator(
+            original,
+            source,
+            declarations,
+            nominal,
+            &*value,
+            false,
+            owner_plus_one
+        ),
+        @parse_chain
+    );
+    handle move found {
             Result::Err(_) => finish_chain(value, output, pending),
             Result::Ok(operator) => handle operator.precedence < minimum {
                 Result::Ok(_) => finish_chain(value, output, pending),
@@ -1775,52 +1788,51 @@ parse_chain(
                         Result::Err(_) => finish_chain(value, output, pending),
                         Result::Ok(_) => {
                             value.cursor = operator.end;
-                            handle parse_primary(
+                            let operand = try(
+                                parse_primary(
+                                    original,
+                                    source,
+                                    declarations,
+                                    nominal,
+                                    value,
+                                    owner_plus_one,
+                                    depth
+                                ),
+                                @parse_chain
+                            );
+                            try(
+                                prepare_operator(
+                                    &mut *value,
+                                    &mut *output,
+                                    &mut *pending,
+                                    operator
+                                ),
+                                @parse_chain
+                            );
+                            operator_push(
+                                &mut *pending,
+                                operator
+                            );
+                            push_word(
+                                &mut *output,
+                                operand.index
+                            );
+                            parse_chain(
                                 original,
                                 source,
                                 declarations,
                                 nominal,
                                 value,
                                 owner_plus_one,
-                                depth
-                            ) {
-                                Result::Err(error) => Result::Err(move error),
-                                Result::Ok(operand) => handle prepare_operator(
-                                    &mut *value,
-                                    &mut *output,
-                                    &mut *pending,
-                                    operator
-                                ) {
-                                    Result::Err(error) => Result::Err(move error),
-                                    Result::Ok(_) => {
-                                        operator_push(
-                                            &mut *pending,
-                                            operator
-                                        );
-                                        push_word(
-                                            &mut *output,
-                                            operand.index
-                                        );
-                                        parse_chain(
-                                            original,
-                                            source,
-                                            declarations,
-                                            nominal,
-                                            value,
-                                            owner_plus_one,
-                                            minimum,
-                                            depth,
-                                            output,
-                                            pending
-                                        )
-                                    }
-                                }
-                            }
+                                minimum,
+                                depth,
+                                output,
+                                pending
+                            )
                         }
                     }
                 }
             }
-        }
     }
 }
 
@@ -1920,34 +1932,33 @@ parse_expression(
     minimum: u8,
     depth: u16
 ) -> Result<ExprId, BodyError> {
-    handle parse_primary(
+    let first = try(
+        parse_primary(
+            original,
+            source,
+            declarations,
+            nominal,
+            value,
+            owner_plus_one,
+            depth
+        ),
+        @parse_expression
+    );
+    let output = Vec::new();
+    let pending = Vec::new();
+    push_word(&mut output, first.index);
+    parse_chain(
         original,
         source,
         declarations,
         nominal,
         value,
         owner_plus_one,
-        depth
-    ) {
-        Result::Err(error) => Result::Err(move error),
-        Result::Ok(first) => {
-            let output = Vec::new();
-            let pending = Vec::new();
-            push_word(&mut output, first.index);
-            parse_chain(
-                original,
-                source,
-                declarations,
-                nominal,
-                value,
-                owner_plus_one,
-                minimum,
-                depth,
-                &mut output,
-                &mut pending
-            )
-        }
-    }
+        minimum,
+        depth,
+        &mut output,
+        &mut pending
+    )
 }
 
 parse_block_statement(
@@ -1987,30 +1998,27 @@ parse_block_statement(
                                 ),
                                 Result::Ok(_) => {
                                     value.cursor = equals + usize_value(1);
-                                    handle parse_expression(
-                                        original,
-                                        source,
-                                        declarations,
-                                        nominal,
-                                        value,
-                                        owner_plus_one,
-                                        0,
-                                        depth
-                                    ) {
-                                        Result::Err(error) => Result::Err(
-                                            move error
+                                    let initializer = try(
+                                        parse_expression(
+                                            original,
+                                            source,
+                                            declarations,
+                                            nominal,
+                                            value,
+                                            owner_plus_one,
+                                            0,
+                                            depth
                                         ),
-                                        Result::Ok(initializer) => {
-                                            push_statement(
-                                                &mut *statements,
-                                                1,
-                                                u32_from_usize(name_token)
-                                                    + u32_value(1),
-                                                initializer
-                                            );
-                                            Result::Ok(())
-                                        }
-                                    }
+                                        @parse_block_statement
+                                    );
+                                    push_statement(
+                                        &mut *statements,
+                                        1,
+                                        u32_from_usize(name_token)
+                                            + u32_value(1),
+                                        initializer
+                                    );
+                                    Result::Ok(())
                                 }
                             }
                         }
@@ -2018,21 +2026,22 @@ parse_block_statement(
                 }
             }
         },
-        _ => handle parse_expression(
-            original,
-            source,
-            declarations,
-            nominal,
-            value,
-            owner_plus_one,
-            0,
-            depth
-        ) {
-            Result::Err(error) => Result::Err(move error),
-            Result::Ok(expression) => {
-                push_statement(&mut *statements, 2, 0, expression);
-                Result::Ok(())
-            }
+        _ => {
+            let expression = try(
+                parse_expression(
+                    original,
+                    source,
+                    declarations,
+                    nominal,
+                    value,
+                    owner_plus_one,
+                    0,
+                    depth
+                ),
+                @parse_block_statement
+            );
+            push_statement(&mut *statements, 2, 0, expression);
+            Result::Ok(())
         }
     }
 }
@@ -2138,18 +2147,21 @@ parse_block_contents(
                         value.cursor
                     ))
                 },
-                Result::Err(_) => handle parse_block_statement(
-                    original,
-                    source,
-                    declarations,
-                    nominal,
-                    value,
-                    owner_plus_one,
-                    depth,
-                    statements
-                ) {
-                    Result::Err(error) => Result::Err(move error),
-                    Result::Ok(_) => parse_block_after_statement(
+                Result::Err(_) => {
+                    try(
+                        parse_block_statement(
+                            original,
+                            source,
+                            declarations,
+                            nominal,
+                            value,
+                            owner_plus_one,
+                            depth,
+                            statements
+                        ),
+                        @parse_block_contents
+                    );
+                    parse_block_after_statement(
                         original,
                         source,
                         declarations,
@@ -2163,18 +2175,21 @@ parse_block_contents(
                     )
                 }
             },
-            Result::Err(_) => handle parse_block_statement(
-                original,
-                source,
-                declarations,
-                nominal,
-                value,
-                owner_plus_one,
-                depth,
-                statements
-            ) {
-                Result::Err(error) => Result::Err(move error),
-                Result::Ok(_) => parse_block_after_statement(
+            Result::Err(_) => {
+                try(
+                    parse_block_statement(
+                        original,
+                        source,
+                        declarations,
+                        nominal,
+                        value,
+                        owner_plus_one,
+                        depth,
+                        statements
+                    ),
+                    @parse_block_contents
+                );
+                parse_block_after_statement(
                     original,
                     source,
                     declarations,
@@ -2218,27 +2233,28 @@ pub parse_function_body(
                     let source = super::headers::parsed_source(headers);
                     let nominal = super::headers::nominal_index(headers);
                     let statements = Vec::new();
-                    handle parse_block_contents(
-                        original,
-                        source,
-                        declarations,
-                        nominal,
-                        &mut parser,
-                        shell_owner_plus_one(declarations, shell),
-                        0,
-                        start,
-                        0,
-                        &mut statements
-                    ) {
-                        Result::Err(error) => Result::Err(move error),
-                        Result::Ok(root) => Result::Ok(ParsedBody {
-                            shell: u32_from_usize(shell),
-                            root: root,
-                            nodes: move parser.nodes,
-                            edges: move parser.edges,
-                            names: move parser.names
-                        })
-                    }
+                    let root = try(
+                        parse_block_contents(
+                            original,
+                            source,
+                            declarations,
+                            nominal,
+                            &mut parser,
+                            shell_owner_plus_one(declarations, shell),
+                            0,
+                            start,
+                            0,
+                            &mut statements
+                        ),
+                        @parse_function_body
+                    );
+                    Result::Ok(ParsedBody {
+                        shell: u32_from_usize(shell),
+                        root: root,
+                        nodes: move parser.nodes,
+                        edges: move parser.edges,
+                        names: move parser.names
+                    })
                 }
             }
         }
@@ -2759,33 +2775,35 @@ write_functions(
                     declarations,
                     index + usize_value(1)
                 ),
-                Result::Ok(_) => handle parse_function_body(
-                    original,
-                    headers,
-                    declarations,
-                    index
-                ) {
-                    Result::Err(error) => Result::Err(move error),
-                    Result::Ok(body) => {
-                        let source = super::headers::parsed_source(headers);
-                        write_function_name(&mut *output, source, shell);
-                        handle write_expression(
+                Result::Ok(_) => {
+                    let body = try(
+                        parse_function_body(
+                            original,
+                            headers,
+                            declarations,
+                            index
+                        ),
+                        @write_functions
+                    );
+                    let source = super::headers::parsed_source(headers);
+                    write_function_name(&mut *output, source, shell);
+                    try(
+                        write_expression(
                             &mut *output,
                             original,
                             source,
                             &body,
                             body.root
-                        ) {
-                            Result::Err(error) => Result::Err(move error),
-                            Result::Ok(_) => write_functions(
-                                move output,
-                                original,
-                                headers,
-                                declarations,
-                                index + usize_value(1)
-                            )
-                        }
-                    }
+                        ),
+                        @write_functions
+                    );
+                    write_functions(
+                        move output,
+                        original,
+                        headers,
+                        declarations,
+                        index + usize_value(1)
+                    )
                 }
             }
         }

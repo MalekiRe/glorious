@@ -573,22 +573,23 @@ finish_variant_name(
                 )),
                 Result::Ok(header) => {
                     let variants = super::headers::enum_variants(header);
-                    handle find_variant(
-                        nominal,
-                        super::headers::range_start(variants),
-                        super::headers::range_count(variants),
-                        variant_name,
-                        variant_token,
-                        0
-                    ) {
-                        Result::Err(error) => Result::Err(move error),
-                        Result::Ok(variant) => Result::Ok(ResolvedName {
-                            expression: 0,
-                            kind: 5,
-                            owner: super::headers::enum_shell(header),
-                            index: variant
-                        })
-                    }
+                    let variant = try(
+                        find_variant(
+                            nominal,
+                            super::headers::range_start(variants),
+                            super::headers::range_count(variants),
+                            variant_name,
+                            variant_token,
+                            0
+                        ),
+                        @finish_variant_name
+                    );
+                    Result::Ok(ResolvedName {
+                        expression: 0,
+                        kind: 5,
+                        owner: super::headers::enum_shell(header),
+                        index: variant
+                    })
                 }
             }
         },
@@ -850,37 +851,35 @@ resolve_block_children(
                                     u32_from_usize(token)
                                 );
                                 push_word(&mut output.locals, expression);
-                                handle resolve_expression(
+                                try(
+                                    resolve_expression(
+                                        headers,
+                                        declarations,
+                                        body,
+                                        bindings,
+                                        output,
+                                        value,
+                                        module_plus_one
+                                    ),
+                                    @resolve_block_children
+                                );
+                                push_binding(
+                                    bindings,
+                                    Id::to_u32(move name),
+                                    2,
+                                    super::bodies::body_shell(body),
+                                    u32_from_usize(local)
+                                );
+                                resolve_block_children(
                                     headers,
                                     declarations,
                                     body,
                                     bindings,
                                     output,
-                                    value,
-                                    module_plus_one
-                                ) {
-                                    Result::Err(error) =>
-                                        Result::Err(move error),
-                                    Result::Ok(_) => {
-                                        push_binding(
-                                            bindings,
-                                            Id::to_u32(move name),
-                                            2,
-                                            super::bodies::body_shell(body),
-                                            u32_from_usize(local)
-                                        );
-                                        resolve_block_children(
-                                            headers,
-                                            declarations,
-                                            body,
-                                            bindings,
-                                            output,
-                                            expression,
-                                            module_plus_one,
-                                            child + u32_value(1)
-                                        )
-                                    }
-                                }
+                                    expression,
+                                    module_plus_one,
+                                    child + u32_value(1)
+                                )
                             },
                             _ => Result::Err(resolution_error(3, token, token))
                         }
@@ -892,17 +891,20 @@ resolve_block_children(
                         super::bodies::expression_token_start_at(body, value),
                         usize_from_u32(metadata)
                     )),
-                    Result::Ok(_) => handle resolve_expression(
-                        headers,
-                        declarations,
-                        body,
-                        bindings,
-                        output,
-                        value,
-                        module_plus_one
-                    ) {
-                        Result::Err(error) => Result::Err(move error),
-                        Result::Ok(_) => resolve_block_children(
+                    Result::Ok(_) => {
+                        try(
+                            resolve_expression(
+                                headers,
+                                declarations,
+                                body,
+                                bindings,
+                                output,
+                                value,
+                                module_plus_one
+                            ),
+                            @resolve_block_children
+                        );
+                        resolve_block_children(
                             headers,
                             declarations,
                             body,
@@ -1135,15 +1137,18 @@ pub resolve_function_body(
                     names: Vec::new(),
                     locals: Vec::new()
                 };
-                handle add_parameters(
-                    index,
-                    callable,
-                    shell_index,
-                    &mut bindings,
-                    0
-                ) {
-                    Result::Err(error) => Result::Err(move error),
-                    Result::Ok(_) => handle resolve_expression(
+                try(
+                    add_parameters(
+                        index,
+                        callable,
+                        shell_index,
+                        &mut bindings,
+                        0
+                    ),
+                    @resolve_function_body
+                );
+                try(
+                    resolve_expression(
                         headers,
                         declarations,
                         body,
@@ -1151,11 +1156,10 @@ pub resolve_function_body(
                         &mut output,
                         super::bodies::body_root_index(body),
                         super::scanner::shell_parent_plus_one(shell)
-                    ) {
-                        Result::Err(error) => Result::Err(move error),
-                        Result::Ok(_) => Result::Ok(move output)
-                    }
-                }
+                    ),
+                    @resolve_function_body
+                );
+                Result::Ok(move output)
             }
         }
     }
@@ -1490,47 +1494,48 @@ write_resolved_function(
             Result::Err(_) => Result::Err(
                 resolution_error(3, shell_index, shell_index)
             ),
-            Result::Ok(body) => handle resolve_function_body(
-                headers,
-                declarations,
-                &body
-            ) {
-                Result::Err(error) => Result::Err(move error),
-                Result::Ok(resolved) => {
-                    write_function_identity(
-                        &mut *output,
-                        source,
+            Result::Ok(body) => {
+                let resolved = try(
+                    resolve_function_body(
+                        headers,
                         declarations,
-                        shell_index
-                    );
-                    ByteBuf::write_u32_le(
-                        &mut *output,
-                        parameter_count + u32_from_usize(local_count(&resolved))
-                    );
-                    write_parameters(
-                        &mut *output,
-                        source,
-                        index,
-                        parameters.start,
-                        parameters.count,
-                        0
-                    );
-                    write_locals(&mut *output, source, &resolved, 0);
-                    ByteBuf::write_u32_le(
-                        &mut *output,
-                        u32_from_usize(resolved_name_count(&resolved))
-                    );
-                    write_occurrences(
-                        move output,
-                        source,
-                        declarations,
-                        &body,
-                        &resolved,
-                        parameter_count,
-                        0
-                    );
-                    Result::Ok(())
-                }
+                        &body
+                    ),
+                    @write_resolved_function
+                );
+                write_function_identity(
+                    &mut *output,
+                    source,
+                    declarations,
+                    shell_index
+                );
+                ByteBuf::write_u32_le(
+                    &mut *output,
+                    parameter_count + u32_from_usize(local_count(&resolved))
+                );
+                write_parameters(
+                    &mut *output,
+                    source,
+                    index,
+                    parameters.start,
+                    parameters.count,
+                    0
+                );
+                write_locals(&mut *output, source, &resolved, 0);
+                ByteBuf::write_u32_le(
+                    &mut *output,
+                    u32_from_usize(resolved_name_count(&resolved))
+                );
+                write_occurrences(
+                    move output,
+                    source,
+                    declarations,
+                    &body,
+                    &resolved,
+                    parameter_count,
+                    0
+                );
+                Result::Ok(())
             }
         }
         }
@@ -1578,15 +1583,18 @@ write_functions(
                     declarations,
                     index + usize_value(1)
                 ),
-                Result::Ok(_) => handle write_resolved_function(
-                    output,
-                    original,
-                    headers,
-                    declarations,
-                    index
-                ) {
-                    Result::Err(error) => Result::Err(move error),
-                    Result::Ok(_) => write_functions(
+                Result::Ok(_) => {
+                    try(
+                        write_resolved_function(
+                            &mut *output,
+                            original,
+                            headers,
+                            declarations,
+                            index
+                        ),
+                        @write_functions
+                    );
+                    write_functions(
                         move output,
                         original,
                         headers,

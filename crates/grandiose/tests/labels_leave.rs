@@ -381,6 +381,47 @@ fn standard_try_propagates_through_the_implicit_function_label() {
 }
 
 #[test]
+fn primitive_consumes_projected_reference_before_try_leaves() {
+    let source = r#"
+        struct State { values: Vec<i64> }
+        fail() -> Result<(), i64> { Result::Err(7) }
+        compute(state: &State) -> Result<usize, i64> {
+            let count = Vec::len(&state.values);
+            try(fail(), @compute);
+            Result::Ok(count)
+        }
+        answer() -> i64 {
+            let state = State { values: Vec::new() };
+            handle compute(&state) {
+                Result::Ok(_) => 0,
+                Result::Err(error) => error
+            }
+        }
+        main() -> { () }
+    "#;
+    for optimization_level in [OptimizationLevel::O1, OptimizationLevel::O2] {
+        let phases = compile_source_to_phases_with_options(
+            "primitive-reference-before-try.glorious",
+            source,
+            CompileOptions { optimization_level },
+        )
+        .unwrap_or_else(|errors| panic!("{optimization_level:?}: {errors:#?}"));
+        let answer = phases
+            .artifact
+            .functions
+            .iter()
+            .position(|function| function.name == "answer")
+            .unwrap() as u32;
+        assert_eq!(
+            Vm::new(verify(phases.artifact).unwrap())
+                .run(answer, vec![])
+                .unwrap(),
+            Value::I64(7)
+        );
+    }
+}
+
+#[test]
 fn a_label_captured_by_an_inlined_closure_stays_a_direct_transfer() {
     let source = r#"
         invoke<F>(body: F) -> () where F: Fn<(), Output=()> { body() }
