@@ -145,13 +145,7 @@ shell_parent_module(
 }
 
 same_module(left: Option<usize>, right: Option<usize>) -> Bool {
-    handle left {
-        Result::Err(_) => Option::is_none(&right),
-        Result::Ok(left_index) => handle right {
-            Result::Err(_) => false,
-            Result::Ok(right_index) => left_index == right_index
-        }
-    }
+    left == right
 }
 
 local_id_from_usize(value: usize) -> Option<LocalId> {

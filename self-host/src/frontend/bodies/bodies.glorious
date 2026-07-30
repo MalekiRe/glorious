@@ -901,13 +901,7 @@ fixity_owner(
 }
 
 same_owner(left: Option<usize>, right: Option<usize>) -> Bool {
-    handle left {
-        Result::Err(_) => Option::is_none(&right),
-        Result::Ok(left_index) => handle right {
-            Result::Err(_) => false,
-            Result::Ok(right_index) => left_index == right_index
-        }
-    }
+    left == right
 }
 
 operator_range(

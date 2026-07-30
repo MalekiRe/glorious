@@ -7794,6 +7794,14 @@ E > Default for Result<T, E> where T: Default {
 }
 
 impl < T,
+E > Equal for Result<T, E> where T: Eq,
+E: Eq {
+    ==(self: Result<T, E>, other: Result<T, E>) -> Bool {
+        Eq::eq(&self, &other)
+    }
+}
+
+impl < T,
 E > Eq for Result<T, E> where T: Eq,
 E: Eq {
     eq(self: &Result<T, E>, other: &Result<T, E>) -> Bool {

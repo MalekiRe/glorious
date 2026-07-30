@@ -310,7 +310,7 @@ collect_offsets(
 }
 
 fixed_sections_valid(sections: &Vec<Section>, index: usize) -> Bool {
-    handle find_range(Range::new(index, Vec::len(sections)), { current => {
+    find_range(Range::new(index, Vec::len(sections)), { current => {
         let width = section_width(current);
         if(width == 0) {
             false
@@ -320,10 +320,7 @@ fixed_sections_valid(sections: &Vec<Section>, index: usize) -> Bool {
                 != wrapping_convert_to_usize(section.count)
                     * wrapping_convert_to_usize(width)
         }
-    } }) {
-        Option::Some(_) => false,
-        None => true
-    }
+    } }) is None
 }
 
 write_magic(output: &mut ByteBuf) {

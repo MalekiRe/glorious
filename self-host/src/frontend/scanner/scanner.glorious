@@ -163,38 +163,23 @@ ident_is(
 }
 
 token_is_number(value: &super::lexer::LexedSource, index: usize) -> Bool {
-    handle token_kind_at(value, index) {
-        TokenKind::Number(_) => true,
-        _ => false
-    }
+    token_kind_at(value, index) is TokenKind::Number(_)
 }
 
 token_is_slash(value: &super::lexer::LexedSource, index: usize) -> Bool {
-    handle token_kind_at(value, index) {
-        TokenKind::Slash => true,
-        _ => false
-    }
+    token_kind_at(value, index) is TokenKind::Slash
 }
 
 token_is_eq(value: &super::lexer::LexedSource, index: usize) -> Bool {
-    handle token_kind_at(value, index) {
-        TokenKind::Eq => true,
-        _ => false
-    }
+    token_kind_at(value, index) is TokenKind::Eq
 }
 
 token_is_semicolon(value: &super::lexer::LexedSource, index: usize) -> Bool {
-    handle token_kind_at(value, index) {
-        TokenKind::Semicolon => true,
-        _ => false
-    }
+    token_kind_at(value, index) is TokenKind::Semicolon
 }
 
 token_is_eof(value: &super::lexer::LexedSource, index: usize) -> Bool {
-    handle token_kind_at(value, index) {
-        TokenKind::Eof => true,
-        _ => false
-    }
+    token_kind_at(value, index) is TokenKind::Eof
 }
 
 matching_close_walk(

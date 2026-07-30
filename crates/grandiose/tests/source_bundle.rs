@@ -509,6 +509,18 @@ fn distributed_result_control_runs_every_success_and_failure_path() {
         not_failure() -> i64 {
             not ok_i64(20) else { 21 }
         }
+        option_equal_some() -> i64 {
+            if(some(22) == some(22)) { 22 } else { 0 }
+        }
+        option_unequal_some() -> i64 {
+            if(some(22) == some(23)) { 0 } else { 23 }
+        }
+        option_equal_none() -> i64 {
+            if(none_i64() == none_i64()) { 24 } else { 0 }
+        }
+        option_mixed_variants() -> i64 {
+            if(some(25) == none_i64()) { 0 } else { 25 }
+        }
         main() -> () { () }
     "#;
     let artifact = compile_source_to_bytecode("result-control.glorious", source).unwrap();
@@ -524,6 +536,10 @@ fn distributed_result_control_runs_every_success_and_failure_path() {
         ("or_failure", 18),
         ("not_success", 19),
         ("not_failure", 21),
+        ("option_equal_some", 22),
+        ("option_unequal_some", 23),
+        ("option_equal_none", 24),
+        ("option_mixed_variants", 25),
     ] {
         let function = artifact
             .functions

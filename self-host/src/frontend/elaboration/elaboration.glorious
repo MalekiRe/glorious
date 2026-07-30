@@ -1416,16 +1416,7 @@ shell_parent_module(
 }
 
 same_module(left: Option<usize>, right: Option<usize>) -> Bool {
-    handle left {
-        Result::Err(_) => handle right {
-            Result::Err(_) => true,
-            Result::Ok(_) => false
-        },
-        Result::Ok(left_index) => handle right {
-            Result::Err(_) => false,
-            Result::Ok(right_index) => left_index == right_index
-        }
-    }
+    left == right
 }
 
 type_name_target_in(
@@ -1480,10 +1471,9 @@ type_name_target_in(
                     declarations,
                     usize_from_u32(found.0)
                 ), @type_name_target_in);
-                if(bool_and(
-                    found.1 == name,
+                if(found.1 == name and {
                     same_module(shell_parent_module(shell), module)
-                )) { Result::Ok(TypeNameTarget {
+                }) { Result::Ok(TypeNameTarget {
                         kind: kind,
                         index: u32_from_usize(index)
                     }) } else { type_name_target_in(
@@ -1799,10 +1789,9 @@ module_named_in(
             super::scanner::shell_at(declarations, index),
             @module_named_in
         );
-        if(bool_and(
-                super::scanner::shell_kind_code(shell) == 1,
+        if(super::scanner::shell_kind_code(shell) == 1 and {
                 same_module(shell_parent_module(shell), parent)
-            )) { handle Option::as_ref(
+            }) { handle Option::as_ref(
                     super::scanner::shell_name(shell)
                 ) {
                     Result::Err(_) => module_named_in(
@@ -2125,11 +2114,9 @@ collect_callables(
     if(index < super::headers::callable_count(header_index)) { handle super::headers::callable_at(header_index, index) {
             Result::Err(_) => Result::Err(error(7, index, index, 0, 0)),
             Result::Ok(callable) => {
-                let unsupported = bool_or(
-                    0
-                        < super::headers::callable_generic_count(callable),
-                    super::headers::callable_has_effects(callable)
-                );
+                let unsupported =
+                    0 < super::headers::callable_generic_count(callable)
+                    or { super::headers::callable_has_effects(callable) };
                 if(unsupported) {
                     let shell = super::headers::callable_shell(callable);
                     Result::Err(error(
@@ -3337,10 +3324,7 @@ elaborate_integer(
         TokenKind::Number(number) => if(super::lexer::number_is_float(&number)) { Result::Err(error(2, token, token, 0, 0)) } else {
             let ty_id = expected else { type_id_from_u32(10) };
             let ty = Id::to_u32(ty_id);
-            if(bool_and(
-                2 <= ty,
-                ty <= 13
-            )) {
+            if(2 <= ty and { ty <= 13 }) {
                 let digits = super::lexer::number_digits(&number);
                 handle parse_digits(
                     String::as_bytes(original),
@@ -3438,10 +3422,9 @@ elaborate_local(
         Result::Err(_) => Result::Err(error(7, token, token, 0, 0)),
         Result::Ok(ty_id) => {
             let ty = Id::to_u32(ty_id);
-            let access = if(bool_and(
-                final_transfer,
+            let access = if(final_transfer and {
                 type_is_copyable(interfaces, ty_id)
-            )) { CoreLocalAccess::Move } else { CoreLocalAccess::Copy };
+            }) { CoreLocalAccess::Move } else { CoreLocalAccess::Copy };
             let core = push_value(
                 value,
                 ty_id,
@@ -4098,25 +4081,21 @@ struct_field_accessible(
         interfaces,
         interface_field_id_from_u32(range.start + ordinal)
     );
-    handle field.private {
-      Result::Err(_) => true,
-      Result::Ok(_) => handle super::scanner::shell_at(
+    Option::is_none(&field.private) or {
+        if(super::scanner::shell_at(
             declarations,
             usize_from_u32(node.shell)
-        ) {
-            Result::Err(_) => false,
-            Result::Ok(owner) => handle super::scanner::shell_at(
+        ) is Result::Ok(owner)) {
+            if(super::scanner::shell_at(
                 declarations,
                 usize_from_u32(body_shell)
-            ) {
-                Result::Err(_) => false,
-                Result::Ok(current) =>
-                    same_module(
-                        shell_parent_module(owner),
-                        shell_parent_module(current)
-                    )
-            }
-        }
+            ) is Result::Ok(current)) {
+                same_module(
+                    shell_parent_module(owner),
+                    shell_parent_module(current)
+                )
+            } else { false }
+        } else { false }
     }
 }
 
@@ -4192,17 +4171,16 @@ elaborate_struct_fields(
         ) {
             Result::Err(_) =>
                 Result::Err(error(6, token, token, 0, name)),
-            Result::Ok(field) => if(bool_and(
-                *Vec::index(&*seen, usize_from_u32(field))
-                    == 0,
-                struct_field_accessible(
+            Result::Ok(field) => if(
+                *Vec::index(&*seen, usize_from_u32(field)) == 0
+                and { struct_field_accessible(
                     declarations,
                     &*interfaces,
                     super::bodies::body_shell(body),
                     nominal,
                     field
-                )
-            )) {
+                ) }
+            ) {
                 let field_type = nominal_struct_field_type(
                     &*interfaces,
                     nominal,
@@ -4291,10 +4269,9 @@ elaborate_struct(
                     Result::Ok(found) => found
                 };
                 let nominal = Id::to_u32(nominal_id);
-                if(bool_and(
-                    type_is_copyable(interfaces, ty_id),
+                if(type_is_copyable(interfaces, ty_id) and {
                     expected_matches(expected, ty_id)
-                )) {
+                }) {
                     let nominal_node = *interface_nominal_at(
                         interfaces,
                         nominal_id
@@ -4465,13 +4442,10 @@ elaborate_enum_construct(
         let found_count =
             super::bodies::expression_child_count_at(body, expression)
                 - 1;
-        if(bool_and(
-            payload_count == found_count,
-            bool_and(
-                type_is_copyable(interfaces, ty_id),
-                expected_matches(expected, ty_id)
-            )
-        )) {
+        if(payload_count == found_count and {
+            type_is_copyable(interfaces, ty_id)
+                and { expected_matches(expected, ty_id) }
+        }) {
             let wrappers = Vec::new();
             let fields = Vec::new();
             try(elaborate_enum_payloads(
@@ -4534,13 +4508,10 @@ elaborate_enum_bare(
             Result::Ok(found) => found
         };
         let ty = Id::to_u32(ty_id);
-        if(bool_and(
-            payload_count == 0,
-            bool_and(
-                type_is_copyable(interfaces, ty_id),
-                expected_matches(expected, ty_id)
-            )
-        )) {
+        if(payload_count == 0 and {
+            type_is_copyable(interfaces, ty_id)
+                and { expected_matches(expected, ty_id) }
+        }) {
             let fields = Vec::new();
             let wrappers = Vec::new();
             Result::Ok(finish_construct(
@@ -4646,19 +4617,14 @@ elaborate_projection(
                         _ => unreachable()
                     };
                     let result_type_word = Id::to_u32(result_type);
-                    if(bool_and(
+                    if(type_is_copyable(interfaces, subject_type) and {
                         type_is_copyable(
                             interfaces,
-                            subject_type
-                        ),
-                        bool_and(
-                            type_is_copyable(
-                                interfaces,
-                                result_type
-                            ),
+                            result_type
+                        ) and {
                             expected_matches(expected, result_type)
-                        )
-                    )) {
+                        }
+                    }) {
                         let wrappers = Vec::new();
                         let operand = materialize_operand(
                             value,
@@ -4809,13 +4775,10 @@ elaborate_handle_arms(
                 &*interfaces,
                 interface_variant_id_from_u32(variant_index)
             );
-            if(bool_and(
-                variant.owner == nominal,
-                bool_and(
-                    variants.start <= variant_index,
-                    variant_index < variants.start + variants.count
-                )
-            )) {
+            if(variant.owner == nominal and {
+                variants.start <= variant_index
+                    and { variant_index < variants.start + variants.count }
+            }) {
                 let variant_ordinal = variant_index - variants.start;
                 if(*Vec::index(seen, usize_from_u32(variant_ordinal))) {
                     Result::Err(error(
@@ -5490,8 +5453,7 @@ expression_contains_repeated_struct_local(
     expression: u32,
     local_count: usize
 ) -> Bool {
-    if(bool_and(
-        super::bodies::expression_kind_at(body, expression) == 10,
+    if(super::bodies::expression_kind_at(body, expression) == 10 and {
         struct_has_repeated_local(
             body,
             map,
@@ -5500,7 +5462,7 @@ expression_contains_repeated_struct_local(
             0,
             local_count
         )
-    )) { true } else { expression_children_contain_repeated_struct_local(
+    }) { true } else { expression_children_contain_repeated_struct_local(
             body,
             map,
             parameter_count,
@@ -6101,10 +6063,9 @@ write_value_expression(
                 constant_id
             );
             let at = Id::to_usize(constant_id) * 4;
-            if(bool_or(
-                constant.high0 != 0,
+            if(constant.high0 != 0 or {
                 constant.high1 != 0
-            )) { Result::Err(error(7, at, at, 0, ty)) } else {
+            }) { Result::Err(error(7, at, at, 0, ty)) } else {
                 ByteBuf::push(&mut *output, 1);
                 write_type_id(&mut *output, ty);
                 ByteBuf::write_u64_le(
@@ -6814,11 +6775,3 @@ usize_from_u8(value: u8) -> usize { wrapping_convert_to_usize( value) }
 u32_from_u8(value: u8) -> u32 { wrapping_convert_to_u32( value) }
 
 u8_from_u32(value: u32) -> u8 { wrapping_convert_to_u8( value) }
-
-bool_and(left: Bool, right: Bool) -> Bool {
-    if(move left) { right } else { false }
-}
-
-bool_or(left: Bool, right: Bool) -> Bool {
-    if(move left) { true } else { right }
-}
