@@ -1421,6 +1421,15 @@ struct ActiveLateControlLoop {
     continuation_locals: BTreeSet<core::LocalId>,
 }
 
+#[derive(Clone)]
+struct StaticClosure {
+    source: Expr,
+    result: Option<TypeId>,
+    /// Lexical free-name bindings captured before generic helper parameters
+    /// can shadow them during static beta reduction.
+    captures: BTreeMap<String, CoreLocal>,
+}
+
 struct CoreLowerer<'a> {
     program: &'a Program,
     nominal_ids: &'a BTreeMap<&'a str, TypeId>,
@@ -1544,7 +1553,7 @@ struct CoreLowerer<'a> {
     /// Nonescaping closures that mention a static label. These are
     /// beta-reduced in the destination frame for the same reason as generic
     /// label helpers.
-    static_closures: BTreeMap<String, (Expr, Option<TypeId>)>,
+    static_closures: BTreeMap<String, StaticClosure>,
     recursive_receiver: Option<RecursiveReceiverContext>,
 }
 
@@ -26460,17 +26469,44 @@ impl<'a> CoreLowerer<'a> {
             })
     }
 
-    fn static_closure_argument(&self, expression: &Expr) -> Option<Expr> {
+    fn capture_static_closure(&self, expression: &Expr) -> StaticClosure {
+        let (parameters, body) = match &expression.kind {
+            ExprKind::Closure { params, body } => (
+                params.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                body.as_ref(),
+            ),
+            ExprKind::TypedClosure { params, body, .. } => (
+                params
+                    .iter()
+                    .map(|parameter| parameter.name.clone())
+                    .collect::<Vec<_>>(),
+                body.as_ref(),
+            ),
+            ExprKind::Block(_) | ExprKind::ContextBlock(_) => (Vec::new(), expression),
+            _ => unreachable!("only a source closure can be captured statically"),
+        };
+        let outer = self.locals.keys().cloned().collect::<BTreeSet<_>>();
+        let captures = specialization::captured_outer_uses(body, &outer, &parameters)
+            .into_iter()
+            .filter_map(|(name, _)| self.locals.get(&name).cloned().map(|local| (name, local)))
+            .collect();
+        StaticClosure {
+            source: expression.clone(),
+            result: None,
+            captures,
+        }
+    }
+
+    fn static_closure_argument(&self, expression: &Expr) -> Option<StaticClosure> {
         match &expression.kind {
             ExprKind::Closure { .. } | ExprKind::TypedClosure { .. }
                 if self.expression_contains_active_label(expression) =>
             {
-                Some(expression.clone())
+                Some(self.capture_static_closure(expression))
             }
-            ExprKind::Variable(path) if path.len() == 1 => self
-                .static_closures
-                .get(path[0].as_ref())
-                .map(|(closure, _)| closure.clone()),
+            ExprKind::Variable(path) if path.len() == 1 => {
+                self.static_closures.get(path[0].as_ref()).cloned()
+            }
             ExprKind::Move(value) => self.static_closure_argument(value),
             _ => None,
         }
@@ -26707,12 +26743,12 @@ impl<'a> CoreLowerer<'a> {
 
     fn inline_static_closure(
         &mut self,
-        closure: &Expr,
+        closure: &StaticClosure,
         arguments: &[Expr],
         span: Span,
         expected: Option<TypeId>,
     ) -> Result<core::Expr, Vec<Diagnostic>> {
-        let (parameters, body) = match &closure.kind {
+        let (parameters, body) = match &closure.source.kind {
             ExprKind::Closure { params, body } => (
                 params.iter().map(ToString::to_string).collect::<Vec<_>>(),
                 body.as_ref(),
@@ -26724,7 +26760,7 @@ impl<'a> CoreLowerer<'a> {
                     .collect::<Vec<_>>(),
                 body.as_ref(),
             ),
-            ExprKind::Block(_) | ExprKind::ContextBlock(_) => (vec![], closure),
+            ExprKind::Block(_) | ExprKind::ContextBlock(_) => (vec![], &closure.source),
             _ => {
                 return Err(vec![unsupported(
                     span,
@@ -26773,9 +26809,16 @@ impl<'a> CoreLowerer<'a> {
                 .filter_map(|name| self.locals.get(name))
                 .map(|binding| binding.local),
         );
+        continuation_locals.extend(closure.captures.values().map(|capture| capture.local));
         self.late_inline_continuation_locals
             .push(continuation_locals);
-        let result = self.block(&statements, span, expected);
+        let result = self.static_closure_block(
+            &statements,
+            arguments.len(),
+            &closure.captures,
+            span,
+            expected,
+        );
         self.late_inline_continuation_locals
             .pop()
             .expect("static-closure continuation stack must remain balanced");
@@ -27168,7 +27211,7 @@ impl<'a> CoreLowerer<'a> {
         name: &str,
         arguments: &[Expr],
         label_arguments: &[Option<crate::ast::LabelSyntax>],
-        closure_arguments: &[Option<Expr>],
+        closure_arguments: &[Option<StaticClosure>],
         span: Span,
     ) -> Result<core::Expr, Vec<Diagnostic>> {
         let loop_context = self.active_late_control_loops[name].clone();
@@ -27194,7 +27237,7 @@ impl<'a> CoreLowerer<'a> {
         for (index, expected) in loop_context.static_closures.iter().enumerate() {
             let actual = closure_arguments[index]
                 .as_ref()
-                .map(|closure| (closure.span.start, closure.span.end));
+                .map(|closure| (closure.source.span.start, closure.source.span.end));
             if &actual != expected {
                 return Err(vec![unsupported(
                     arguments[index].span,
@@ -27441,9 +27484,11 @@ impl<'a> CoreLowerer<'a> {
             .iter()
             .enumerate()
             .map(|(index, argument)| match &argument.kind {
-                ExprKind::Closure { .. } | ExprKind::TypedClosure { .. } => Some(argument.clone()),
+                ExprKind::Closure { .. } | ExprKind::TypedClosure { .. } => {
+                    Some(self.capture_static_closure(argument))
+                }
                 ExprKind::Block(_) | ExprKind::ContextBlock(_) if callable_parameters[index] => {
-                    Some(argument.clone())
+                    Some(self.capture_static_closure(argument))
                 }
                 _ => self.static_closure_argument(argument),
             })
@@ -27553,6 +27598,13 @@ impl<'a> CoreLowerer<'a> {
                 .filter_map(|name| self.locals.get(name))
                 .map(|binding| binding.local),
         );
+        continuation_locals.extend(
+            closure_arguments
+                .iter()
+                .flatten()
+                .flat_map(|closure| closure.captures.values())
+                .map(|capture| capture.local),
+        );
         let visible_locals = self
             .locals
             .values()
@@ -27584,7 +27636,7 @@ impl<'a> CoreLowerer<'a> {
                         .map(|closure| {
                             closure
                                 .as_ref()
-                                .map(|closure| (closure.span.start, closure.span.end))
+                                .map(|closure| (closure.source.span.start, closure.source.span.end))
                         })
                         .collect(),
                     outer_locals: self
@@ -27690,7 +27742,7 @@ impl<'a> CoreLowerer<'a> {
             ));
         }
         let mut previous_closures = Vec::new();
-        for (param, closure, result) in function
+        for (param, mut closure, result) in function
             .params
             .iter()
             .zip(closure_arguments)
@@ -27699,10 +27751,10 @@ impl<'a> CoreLowerer<'a> {
                 closure.map(|closure| (param, closure, result))
             })
         {
+            closure.result = result;
             previous_closures.push((
                 param.name.clone(),
-                self.static_closures
-                    .insert(param.name.clone(), (closure, result)),
+                self.static_closures.insert(param.name.clone(), closure),
             ));
         }
         let mut previous_let_expectations = Vec::with_capacity(let_expectations.len());
@@ -35386,12 +35438,13 @@ impl<'a> CoreLowerer<'a> {
                     };
                     return self.expression(&transfer, expected);
                 }
-                if let Some((closure, result)) = self.static_closures.get(source_name).cloned() {
+                if let Some(closure) = self.static_closures.get(source_name).cloned() {
+                    let closure_result = closure.result;
                     return self.inline_static_closure(
                         &closure,
                         arguments,
                         span,
-                        expected.or(result),
+                        expected.or(closure_result),
                     );
                 }
                 if source_name == "try"
@@ -39679,7 +39732,7 @@ impl<'a> CoreLowerer<'a> {
             self.inherited_final_uses.push(saved_final_uses.clone());
         }
         self.final_use_block_depth += 1;
-        let result = self.block_inner(statements, span, expected);
+        let result = self.block_inner(statements, None, span, expected);
         self.final_use_block_depth -= 1;
         if nested {
             self.inherited_final_uses
@@ -39704,7 +39757,7 @@ impl<'a> CoreLowerer<'a> {
                 outer_names: self.locals.keys().cloned().collect(),
                 allowed: saved_final_uses,
             });
-        let result = self.block_inner(statements, span, expected);
+        let result = self.block_inner(statements, None, span, expected);
         self.inferred_final_uses = self
             .transparent_final_use_limits
             .pop()
@@ -39714,9 +39767,42 @@ impl<'a> CoreLowerer<'a> {
         result
     }
 
+    fn static_closure_block(
+        &mut self,
+        statements: &[Stmt],
+        parameter_count: usize,
+        captures: &BTreeMap<String, CoreLocal>,
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> Result<core::Expr, Vec<Diagnostic>> {
+        let saved_final_uses = std::mem::take(&mut self.inferred_final_uses);
+        let saved_live_after = std::mem::take(&mut self.current_live_after);
+        let nested = self.final_use_block_depth != 0;
+        if nested {
+            self.inherited_final_uses.push(saved_final_uses.clone());
+        }
+        self.final_use_block_depth += 1;
+        let result = self.block_inner(
+            statements,
+            Some((parameter_count, captures)),
+            span,
+            expected,
+        );
+        self.final_use_block_depth -= 1;
+        if nested {
+            self.inherited_final_uses
+                .pop()
+                .expect("nested final-use authorization stack must remain balanced");
+        }
+        self.inferred_final_uses = saved_final_uses;
+        self.current_live_after = saved_live_after;
+        result
+    }
+
     fn block_inner(
         &mut self,
         statements: &[Stmt],
+        static_capture_overlay: Option<(usize, &BTreeMap<String, CoreLocal>)>,
         span: Span,
         expected: Option<TypeId>,
     ) -> Result<core::Expr, Vec<Diagnostic>> {
@@ -39744,6 +39830,9 @@ impl<'a> CoreLowerer<'a> {
             })
             .collect::<Vec<_>>();
         let mut names = self.locals.keys().cloned().collect::<BTreeSet<_>>();
+        if let Some((_, captures)) = static_capture_overlay {
+            names.extend(captures.keys().cloned());
+        }
         for statement in statements {
             match statement {
                 Stmt::Let { name, .. } => {
@@ -39812,6 +39901,15 @@ impl<'a> CoreLowerer<'a> {
         };
         let liveness = point_graph.solve();
         for (index, statement) in statements.iter().enumerate() {
+            if let Some((overlay_at, captures)) = static_capture_overlay
+                && index == overlay_at
+            {
+                self.locals.extend(
+                    captures
+                        .iter()
+                        .map(|(name, local)| (name.clone(), local.clone())),
+                );
+            }
             self.current_point = points[index];
             self.current_live_after = liveness.live_out[&points[index]].clone();
             let last = index + 1 == statements.len();

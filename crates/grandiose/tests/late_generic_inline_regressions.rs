@@ -53,6 +53,54 @@ fn canonical_function_section<'a>(text: &'a str, name: &str) -> &'a str {
 }
 
 #[test]
+fn static_control_closure_preserves_colliding_mutable_capture() {
+    let source = r#"
+        values() -> Vec<usize> {
+            let output = Vec::new();
+            Vec::push(&mut output, 2);
+            Vec::push(&mut output, 3);
+            Vec::push(&mut output, 5);
+            output
+        }
+
+        accept(item: &usize) -> Result<(), usize> {
+            if(*item == 5) {
+                Result::Err(*item)
+            } else {
+                Result::Ok(())
+            }
+        }
+
+        collect(
+            value: &mut Vec<usize>,
+            source: &Vec<usize>
+        ) -> Result<(), usize> {
+            Slice::try_for_each(Vec::as_slice(source), { item => {
+                try(accept(item), @collect);
+                Vec::push(&mut *value, *item);
+                Result::Ok(())
+            }})
+        }
+
+        answer() -> usize {
+            let source = values();
+            let output = Vec::new();
+            handle collect(&mut output, &source) {
+                Result::Err(error) => error * 10 + Vec::len(&output),
+                Result::Ok(_) => 90
+            }
+        }
+
+        main() -> { () }
+    "#;
+
+    assert_eq!(
+        run("static-control-closure-capture.glorious", source, "answer"),
+        Value::U64(52)
+    );
+}
+
+#[test]
 fn late_generic_inline_evaluates_each_argument_once() {
     let source = r#"
         effect Ask { [0,1] ask() -> i64 }

@@ -980,15 +980,16 @@ lower_arguments<'a>(
 ) -> Result<(), LoweringError> {
     Slice::try_for_each(operands, { operand => {
         let id = *operand;
-        handle lower_value(interfaces, body, value, id) {
-            Result::Err(found) => Result::Err(found),
-            Result::Ok(lowered) => handle lowered {
-                Result::Err(_) =>
-                    Result::Err(LoweringError::MissingValue(id)),
-                Result::Ok(register) => {
-                    Vec::push(&mut *output, register);
-                    Result::Ok(())
-                }
+        let lowered = try(
+            lower_value(interfaces, body, value, id),
+            @lower_arguments
+        );
+        handle lowered {
+            Result::Err(_) =>
+                Result::Err(LoweringError::MissingValue(id)),
+            Result::Ok(register) => {
+                Vec::push(&mut *output, register);
+                Result::Ok(())
             }
         }
     } })
