@@ -1414,6 +1414,11 @@ struct ActiveLateControlLoop {
     runtime_parameters: Vec<(usize, TypeId)>,
     static_labels: Vec<Option<String>>,
     static_closures: Vec<Option<(usize, usize)>>,
+    /// Candidate caller locals and their use counts before the helper body.
+    /// Final loop capture retains candidates referenced by the generated body
+    /// plus the caller continuation's independently live locals.
+    outer_locals: Vec<(core::LocalId, u64, bool)>,
+    continuation_locals: BTreeSet<core::LocalId>,
 }
 
 struct CoreLowerer<'a> {
@@ -1517,9 +1522,13 @@ struct CoreLowerer<'a> {
     /// every predecessor. This avoids manufacturing branch-conditional loan
     /// state for observational `is` decisions.
     defer_branch_region_ends: u32,
-    late_inline_stack: BTreeSet<String>,
+    late_inline_stack: BTreeSet<(String, usize, usize)>,
     next_control_loop: u32,
     active_late_control_loops: BTreeMap<String, ActiveLateControlLoop>,
+    /// Source names live after the statement currently being lowered.
+    current_live_after: BTreeSet<String>,
+    /// Caller-continuation locals propagated through nested late inlining.
+    late_inline_continuation_locals: Vec<BTreeSet<core::LocalId>>,
     /// Expected types for argument-evaluation lets synthesized while a late
     /// generic call is control-inlined. Source spans uniquely identify those
     /// synthetic lets without imposing their context on user-written lets.
@@ -7976,6 +7985,18 @@ fn compile_program_with_phases(
                     .sum::<u64>()
         })
         .sum();
+    let edge_copies_canonicalized = mir::optimizer::canonicalize_dead_edge_copies_for_emission(
+        &mut mir_program,
+        &artifact.types,
+    )
+    .map_err(|error| {
+        vec![
+            Diagnostic::plain(format!(
+                "MIR edge-copy canonicalization rejected its input or output: {error}"
+            ))
+            .with_code("G1OPT999"),
+        ]
+    })?;
     let _registers_compacted =
         mir::optimizer::compact_live_registers_for_emission(&mut mir_program, &artifact.types)
             .map_err(|error| {
@@ -7990,7 +8011,7 @@ fn compile_program_with_phases(
         .passes
         .push(mir::OptimizationPassReport {
             pass: mir::OptimizationPass::LowerRegistersAndEdges,
-            outcome: if lowering_work > 0 {
+            outcome: if lowering_work > 0 || edge_copies_canonicalized > 0 {
                 mir::OptimizationPassOutcome::Changed
             } else {
                 mir::OptimizationPassOutcome::Unchanged
@@ -8260,6 +8281,23 @@ fn compile_program_with_phases(
             .with_code("G1BC999"),
         ]
     })?;
+    let has_leave = artifact
+        .code
+        .iter()
+        .any(|instruction| matches!(instruction, Instruction::Leave { .. }));
+    artifact = if has_leave {
+        grandiose_vm::verify::with_compiler_seeded_cleanup_plans(artifact)
+    } else {
+        grandiose_vm::verify::with_generated_cleanup_plans(artifact)
+    }
+    .map_err(|error| {
+        vec![
+            Diagnostic::plain(format!(
+                "the VM cleanup oracle rejected compiler-emitted MIR anchors: {error}"
+            ))
+            .with_code("G1BC999"),
+        ]
+    })?;
     let registers_compacted_after_peephole =
         compact_artifact_registers_after_peephole(&mut artifact);
 
@@ -8337,15 +8375,12 @@ fn compile_program_with_phases(
                     function,
                     instruction,
                     ..
-                } => artifact_for_diagnostics
-                    .functions
-                    .get(*function as usize)
-                    .map(|item| {
-                        let opcode = artifact_for_diagnostics
-                            .code
-                            .get((item.code_start + instruction) as usize);
-                        let relative_start = instruction.saturating_sub(8);
-                        let context_start = (item.code_start + relative_start) as usize;
+                } => artifact_for_diagnostics.functions.get(*function as usize).map(|item| {
+                    let opcode = artifact_for_diagnostics
+                        .code
+                        .get((item.code_start + instruction) as usize);
+                    let relative_start = instruction.saturating_sub(8);
+                    let context_start = (item.code_start + relative_start) as usize;
                         let context_end = (item.code_start + instruction + 1) as usize;
                         let context = artifact_for_diagnostics
                             .code
@@ -24420,6 +24455,15 @@ impl<'a> CoreLowerer<'a> {
                 })
     }
 
+    fn source_bool_type_id(&self) -> Option<TypeId> {
+        self.effects
+            .late_nominals
+            .keys()
+            .copied()
+            .chain(self.nominals.values().map(|info| info.id))
+            .find(|ty| self.is_source_bool_type(*ty))
+    }
+
     /// Resolve an ordinary frozen structural type, or intern a late structural
     /// wrapper whose leaves include a handler-site resumption identity. Handler
     /// resumptions deliberately do not exist when `ReferenceTypes` is frozen,
@@ -24888,6 +24932,8 @@ impl<'a> CoreLowerer<'a> {
                 late_inline_stack: BTreeSet::new(),
                 next_control_loop: 0,
                 active_late_control_loops: BTreeMap::new(),
+                current_live_after: BTreeSet::new(),
+                late_inline_continuation_locals: Vec::new(),
                 late_inline_let_expectations: BTreeMap::new(),
                 late_inline_type_substitutions: BTreeMap::new(),
                 active_labels: BTreeMap::new(),
@@ -25086,6 +25132,8 @@ impl<'a> CoreLowerer<'a> {
                 late_inline_stack: BTreeSet::new(),
                 next_control_loop: 0,
                 active_late_control_loops: BTreeMap::new(),
+                current_live_after: BTreeSet::new(),
+                late_inline_continuation_locals: Vec::new(),
                 late_inline_let_expectations: BTreeMap::new(),
                 late_inline_type_substitutions: BTreeMap::new(),
                 active_labels: BTreeMap::new(),
@@ -26710,7 +26758,28 @@ impl<'a> CoreLowerer<'a> {
             }
             _ => statements.push(Stmt::Expr(body.clone())),
         }
-        self.block(&statements, span, expected)
+        // Beta-reducing a static callback introduces a block boundary which
+        // its local liveness graph cannot see through. Propagate the caller's
+        // live-out locals so a nested fused control loop retains values used
+        // after the callback returns.
+        let mut continuation_locals = self
+            .late_inline_continuation_locals
+            .last()
+            .cloned()
+            .unwrap_or_default();
+        continuation_locals.extend(
+            self.current_live_after
+                .iter()
+                .filter_map(|name| self.locals.get(name))
+                .map(|binding| binding.local),
+        );
+        self.late_inline_continuation_locals
+            .push(continuation_locals);
+        let result = self.block(&statements, span, expected);
+        self.late_inline_continuation_locals
+            .pop()
+            .expect("static-closure continuation stack must remain balanced");
+        result
     }
 
     fn inline_static_label_handler(
@@ -27290,12 +27359,29 @@ impl<'a> CoreLowerer<'a> {
                 });
             let planned_result =
                 planned_result.and_then(|result| self.late_closure_type_id(&result));
+            fn tail_expression(expression: &Expr) -> &Expr {
+                match &expression.kind {
+                    ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                        match statements.last() {
+                            Some(Stmt::Expr(tail)) => tail_expression(tail),
+                            _ => expression,
+                        }
+                    }
+                    _ => expression,
+                }
+            }
             let provisional_result = match &argument.kind {
                 ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
-                    self.provisional_handler_result(body.span)
+                    let tail = tail_expression(body);
+                    self.static_local_expression_type(tail)
+                        .or_else(|| self.provisional_handler_result(body.span))
+                        .or_else(|| self.provisional_handler_result(tail.span))
                 }
                 ExprKind::Block(_) | ExprKind::ContextBlock(_) => {
-                    self.provisional_handler_result(argument.span)
+                    let tail = tail_expression(argument);
+                    self.static_local_expression_type(tail)
+                        .or_else(|| self.provisional_handler_result(argument.span))
+                        .or_else(|| self.provisional_handler_result(tail.span))
                 }
                 _ => None,
             };
@@ -27362,7 +27448,13 @@ impl<'a> CoreLowerer<'a> {
                 _ => self.static_closure_argument(argument),
             })
             .collect::<Vec<_>>();
-        if self.late_inline_stack.contains(name) {
+        // Re-entering the same generic control helper at a different source
+        // call site is ordinary higher-order nesting, not source recursion.
+        // Keying only by the declaration name falsely rejected expressions
+        // such as nested lazy `and` calls. A genuine recursive body revisits
+        // its fixed call site and is still caught on the next expansion.
+        let inline_key = (name.to_owned(), span.start, span.end);
+        if self.late_inline_stack.contains(&inline_key) {
             if self.active_late_control_loops.contains_key(name) {
                 return self.continue_late_control_loop(
                     name,
@@ -27378,7 +27470,7 @@ impl<'a> CoreLowerer<'a> {
                 "recursive generic calls transporting a label or handler resumption require direct, statically invariant tail recursion",
             )]);
         }
-        if !self.late_inline_stack.insert(name.to_owned()) {
+        if !self.late_inline_stack.insert(inline_key.clone()) {
             unreachable!("the recursive late-inline case returned above")
         }
         let closure_results = function
@@ -27450,6 +27542,22 @@ impl<'a> CoreLowerer<'a> {
                         .chain(local.reference_fields.values())
                         .all(|origin| origin.external))
         });
+        let mut continuation_locals = self
+            .late_inline_continuation_locals
+            .last()
+            .cloned()
+            .unwrap_or_default();
+        continuation_locals.extend(
+            self.current_live_after
+                .iter()
+                .filter_map(|name| self.locals.get(name))
+                .map(|binding| binding.local),
+        );
+        let visible_locals = self
+            .locals
+            .values()
+            .map(|binding| binding.local)
+            .collect::<BTreeSet<_>>();
         let control_context = (recursive_occurrences != 0
             && tail_recursive
             && can_bind_directly
@@ -27479,6 +27587,41 @@ impl<'a> CoreLowerer<'a> {
                                 .map(|closure| (closure.span.start, closure.span.end))
                         })
                         .collect(),
+                    outer_locals: self
+                        .locals
+                        .values()
+                        .map(|binding| {
+                            (
+                                binding.local,
+                                self.actual_uses.get(&binding.local).copied().unwrap_or(0),
+                                matches!(
+                                    self.references.resolved(binding.ty),
+                                    ResolvedType::Shared(_) | ResolvedType::Unique(_)
+                                ) || self.loans.contains_key(&binding.local)
+                                    || self.suspended.contains(&binding.local),
+                            )
+                        })
+                        .chain(
+                            continuation_locals
+                                .iter()
+                                .filter(|local| !visible_locals.contains(local))
+                                .filter_map(|local| {
+                                    let ty = self.owner_types.get(local).copied()?;
+                                    Some((
+                                        *local,
+                                        self.actual_uses.get(local).copied().unwrap_or(0),
+                                        matches!(
+                                            self.references.resolved(ty),
+                                            ResolvedType::Shared(_) | ResolvedType::Unique(_)
+                                        ) || self.loans.contains_key(local)
+                                            || self.suspended.contains(local),
+                                    ))
+                                }),
+                        )
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect(),
+                    continuation_locals: continuation_locals.clone(),
                 }
             });
         let mut statements = Vec::with_capacity(arguments.len() * 2 + 1);
@@ -27581,7 +27724,12 @@ impl<'a> CoreLowerer<'a> {
             self.active_late_control_loops
                 .insert(name.to_owned(), context.clone());
         }
+        self.late_inline_continuation_locals
+            .push(continuation_locals);
         let result = self.block(&statements, span, expected);
+        self.late_inline_continuation_locals
+            .pop()
+            .expect("late-inline continuation stack must remain balanced");
         self.active_late_control_loops.remove(name);
         for (key, previous) in previous_type_substitutions.into_iter().rev() {
             if let Some(previous) = previous {
@@ -27611,7 +27759,7 @@ impl<'a> CoreLowerer<'a> {
                 self.static_labels.remove(&name);
             }
         }
-        self.late_inline_stack.remove(name);
+        self.late_inline_stack.remove(&inline_key);
         let result = result?;
         let Some(control_context) = control_context else {
             return Ok(result);
@@ -27673,6 +27821,142 @@ impl<'a> CoreLowerer<'a> {
         } else {
             self.typed(body_span, ty, core::ExprKind::Block { statements, tail })
         };
+        let parameter_locals = params
+            .iter()
+            .map(|parameter| parameter.local)
+            .collect::<BTreeSet<_>>();
+        fn collect_initial_sources(expression: &core::Expr, sources: &mut BTreeSet<core::LocalId>) {
+            let collect = |expressions: &[core::Expr], sources: &mut BTreeSet<core::LocalId>| {
+                for expression in expressions {
+                    collect_initial_sources(expression, sources);
+                }
+            };
+            match &expression.kind {
+                core::ExprKind::Local { local, .. }
+                | core::ExprKind::Move { local }
+                | core::ExprKind::Borrow { source: local, .. }
+                | core::ExprKind::ProjectBorrow { source: local, .. }
+                | core::ExprKind::Reborrow { source: local, .. }
+                | core::ExprKind::DerefCopy { source: local }
+                | core::ExprKind::DerefMove { source: local }
+                | core::ExprKind::PatternTestBorrowed {
+                    reference: local, ..
+                }
+                | core::ExprKind::LocalReferenceView { local } => {
+                    sources.insert(*local);
+                }
+                core::ExprKind::TemporaryProjectBorrow { source, .. }
+                | core::ExprKind::LabelDestination { body: source, .. }
+                | core::ExprKind::Leave { value: source, .. }
+                | core::ExprKind::PatternTest {
+                    subject: source, ..
+                }
+                | core::ExprKind::Project {
+                    subject: source, ..
+                }
+                | core::ExprKind::Cancel { resumption: source } => {
+                    collect_initial_sources(source, sources);
+                }
+                core::ExprKind::Call { args, .. }
+                | core::ExprKind::TailCall { args, .. }
+                | core::ExprKind::CallSelf { args }
+                | core::ExprKind::TailCallSelf { args }
+                | core::ExprKind::ControlContinue { args, .. }
+                | core::ExprKind::MakeCallable { captures: args, .. }
+                | core::ExprKind::Primitive { args, .. }
+                | core::ExprKind::HostCall { args, .. }
+                | core::ExprKind::Perform { payloads: args, .. } => collect(args, sources),
+                core::ExprKind::CallKnownReceiver { receiver, args, .. }
+                | core::ExprKind::TailCallKnownReceiver { receiver, args, .. } => {
+                    collect_initial_sources(receiver, sources);
+                    collect(args, sources);
+                }
+                core::ExprKind::ControlLoop {
+                    initial_args, body, ..
+                } => {
+                    collect(initial_args, sources);
+                    collect_initial_sources(body, sources);
+                }
+                core::ExprKind::CallIndirect { callable, args, .. }
+                | core::ExprKind::TailCallIndirect { callable, args, .. } => {
+                    collect_initial_sources(callable, sources);
+                    collect(args, sources);
+                }
+                core::ExprKind::RefinementBranch {
+                    subject,
+                    positive,
+                    negative,
+                    ..
+                } => {
+                    collect_initial_sources(subject, sources);
+                    collect_initial_sources(positive, sources);
+                    collect_initial_sources(negative, sources);
+                }
+                core::ExprKind::Construct { fields, .. } => {
+                    for field in fields {
+                        collect_initial_sources(&field.value, sources);
+                    }
+                }
+                core::ExprKind::Resume {
+                    resumption, value, ..
+                }
+                | core::ExprKind::TailResume { resumption, value } => {
+                    collect_initial_sources(resumption, sources);
+                    collect_initial_sources(value, sources);
+                }
+                core::ExprKind::Handle {
+                    clauses,
+                    shared_clause_captures,
+                    body_captures,
+                    ..
+                } => {
+                    for (_, _, captures) in clauses {
+                        collect(captures, sources);
+                    }
+                    collect(shared_clause_captures, sources);
+                    collect(body_captures, sources);
+                }
+                core::ExprKind::Block { statements, tail } => {
+                    for statement in statements {
+                        match statement {
+                            core::Stmt::Let { value, .. }
+                            | core::Stmt::Assign { value, .. }
+                            | core::Stmt::Expr(value) => {
+                                collect_initial_sources(value, sources);
+                            }
+                            core::Stmt::Deconstruct { source, .. }
+                            | core::Stmt::EndBorrow { local: source, .. } => {
+                                sources.insert(*source);
+                            }
+                        }
+                    }
+                    collect_initial_sources(tail, sources);
+                }
+                core::ExprKind::Unit
+                | core::ExprKind::Constant(_)
+                | core::ExprKind::Receiver
+                | core::ExprKind::HostLeafStub
+                | core::ExprKind::Abort { .. } => {}
+            }
+        }
+        let mut initial_source_locals = BTreeSet::new();
+        for argument in &initial_args {
+            collect_initial_sources(argument, &mut initial_source_locals);
+        }
+        let outer_locals = control_context
+            .outer_locals
+            .iter()
+            .filter_map(|(local, uses_before, always_preserve)| {
+                (!parameter_locals.contains(local)
+                    && (!initial_source_locals.contains(local)
+                        || control_context.continuation_locals.contains(local)
+                        || *always_preserve)
+                    && (control_context.continuation_locals.contains(local)
+                        || *always_preserve
+                        || self.actual_uses.get(local).copied().unwrap_or(0) > *uses_before))
+                    .then_some(*local)
+            })
+            .collect();
         Ok(core::Expr {
             ty,
             span: body_span,
@@ -27682,6 +27966,7 @@ impl<'a> CoreLowerer<'a> {
                 control: control_context.control,
                 initial_args,
                 params,
+                outer_locals,
                 body: Box::new(body),
             },
         })
@@ -31768,6 +32053,20 @@ impl<'a> CoreLowerer<'a> {
     }
 
     fn static_local_expression_type(&self, expression: &Expr) -> Option<TypeId> {
+        fn tail_expression(expression: &Expr) -> &Expr {
+            match &expression.kind {
+                ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                    match statements.last() {
+                        Some(Stmt::Expr(tail)) => tail_expression(tail),
+                        _ => expression,
+                    }
+                }
+                ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
+                    tail_expression(body)
+                }
+                _ => expression,
+            }
+        }
         match &expression.kind {
             ExprKind::Unit => Some(UNIT),
             ExprKind::String(_) => Some(TEXT),
@@ -31777,11 +32076,22 @@ impl<'a> CoreLowerer<'a> {
             ExprKind::Variable(path) if path.len() == 1 => {
                 self.locals.get(path[0].as_ref()).map(|local| local.ty)
             }
-            ExprKind::Call(callee, _) => match &callee.kind {
+            ExprKind::Call(callee, arguments) => match &callee.kind {
                 ExprKind::Variable(path) if path.len() == 1 => self
                     .signatures
                     .get(path[0].as_ref())
-                    .map(|signature| signature.result),
+                    .map(|signature| signature.result)
+                    .or_else(|| {
+                        let [value, alternative] = arguments.as_slice() else {
+                            return None;
+                        };
+                        (path[0].as_ref() == "or").then(|| {
+                            let value = self.static_local_expression_type(value)?;
+                            let alternative =
+                                self.static_local_expression_type(tail_expression(alternative))?;
+                            (value == alternative).then_some(value)
+                        })?
+                    }),
                 _ => None,
             },
             ExprKind::Move(value) => self.static_local_expression_type(value),
@@ -31843,6 +32153,16 @@ impl<'a> CoreLowerer<'a> {
                 };
                 self.references.ids.get(&reference).copied()
             }
+            ExprKind::Binary {
+                op:
+                    BinaryOp::Eq
+                    | BinaryOp::NotEq
+                    | BinaryOp::Lt
+                    | BinaryOp::LtEq
+                    | BinaryOp::Gt
+                    | BinaryOp::GtEq,
+                ..
+            } => self.source_bool_type_id(),
             _ => None,
         }
     }
@@ -39353,6 +39673,7 @@ impl<'a> CoreLowerer<'a> {
         expected: Option<TypeId>,
     ) -> Result<core::Expr, Vec<Diagnostic>> {
         let saved_final_uses = std::mem::take(&mut self.inferred_final_uses);
+        let saved_live_after = std::mem::take(&mut self.current_live_after);
         let nested = self.final_use_block_depth != 0;
         if nested {
             self.inherited_final_uses.push(saved_final_uses.clone());
@@ -39366,6 +39687,7 @@ impl<'a> CoreLowerer<'a> {
                 .expect("nested final-use authorization stack must remain balanced");
         }
         self.inferred_final_uses = saved_final_uses;
+        self.current_live_after = saved_live_after;
         result
     }
 
@@ -39376,6 +39698,7 @@ impl<'a> CoreLowerer<'a> {
         expected: Option<TypeId>,
     ) -> Result<core::Expr, Vec<Diagnostic>> {
         let saved_final_uses = std::mem::take(&mut self.inferred_final_uses);
+        let saved_live_after = std::mem::take(&mut self.current_live_after);
         self.transparent_final_use_limits
             .push(TransparentFinalUseLimit {
                 outer_names: self.locals.keys().cloned().collect(),
@@ -39387,6 +39710,7 @@ impl<'a> CoreLowerer<'a> {
             .pop()
             .expect("transparent final-use limit stack must remain balanced")
             .allowed;
+        self.current_live_after = saved_live_after;
         result
     }
 
@@ -39489,6 +39813,7 @@ impl<'a> CoreLowerer<'a> {
         let liveness = point_graph.solve();
         for (index, statement) in statements.iter().enumerate() {
             self.current_point = points[index];
+            self.current_live_after = liveness.live_out[&points[index]].clone();
             let last = index + 1 == statements.len();
             self.inferred_final_uses = match statement {
                 Stmt::Let { value, .. }
@@ -40976,9 +41301,42 @@ impl MirLowerer {
         mir::Operand { register, mode }
     }
 
+    /// Transport a live local into an SSA join. Plain duplicable values remain
+    /// available to correlated sibling paths. Values with custom destruction
+    /// still transfer linearly: every logical copy needs its eventual Drop.
+    fn join_operand(&self, register: u32) -> mir::Operand {
+        let ty = self.register_types[register as usize];
+        if !self.partial_aggregates.contains_key(&register)
+            && self.duplicable_types.contains(&ty)
+            && !self.custom_drop_types.contains(&ty)
+            && !self.reference_types.contains(&ty)
+        {
+            Self::operand(register, mir::UseMode::Copy)
+        } else {
+            Self::operand(register, mir::UseMode::Move)
+        }
+    }
+
     fn transfer_owner(&mut self, source: u32) {
         if let Some(index) = self.owned.iter().position(|register| *register == source) {
             self.owned.remove(index);
+        }
+    }
+
+    fn rename_borrow_tracking(&mut self, source: u32, destination: u32) {
+        if self.borrowed.remove(&source) {
+            self.borrowed.insert(destination);
+        }
+        if let Some(parent) = self.borrow_parents.remove(&source) {
+            self.borrow_parents.insert(destination, parent);
+        }
+        for parent in self.borrow_parents.values_mut() {
+            if *parent == source {
+                *parent = destination;
+            }
+        }
+        if let Some(loan) = self.loan_of.remove(&source) {
+            self.loan_of.insert(destination, loan);
         }
     }
 
@@ -41031,6 +41389,33 @@ impl MirLowerer {
             );
             if let Some(parent) = self.borrow_parents.remove(&register) {
                 self.release_borrow_parent(parent, span);
+            }
+        } else if self
+            .duplicable_types
+            .contains(&self.register_types[register as usize])
+            && !self
+                .custom_drop_types
+                .contains(&self.register_types[register as usize])
+            && !self
+                .reference_types
+                .contains(&self.register_types[register as usize])
+        {
+            // Deconstruct is valid only after every field has moved. A
+            // residual copyable aggregate can still contain initialized
+            // fields; Drop retires those no-op fields and the shell together.
+            if self
+                .partial_aggregates
+                .get(&register)
+                .is_some_and(|fields| fields.iter().all(|initialized| !initialized))
+            {
+                self.push(span, mir::InstructionKind::Deconstruct { src: register });
+            } else {
+                self.push(
+                    span,
+                    mir::InstructionKind::Drop {
+                        owner: Self::operand(register, mir::UseMode::Move),
+                    },
+                );
             }
         } else {
             self.push(
@@ -42351,6 +42736,7 @@ impl MirLowerer {
                 control,
                 initial_args,
                 params,
+                outer_locals: preserved_outer_locals,
                 body,
             } => {
                 debug_assert_eq!(initial_args.len(), params.len());
@@ -42363,16 +42749,71 @@ impl MirLowerer {
                     incoming.push(self.materialize(value, argument.span));
                 }
                 let incoming_set = incoming.iter().copied().collect::<BTreeSet<_>>();
+                let preserved_outer_locals = preserved_outer_locals
+                    .iter()
+                    .copied()
+                    .collect::<BTreeSet<_>>();
+                let initial_aliases = initial_args
+                    .iter()
+                    .zip(params)
+                    .filter_map(|(argument, parameter)| {
+                        let core::ExprKind::Local { local, .. } = &argument.kind else {
+                            return None;
+                        };
+                        (*local != parameter.local && preserved_outer_locals.contains(local))
+                            .then_some((*local, parameter.local))
+                    })
+                    .collect::<Vec<_>>();
+                let aliased_outer_locals = initial_aliases
+                    .iter()
+                    .map(|(outer, _)| *outer)
+                    .collect::<BTreeSet<_>>();
                 let outer_locals = self
                     .locals
                     .iter()
                     .filter_map(|(local, register)| {
-                        (self.owned.contains(register) && !incoming_set.contains(register))
-                            .then_some((*local, self.register_types[*register as usize]))
+                        (preserved_outer_locals.contains(local)
+                            && !aliased_outer_locals.contains(local)
+                            && self.owned.contains(register)
+                            && !incoming_set.contains(register))
+                        .then_some((*local, self.register_types[*register as usize]))
                     })
                     .collect::<Vec<_>>();
                 for (local, _) in &outer_locals {
                     incoming.push(self.locals[local]);
+                }
+                let carried = incoming.iter().copied().collect::<BTreeSet<_>>();
+                let protected_label_owners = self
+                    .active_labels
+                    .values()
+                    .flat_map(|label| label.outer_owned.iter().copied())
+                    .filter(|register| {
+                        let ty = self.register_types[*register as usize];
+                        self.duplicable_types.contains(&ty)
+                            && !self.custom_drop_types.contains(&ty)
+                            && !self.reference_types.contains(&ty)
+                    })
+                    .collect::<BTreeSet<_>>();
+                for owner in self.owned.clone().into_iter().rev() {
+                    if !carried.contains(&owner) && !protected_label_owners.contains(&owner) {
+                        // A nested fused loop is not a boundary for an
+                        // enclosing label destination. Plain copyable owners
+                        // in that exact baseline remain available to sibling
+                        // Leave paths; remapping them to this loop's header
+                        // would be wrong because those paths need not be
+                        // dominated by the header.
+                        self.destroy(owner, expression.span);
+                        self.transfer_owner(owner);
+                        let retired = self
+                            .locals
+                            .iter()
+                            .filter_map(|(local, register)| (*register == owner).then_some(*local))
+                            .collect::<Vec<_>>();
+                        for local in retired {
+                            self.locals.remove(&local);
+                            self.uninitialized_locals.insert(local);
+                        }
+                    }
                 }
                 let header = self.label();
                 self.terminate(mir::Terminator::Goto(mir::Edge {
@@ -42393,6 +42834,14 @@ impl MirLowerer {
                     .iter()
                     .map(|(_, ty)| self.allocate(*ty))
                     .collect::<Vec<_>>();
+                let header_registers = parameter_registers
+                    .iter()
+                    .chain(&outer_registers)
+                    .copied()
+                    .collect::<Vec<_>>();
+                for (source, destination) in incoming.iter().zip(&header_registers) {
+                    self.rename_borrow_tracking(*source, *destination);
+                }
                 self.mark_with_params(
                     header,
                     params
@@ -42434,24 +42883,51 @@ impl MirLowerer {
                 let value = self.expression(body);
                 self.active_control_loops.remove(control);
                 if let MirFlow::Value(result) = value {
+                    for (outer, parameter) in &initial_aliases {
+                        if let Some(register) = self.locals.get(parameter).copied() {
+                            self.locals.insert(*outer, register);
+                        }
+                    }
                     let mut protected = result.into_iter().collect::<BTreeSet<_>>();
                     protected.extend(
-                        outer_locals
+                        initial_aliases
                             .iter()
-                            .filter_map(|(local, _)| self.locals.get(local))
-                            .copied(),
+                            .filter_map(|(outer, _)| self.locals.get(outer).copied()),
                     );
+                    protected.extend(outer_locals.iter().map(|(local, _)| {
+                        *self.locals.get(local).unwrap_or_else(|| {
+                            panic!(
+                                "control-loop outer local {local:?} was lost on normal exit {:?}; expected={outer_locals:?}, live={:?}",
+                                body.span,
+                                self.locals.keys().collect::<Vec<_>>(),
+                            )
+                        })
+                    }));
                     for owner in self.owned.clone().into_iter().rev() {
                         if !protected.contains(&owner) {
                             self.destroy(owner, body.span);
                             self.transfer_owner(owner);
                         }
                     }
-                    self.locals
-                        .retain(|local, _| saved_locals.contains_key(local));
+                    self.locals.retain(|local, _| {
+                        saved_locals.contains_key(local) && preserved_outer_locals.contains(local)
+                    });
                     MirFlow::Value(result)
                 } else {
-                    self.locals = saved_locals;
+                    // A syntactically diverging fused loop may still reach an
+                    // enclosing label destination. Keep only the explicitly
+                    // selected caller continuation locals, at their current
+                    // SSA identities. Restoring the whole preheader map would
+                    // resurrect loop parameters whose owners were transferred
+                    // through the header and eventually retired.
+                    for (outer, parameter) in &initial_aliases {
+                        if let Some(register) = self.locals.get(parameter).copied() {
+                            self.locals.insert(*outer, register);
+                        }
+                    }
+                    self.locals.retain(|local, _| {
+                        saved_locals.contains_key(local) && preserved_outer_locals.contains(local)
+                    });
                     MirFlow::Diverged
                 }
             }
@@ -42471,12 +42947,14 @@ impl MirLowerer {
                     incoming.push(self.materialize(value, argument.span));
                 }
                 for (local, _) in &context.outer_locals {
-                    incoming.push(
-                        *self
-                            .locals
-                            .get(local)
-                            .expect("a control-loop outer local remains live at its backedge"),
-                    );
+                    incoming.push(*self.locals.get(local).unwrap_or_else(|| {
+                        panic!(
+                            "control-loop outer local {local:?} was not live at its backedge {:?}; expected={:?}, live={:?}",
+                            expression.span,
+                            context.outer_locals,
+                            self.locals.keys().collect::<Vec<_>>(),
+                        )
+                    }));
                 }
                 let incoming_set = incoming.iter().copied().collect::<BTreeSet<_>>();
                 for owner in self.owned.clone().into_iter().rev() {
@@ -42608,6 +43086,8 @@ impl MirLowerer {
                 let mut joined_entry_borrowed = BTreeSet::new();
                 let mut joined_uninitialized = BTreeSet::new();
                 let mut positive_reaches_join = false;
+                let mut positive_edge_item = None;
+                let mut positive_sources = Vec::new();
                 if let MirFlow::Value(value) = self.expression(positive) {
                     positive_reaches_join = true;
                     let value = self.materialize(value, positive.span);
@@ -42623,7 +43103,8 @@ impl MirLowerer {
                     join_local_ids = baseline_locals
                         .keys()
                         .filter(|local| {
-                            !self.uninitialized_locals.contains(local)
+                            self.locals.contains_key(local)
+                                && !self.uninitialized_locals.contains(local)
                                 && !retire_at_join.contains(local)
                         })
                         .copied()
@@ -42672,12 +43153,10 @@ impl MirLowerer {
                         .copied()
                         .collect();
                     let mut args = vec![Self::operand(value, mir::UseMode::Move)];
-                    args.extend(
-                        sources
-                            .into_iter()
-                            .map(|source| Self::operand(source, mir::UseMode::Move)),
-                    );
+                    positive_sources = sources.clone();
+                    args.extend(sources.into_iter().map(|source| self.join_operand(source)));
                     self.terminate(mir::Terminator::Goto(mir::Edge { target: join, args }));
+                    positive_edge_item = Some(self.items.len() - 1);
                 }
 
                 self.locals = baseline_locals.clone();
@@ -42725,16 +43204,172 @@ impl MirLowerer {
                         }
                         self.uninitialized_locals.insert(local);
                     }
-                    let negative_local_ids = baseline_locals
+                    let mut negative_local_ids = baseline_locals
                         .keys()
                         .filter(|local| {
-                            !self.uninitialized_locals.contains(local)
+                            self.locals.contains_key(local)
+                                && !self.uninitialized_locals.contains(local)
                                 && !retire_at_join.contains(local)
                         })
                         .copied()
                         .collect::<Vec<_>>();
+                    if positive_reaches_join {
+                        let negative_set =
+                            negative_local_ids.iter().copied().collect::<BTreeSet<_>>();
+                        let removed_positive = join_local_ids
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, local)| {
+                                (!negative_set.contains(local)).then_some((index, *local))
+                            })
+                            .collect::<Vec<_>>();
+                        if !removed_positive.is_empty() {
+                            let edge_item = positive_edge_item
+                                .expect("a reaching positive refinement arm emitted one join edge");
+                            let mut cleanup = Vec::with_capacity(removed_positive.len());
+                            for (index, local) in removed_positive.iter().rev() {
+                                let source = positive_sources[*index];
+                                let ty = self.register_types[source as usize];
+                                assert!(
+                                    self.duplicable_types.contains(&ty)
+                                        && !self.custom_drop_types.contains(&ty)
+                                        && !self.reference_types.contains(&ty),
+                                    "restricted local {local:?} disappeared from only one refinement predecessor"
+                                );
+                                let kind =
+                                    if self.partial_aggregates.get(&source).is_some_and(|fields| {
+                                        fields.iter().all(|initialized| !initialized)
+                                    }) {
+                                        mir::InstructionKind::Deconstruct { src: source }
+                                    } else {
+                                        mir::InstructionKind::Drop {
+                                            owner: Self::operand(source, mir::UseMode::Move),
+                                        }
+                                    };
+                                cleanup.push(MirBuilderItem::Statement(mir::Instruction {
+                                    span: positive.span,
+                                    kind,
+                                }));
+                            }
+                            cleanup.reverse();
+                            let cleanup_len = cleanup.len();
+                            self.items.splice(edge_item..edge_item, cleanup);
+                            let removed_args = removed_positive
+                                .iter()
+                                .map(|(index, _)| index + 1)
+                                .collect::<BTreeSet<_>>();
+                            let MirBuilderItem::Terminator(mir::Terminator::Goto(edge)) =
+                                &mut self.items[edge_item + cleanup_len]
+                            else {
+                                unreachable!("recorded positive refinement edge is a Goto")
+                            };
+                            edge.args = edge
+                                .args
+                                .drain(..)
+                                .enumerate()
+                                .filter_map(|(index, argument)| {
+                                    (!removed_args.contains(&index)).then_some(argument)
+                                })
+                                .collect();
+                            positive_edge_item = Some(edge_item + cleanup_len);
+                            for (index, _) in removed_positive.into_iter().rev() {
+                                join_local_ids.remove(index);
+                                join_registers.remove(index);
+                                join_owned.remove(index);
+                                join_borrowed.remove(index);
+                                join_partial.remove(index);
+                                positive_sources.remove(index);
+                            }
+                        }
+                        let retained = join_local_ids.iter().copied().collect::<BTreeSet<_>>();
+                        let retired = negative_local_ids
+                            .iter()
+                            .copied()
+                            .filter(|local| !retained.contains(local))
+                            .collect::<Vec<_>>();
+                        for local in retired {
+                            if let Some(register) = self.locals.remove(&local) {
+                                self.destroy(register, negative.span);
+                                self.transfer_owner(register);
+                            }
+                            self.uninitialized_locals.insert(local);
+                        }
+                        negative_local_ids.retain(|local| retained.contains(local));
+                    }
                     let negative_detached_keys =
                         self.detached_subtrees.keys().cloned().collect::<Vec<_>>();
+                    if positive_reaches_join {
+                        let negative_set = negative_detached_keys
+                            .iter()
+                            .cloned()
+                            .collect::<BTreeSet<_>>();
+                        let removed_positive = join_detached_keys
+                            .iter()
+                            .enumerate()
+                            .filter_map(|(index, key)| {
+                                (!negative_set.contains(key)).then_some((index, key.clone()))
+                            })
+                            .collect::<Vec<_>>();
+                        if !removed_positive.is_empty() {
+                            let edge_item = positive_edge_item
+                                .expect("a reaching positive refinement arm emitted one join edge");
+                            let local_count = join_local_ids.len();
+                            let mut cleanup = Vec::with_capacity(removed_positive.len());
+                            for (index, key) in removed_positive.iter().rev() {
+                                let source = positive_sources[local_count + *index];
+                                let ty = self.register_types[source as usize];
+                                assert!(
+                                    self.duplicable_types.contains(&ty)
+                                        && !self.custom_drop_types.contains(&ty)
+                                        && !self.reference_types.contains(&ty),
+                                    "restricted detached subtree {key:?} disappeared from only one refinement predecessor"
+                                );
+                                let kind =
+                                    if self.partial_aggregates.get(&source).is_some_and(|fields| {
+                                        fields.iter().all(|initialized| !initialized)
+                                    }) {
+                                        mir::InstructionKind::Deconstruct { src: source }
+                                    } else {
+                                        mir::InstructionKind::Drop {
+                                            owner: Self::operand(source, mir::UseMode::Move),
+                                        }
+                                    };
+                                cleanup.push(MirBuilderItem::Statement(mir::Instruction {
+                                    span: positive.span,
+                                    kind,
+                                }));
+                            }
+                            cleanup.reverse();
+                            let cleanup_len = cleanup.len();
+                            self.items.splice(edge_item..edge_item, cleanup);
+                            let removed_args = removed_positive
+                                .iter()
+                                .map(|(index, _)| local_count + index + 1)
+                                .collect::<BTreeSet<_>>();
+                            let MirBuilderItem::Terminator(mir::Terminator::Goto(edge)) =
+                                &mut self.items[edge_item + cleanup_len]
+                            else {
+                                unreachable!("recorded positive refinement edge is a Goto")
+                            };
+                            edge.args = edge
+                                .args
+                                .drain(..)
+                                .enumerate()
+                                .filter_map(|(index, argument)| {
+                                    (!removed_args.contains(&index)).then_some(argument)
+                                })
+                                .collect();
+                            for (index, _) in removed_positive.into_iter().rev() {
+                                let combined = local_count + index;
+                                join_detached_keys.remove(index);
+                                join_registers.remove(combined);
+                                join_owned.remove(combined);
+                                join_borrowed.remove(combined);
+                                join_partial.remove(combined);
+                                positive_sources.remove(combined);
+                            }
+                        }
+                    }
                     let sources = negative_local_ids
                         .iter()
                         .map(|local| self.locals[local])
@@ -42872,11 +43507,7 @@ impl MirLowerer {
                         joined_entry_borrowed = negative_entry_borrowed;
                     }
                     let mut args = vec![Self::operand(value, mir::UseMode::Move)];
-                    args.extend(
-                        sources
-                            .into_iter()
-                            .map(|source| Self::operand(source, mir::UseMode::Move)),
-                    );
+                    args.extend(sources.into_iter().map(|source| self.join_operand(source)));
                     self.terminate(mir::Terminator::Goto(mir::Edge { target: join, args }));
                 }
 
@@ -42894,7 +43525,11 @@ impl MirLowerer {
                     role: mir::BlockParamRole::Ordinary,
                 }));
                 self.mark_with_params(join, params);
-                self.locals = baseline_locals;
+                let joined_local_ids = join_local_ids.iter().copied().collect::<BTreeSet<_>>();
+                self.locals = baseline_locals
+                    .into_iter()
+                    .filter(|(local, _)| joined_local_ids.contains(local))
+                    .collect();
                 for (local, register) in join_local_ids.iter().zip(&join_registers) {
                     self.locals.insert(*local, *register);
                 }
@@ -42969,7 +43604,13 @@ impl MirLowerer {
                     );
                     return MirFlow::Value(Some(dst));
                 }
-                let src = self.locals[local];
+                let src = *self.locals.get(local).unwrap_or_else(|| {
+                    panic!(
+                        "Core local {local:?} at {:?} was not installed in MIR; copy={copy}, live locals={:?}",
+                        expression.span,
+                        self.locals.keys().collect::<Vec<_>>(),
+                    )
+                });
                 let dst = self.allocate(expression.ty);
                 if *copy {
                     self.push(
@@ -44538,7 +45179,7 @@ impl MirLowerer {
                             // The RHS is lowered and materialized before even
                             // looking up/evaluating the destination reference.
                             let MirFlow::Value(value_register) = self.expression(value) else {
-                                self.locals = saved;
+                                self.locals.retain(|local, _| saved.contains_key(local));
                                 return MirFlow::Diverged;
                             };
                             let value_register = self.materialize(value_register, value.span);
@@ -44667,7 +45308,7 @@ impl MirLowerer {
                                 core::AssignmentRoot::Dereference { reference, .. } => {
                                     let MirFlow::Value(register) = self.expression(reference)
                                     else {
-                                        self.locals = saved;
+                                        self.locals.retain(|local, _| saved.contains_key(local));
                                         return MirFlow::Diverged;
                                     };
                                     (self.materialize(register, reference.span), true)
@@ -44760,7 +45401,7 @@ impl MirLowerer {
                         core::Stmt::Expr(value) => {
                             let flow = self.expression(value);
                             let MirFlow::Value(emitted) = flow else {
-                                self.locals = saved;
+                                self.locals.retain(|local, _| saved.contains_key(local));
                                 return MirFlow::Diverged;
                             };
                             if let Some(register) = emitted {
@@ -44771,7 +45412,7 @@ impl MirLowerer {
                 }
                 let value = self.expression(tail);
                 if matches!(value, MirFlow::Diverged) {
-                    self.locals = saved;
+                    self.locals.retain(|local, _| saved.contains_key(local));
                     return MirFlow::Diverged;
                 }
                 let mut escaping_borrow_parents = BTreeSet::new();
@@ -46090,7 +46731,16 @@ fn serialize_mir_cleanup_plans(
                     "Leave boundary attached to non-Leave block {block}"
                 ));
             };
-            expected[offsets[&target.target] as usize] = Some(anchor.target);
+            let destination = &mut expected[offsets[&target.target] as usize];
+            if let Some(existing) = destination
+                && existing != &anchor.target
+            {
+                return Err(format!(
+                    "Leave edges targeting block {} require incompatible cleanup anchors: {existing:?} and {:?}",
+                    target.target, anchor.target
+                ));
+            }
+            *destination = Some(anchor.target);
         }
 
         let descriptor = &artifact.functions[fid];
@@ -46154,23 +46804,36 @@ fn cross_validate_cleanup_maps(
     mir_program: &mir::Program,
     pc_maps: &[Option<PeepholePcMap>],
 ) -> Result<(), String> {
-    let cleanup_lists = mir::optimizer::derive_program_cleanup_lists(mir_program, &artifact.types)
-        .map_err(|error| error.to_string())?;
+    // Bytecode structurally verifies every encoded switch successor, including
+    // arms the semantic enum-refinement solver can prove impossible. Compare
+    // serialization against that same physical CFG solution; the refined
+    // ownership solution has already passed its independent MIR validation.
+    let cleanup_lists =
+        mir::optimizer::derive_program_serialization_cleanup_lists(mir_program, &artifact.types)
+            .map_err(|error| error.to_string())?;
     for (fid, function) in mir_program.functions.iter().enumerate() {
         let lists = &cleanup_lists[fid];
-        let label_results = function
-            .flow
-            .labels
-            .iter()
-            .filter_map(|label| {
-                function
-                    .blocks
-                    .iter()
-                    .find(|block| block.id == label.destination)
-                    .and_then(|block| block.params.first())
-                    .map(|param| param.register)
-            })
-            .collect::<BTreeSet<_>>();
+        let leave_anchors = mir::optimizer::derive_leave_cleanup_anchors(function, lists)
+            .map_err(|error| error.to_string())?;
+        let mut label_anchor_registers = BTreeMap::<u32, Vec<u32>>::new();
+        let mut leave_source_anchor_registers = BTreeMap::<u32, Vec<u32>>::new();
+        for block in &function.blocks {
+            let mir::Terminator::Leave { target, .. } = &block.terminator else {
+                continue;
+            };
+            if let Some(anchor) = leave_anchors.get(&block.id) {
+                leave_source_anchor_registers.insert(block.id, anchor.source.clone());
+                if let Some(existing) = label_anchor_registers.get(&target.target)
+                    && existing != &anchor.target
+                {
+                    return Err(format!(
+                        "Leave edges targeting block {} derive incompatible cleanup anchors: {existing:?} and {:?}",
+                        target.target, anchor.target
+                    ));
+                }
+                label_anchor_registers.insert(target.target, anchor.target.clone());
+            }
+        }
         let map = pc_maps.get(fid).and_then(|map| map.as_ref());
         let mut offset = 0_u32;
         for block in &function.blocks {
@@ -46201,11 +46864,57 @@ fn cross_validate_cleanup_maps(
                         })
                         .map(|plan| plan.registers.as_slice())
                         .unwrap_or(&[]);
+                    let relocated_pc = |old_pc: u32| {
+                        map.and_then(|map| map.ordinals.get(old_pc as usize).copied())
+                            .unwrap_or(old_pc)
+                    };
+                    let at_label_destination_anchor = label_anchor_registers
+                        .contains_key(&block.id)
+                        && pc == relocated_pc(offset);
+                    let at_leave_source_anchor = leave_source_anchor_registers
+                        .contains_key(&block.id)
+                        && pc == relocated_pc(offset + block.statements.len() as u32);
+                    let peephole_relocated = map.is_some_and(|map| {
+                        !map.state_renames[old_pc as usize].is_empty()
+                            || map
+                                .ordinals
+                                .iter()
+                                .filter(|ordinal| **ordinal == pc)
+                                .nth(1)
+                                .is_some()
+                    });
+                    // A peephole may fold a reference-free transfer chain and
+                    // retire an unrestricted source earlier than its old MIR
+                    // ordinal. `state_renames` records surviving identities;
+                    // the final VM verifier independently proves exact
+                    // initialization state for the rewritten bytecode.
+                    let folded_unrestricted =
+                        |register: &u32| {
+                            peephole_relocated
+                                && function.flow.locals.get(*register as usize).is_some_and(
+                                    |fact| {
+                                        matches!(
+                                            fact.ownership,
+                                            mir::OwnershipCategory::CopyValue
+                                                | mir::OwnershipCategory::ZstErased
+                                        ) && fact.drop_glue != mir::DropGlueKind::Custom
+                                    },
+                                )
+                        };
                     let matches = actual == expected.as_slice()
-                        || (expected.iter().all(|register| actual.contains(register))
-                            && actual.iter().all(|register| {
-                                expected.contains(register) || label_results.contains(register)
-                            }));
+                        || (expected.iter().all(|register| {
+                            actual.contains(register) || folded_unrestricted(register)
+                        }) && actual.iter().all(|register| {
+                            expected.contains(register)
+                                || (at_label_destination_anchor
+                                    && label_anchor_registers
+                                        .get(&block.id)
+                                        .is_some_and(|registers| registers.contains(register)))
+                                || (at_leave_source_anchor
+                                    && leave_source_anchor_registers
+                                        .get(&block.id)
+                                        .is_some_and(|registers| registers.contains(register)))
+                        }));
                     if !matches {
                         return Err(format!(
                             "function `{}` block {} instruction {pc}: serialized cleanup list {actual:?} does not match the MIR-derived owner list {expected:?}",

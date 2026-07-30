@@ -299,7 +299,6 @@ impl OwnState {
             && self.aggregate_reference_origins == other.aggregate_reference_origins
             && self.constants == other.constants
             && self.quantity_groups == other.quantity_groups
-            && self.labels == other.labels
             && self
                 .regs
                 .iter()
@@ -2259,15 +2258,29 @@ impl Interpreter<'_> {
         Ok(())
     }
 
+    fn replaceable_unrestricted(&self, register: Register) -> bool {
+        let fact = &self.context.locals[register as usize];
+        matches!(
+            fact.ownership,
+            OwnershipCategory::SharedRef
+                | OwnershipCategory::CopyValue
+                | OwnershipCategory::ZstErased
+        ) && fact.drop_glue != DropGlueKind::Custom
+    }
+
     fn define(&mut self, register: Register, origin: &str) -> Result<(), FlowError> {
+        let replaceable_unrestricted = self.replaceable_unrestricted(register);
         let slot = &mut self.state.regs[register as usize];
         if slot.is_live() {
-            if self.context.strict {
+            if self.context.strict && !replaceable_unrestricted {
                 return Err(self.error(format!(
                     "{origin} stores into r{register} while it still holds a value"
                 )));
             }
             self.state.order.retain(|live| *live != register);
+            if replaceable_unrestricted {
+                self.state.loans.remove(&register);
+            }
         }
         *slot = RegState::Live;
         self.state.conditional_fields.remove(&register);
@@ -2342,6 +2355,9 @@ impl Interpreter<'_> {
             }
         }
         self.state.order.retain(|live| *live != register);
+        for label in &mut self.state.labels {
+            label.owners.retain(|owner| *owner != register);
+        }
         Ok(())
     }
 
@@ -2460,6 +2476,33 @@ impl Interpreter<'_> {
                 if let Some(origins) = aggregate_origins {
                     self.state.aggregate_reference_origins.insert(*dst, origins);
                 }
+                let ty = self.context.register_type(src.register);
+                if self.context.is_reference(ty) {
+                    let loan = self
+                        .state
+                        .loans
+                        .get(&src.register)
+                        .cloned()
+                        .unwrap_or(LiveLoan {
+                            id: u32::MAX,
+                            unique: self.context.is_unique_reference(ty),
+                            external: true,
+                            borrowed: Place::local(src.register),
+                            parent: None,
+                            suspended: 0,
+                        });
+                    self.state.loans.insert(
+                        *dst,
+                        LiveLoan {
+                            id: u32::MAX,
+                            borrowed: loan.borrowed,
+                            parent: loan.parent,
+                            unique: loan.unique,
+                            external: loan.external,
+                            suspended: 0,
+                        },
+                    );
+                }
                 Ok(())
             }
             InstructionKind::Move { dst, src } => {
@@ -2469,10 +2512,31 @@ impl Interpreter<'_> {
                 // Renaming: the owner, its age, loan, hole, bitmap, and use
                 // account transfer to the destination register unchanged.
                 let state = std::mem::replace(&mut self.state.regs[source], RegState::Consumed);
-                if self.state.regs[destination].is_live() && self.context.strict {
+                for label in &mut self.state.labels {
+                    label.owners.retain(|owner| *owner != src.register);
+                }
+                let replacing_unrestricted =
+                    self.state.regs[destination].is_live() && self.replaceable_unrestricted(*dst);
+                if self.state.regs[destination].is_live()
+                    && self.context.strict
+                    && !replacing_unrestricted
+                {
                     return Err(self.error(format!(
                         "Move stores into r{dst} while it still holds a value"
                     )));
+                }
+                if replacing_unrestricted {
+                    self.state.order.retain(|live| *live != *dst);
+                    self.state.loans.remove(dst);
+                    self.state.holes.remove(dst);
+                    self.state.conditional_fields.remove(dst);
+                    self.state.array_slots.remove(dst);
+                    self.state.aggregate_reference_origins.remove(dst);
+                    self.state.active_variants[destination] = None;
+                    self.state.enum_tag_sources[destination] = None;
+                    self.state.constants[destination] = None;
+                    self.state.uses[destination] = UseCount::ZERO;
+                    self.state.quantity_groups[destination] = None;
                 }
                 self.state.regs[destination] = if matches!(state, RegState::Undefined) {
                     RegState::Live
@@ -2504,7 +2568,19 @@ impl Interpreter<'_> {
                 } else if !self.context.strict {
                     self.state.order.push(*dst);
                 }
-                if let Some(loan) = self.state.loans.remove(&src.register) {
+                if let Some(mut loan) = self.state.loans.remove(&src.register) {
+                    let rebases_opaque_external_root = loan.external
+                        && loan.id == u32::MAX
+                        && loan.parent.is_none()
+                        && loan.borrowed == Place::local(src.register);
+                    if rebases_opaque_external_root {
+                        // Opaque caller-provided references use their current
+                        // SSA register as a symbolic place. A Move is a pure
+                        // rename, so keep that placeholder canonical instead
+                        // of leaking an edge-transfer temporary into child
+                        // reborrows observed on the next dataflow iteration.
+                        loan.borrowed = Place::local(*dst);
+                    }
                     self.state.loans.insert(*dst, loan);
                     // Move is a pure SSA rename for a reference loan. Any
                     // simultaneously live reborrow must follow that rename so
@@ -2513,6 +2589,12 @@ impl Interpreter<'_> {
                     for child in self.state.loans.values_mut() {
                         if child.parent == Some(src.register) {
                             child.parent = Some(*dst);
+                        }
+                        if rebases_opaque_external_root
+                            && child.external
+                            && child.borrowed.base == src.register
+                        {
+                            child.borrowed.base = *dst;
                         }
                     }
                 }
@@ -2690,7 +2772,32 @@ impl Interpreter<'_> {
                 self.operand(src, "DerefStore")
             }
             InstructionKind::EndBorrow { reference } => {
+                if matches!(
+                    self.context.locals[*reference as usize].ownership,
+                    OwnershipCategory::SharedRef
+                ) && matches!(
+                    self.state.regs[*reference as usize],
+                    RegState::MaybeLive | RegState::Consumed
+                ) {
+                    // Correlated SSA paths may make a proof-only shared
+                    // handle conditional at a later common cleanup. Ending
+                    // that handle is safe on either path; ordinary reads of a
+                    // MaybeLive reference remain rejected.
+                    self.state.loans.remove(reference);
+                    self.state.regs[*reference as usize] = RegState::Consumed;
+                    self.state.order.retain(|live| live != reference);
+                    return Ok(());
+                }
                 let Some(loan) = self.state.loans.get(reference) else {
+                    if matches!(
+                        self.context.locals[*reference as usize].ownership,
+                        OwnershipCategory::SharedRef
+                    ) {
+                        // A copied proof-only shared handle may outlive the
+                        // precise loan identity through correlated SSA joins.
+                        // Retiring the handle is still a valid non-unique end.
+                        return self.consume(*reference, "EndBorrow");
+                    }
                     return Err(if self.context.strict {
                         self.error(format!(
                             "EndBorrow ends r{reference}, which holds no live loan"
@@ -3498,6 +3605,23 @@ fn apply_edge(
     let original_count = interpreter.state.regs.len();
     let mut temporaries = vec![0; edge.args.len()];
 
+    // A consuming edge argument is an SSA rename into the target block
+    // parameter, not a source-level move out of the active label scope.
+    // Preserve the logical outer owner across that phi. Copy arguments create
+    // an alias and deliberately leave the original baseline identity intact.
+    for (parameter, argument) in params.iter().skip(skip).zip(&edge.args) {
+        if argument.mode != UseMode::Move {
+            continue;
+        }
+        for label in &mut interpreter.state.labels {
+            for owner in &mut label.owners {
+                if *owner == argument.register {
+                    *owner = parameter.register;
+                }
+            }
+        }
+    }
+
     // Bytecode snapshots every edge argument before it writes any target
     // parameter. Model those physical temporaries here as well; applying the
     // renames sequentially loses values for swaps and longer cycles.
@@ -4151,12 +4275,15 @@ fn terminator_transfer(
                 })
                 .collect::<Vec<_>>();
             for register in abandoned {
-                if interpreter.state.loans.contains_key(&register)
-                    && context.is_reference(context.register_type(register))
-                {
+                if context.is_reference(context.register_type(register)) {
                     interpreter.statement(&InstructionKind::EndBorrow {
                         reference: register,
                     })?;
+                } else if interpreter.replaceable_unrestricted(register) {
+                    // Plain copy/ZST values have no runtime cleanup. Retire
+                    // the analysis slot without synthesizing a Drop action;
+                    // custom-drop copies are deliberately excluded.
+                    interpreter.consume(register, "Leave cleanup")?;
                 } else {
                     interpreter.statement(&InstructionKind::Drop {
                         owner: Operand {
@@ -4264,14 +4391,53 @@ fn join_states(
     existing: &OwnState,
     incoming: &OwnState,
 ) -> Result<Option<OwnState>, FlowError> {
-    if existing.labels != incoming.labels {
+    if existing.labels.len() != incoming.labels.len() {
         return Err(flow_error(
             block,
-            "block join combines incompatible active label stacks",
+            "block join combines differently nested active label stacks",
         ));
+    }
+    let mut joined_labels = Vec::with_capacity(existing.labels.len());
+    for (left, right) in existing.labels.iter().zip(&incoming.labels) {
+        if left.label != right.label {
+            return Err(flow_error(
+                block,
+                "block join combines incompatible active label baselines",
+            ));
+        }
+        let left_set = left.owners.iter().copied().collect::<BTreeSet<_>>();
+        let right_set = right.owners.iter().copied().collect::<BTreeSet<_>>();
+        let left_common = left
+            .owners
+            .iter()
+            .filter(|owner| right_set.contains(owner))
+            .copied()
+            .collect::<Vec<_>>();
+        let right_common = right
+            .owners
+            .iter()
+            .filter(|owner| left_set.contains(owner))
+            .copied()
+            .collect::<Vec<_>>();
+        if left_common != right_common {
+            return Err(flow_error(
+                block,
+                "block join reorders active label-baseline owners",
+            ));
+        }
+        joined_labels.push(LabelBaseline {
+            label: left.label,
+            // Label membership is a must-property: only an owner classified
+            // as outer on every continuing path may survive a future Leave.
+            // Ordinary register-state joining independently rejects an unsafe
+            // live/dead mismatch for restricted values, so this metadata meet
+            // does not weaken linear or custom-drop checking.
+            owners: left_common,
+        });
     }
     if existing.agrees_with(incoming) {
         let mut joined = existing.clone();
+        joined.labels = joined_labels;
         let mut changed = false;
         for register in 0..joined.regs.len() {
             if joined.active_variants[register] != incoming.active_variants[register] {
@@ -4316,6 +4482,7 @@ fn join_states(
     // Initialization conflict: allowed only through drop flags in strict
     // mode; the synthesized-fact bridge merges deterministically instead.
     let mut joined = existing.clone();
+    joined.labels = joined_labels;
     for register in 0..existing.regs.len() as Register {
         let left = existing.regs[register as usize].normalized().clone();
         let right = incoming.regs[register as usize].normalized().clone();
@@ -4424,12 +4591,30 @@ fn join_states(
             }
             continue;
         }
+        let discard_conditional_value = context.strict
+            && matches!(
+                context.locals[register as usize].ownership,
+                OwnershipCategory::SharedRef
+                    | OwnershipCategory::CopyValue
+                    | OwnershipCategory::ZstErased
+            )
+            && matches!(
+                (&left, &right),
+                (RegState::Live, RegState::Consumed)
+                    | (RegState::Consumed, RegState::Live)
+                    | (RegState::MaybeLive, RegState::Consumed)
+                    | (RegState::Consumed, RegState::MaybeLive)
+                    | (RegState::MaybeLive, RegState::Live)
+                    | (RegState::Live, RegState::MaybeLive)
+            );
         if context.strict {
             let flagged = context.has_drop_flag(register);
             let ownership = context.locals[register as usize].ownership;
             let ownership_is_unrestricted = matches!(
                 ownership,
-                OwnershipCategory::CopyValue | OwnershipCategory::ZstErased
+                OwnershipCategory::SharedRef
+                    | OwnershipCategory::CopyValue
+                    | OwnershipCategory::ZstErased
             );
             let conditional = matches!(
                 (&left, &right),
@@ -4450,13 +4635,23 @@ fn join_states(
                 ));
             }
         }
-        joined.regs[register as usize] = match (&left, &right) {
-            (RegState::Partial(bitmap), _) | (_, RegState::Partial(bitmap)) => {
-                RegState::Partial(bitmap.clone())
+        joined.regs[register as usize] = if discard_conditional_value {
+            // An unrestricted SSA temporary which exists on only one
+            // predecessor cannot be observed after the join. End it (and any
+            // reference loan) at the edge; a later use is correctly rejected
+            // as use-after-consume, while no runtime presence flag is needed.
+            RegState::Consumed
+        } else {
+            match (&left, &right) {
+                (RegState::Partial(bitmap), _) | (_, RegState::Partial(bitmap)) => {
+                    RegState::Partial(bitmap.clone())
+                }
+                _ => RegState::MaybeLive,
             }
-            _ => RegState::MaybeLive,
         };
-        if !joined.order.contains(&register) {
+        if !joined.regs[register as usize].is_live() {
+            joined.order.retain(|live| *live != register);
+        } else if !joined.order.contains(&register) {
             if let Some(position) = incoming.order.iter().position(|live| *live == register) {
                 let at = position.min(joined.order.len());
                 joined.order.insert(at, register);
@@ -4470,7 +4665,9 @@ fn join_states(
             !matches!(joined.regs[**register as usize], RegState::MaybeLive)
                 && !matches!(
                     context.locals[**register as usize].ownership,
-                    OwnershipCategory::CopyValue | OwnershipCategory::ZstErased
+                    OwnershipCategory::SharedRef
+                        | OwnershipCategory::CopyValue
+                        | OwnershipCategory::ZstErased
                 )
         };
         let strict_conflict = joined
@@ -4498,22 +4695,37 @@ fn join_states(
     let joined_live = joined
         .regs
         .iter()
-        .map(RegState::is_live)
+        .map(|state| matches!(state, RegState::Live | RegState::Partial(_)))
         .collect::<Vec<_>>();
-    joined
-        .loans
-        .retain(|reference, _| joined_live[*reference as usize]);
+    let retain_live_loans = |loans: &mut BTreeMap<Register, LiveLoan>, live: &[bool]| {
+        let removed_parents = loans
+            .iter()
+            .filter(|(reference, _)| !live[**reference as usize])
+            .filter_map(|(_, loan)| loan.parent)
+            .collect::<Vec<_>>();
+        loans.retain(|reference, _| live[*reference as usize]);
+        for parent in removed_parents {
+            if let Some(loan) = loans.get_mut(&parent) {
+                loan.suspended = loan.suspended.saturating_sub(1);
+            }
+        }
+    };
+    retain_live_loans(&mut joined.loans, &joined_live);
     for (reference, loan) in &mut joined.loans {
         if loan.external && loan.id == u32::MAX && loan.parent.is_none() {
             loan.borrowed = Place::local(*reference);
         }
     }
-    let mut incoming_loans = incoming
-        .loans
+    let incoming_live = incoming
+        .regs
         .iter()
-        .filter(|(reference, _)| incoming.regs[**reference as usize].is_live())
-        .map(|(reference, loan)| (*reference, loan.clone()))
-        .collect::<BTreeMap<_, _>>();
+        .zip(&joined.regs)
+        .map(|(incoming, joined)| {
+            incoming.is_live() && matches!(joined, RegState::Live | RegState::Partial(_))
+        })
+        .collect::<Vec<_>>();
+    let mut incoming_loans = incoming.loans.clone();
+    retain_live_loans(&mut incoming_loans, &incoming_live);
     for (reference, loan) in &mut incoming_loans {
         if loan.external && loan.id == u32::MAX && loan.parent.is_none() {
             loan.borrowed = Place::local(*reference);
@@ -4523,7 +4735,10 @@ fn join_states(
         if context.strict {
             return Err(flow_error(
                 block,
-                "block join has conflicting live loan sets",
+                format!(
+                    "block join has conflicting live loan sets ({:?} vs {:?})",
+                    joined.loans, incoming_loans
+                ),
             ));
         }
         for (reference, loan) in &incoming_loans {
@@ -4563,6 +4778,10 @@ fn join_states(
         .copied()
         .collect::<BTreeSet<_>>();
     for owner in array_owners {
+        if !joined.regs[owner as usize].is_live() {
+            joined.array_slots.remove(&owner);
+            continue;
+        }
         let left = joined
             .array_slots
             .get(&owner)
@@ -4638,6 +4857,13 @@ fn join_states(
             .copied()
             .collect::<BTreeSet<_>>();
         for register in registers {
+            if !joined.regs[register as usize].is_live() {
+                // Origin facts describe only values which survive the join.
+                // Unrestricted temporaries deliberately retired above must
+                // not retain path-specific embedded-reference metadata.
+                joined.aggregate_reference_origins.remove(&register);
+                continue;
+            }
             let left = joined
                 .aggregate_reference_origins
                 .get(&register)
@@ -4666,7 +4892,9 @@ fn join_states(
                 if context.strict {
                     return Err(flow_error(
                         block,
-                        "block join has conflicting aggregate reference-origin paths",
+                        format!(
+                            "block join has conflicting aggregate reference-origin paths for r{register} ({left:?} vs {right:?})"
+                        ),
                     ));
                 }
                 joined.aggregate_reference_origins.remove(&register);
@@ -5632,6 +5860,115 @@ mod ownership_engine_tests {
         };
         solve_function(&abandonment, &types)
             .expect("a whole drop flag remains cancellation-safe at terminal abandonment");
+    }
+
+    #[test]
+    fn dead_conditionally_initialized_shared_reference_needs_no_drop_flag() {
+        let (types, shared, _) = reference_types();
+        let blocks = vec![
+            block(
+                0,
+                vec![],
+                Terminator::Switch {
+                    discr: Operand {
+                        register: 2,
+                        mode: UseMode::Copy,
+                    },
+                    cases: vec![(
+                        grandiose_vm::Constant::U32(0),
+                        Edge {
+                            target: 1,
+                            args: vec![],
+                        },
+                    )],
+                    otherwise: Edge {
+                        target: 2,
+                        args: vec![],
+                    },
+                },
+            ),
+            block(
+                1,
+                vec![statement(InstructionKind::Reborrow {
+                    dst: 3,
+                    src: 1,
+                    unique: false,
+                })],
+                Terminator::Goto(Edge {
+                    target: 3,
+                    args: vec![],
+                }),
+            ),
+            block(
+                2,
+                vec![],
+                Terminator::Goto(Edge {
+                    target: 3,
+                    args: vec![],
+                }),
+            ),
+            block(3, vec![], Terminator::Return { value: None }),
+        ];
+        let function = exported_function(
+            vec![UNIT, shared, grandiose_vm::U32, shared],
+            2,
+            blocks,
+            &types,
+        );
+        solve_function(&function, &types)
+            .expect("dead shared-reference temporaries require no runtime presence flag");
+    }
+
+    #[test]
+    fn dead_conditionally_initialized_copy_temporary_is_consumed_at_join() {
+        let types = Type::predefined();
+        let blocks = vec![
+            block(
+                0,
+                vec![],
+                Terminator::Switch {
+                    discr: Operand {
+                        register: 1,
+                        mode: UseMode::Copy,
+                    },
+                    cases: vec![(
+                        grandiose_vm::Constant::U32(0),
+                        Edge {
+                            target: 1,
+                            args: vec![],
+                        },
+                    )],
+                    otherwise: Edge {
+                        target: 2,
+                        args: vec![],
+                    },
+                },
+            ),
+            block(
+                1,
+                vec![statement(InstructionKind::Const {
+                    dst: 2,
+                    value: grandiose_vm::Constant::I64(1),
+                })],
+                Terminator::Goto(Edge {
+                    target: 3,
+                    args: vec![],
+                }),
+            ),
+            block(
+                2,
+                vec![],
+                Terminator::Goto(Edge {
+                    target: 3,
+                    args: vec![],
+                }),
+            ),
+            block(3, vec![], Terminator::Return { value: None }),
+        ];
+        let function = exported_function(vec![UNIT, grandiose_vm::U32, I64], 1, blocks, &types);
+        let solution = solve_function(&function, &types)
+            .expect("dead copy temporaries require no runtime presence flag");
+        assert_eq!(solution.entries[&3].regs[2], RegState::Consumed);
     }
 
     #[test]

@@ -17,9 +17,9 @@ use grandiose_vm::{
 use super::{
     BasicBlock, BlockKind, BlockParam, BlockParamRole, CleanupAction, CleanupEdge, CleanupPlanFact,
     CleanupPlanId, DropGlueKind, Edge, FlowProvenance, Function, HandlerSiteFact, Instruction,
-    InstructionKind, LabelId, LoanId, LocalFact, MovePathId, MovePaths, Operand, PerformSiteFact,
-    Program, Projection, RegionId, Register, RegisterUseKind, ResumptionSiteFact, ScopeId,
-    SourceInfoId, Terminator, UseMode, analysis,
+    InstructionKind, LabelId, LoanId, LocalFact, MovePathId, MovePaths, Operand, OwnershipCategory,
+    PerformSiteFact, Program, Projection, RegionId, Register, RegisterUseKind, ResumptionSiteFact,
+    ScopeId, SourceInfoId, Terminator, UseMode, analysis,
 };
 use crate::compiler_mir::analyses::{
     AnalysisErrorKind, ControlFlowAnalysis, EdgeLiveness, PhysicalRegisterAllocation,
@@ -7564,7 +7564,13 @@ pub(crate) fn compact_live_registers_for_emission(
                 interval.ty
             );
             debug_assert!(!interval.addressable || interval.class != RegisterClass::Erased);
-            if !interval.addressable
+            // In a multi-block body, an unrestricted SSA value can remain an
+            // ambient physical owner at a successor even when every explicit
+            // definition/use belongs to one block. Until interval construction
+            // incorporates ownership cleanup-state liveness, only straight-line
+            // bodies may reuse an emptied slot.
+            if function.blocks.len() == 1
+                && !interval.addressable
                 && interval.local_block.is_some_and(|block| {
                     register_emptied_at_last_local_activity(function, interval.register, block)
                 })
@@ -11815,21 +11821,329 @@ pub(crate) fn derive_cleanup_lists(
     Ok(derive_cleanup_state_analysis(function, types)?.lists)
 }
 
-pub(crate) fn derive_program_cleanup_lists(
-    program: &Program,
+/// Turn an edge copy into a transfer when the original SSA register is not
+/// independently live at the destination. MIR edges snapshot arguments into
+/// temporaries before committing target parameters, so the final occurrence
+/// of one dead source can consume it after any earlier copies have taken
+/// their snapshots.
+///
+/// Keeping such an argument as `Copy` is semantically harmless in the
+/// ownership fixed point, which discards conditional unrestricted aliases at
+/// joins, but it is not a faithful physical lowering: the bytecode `COPY`
+/// leaves an extra initialized source register that is absent from the
+/// destination's cleanup state. Canonicalizing before emission makes the MIR
+/// ownership facts and the verifier-visible transfer agree.
+pub(crate) fn canonicalize_dead_edge_copies_for_emission(
+    program: &mut Program,
     types: &[Type],
-) -> Result<Vec<BTreeMap<u32, Vec<Vec<Register>>>>, ValidationError> {
-    let array_calls = regions::array_call_summaries(program, types);
-    program
-        .functions
-        .iter()
-        .map(|function| {
-            Ok(
-                derive_cleanup_state_analysis_with_array_calls(function, types, &array_calls)?
-                    .lists,
-            )
-        })
-        .collect()
+) -> Result<u64, ValidationError> {
+    let mut changed = 0_u64;
+    for function in &mut program.functions {
+        let changed_before = changed;
+        // This is ordinary backwards liveness, independent of the current
+        // edge transfer modes. In particular, a Copy argument cannot make its
+        // own source appear live at the destination and thereby defeat
+        // final-use transfer inference.
+        let liveness = EdgeLiveness::compute(function, u64::MAX)
+            .map_err(|analysis| error(function, None, analysis.to_string()))?;
+        let params_by_block = function
+            .blocks
+            .iter()
+            .map(|block| (block.id, block.params.clone()))
+            .collect::<BTreeMap<_, _>>();
+        for block in &mut function.blocks {
+            for_each_edge_with_implicit_mut(&mut block.terminator, |edge, implicit| {
+                let independently_live = liveness
+                    .live_in(super::BlockId(edge.target))
+                    .cloned()
+                    .unwrap_or_default();
+                let overwritten = params_by_block
+                    .get(&edge.target)
+                    .into_iter()
+                    .flat_map(|params| params.iter().skip(implicit))
+                    .map(|parameter| parameter.register)
+                    .collect::<BTreeSet<_>>();
+                let already_moved = edge
+                    .args
+                    .iter()
+                    .filter(|argument| argument.mode == UseMode::Move)
+                    .map(|argument| argument.register)
+                    .collect::<BTreeSet<_>>();
+                let mut final_dead_copy = BTreeMap::<Register, usize>::new();
+                for (index, argument) in edge.args.iter().enumerate() {
+                    if argument.mode == UseMode::Copy
+                        && !already_moved.contains(&argument.register)
+                        && (!independently_live.contains(&argument.register)
+                            || overwritten.contains(&argument.register))
+                    {
+                        final_dead_copy.insert(argument.register, index);
+                    }
+                }
+                for index in final_dead_copy.into_values() {
+                    edge.args[index].mode = UseMode::Move;
+                    changed += 1;
+                }
+            });
+        }
+        if changed != changed_before {
+            function.invalid_analyses |= analysis::ALL;
+        }
+    }
+
+    // Re-solve after transfer canonicalization, then materialize the other
+    // half of physical join normalization: unrestricted ambient owners which
+    // exist on only one ordinary or switch predecessor and are not carried by
+    // an edge.
+    // Keeping this as an ordinary MIR cleanup block means every later phase,
+    // including move-path and loan verification, observes the retirement.
+    let cleanup_lists = derive_program_serialization_cleanup_lists(program, types)?;
+    for (function, lists) in program.functions.iter_mut().zip(cleanup_lists) {
+        let function_name = function.name.clone();
+        let mut next_block = function
+            .blocks
+            .iter()
+            .map(|block| block.id)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        let mut cleanup_blocks = Vec::new();
+        let ownerships = function
+            .flow
+            .locals
+            .iter()
+            .map(|fact| fact.ownership)
+            .collect::<Vec<_>>();
+        let params_by_block = function
+            .blocks
+            .iter()
+            .map(|block| (block.id, block.params.clone()))
+            .collect::<BTreeMap<_, _>>();
+        for block in &mut function.blocks {
+            let Some(source) = lists.get(&block.id).and_then(|points| points.last()) else {
+                continue;
+            };
+            let block_id = block.id;
+            let mut reconcile = |edge: &mut Edge| -> Result<(), ValidationError> {
+                let Some(destination) = lists.get(&edge.target).and_then(|points| points.first())
+                else {
+                    return Ok(());
+                };
+                let destination = destination.iter().copied().collect::<BTreeSet<_>>();
+                let overwritten = params_by_block
+                    .get(&edge.target)
+                    .into_iter()
+                    .flatten()
+                    .map(|parameter| parameter.register)
+                    .collect::<BTreeSet<_>>();
+                let transferred = edge
+                    .args
+                    .iter()
+                    .filter(|argument| argument.mode == UseMode::Move)
+                    .map(|argument| argument.register)
+                    .collect::<BTreeSet<_>>();
+                let retire = source
+                    .iter()
+                    .copied()
+                    .filter(|register| {
+                        (!destination.contains(register) || overwritten.contains(register))
+                            && !transferred.contains(register)
+                    })
+                    .filter(|register| {
+                        ownerships.get(*register as usize).is_some_and(|ownership| {
+                            matches!(
+                                ownership,
+                                OwnershipCategory::SharedRef
+                                    | OwnershipCategory::CopyValue
+                                    | OwnershipCategory::ZstErased
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if retire.is_empty() {
+                    return Ok(());
+                }
+                let original = edge.clone();
+                let cleanup = next_block;
+                next_block = next_block.checked_add(1).ok_or_else(|| ValidationError {
+                    function: function_name.clone(),
+                    block: Some(block_id),
+                    message: "MIR block space exhausted".into(),
+                })?;
+                edge.target = cleanup;
+                edge.args.clear();
+                let statements = retire
+                    .into_iter()
+                    .map(|register| Instruction {
+                        span: Span::default(),
+                        kind: match ownerships[register as usize] {
+                            OwnershipCategory::SharedRef => InstructionKind::EndBorrow {
+                                reference: register,
+                            },
+                            OwnershipCategory::CopyValue | OwnershipCategory::ZstErased => {
+                                InstructionKind::Drop {
+                                    owner: Operand {
+                                        register,
+                                        mode: UseMode::Move,
+                                    },
+                                }
+                            }
+                            OwnershipCategory::Owned | OwnershipCategory::UniqueRef => {
+                                unreachable!("restricted owners are never normalized at joins")
+                            }
+                        },
+                    })
+                    .collect();
+                cleanup_blocks.push(BasicBlock {
+                    id: cleanup,
+                    params: Vec::new(),
+                    statements,
+                    terminator: Terminator::Goto(original),
+                });
+                changed += 1;
+                Ok(())
+            };
+            match &mut block.terminator {
+                Terminator::Goto(edge) => reconcile(edge)?,
+                Terminator::Switch {
+                    cases, otherwise, ..
+                } => {
+                    for (_, edge) in cases {
+                        reconcile(edge)?;
+                    }
+                    reconcile(otherwise)?;
+                }
+                _ => {}
+            }
+
+            // A normal call/control edge may define an implicit result
+            // parameter. Forward every destination parameter through fresh
+            // cleanup-block parameters, retire predecessor-only ambient
+            // owners after the operation, then move the forwarded values into
+            // the original destination.
+            let mut consumed = BTreeSet::new();
+            block.terminator.for_each_register_use(|register, kind| {
+                if kind == RegisterUseKind::Consume {
+                    consumed.insert(register);
+                }
+            });
+            let normal = match &mut block.terminator {
+                Terminator::Call { normal, .. }
+                | Terminator::CallSelf { normal, .. }
+                | Terminator::CallKnownReceiver { normal, .. }
+                | Terminator::HostCall { normal, .. }
+                | Terminator::CallIndirect { normal, .. }
+                | Terminator::Handle { normal, .. }
+                | Terminator::Resume { normal, .. }
+                | Terminator::Cancel { normal, .. } => Some(normal),
+                Terminator::Perform {
+                    resume: Some(resume),
+                    ..
+                } => Some(resume),
+                _ => None,
+            };
+            if let Some(normal) = normal
+                && let Some(destination) =
+                    lists.get(&normal.target).and_then(|points| points.first())
+            {
+                let destination = destination.iter().copied().collect::<BTreeSet<_>>();
+                let retire = source
+                    .iter()
+                    .copied()
+                    .filter(|register| {
+                        !destination.contains(register) && !consumed.contains(register)
+                    })
+                    .filter(|register| {
+                        ownerships.get(*register as usize).is_some_and(|ownership| {
+                            matches!(
+                                ownership,
+                                OwnershipCategory::SharedRef
+                                    | OwnershipCategory::CopyValue
+                                    | OwnershipCategory::ZstErased
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                if !retire.is_empty() {
+                    let original = normal.clone();
+                    let target_params =
+                        params_by_block
+                            .get(&original.target)
+                            .ok_or_else(|| ValidationError {
+                                function: function_name.clone(),
+                                block: Some(block_id),
+                                message: format!(
+                                    "normal edge targets missing block {}",
+                                    original.target
+                                ),
+                            })?;
+                    let cleanup = next_block;
+                    next_block = next_block.checked_add(1).ok_or_else(|| ValidationError {
+                        function: function_name.clone(),
+                        block: Some(block_id),
+                        message: "MIR block space exhausted".into(),
+                    })?;
+                    let mut forwarded_params = Vec::with_capacity(target_params.len());
+                    let mut forwarded_args = Vec::with_capacity(target_params.len());
+                    for parameter in target_params {
+                        let register = function.register_types.len() as Register;
+                        function.register_types.push(parameter.ty);
+                        forwarded_params.push(BlockParam {
+                            register,
+                            ty: parameter.ty,
+                            role: parameter.role,
+                        });
+                        forwarded_args.push(Operand {
+                            register,
+                            mode: UseMode::Move,
+                        });
+                    }
+                    normal.target = cleanup;
+                    let statements = retire
+                        .into_iter()
+                        .map(|register| Instruction {
+                            span: Span::default(),
+                            kind: match ownerships[register as usize] {
+                                OwnershipCategory::SharedRef => InstructionKind::EndBorrow {
+                                    reference: register,
+                                },
+                                OwnershipCategory::CopyValue | OwnershipCategory::ZstErased => {
+                                    InstructionKind::Drop {
+                                        owner: Operand {
+                                            register,
+                                            mode: UseMode::Move,
+                                        },
+                                    }
+                                }
+                                OwnershipCategory::Owned | OwnershipCategory::UniqueRef => {
+                                    unreachable!("restricted owners are never normalized at joins")
+                                }
+                            },
+                        })
+                        .collect();
+                    cleanup_blocks.push(BasicBlock {
+                        id: cleanup,
+                        params: forwarded_params,
+                        statements,
+                        terminator: Terminator::Goto(Edge {
+                            target: original.target,
+                            args: forwarded_args,
+                        }),
+                    });
+                    changed += 1;
+                    function.invalid_analyses |= analysis::ALL;
+                }
+            }
+        }
+        if !cleanup_blocks.is_empty() {
+            function.blocks.extend(cleanup_blocks);
+            function.invalid_analyses |= analysis::ALL;
+        }
+    }
+    refresh_invalidated_flow(program, types)?;
+    // No emission-only assumption bypasses the ordinary ownership, loan, or
+    // physical-switch checks.
+    derive_program_serialization_cleanup_lists(program, types)?;
+    Ok(changed)
 }
 
 /// Derive physical cleanup states for final bytecode serialization. Semantic
@@ -11947,7 +12261,7 @@ fn derive_leave_cleanup_boundaries(
             .filter(|parameter| parameter.role == BlockParamRole::ProtectedExitValue)
             .map(|parameter| parameter.register)
             .collect::<BTreeSet<_>>();
-        let source = source_points
+        let mut source = source_points
             .last()
             .into_iter()
             .flatten()
@@ -11962,13 +12276,55 @@ fn derive_leave_cleanup_boundaries(
             .copied()
             .collect::<Vec<_>>();
         if !source.ends_with(&target) {
-            return Err(error(
-                function,
-                Some(block.id),
-                format!(
-                    "Leave cleanup target {target:?} is not a suffix of source {source:?} after protected transfer"
-                ),
-            ));
+            let target_set = target.iter().copied().collect::<BTreeSet<_>>();
+            let reordered = source
+                .iter()
+                .enumerate()
+                .filter(|(_, register)| target.first() == Some(register))
+                .filter_map(|(start, _)| {
+                    let candidate = &source[start..];
+                    let retained = candidate
+                        .iter()
+                        .filter(|register| target_set.contains(register))
+                        .copied()
+                        .collect::<Vec<_>>();
+                    if retained != target
+                        || !candidate.iter().all(|register| {
+                            target_set.contains(register)
+                                || function.flow.locals.get(*register as usize).is_some_and(
+                                    |fact| {
+                                        matches!(
+                                            fact.ownership,
+                                            OwnershipCategory::CopyValue
+                                                | OwnershipCategory::ZstErased
+                                        ) && fact.drop_glue != DropGlueKind::Custom
+                                    },
+                                )
+                        })
+                    {
+                        return None;
+                    }
+                    let mut reordered = source[..start].to_vec();
+                    reordered.extend(
+                        candidate
+                            .iter()
+                            .filter(|register| !target_set.contains(register))
+                            .copied(),
+                    );
+                    reordered.extend(target.iter().copied());
+                    Some(reordered)
+                })
+                .next();
+            let Some(reordered) = reordered else {
+                return Err(error(
+                    function,
+                    Some(block.id),
+                    format!(
+                        "Leave cleanup target {target:?} is not a suffix of source {source:?} after protected transfer"
+                    ),
+                ));
+            };
+            source = reordered;
         }
         result.insert(block.id, LeaveCleanupBoundary { source, target });
     }
@@ -11984,7 +12340,7 @@ pub(crate) fn derive_leave_cleanup_anchors(
     function: &Function,
     lists: &BTreeMap<u32, Vec<Vec<Register>>>,
 ) -> Result<BTreeMap<u32, LeaveCleanupAnchors>, ValidationError> {
-    derive_leave_cleanup_boundaries(function, lists)?;
+    let boundaries = derive_leave_cleanup_boundaries(function, lists)?;
     let mut result = BTreeMap::new();
     for block in &function.blocks {
         let Terminator::Leave { target, .. } = &block.terminator else {
@@ -11996,6 +12352,30 @@ pub(crate) fn derive_leave_cleanup_anchors(
             continue;
         };
         let destination = target_points.first().cloned().unwrap_or_default();
+        let boundary = &boundaries[&block.id];
+        let protected_targets = function
+            .blocks
+            .iter()
+            .find(|candidate| candidate.id == target.target)
+            .into_iter()
+            .flat_map(|target| &target.params)
+            .filter(|parameter| parameter.role == BlockParamRole::ProtectedExitValue)
+            .map(|parameter| parameter.register)
+            .collect::<BTreeSet<_>>();
+        let mut augmented_destination = Vec::new();
+        let mut inserted_boundary = false;
+        for register in &destination {
+            if protected_targets.contains(register) {
+                augmented_destination.push(*register);
+            } else if !inserted_boundary {
+                augmented_destination.extend(boundary.target.iter().copied());
+                inserted_boundary = true;
+            }
+        }
+        if !inserted_boundary {
+            augmented_destination.extend(boundary.target.iter().copied());
+        }
+        let destination = augmented_destination;
         let destination_registers = destination.iter().copied().collect::<BTreeSet<_>>();
         let mut source = source_points
             .last()
@@ -19867,6 +20247,76 @@ mod tests {
         *target = 0;
         let error = validate_program(&program(invalid), &types, MirPhase::Raw).unwrap_err();
         assert!(error.message.contains("LabelPush disagrees"), "{error}");
+    }
+
+    #[test]
+    fn leave_sources_retire_distinct_copy_interlopers_before_one_common_target() {
+        let types = Type::predefined();
+        let label = LabelId(0);
+        let destination = BasicBlock {
+            id: 2,
+            params: vec![BlockParam {
+                register: 7,
+                ty: I64,
+                role: BlockParamRole::ProtectedExitValue,
+            }],
+            statements: vec![],
+            terminator: Terminator::Return {
+                value: Some(move_operand(7)),
+            },
+        };
+        let mut body = function(
+            vec![
+                block(
+                    0,
+                    Terminator::Leave {
+                        label,
+                        target: Edge {
+                            target: 2,
+                            args: vec![move_operand(5)],
+                        },
+                    },
+                ),
+                block(
+                    1,
+                    Terminator::Leave {
+                        label,
+                        target: Edge {
+                            target: 2,
+                            args: vec![move_operand(6)],
+                        },
+                    },
+                ),
+                destination,
+            ],
+            vec![UNIT, I64, I64, I64, I64, I64, I64, I64],
+        );
+        body.flow.locals = bridged_locals(&body, &types);
+        let lists = BTreeMap::from([
+            (0, vec![vec![5, 1, 3, 2]]),
+            (1, vec![vec![6, 1, 4, 2]]),
+            (2, vec![vec![7, 1, 2]]),
+        ]);
+
+        let boundaries = derive_leave_cleanup_boundaries(&body, &lists).unwrap();
+        assert_eq!(boundaries[&0].source, [3, 1, 2]);
+        assert_eq!(boundaries[&1].source, [4, 1, 2]);
+        assert_eq!(boundaries[&0].target, [1, 2]);
+        assert_eq!(boundaries[&1].target, [1, 2]);
+
+        let anchors = derive_leave_cleanup_anchors(&body, &lists).unwrap();
+        assert_eq!(anchors[&0].source, [5, 3, 7, 1, 2]);
+        assert_eq!(anchors[&1].source, [6, 4, 7, 1, 2]);
+        assert_eq!(anchors[&0].target, [7, 1, 2]);
+        assert_eq!(anchors[&1].target, [7, 1, 2]);
+
+        body.flow.locals[3].ownership = OwnershipCategory::Owned;
+        let error = derive_leave_cleanup_boundaries(&body, &lists).unwrap_err();
+        assert!(error.message.contains("not a suffix"), "{error}");
+        body.flow.locals[3].ownership = OwnershipCategory::CopyValue;
+        body.flow.locals[3].drop_glue = DropGlueKind::Custom;
+        let error = derive_leave_cleanup_boundaries(&body, &lists).unwrap_err();
+        assert!(error.message.contains("not a suffix"), "{error}");
     }
 
     #[test]

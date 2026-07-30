@@ -186,6 +186,11 @@ pub enum ExprKind {
         control: ControlLoopId,
         initial_args: Vec<Expr>,
         params: Vec<ControlLoopParam>,
+        /// Caller locals that were already live at the original helper call.
+        /// MIR carries only these across synthesized tail-recursive
+        /// backedges; locals introduced by an iteration must be cleaned
+        /// before the next iteration or the loop's normal exit.
+        outer_locals: Vec<LocalId>,
         body: Box<Expr>,
     },
     /// Continue a compiler-owned local loop with replacement carried values.
@@ -629,14 +634,16 @@ impl Expr {
                 control,
                 initial_args,
                 params,
+                outer_locals,
                 body,
             } => {
                 writeln!(
                     output,
-                    "control-loop control#{} params={} initial={}",
+                    "control-loop control#{} params={} initial={} outer={:?}",
                     control.0,
                     params.len(),
-                    initial_args.len()
+                    initial_args.len(),
+                    outer_locals,
                 )
                 .unwrap();
                 for param in params {

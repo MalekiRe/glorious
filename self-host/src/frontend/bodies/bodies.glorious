@@ -63,7 +63,26 @@ pub struct ParsedBody {
     pattern_binders: Vec<PatternBinder>
 }
 
-pub struct BodyError { code: u8, token: usize, related: usize }
+pub enum BodyError {
+    ExpectedExpression(usize, usize),
+    ExpectedGroupingClose(usize, usize),
+    DuplicatePatternBinder(usize, usize),
+    IncompatibleAssociativity(usize, usize),
+    NonAssociativeChain(usize, usize),
+    ConflictingFixity(usize, usize),
+    ExpressionDepthLimit(usize, usize),
+    MissingBodyShell(usize, usize),
+    InvalidEncodedExpression(usize, usize),
+    ExpectedCallClose(usize, usize),
+    InvalidLetSyntax(usize, usize),
+    MissingEncodedName(usize, usize),
+    ExpectedBlockClose(usize, usize),
+    ExpectedIdentifier(usize, usize),
+    ExpectedTupleDelimiter(usize, usize),
+    InvalidHandleArm(usize, usize),
+    InvalidStructField(usize, usize),
+    ExpectedProjectionName(usize, usize)
+}
 
 struct BodyParser {
     cursor: usize,
@@ -101,11 +120,74 @@ struct PendingHandleArm {
 impl Use<[0, *]> for OperatorUse {}
 impl Use<[0, *]> for PendingStatement {}
 
-pub error_code(value: &BodyError) -> u8 { value.code }
+pub error_code(value: &BodyError) -> u8 {
+    handle *value {
+        BodyError::ExpectedExpression(_, _) => 1,
+        BodyError::ExpectedGroupingClose(_, _) => 2,
+        BodyError::DuplicatePatternBinder(_, _) => 2,
+        BodyError::IncompatibleAssociativity(_, _) => 3,
+        BodyError::NonAssociativeChain(_, _) => 4,
+        BodyError::ConflictingFixity(_, _) => 5,
+        BodyError::ExpressionDepthLimit(_, _) => 6,
+        BodyError::MissingBodyShell(_, _) => 7,
+        BodyError::InvalidEncodedExpression(_, _) => 9,
+        BodyError::ExpectedCallClose(_, _) => 10,
+        BodyError::InvalidLetSyntax(_, _) => 11,
+        BodyError::MissingEncodedName(_, _) => 11,
+        BodyError::ExpectedBlockClose(_, _) => 12,
+        BodyError::ExpectedIdentifier(_, _) => 13,
+        BodyError::ExpectedTupleDelimiter(_, _) => 14,
+        BodyError::InvalidHandleArm(_, _) => 15,
+        BodyError::InvalidStructField(_, _) => 15,
+        BodyError::ExpectedProjectionName(_, _) => 16
+    }
+}
 
-pub error_token(value: &BodyError) -> usize { value.token }
+pub error_token(value: &BodyError) -> usize {
+    handle *value {
+        BodyError::ExpectedExpression(token, _) => token,
+        BodyError::ExpectedGroupingClose(token, _) => token,
+        BodyError::DuplicatePatternBinder(token, _) => token,
+        BodyError::IncompatibleAssociativity(token, _) => token,
+        BodyError::NonAssociativeChain(token, _) => token,
+        BodyError::ConflictingFixity(token, _) => token,
+        BodyError::ExpressionDepthLimit(token, _) => token,
+        BodyError::MissingBodyShell(token, _) => token,
+        BodyError::InvalidEncodedExpression(token, _) => token,
+        BodyError::ExpectedCallClose(token, _) => token,
+        BodyError::InvalidLetSyntax(token, _) => token,
+        BodyError::MissingEncodedName(token, _) => token,
+        BodyError::ExpectedBlockClose(token, _) => token,
+        BodyError::ExpectedIdentifier(token, _) => token,
+        BodyError::ExpectedTupleDelimiter(token, _) => token,
+        BodyError::InvalidHandleArm(token, _) => token,
+        BodyError::InvalidStructField(token, _) => token,
+        BodyError::ExpectedProjectionName(token, _) => token
+    }
+}
 
-pub error_related(value: &BodyError) -> usize { value.related }
+pub error_related(value: &BodyError) -> usize {
+    handle *value {
+        BodyError::ExpectedExpression(_, related) => related,
+        BodyError::ExpectedGroupingClose(_, related) => related,
+        BodyError::DuplicatePatternBinder(_, related) => related,
+        BodyError::IncompatibleAssociativity(_, related) => related,
+        BodyError::NonAssociativeChain(_, related) => related,
+        BodyError::ConflictingFixity(_, related) => related,
+        BodyError::ExpressionDepthLimit(_, related) => related,
+        BodyError::MissingBodyShell(_, related) => related,
+        BodyError::InvalidEncodedExpression(_, related) => related,
+        BodyError::ExpectedCallClose(_, related) => related,
+        BodyError::InvalidLetSyntax(_, related) => related,
+        BodyError::MissingEncodedName(_, related) => related,
+        BodyError::ExpectedBlockClose(_, related) => related,
+        BodyError::ExpectedIdentifier(_, related) => related,
+        BodyError::ExpectedTupleDelimiter(_, related) => related,
+        BodyError::InvalidHandleArm(_, related) => related,
+        BodyError::InvalidStructField(_, related) => related,
+        BodyError::ExpectedProjectionName(_, related) => related
+    }
+}
 
 arena_node_at_raw<'a>(
     value: &'a Arena<ExprTag, ExprNode>,
@@ -366,10 +448,6 @@ edge_suffix<'a>(
         Result::Err(_) => unreachable(),
         Result::Ok(found) => found
     }
-}
-
-body_error(code: u8, token: usize, related: usize) -> BodyError {
-    BodyError { code: code, token:  token, related:  related }
 }
 
 token_range(start: usize, end: usize) -> BodyTokenRange {
@@ -983,8 +1061,7 @@ lookup_scope(
                                         Result::Ok(previous)
                                     )
                                 } else {
-                                    Result::Err(body_error(
-                                        5,
+                                    Result::Err(BodyError::ConflictingFixity(
                                         operator.start,
                                         super::headers::fixity_operator_start_at(
                                             nominal,
@@ -993,8 +1070,7 @@ lookup_scope(
                                     ))
                                 }
                             } else {
-                                Result::Err(body_error(
-                                    5,
+                                Result::Err(BodyError::ConflictingFixity(
                                     operator.start,
                                     super::headers::fixity_operator_start_at(
                                         nominal,
@@ -1188,7 +1264,10 @@ parse_primary(
                 }
             }
     } else {
-        Result::Err(body_error(6, value.cursor, value.cursor))
+        Result::Err(BodyError::ExpressionDepthLimit(
+            value.cursor,
+            value.cursor
+        ))
     }
 }
 
@@ -1206,7 +1285,7 @@ push_identifier_name(
             );
             Result::Ok(())
         },
-        _ => Result::Err(body_error(13, token, related))
+        _ => Result::Err(BodyError::ExpectedIdentifier(token, related))
     }
 }
 
@@ -1240,7 +1319,7 @@ parse_identifier_tail(
                         )
                 } else {
                     Result::Err(
-                        body_error(13, token, separator)
+                        BodyError::ExpectedIdentifier(token, separator)
                     )
                 }
         } else {
@@ -1340,17 +1419,20 @@ parse_tuple_tail(
                             )
                         },
                         _ => Result::Err(
-                            body_error(14, value.cursor, start)
+                            BodyError::ExpectedTupleDelimiter(
+                                value.cursor,
+                                start
+                            )
                         )
                     }
                 } else {
                     Result::Err(
-                        body_error(14, value.cursor, start)
+                        BodyError::ExpectedTupleDelimiter(value.cursor, start)
                     )
                 }
         }
     } else {
-        Result::Err(body_error(14, value.cursor, start))
+        Result::Err(BodyError::ExpectedTupleDelimiter(value.cursor, start))
     }
 }
 
@@ -1383,7 +1465,7 @@ parse_pattern_binder(
     handle super::lexer::token_kind_at(source, token) {
         TokenKind::Ident(name) => handle super::lexer::lexeme(source, name) {
             Result::Err(_) =>
-                Result::Err(body_error(13, token, related)),
+                Result::Err(BodyError::ExpectedIdentifier(token, related)),
             Result::Ok(text) => {
                 if(String::eq(text, &"_")) {
                     Vec::push(
@@ -1395,7 +1477,7 @@ parse_pattern_binder(
                 } else {
                     if(pattern_binder_named(&*binders, name, 0)) {
                         Result::Err(
-                            body_error(2, token, related)
+                            BodyError::DuplicatePatternBinder(token, related)
                         )
                     } else {
                         Vec::push(
@@ -1408,7 +1490,7 @@ parse_pattern_binder(
                 }
             }
         },
-        _ => Result::Err(body_error(13, token, related))
+        _ => Result::Err(BodyError::ExpectedIdentifier(token, related))
     }
 }
 
@@ -1447,18 +1529,17 @@ parse_pattern_binders(
                             open
                         )
                     },
-                    _ => Result::Err(body_error(
-                        10,
+                    _ => Result::Err(BodyError::ExpectedCallClose(
                         value.cursor,
                         open
                     ))
                 }
             } else {
-                Result::Err(body_error(10, value.cursor, open))
+                Result::Err(BodyError::ExpectedCallClose(value.cursor, open))
             }
         }
     } else {
-        Result::Err(body_error(10, value.cursor, open))
+        Result::Err(BodyError::ExpectedCallClose(value.cursor, open))
     }
 }
 
@@ -1469,7 +1550,7 @@ identifier_name(
 ) -> Result<Id<String>, BodyError> {
     handle super::lexer::token_kind_at(source, token) {
         TokenKind::Ident(name) => Result::Ok(name),
-        _ => Result::Err(body_error(13, token, related))
+        _ => Result::Err(BodyError::ExpectedIdentifier(token, related))
     }
 }
 
@@ -1545,17 +1626,19 @@ parse_handle_arm(
                     body: body
                 })
             } else {
-                Result::Err(body_error(
-                    15,
+                Result::Err(BodyError::InvalidHandleArm(
                     value.cursor,
                     variant_token
                 ))
             }
         } else {
-            Result::Err(body_error(13, variant_token, separator))
+            Result::Err(BodyError::ExpectedIdentifier(
+                variant_token,
+                separator
+            ))
         }
     } else {
-        Result::Err(body_error(13, separator, enum_token))
+        Result::Err(BodyError::ExpectedIdentifier(separator, enum_token))
     }
 }
 
@@ -1604,11 +1687,11 @@ parse_handle_arms(
                     output
                 )
             } else {
-                Result::Err(body_error(12, value.cursor, open))
+                Result::Err(BodyError::ExpectedBlockClose(value.cursor, open))
             }
         }
     } else {
-        Result::Err(body_error(12, value.cursor, open))
+        Result::Err(BodyError::ExpectedBlockClose(value.cursor, open))
     }
 }
 
@@ -1741,7 +1824,7 @@ parse_handle(
             value.cursor
         ))
     } else {
-        Result::Err(body_error(12, open, start))
+        Result::Err(BodyError::ExpectedBlockClose(open, start))
     }
 }
 
@@ -1840,17 +1923,23 @@ parse_atom(
                                         )
                                     },
                                     _ => Result::Err(
-                                        body_error(2, value.cursor, start)
+                                        BodyError::ExpectedGroupingClose(
+                                            value.cursor,
+                                            start
+                                        )
                                     )
                                 }
                         } else {
                             Result::Err(
-                                    body_error(2, value.cursor, start)
+                                    BodyError::ExpectedGroupingClose(
+                                        value.cursor,
+                                        start
+                                    )
                                 )
                         }
                 }
             } else {
-                Result::Err(body_error(2, start, start))
+                Result::Err(BodyError::ExpectedGroupingClose(start, start))
             },
             13 => {
                 value.cursor = start + 1;
@@ -1868,11 +1957,11 @@ parse_atom(
                     &mut statements
                 )
             },
-            _ => Result::Err(body_error(1, start, start))
+            _ => Result::Err(BodyError::ExpectedExpression(start, start))
             }
         }
     } else {
-        Result::Err(body_error(1, start, start))
+        Result::Err(BodyError::ExpectedExpression(start, start))
     }
 }
 
@@ -1931,17 +2020,17 @@ parse_call_arguments(
                             )
                         },
                         _ => Result::Err(
-                            body_error(10, value.cursor, open)
+                            BodyError::ExpectedCallClose(value.cursor, open)
                         )
                     }
                 } else {
                     Result::Err(
-                        body_error(10, value.cursor, open)
+                        BodyError::ExpectedCallClose(value.cursor, open)
                     )
                 }
         }
     } else {
-        Result::Err(body_error(10, value.cursor, open))
+        Result::Err(BodyError::ExpectedCallClose(value.cursor, open))
     }
 }
 
@@ -2040,8 +2129,7 @@ parse_struct_fields(
                                                 )
                                             },
                                             _ => Result::Err(
-                                                body_error(
-                                                    15,
+                                                BodyError::InvalidStructField(
                                                     value.cursor,
                                                     open
                                                 )
@@ -2049,8 +2137,7 @@ parse_struct_fields(
                                         }
                                     } else {
                                         Result::Err(
-                                            body_error(
-                                                15,
+                                            BodyError::InvalidStructField(
                                                 value.cursor,
                                                 open
                                             )
@@ -2058,20 +2145,26 @@ parse_struct_fields(
                                     }
                             } else {
                                 Result::Err(
-                                    body_error(15, colon, name_token)
+                                    BodyError::InvalidStructField(
+                                        colon,
+                                        name_token
+                                    )
                                 )
                             }
                         } else {
                             Result::Err(
-                                body_error(15, colon, open)
+                                BodyError::InvalidStructField(colon, open)
                             )
                         }
                     },
-                    _ => Result::Err(body_error(15, name_token, open))
+                    _ => Result::Err(BodyError::InvalidStructField(
+                        name_token,
+                        open
+                    ))
                 }
         }
     } else {
-        Result::Err(body_error(15, value.cursor, open))
+        Result::Err(BodyError::InvalidStructField(value.cursor, open))
     }
 }
 
@@ -2095,7 +2188,7 @@ parse_projection_name(
                 ))
             },
             TokenKind::Number(number) => if(super::lexer::number_is_float(&number)) {
-                Result::Err(body_error(16, token, dot))
+                Result::Err(BodyError::ExpectedProjectionName(token, dot))
             } else {
                 let text = range_text(
                         original,
@@ -2105,7 +2198,10 @@ parse_projection_name(
                     );
                     handle parse_u64(&text) {
                         Result::Err(_) =>
-                            Result::Err(body_error(16, token, dot)),
+                            Result::Err(BodyError::ExpectedProjectionName(
+                                token,
+                                dot
+                            )),
                         Result::Ok(field) => if(field <= 4294967295) {
                             value.cursor = token + 1;
                                 Result::Ok(push_projection(
@@ -2118,14 +2214,17 @@ parse_projection_name(
                                     value.cursor
                                 ))
                         } else {
-                            Result::Err(body_error(16, token, dot))
+                            Result::Err(BodyError::ExpectedProjectionName(
+                                token,
+                                dot
+                            ))
                         }
                     }
             },
-            _ => Result::Err(body_error(16, token, dot))
+            _ => Result::Err(BodyError::ExpectedProjectionName(token, dot))
         }
     } else {
-        Result::Err(body_error(16, token, dot))
+        Result::Err(BodyError::ExpectedProjectionName(token, dot))
     }
 }
 
@@ -2290,7 +2389,7 @@ parse_postfix(
             }
         } else {
             Result::Err(
-                body_error(6, value.cursor, value.cursor)
+                BodyError::ExpressionDepthLimit(value.cursor, value.cursor)
             )
         }
     } else {
@@ -2459,12 +2558,18 @@ prepare_operator(
                             },
                             3 => Result::Ok(()),
                             _ => Result::Err(
-                                body_error(4, incoming.start, top.start)
+                                BodyError::NonAssociativeChain(
+                                    incoming.start,
+                                    top.start
+                                )
                             )
                         }
                     } else {
                         Result::Err(
-                            body_error(3, incoming.start, top.start)
+                            BodyError::IncompatibleAssociativity(
+                                incoming.start,
+                                top.start
+                            )
                         )
                     }
                 } else {
@@ -2572,21 +2677,21 @@ parse_block_statement(
                                     Result::Ok(())
                             } else {
                                 Result::Err(
-                                    body_error(11, equals, start)
+                                    BodyError::InvalidLetSyntax(equals, start)
                                 )
                             }
                         } else {
                             Result::Err(
-                                body_error(11, equals, start)
+                                BodyError::InvalidLetSyntax(equals, start)
                             )
                         }
                 } else {
                     Result::Err(
-                        body_error(11, name_token, start)
+                        BodyError::InvalidLetSyntax(name_token, start)
                     )
                 }
             } else {
-                Result::Err(body_error(11, name_token, start))
+                Result::Err(BodyError::InvalidLetSyntax(name_token, start))
             }
         },
         _ => {
@@ -2656,10 +2761,13 @@ parse_block_after_statement(
                 )
             } else {
                 Result::Err(
-                    body_error(12, value.cursor, start)
+                    BodyError::ExpectedBlockClose(value.cursor, start)
                 )
             },
-            _ => Result::Err(body_error(12, value.cursor, start))
+            _ => Result::Err(BodyError::ExpectedBlockClose(
+                value.cursor,
+                start
+            ))
         }
     } else {
         parse_block_contents(
@@ -2763,7 +2871,7 @@ parse_block_contents(
             )
         } else {
             Result::Err(
-                body_error(12, value.cursor, start)
+                BodyError::ExpectedBlockClose(value.cursor, start)
             )
         }
     }
@@ -2776,11 +2884,13 @@ pub parse_function_body(
     shell: usize
 ) -> Result<ParsedBody, BodyError> {
     handle super::scanner::shell_at(declarations, shell) {
-        Result::Err(_) => Result::Err(body_error(7, shell, shell)),
+        Result::Err(_) =>
+            Result::Err(BodyError::MissingBodyShell(shell, shell)),
         Result::Ok(declaration) => if(super::scanner::shell_kind_code(declaration) == 12) {
             handle
                 super::scanner::shell_body_range(declaration) {
-                Result::Err(_) => Result::Err(body_error(7, shell, shell)),
+                Result::Err(_) =>
+                    Result::Err(BodyError::MissingBodyShell(shell, shell)),
                 Result::Ok(body) => {
                     let start = super::scanner::range_start(&body);
                     let end = super::scanner::range_end(&body);
@@ -2823,7 +2933,7 @@ pub parse_function_body(
                 }
             }
         } else {
-            Result::Err(body_error(7, shell, shell))
+            Result::Err(BodyError::MissingBodyShell(shell, shell))
         }
     }
 }
@@ -2844,13 +2954,14 @@ write_name_token(
 ) -> Result<(), BodyError> {
     handle super::lexer::token_kind_at(source, token) {
         TokenKind::Ident(name) => handle super::lexer::lexeme(source, name) {
-            Result::Err(_) => Result::Err(body_error(11, token, token)),
+            Result::Err(_) =>
+                Result::Err(BodyError::MissingEncodedName(token, token)),
             Result::Ok(text) => {
                 write_string( output, text);
                 Result::Ok(())
             }
         },
-        _ => Result::Err(body_error(11, token, token))
+        _ => Result::Err(BodyError::MissingEncodedName(token, token))
     }
 }
 
@@ -2866,7 +2977,8 @@ write_node_name(
     handle *Vec::index(&value.names, usize_from_u32(at)) {
         ExpressionName::Identifier(name, token) =>
             handle super::lexer::lexeme(source, name) {
-            Result::Err(_) => Result::Err(body_error(11, token, token)),
+            Result::Err(_) =>
+                Result::Err(BodyError::MissingEncodedName(token, token)),
             Result::Ok(text) => {
                 write_string( output, text);
                 Result::Ok(())
@@ -2956,7 +3068,10 @@ write_pattern_binders<'a>(
                 ByteBuf::push(&mut *output, 1);
                 handle super::lexer::lexeme(source, name) {
                     Result::Err(_) =>
-                        Result::Err(body_error(11, token, token)),
+                        Result::Err(BodyError::MissingEncodedName(
+                            token,
+                            token
+                        )),
                     Result::Ok(text) => {
                         write_string(&mut *output, text);
                         write_pattern_binders(
@@ -2986,16 +3101,14 @@ write_handle_arms<'a>(
             Result::Ok(found) => found
         };
         handle super::lexer::lexeme(source, arm.enum_name) {
-            Result::Err(_) => Result::Err(body_error(
-                11,
+            Result::Err(_) => Result::Err(BodyError::MissingEncodedName(
                 arm.enum_token,
                 arm.enum_token
             )),
             Result::Ok(enum_name) => {
                 write_string(&mut *output, enum_name);
                 handle super::lexer::lexeme(source, arm.variant_name) {
-                    Result::Err(_) => Result::Err(body_error(
-                        11,
+                    Result::Err(_) => Result::Err(BodyError::MissingEncodedName(
                         arm.variant_token,
                         arm.variant_token
                     )),
@@ -3104,7 +3217,10 @@ write_expression(
             );
             handle parse_u64(&text) {
                 Result::Err(_) => Result::Err(
-                    body_error(9, node.tokens.start, node.tokens.start)
+                    BodyError::InvalidEncodedExpression(
+                        node.tokens.start,
+                        node.tokens.start
+                    )
                 ),
                 Result::Ok(number) => {
                     ByteBuf::push(&mut *output, 2);
@@ -3278,8 +3394,7 @@ write_expression(
                 0
             )
         },
-        _ => Result::Err(body_error(
-            9,
+        _ => Result::Err(BodyError::InvalidEncodedExpression(
             node.tokens.start,
             node.tokens.start
         ))

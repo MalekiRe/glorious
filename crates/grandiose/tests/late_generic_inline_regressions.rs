@@ -631,6 +631,63 @@ fn range_callback_branded_try_leaves_the_enclosing_function() {
 }
 
 #[test]
+fn nested_fused_loop_preserves_enclosing_range_continuation() {
+    let source = r#"
+        check_index(index: usize, rejected: usize) -> Result<(), usize> {
+            if(index == rejected) {
+                Result::Err(index)
+            } else {
+                Result::Ok(())
+            }
+        }
+
+        walk(limit: usize, rejected: usize) -> Result<(), usize> {
+            try_for_range(Range::new(0, limit), { index => {
+                for_range(Range::new(0, 1), { inner => {
+                    inner;
+                    ()
+                } });
+                try(check_index(index, rejected), @walk);
+                Result::Ok(())
+            } })
+        }
+
+        success() -> usize {
+            handle walk(4, 9) {
+                Result::Ok(_) => 42,
+                Result::Err(error) => error
+            }
+        }
+
+        failure() -> usize {
+            handle walk(4, 2) {
+                Result::Ok(_) => 90,
+                Result::Err(error) => error
+            }
+        }
+
+        main() -> { () }
+    "#;
+
+    assert_eq!(
+        run(
+            "nested-fused-loop-range-continuation.glorious",
+            source,
+            "success"
+        ),
+        Value::U64(42)
+    );
+    assert_eq!(
+        run(
+            "nested-fused-loop-range-continuation.glorious",
+            source,
+            "failure"
+        ),
+        Value::U64(2)
+    );
+}
+
+#[test]
 fn range_callback_infers_nested_vec_constructors() {
     let source = r#"
         consume(values: &mut Vec<u32>, value: u32) {

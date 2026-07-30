@@ -29,10 +29,7 @@ pub enum CompileError {
 }
 
 checked_u32(value: usize) -> u32 {
-    handle checked_usize_to_u32(value) {
-        Result::Err(_) => unreachable(),
-        Result::Ok(found) => found
-    }
+    checked_usize_to_u32(value) else { unreachable() }
 }
 
 usize_from_u32(value: u32) -> usize {

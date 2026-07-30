@@ -11114,12 +11114,13 @@ fn places_overlap(a: &BorrowedPlace, b: &BorrowedPlace) -> bool {
 
 /// Identify the snapshot/commit move bundles emitted for MIR block edges.
 ///
-/// A bundle is a maximal move-only suffix immediately before a jump.  Its
-/// first half snapshots pairwise-distinct sources into fresh scratch
-/// registers; its second half moves each scratch exactly once into a
-/// pairwise-distinct block parameter.  This shape is deliberately narrower
-/// than an arbitrary run of MOVE instructions, so hostile bytecode cannot
-/// relabel a borrowed owner with a lone move.
+/// Before peephole folding, a bundle is a maximal move-only suffix immediately
+/// before a jump. Its first half snapshots pairwise-distinct sources into
+/// fresh scratch registers; its second half moves each scratch exactly once
+/// into a pairwise-distinct block parameter. Peephole folding may collapse
+/// that shape to a direct COPY/MOVE run whose sources and destinations are
+/// disjoint. Both forms require at least two transfers, so a lone hostile MOVE
+/// cannot masquerade as an authenticated edge relocation.
 fn parallel_edge_move_members(a: &Artifact, f: &Function) -> Vec<Option<BTreeSet<u32>>> {
     let len = f.code_len as usize;
     let start = f.code_start as usize;
@@ -11144,55 +11145,103 @@ fn parallel_edge_move_members(a: &Artifact, f: &Function) -> Vec<Option<BTreeSet
             continue;
         }
         let mut first = boundary;
-        while first > 0 && matches!(a.code[start + first - 1], Instruction::Move { .. }) {
+        while first > 0
+            && matches!(
+                a.code[start + first - 1],
+                Instruction::Copy { .. } | Instruction::Move { .. }
+            )
+        {
             first -= 1;
         }
-        let moves = &a.code[start + first..start + boundary];
-        if moves.len() < 2 || !moves.len().is_multiple_of(2) {
+        let transfers = &a.code[start + first..start + boundary];
+        if transfers.len() < 2 {
             continue;
         }
-        let count = moves.len() / 2;
-        let snapshots = moves[..count]
+        let direct = transfers
             .iter()
-            .filter_map(|instruction| match instruction {
-                Instruction::Move { dst, src } => Some((*src, *dst)),
+            .map(|instruction| match instruction {
+                Instruction::Copy { dst, src } => Some((false, *src, *dst)),
+                Instruction::Move { dst, src } => Some((true, *src, *dst)),
                 _ => None,
             })
-            .collect::<Vec<_>>();
-        let commits = moves[count..]
-            .iter()
-            .filter_map(|instruction| match instruction {
-                Instruction::Move { dst, src } => Some((*src, *dst)),
-                _ => None,
+            .collect::<Option<Vec<_>>>()
+            .and_then(|transfers| {
+                let sources = transfers
+                    .iter()
+                    .map(|(_, source, _)| *source)
+                    .collect::<BTreeSet<_>>();
+                let destinations = transfers
+                    .iter()
+                    .map(|(_, _, destination)| *destination)
+                    .collect::<BTreeSet<_>>();
+                let moved_sources = transfers
+                    .iter()
+                    .filter(|(moved, _, _)| *moved)
+                    .map(|(_, source, _)| *source)
+                    .collect::<BTreeSet<_>>();
+                (destinations.len() == transfers.len()
+                    && moved_sources.len()
+                        == transfers.iter().filter(|(moved, _, _)| *moved).count()
+                    && sources.is_disjoint(&destinations))
+                .then(|| {
+                    sources
+                        .into_iter()
+                        .chain(destinations)
+                        .collect::<BTreeSet<_>>()
+                })
+            });
+        let members = direct.or_else(|| {
+            if !transfers.len().is_multiple_of(2)
+                || transfers
+                    .iter()
+                    .any(|instruction| !matches!(instruction, Instruction::Move { .. }))
+            {
+                return None;
+            }
+            let count = transfers.len() / 2;
+            let snapshots = transfers[..count]
+                .iter()
+                .filter_map(|instruction| match instruction {
+                    Instruction::Move { dst, src } => Some((*src, *dst)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let commits = transfers[count..]
+                .iter()
+                .filter_map(|instruction| match instruction {
+                    Instruction::Move { dst, src } => Some((*src, *dst)),
+                    _ => None,
+                })
+                .collect::<Vec<_>>();
+            let sources = snapshots
+                .iter()
+                .map(|(src, _)| *src)
+                .collect::<BTreeSet<_>>();
+            let scratches = snapshots
+                .iter()
+                .map(|(_, dst)| *dst)
+                .collect::<BTreeSet<_>>();
+            let committed_scratches = commits.iter().map(|(src, _)| *src).collect::<BTreeSet<_>>();
+            let destinations = commits.iter().map(|(_, dst)| *dst).collect::<BTreeSet<_>>();
+            (snapshots.len() == count
+                && commits.len() == count
+                && sources.len() == count
+                && scratches.len() == count
+                && destinations.len() == count
+                && scratches == committed_scratches
+                && sources.is_disjoint(&scratches)
+                && destinations.is_disjoint(&scratches))
+            .then(|| {
+                sources
+                    .into_iter()
+                    .chain(scratches)
+                    .chain(destinations)
+                    .collect()
             })
-            .collect::<Vec<_>>();
-        if snapshots.len() != count || commits.len() != count {
+        });
+        let Some(members) = members else {
             continue;
-        }
-        let sources = snapshots
-            .iter()
-            .map(|(src, _)| *src)
-            .collect::<BTreeSet<_>>();
-        let scratches = snapshots
-            .iter()
-            .map(|(_, dst)| *dst)
-            .collect::<BTreeSet<_>>();
-        let committed_scratches = commits.iter().map(|(src, _)| *src).collect::<BTreeSet<_>>();
-        let destinations = commits.iter().map(|(_, dst)| *dst).collect::<BTreeSet<_>>();
-        if sources.len() != count
-            || scratches.len() != count
-            || destinations.len() != count
-            || scratches != committed_scratches
-            || !sources.is_disjoint(&scratches)
-            || !destinations.is_disjoint(&scratches)
-        {
-            continue;
-        }
-        let members = sources
-            .into_iter()
-            .chain(scratches)
-            .chain(destinations)
-            .collect::<BTreeSet<_>>();
+        };
         for slot in groups.iter_mut().take(boundary).skip(first) {
             *slot = Some(members.clone());
         }
@@ -16194,6 +16243,59 @@ mod tests {
             required_features: 1,
             entry_function: None,
         }
+    }
+
+    #[test]
+    fn compact_parallel_edge_relocates_a_borrow_with_its_owner() {
+        let reference = Type::predefined().len() as TypeId;
+        let mut artifact = base(
+            vec![
+                Instruction::BorrowShared { dst: 2, src: 1 },
+                Instruction::Move { dst: 4, src: 2 },
+                Instruction::Move { dst: 3, src: 1 },
+                Instruction::Jump { target: 4 },
+                Instruction::EndBorrow { reference: 4 },
+                Instruction::Drop { register: 3 },
+                Instruction::Return { src: None },
+            ],
+            vec![UNIT, I64, reference, I64, reference],
+        );
+        artifact.types.push(Type::RefShared { referent: I64 });
+        artifact.functions[0].params = vec![I64];
+        artifact.functions[0].return_type = UNIT;
+        artifact.required_features =
+            crate::bytecode::used_features(&artifact.types, &artifact.code, false, false);
+
+        verify(artifact).expect("a disjoint edge transfer relocates the loan and its owner");
+    }
+
+    #[test]
+    fn lone_move_cannot_relocate_a_borrowed_owner() {
+        let reference = Type::predefined().len() as TypeId;
+        let mut artifact = base(
+            vec![
+                Instruction::BorrowShared { dst: 2, src: 1 },
+                Instruction::Move { dst: 3, src: 1 },
+                Instruction::EndBorrow { reference: 2 },
+                Instruction::Drop { register: 3 },
+                Instruction::Return { src: None },
+            ],
+            vec![UNIT, I64, reference, I64],
+        );
+        artifact.types.push(Type::RefShared { referent: I64 });
+        artifact.functions[0].params = vec![I64];
+        artifact.functions[0].return_type = UNIT;
+        artifact.required_features =
+            crate::bytecode::used_features(&artifact.types, &artifact.code, false, false);
+
+        assert!(matches!(
+            verify(artifact),
+            Err(VerifyError::BorrowConflict {
+                function: 0,
+                instruction: 1,
+                register: 1,
+            })
+        ));
     }
 
     #[test]

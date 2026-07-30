@@ -4791,9 +4791,6 @@ impl<'a> Walker<'a> {
                     // `Vec<Result<(K, V), ()>>` have no source-written `Use`
                     // impl for each intermediate nominal; their principal is
                     // the intersection of the instantiated payload fields.
-                    if instance.arguments.is_empty() {
-                        return None;
-                    }
                     let template = self
                         .nominal_templates
                         .get(instance.declaration.0.as_str())?;

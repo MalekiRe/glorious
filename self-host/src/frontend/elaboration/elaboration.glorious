@@ -238,12 +238,56 @@ pub struct TypedBody {
     integer_constants: Arena<IntegerConstantTag, IntegerConstant>
 }
 
-pub struct ElaborationError {
-    code: u8,
-    token: usize,
-    related: usize,
-    expected: u32,
-    found: u32
+pub enum ElaborationError {
+    CyclicTypeAlias(usize),
+    MissingAliasHeader(usize),
+    MissingDeclarationShell(usize),
+    GenericTypeAliasUnsupported(usize),
+    MissingNominalType(usize),
+    UnknownTypeName(usize),
+    UnknownTypeModule(usize),
+    NamedReferenceLifetimeUnsupported(usize),
+    InvalidSignatureType(usize),
+    MissingParameterHeader(usize),
+    MissingCallableHeader(usize),
+    UnsupportedCallableSignature(usize),
+    MissingCallableType(usize),
+    MissingNominalDeclaration(usize),
+    MissingFieldHeader(usize),
+    MissingVariantHeader(usize),
+    MissingStructHeader(usize),
+    MissingEnumHeader(usize),
+    CyclicNominalType(usize, u32),
+    InvalidResolvedExpression(usize, usize),
+    TypeMismatch(usize, u32, u32),
+    FloatLiteralUnsupported(usize),
+    IntegerLiteralOutOfRange(usize, u32),
+    UnexpectedExpressionToken(usize),
+    FunctionUsedAsValue(usize),
+    MissingLocalType(usize),
+    MissingCallableInterface(usize, u32),
+    ArgumentCountMismatch(usize, u32, u32),
+    InvalidCallTarget(usize, u32),
+    InvalidTupleElement(usize, usize),
+    MissingTupleElement(usize, u32),
+    ExpectedTupleType(usize, u32),
+    UnknownStructField(usize, u32),
+    DuplicateOrInaccessibleField(usize, u32),
+    StructFieldCountMismatch(usize, u32, u32),
+    InvalidStructTarget(usize, u32),
+    VariantPayloadCountMismatch(usize, u32, u32),
+    MissingVariant(usize, u32),
+    UnknownProjectionField(usize, u32, u32),
+    DuplicateMatchVariant(usize, u32, u32),
+    VariantOwnerMismatch(usize, u32, u32),
+    MissingMatchVariants(usize, u32, u32),
+    ExpectedEnumType(usize, u32),
+    UnsupportedExpression(usize),
+    MissingBodyCallable(usize, u32),
+    IntegerEncodingOverflow(usize, u32),
+    InvalidLocalReference(usize, u32, u32),
+    EmbeddedValueSerializationUnsupported(usize),
+    MatchSerializationUnsupported(usize)
 }
 
 // Backend-facing views keep the finalized Core representation semantic.
@@ -681,19 +725,157 @@ construction_flavor_word(value: ConstructionFlavor) -> u32 {
     }
 }
 
-pub elaboration_error_code(value: &ElaborationError) -> u8 { value.code }
+pub elaboration_error_code(value: &ElaborationError) -> u8 {
+    handle *value {
+        ElaborationError::CyclicTypeAlias(_) => 1,
+        ElaborationError::GenericTypeAliasUnsupported(_) => 1,
+        ElaborationError::UnknownTypeName(_) => 1,
+        ElaborationError::UnknownTypeModule(_) => 1,
+        ElaborationError::NamedReferenceLifetimeUnsupported(_) => 1,
+        ElaborationError::InvalidSignatureType(_) => 1,
+        ElaborationError::UnsupportedCallableSignature(_) => 1,
+        ElaborationError::MissingNominalDeclaration(_) => 1,
+        ElaborationError::CyclicNominalType(_, _) => 1,
+        ElaborationError::ExpectedTupleType(_, _) => 1,
+        ElaborationError::FloatLiteralUnsupported(_) => 2,
+        ElaborationError::FunctionUsedAsValue(_) => 2,
+        ElaborationError::UnsupportedExpression(_) => 2,
+        ElaborationError::MatchSerializationUnsupported(_) => 2,
+        ElaborationError::TypeMismatch(_, _, _) => 3,
+        ElaborationError::VariantOwnerMismatch(_, _, _) => 3,
+        ElaborationError::ExpectedEnumType(_, _) => 3,
+        ElaborationError::ArgumentCountMismatch(_, _, _) => 4,
+        ElaborationError::StructFieldCountMismatch(_, _, _) => 4,
+        ElaborationError::VariantPayloadCountMismatch(_, _, _) => 4,
+        ElaborationError::DuplicateMatchVariant(_, _, _) => 4,
+        ElaborationError::MissingMatchVariants(_, _, _) => 4,
+        ElaborationError::IntegerLiteralOutOfRange(_, _) => 5,
+        ElaborationError::InvalidCallTarget(_, _) => 6,
+        ElaborationError::UnknownStructField(_, _) => 6,
+        ElaborationError::DuplicateOrInaccessibleField(_, _) => 6,
+        ElaborationError::InvalidStructTarget(_, _) => 6,
+        ElaborationError::UnknownProjectionField(_, _, _) => 6,
+        _ => 7
+    }
+}
 
-pub elaboration_error_token(value: &ElaborationError) -> usize { value.token }
+pub elaboration_error_token(value: &ElaborationError) -> usize {
+    handle *value {
+        ElaborationError::CyclicTypeAlias(token) => token,
+        ElaborationError::MissingAliasHeader(token) => token,
+        ElaborationError::MissingDeclarationShell(token) => token,
+        ElaborationError::GenericTypeAliasUnsupported(token) => token,
+        ElaborationError::MissingNominalType(token) => token,
+        ElaborationError::UnknownTypeName(token) => token,
+        ElaborationError::UnknownTypeModule(token) => token,
+        ElaborationError::NamedReferenceLifetimeUnsupported(token) => token,
+        ElaborationError::InvalidSignatureType(token) => token,
+        ElaborationError::MissingParameterHeader(index) => index,
+        ElaborationError::MissingCallableHeader(index) => index,
+        ElaborationError::UnsupportedCallableSignature(shell) => shell,
+        ElaborationError::MissingCallableType(shell) => shell,
+        ElaborationError::MissingNominalDeclaration(ordinal) => ordinal,
+        ElaborationError::MissingFieldHeader(index) => index,
+        ElaborationError::MissingVariantHeader(index) => index,
+        ElaborationError::MissingStructHeader(shell) => shell,
+        ElaborationError::MissingEnumHeader(shell) => shell,
+        ElaborationError::CyclicNominalType(token, _) => token,
+        ElaborationError::InvalidResolvedExpression(expression, _) =>
+            expression,
+        ElaborationError::TypeMismatch(token, _, _) => token,
+        ElaborationError::FloatLiteralUnsupported(token) => token,
+        ElaborationError::IntegerLiteralOutOfRange(token, _) => token,
+        ElaborationError::UnexpectedExpressionToken(token) => token,
+        ElaborationError::FunctionUsedAsValue(token) => token,
+        ElaborationError::MissingLocalType(token) => token,
+        ElaborationError::MissingCallableInterface(token, _) => token,
+        ElaborationError::ArgumentCountMismatch(token, _, _) => token,
+        ElaborationError::InvalidCallTarget(token, _) => token,
+        ElaborationError::InvalidTupleElement(token, _) => token,
+        ElaborationError::MissingTupleElement(token, _) => token,
+        ElaborationError::ExpectedTupleType(token, _) => token,
+        ElaborationError::UnknownStructField(token, _) => token,
+        ElaborationError::DuplicateOrInaccessibleField(token, _) => token,
+        ElaborationError::StructFieldCountMismatch(token, _, _) => token,
+        ElaborationError::InvalidStructTarget(token, _) => token,
+        ElaborationError::VariantPayloadCountMismatch(token, _, _) => token,
+        ElaborationError::MissingVariant(token, _) => token,
+        ElaborationError::UnknownProjectionField(token, _, _) => token,
+        ElaborationError::DuplicateMatchVariant(token, _, _) => token,
+        ElaborationError::VariantOwnerMismatch(token, _, _) => token,
+        ElaborationError::MissingMatchVariants(token, _, _) => token,
+        ElaborationError::ExpectedEnumType(token, _) => token,
+        ElaborationError::UnsupportedExpression(token) => token,
+        ElaborationError::MissingBodyCallable(shell, _) => shell,
+        ElaborationError::IntegerEncodingOverflow(at, _) => at,
+        ElaborationError::InvalidLocalReference(local, _, _) => local,
+        ElaborationError::EmbeddedValueSerializationUnsupported(value) =>
+            value,
+        ElaborationError::MatchSerializationUnsupported(computation) =>
+            computation
+    }
+}
 
 pub elaboration_error_related(value: &ElaborationError) -> usize {
-    value.related
+    handle *value {
+        ElaborationError::InvalidResolvedExpression(_, occurrence) =>
+            occurrence,
+        ElaborationError::InvalidTupleElement(_, position) => position,
+        _ => elaboration_error_token(value)
+    }
 }
 
 pub elaboration_error_expected(value: &ElaborationError) -> u32 {
-    value.expected
+    handle *value {
+        ElaborationError::CyclicNominalType(_, nominal) => nominal,
+        ElaborationError::TypeMismatch(_, expected, _) => expected,
+        ElaborationError::IntegerLiteralOutOfRange(_, ty) => ty,
+        ElaborationError::ArgumentCountMismatch(_, expected, _) => expected,
+        ElaborationError::MissingTupleElement(_, expected) => expected,
+        ElaborationError::ExpectedTupleType(_, ty) => ty,
+        ElaborationError::DuplicateOrInaccessibleField(_, field) => field,
+        ElaborationError::StructFieldCountMismatch(_, expected, _) =>
+            expected,
+        ElaborationError::InvalidStructTarget(_, _) => 4,
+        ElaborationError::VariantPayloadCountMismatch(_, expected, _) =>
+            expected,
+        ElaborationError::UnknownProjectionField(_, subject, _) => subject,
+        ElaborationError::DuplicateMatchVariant(_, expected, _) => expected,
+        ElaborationError::VariantOwnerMismatch(_, expected, _) => expected,
+        ElaborationError::MissingMatchVariants(_, expected, _) => expected,
+        ElaborationError::InvalidLocalReference(_, limit, _) => limit,
+        _ => 0
+    }
 }
 
-pub elaboration_error_found(value: &ElaborationError) -> u32 { value.found }
+pub elaboration_error_found(value: &ElaborationError) -> u32 {
+    handle *value {
+        ElaborationError::CyclicNominalType(_, nominal) => nominal,
+        ElaborationError::TypeMismatch(_, _, found) => found,
+        ElaborationError::IntegerLiteralOutOfRange(_, ty) => ty,
+        ElaborationError::MissingCallableInterface(_, shell) => shell,
+        ElaborationError::ArgumentCountMismatch(_, _, found) => found,
+        ElaborationError::InvalidCallTarget(_, found) => found,
+        ElaborationError::ExpectedTupleType(_, ty) => ty,
+        ElaborationError::UnknownStructField(_, name) => name,
+        ElaborationError::DuplicateOrInaccessibleField(_, field) => field,
+        ElaborationError::StructFieldCountMismatch(_, _, found) => found,
+        ElaborationError::InvalidStructTarget(_, found) => found,
+        ElaborationError::VariantPayloadCountMismatch(_, _, found) => found,
+        ElaborationError::MissingVariant(_, variant) => variant,
+        ElaborationError::UnknownProjectionField(_, _, name) => name,
+        ElaborationError::DuplicateMatchVariant(_, _, found) => found,
+        ElaborationError::VariantOwnerMismatch(_, _, found) => found,
+        ElaborationError::MissingMatchVariants(_, _, found) => found,
+        ElaborationError::ExpectedEnumType(_, found) => found,
+        ElaborationError::MissingBodyCallable(_, shell) => shell,
+        ElaborationError::IntegerEncodingOverflow(_, ty) => ty,
+        ElaborationError::InvalidLocalReference(_, _, local) => local,
+        ElaborationError::EmbeddedValueSerializationUnsupported(_) => 5,
+        ElaborationError::MatchSerializationUnsupported(_) => 12,
+        _ => 0
+    }
+}
 
 pub interface_type_count(value: &TypedInterfaces) -> usize {
     Arena::len(&value.types)
@@ -1172,22 +1354,6 @@ pub typed_body_integer_constant_word_at(
         2 => found.high0,
         3 => found.high1,
         _ => unreachable()
-    }
-}
-
-error(
-    code: u8,
-    token: usize,
-    related: usize,
-    expected: u32,
-    found: u32
-) -> ElaborationError {
-    ElaborationError {
-        code: code,
-        token:  token,
-        related:  related,
-        expected: expected,
-        found: found
     }
 }
 
@@ -1729,7 +1895,7 @@ resolve_alias_type(
     let state = *Vec::index(&output.alias_states, alias_index);
     handle state {
         AliasResolutionState::Resolving =>
-            Result::Err(error(1, token, token, 0, 0)),
+            Result::Err(ElaborationError::CyclicTypeAlias(token)),
         AliasResolutionState::Resolved(ty) =>
             Result::Ok(Id::to_u32(ty)),
         AliasResolutionState::Unresolved => {
@@ -1739,7 +1905,8 @@ resolve_alias_type(
                 super::headers::nominal_index(headers),
                 alias_index
             ) {
-                Result::Err(_) => Result::Err(error(7, token, token, 0, 0)),
+                Result::Err(_) =>
+                    Result::Err(ElaborationError::MissingAliasHeader(token)),
                 Result::Ok(alias) => {
                     let shell = super::headers::alias_shell(alias);
                     let generics = super::headers::alias_generics(alias);
@@ -1748,8 +1915,11 @@ resolve_alias_type(
                             declarations,
                             usize_from_u32(shell)
                         ) {
-                            Result::Err(_) =>
-                                Result::Err(error(7, token, token, 0, 0)),
+                            Result::Err(_) => Result::Err(
+                                ElaborationError::MissingDeclarationShell(
+                                    token
+                                )
+                            ),
                             Result::Ok(owner) => {
                                 let ty = try(resolve_signature_type(
                                     headers,
@@ -1768,7 +1938,11 @@ resolve_alias_type(
                                 );
                                 Result::Ok(ty)
                             }
-                        } } else { Result::Err(error(1, token, token, 0, 0)) }
+                        } } else { Result::Err(
+                            ElaborationError::GenericTypeAliasUnsupported(
+                                token
+                            )
+                        ) }
                 }
             }
         }
@@ -1866,7 +2040,7 @@ resolve_type_name_target(
             };
             handle interface_type_for_shell(&*output, shell) {
                 Result::Err(_) =>
-                    Result::Err(error(7, token, token, 0, 0)),
+                    Result::Err(ElaborationError::MissingNominalType(token)),
                 Result::Ok(ty) => Result::Ok(Id::to_u32(ty))
             }
         }
@@ -1893,7 +2067,7 @@ resolve_signature_type(
                 Id::from_u32(raw)
             ) {
                 Result::Err(_) =>
-                    Result::Err(error(1, token, token, 0, 0)),
+                    Result::Err(ElaborationError::UnknownTypeName(token)),
                 Result::Ok(name) => if(String::eq(name, &"Unit")) { Result::Ok(0) } else { handle scalar_kind(name) {
                         Result::Err(_) => handle type_name_target(
                             headers,
@@ -1902,7 +2076,7 @@ resolve_signature_type(
                             module
                         ) {
                             Result::Err(_) => Result::Err(
-                                error(1, token, token, 0, 0)
+                                ElaborationError::UnknownTypeName(token)
                             ),
                             Result::Ok(found) => handle found.kind {
                                 1 => resolve_alias_type(
@@ -1946,7 +2120,9 @@ resolve_signature_type(
                                         nominal
                                     ) {
                                         Result::Err(_) => Result::Err(
-                                            error(7, token, token, 0, 0)
+                                            ElaborationError::MissingNominalType(
+                                                token
+                                            )
                                         ),
                                         Result::Ok(ty) =>
                                             Result::Ok(Id::to_u32(ty))
@@ -1969,7 +2145,9 @@ resolve_signature_type(
                     module
                 ) {
                     Result::Err(_) =>
-                        Result::Err(error(1, token, token, 0, 0)),
+                        Result::Err(
+                            ElaborationError::UnknownTypeModule(token)
+                        ),
                     Result::Ok(module) => handle type_name_target(
                         headers,
                         declarations,
@@ -1981,7 +2159,9 @@ resolve_signature_type(
                         Option::Some(module)
                     ) {
                         Result::Err(_) =>
-                            Result::Err(error(1, token, token, 0, 0)),
+                            Result::Err(
+                                ElaborationError::UnknownTypeName(token)
+                            ),
                         Result::Ok(found) => resolve_type_name_target(
                             headers,
                             declarations,
@@ -1990,7 +2170,9 @@ resolve_signature_type(
                             token
                         )
                     }
-                } } else { Result::Err(error(1, token, token, 0, 0)) } },
+                } } else { Result::Err(
+                    ElaborationError::InvalidSignatureType(token)
+                ) } },
         2 => handle super::headers::type_lifetime_name_at(index, type_index) {
             Result::Err(_) => {
                 let referent = try(resolve_signature_type(
@@ -2011,7 +2193,9 @@ resolve_signature_type(
                 ))
             },
             Result::Ok(_) =>
-                Result::Err(error(1, token, token, 0, 0))
+                Result::Err(
+                    ElaborationError::NamedReferenceLifetimeUnsupported(token)
+                )
         },
         3 => handle super::headers::type_lifetime_name_at(index, type_index) {
             Result::Err(_) => {
@@ -2033,7 +2217,9 @@ resolve_signature_type(
                 ))
             },
             Result::Ok(_) =>
-                Result::Err(error(1, token, token, 0, 0))
+                Result::Err(
+                    ElaborationError::NamedReferenceLifetimeUnsupported(token)
+                )
         },
         4 => if(super::headers::type_child_count_at(index, type_index)
             == 0) { Result::Ok(0) } else {
@@ -2050,7 +2236,7 @@ resolve_signature_type(
             Result::Ok(intern_tuple_type(output, &elements))
         },
         6 => Result::Ok(1),
-        _ => Result::Err(error(1, token, token, 0, 0))
+        _ => Result::Err(ElaborationError::InvalidSignatureType(token))
     }
 }
 
@@ -2069,13 +2255,9 @@ collect_parameter_types(
             super::headers::parsed_index(headers),
             usize_from_u32(at)
         ) {
-            Result::Err(_) => Result::Err(error(
-                7,
-                usize_from_u32(at),
-                usize_from_u32(at),
-                0,
-                0
-            )),
+            Result::Err(_) => Result::Err(
+                ElaborationError::MissingParameterHeader(usize_from_u32(at))
+            ),
             Result::Ok(parameter) => {
                 let ty = try(resolve_signature_type(
                     headers,
@@ -2109,20 +2291,19 @@ collect_callables(
 ) -> Result<(), ElaborationError> {
     let header_index = super::headers::parsed_index(headers);
     if(index < super::headers::callable_count(header_index)) { handle super::headers::callable_at(header_index, index) {
-            Result::Err(_) => Result::Err(error(7, index, index, 0, 0)),
+            Result::Err(_) =>
+                Result::Err(ElaborationError::MissingCallableHeader(index)),
             Result::Ok(callable) => {
                 let unsupported =
                     0 < super::headers::callable_generic_count(callable)
                     or { super::headers::callable_has_effects(callable) };
                 if(unsupported) {
                     let shell = super::headers::callable_shell(callable);
-                    Result::Err(error(
-                        1,
-                        usize_from_u32(shell),
-                        usize_from_u32(shell),
-                        0,
-                        0
-                    ))
+                    Result::Err(
+                        ElaborationError::UnsupportedCallableSignature(
+                            usize_from_u32(shell)
+                        )
+                    )
                 } else {
                     handle super::headers::callable_result(callable) {
                         Result::Err(_) => collect_callable(
@@ -2214,13 +2395,11 @@ collect_callable(
                     output,
                     index + 1
                 )
-            } else { Result::Err(error(
-                    7,
-                    usize_from_u32(shell),
-                    usize_from_u32(shell),
-                    0,
-                    0
-                )) }
+            } else { Result::Err(
+                    ElaborationError::MissingCallableType(
+                        usize_from_u32(shell)
+                    )
+                ) }
 }
 
 predeclare_nominals(
@@ -2256,7 +2435,9 @@ predeclare_nominals(
             _ => Result::Ok((0, 0))
         };
         handle move declaration {
-            Result::Err(_) => Result::Err(error(1, ordinal, ordinal, 0, 0)),
+            Result::Err(_) => Result::Err(
+                ElaborationError::MissingNominalDeclaration(ordinal)
+            ),
             Result::Ok(found) => {
                 if(found.1 == 0) { () } else {
                     let nominal_id = alloc_interface_nominal(
@@ -2352,13 +2533,9 @@ collect_struct_fields(
             super::headers::nominal_index(headers),
             usize_from_u32(index)
         ) {
-            Result::Err(_) => Result::Err(error(
-                7,
-                usize_from_u32(index),
-                usize_from_u32(index),
-                0,
-                0
-            )),
+            Result::Err(_) => Result::Err(
+                ElaborationError::MissingFieldHeader(usize_from_u32(index))
+            ),
             Result::Ok(field) => {
                 let ty = try(resolve_signature_type(
                     headers,
@@ -2439,13 +2616,9 @@ collect_enum_variants(
             super::headers::nominal_index(headers),
             usize_from_u32(index)
         ) {
-            Result::Err(_) => Result::Err(error(
-                7,
-                usize_from_u32(index),
-                usize_from_u32(index),
-                0,
-                0
-            )),
+            Result::Err(_) => Result::Err(
+                ElaborationError::MissingVariantHeader(usize_from_u32(index))
+            ),
             Result::Ok(variant) => {
                 let payloads = super::headers::variant_fields(variant);
                 let start = checked_u32_from_usize(
@@ -2505,13 +2678,11 @@ collect_nominal_definitions(
                 shell,
                 0
             ) {
-                Result::Err(_) => Result::Err(error(
-                    7,
-                    usize_from_u32(shell),
-                    usize_from_u32(shell),
-                    0,
-                    0
-                )),
+                Result::Err(_) => Result::Err(
+                    ElaborationError::MissingStructHeader(
+                        usize_from_u32(shell)
+                    )
+                ),
                 Result::Ok(found) => {
                     let fields = super::headers::struct_fields(found);
                     let start = checked_u32_from_usize(
@@ -2549,13 +2720,11 @@ collect_nominal_definitions(
                 shell,
                 0
             ) {
-                Result::Err(_) => Result::Err(error(
-                    7,
-                    usize_from_u32(shell),
-                    usize_from_u32(shell),
-                    0,
-                    0
-                )),
+                Result::Err(_) => Result::Err(
+                    ElaborationError::MissingEnumHeader(
+                        usize_from_u32(shell)
+                    )
+                ),
                 Result::Ok(found) => {
                     let variants = super::headers::enum_variants(found);
                     let start = checked_u32_from_usize(
@@ -2741,7 +2910,9 @@ nominal_copyable(
     let node = *interface_nominal_at(&*output, id);
     handle node.copy_state {
         NominalCopyState::Resolving =>
-            Result::Err(error(1, token, token, nominal, nominal)),
+            Result::Err(
+                ElaborationError::CyclicNominalType(token, nominal)
+            ),
         NominalCopyState::Resolved => {
             let shell = node.shell;
             let ty = handle interface_type_for_shell(&*output, shell) {
@@ -2966,13 +3137,12 @@ build_resolution_map(
                 occurrence + 1,
                 output
             )
-        } else { Result::Err(error(
-                7,
-                expression_index,
-                occurrence,
-                0,
-                0
-            )) }
+        } else { Result::Err(
+                ElaborationError::InvalidResolvedExpression(
+                    expression_index,
+                    occurrence
+                )
+            ) }
     } else { Result::Ok(()) }
 }
 
@@ -3155,13 +3325,13 @@ check_expected(
     handle expected {
         Result::Err(_) => Result::Ok(found),
         Result::Ok(ty) =>
-            if(found.type_id == ty) { Result::Ok(found) } else { Result::Err(error(
-                3,
-                token,
-                token,
-                Id::to_u32(ty),
-                Id::to_u32(found.type_id)
-            )) }
+            if(found.type_id == ty) { Result::Ok(found) } else { Result::Err(
+                ElaborationError::TypeMismatch(
+                    token,
+                    Id::to_u32(ty),
+                    Id::to_u32(found.type_id)
+                )
+            ) }
     }
 }
 
@@ -3175,9 +3345,7 @@ check_expected_type(
         Result::Ok(ty) => if(found == ty) {
             Result::Ok(())
         } else {
-            Result::Err(error(
-                3,
-                token,
+            Result::Err(ElaborationError::TypeMismatch(
                 token,
                 Id::to_u32(ty),
                 Id::to_u32(found)
@@ -3318,7 +3486,9 @@ elaborate_integer(
         super::headers::parsed_source(headers),
         token
     ) {
-        TokenKind::Number(number) => if(super::lexer::number_is_float(&number)) { Result::Err(error(2, token, token, 0, 0)) } else {
+        TokenKind::Number(number) => if(super::lexer::number_is_float(&number)) {
+            Result::Err(ElaborationError::FloatLiteralUnsupported(token))
+        } else {
             let ty_id = expected else { type_id_from_u32(10) };
             let ty = Id::to_u32(ty_id);
             if(2 <= ty and { ty <= 13 }) {
@@ -3330,13 +3500,9 @@ elaborate_integer(
                     number_radix(&number),
                     wrapping_convert_to_u128(0)
                 ) {
-                    Result::Err(_) => Result::Err(error(
-                        5,
-                        token,
-                        token,
-                        ty,
-                        ty
-                    )),
+                    Result::Err(_) => Result::Err(
+                        ElaborationError::IntegerLiteralOutOfRange(token, ty)
+                    ),
                     Result::Ok(magnitude) => {
                         let kind = type_to_scalar_kind(ty);
                         if(magnitude <= scalar_max(kind)) {
@@ -3353,18 +3519,21 @@ elaborate_integer(
                                 type_id: ty_id,
                                 form: ElaboratedForm::Value(core)
                             })
-                        } else { Result::Err(error(
-                                5,
-                                token,
-                                token,
-                                ty,
-                                ty
-                            )) }
+                        } else { Result::Err(
+                                ElaborationError::IntegerLiteralOutOfRange(
+                                    token,
+                                    ty
+                                )
+                            ) }
                     }
                 }
-            } else { Result::Err(error(3, token, token, ty, 10)) }
+            } else { Result::Err(
+                ElaborationError::TypeMismatch(token, ty, 10)
+            ) }
         },
-        _ => Result::Err(error(7, token, token, 0, 0))
+        _ => Result::Err(
+            ElaborationError::UnexpectedExpressionToken(token)
+        )
     }
 }
 
@@ -3401,8 +3570,10 @@ elaborate_identifier(
             final_transfer
         ),
         ElaborationTarget::Function(_) =>
-            Result::Err(error(2, token, token, 0, 0)),
-        _ => Result::Err(error(7, token, token, 0, 0))
+            Result::Err(ElaborationError::FunctionUsedAsValue(token)),
+        _ => Result::Err(
+            ElaborationError::UnexpectedExpressionToken(token)
+        )
     }
 }
 
@@ -3416,7 +3587,8 @@ elaborate_local(
 ) -> Result<Elaborated, ElaborationError> {
     if(Id::to_usize(local) < IndexVec::len(&value.local_types)) {
         handle *IndexVec::index(&value.local_types, local) {
-        Result::Err(_) => Result::Err(error(7, token, token, 0, 0)),
+        Result::Err(_) =>
+            Result::Err(ElaborationError::MissingLocalType(token)),
         Result::Ok(ty_id) => {
             let ty = Id::to_u32(ty_id);
             let access = if(final_transfer and {
@@ -3436,7 +3608,7 @@ elaborate_local(
                 token
             )
         } }
-    } else { Result::Err(error(7, token, token, 0, 0)) }
+    } else { Result::Err(ElaborationError::MissingLocalType(token)) }
 }
 
 elaborate_call_arguments(
@@ -3540,7 +3712,9 @@ elaborate_call(
     handle elaboration_target_at(map, callee) {
         ElaborationTarget::Function(shell) =>
             handle interface_callable_for_shell_id(interfaces, shell) {
-            Result::Err(_) => Result::Err(error(7, token, token, 0, shell)),
+            Result::Err(_) => Result::Err(
+                ElaborationError::MissingCallableInterface(token, shell)
+            ),
             Result::Ok(callable) => {
                 let parameters =
                     interface_callable_parameters(interfaces, callable);
@@ -3598,13 +3772,13 @@ elaborate_call(
                         type_id: result,
                         form: ElaboratedForm::Computation(root)
                     })
-                } else { Result::Err(error(
-                        4,
-                        token,
-                        token,
-                        expected_count,
-                        found_count
-                    )) }
+                } else { Result::Err(
+                        ElaborationError::ArgumentCountMismatch(
+                            token,
+                            expected_count,
+                            found_count
+                        )
+                    ) }
             }
         },
         ElaborationTarget::Variant(variant) => elaborate_enum_construct(
@@ -3619,11 +3793,8 @@ elaborate_call(
             variant,
             expected
         ),
-        target => Result::Err(error(
-            6,
+        target => Result::Err(ElaborationError::InvalidCallTarget(
             token,
-            token,
-            0,
             elaboration_target_kind(target)
         ))
     }
@@ -3737,12 +3908,9 @@ elaborate_block_statements(
                     )
                 }
             },
-            _ => Result::Err(error(
-                7,
+            _ => Result::Err(ElaborationError::InvalidTupleElement(
                 super::bodies::expression_token_start_at(body, child),
-                usize_from_u8(position),
-                0,
-                0
+                usize_from_u8(position)
             ))
         }
     } else {
@@ -3955,7 +4123,10 @@ elaborate_tuple(
                 Option::Some(expected_type),
                 token
             ) } else { Result::Err(
-                error(3, token, token, Id::to_u32(expected_type), 0)
+                ElaborationError::MissingTupleElement(
+                    token,
+                    Id::to_u32(expected_type)
+                )
             ) }
         }
     }
@@ -4008,7 +4179,9 @@ elaborate_tuple_checked(
             ConstructionFlavor::Product,
             &fields,
             &wrappers
-        )) } else { Result::Err(error(1, token, token, ty, ty)) }
+        )) } else { Result::Err(
+            ElaborationError::ExpectedTupleType(token, ty)
+        ) }
 }
 
 field_ordinal_by_name(
@@ -4167,7 +4340,9 @@ elaborate_struct_fields(
             0
         ) {
             Result::Err(_) =>
-                Result::Err(error(6, token, token, 0, name)),
+                Result::Err(
+                    ElaborationError::UnknownStructField(token, name)
+                ),
             Result::Ok(field) => if(
                 *Vec::index(&*seen, usize_from_u32(field)) == 0
                 and { struct_field_accessible(
@@ -4224,7 +4399,9 @@ elaborate_struct_fields(
                     seen,
                     values
                 )
-            } else { Result::Err(error(6, token, token, field, field)) }
+            } else { Result::Err(
+                ElaborationError::DuplicateOrInaccessibleField(token, field)
+            ) }
         }
     } else { Result::Ok(()) }
 }
@@ -4247,7 +4424,8 @@ elaborate_struct(
             super::headers::nominal_index(headers),
             usize_from_u32(header_index)
         ) {
-            Result::Err(_) => Result::Err(error(7, token, token, 0, 0)),
+            Result::Err(_) =>
+                Result::Err(ElaborationError::MissingStructHeader(token)),
             Result::Ok(header) => {
                 let shell = super::headers::struct_shell(header);
                 let ty_id = handle interface_type_for_shell(
@@ -4313,30 +4491,25 @@ elaborate_struct(
                             &fields,
                             &wrappers
                         ))
-                    } else { Result::Err(error(
-                            4,
-                            token,
-                            token,
-                            count,
-                            super::bodies::expression_child_count_at(
-                                body,
-                                expression
+                    } else { Result::Err(
+                            ElaborationError::StructFieldCountMismatch(
+                                token,
+                                count,
+                                super::bodies::expression_child_count_at(
+                                    body,
+                                    expression
+                                )
                             )
-                        )) }
-                } else { Result::Err(error(
-                    3,
-                    token,
+                        ) }
+                } else { Result::Err(ElaborationError::TypeMismatch(
                     token,
                     expected_word_or(expected, ty_id),
                     ty
                 )) }
             }
         },
-        target => Result::Err(error(
-            6,
+        target => Result::Err(ElaborationError::InvalidStructTarget(
             token,
-            token,
-            4,
             elaboration_target_kind(target)
         ))
     }
@@ -4468,10 +4641,14 @@ elaborate_enum_construct(
                 &wrappers
             ))
         } else { Result::Err(
-                error(4, token, token, payload_count, found_count)
+                ElaborationError::VariantPayloadCountMismatch(
+                    token,
+                    payload_count,
+                    found_count
+                )
             ) }
     } else { Result::Err(
-            error(7, token, token, 0, variant_index)
+            ElaborationError::MissingVariant(token, variant_index)
         ) }
 }
 
@@ -4518,8 +4695,16 @@ elaborate_enum_bare(
                 &fields,
                 &wrappers
             ))
-        } else { Result::Err(error(4, token, token, payload_count, 0)) }
-    } else { Result::Err(error(7, token, token, 0, variant_index)) }
+        } else { Result::Err(
+            ElaborationError::VariantPayloadCountMismatch(
+                token,
+                payload_count,
+                0
+            )
+        ) }
+    } else { Result::Err(
+        ElaborationError::MissingVariant(token, variant_index)
+    ) }
 }
 
 elaborate_projection(
@@ -4594,9 +4779,13 @@ elaborate_projection(
                   } else { Result::Err(()) },
                 _ => Result::Err(())
     };
-    handle move field {
+            handle move field {
                 Result::Err(_) => Result::Err(
-                    error(6, token, token, subject_type_word, name)
+                    ElaborationError::UnknownProjectionField(
+                        token,
+                        subject_type_word,
+                        name
+                    )
                 ),
                 Result::Ok(field_index) => {
                     let result_type = handle subject_kind {
@@ -4654,9 +4843,7 @@ elaborate_projection(
                                 form: ElaboratedForm::Computation(root)
                             })
                         }
-                    } else { Result::Err(error(
-                            3,
-                            token,
+                    } else { Result::Err(ElaborationError::TypeMismatch(
                             token,
                             expected_word_or(expected, result_type),
                             result_type_word
@@ -4778,9 +4965,7 @@ elaborate_handle_arms(
             }) {
                 let variant_ordinal = variant_index - variants.start;
                 if(*Vec::index(seen, usize_from_u32(variant_ordinal))) {
-                    Result::Err(error(
-                        4,
-                        token,
+                    Result::Err(ElaborationError::DuplicateMatchVariant(
                         token,
                         variants.count,
                         u32_from_usize(Slice::len(source_arms))
@@ -4843,37 +5028,36 @@ elaborate_handle_arms(
                             output_arms,
                             output_bindings
                         )
-                    } else { Result::Err(error(
-                            4,
-                            token,
+                    } else { Result::Err(
+                        ElaborationError::VariantPayloadCountMismatch(
                             token,
                             variant.payloads.count,
                             binders.count
-                        )) }
+                        )
+                    ) }
                 }
-            } else { Result::Err(error(
-                    3,
-                    token,
+            } else { Result::Err(
+                ElaborationError::VariantOwnerMismatch(
                     token,
                     Id::to_u32(nominal),
                     Id::to_u32(variant.owner)
-                )) }
-        } else { Result::Err(error(
-                7,
-                token,
-                token,
-                0,
-                variant_index
-            )) }
+                )
+            ) }
+        } else { Result::Err(
+            ElaborationError::MissingVariant(token, variant_index)
+        ) }
     } else {
         handle expected {
-            Result::Err(_) => Result::Err(error(
-                4,
-                super::bodies::expression_token_start_at(body, expression),
-                super::bodies::expression_token_start_at(body, expression),
-                variants.count,
-                0
-            )),
+            Result::Err(_) => Result::Err(
+                ElaborationError::MissingMatchVariants(
+                    super::bodies::expression_token_start_at(
+                        body,
+                        expression
+                    ),
+                    variants.count,
+                    0
+                )
+            ),
             Result::Ok(found) => Result::Ok(found)
         }
     }
@@ -4906,13 +5090,12 @@ elaborate_handle(
         TypeKind::Nominal(nominal) => {
             let nominal_node = *interface_nominal_at(&*interfaces, nominal);
             handle nominal_node.kind {
-                InterfaceNominalKind::Struct(_) => Result::Err(error(
-                    3,
-                    token,
-                    token,
-                    0,
-                    Id::to_u32(subject.type_id)
-                )),
+                InterfaceNominalKind::Struct(_) => Result::Err(
+                    ElaborationError::ExpectedEnumType(
+                        token,
+                        Id::to_u32(subject.type_id)
+                    )
+                ),
                 InterfaceNominalKind::Enum(variants) => {
                     let source_arms =
                         super::bodies::expression_handle_arms(
@@ -4991,28 +5174,25 @@ elaborate_handle(
                                 type_id: result_type,
                                 form: ElaboratedForm::Computation(root)
                             })
-                        } else { Result::Err(error(
-                                4,
-                                token,
+                        } else { Result::Err(
+                            ElaborationError::MissingMatchVariants(
                                 token,
                                 variants.count,
                                 u32_from_usize(Slice::len(source_arms))
-                            )) }
-                    } else { Result::Err(error(
-                            4,
-                            token,
+                            )
+                        ) }
+                    } else { Result::Err(
+                        ElaborationError::MissingMatchVariants(
                             token,
                             variants.count,
                             u32_from_usize(Slice::len(source_arms))
-                        )) }
+                        )
+                    ) }
                 }
             }
         },
-        _ => Result::Err(error(
-            3,
+        _ => Result::Err(ElaborationError::ExpectedEnumType(
             token,
-            token,
-            0,
             Id::to_u32(subject.type_id)
         ))
     }
@@ -5086,19 +5266,11 @@ elaborate_expression(
             super::bodies::expression_child_at(body, expression, 0),
             expected
         ),
-        5 => Result::Err(error(
-            2,
-            super::bodies::expression_token_start_at(body, expression),
-            super::bodies::expression_token_start_at(body, expression),
-            0,
-            0
+        5 => Result::Err(ElaborationError::UnsupportedExpression(
+            super::bodies::expression_token_start_at(body, expression)
         )),
-        6 => Result::Err(error(
-            2,
-            super::bodies::expression_token_start_at(body, expression),
-            super::bodies::expression_token_start_at(body, expression),
-            0,
-            0
+        6 => Result::Err(ElaborationError::UnsupportedExpression(
+            super::bodies::expression_token_start_at(body, expression)
         )),
         7 => elaborate_call(
             original,
@@ -5166,12 +5338,8 @@ elaborate_expression(
             expression,
             expected
         ),
-        _ => Result::Err(error(
-            2,
-            super::bodies::expression_token_start_at(body, expression),
-            super::bodies::expression_token_start_at(body, expression),
-            0,
-            0
+        _ => Result::Err(ElaborationError::UnsupportedExpression(
+            super::bodies::expression_token_start_at(body, expression)
         ))
     }
 }
@@ -5704,13 +5872,12 @@ pub elaborate_function_body(
 ) -> Result<TypedBody, ElaborationError> {
     let shell = super::bodies::body_shell(body);
     handle interface_callable_for_shell_id(interfaces, shell) {
-        Result::Err(_) => Result::Err(error(
-            7,
-            usize_from_u32(shell),
-            usize_from_u32(shell),
-            0,
-            shell
-        )),
+        Result::Err(_) => Result::Err(
+            ElaborationError::MissingBodyCallable(
+                usize_from_u32(shell),
+                shell
+            )
+        ),
         Result::Ok(callable) => {
             let result =
                 interface_callable_result(interfaces, callable);
@@ -6062,7 +6229,9 @@ write_value_expression(
             let at = Id::to_usize(constant_id) * 4;
             if(constant.high0 != 0 or {
                 constant.high1 != 0
-            }) { Result::Err(error(7, at, at, 0, ty)) } else {
+            }) { Result::Err(
+                ElaborationError::IntegerEncodingOverflow(at, ty)
+            ) } else {
                 ByteBuf::push(&mut *output, 1);
                 write_type_id(&mut *output, ty);
                 ByteBuf::write_u64_le(
@@ -6090,13 +6259,13 @@ write_value_expression(
                     }
                 );
                 Result::Ok(())
-            } else { Result::Err(error(
-                    7,
-                    usize_from_u32(local),
-                    usize_from_u32(local),
-                    source_local_limit,
-                    local
-                )) }
+            } else { Result::Err(
+                    ElaborationError::InvalidLocalReference(
+                        usize_from_u32(local),
+                        source_local_limit,
+                        local
+                    )
+                ) }
         },
         CoreValueKind::Projection(subject, field) => {
             ByteBuf::push(&mut *output, 7);
@@ -6113,13 +6282,11 @@ write_value_expression(
                 source_local_limit
             )
         },
-        CoreValueKind::Embedded(_) => Result::Err(error(
-            7,
-            Id::to_usize(value),
-            Id::to_usize(value),
-            0,
-            5
-        ))
+        CoreValueKind::Embedded(_) => Result::Err(
+            ElaborationError::EmbeddedValueSerializationUnsupported(
+                Id::to_usize(value)
+            )
+        )
     }
 }
 
@@ -6323,13 +6490,11 @@ write_computation_expression(
         },
         // The legacy Stage-A typed-Core wire format predates direct Match.
         // Backend consumers use CoreComputationView::Match instead.
-        CoreComputationKind::Match(_, _) => Result::Err(error(
-            2,
-            Id::to_usize(computation),
-            Id::to_usize(computation),
-            0,
-            12
-        ))
+        CoreComputationKind::Match(_, _) => Result::Err(
+            ElaborationError::MatchSerializationUnsupported(
+                Id::to_usize(computation)
+            )
+        )
     }
 }
 
@@ -6394,13 +6559,13 @@ write_block_statements(
                     body,
                     remainder,
                     local_id
-                )) { Result::Err(error(
-                        7,
-                        usize_from_u32(local),
-                        usize_from_u32(local),
-                        source_local_limit,
-                        local
-                    )) } else {
+                )) { Result::Err(
+                        ElaborationError::InvalidLocalReference(
+                            usize_from_u32(local),
+                            source_local_limit,
+                            local
+                        )
+                    ) } else {
                     ByteBuf::push(&mut *output, 2);
                     try(write_computation_expression(
                         output,
