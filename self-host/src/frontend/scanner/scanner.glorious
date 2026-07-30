@@ -37,7 +37,14 @@ pub struct DeclarationShell {
 
 pub struct DeclarationIndex { shells: Vec<DeclarationShell> }
 
-pub struct ScanError { code: u8, token: usize, related: usize }
+pub enum ScanError {
+    UnexpectedClosingDelimiter(usize, usize),
+    MismatchedClosingDelimiter(usize, usize),
+    UnclosedDelimiter(usize, usize),
+    InvalidDeclarationStart(usize, usize),
+    IncompleteDeclaration(usize, usize),
+    ExpectedDeclarationName(usize, usize)
+}
 
 struct OpenDelimiter { kind: u8, token: usize }
 
@@ -103,14 +110,37 @@ pub shell_whole(value: &DeclarationShell) -> &TokenRange { &value.whole }
 
 pub shell_parent(value: &DeclarationShell) -> &Option<usize> { &value.parent }
 
-pub scan_error_code(value: &ScanError) -> u8 { value.code }
+pub scan_error_code(value: &ScanError) -> u8 {
+    handle *value {
+        ScanError::UnexpectedClosingDelimiter(_, _) => 1,
+        ScanError::MismatchedClosingDelimiter(_, _) => 2,
+        ScanError::UnclosedDelimiter(_, _) => 3,
+        ScanError::InvalidDeclarationStart(_, _) => 4,
+        ScanError::IncompleteDeclaration(_, _) => 5,
+        ScanError::ExpectedDeclarationName(_, _) => 6
+    }
+}
 
-pub scan_error_token(value: &ScanError) -> usize { value.token }
+pub scan_error_token(value: &ScanError) -> usize {
+    handle *value {
+        ScanError::UnexpectedClosingDelimiter(token, _) => token,
+        ScanError::MismatchedClosingDelimiter(token, _) => token,
+        ScanError::UnclosedDelimiter(token, _) => token,
+        ScanError::InvalidDeclarationStart(token, _) => token,
+        ScanError::IncompleteDeclaration(token, _) => token,
+        ScanError::ExpectedDeclarationName(token, _) => token
+    }
+}
 
-pub scan_error_related(value: &ScanError) -> usize { value.related }
-
-scan_error(code: u8, token: usize, related: usize) -> ScanError {
-    ScanError { code: code, token:  token, related: related }
+pub scan_error_related(value: &ScanError) -> usize {
+    handle *value {
+        ScanError::UnexpectedClosingDelimiter(_, related) => related,
+        ScanError::MismatchedClosingDelimiter(_, related) => related,
+        ScanError::UnclosedDelimiter(_, related) => related,
+        ScanError::InvalidDeclarationStart(_, related) => related,
+        ScanError::IncompleteDeclaration(_, related) => related,
+        ScanError::ExpectedDeclarationName(_, related) => related
+    }
 }
 
 u8_equal(left: u8, right: u8) -> Bool {  left ==  right }
@@ -190,8 +220,12 @@ matching_close_walk(
     let count = super::lexer::token_count(value);
     if(index < count) { if(token_is_eof(value, index)) {
             handle Vec::last(&stack) {
-                Result::Ok(open) => Result::Err(scan_error(3, index, open.token)),
-                Result::Err(_) => Result::Err(scan_error(5, index, count))
+                Result::Ok(open) => Result::Err(
+                    ScanError::UnclosedDelimiter(index, open.token)
+                ),
+                Result::Err(_) => Result::Err(
+                    ScanError::IncompleteDeclaration(index, count)
+                )
             }
         } else {
                 let kind = token_kind_at(value, index);
@@ -205,14 +239,20 @@ matching_close_walk(
                         let next =  stack;
                         handle Vec::pop(&mut next) {
                             Result::Err(_) => Result::Err(
-                                scan_error(1, index, count)
+                                ScanError::UnexpectedClosingDelimiter(
+                                    index,
+                                    count
+                                )
                             ),
                             Result::Ok(open) => if(u8_equal(open.kind, closing)) { if(Vec::is_empty(&next)) { Result::Ok(index) } else { matching_close_walk(
                                         value,
                                         index + 1,
                                         next
                                     ) } } else { Result::Err(
-                                    scan_error(2, index, open.token)
+                                    ScanError::MismatchedClosingDelimiter(
+                                        index,
+                                        open.token
+                                    )
                                 ) }
                         }
                     } } else {
@@ -224,8 +264,12 @@ matching_close_walk(
                     matching_close_walk(value, index + 1, next)
                 }
         } } else { handle Vec::last(&stack) {
-            Result::Ok(open) => Result::Err(scan_error(3, count, open.token)),
-            Result::Err(_) => Result::Err(scan_error(5, count, count))
+            Result::Ok(open) => Result::Err(
+                ScanError::UnclosedDelimiter(count, open.token)
+            ),
+            Result::Err(_) => Result::Err(
+                ScanError::IncompleteDeclaration(count, count)
+            )
         } }
 }
 
@@ -234,7 +278,9 @@ matching_close(
     open: usize
 ) -> Result<usize, ScanError> {
     let kind = delimiter_open(token_kind_at(value, open));
-    if(u8_equal(kind, 0)) { Result::Err(scan_error(5, open, open)) } else {
+    if(u8_equal(kind, 0)) {
+        Result::Err(ScanError::IncompleteDeclaration(open, open))
+    } else {
         let stack = Vec::new();
         Vec::push(
             &mut stack,
@@ -250,7 +296,9 @@ find_semicolon(
     limit: usize,
     start: usize
 ) -> Result<usize, ScanError> {
-    if(index < limit) { if(token_is_eof(value, index)) { Result::Err(scan_error(5, index, start)) } else {
+    if(index < limit) { if(token_is_eof(value, index)) { Result::Err(
+        ScanError::IncompleteDeclaration(index, start)
+    ) } else {
             let kind = token_kind_at(value, index);
             let opening = delimiter_open(kind);
             let closing = delimiter_close(kind);
@@ -260,8 +308,7 @@ find_semicolon(
                             limit,
                             start
                         ) } else { Result::Err(
-                            scan_error(
-                                1,
+                            ScanError::UnexpectedClosingDelimiter(
                                 index,
                                 super::lexer::token_count(value)
                             )
@@ -277,7 +324,9 @@ find_semicolon(
                         start
                     )
                 } }
-        } } else { Result::Err(scan_error(5, limit, start)) }
+        } } else { Result::Err(
+            ScanError::IncompleteDeclaration(limit, start)
+        ) }
 }
 
 find_body(
@@ -287,7 +336,9 @@ find_body(
     start: usize,
     function: Bool
 ) -> Result<TokenRange, ScanError> {
-    if(index < limit) { if(token_is_eof(value, index)) { Result::Err(scan_error(5, index, start)) } else {
+    if(index < limit) { if(token_is_eof(value, index)) { Result::Err(
+        ScanError::IncompleteDeclaration(index, start)
+    ) } else {
             let kind = token_kind_at(value, index);
             let opening = delimiter_open(kind);
             let closing = delimiter_close(kind);
@@ -298,8 +349,7 @@ find_body(
                         start,
                         function
                     ) } else { Result::Err(
-                        scan_error(
-                            1,
+                        ScanError::UnexpectedClosingDelimiter(
                             index,
                             super::lexer::token_count(value)
                         )
@@ -348,7 +398,9 @@ find_body(
                             start
                         ) }
                 } }
-        } } else { Result::Err(scan_error(5, limit, start)) }
+        } } else { Result::Err(
+            ScanError::IncompleteDeclaration(limit, start)
+        ) }
 }
 
 body_range(
@@ -360,7 +412,9 @@ body_range(
     let close = try(matching_close(value, open), @body_range);
     if(close < limit) { Result::Ok(
             TokenRange { start: open, end: close }
-        ) } else { Result::Err(scan_error(5, limit, start)) }
+        ) } else { Result::Err(
+            ScanError::IncompleteDeclaration(limit, start)
+        ) }
 }
 
 find_top_level_eq(
@@ -394,7 +448,9 @@ name_at(
 ) -> Result<Id<String>, ScanError> {
     handle token_ident(value, index) {
         Result::Ok(name) => Result::Ok( name),
-        Result::Err(_) => Result::Err(scan_error(6, index, start))
+        Result::Err(_) => Result::Err(
+            ScanError::ExpectedDeclarationName(index, start)
+        )
     }
 }
 
@@ -478,8 +534,7 @@ classify(
             start,
              name
         ),
-        _ => Result::Err(scan_error(
-            4,
+        _ => Result::Err(ScanError::InvalidDeclarationStart(
             cursor,
             super::lexer::token_count(value)
         ))
@@ -608,7 +663,7 @@ scan_semicolon_shell(
                     Result::Err(_) => scan_state_error(
                         move kind,
                         move name,
-                        scan_error(5, end, start)
+                        ScanError::IncompleteDeclaration(end, start)
                     ),
                     Result::Ok(equal) => {
                         let whole = TokenRange {
@@ -783,11 +838,13 @@ find_module_style(
                         index + 1,
                         limit,
                         start
-                    ) } else { Result::Err(scan_error(
-                        1,
+                    ) } else { Result::Err(
+                        ScanError::UnexpectedClosingDelimiter(
                         index,
                         super::lexer::token_count(value)
-                    )) } } } } else { Result::Err(scan_error(5, limit, start)) }
+                    )) } } } } else { Result::Err(
+                        ScanError::IncompleteDeclaration(limit, start)
+                    ) }
 }
 
 scan_loop_error(
@@ -974,14 +1031,14 @@ encode_scan(
     handle scan(&lexed) {
         Result::Err(error) => {
             ByteBuf::push(&mut *output, 2);
-            ByteBuf::push(&mut *output, error.code);
+            ByteBuf::push(&mut *output, scan_error_code(&error));
             ByteBuf::write_u32_le(
                 &mut *output,
-                wrapping_convert_to_u32(error.token)
+                wrapping_convert_to_u32(scan_error_token(&error))
             );
             ByteBuf::write_u32_le(
                  output,
-                wrapping_convert_to_u32(error.related)
+                wrapping_convert_to_u32(scan_error_related(&error))
             )
         },
         Result::Ok(index) => {
