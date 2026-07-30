@@ -1,0 +1,639 @@
+// The self-hosted compiler pipeline owns source semantics across frontend and
+// backend phase boundaries. Frontend and backend modules remain reusable phase
+// libraries; this module owns orchestration, cross-phase state, and the host
+// application boundary.
+
+use super::backend::emission;
+use super::backend::lowering;
+use super::frontend::bodies;
+use super::frontend::elaboration;
+use super::frontend::headers;
+use super::frontend::lexer;
+use super::frontend::resolution;
+use super::frontend::scanner;
+
+use super::backend::emission::EmissionError;
+use super::backend::lowering::LoweringError;
+use super::frontend::bodies::BodyError;
+use super::frontend::elaboration::ElaborationError;
+use super::frontend::elaboration::InterfaceNominalView;
+use super::frontend::elaboration::InterfaceTypeView;
+use super::frontend::headers::HeaderError;
+use super::frontend::lexer::LexError;
+use super::frontend::resolution::ResolutionError;
+use super::frontend::scanner::ScanError;
+
+pub enum CompileError {
+    Lex(LexError),
+    Scan(ScanError),
+    Headers(HeaderError),
+    ResolutionIndex(ResolutionError),
+    InterfaceCollection(ElaborationError),
+    DeclarationName(u32),
+    BodyParse(u32, BodyError),
+    BodyResolution(u32, ResolutionError),
+    BodyElaboration(u32, ElaborationError),
+    Lowering(u32, LoweringError),
+    InterfaceName(u32),
+    UnsupportedInterfaceType(usize),
+    Emission(EmissionError)
+}
+
+type StageFunctionArena = Arena<
+    lowering::StageFunctionTag,
+    lowering::StageFunction
+>;
+
+type StageTypeArena = Arena<
+    lowering::StageTypeTag,
+    lowering::StageType
+>;
+
+// One session owns all cross-body semantic state. Body syntax and resolution
+// are deliberately absent: those live only in BodyCompilation and are released
+// immediately after the corresponding function is lowered.
+struct CompilerSession<'a> {
+    original: &'a String,
+    headers: headers::ParsedHeaders,
+    declarations: scanner::DeclarationIndex,
+    resolution_index: resolution::ResolutionIndex,
+    interfaces: elaboration::TypedInterfaces
+}
+
+// The body-local compilation object is the sole persistent bridge from parsed
+// syntax to Typed Core. Keeping this object local prevents a whole-program AST
+// or a second persistent HIR from becoming part of the architecture.
+struct BodyCompilation {
+    shell: u32,
+    callable: usize,
+    name: String,
+    syntax: bodies::ParsedBody,
+    resolution: resolution::ResolvedBody
+}
+
+checked_u32(value: usize) -> u32 {
+    checked_usize_to_u32(value) else { unreachable() }
+}
+
+usize_from_u32(value: u32) -> usize {
+    wrapping_convert_to_usize(value)
+}
+
+compile_error_message(value: &CompileError) -> String {
+    handle *value {
+        CompileError::Lex(_) =>
+            "self-host compiler: lexical analysis failed",
+        CompileError::Scan(_) =>
+            "self-host compiler: declaration scanning failed",
+        CompileError::Headers(_) =>
+            "self-host compiler: declaration header parsing failed",
+        CompileError::ResolutionIndex(_) =>
+            "self-host compiler: declaration indexing failed",
+        CompileError::InterfaceCollection(_) =>
+            "self-host compiler: interface collection failed",
+        CompileError::DeclarationName(_) =>
+            "self-host compiler: declaration name lookup failed",
+        CompileError::BodyParse(_, _) =>
+            "self-host compiler: body parsing failed",
+        CompileError::BodyResolution(_, _) =>
+            "self-host compiler: body resolution failed",
+        CompileError::BodyElaboration(_, _) =>
+            "self-host compiler: body elaboration failed",
+        CompileError::Lowering(_, _) =>
+            "self-host compiler: ownership lowering failed",
+        CompileError::InterfaceName(_) =>
+            "self-host compiler: interface name lookup failed",
+        CompileError::UnsupportedInterfaceType(_) =>
+            "self-host compiler: interface contains an unsupported type",
+        CompileError::Emission(_) =>
+            "self-host compiler: bytecode emission failed"
+    }
+}
+
+function_name(
+    session: &CompilerSession,
+    shell: u32
+) -> Result<String, CompileError> {
+    handle scanner::shell_at(
+        &session.declarations,
+        usize_from_u32(shell)
+    ) {
+        Result::Err(_) =>
+            Result::Err(CompileError::DeclarationName(shell)),
+        Result::Ok(declaration) => handle
+            *scanner::shell_name(declaration) {
+            Result::Err(_) =>
+                Result::Err(CompileError::DeclarationName(shell)),
+            Result::Ok(name) => handle lexer::lexeme(
+                headers::parsed_source(&session.headers),
+                name
+            ) {
+                Result::Err(_) =>
+                    Result::Err(CompileError::DeclarationName(shell)),
+                Result::Ok(found) => Result::Ok(*found)
+            }
+        }
+    }
+}
+
+prepare_body(
+    session: &CompilerSession,
+    callable: usize
+) -> Result<BodyCompilation, CompileError> {
+    let shell = elaboration::interface_callable_shell_at(
+        &session.interfaces,
+        callable
+    );
+    let name = try(
+        function_name(session, shell),
+        @prepare_body
+    );
+    let syntax = try(
+        Result::map_err(
+            bodies::parse_function_body(
+                session.original,
+                &session.headers,
+                &session.declarations,
+                usize_from_u32(shell)
+            ),
+            { found => CompileError::BodyParse(shell, found) }
+        ),
+        @prepare_body
+    );
+    let resolved = try(
+        Result::map_err(
+            resolution::resolve_function_body_indexed(
+                &session.resolution_index,
+                &session.headers,
+                &session.declarations,
+                &syntax
+            ),
+            { found => CompileError::BodyResolution(shell, found) }
+        ),
+        @prepare_body
+    );
+    Result::Ok(BodyCompilation {
+        shell: shell,
+        callable: callable,
+        name: name,
+        syntax: syntax,
+        resolution: resolved
+    })
+}
+
+lower_body(
+    session: &mut CompilerSession,
+    body: BodyCompilation
+) -> Result<lowering::StageFunction, CompileError> {
+    let BodyCompilation {
+        shell,
+        callable,
+        name,
+        syntax,
+        resolution: resolved
+    } = move body;
+    let typed = try(
+        Result::map_err(
+            elaboration::elaborate_function_body(
+                session.original,
+                &session.headers,
+                &session.declarations,
+                &mut session.interfaces,
+                &syntax,
+                &resolved
+            ),
+            { found => CompileError::BodyElaboration(shell, found) }
+        ),
+        @lower_body
+    );
+    Result::map_err(
+        lowering::lower_function(
+            name,
+            &session.interfaces,
+            &typed,
+            callable
+        ),
+        { found => CompileError::Lowering(shell, found) }
+    )
+}
+
+lower_functions(
+    session: &mut CompilerSession,
+    index: usize,
+    output: &mut StageFunctionArena
+) -> Result<(), CompileError> {
+    let end = elaboration::interface_callable_count(&session.interfaces);
+    try_for_range(Range::new(index, end), { current => {
+        let body = try(
+            prepare_body(&*session, current),
+            @lower_functions
+        );
+        let function = try(
+            lower_body(&mut *session, body),
+            @lower_functions
+        );
+        handle Arena::alloc(&mut *output, function) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(_) => ()
+        };
+        Result::Ok(())
+    } })
+}
+
+find_entry(
+    program: &lowering::StageProgram,
+    index: usize
+) -> Option<lowering::StageFunctionId> {
+    let count = lowering::stage_program_function_count(program);
+    handle find_range(Range::new(index, count), { current => {
+        let function = lowering::stage_program_function_at(
+            program,
+            lowering::stage_function_id_from_usize(current)
+        );
+        String::eq(
+            lowering::stage_function_name(function),
+            &"main"
+        ) and {
+            lowering::stage_function_parameter_count(function) == 0
+        } and {
+            lowering::artifact_type_raw(
+                lowering::stage_function_result(function)
+            ) == 0
+        }
+    } }) {
+        Option::Some(found) => Option::Some(
+            lowering::stage_function_id_from_usize(found)
+        ),
+        None => None
+    }
+}
+
+interface_name(
+    session: &CompilerSession,
+    raw: u32,
+    detail: u32
+) -> Result<String, CompileError> {
+    handle lexer::lexeme(
+        headers::parsed_source(&session.headers),
+        Id::from_u32(raw)
+    ) {
+        Result::Err(_) =>
+            Result::Err(CompileError::InterfaceName(detail)),
+        Result::Ok(found) => Result::Ok(*found)
+    }
+}
+
+collect_struct_fields(
+    session: &CompilerSession,
+    start: u32,
+    count: u32,
+    ordinal: u32,
+    type_names: &mut Vec<String>,
+    names: &mut Vec<u32>,
+    types: &mut Vec<lowering::ArtifactTypeId>
+) -> Result<(), CompileError> {
+    try_for_range(Range::new(
+        usize_from_u32(ordinal),
+        usize_from_u32(count)
+    ), { current => {
+        let current_ordinal = checked_u32(current);
+        let field = elaboration::interface_field_at_view(
+            &session.interfaces,
+            usize_from_u32(start + current_ordinal)
+        );
+        let name = try(interface_name(
+            session,
+            elaboration::interface_field_view_name(&field),
+            start + current_ordinal
+        ), @collect_struct_fields);
+        Vec::push(
+            &mut *names,
+            checked_u32(Vec::len(&*type_names))
+        );
+        Vec::push(&mut *type_names, name);
+        Vec::push(
+            &mut *types,
+            lowering::artifact_type_id(
+                elaboration::interface_field_view_type(&field)
+            )
+        );
+        Result::Ok(())
+    } })
+}
+
+ordinal_name(value: usize) -> String {
+    let output = Formatter::new();
+    Formatter::append_u64(
+        &mut output,
+        wrapping_convert_to_u64(value)
+    );
+    handle Formatter::finish(output) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+collect_variant_payloads<'a>(
+    payloads: Slice<'a, elaboration::TypeId>,
+    type_names: &mut Vec<String>,
+    names: &mut Vec<u32>,
+    types: &mut Vec<lowering::ArtifactTypeId>
+) {
+    Slice::for_each(payloads, { payload => {
+        Vec::push(
+            &mut *names,
+            checked_u32(Vec::len(&*type_names))
+        );
+        Vec::push(
+            &mut *type_names,
+            ordinal_name(Vec::len(&*types))
+        );
+        Vec::push(
+            &mut *types,
+            lowering::artifact_type_id(Id::to_u32(*payload))
+        )
+    } })
+}
+
+collect_enum_variants(
+    session: &CompilerSession,
+    start: u32,
+    count: u32,
+    ordinal: u32,
+    type_names: &mut Vec<String>,
+    output: &mut Vec<lowering::StageVariant>
+) -> Result<(), CompileError> {
+    try_for_range(Range::new(
+        usize_from_u32(ordinal),
+        usize_from_u32(count)
+    ), { current => {
+        let current_ordinal = checked_u32(current);
+        let variant = usize_from_u32(start + current_ordinal);
+        let name = try(interface_name(
+            session,
+            elaboration::interface_variant_name_at(
+                &session.interfaces,
+                variant
+            ),
+            start + current_ordinal
+        ), @collect_enum_variants);
+        let name_index = checked_u32(Vec::len(&*type_names));
+        Vec::push(&mut *type_names, name);
+        let field_names = Vec::new();
+        let field_types = Vec::new();
+        collect_variant_payloads(
+            elaboration::interface_variant_payloads_at(
+                &session.interfaces,
+                variant
+            ),
+            type_names,
+            &mut field_names,
+            &mut field_types
+        );
+        Vec::push(
+            &mut *output,
+            lowering::enum_variant(
+                name_index,
+                field_names,
+                field_types
+            )
+        );
+        Result::Ok(())
+    } })
+}
+
+collect_types(
+    session: &CompilerSession,
+    index: usize,
+    output: &mut StageTypeArena,
+    type_names: &mut Vec<String>
+) -> Result<(), CompileError> {
+    let end = elaboration::interface_type_count(&session.interfaces);
+    try_for_range(Range::new(index, end), { current => {
+        handle elaboration::interface_type_at(
+            &session.interfaces,
+            current
+        ) {
+            InterfaceTypeView::Tuple(elements) => {
+                let fields = Vec::new();
+                Slice::for_each(elements, { element =>
+                    Vec::push(
+                        &mut fields,
+                        lowering::artifact_type_id(Id::to_u32(*element))
+                    )
+                });
+                handle Arena::alloc(
+                    &mut *output,
+                    lowering::tuple_type(
+                        fields,
+                        if(
+                            elaboration::interface_type_flags_at(
+                                &session.interfaces,
+                                current
+                            ) % 2 == 1
+                        ) { 1 } else { 0 }
+                    )
+                ) {
+                    Result::Err(_) => unreachable(),
+                    Result::Ok(_) => ()
+                };
+                Result::Ok(())
+            },
+            InterfaceTypeView::Nominal(nominal) => handle
+                elaboration::interface_nominal_at_view(
+                    &session.interfaces,
+                    usize_from_u32(nominal)
+                ) {
+                InterfaceNominalView::Struct(shell, start, count) => {
+                    let name = try(
+                        function_name(session, shell),
+                        @collect_types
+                    );
+                    let name_index = checked_u32(Vec::len(&*type_names));
+                    Vec::push(&mut *type_names, name);
+                    let field_names = Vec::new();
+                    let field_types = Vec::new();
+                    try(collect_struct_fields(
+                        session,
+                        start,
+                        count,
+                        0,
+                        type_names,
+                        &mut field_names,
+                        &mut field_types
+                    ), @collect_types);
+                    handle Arena::alloc(
+                        &mut *output,
+                        lowering::struct_type(
+                            name_index,
+                            field_names,
+                            field_types,
+                            if(
+                                elaboration::interface_type_flags_at(
+                                    &session.interfaces,
+                                    current
+                                ) % 2 == 1
+                            ) { 1 } else { 0 }
+                        )
+                    ) {
+                        Result::Err(_) => unreachable(),
+                        Result::Ok(_) => ()
+                    };
+                    Result::Ok(())
+                },
+                InterfaceNominalView::Enum(shell, start, count) => {
+                    let name = try(
+                        function_name(session, shell),
+                        @collect_types
+                    );
+                    let name_index = checked_u32(Vec::len(&*type_names));
+                    Vec::push(&mut *type_names, name);
+                    let variants = Vec::new();
+                    try(collect_enum_variants(
+                        session,
+                        start,
+                        count,
+                        0,
+                        type_names,
+                        &mut variants
+                    ), @collect_types);
+                    handle Arena::alloc(
+                        &mut *output,
+                        lowering::enum_type(
+                            name_index,
+                            variants,
+                            if(
+                                elaboration::interface_type_flags_at(
+                                    &session.interfaces,
+                                    current
+                                ) % 2 == 1
+                            ) { 1 } else { 0 }
+                        )
+                    ) {
+                        Result::Err(_) => unreachable(),
+                        Result::Ok(_) => ()
+                    };
+                    Result::Ok(())
+                }
+            },
+            _ => Result::Err(
+                CompileError::UnsupportedInterfaceType(current)
+            )
+        }
+    } })
+}
+
+prepare_session<'a>(
+    original: &'a String
+) -> Result<CompilerSession<'a>, CompileError> {
+    let source = try(
+        Result::map_err(
+            lexer::lex(original),
+            { found => CompileError::Lex(found) }
+        ),
+        @prepare_session
+    );
+    let declarations = try(
+        Result::map_err(
+            scanner::scan(&source),
+            { found => CompileError::Scan(found) }
+        ),
+        @prepare_session
+    );
+    let parsed_headers = try(
+        Result::map_err(
+            headers::parse(original, source, &declarations),
+            { found => CompileError::Headers(found) }
+        ),
+        @prepare_session
+    );
+    let resolution_index = try(
+        Result::map_err(
+            resolution::build_resolution_index(
+                &parsed_headers,
+                &declarations
+            ),
+            { found => CompileError::ResolutionIndex(found) }
+        ),
+        @prepare_session
+    );
+    let interfaces = try(
+        Result::map_err(
+            elaboration::collect_interfaces(
+                &parsed_headers,
+                &declarations
+            ),
+            { found => CompileError::InterfaceCollection(found) }
+        ),
+        @prepare_session
+    );
+    Result::Ok(CompilerSession {
+        original: original,
+        headers: parsed_headers,
+        declarations: declarations,
+        resolution_index: resolution_index,
+        interfaces: interfaces
+    })
+}
+
+compile_session<'a>(
+    session: CompilerSession<'a>
+) -> Result<Bytes, CompileError> {
+    let functions = Arena::new();
+    let types = Arena::new();
+    let type_names = Vec::new();
+    try(lower_functions(
+        &mut session,
+        0,
+        &mut functions
+    ), @compile_session);
+    // Body elaboration interns structural types into the shared interface arena,
+    // so freeze the emitted type table only after every body has been lowered.
+    try(collect_types(
+        &session,
+        14,
+        &mut types,
+        &mut type_names
+    ), @compile_session);
+    let program = lowering::finish_program(
+        functions,
+        types,
+        type_names
+    );
+    let entry = find_entry(&program, 0);
+    Result::map_err(
+        emission::encode(&program, entry),
+        { found => CompileError::Emission(found) }
+    )
+}
+
+pub compile_source(original: &String) -> Result<Bytes, CompileError> {
+    let session = try(
+        prepare_session(original),
+        @compile_source
+    );
+    compile_session(session)
+}
+
+pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
+    let arguments = process_args();
+    if(Vec::len(&arguments) < 2) {
+        write_diagnostic(
+            "usage: grandiose-self-host-compiler <output.grbc> <input.glorious>"
+        )
+    } else {
+        let output_path = *Vec::index(&arguments, 0);
+        let input_path = *Vec::index(&arguments, 1);
+        let bytes = read_file(input_path);
+        handle String::from_utf8(bytes) {
+            Result::Err(_) =>
+                write_diagnostic("self-host compiler: input is not UTF-8"),
+            Result::Ok(source) => handle compile_source(&source) {
+                Result::Err(error) =>
+                    write_diagnostic(compile_error_message(&error)),
+                Result::Ok(artifact) =>
+                    write_file(output_path, artifact)
+            }
+        }
+    }
+}
