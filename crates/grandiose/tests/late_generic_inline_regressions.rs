@@ -738,6 +738,137 @@ fn range_callback_branded_try_leaves_the_enclosing_function() {
 }
 
 #[test]
+fn slice_for_each_callback_branded_try_fuses_direct_recursion_once() {
+    let owner = r#"
+        struct Edge { value: u32 }
+
+        struct Index { private values: Vec<Edge> }
+
+        struct Headers { private index: Index }
+
+        enum IndexView<'a> {
+            Tuple(Slice<'a, Edge>),
+            Never
+        }
+
+        impl<'a> Use<[0, *]> for IndexView<'a> {}
+
+        headers() -> Headers {
+            let values = Vec::new();
+            Vec::push(&mut values, Edge { value: 1 });
+            Vec::push(&mut values, Edge { value: 1 });
+            Headers { index: Index { values: values } }
+        }
+
+        parsed_index<'a>(value: &'a Headers) -> &'a Index { &value.index }
+
+        index_view<'a>(value: &'a Index, id: u32) -> IndexView<'a> {
+            if(id == 0) {
+                IndexView::Tuple(Vec::as_slice(&value.values))
+            } else {
+                IndexView::Never
+            }
+        }
+
+        edge_value(value: &Edge) -> u32 { value.value }
+    "#;
+
+    let caller = r#"
+        enum ResolveError { Rejected(usize) }
+
+        words() -> Vec<u32> { Vec::new() }
+
+        finish(output: &mut Vec<u32>, accepted: &Vec<u32>) -> usize {
+            Vec::push(&mut *output, wrapping_convert_to_u32(Vec::len(accepted)));
+            Vec::len(output)
+        }
+
+        resolve(
+            headers: &Headers,
+            declarations: &Vec<u32>,
+            output: &mut Vec<u32>,
+            type_id: u32,
+            module: Option<usize>
+        ) -> Result<u32, ResolveError> {
+            let parsed = parsed_index(headers);
+            handle index_view(parsed, type_id) {
+                IndexView::Tuple(children) => if(Slice::is_empty(children)) {
+                    Result::Ok(0)
+                } else {
+                    let accepted_values = words();
+                    Slice::for_each(children, { value => {
+                        let accepted = try(resolve(
+                            headers,
+                            declarations,
+                            &mut *output,
+                            edge_value(value),
+                            module
+                        ), @resolve);
+                        Vec::push(&mut accepted_values, accepted)
+                    } });
+                    finish(output, &accepted_values);
+                    Result::Ok(wrapping_convert_to_u32(
+                        Vec::len(&accepted_values)
+                    ))
+                },
+                IndexView::Never => Result::Ok(type_id)
+            }
+        }
+
+        answer() -> usize {
+            let headers = headers();
+            let declarations = words();
+            let output = Vec::new();
+            handle resolve(
+                &headers,
+                &declarations,
+                &mut output,
+                0,
+                Option::Some(7)
+            ) {
+                Result::Err(_) => 50 + Vec::len(&output),
+                Result::Ok(value) => wrapping_convert_to_usize(value)
+            }
+        }
+
+        main() -> { () }
+    "#;
+
+    let bundle = SourceBundle::distributed(
+        Segment::new("slice-view-owner.glorious", owner),
+        [Segment::new("slice-view-caller.glorious", caller)],
+    );
+    let phases = grandiose::compile_bundle_to_phases(&bundle).unwrap();
+    let resolve = phases
+        .core
+        .functions
+        .iter()
+        .find(|function| function.name == "resolve")
+        .unwrap();
+    let control_loops = format!("{:#?}", resolve.body)
+        .match_indices("kind: ControlLoop {")
+        .count();
+    assert_eq!(
+        control_loops, 1,
+        "the direct recursive slice helper should fuse into one control loop"
+    );
+    assert_eq!(
+        {
+            let answer = phases
+                .artifact
+                .functions
+                .iter()
+                .position(|function| function.name == "answer")
+                .unwrap() as u32;
+            Vm::new(verify(phases.artifact).unwrap())
+                .run(answer, vec![])
+                .unwrap()
+        },
+        Value::U64(2)
+    );
+}
+
+#[test]
 fn nested_fused_loop_preserves_enclosing_range_continuation() {
     let source = r#"
         check_index(index: usize, rejected: usize) -> Result<(), usize> {
@@ -791,6 +922,51 @@ fn nested_fused_loop_preserves_enclosing_range_continuation() {
             "failure"
         ),
         Value::U64(2)
+    );
+}
+
+#[test]
+fn nested_same_range_helper_preserves_both_control_loops() {
+    let source = r#"
+        nested_sum() -> usize {
+            for_range(Range::new(0, 3), { outer => {
+                for_range(Range::new(0, 2), { inner => {
+                    outer;
+                    inner;
+                    ()
+                } })
+            } });
+            wrapping_convert_to_usize(42)
+        }
+
+        main() -> { () }
+    "#;
+
+    let phases = grandiose::compile_source_to_phases("nested-same-range.glorious", source).unwrap();
+    let nested = phases
+        .core
+        .functions
+        .iter()
+        .find(|function| function.name == "nested_sum")
+        .unwrap();
+    assert_eq!(
+        format!("{:#?}", nested.body)
+            .match_indices("kind: ControlLoop {")
+            .count(),
+        2,
+        "each nested invocation of the same recursive helper needs its own loop context"
+    );
+    let function = phases
+        .artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "nested_sum")
+        .unwrap() as u32;
+    assert_eq!(
+        Vm::new(verify(phases.artifact).unwrap())
+            .run(function, vec![])
+            .unwrap(),
+        Value::U64(42)
     );
 }
 

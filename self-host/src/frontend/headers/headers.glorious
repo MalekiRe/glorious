@@ -19,7 +19,7 @@ pub struct TypeEdge { value: TypeId, position: u32 }
 // kind_code:
 // 1 path, 2 shared reference, 3 unique reference, 4 tuple,
 // 5 application, 6 never.
-pub struct TypeNode {
+struct TypeNode {
     kind_code: u8,
     tokens: HeaderTokenRange,
     names: HeaderRange,
@@ -27,6 +27,19 @@ pub struct TypeNode {
     constructor: Option<TypeId>,
     lifetime: Option<NameUse>
 }
+
+// Semantic consumers borrow the parsed type graph through this view rather
+// than depending on its arena kind codes and packed ranges.
+pub enum HeaderTypeView<'a> {
+    Path(usize, Slice<'a, NameUse>),
+    SharedReference(usize, Option<usize>, TypeId),
+    UniqueReference(usize, Option<usize>, TypeId),
+    Tuple(usize, Slice<'a, TypeEdge>),
+    Application(usize, TypeId, Slice<'a, TypeEdge>),
+    Never(usize)
+}
+
+impl<'a> Use<[0, *]> for HeaderTypeView<'a> {}
 
 // kind_code: 1 type, 2 lifetime, 3 effect row.
 pub struct GenericParam {
@@ -173,8 +186,6 @@ pub range_start(value: &HeaderRange) -> u32 { value.start }
 
 pub range_count(value: &HeaderRange) -> u32 { value.count }
 
-pub type_index(value: &TypeId) -> u32 { Id::to_u32(*value) }
-
 pub callable_count(value: &HeaderIndex) -> usize { Vec::len(&value.callables) }
 
 pub header_count(value: &NominalIndex) -> usize { Vec::len(&value.order_kinds) }
@@ -304,7 +315,7 @@ pub parameter_name_raw(value: &Parameter) -> u32 {
 
 pub parameter_name_token(value: &Parameter) -> usize { value.name_token }
 
-pub parameter_type_index(value: &Parameter) -> u32 { Id::to_u32(value.ty) }
+pub parameter_type(value: &Parameter) -> TypeId { value.ty }
 
 pub callable_generic_count(value: &CallableHeader) -> u32 {
     value.generics.count
@@ -316,77 +327,89 @@ pub callable_has_effects(value: &CallableHeader) -> Bool {
 
 pub callable_result(value: &CallableHeader) -> Option<TypeId> { value.result }
 
-type_node_at_raw<'a>(value: &'a HeaderIndex, index: u32) -> &'a TypeNode {
-    Arena::index(&value.types, Id::from_u32(index))
-}
-
-pub type_kind_code_at(value: &HeaderIndex, index: u32) -> u8 {
-    let node = type_node_at_raw(value, index);
-    node.kind_code
-}
-
-pub type_child_count_at(value: &HeaderIndex, index: u32) -> u32 {
-    let node = type_node_at_raw(value, index);
-    node.children.count
-}
-
-pub type_child_index_at(
-    value: &HeaderIndex,
-    index: u32,
-    ordinal: u32
-) -> u32 {
-    let node = type_node_at_raw(value, index);
-    type_edge_index_at(value, node.children.start + ordinal)
-}
-
-pub type_edge_index_at(value: &HeaderIndex, index: u32) -> u32 {
-    let edge = Vec::index(
-        &value.type_edges,
-        wrapping_convert_to_usize(index)
-    );
-    Id::to_u32(edge.value)
-}
-
-pub type_lifetime_name_at(
-    value: &HeaderIndex,
-    index: u32
-) -> Option<Id<String>> {
-    let node = type_node_at_raw(value, index);
-    handle Option::as_ref(&node.lifetime) {
-        Result::Err(_) => None,
-        Result::Ok(found) => Option::Some(found.name)
+header_slice<'a, T>(
+    values: &'a Vec<T>,
+    range: &HeaderRange
+) -> Slice<'a, T> {
+    handle Slice::subslice(
+        Vec::as_slice(values),
+        wrapping_convert_to_usize(range.start),
+        wrapping_convert_to_usize(range.count)
+    ) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
     }
 }
 
-pub type_name_count_at(value: &HeaderIndex, index: u32) -> u32 {
-    let node = type_node_at_raw(value, index);
-    node.names.count
+type_edges<'a>(
+    value: &'a HeaderIndex,
+    range: &HeaderRange
+) -> Slice<'a, TypeEdge> {
+    header_slice(&value.type_edges, range)
 }
 
-pub type_name_raw_at(
-    value: &HeaderIndex,
-    index: u32,
-    ordinal: u32
-) -> u32 {
-    let node = type_node_at_raw(value, index);
-    let name = Vec::index(
-        &value.names,
-        wrapping_convert_to_usize(node.names.start + ordinal)
-    );
-    Id::to_u32(name.name)
+reference_type<'a>(value: Slice<'a, TypeEdge>) -> TypeId {
+    handle Slice::first(value) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(edge) => edge.value
+    }
 }
 
-pub type_name_token_at(
-    value: &HeaderIndex,
-    index: u32,
-    ordinal: u32
-) -> usize {
-    let node = type_node_at_raw(value, index);
-    let name = Vec::index(
-        &value.names,
-        wrapping_convert_to_usize(node.names.start + ordinal)
-    );
-    name.token
+pub header_type_view<'a>(
+    value: &'a HeaderIndex,
+    id: TypeId
+) -> HeaderTypeView<'a> {
+    let node = Arena::index(&value.types, id);
+    let token = node.tokens.start;
+    handle node.kind_code {
+        1 => HeaderTypeView::Path(
+            token,
+            header_slice(&value.names, &node.names)
+        ),
+        2 => HeaderTypeView::SharedReference(
+            token,
+            handle Option::as_ref(&node.lifetime) {
+                Result::Err(_) => None,
+                Result::Ok(found) => Option::Some(found.token)
+            },
+            reference_type(type_edges(value, &node.children))
+        ),
+        3 => HeaderTypeView::UniqueReference(
+            token,
+            handle Option::as_ref(&node.lifetime) {
+                Result::Err(_) => None,
+                Result::Ok(found) => Option::Some(found.token)
+            },
+            reference_type(type_edges(value, &node.children))
+        ),
+        4 => HeaderTypeView::Tuple(
+            token,
+            type_edges(value, &node.children)
+        ),
+        5 => HeaderTypeView::Application(
+            token,
+            handle node.constructor {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            },
+            type_edges(value, &node.children)
+        ),
+        6 => HeaderTypeView::Never(token),
+        _ => unreachable()
+    }
+}
+
+pub name_use_name(value: &NameUse) -> Id<String> { value.name }
+
+pub name_use_token(value: &NameUse) -> usize { value.token }
+
+pub type_edge_type(value: &TypeEdge) -> TypeId { value.value }
+
+pub variant_payloads<'a>(
+    value: &'a HeaderIndex,
+    variant: &VariantHeader
+) -> Slice<'a, TypeEdge> {
+    type_edges(value, &variant.fields)
 }
 
 pub token_range_start(value: &HeaderTokenRange) -> usize { value.start }
@@ -404,15 +427,6 @@ pub fixity_operator_start(value: &FixityHeader) -> usize {
 }
 
 pub fixity_operator_end(value: &FixityHeader) -> usize { value.operator.end }
-
-pub type_at<'a>(value: &'a HeaderIndex, index: usize) -> Option<&'a TypeNode> {
-    if(index < Arena::len(&value.types)) {
-        Arena::get(
-            &value.types,
-            Id::from_u32(wrapping_convert_to_u32(index))
-        )
-    } else { None }
-}
 
 pub alias_generics(value: &TypeAliasHeader) -> &HeaderRange { &value.generics }
 
@@ -453,8 +467,6 @@ pub enum_variants(value: &EnumHeader) -> &HeaderRange { &value.variants }
 pub variant_name_raw(value: &VariantHeader) -> u32 { Id::to_u32(value.name) }
 
 pub variant_name_token(value: &VariantHeader) -> usize { value.name_token }
-
-pub variant_fields(value: &VariantHeader) -> &HeaderRange { &value.fields }
 
 pub error_code(value: &HeaderError) -> u8 {
     handle *value {

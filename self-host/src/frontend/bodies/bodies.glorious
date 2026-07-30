@@ -109,6 +109,12 @@ struct OperatorUse {
     precedence: u8
 }
 
+struct PendingField {
+    name: Id<String>,
+    name_token: usize,
+    expression: ExprId
+}
+
 enum PendingStatement {
     Let(usize, ExprId),
     Expression(ExprId)
@@ -124,6 +130,7 @@ struct PendingHandleArm {
 }
 
 impl Use<[0, *]> for OperatorUse {}
+impl Use<[0, *]> for PendingField {}
 impl Use<[0, *]> for PendingStatement {}
 
 pub error_code(value: &BodyError) -> u8 {
@@ -462,27 +469,6 @@ push_name(value: &mut Vec<ExpressionName>, name: ExpressionName) {
     Vec::push(&mut *value, name)
 }
 
-word_count(value: &Vec<u32>) -> usize { Vec::len(value) }
-
-word_at(value: &Vec<u32>, index: usize) -> u32 {
-    *Vec::index(value, index)
-}
-
-push_word(value: &mut Vec<u32>, word: u32) {
-    Vec::push(&mut *value,  word)
-}
-
-pop_word(value: &mut Vec<u32>) -> u32 {
-    handle Vec::pop(&mut *value) {
-        Result::Err(_) => unreachable(),
-        Result::Ok(found) => found
-    }
-}
-
-expr_id_at(value: &Vec<u32>, index: usize) -> ExprId {
-    Id::from_u32(word_at(value, index))
-}
-
 pop_operator(value: &mut Vec<OperatorUse>) -> OperatorUse {
     handle Vec::pop(&mut *value) {
         Result::Err(_) => unreachable(),
@@ -675,14 +661,14 @@ push_binary(
 
 push_argument_edges(
     value: &mut BodyParser,
-    arguments: &Vec<u32>,
+    arguments: &Vec<ExprId>,
     index: usize
 ) {
-    for_range(Range::new(index, word_count(arguments)), { current =>
+    for_range(Range::new(index, Vec::len(arguments)), { current =>
         Vec::push(
             &mut value.edges,
             ExprEdge {
-                value: expr_id_at(arguments, current),
+                value: *Vec::index(arguments, current),
                 position: 1,
                 metadata: 0
             }
@@ -693,7 +679,7 @@ push_argument_edges(
 push_call(
     value: &mut BodyParser,
     callee: ExprId,
-    arguments: &Vec<u32>,
+    arguments: &Vec<ExprId>,
     start: usize,
     end: usize
 ) -> ExprId {
@@ -716,15 +702,15 @@ push_call(
 
 push_expression_edges(
     value: &mut BodyParser,
-    expressions: &Vec<u32>,
+    expressions: &Vec<ExprId>,
     index: usize,
     position: u8
 ) {
-    for_range(Range::new(index, word_count(expressions)), { current =>
+    for_range(Range::new(index, Vec::len(expressions)), { current =>
         Vec::push(
             &mut value.edges,
             ExprEdge {
-                value: expr_id_at(expressions, current),
+                value: *Vec::index(expressions, current),
                 position: position,
                 metadata: u32_from_usize(current)
             }
@@ -734,7 +720,7 @@ push_expression_edges(
 
 push_tuple(
     value: &mut BodyParser,
-    elements: &Vec<u32>,
+    elements: &Vec<ExprId>,
     start: usize,
     end: usize
 ) -> ExprId {
@@ -751,25 +737,21 @@ push_tuple(
     )
 }
 
-field_count(value: &Vec<u32>) -> usize {
-    word_count(value) / 3
-}
-
 push_struct_fields(
     value: &mut BodyParser,
-    fields: &Vec<u32>,
+    fields: &Vec<PendingField>,
     index: usize
 ) {
-    for_range(Range::new(index, field_count(fields)), { current => {
-        let base = current * 3;
+    for_range(Range::new(index, Vec::len(fields)), { current => {
+        let field = Vec::index(fields, current);
         push_name(&mut value.names, ExpressionName::Identifier(
-            Id::from_u32(word_at(fields, base)),
-            usize_from_u32(word_at(fields, base + 1))
+            field.name,
+            field.name_token
         ));
         Vec::push(
             &mut value.edges,
             ExprEdge {
-                value: Id::from_u32(word_at(fields, base + 2)),
+                value: field.expression,
                 position: 1,
                 // Name zero is the constructed nominal.
                 metadata: u32_from_usize(current) + 1
@@ -781,7 +763,7 @@ push_struct_fields(
 push_struct(
     value: &mut BodyParser,
     constructor: ExprId,
-    fields: &Vec<u32>,
+    fields: &Vec<PendingField>,
     start: usize,
     end: usize
 ) -> ExprId {
@@ -1323,7 +1305,7 @@ parse_tuple_tail(
     owner: Option<usize>,
     depth: u16,
     start: usize,
-    elements: &mut Vec<u32>
+    elements: &mut Vec<ExprId>
 ) -> Result<ExprId, BodyError> {
     if(value.cursor < value.limit) {
         if(super::lexer::token_code_at(source, value.cursor)
@@ -1349,7 +1331,7 @@ parse_tuple_tail(
                     ),
                     @parse_tuple_tail
                 );
-                push_word(&mut *elements, Id::to_u32(element));
+                Vec::push(&mut *elements, element);
                 if(value.cursor < value.limit) {
                     handle
                         super::lexer::token_code_at(source, value.cursor) {
@@ -1862,10 +1844,7 @@ parse_atom(
                                     },
                                     17 => {
                                         let elements = Vec::new();
-                                        push_word(
-                                            &mut elements,
-                                            Id::to_u32(child)
-                                        );
+                                        Vec::push(&mut elements, child);
                                         value.cursor = value.cursor
                                             + 1;
                                         parse_tuple_tail(
@@ -1931,7 +1910,7 @@ parse_call_arguments(
     value: &mut BodyParser,
     owner: Option<usize>,
     depth: u16,
-    arguments: &mut Vec<u32>,
+    arguments: &mut Vec<ExprId>,
     open: usize
 ) -> Result<(), BodyError> {
     if(value.cursor < value.limit) {
@@ -1955,7 +1934,7 @@ parse_call_arguments(
                     ),
                     @parse_call_arguments
                 );
-                push_word(&mut *arguments, Id::to_u32(argument));
+                Vec::push(&mut *arguments, argument);
                 if(value.cursor < value.limit) {
                     handle
                         super::lexer::token_code_at(source, value.cursor) {
@@ -2003,7 +1982,7 @@ parse_struct_fields(
     constructor: ExprId,
     start: usize,
     open: usize,
-    fields: &mut Vec<u32>
+    fields: &mut Vec<PendingField>
 ) -> Result<ExprId, BodyError> {
     if(value.cursor < value.limit) {
         if(super::lexer::token_code_at(source, value.cursor)
@@ -2038,17 +2017,13 @@ parse_struct_fields(
                                         ),
                                         @parse_struct_fields
                                     );
-                                    push_word(
+                                    Vec::push(
                                         &mut *fields,
-                                        Id::to_u32(name)
-                                    );
-                                    push_word(
-                                        &mut *fields,
-                                        u32_from_usize(name_token)
-                                    );
-                                    push_word(
-                                        &mut *fields,
-                                        Id::to_u32(field)
+                                        PendingField {
+                                            name: name,
+                                            name_token: name_token,
+                                            expression: field
+                                        }
                                     );
                                     if(value.cursor < value.limit) {
                                         handle

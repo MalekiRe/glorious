@@ -1407,6 +1407,14 @@ enum LateInlineLetExpectation {
     Binder(String),
 }
 
+#[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
+struct LateInlineKey {
+    name: String,
+    span: (usize, usize),
+    static_labels: Vec<Option<String>>,
+    static_closures: Vec<Option<(usize, usize)>>,
+}
+
 #[derive(Clone)]
 struct ActiveLateControlLoop {
     control: core::ControlLoopId,
@@ -1539,7 +1547,7 @@ struct CoreLowerer<'a> {
     /// every predecessor. This avoids manufacturing branch-conditional loan
     /// state for observational `is` decisions.
     defer_branch_region_ends: u32,
-    late_inline_stack: BTreeSet<(String, usize, usize)>,
+    late_inline_stack: BTreeSet<LateInlineKey>,
     next_control_loop: u32,
     active_late_control_loops: BTreeMap<String, ActiveLateControlLoop>,
     /// Source names live after the statement currently being lowered.
@@ -26413,6 +26421,26 @@ impl<'a> CoreLowerer<'a> {
             .map(|signature| signature.result)
     }
 
+    fn planned_call_result(&mut self, expression: &Expr) -> Option<TypeId> {
+        if let Some(result) = self.planned_direct_call_result(expression) {
+            return Some(result);
+        }
+        let body = self.body_instance.clone()?;
+        let expression_ordinal = self.expression_ordinal(expression)?;
+        let target = self
+            .specialization_graph
+            .direct_calls
+            .get(&specialization::CallSiteKey {
+                body,
+                expression_ordinal,
+            })?
+            .clone();
+        let template = self.specialization_graph.templates.get(&target.template)?;
+        let substitutions = specialization::substitutions_for_key(template, &target);
+        let result = specialization::substitute(&template.result, &substitutions)?;
+        self.late_closure_type_id(&result)
+    }
+
     fn static_label_argument(&self, expression: &Expr) -> Option<crate::ast::LabelSyntax> {
         match &expression.kind {
             ExprKind::LabelReference(label)
@@ -26774,7 +26802,7 @@ impl<'a> CoreLowerer<'a> {
         {
             return false;
         }
-        let (recursive_occurrences, tail_recursive) =
+        let (recursive_call_sites, tail_recursive) =
             Self::late_control_recursion_shape(&target.body, &target.name);
         let forwarded_callbacks = forwarded
             .iter()
@@ -26787,7 +26815,7 @@ impl<'a> CoreLowerer<'a> {
                     .map(|_| target.params[index].name.as_str())
             })
             .collect::<Vec<_>>();
-        let eligible = recursive_occurrences != 0
+        let eligible = !recursive_call_sites.is_empty()
             && tail_recursive
             && unit_control_result(target)
             && !forwarded_callbacks.is_empty()
@@ -27140,14 +27168,23 @@ impl<'a> CoreLowerer<'a> {
     /// vocabulary used by the distributed range walkers; an ordinary call
     /// argument, initializer, assignment, or nested runtime closure is not a
     /// tail position.
-    fn late_control_recursion_shape(expression: &Expr, name: &str) -> (usize, bool) {
-        fn visit(expression: &Expr, name: &str, tail: bool, found: &mut usize, valid: &mut bool) {
+    fn late_control_recursion_shape(
+        expression: &Expr,
+        name: &str,
+    ) -> (BTreeSet<(usize, usize)>, bool) {
+        fn visit(
+            expression: &Expr,
+            name: &str,
+            tail: bool,
+            found: &mut BTreeSet<(usize, usize)>,
+            valid: &mut bool,
+        ) {
             match &expression.kind {
                 ExprKind::Call(callee, arguments) => {
                     let direct = matches!(&callee.kind, ExprKind::Variable(path)
                         if path.len() == 1 && path[0].as_ref() == name);
                     if direct {
-                        *found += 1;
+                        found.insert((expression.span.start, expression.span.end));
                         *valid &= tail;
                         for argument in arguments.iter() {
                             visit(argument, name, false, found, valid);
@@ -27258,7 +27295,7 @@ impl<'a> CoreLowerer<'a> {
                 | ExprKind::LabelReference(_) => {}
             }
         }
-        let mut found = 0;
+        let mut found = BTreeSet::new();
         let mut valid = true;
         visit(expression, name, true, &mut found, &mut valid);
         (found, valid)
@@ -27551,22 +27588,41 @@ impl<'a> CoreLowerer<'a> {
                 _ => self.static_closure_argument(argument),
             })
             .collect::<Vec<_>>();
+        let (recursive_call_sites, tail_recursive) =
+            Self::late_control_recursion_shape(&function.body, name);
+        if self.active_late_control_loops.contains_key(name)
+            && recursive_call_sites.contains(&(span.start, span.end))
+        {
+            return self.continue_late_control_loop(
+                name,
+                arguments,
+                &label_arguments,
+                &closure_arguments,
+                span,
+            );
+        }
         // Re-entering the same generic control helper at a different source
         // call site is ordinary higher-order nesting, not source recursion.
         // Keying only by the declaration name falsely rejected expressions
         // such as nested lazy `and` calls. A genuine recursive body revisits
         // its fixed call site and is still caught on the next expansion.
-        let inline_key = (name.to_owned(), span.start, span.end);
+        let inline_key = LateInlineKey {
+            name: name.to_owned(),
+            span: (span.start, span.end),
+            static_labels: label_arguments
+                .iter()
+                .map(|label| label.as_ref().map(|label| label.name.to_string()))
+                .collect(),
+            static_closures: closure_arguments
+                .iter()
+                .map(|closure| {
+                    closure
+                        .as_ref()
+                        .map(|closure| (closure.source.span.start, closure.source.span.end))
+                })
+                .collect(),
+        };
         if self.late_inline_stack.contains(&inline_key) {
-            if self.active_late_control_loops.contains_key(name) {
-                return self.continue_late_control_loop(
-                    name,
-                    arguments,
-                    &label_arguments,
-                    &closure_arguments,
-                    span,
-                );
-            }
             return Err(vec![unsupported(
                 span,
                 "recursive late generic specialization",
@@ -27623,8 +27679,7 @@ impl<'a> CoreLowerer<'a> {
                 .skip(index + 1)
                 .all(|argument| !expression_mentions_name(argument, &param.name))
         });
-        let (recursive_occurrences, tail_recursive) =
-            Self::late_control_recursion_shape(&function.body, name);
+        let recursive_occurrences = recursive_call_sites.len();
         let runtime_parameters = parameter_expectations
             .iter()
             .enumerate()
@@ -27830,17 +27885,24 @@ impl<'a> CoreLowerer<'a> {
             }
             previous_type_substitutions.push((key, previous));
         }
-        if let Some(context) = &control_context {
+        let previous_control_context = if let Some(context) = &control_context {
             self.active_late_control_loops
-                .insert(name.to_owned(), context.clone());
-        }
+                .insert(name.to_owned(), context.clone())
+        } else {
+            self.active_late_control_loops.remove(name)
+        };
         self.late_inline_continuation_locals
             .push(continuation_locals);
         let result = self.block(&statements, span, expected);
         self.late_inline_continuation_locals
             .pop()
             .expect("late-inline continuation stack must remain balanced");
-        self.active_late_control_loops.remove(name);
+        if let Some(previous) = previous_control_context {
+            self.active_late_control_loops
+                .insert(name.to_owned(), previous);
+        } else {
+            self.active_late_control_loops.remove(name);
+        }
         for (key, previous) in previous_type_substitutions.into_iter().rev() {
             if let Some(previous) = previous {
                 self.late_inline_type_substitutions.insert(key, previous);
@@ -28746,11 +28808,15 @@ impl<'a> CoreLowerer<'a> {
             typeck::ProvisionalType::Predefined(name) => {
                 scalar_type(name).or_else(|| self.nominals.get(name).map(|nominal| nominal.id))
             }
-            typeck::ProvisionalType::Nominal(instance) => {
-                let name = if instance.arguments.is_empty() {
-                    instance.declaration.0.clone()
+            typeck::ProvisionalType::Nominal(_) => {
+                let grounded = self.ground_late_closure_type(ty)?;
+                let typeck::ProvisionalType::Nominal(grounded) = grounded else {
+                    unreachable!("grounding a nominal preserves its outer constructor")
+                };
+                let name = if grounded.arguments.is_empty() {
+                    grounded.declaration.0.clone()
                 } else {
-                    encode_nominal_instance(instance)
+                    encode_nominal_instance(&grounded)
                 };
                 self.nominals.get(&name).map(|nominal| nominal.id)
             }
@@ -28794,6 +28860,67 @@ impl<'a> CoreLowerer<'a> {
             typeck::ProvisionalType::Callable(_) => None,
             typeck::ProvisionalType::Const(_) => None,
         }
+    }
+
+    fn ground_late_closure_type(
+        &self,
+        ty: &typeck::ProvisionalType,
+    ) -> Option<typeck::ProvisionalType> {
+        self.ground_late_closure_type_inner(ty, &mut BTreeSet::new())
+    }
+
+    fn ground_late_closure_type_inner(
+        &self,
+        ty: &typeck::ProvisionalType,
+        visiting: &mut BTreeSet<typeck::GenericParamKey>,
+    ) -> Option<typeck::ProvisionalType> {
+        Some(match ty {
+            typeck::ProvisionalType::Predefined(_) | typeck::ProvisionalType::Const(_) => {
+                ty.clone()
+            }
+            typeck::ProvisionalType::Nominal(instance) => {
+                typeck::ProvisionalType::Nominal(typeck::NominalInstanceKey {
+                    declaration: instance.declaration.clone(),
+                    arguments: instance
+                        .arguments
+                        .iter()
+                        .map(|argument| self.ground_late_closure_type_inner(argument, visiting))
+                        .collect::<Option<Vec<_>>>()?,
+                })
+            }
+            typeck::ProvisionalType::Tuple(elements) => typeck::ProvisionalType::Tuple(
+                elements
+                    .iter()
+                    .map(|element| self.ground_late_closure_type_inner(element, visiting))
+                    .collect::<Option<Vec<_>>>()?,
+            ),
+            typeck::ProvisionalType::Shared(referent) => typeck::ProvisionalType::Shared(Box::new(
+                self.ground_late_closure_type_inner(referent, visiting)?,
+            )),
+            typeck::ProvisionalType::Unique(referent) => typeck::ProvisionalType::Unique(Box::new(
+                self.ground_late_closure_type_inner(referent, visiting)?,
+            )),
+            typeck::ProvisionalType::Param(param) => {
+                if !visiting.insert(param.clone()) {
+                    return None;
+                }
+                let specialization::BodyInstanceKey::Specialization(key) =
+                    self.body_instance.as_ref()?
+                else {
+                    return None;
+                };
+                let template = self.specialization_graph.templates.get(&key.template)?;
+                let substitutions = specialization::substitutions_for_key(template, key);
+                let specialization::SpecializationArgument::Type(ty) = substitutions.get(param)?
+                else {
+                    return None;
+                };
+                let grounded = self.ground_late_closure_type_inner(ty, visiting);
+                visiting.remove(param);
+                grounded?
+            }
+            typeck::ProvisionalType::Callable(_) => return None,
+        })
     }
 
     fn lower_late_closure(
@@ -32206,16 +32333,18 @@ impl<'a> CoreLowerer<'a> {
                     .signatures
                     .get(path[0].as_ref())
                     .map(|signature| signature.result)
-                    .or_else(|| {
-                        let [value, alternative] = arguments.as_slice() else {
-                            return None;
-                        };
-                        (path[0].as_ref() == "or").then(|| {
+                    .or_else(|| match (path[0].as_ref(), arguments.as_slice()) {
+                        ("and" | "or", [value, alternative]) => {
                             let value = self.static_local_expression_type(value)?;
                             let alternative =
                                 self.static_local_expression_type(tail_expression(alternative))?;
                             (value == alternative).then_some(value)
-                        })?
+                        }
+                        ("not", [value]) => {
+                            let value = self.static_local_expression_type(value)?;
+                            self.is_source_bool_type(value).then_some(value)
+                        }
+                        _ => None,
                     }),
                 _ => None,
             },
@@ -32288,6 +32417,7 @@ impl<'a> CoreLowerer<'a> {
                     | BinaryOp::GtEq,
                 ..
             } => self.source_bool_type_id(),
+            ExprKind::Is { .. } => self.source_bool_type_id(),
             _ => None,
         }
     }
@@ -35553,7 +35683,16 @@ impl<'a> CoreLowerer<'a> {
                                 || self.static_closure_argument(argument).is_some()
                         }))
                 {
-                    return self.inline_late_generic_call(source_name, arguments, span, expected);
+                    let planned_result = self
+                        .planned_call_result(expression)
+                        .or(expected)
+                        .or_else(|| self.static_local_expression_type(expression));
+                    return self.inline_late_generic_call(
+                        source_name,
+                        arguments,
+                        span,
+                        planned_result,
+                    );
                 }
                 let deferred_target = if source_name.starts_with("$trait_deferred$")
                     && self.planned_call(expression).is_some()
@@ -35589,6 +35728,8 @@ impl<'a> CoreLowerer<'a> {
                         }
                     ) || self
                         .provisional_handler_result(condition.span)
+                        .or_else(|| self.planned_call_result(condition))
+                        .or_else(|| self.static_local_expression_type(condition))
                         .is_some_and(|ty| self.is_source_bool_type(ty))
                 } else {
                     false
@@ -36706,8 +36847,9 @@ impl<'a> CoreLowerer<'a> {
                     // concrete result. Preserve that result as context for
                     // generic constructors in the cloned template body.
                     let planned_result = self
-                        .planned_direct_call_result(expression)
-                        .or(expected);
+                        .planned_call_result(expression)
+                        .or(expected)
+                        .or_else(|| self.static_local_expression_type(expression));
                     if let Some(planned_result) = planned_result {
                         self.check(span, expected, planned_result)?;
                     }
@@ -41365,6 +41507,11 @@ impl MirLowerer {
                     if let Some(initialized) = initialized.get_mut(*field as usize) {
                         *initialized = false;
                     }
+                }
+            }
+            mir::InstructionKind::Copy { dst, src } => {
+                if let Some(loan) = self.loan_of.get(&src.register).copied() {
+                    self.loan_of.insert(*dst, loan);
                 }
             }
             mir::InstructionKind::Move { dst, src } => {

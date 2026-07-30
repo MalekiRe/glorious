@@ -1626,7 +1626,7 @@ fn verify_function(
             reference_return_parameter(a, fid, &mut Vec::new())?;
         }
     }
-    let loan_states = verify_loans(a, fid, f, &label_states, &loan_live)?;
+    let loan_states = verify_loans(a, fid, f, &enum_facts, &label_states, &loan_live)?;
     let mut entry = vec![false; f.register_types.len()];
     entry[0] = f.receiver_mode.is_some();
     entry[1..1 + f.params.len()].fill(true);
@@ -11279,6 +11279,7 @@ fn verify_loans(
     a: &Artifact,
     fid: u32,
     f: &Function,
+    enum_facts: &[Vec<Option<u32>>],
     label_states: &[Vec<LabelEntry>],
     live_registers: &[Vec<bool>],
 ) -> Result<Vec<Vec<CarrierLoans>>, VerifyError> {
@@ -11828,19 +11829,13 @@ fn verify_loans(
                     return Err(conflict(*src));
                 }
                 let mut projected = Vec::new();
-                let enum_variants = match type_at(a, f.register_types[*src as usize])? {
-                    Type::Enum { variants, .. } => u32::try_from(variants.len()).ok(),
-                    _ => None,
-                };
+                let prefix = enum_facts[pc as usize][*src as usize]
+                    .map(|variant| vec![u32::MAX - variant, *field])
+                    .unwrap_or_else(|| vec![*field]);
                 loans[*src as usize].retain(|loan| {
-                    let enum_match = enum_variants.is_some_and(|count| {
-                        loan.path.len() >= 2
-                            && u32::MAX - loan.path[0] < count
-                            && loan.path[1] == *field
-                    });
-                    if enum_match || loan.path.first() == Some(field) {
+                    if loan.path.starts_with(&prefix) {
                         let mut loan = loan.clone();
-                        loan.path.drain(..if enum_match { 2 } else { 1 });
+                        loan.path.drain(..prefix.len());
                         projected.push(loan);
                         false
                     } else {
@@ -11859,28 +11854,15 @@ fn verify_loans(
                 if conflicts(&place, false, None, &loans) {
                     return Err(conflict(*src));
                 }
-                let enum_variants = match type_at(a, f.register_types[*src as usize])? {
-                    Type::Enum { variants, .. } => u32::try_from(variants.len()).ok(),
-                    _ => None,
-                };
+                let prefix = enum_facts[pc as usize][*src as usize]
+                    .map(|variant| vec![u32::MAX - variant, *field])
+                    .unwrap_or_else(|| vec![*field]);
                 let mut projected = loans[*src as usize]
                     .iter()
-                    .filter(|loan| {
-                        loan.path.first() == Some(field)
-                            || enum_variants.is_some_and(|count| {
-                                loan.path.len() >= 2
-                                    && u32::MAX - loan.path[0] < count
-                                    && loan.path[1] == *field
-                            })
-                    })
+                    .filter(|loan| loan.path.starts_with(&prefix))
                     .cloned()
                     .map(|mut loan| {
-                        let enum_match = enum_variants.is_some_and(|count| {
-                            loan.path.len() >= 2
-                                && u32::MAX - loan.path[0] < count
-                                && loan.path[1] == *field
-                        });
-                        loan.path.drain(..if enum_match { 2 } else { 1 });
+                        loan.path.drain(..prefix.len());
                         loan
                     })
                     .collect::<Vec<_>>();
@@ -15444,10 +15426,30 @@ fn register_live_registers(
 ) -> Result<Vec<Vec<bool>>, VerifyError> {
     let len = function.code_len as usize;
     let registers = function.register_types.len();
+    let start = function.code_start as usize;
+    let mut reachable = vec![false; len];
+    let mut pending = VecDeque::from([0u32]);
+    while let Some(pc) = pending.pop_front() {
+        if reachable[pc as usize] {
+            continue;
+        }
+        reachable[pc as usize] = true;
+        let instruction = &a.code[start + pc as usize];
+        let successors = label_successors(instruction, pc, &label_states[pc as usize])
+            .map_err(|_| VerifyError::InvalidFunction(u32::MAX))?;
+        for (successor, _) in successors {
+            if !reachable[successor as usize] {
+                pending.push_back(successor);
+            }
+        }
+    }
     let mut live_in = vec![vec![false; registers]; len];
     loop {
         let mut changed = false;
         for pc in (0..len).rev() {
+            if !reachable[pc] {
+                continue;
+            }
             let instruction = &a.code[function.code_start as usize + pc];
             let successors = match instruction {
                 Instruction::Jump { target } => vec![*target],
@@ -18976,6 +18978,67 @@ mod tests {
     }
 
     #[test]
+    fn enum_projection_selects_only_the_proven_variants_reference_loan() {
+        let mut types = Type::predefined();
+        let shared = types.len() as TypeId;
+        types.push(Type::RefShared { referent: I64 });
+        let choice = types.len() as TypeId;
+        types.push(Type::Enum {
+            name: "BorrowedChoice".into(),
+            variants: ["Left", "Right"]
+                .into_iter()
+                .map(|name| EnumVariant {
+                    name: name.into(),
+                    fields: vec![Field {
+                        name: "value".into(),
+                        ty: shared,
+                    }],
+                })
+                .collect(),
+            copy: true,
+        });
+        let artifact = Artifact {
+            types,
+            constants: vec![Constant::U32(0)],
+            functions: vec![Function {
+                flags: 0,
+                name: "project_proven_alternative".into(),
+                params: vec![choice],
+                return_type: choice,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, choice, U32, shared, shared],
+                code_start: 0,
+                code_len: 7,
+                label_slot_count: 0,
+            }],
+            code: vec![
+                Instruction::EnumTag { dst: 2, src: 1 },
+                Instruction::Switch {
+                    discr: 2,
+                    cases: vec![(0, 2)],
+                    otherwise: 6,
+                },
+                Instruction::ProjectCopy {
+                    dst: 3,
+                    src: 1,
+                    field: 0,
+                },
+                Instruction::ReborrowShared { dst: 4, src: 3 },
+                Instruction::EndBorrow { reference: 4 },
+                Instruction::EndBorrow { reference: 3 },
+                Instruction::Return { src: Some(1) },
+            ],
+            required_features: 1 | (1 << 1),
+            ..Artifact::default()
+        };
+
+        verify(artifact).expect(
+            "the proven enum alternative must not retain the other variant's same-ordinal field",
+        );
+    }
+
+    #[test]
     fn rejects_parent_unique_reference_use_while_a_reborrow_is_live() {
         let mut types = Type::predefined();
         types.push(Type::Struct {
@@ -20467,6 +20530,24 @@ mod tests {
             verify(artifact),
             Err(VerifyError::InvalidFunction(0))
         ));
+    }
+
+    #[test]
+    fn liveness_ignores_an_unreachable_leave_without_a_label_state() {
+        let mut artifact = base(
+            vec![
+                Instruction::Jump { target: 2 },
+                Instruction::Leave { slot: 0, value: 0 },
+                Instruction::Return { src: None },
+            ],
+            vec![UNIT],
+        );
+        artifact.functions[0].label_slot_count = 1;
+        let function = &artifact.functions[0];
+        let labels = verify_labels(&artifact, 0, function).unwrap();
+
+        assert!(loan_live_registers(&artifact, function, &labels).is_ok());
+        assert!(continuation_live_registers(&artifact, function, &labels).is_ok());
     }
 
     #[test]

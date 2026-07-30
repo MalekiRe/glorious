@@ -285,6 +285,43 @@ fn nested_unique_projection_loans_end_as_one_path_at_all_levels() {
 }
 
 #[test]
+fn copied_shared_reference_reborrow_retains_the_original_loan() {
+    let source = r#"
+        run() -> i64 {
+            let value = 21;
+            let reference = &value;
+            let alias = reference;
+            let child = &*alias;
+            let left = *child;
+            let right = *reference;
+            left + right
+        }
+        main() -> { () }
+    "#;
+    let phases = phases_at(source, OptimizationLevel::O0);
+    assert_eq!(run_main(&phases), Value::I64(42));
+    let run = phases
+        .mir
+        .functions
+        .iter()
+        .find(|function| function.name == "run")
+        .expect("run was compiled");
+    let (child, parent) = run
+        .flow
+        .loans
+        .iter()
+        .find_map(|child| {
+            let parent = child.parent?;
+            Some((child, &run.flow.loans[parent.index()]))
+        })
+        .expect("the copied shared reference should be reborrowed");
+    assert_eq!(
+        child.borrowed, parent.borrowed,
+        "a shared-reference Copy aliases the same loan rather than borrowing the copy register"
+    );
+}
+
+#[test]
 fn repeated_compilation_is_deterministic_including_flow_facts() {
     let source = r#"
         effect Pick { [1,1] pick() -> i64 }

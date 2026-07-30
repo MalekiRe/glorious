@@ -1840,37 +1840,6 @@ intern_tuple_type(output: &mut TypedInterfaces, elements: &Vec<u32>) -> u32 {
     }
 }
 
-resolve_type_children(
-    headers: &super::headers::ParsedHeaders,
-    declarations: &super::scanner::DeclarationIndex,
-    output: &mut TypedInterfaces,
-    type_index: u32,
-    module: Option<usize>,
-    ordinal: u32,
-    elements: &mut Vec<u32>
-) -> Result<(), ElaborationError> {
-    let index = super::headers::parsed_index(headers);
-    if(ordinal < super::headers::type_child_count_at(index, type_index)) {
-        let ty = try(resolve_signature_type(
-            headers,
-            declarations,
-            output,
-            super::headers::type_child_index_at(index, type_index, ordinal),
-            module
-        ), @resolve_type_children);
-        push_word(&mut *elements, ty);
-        resolve_type_children(
-            headers,
-            declarations,
-            output,
-            type_index,
-            module,
-            ordinal + 1,
-            elements
-        )
-    } else { Result::Ok(()) }
-}
-
 resolve_alias_type(
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex,
@@ -1911,9 +1880,7 @@ resolve_alias_type(
                                     headers,
                                     declarations,
                                     output,
-                                    super::headers::type_index(
-                                        super::headers::alias_target(alias)
-                                    ),
+                                    *super::headers::alias_target(alias),
                                     shell_parent_module(owner)
                                 ), @resolve_alias_type);
                                 *Vec::index_mut(
@@ -2037,20 +2004,22 @@ resolve_signature_type(
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex,
     output: &mut TypedInterfaces,
-    type_index: u32,
+    type_id: super::headers::TypeId,
     module: Option<usize>
 ) -> Result<u32, ElaborationError> {
     let index = super::headers::parsed_index(headers);
-    let kind = super::headers::type_kind_code_at(index, type_index);
-    let count = super::headers::type_name_count_at(index, type_index);
-    let token = if(count == 0) { usize_from_u32(type_index) } else { super::headers::type_name_token_at(index, type_index, 0) };
-    handle kind {
-        1 => if(count == 1) {
-            let raw =
-                super::headers::type_name_raw_at(index, type_index, 0);
+    handle super::headers::header_type_view(index, type_id) {
+        super::headers::HeaderTypeView::Path(token, names) => if(
+            Slice::len(names) == 1
+        ) {
+            let name = handle Slice::first(names) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            };
+            let raw = Id::to_u32(super::headers::name_use_name(name));
             handle super::lexer::lexeme(
                 super::headers::parsed_source(headers),
-                Id::from_u32(raw)
+                super::headers::name_use_name(name)
             ) {
                 Result::Err(_) =>
                     Result::Err(ElaborationError::UnknownTypeName(token)),
@@ -2121,15 +2090,21 @@ resolve_signature_type(
                         )
                     } }
             }
-        } else { if(count == 2) { handle module_named(
-                    declarations,
-                    super::headers::type_name_raw_at(
-                        index,
-                        type_index,
-                        0
-                    ),
-                    module
-                ) {
+        } else { if(Slice::len(names) == 2) {
+            let module_name = handle Slice::get(names, 0) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            };
+            let type_name = handle Slice::get(names, 1) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            };
+            let type_token = super::headers::name_use_token(type_name);
+            handle module_named(
+                declarations,
+                Id::to_u32(super::headers::name_use_name(module_name)),
+                module
+            ) {
                     Result::Err(_) =>
                         Result::Err(
                             ElaborationError::UnknownTypeModule(token)
@@ -2137,39 +2112,37 @@ resolve_signature_type(
                     Result::Ok(module) => handle type_name_target(
                         headers,
                         declarations,
-                        super::headers::type_name_raw_at(
-                            index,
-                            type_index,
-                            1
+                        Id::to_u32(
+                            super::headers::name_use_name(type_name)
                         ),
                         Option::Some(module)
                     ) {
                         Result::Err(_) =>
                             Result::Err(
-                                ElaborationError::UnknownTypeName(token)
+                                ElaborationError::UnknownTypeName(type_token)
                             ),
                         Result::Ok(found) => resolve_type_name_target(
                             headers,
                             declarations,
                             output,
                             found,
-                            token
+                            type_token
                         )
                     }
                 } } else { Result::Err(
                     ElaborationError::InvalidSignatureType(token)
-                ) } },
-        2 => handle super::headers::type_lifetime_name_at(index, type_index) {
+        ) } },
+        super::headers::HeaderTypeView::SharedReference(
+            _,
+            lifetime,
+            referent
+        ) => handle lifetime {
             Result::Err(_) => {
                 let referent = try(resolve_signature_type(
                     headers,
                     declarations,
                     output,
-                    super::headers::type_child_index_at(
-                        index,
-                        type_index,
-                        0
-                    ),
+                    referent,
                     module
                 ), @resolve_signature_type);
                 Result::Ok(intern_record_type(
@@ -2178,22 +2151,24 @@ resolve_signature_type(
                     true
                 ))
             },
-            Result::Ok(_) =>
+            Result::Ok(lifetime_token) =>
                 Result::Err(
-                    ElaborationError::NamedReferenceLifetimeUnsupported(token)
+                    ElaborationError::NamedReferenceLifetimeUnsupported(
+                        lifetime_token
+                    )
                 )
         },
-        3 => handle super::headers::type_lifetime_name_at(index, type_index) {
+        super::headers::HeaderTypeView::UniqueReference(
+            _,
+            lifetime,
+            referent
+        ) => handle lifetime {
             Result::Err(_) => {
                 let referent = try(resolve_signature_type(
                     headers,
                     declarations,
                     output,
-                    super::headers::type_child_index_at(
-                        index,
-                        type_index,
-                        0
-                    ),
+                    referent,
                     module
                 ), @resolve_signature_type);
                 Result::Ok(intern_record_type(
@@ -2202,27 +2177,35 @@ resolve_signature_type(
                     false
                 ))
             },
-            Result::Ok(_) =>
+            Result::Ok(lifetime_token) =>
                 Result::Err(
-                    ElaborationError::NamedReferenceLifetimeUnsupported(token)
+                    ElaborationError::NamedReferenceLifetimeUnsupported(
+                        lifetime_token
+                    )
                 )
         },
-        4 => if(super::headers::type_child_count_at(index, type_index)
-            == 0) { Result::Ok(0) } else {
+        super::headers::HeaderTypeView::Tuple(_, children) =>
+            if(Slice::is_empty(children)) { Result::Ok(0) } else {
             let elements = Vec::new();
-            try(resolve_type_children(
-                headers,
-                declarations,
-                output,
-                type_index,
-                module,
-                0,
-                &mut elements
-            ), @resolve_signature_type);
+            try(Slice::try_for_each(children, { edge => {
+                let ty = try(resolve_signature_type(
+                    headers,
+                    declarations,
+                    &mut *output,
+                    super::headers::type_edge_type(edge),
+                    module
+                ), @resolve_signature_type);
+                push_word(&mut elements, ty);
+                Result::Ok(())
+            }}), @resolve_signature_type);
             Result::Ok(intern_tuple_type(output, &elements))
         },
-        6 => Result::Ok(1),
-        _ => Result::Err(ElaborationError::InvalidSignatureType(token))
+        super::headers::HeaderTypeView::Application(
+            token,
+            _,
+            _
+        ) => Result::Err(ElaborationError::InvalidSignatureType(token)),
+        super::headers::HeaderTypeView::Never(_) => Result::Ok(1)
     }
 }
 
@@ -2249,7 +2232,7 @@ collect_parameter_types(
                     headers,
                     declarations,
                     output,
-                    super::headers::parameter_type_index(parameter),
+                    super::headers::parameter_type(parameter),
                     module
                 ), @collect_parameter_types);
                 Vec::push(
@@ -2305,7 +2288,7 @@ collect_callables(
                             headers,
                             declarations,
                             output,
-                            Id::to_u32(result_type),
+                            result_type,
                             handle super::scanner::shell_at(
                                 declarations,
                                 usize_from_u32(
@@ -2527,9 +2510,7 @@ collect_struct_fields(
                     headers,
                     declarations,
                     output,
-                    super::headers::type_index(
-                        super::headers::field_type(field)
-                    ),
+                    *super::headers::field_type(field),
                     module
                 ), @collect_struct_fields);
                 alloc_interface_field(output, InterfaceField {
@@ -2553,38 +2534,27 @@ collect_struct_fields(
     } else { Result::Ok(()) }
 }
 
-collect_variant_payloads(
+collect_variant_payloads<'a>(
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex,
     output: &mut TypedInterfaces,
-    fields: &super::headers::HeaderRange,
-    module: Option<usize>,
-    ordinal: u32
+    fields: Slice<'a, super::headers::TypeEdge>,
+    module: Option<usize>
 ) -> Result<(), ElaborationError> {
-    if(ordinal < super::headers::range_count(fields)) {
+    Slice::try_for_each(fields, { field => {
         let ty = try(resolve_signature_type(
             headers,
             declarations,
-            output,
-            super::headers::type_edge_index_at(
-                super::headers::parsed_index(headers),
-                super::headers::range_start(fields) + ordinal
-            ),
+            &mut *output,
+            super::headers::type_edge_type(field),
             module
         ), @collect_variant_payloads);
         Vec::push(
             &mut output.variant_payloads,
             type_id_from_u32(ty)
         );
-        collect_variant_payloads(
-            headers,
-            declarations,
-            output,
-            fields,
-            module,
-            ordinal + 1
-        )
-    } else { Result::Ok(()) }
+        Result::Ok(())
+    }})
 }
 
 collect_enum_variants(
@@ -2606,7 +2576,10 @@ collect_enum_variants(
                 ElaborationError::MissingVariantHeader(usize_from_u32(index))
             ),
             Result::Ok(variant) => {
-                let payloads = super::headers::variant_fields(variant);
+                let payloads = super::headers::variant_payloads(
+                    super::headers::parsed_index(headers),
+                    variant
+                );
                 let start = checked_u32_from_usize(
                     Vec::len(&output.variant_payloads)
                 );
@@ -2615,15 +2588,14 @@ collect_enum_variants(
                     declarations,
                     output,
                     payloads,
-                    module,
-                    0
+                    module
                 ), @collect_enum_variants);
                 alloc_interface_variant(output, InterfaceVariant {
                     owner: owner,
                     name: super::headers::variant_name_raw(variant),
                     payloads: VariantPayloadRange {
                         start: start,
-                        count: super::headers::range_count(payloads)
+                        count: checked_u32_from_usize(Slice::len(payloads))
                     },
                     name_token: super::headers::variant_name_token(variant)
                 });

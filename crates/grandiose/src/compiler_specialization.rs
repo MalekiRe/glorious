@@ -2189,9 +2189,22 @@ pub(crate) fn substitute(
     .ok()
 }
 
-/// Controls the one intentional distinction between substituting an input
-/// type and recursively resolving a substitution value: a value may terminate
-/// in a rigid parameter owned by its generic caller.
+fn substitute_preserving_missing(
+    ty: &ProvisionalType,
+    substitutions: &BTreeMap<GenericParamKey, SpecializationArgument>,
+) -> Option<ProvisionalType> {
+    SubstitutionFolder {
+        substitutions,
+        visiting: BTreeSet::new(),
+        missing: MissingParameter::Preserve,
+    }
+    .fold_type(ty)
+    .ok()
+}
+
+/// Controls whether an incomplete contextual type preserves rigid parameters
+/// owned by its generic caller. Recursively resolving a substitution value
+/// always preserves such a rigid tail.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum MissingParameter {
     Reject,
@@ -2436,11 +2449,12 @@ fn inference_occurs(
     })
 }
 
-fn unify_inference(
+fn unify_inference_with_rigid_mode(
     left: &ProvisionalType,
     right: &ProvisionalType,
     mutable: &BTreeSet<GenericParamKey>,
     substitutions: &mut BTreeMap<GenericParamKey, SpecializationArgument>,
+    rigid_are_unknown: bool,
 ) -> bool {
     fn resolve(
         ty: &ProvisionalType,
@@ -2473,7 +2487,8 @@ fn unify_inference(
     let left = resolve(left, substitutions);
     let right = resolve(right, substitutions);
     if left == right {
-        if let ProvisionalType::Param(key) = &left
+        if !rigid_are_unknown
+            && let ProvisionalType::Param(key) = &left
             && mutable.contains(key)
         {
             substitutions
@@ -2485,41 +2500,91 @@ fn unify_inference(
     if let ProvisionalType::Param(key) = &left
         && mutable.contains(key)
     {
+        if rigid_are_unknown
+            && provisional_type_any(
+                &right,
+                &mut |ty| matches!(ty, ProvisionalType::Param(candidate) if !mutable.contains(candidate)),
+            )
+        {
+            return true;
+        }
         return bind_var(key, &right, substitutions);
     }
     if let ProvisionalType::Param(key) = &right
         && mutable.contains(key)
     {
+        if rigid_are_unknown
+            && provisional_type_any(
+                &left,
+                &mut |ty| matches!(ty, ProvisionalType::Param(candidate) if !mutable.contains(candidate)),
+            )
+        {
+            return true;
+        }
         return bind_var(key, &left, substitutions);
+    }
+    if rigid_are_unknown
+        && (matches!(left, ProvisionalType::Param(_)) || matches!(right, ProvisionalType::Param(_)))
+    {
+        return true;
     }
     match (&left, &right) {
         (ProvisionalType::Shared(a), ProvisionalType::Shared(b))
         | (ProvisionalType::Unique(a), ProvisionalType::Unique(b)) => {
-            unify_inference(a, b, mutable, substitutions)
+            unify_inference_with_rigid_mode(a, b, mutable, substitutions, rigid_are_unknown)
         }
-        (ProvisionalType::Tuple(a), ProvisionalType::Tuple(b)) if a.len() == b.len() => a
-            .iter()
-            .zip(b)
-            .all(|(a, b)| unify_inference(a, b, mutable, substitutions)),
+        (ProvisionalType::Tuple(a), ProvisionalType::Tuple(b)) if a.len() == b.len() => {
+            a.iter().zip(b).all(|(a, b)| {
+                unify_inference_with_rigid_mode(a, b, mutable, substitutions, rigid_are_unknown)
+            })
+        }
         (ProvisionalType::Nominal(a), ProvisionalType::Nominal(b))
             if a.declaration == b.declaration && a.arguments.len() == b.arguments.len() =>
         {
-            a.arguments
-                .iter()
-                .zip(&b.arguments)
-                .all(|(a, b)| unify_inference(a, b, mutable, substitutions))
+            a.arguments.iter().zip(&b.arguments).all(|(a, b)| {
+                unify_inference_with_rigid_mode(a, b, mutable, substitutions, rigid_are_unknown)
+            })
         }
         (ProvisionalType::Callable(a), ProvisionalType::Callable(b))
             if a.params.len() == b.params.len() && a.effects == b.effects =>
         {
-            a.params
-                .iter()
-                .zip(&b.params)
-                .all(|(a, b)| unify_inference(a, b, mutable, substitutions))
-                && unify_inference(&a.result, &b.result, mutable, substitutions)
+            a.params.iter().zip(&b.params).all(|(a, b)| {
+                unify_inference_with_rigid_mode(a, b, mutable, substitutions, rigid_are_unknown)
+            }) && unify_inference_with_rigid_mode(
+                &a.result,
+                &b.result,
+                mutable,
+                substitutions,
+                rigid_are_unknown,
+            )
         }
         _ => false,
     }
+}
+
+fn unify_inference(
+    left: &ProvisionalType,
+    right: &ProvisionalType,
+    mutable: &BTreeSet<GenericParamKey>,
+    substitutions: &mut BTreeMap<GenericParamKey, SpecializationArgument>,
+) -> bool {
+    unify_inference_with_rigid_mode(left, right, mutable, substitutions, false)
+}
+
+/// Constrain inference variables owned by the current call from a contextual
+/// type that may still contain rigid variables owned by an enclosing call.
+///
+/// A rigid variable is an unknown here, not evidence that two otherwise
+/// matching structures conflict. For example, an inner `Result<(), E>` must
+/// learn `E = WalkError` from the outer context `Result<T, WalkError>` even
+/// though only the enclosing call is allowed to solve `T`.
+fn constrain_contextual_inference(
+    left: &ProvisionalType,
+    right: &ProvisionalType,
+    mutable: &BTreeSet<GenericParamKey>,
+    substitutions: &mut BTreeMap<GenericParamKey, SpecializationArgument>,
+) -> bool {
+    unify_inference_with_rigid_mode(left, right, mutable, substitutions, true)
 }
 
 pub(crate) fn captured_outer_uses(
@@ -6843,7 +6908,15 @@ impl<'a> Walker<'a> {
             && !contains_projection_placeholder(&template.result)
         {
             let mut trial = substitutions.clone();
-            if unify_inference(&template.result, expected, &mutable_inference, &mut trial) {
+            if unify_inference(&template.result, expected, &mutable_inference, &mut trial)
+                || (!ground(expected)
+                    && constrain_contextual_inference(
+                        &template.result,
+                        expected,
+                        &mutable_inference,
+                        &mut trial,
+                    ))
+            {
                 substitutions = trial;
             } else if template.generic_params.is_empty() && !self.symbolic_validation {
                 self.error(format!("call to `{name}` has an ambiguous result"));
@@ -6880,9 +6953,48 @@ impl<'a> Walker<'a> {
                 }
             }
         }
+        // Static label arguments are independently synthesizable, but their
+        // payload equality lives in the Label marker rather than the ordinary
+        // parameter type. Apply that equality before walking context-dependent
+        // value arguments. This lets `try(value, @function)` pass the
+        // function's exact `Result<_, E>` context into `value`, including a
+        // generic iterator callback whose only successful arm is `Ok(())`.
+        for constraint in &template.marker_constraints {
+            if constraint.polarity != GoalPolarity::Positive
+                || !self
+                    .trait_db
+                    .intrinsic_key(IntrinsicRole::Label)
+                    .is_some_and(|key| key == &constraint.trait_key)
+            {
+                continue;
+            }
+            let constraint_subject = constraint
+                .subject_binder
+                .clone()
+                .map(ProvisionalType::Param)
+                .unwrap_or_else(|| constraint.subject.clone());
+            let Some(subject) = substitute(&constraint_subject, &substitutions) else {
+                continue;
+            };
+            let Some(payload) = label_payload_type(&subject) else {
+                continue;
+            };
+            let [GenericArg::Type(formal_payload)] = constraint.arguments.as_slice() else {
+                continue;
+            };
+            let mut trial = substitutions.clone();
+            if constrain_contextual_inference(
+                formal_payload,
+                payload,
+                &mutable_inference,
+                &mut trial,
+            ) {
+                substitutions = trial;
+            }
+        }
         for (index, (argument, formal)) in args.iter().zip(&template.params).enumerate() {
-            let resolved_formal =
-                substitute(formal, &substitutions).unwrap_or_else(|| formal.clone());
+            let resolved_formal = substitute_preserving_missing(formal, &substitutions)
+                .unwrap_or_else(|| formal.clone());
             let resolved_formal = normalize_projection_placeholders(
                 &resolved_formal,
                 self.trait_db,
@@ -7072,10 +7184,17 @@ impl<'a> Walker<'a> {
                 }
                 closures.insert(closure);
             } else {
-                let contextual_formal = substitute(formal, &substitutions);
-                let contextual_formal = contextual_formal
-                    .as_ref()
-                    .filter(|formal| self.symbolic_validation || ground(formal));
+                let contextual_formal = substitute_preserving_missing(formal, &substitutions);
+                let contextual_formal = contextual_formal.as_ref().filter(|formal| {
+                    self.symbolic_validation
+                            || ground(formal)
+                            // A nested call can solve its own variables from
+                            // the concrete portions of an enclosing symbolic
+                            // formal. Its remaining rigid variables are then
+                            // solved when the resulting ground type is unified
+                            // back into this call below.
+                            || matches!(argument.kind, ExprKind::Call(_, _))
+                });
                 let mut actual = self.expression(argument, contextual_formal).or_else(|| {
                     self.may_use_bidirectional_result_fallback(argument)
                         .then(|| contextual_formal.cloned())
@@ -10273,6 +10392,81 @@ mod tests {
                 )]),
             ),
             Some(ProvisionalType::Tuple(vec![rigid_type]))
+        );
+    }
+
+    #[test]
+    fn partial_context_retains_outer_rigid_fields_and_constrains_inner_fields() {
+        let outer = GenericParamKey {
+            owner: DeclarationKey::Function("outer".into()),
+            ordinal: 0,
+        };
+        let inner = GenericParamKey {
+            owner: DeclarationKey::Function("inner".into()),
+            ordinal: 0,
+        };
+        let result = |ok, error| {
+            ProvisionalType::Nominal(NominalInstanceKey {
+                declaration: NominalKey("Result".into()),
+                arguments: vec![ok, error],
+            })
+        };
+        let walk_error = ProvisionalType::Nominal(NominalInstanceKey::monomorphic("WalkError"));
+        let formal = result(
+            ProvisionalType::Predefined("Unit".into()),
+            ProvisionalType::Param(inner.clone()),
+        );
+        let context = result(ProvisionalType::Param(outer.clone()), walk_error.clone());
+        let mutable = BTreeSet::from([inner.clone()]);
+        let mut substitutions = BTreeMap::new();
+
+        assert!(constrain_contextual_inference(
+            &formal,
+            &context,
+            &mutable,
+            &mut substitutions,
+        ));
+        assert_eq!(
+            substitutions.get(&inner),
+            Some(&SpecializationArgument::Type(walk_error.clone()))
+        );
+        assert_eq!(
+            substitute_preserving_missing(&context, &substitutions),
+            Some(result(ProvisionalType::Param(outer), walk_error))
+        );
+    }
+
+    #[test]
+    fn contextual_inference_defers_a_rigid_outer_variable_until_concrete_evidence() {
+        let inner = GenericParamKey {
+            owner: DeclarationKey::Function("inner".into()),
+            ordinal: 0,
+        };
+        let outer = GenericParamKey {
+            owner: DeclarationKey::Function("outer".into()),
+            ordinal: 0,
+        };
+        let mutable = BTreeSet::from([inner.clone()]);
+        let mut substitutions = BTreeMap::new();
+
+        assert!(constrain_contextual_inference(
+            &ProvisionalType::Param(inner.clone()),
+            &ProvisionalType::Param(outer),
+            &mutable,
+            &mut substitutions,
+        ));
+        assert!(!substitutions.contains_key(&inner));
+
+        let integer = ProvisionalType::Predefined("i64".into());
+        assert!(unify_inference(
+            &ProvisionalType::Param(inner.clone()),
+            &integer,
+            &mutable,
+            &mut substitutions,
+        ));
+        assert_eq!(
+            substitutions.get(&inner),
+            Some(&SpecializationArgument::Type(integer))
         );
     }
 
