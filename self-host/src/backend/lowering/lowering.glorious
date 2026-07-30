@@ -7,6 +7,8 @@
 use super::super::frontend::elaboration::CoreComputationView;
 use super::super::frontend::elaboration::CoreComputationId;
 use super::super::frontend::elaboration::CoreLocalId;
+use super::super::frontend::elaboration::CoreMatchArm;
+use super::super::frontend::elaboration::CoreMatchBinding;
 use super::super::frontend::elaboration::CoreValueView;
 use super::super::frontend::elaboration::CoreValueId;
 use super::super::frontend::elaboration::ConstructionField;
@@ -34,16 +36,34 @@ pub type ArtifactTypeId = Id<ArtifactTypeTag>;
 pub struct StageConstantTag {}
 pub type StageConstantId = Id<StageConstantTag>;
 
+pub struct StageBlockTag {}
+pub type StageBlockId = Id<StageBlockTag>;
+
+pub struct StageSwitchPackTag {}
+pub type StageSwitchPackId = Id<StageSwitchPackTag>;
+
 pub enum StageInstruction {
     Const(RegisterId, Bytes),
     Move(RegisterId, RegisterId),
     Copy(RegisterId, RegisterId),
     Construct(RegisterId, ArtifactTypeId, Option<u32>, RegisterPackId),
+    ProjectMove(RegisterId, RegisterId, u32),
     ProjectCopy(RegisterId, RegisterId, u32),
+    EnumTag(RegisterId, RegisterId),
     Drop(RegisterId),
+    Deconstruct(RegisterId),
+    Jump(StageBlockId),
+    Switch(RegisterId, StageSwitchPackId, StageBlockId),
     Call(Option<RegisterId>, StageFunctionId, RegisterPackId),
     Return(Option<RegisterId>)
 }
+
+pub struct StageSwitchCase {
+    key: Bytes,
+    target: StageBlockId
+}
+
+pub struct StageSwitchPack { cases: Vec<StageSwitchCase> }
 
 pub struct StageVariant {
     name_index: u32,
@@ -75,7 +95,9 @@ pub struct StageFunction {
     register_count: u32,
     instructions: Vec<StageInstruction>,
     cleanups: Vec<StageCleanup>,
-    register_packs: Arena<RegisterPackTag, RegisterPack>
+    register_packs: Arena<RegisterPackTag, RegisterPack>,
+    blocks: Arena<StageBlockTag, Option<u32>>,
+    switch_packs: Arena<StageSwitchPackTag, StageSwitchPack>
 }
 
 pub struct StageProgram {
@@ -97,7 +119,12 @@ pub enum LoweringError {
     MissingVariant(TypeId),
     VariantOutOfRange(TypeId, u32),
     ConstructionFieldOrder(u32, u32),
-    MissingResult(TypeId)
+    MissingResult(TypeId),
+    MissingMatchSubject(CoreValueId),
+    MissingMatchResult(CoreComputationId),
+    InvalidMatchType(TypeId),
+    MatchBindingCount(TypeId, u32, u32),
+    MatchStateMismatch
 }
 
 struct FunctionBuilder {
@@ -106,6 +133,8 @@ struct FunctionBuilder {
     instructions: Vec<StageInstruction>,
     cleanups: Vec<StageCleanup>,
     register_packs: Arena<RegisterPackTag, RegisterPack>,
+    blocks: Arena<StageBlockTag, Option<u32>>,
+    switch_packs: Arena<StageSwitchPackTag, StageSwitchPack>,
     register_count: u32
 }
 
@@ -459,6 +488,42 @@ pub register_pack_at(value: &RegisterPack, index: usize) -> RegisterId {
     *Vec::index(&value.registers, index)
 }
 
+pub stage_function_block_offset(
+    value: &StageFunction,
+    id: StageBlockId
+) -> u32 {
+    handle *Arena::index(&value.blocks, id) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(offset) => offset
+    }
+}
+
+pub stage_function_switch_pack<'a>(
+    value: &'a StageFunction,
+    id: StageSwitchPackId
+) -> &'a StageSwitchPack {
+    Arena::index(&value.switch_packs, id)
+}
+
+pub stage_switch_pack_count(value: &StageSwitchPack) -> usize {
+    Vec::len(&value.cases)
+}
+
+pub stage_switch_pack_at<'a>(
+    value: &'a StageSwitchPack,
+    index: usize
+) -> &'a StageSwitchCase {
+    Vec::index(&value.cases, index)
+}
+
+pub stage_switch_case_key(value: &StageSwitchCase) -> &Bytes {
+    &value.key
+}
+
+pub stage_switch_case_target(value: &StageSwitchCase) -> StageBlockId {
+    value.target
+}
+
 pub register_raw(value: RegisterId) -> u32 { Id::to_u32(value) }
 
 checked_u32(value: usize) -> u32 {
@@ -604,6 +669,25 @@ constant_key(
     }
 }
 
+u32_constant_key(value: u32) -> Bytes {
+    let output = Vec::new();
+    Vec::push(&mut output, 4);
+    Vec::push(&mut output, wrapping_convert_to_u8(value));
+    Vec::push(
+        &mut output,
+        wrapping_convert_to_u8(value / 256)
+    );
+    Vec::push(
+        &mut output,
+        wrapping_convert_to_u8(value / 65536)
+    );
+    Vec::push(
+        &mut output,
+        wrapping_convert_to_u8(value / 16777216)
+    );
+    Bytes::from_vec(output)
+}
+
 push_missing_locals(
     output: &mut Vec<Option<RegisterId>>,
     remaining: usize
@@ -683,6 +767,32 @@ alloc_register_pack(
     handle Arena::alloc(
         &mut value.register_packs,
         RegisterPack { registers: registers }
+    ) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
+alloc_block(value: &mut FunctionBuilder) -> StageBlockId {
+    handle Arena::alloc(&mut value.blocks, None) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
+bind_block(value: &mut FunctionBuilder, id: StageBlockId) {
+    *Arena::index_mut(&mut value.blocks, id) =
+        Option::Some(checked_u32(Vec::len(&value.instructions)));
+    ()
+}
+
+alloc_switch_pack(
+    value: &mut FunctionBuilder,
+    cases: Vec<StageSwitchCase>
+) -> StageSwitchPackId {
+    handle Arena::alloc(
+        &mut value.switch_packs,
+        StageSwitchPack { cases: cases }
     ) {
         Result::Err(_) => unreachable(),
         Result::Ok(id) => id
@@ -781,6 +891,21 @@ emit_construct(
     Vec::push(&mut value.live_order, target)
 }
 
+emit_project_move(
+    value: &mut FunctionBuilder,
+    target: RegisterId,
+    source: RegisterId,
+    field: u32
+) {
+    record_cleanup(value);
+    Vec::push(&mut value.instructions, StageInstruction::ProjectMove(
+        target,
+        source,
+        field
+    ));
+    Vec::push(&mut value.live_order, target)
+}
+
 emit_project_copy(
     value: &mut FunctionBuilder,
     target: RegisterId,
@@ -796,10 +921,52 @@ emit_project_copy(
     Vec::push(&mut value.live_order, target)
 }
 
+emit_enum_tag(
+    value: &mut FunctionBuilder,
+    target: RegisterId,
+    source: RegisterId
+) {
+    record_cleanup(value);
+    Vec::push(&mut value.instructions, StageInstruction::EnumTag(
+        target,
+        source
+    ));
+    Vec::push(&mut value.live_order, target)
+}
+
 emit_drop(value: &mut FunctionBuilder, register: RegisterId) {
     record_cleanup(value);
     Vec::push(&mut value.instructions, StageInstruction::Drop(register));
     consume_live(value, register)
+}
+
+emit_deconstruct(value: &mut FunctionBuilder, register: RegisterId) {
+    record_cleanup(value);
+    Vec::push(
+        &mut value.instructions,
+        StageInstruction::Deconstruct(register)
+    );
+    consume_live(value, register)
+}
+
+emit_jump(value: &mut FunctionBuilder, target: StageBlockId) {
+    record_cleanup(value);
+    Vec::push(&mut value.instructions, StageInstruction::Jump(target))
+}
+
+emit_switch(
+    value: &mut FunctionBuilder,
+    discriminant: RegisterId,
+    cases: Vec<StageSwitchCase>,
+    otherwise: StageBlockId
+) {
+    record_cleanup(value);
+    let pack = alloc_switch_pack(value, cases);
+    Vec::push(&mut value.instructions, StageInstruction::Switch(
+        discriminant,
+        pack,
+        otherwise
+    ))
 }
 
 consume_arguments(
@@ -949,6 +1116,423 @@ lower_arguments<'a>(
     } })
 }
 
+append_optional_registers(
+    source: &Vec<Option<RegisterId>>,
+    output: &mut Vec<Option<RegisterId>>,
+    index: usize
+) {
+    if(index < Vec::len(source)) {
+        Vec::push(&mut *output, *Vec::index(source, index));
+        append_optional_registers(source, output, index + 1)
+    } else { () }
+}
+
+append_registers(
+    source: &Vec<RegisterId>,
+    output: &mut Vec<RegisterId>,
+    index: usize
+) {
+    if(index < Vec::len(source)) {
+        Vec::push(&mut *output, *Vec::index(source, index));
+        append_registers(source, output, index + 1)
+    } else { () }
+}
+
+snapshot_locals(value: &FunctionBuilder) -> Vec<Option<RegisterId>> {
+    let output = Vec::new();
+    append_optional_registers(&value.locals, &mut output, 0);
+    output
+}
+
+snapshot_live(value: &FunctionBuilder) -> Vec<RegisterId> {
+    let output = Vec::new();
+    append_registers(&value.live_order, &mut output, 0);
+    output
+}
+
+restore_match_state(
+    value: &mut FunctionBuilder,
+    locals: &Vec<Option<RegisterId>>,
+    live: &Vec<RegisterId>
+) {
+    Vec::clear(&mut value.locals);
+    append_optional_registers(locals, &mut value.locals, 0);
+    Vec::clear(&mut value.live_order);
+    append_registers(live, &mut value.live_order, 0)
+}
+
+optional_registers_equal(
+    left: &Vec<Option<RegisterId>>,
+    right: &Vec<Option<RegisterId>>,
+    index: usize
+) -> Bool {
+    if(Vec::len(left) == Vec::len(right)) {
+        if(index < Vec::len(left)) {
+            if(Eq::eq(
+                Vec::index(left, index),
+                Vec::index(right, index)
+            )) {
+                optional_registers_equal(left, right, index + 1)
+            } else { false }
+        } else { true }
+    } else { false }
+}
+
+registers_equal(
+    left: &Vec<RegisterId>,
+    right: &Vec<RegisterId>,
+    index: usize
+) -> Bool {
+    if(Vec::len(left) == Vec::len(right)) {
+        if(index < Vec::len(left)) {
+            if(*Vec::index(left, index) == *Vec::index(right, index)) {
+                registers_equal(left, right, index + 1)
+            } else { false }
+        } else { true }
+    } else { false }
+}
+
+alloc_match_blocks(
+    value: &mut FunctionBuilder,
+    count: usize,
+    index: usize,
+    output: &mut Vec<StageBlockId>
+) {
+    if(index < count) {
+        Vec::push(&mut *output, alloc_block(value));
+        alloc_match_blocks(value, count, index + 1, output)
+    } else { () }
+}
+
+build_match_switch_cases<'a>(
+    arms: Slice<'a, CoreMatchArm>,
+    blocks: &Vec<StageBlockId>,
+    count: usize,
+    index: usize,
+    output: &mut Vec<StageSwitchCase>
+) {
+    if(index < count) {
+        let arm = handle Slice::get(arms, index) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        Vec::push(&mut *output, StageSwitchCase {
+            key: u32_constant_key(
+                super::super::frontend::elaboration::
+                    core_match_arm_variant(arm)
+            ),
+            target: *Vec::index(blocks, index)
+        });
+        build_match_switch_cases(
+            arms,
+            blocks,
+            count,
+            index + 1,
+            output
+        )
+    } else { () }
+}
+
+project_match_fields<'a>(
+    value: &mut FunctionBuilder,
+    subject: RegisterId,
+    bindings: Slice<'a, CoreMatchBinding>,
+    index: usize,
+    output: &mut Vec<RegisterId>
+) -> Result<(), LoweringError> {
+    if(index < Slice::len(bindings)) {
+        let binding = handle Slice::get(bindings, index) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let field =
+            super::super::frontend::elaboration::
+                core_match_binding_field(binding);
+        if(field == checked_u32(index)) {
+            let target = alloc_register(value);
+            emit_project_move(value, target, subject, field);
+            Vec::push(&mut *output, target);
+            project_match_fields(
+                value,
+                subject,
+                bindings,
+                index + 1,
+                output
+            )
+        } else {
+            Result::Err(LoweringError::ConstructionFieldOrder(
+                checked_u32(index),
+                field
+            ))
+        }
+    } else { Result::Ok(()) }
+}
+
+install_match_bindings_reverse<'a>(
+    value: &mut FunctionBuilder,
+    bindings: Slice<'a, CoreMatchBinding>,
+    registers: &Vec<RegisterId>,
+    remaining: usize
+) {
+    if(remaining == 0) { () } else {
+        let index = remaining - 1;
+        let binding = handle Slice::get(bindings, index) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let register = *Vec::index(registers, index);
+        handle
+            super::super::frontend::elaboration::
+                core_match_binding_local(binding) {
+            Result::Err(_) => emit_drop(value, register),
+            Result::Ok(local) =>
+                set_local(value, local, Option::Some(register))
+        };
+        install_match_bindings_reverse(
+            value,
+            bindings,
+            registers,
+            index
+        )
+    }
+}
+
+drop_match_locals_reverse<'a>(
+    value: &mut FunctionBuilder,
+    bindings: Slice<'a, CoreMatchBinding>,
+    remaining: usize
+) {
+    if(remaining == 0) { () } else {
+        let index = remaining - 1;
+        let binding = handle Slice::get(bindings, index) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        handle
+            super::super::frontend::elaboration::
+                core_match_binding_local(binding) {
+            Result::Err(_) => (),
+            Result::Ok(local) => handle local_register(value, local) {
+                Result::Err(_) => (),
+                Result::Ok(register) => {
+                    emit_drop(value, register);
+                    set_local(value, local, None)
+                }
+            }
+        };
+        drop_match_locals_reverse(value, bindings, index)
+    }
+}
+
+lower_match_arms<'a>(
+    interfaces:
+        &super::super::frontend::elaboration::TypedInterfaces,
+    body: &super::super::frontend::elaboration::TypedBody,
+    value: &mut FunctionBuilder,
+    arms: Slice<'a, CoreMatchArm>,
+    blocks: &Vec<StageBlockId>,
+    subject: RegisterId,
+    tag: RegisterId,
+    result: RegisterId,
+    join: StageBlockId,
+    baseline_locals: &Vec<Option<RegisterId>>,
+    baseline_live: &Vec<RegisterId>,
+    canonical_locals: &mut Vec<Option<RegisterId>>,
+    canonical_live: &mut Vec<RegisterId>,
+    index: usize
+) -> Result<(), LoweringError> {
+    if(index < Slice::len(arms)) {
+        restore_match_state(value, baseline_locals, baseline_live);
+        bind_block(value, *Vec::index(blocks, index));
+        emit_drop(value, tag);
+        let arm = handle Slice::get(arms, index) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let bindings =
+            super::super::frontend::elaboration::
+                core_match_arm_bindings(body, arm);
+        let registers = Vec::new();
+        try(project_match_fields(
+            value,
+            subject,
+            bindings,
+            0,
+            &mut registers
+        ), @lower_match_arms);
+        emit_deconstruct(value, subject);
+        install_match_bindings_reverse(
+            value,
+            bindings,
+            &registers,
+            Vec::len(&registers)
+        );
+        let arm_computation =
+            super::super::frontend::elaboration::
+                core_match_arm_body(arm);
+        let lowered = try(lower_computation(
+            interfaces,
+            body,
+            value,
+            arm_computation
+        ), @lower_match_arms);
+        drop_match_locals_reverse(
+            value,
+            bindings,
+            Slice::len(bindings)
+        );
+        handle lowered {
+            Result::Err(_) => Result::Err(
+                LoweringError::MissingMatchResult(arm_computation)
+            ),
+            Result::Ok(branch_result) => {
+                emit_move(value, result, branch_result);
+                emit_jump(value, join);
+                if(index == 0) {
+                    Vec::clear(canonical_locals);
+                    append_optional_registers(
+                        &value.locals,
+                        canonical_locals,
+                        0
+                    );
+                    Vec::clear(canonical_live);
+                    append_registers(
+                        &value.live_order,
+                        canonical_live,
+                        0
+                    );
+                    lower_match_arms(
+                        interfaces,
+                        body,
+                        value,
+                        arms,
+                        blocks,
+                        subject,
+                        tag,
+                        result,
+                        join,
+                        baseline_locals,
+                        baseline_live,
+                        canonical_locals,
+                        canonical_live,
+                        index + 1
+                    )
+                } else {
+                    if(optional_registers_equal(
+                        &value.locals,
+                        canonical_locals,
+                        0
+                    ) and {
+                        registers_equal(
+                            &value.live_order,
+                            canonical_live,
+                            0
+                        )
+                    }) {
+                        lower_match_arms(
+                            interfaces,
+                            body,
+                            value,
+                            arms,
+                            blocks,
+                            subject,
+                            tag,
+                            result,
+                            join,
+                            baseline_locals,
+                            baseline_live,
+                            canonical_locals,
+                            canonical_live,
+                            index + 1
+                        )
+                    } else {
+                        Result::Err(LoweringError::MatchStateMismatch)
+                    }
+                }
+            }
+        }
+    } else { Result::Ok(()) }
+}
+
+lower_match<'a>(
+    interfaces:
+        &super::super::frontend::elaboration::TypedInterfaces,
+    body: &super::super::frontend::elaboration::TypedBody,
+    value: &mut FunctionBuilder,
+    subject: CoreValueId,
+    arms: Slice<'a, CoreMatchArm>
+) -> Result<Option<RegisterId>, LoweringError> {
+    let lowered_subject = try(lower_value(
+        interfaces,
+        body,
+        value,
+        subject
+    ), @lower_match);
+    handle lowered_subject {
+        Result::Err(_) =>
+            Result::Err(LoweringError::MissingMatchSubject(subject)),
+        Result::Ok(subject_register) => {
+            if(Slice::len(arms) == 0) {
+                Result::Err(LoweringError::MatchStateMismatch)
+            } else {
+                let tag = alloc_register(value);
+                emit_enum_tag(value, tag, subject_register);
+                let result = alloc_register(value);
+                let blocks = Vec::new();
+                alloc_match_blocks(
+                    value,
+                    Slice::len(arms),
+                    0,
+                    &mut blocks
+                );
+                let join = alloc_block(value);
+                let explicit_count = Slice::len(arms) - 1;
+                let cases = Vec::new();
+                build_match_switch_cases(
+                    arms,
+                    &blocks,
+                    explicit_count,
+                    0,
+                    &mut cases
+                );
+                emit_switch(
+                    value,
+                    tag,
+                    cases,
+                    *Vec::index(&blocks, explicit_count)
+                );
+                let baseline_locals = snapshot_locals(&*value);
+                let baseline_live = snapshot_live(&*value);
+                let canonical_locals = Vec::new();
+                let canonical_live = Vec::new();
+                try(lower_match_arms(
+                    interfaces,
+                    body,
+                    value,
+                    arms,
+                    &blocks,
+                    subject_register,
+                    tag,
+                    result,
+                    join,
+                    &baseline_locals,
+                    &baseline_live,
+                    &mut canonical_locals,
+                    &mut canonical_live,
+                    0
+                ), @lower_match);
+                restore_match_state(
+                    value,
+                    &canonical_locals,
+                    &canonical_live
+                );
+                bind_block(value, join);
+                Result::Ok(Option::Some(result))
+            }
+        }
+    }
+}
+
 lower_computation(
     interfaces:
         &super::super::frontend::elaboration::TypedInterfaces,
@@ -1090,7 +1674,9 @@ lower_computation(
                     LoweringError::InvalidConstructionType(type_id)
                 )
             }
-        }
+        },
+        CoreComputationView::Match(_, subject, arms) =>
+            lower_match(interfaces, body, value, subject, arms)
     }
 }
 
@@ -1226,6 +1812,8 @@ pub lower_function(
         instructions: Vec::new(),
         cleanups: Vec::new(),
         register_packs: Arena::new(),
+        blocks: Arena::new(),
+        switch_packs: Arena::new(),
         register_count: parameter_count + 1
     };
     push_parameter_locals(
@@ -1261,25 +1849,57 @@ pub lower_function(
                 register_count: builder.register_count,
                 instructions: builder.instructions,
                 cleanups: builder.cleanups,
-                register_packs: builder.register_packs
+                register_packs: builder.register_packs,
+                blocks: builder.blocks,
+                switch_packs: builder.switch_packs
             })
         }
     }
 }
 
 collect_instruction_constants(
-    instructions: &Vec<StageInstruction>,
+    function: &StageFunction,
     index: usize,
     output: &mut Vec<Vec<u8>>
 ) {
-    if(index < Vec::len(instructions)) {
-        handle Vec::index(instructions, index) {
+    if(index < Vec::len(&function.instructions)) {
+        handle Vec::index(&function.instructions, index) {
             StageInstruction::Const(_, key) =>
                 Vec::push(&mut *output, Bytes::to_vec(key)),
+            StageInstruction::Switch(_, pack, _) =>
+                collect_switch_case_constants(
+                    function,
+                    pack,
+                    0,
+                    output
+                ),
             _ => ()
         };
         collect_instruction_constants(
-            instructions,
+            function,
+            index + 1,
+            output
+        )
+    } else { () }
+}
+
+collect_switch_case_constants(
+    value: &StageFunction,
+    pack: StageSwitchPackId,
+    index: usize,
+    output: &mut Vec<Vec<u8>>
+) {
+    let cases = Arena::index(&value.switch_packs, pack);
+    if(index < Vec::len(&cases.cases)) {
+        let case = Vec::index(&cases.cases, index);
+        let key = stage_switch_case_key(case);
+        Vec::push(
+            &mut *output,
+            Bytes::to_vec(*key)
+        );
+        collect_switch_case_constants(
+            value,
+            pack,
             index + 1,
             output
         )
@@ -1297,7 +1917,7 @@ collect_function_constants(
             stage_function_id_from_usize(index)
         );
         collect_instruction_constants(
-            &function.instructions,
+            function,
             0,
             output
         );

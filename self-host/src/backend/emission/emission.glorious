@@ -11,6 +11,10 @@ struct FunctionSpans {
 
 pub enum EmissionError {
     MissingConstant(super::lowering::RegisterId),
+    MissingSwitchConstant(
+        super::lowering::StageSwitchPackId,
+        usize
+    ),
     UnsupportedInstruction,
     MissingName(EmissionName),
     MissingSignature(super::lowering::StageFunctionId),
@@ -998,6 +1002,49 @@ append_arguments(
     } else { () }
 }
 
+append_switch_cases(
+    program: &super::lowering::StageProgram,
+    function: &super::lowering::StageFunction,
+    pack_id: super::lowering::StageSwitchPackId,
+    index: usize,
+    output: &mut Vec<u32>
+) -> Result<(), EmissionError> {
+    let pack = super::lowering::stage_function_switch_pack(
+        function,
+        pack_id
+    );
+    if(index < super::lowering::stage_switch_pack_count(pack)) {
+        let case = super::lowering::stage_switch_pack_at(pack, index);
+        let key = super::lowering::stage_switch_case_key(case);
+        let words = Bytes::to_vec(*key);
+        handle find_constant(program, &words, 0) {
+            Result::Err(_) => Result::Err(
+                EmissionError::MissingSwitchConstant(pack_id, index)
+            ),
+            Result::Ok(constant) => {
+                Vec::push(
+                    &mut *output,
+                    super::lowering::stage_constant_raw(constant)
+                );
+                Vec::push(
+                    &mut *output,
+                    super::lowering::stage_function_block_offset(
+                        function,
+                        super::lowering::stage_switch_case_target(case)
+                    )
+                );
+                append_switch_cases(
+                    program,
+                    function,
+                    pack_id,
+                    index + 1,
+                    output
+                )
+            }
+        }
+    } else { Result::Ok(()) }
+}
+
 write_instruction(
     program: &super::lowering::StageProgram,
     stage_function: &super::lowering::StageFunction,
@@ -1077,6 +1124,22 @@ write_instruction(
             super::lowering::register_pack_count(fields)
         );
         Result::Ok(())
+    } else if(*instruction is StageInstruction::ProjectMove(
+        target,
+        source,
+        field
+    )) {
+        ByteBuf::write_u32_le(&mut *code, 12298);
+        ByteBuf::write_u32_le(
+            &mut *code,
+            super::lowering::register_raw(target)
+        );
+        ByteBuf::write_u32_le(
+            &mut *code,
+            super::lowering::register_raw(source)
+        );
+        ByteBuf::write_u32_le(code, field);
+        Result::Ok(())
     } else if(*instruction is StageInstruction::ProjectCopy(
         target,
         source,
@@ -1093,11 +1156,79 @@ write_instruction(
         );
         ByteBuf::write_u32_le(code, field);
         Result::Ok(())
+    } else if(*instruction is StageInstruction::EnumTag(
+        target,
+        source
+    )) {
+        ByteBuf::write_u32_le(&mut *code, 8206);
+        ByteBuf::write_u32_le(
+            &mut *code,
+            super::lowering::register_raw(target)
+        );
+        ByteBuf::write_u32_le(
+            code,
+            super::lowering::register_raw(source)
+        );
+        Result::Ok(())
     } else if(*instruction is StageInstruction::Drop(register)) {
         ByteBuf::write_u32_le(&mut *code, 4113);
         ByteBuf::write_u32_le(
             code,
             super::lowering::register_raw(register)
+        );
+        Result::Ok(())
+    } else if(*instruction is StageInstruction::Deconstruct(register)) {
+        ByteBuf::write_u32_le(&mut *code, 4115);
+        ByteBuf::write_u32_le(
+            code,
+            super::lowering::register_raw(register)
+        );
+        Result::Ok(())
+    } else if(*instruction is StageInstruction::Jump(target)) {
+        ByteBuf::write_u32_le(&mut *code, 4128);
+        ByteBuf::write_u32_le(
+            code,
+            super::lowering::stage_function_block_offset(
+                stage_function,
+                target
+            )
+        );
+        Result::Ok(())
+    } else if(*instruction is StageInstruction::Switch(
+        discriminant,
+        pack_id,
+        otherwise
+    )) {
+        let pack = super::lowering::stage_function_switch_pack(
+            stage_function,
+            pack_id
+        );
+        let operand_start = checked_u32(Vec::len(&*operands));
+        try(append_switch_cases(
+            program,
+            stage_function,
+            pack_id,
+            0,
+            operands
+        ), @write_instruction);
+        ByteBuf::write_u32_le(&mut *code, 16417);
+        ByteBuf::write_u32_le(
+            &mut *code,
+            super::lowering::register_raw(discriminant)
+        );
+        ByteBuf::write_u32_le(&mut *code, operand_start);
+        ByteBuf::write_u32_le(
+            &mut *code,
+            checked_u32(
+                super::lowering::stage_switch_pack_count(pack)
+            )
+        );
+        ByteBuf::write_u32_le(
+            code,
+            super::lowering::stage_function_block_offset(
+                stage_function,
+                otherwise
+            )
         );
         Result::Ok(())
     } else if(*instruction is StageInstruction::Call(

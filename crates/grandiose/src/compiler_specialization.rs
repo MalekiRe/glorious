@@ -3425,9 +3425,9 @@ impl<'a> Walker<'a> {
                 Self::expression_mentions_live_name(lhs, live)
                     || Self::expression_mentions_live_name(rhs, live)
             }
-            ExprKind::Unary { operand, .. } | ExprKind::Field(operand, _) => {
-                Self::expression_mentions_live_name(operand, live)
-            }
+            ExprKind::Move(operand)
+            | ExprKind::Unary { operand, .. }
+            | ExprKind::Field(operand, _) => Self::expression_mentions_live_name(operand, live),
             _ => false,
         }
     }
@@ -3676,8 +3676,24 @@ impl<'a> Walker<'a> {
                     );
                 }
             }
-            ExprKind::Struct { fields, .. } => {
-                for (_, value) in fields.iter() {
+            ExprKind::Struct { name, fields } => {
+                let exact_fields = self.nominal_templates.get(name.as_ref());
+                for (field, value) in fields.iter() {
+                    // A later monomorphic struct construction is an exact
+                    // bidirectional use of a preceding inferred binding.
+                    // Recover that field context before recursively walking
+                    // the value so generic constructors such as `None` retain
+                    // their complete nominal arguments inside an inlined
+                    // recursive control block. Generic-dependent fields stay
+                    // excluded until an enclosing nominal instance supplies
+                    // substitutions; a ground field is independent of them.
+                    if Self::expression_mentions_live_name(value, live)
+                        && let Some(expected) = exact_fields
+                            .and_then(|template| template.fields.get(field))
+                            .filter(|expected| ground(expected))
+                    {
+                        candidates.insert(expected.clone());
+                    }
                     self.collect_expression_expectations(
                         value,
                         live,

@@ -10011,33 +10011,34 @@ fn remap_carrier_origins_with_expected(
         return Ok(expected.clone());
     }
     if let Type::Enum { variants, .. } = type_at(a, destination)?
-        && let Some(active_variant) = sources
+        && !sources.is_empty()
+        && let Some(active_variants) = sources
             .iter()
-            .filter_map(|(path, _)| {
+            .map(|(path, _)| {
                 path.first().and_then(|marker| {
                     let variant = u32::MAX - *marker;
                     (variant < variants.len() as u32).then_some(variant)
                 })
             })
-            .next()
-        && sources.iter().all(|(path, origin)| {
-            let marker = u32::MAX - active_variant;
-            path.first() == Some(&marker)
-                && expected
-                    .iter()
-                    .any(|candidate| candidate.0 == *path && candidate.1 == *origin)
-        })
+            .collect::<Option<std::collections::BTreeSet<_>>>()
+        && sources.iter().all(|candidate| expected.contains(candidate))
         && expected.iter().all(|(path, origin)| {
-            path.first() != Some(&(u32::MAX - active_variant))
+            let active = path
+                .first()
+                .map(|marker| u32::MAX - *marker)
+                .is_some_and(|variant| active_variants.contains(&variant));
+            !active
                 || sources
                     .iter()
                     .any(|candidate| candidate.0 == *path && candidate.1 == *origin)
         })
     {
-        // A known enum alternative carries only that alternative's reference
-        // leaves. Preserve the full provisional contract after proving the
-        // active alternative leaf-for-leaf; the other alternatives are
-        // mutually exclusive and are proved on their own return paths.
+        // A branch join may have accumulated several, but not yet all,
+        // mutually exclusive enum alternatives. Preserve the full provisional
+        // contract after proving every active alternative leaf-for-leaf. The
+        // remaining alternatives are established on their own incoming paths;
+        // representing the union early keeps the fixed point independent of
+        // predecessor visitation order.
         return Ok(expected.clone());
     }
     let available = sources
@@ -26587,6 +26588,86 @@ mod tests {
         };
 
         verify(artifact).expect("each enum alternative retains its own parameter provenance");
+    }
+
+    #[test]
+    fn three_reference_enum_alternatives_can_join_before_return() {
+        let mut types = Type::predefined();
+        types.push(Type::RefShared { referent: I64 });
+        types.push(Type::Enum {
+            name: "BorrowedChoice3".into(),
+            variants: ["First", "Second", "Third"]
+                .into_iter()
+                .map(|name| EnumVariant {
+                    name: name.into(),
+                    fields: vec![Field {
+                        name: "value".into(),
+                        ty: 19,
+                    }],
+                })
+                .collect(),
+            copy: true,
+        });
+        let artifact = Artifact {
+            types,
+            constants: vec![Constant::U32(0), Constant::U32(1)],
+            reference_return_contracts: vec![],
+            functions: vec![Function {
+                flags: 0,
+                name: "joined_borrowed_choice".into(),
+                params: vec![19, 19, 19, U32],
+                return_type: 20,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, 19, 19, 19, U32, 19, 19, 19, 20],
+                code_start: 0,
+                code_len: 17,
+                label_slot_count: 0,
+            }],
+            code: vec![
+                Instruction::Copy { dst: 5, src: 1 },
+                Instruction::Copy { dst: 6, src: 2 },
+                Instruction::Copy { dst: 7, src: 3 },
+                Instruction::Switch {
+                    discr: 4,
+                    cases: vec![(0, 4), (1, 8)],
+                    otherwise: 12,
+                },
+                Instruction::Drop { register: 6 },
+                Instruction::Drop { register: 7 },
+                Instruction::Construct {
+                    dst: 8,
+                    ty: 20,
+                    variant: Some(0),
+                    fields: vec![5],
+                },
+                Instruction::Jump { target: 16 },
+                Instruction::Drop { register: 5 },
+                Instruction::Drop { register: 7 },
+                Instruction::Construct {
+                    dst: 8,
+                    ty: 20,
+                    variant: Some(1),
+                    fields: vec![6],
+                },
+                Instruction::Jump { target: 16 },
+                Instruction::Drop { register: 5 },
+                Instruction::Drop { register: 6 },
+                Instruction::Construct {
+                    dst: 8,
+                    ty: 20,
+                    variant: Some(2),
+                    fields: vec![7],
+                },
+                Instruction::Jump { target: 16 },
+                Instruction::Return { src: Some(8) },
+            ],
+            required_features: 1 | (1 << 1),
+            ..Artifact::default()
+        };
+
+        verify(artifact)
+            .expect("a staged join may accumulate several exclusive enum carrier alternatives");
     }
 
     fn indirect_two_reference_artifact() -> Artifact {

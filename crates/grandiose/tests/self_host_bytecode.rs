@@ -10,7 +10,7 @@ use grandiose::{
 };
 use grandiose_vm::{
     Artifact, SystemHost, Type, Value, Vm,
-    bytecode::{I64, U64},
+    bytecode::{I64, Instruction, U64},
     verify::load_verified,
 };
 
@@ -43,6 +43,24 @@ const FIXTURE: &str = r#"
     empty_choice() -> Choice { Choice::Empty }
     number_choice() -> Choice { Choice::Number(13) }
     pair_choice() -> Choice { Choice::Pair(7, 9) }
+    inspect_choice(choice: Choice) -> i64 {
+        handle choice {
+            Choice::Empty => 3,
+            Choice::Number(value) => value,
+            Choice::Pair(first, _) => first
+        }
+    }
+    inspect_choice_tail(choice: Choice) -> u64 {
+        handle choice {
+            Choice::Empty => 3,
+            Choice::Number(_) => 13,
+            Choice::Pair(_, second) => second
+        }
+    }
+    matched_empty() -> i64 { inspect_choice(Choice::Empty) }
+    matched_number() -> i64 { inspect_choice(Choice::Number(13)) }
+    matched_pair() -> i64 { inspect_choice(Choice::Pair(7, 9)) }
+    matched_pair_tail() -> u64 { inspect_choice_tail(Choice::Pair(7, 9)) }
     main() { () }
 "#;
 
@@ -132,6 +150,10 @@ fn assert_compiled_artifact(bytes: &[u8]) {
     let empty_choice = function_id(&decoded, "empty_choice");
     let number_choice = function_id(&decoded, "number_choice");
     let pair_choice = function_id(&decoded, "pair_choice");
+    let matched_empty = function_id(&decoded, "matched_empty");
+    let matched_number = function_id(&decoded, "matched_number");
+    let matched_pair = function_id(&decoded, "matched_pair");
+    let matched_pair_tail = function_id(&decoded, "matched_pair_tail");
     let main = function_id(&decoded, "main");
     assert!(decoded.types.iter().any(|ty| matches!(
         ty.representation(),
@@ -198,6 +220,56 @@ fn assert_compiled_artifact(bytes: &[u8]) {
     assert_eq!(
         Vm::new(verified.clone()).run(pair_choice, vec![]).unwrap(),
         Value::aggregate_with_variant(choice, Some(2), [Value::I64(7), Value::U64(9)])
+    );
+    assert!(
+        decoded
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::EnumTag { .. })),
+        "enum handles must inspect the subject tag"
+    );
+    assert!(
+        decoded
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::Switch { .. })),
+        "enum handles must branch on the subject tag"
+    );
+    assert!(
+        decoded
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::ProjectMove { .. })),
+        "enum handles must move payload fields into arm bindings"
+    );
+    assert!(
+        decoded
+            .code
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::Deconstruct { .. })),
+        "enum handles must consume the matched aggregate shell"
+    );
+    assert_eq!(
+        Vm::new(verified.clone())
+            .run(matched_empty, vec![])
+            .unwrap(),
+        Value::I64(3)
+    );
+    assert_eq!(
+        Vm::new(verified.clone())
+            .run(matched_number, vec![])
+            .unwrap(),
+        Value::I64(13)
+    );
+    assert_eq!(
+        Vm::new(verified.clone()).run(matched_pair, vec![]).unwrap(),
+        Value::I64(7)
+    );
+    assert_eq!(
+        Vm::new(verified.clone())
+            .run(matched_pair_tail, vec![])
+            .unwrap(),
+        Value::U64(9)
     );
     assert_eq!(Vm::new(verified).run(main, vec![]).unwrap(), Value::Unit);
 }

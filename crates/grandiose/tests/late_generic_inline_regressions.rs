@@ -110,6 +110,158 @@ fn late_generic_inline_distinguishes_block_values_from_callable_blocks() {
 }
 
 #[test]
+fn static_label_generic_call_preserves_callable_result_context() {
+    let source = r#"
+        visit<E, F, L>(body: F, exit: L) -> Result<(), E>
+        where F: Fn<(), Output=Result<(), E>>,
+        L: Label<Result<(), E>> {
+            body()
+        }
+        walk() -> Result<(), i64> {
+            visit({ => Result::Err(42) }, @walk)
+        }
+        answer() -> i64 {
+            handle walk() {
+                Result::Err(error) => error,
+                Result::Ok(_) => 0
+            }
+        }
+        main() -> { () }
+    "#;
+
+    assert_eq!(
+        run("late-inline-static-label-result.glorious", source, "answer"),
+        Value::I64(42)
+    );
+}
+
+#[test]
+fn generic_option_constructor_alias_is_planned_inside_monomorphic_callers() {
+    let source = r#"
+        struct Item {
+            cursor: usize,
+            limit: usize,
+            parent: Option<usize>
+        }
+
+        empty_items() -> Vec<Item> { Vec::new() }
+
+        struct State {
+            cursor: usize,
+            limit: usize,
+            parent: Option<usize>,
+            values: Vec<Item>
+        }
+
+        complete(values: Vec<Item>) -> Result<i64, i64> {
+            let remaining = values;
+            handle Vec::pop(&mut remaining) {
+                Result::Err(_) => Result::Ok(42),
+                Result::Ok(item) => continue_scan(State {
+                    cursor: item.cursor,
+                    limit: item.limit,
+                    parent: move item.parent,
+                    values: remaining
+                })
+            }
+        }
+
+        continue_scan(state: State) -> Result<i64, i64> {
+            state.cursor;
+            state.limit;
+            state.parent;
+            complete(state.values)
+        }
+
+        answer() -> i64 {
+            handle complete(empty_items()) {
+                Result::Ok(value) => value,
+                Result::Err(error) => error
+            }
+        }
+
+        main() -> { () }
+    "#;
+
+    assert_eq!(
+        run(
+            "generic-option-constructor-alias.glorious",
+            source,
+            "answer"
+        ),
+        Value::I64(42)
+    );
+}
+
+#[test]
+fn recursive_control_recovers_generic_results_from_named_struct_fields() {
+    let source = r#"
+        enum Binder {
+            Wildcard,
+            Local(u32)
+        }
+        struct Binding {
+            marker: u8,
+            local: Option<u32>
+        }
+
+        empty_binders() -> Vec<Binder> { Vec::new() }
+        empty_bindings() -> Vec<Binding> { Vec::new() }
+
+        local_field_first(
+            binders: &Vec<Binder>,
+            index: usize,
+            output: &mut Vec<Binding>
+        ) {
+            if(index < Vec::len(binders)) {
+                let binder = *Vec::index(binders, index);
+                let local = handle binder {
+                    Binder::Wildcard => None,
+                    Binder::Local(value) => Option::Some(value)
+                };
+                Vec::push(&mut *output, Binding { local: local, marker: 1 });
+                local_field_first(binders, index + 1, output)
+            } else {
+                ()
+            }
+        }
+
+        marker_field_first(
+            binders: &Vec<Binder>,
+            index: usize,
+            output: &mut Vec<Binding>
+        ) {
+            if(index < Vec::len(binders)) {
+                let binder = *Vec::index(binders, index);
+                let local = handle binder {
+                    Binder::Wildcard => None,
+                    Binder::Local(value) => Option::Some(value)
+                };
+                Vec::push(&mut *output, Binding { marker: 2, local: local });
+                marker_field_first(binders, index + 1, output)
+            } else {
+                ()
+            }
+        }
+
+        answer() -> usize {
+            let binders = empty_binders();
+            let left = empty_bindings();
+            let right = empty_bindings();
+            local_field_first(&binders, 0, &mut left);
+            marker_field_first(&binders, 0, &mut right);
+            Vec::len(&left) + Vec::len(&right)
+        }
+        main() -> { () }
+    "#;
+
+    assert_eq!(
+        run("late-inline-struct-field-result.glorious", source, "answer"),
+        Value::U64(0)
+    );
+}
+
+#[test]
 fn mandatory_resumption_is_consumed_once_by_a_nontransparent_generic_callee() {
     let source = r#"
         effect Ask { [1,1] ask() -> i64 }
@@ -127,6 +279,34 @@ fn mandatory_resumption_is_consumed_once_by_a_nontransparent_generic_callee() {
     assert_eq!(
         run("late-inline-mandatory-one.glorious", source, "answer"),
         Value::I64(42)
+    );
+}
+
+#[test]
+fn generic_call_learns_type_arguments_from_borrowed_field_projections() {
+    let source = r#"
+        struct Holder { slot: Option<u64> }
+        store<T>(destination: &mut T, value: T) {
+            *destination = move value;
+        }
+        clear(holder: &mut Holder) {
+            store(&mut holder.slot, None)
+        }
+        answer() -> u64 {
+            let holder = Holder { slot: Option::Some(7) };
+            clear(&mut holder);
+            if(Option::is_none(&holder.slot)) { 42 } else { 0 }
+        }
+        main() -> { () }
+    "#;
+
+    assert_eq!(
+        run(
+            "generic-borrowed-projection-context.glorious",
+            source,
+            "answer"
+        ),
+        Value::U64(42)
     );
 }
 

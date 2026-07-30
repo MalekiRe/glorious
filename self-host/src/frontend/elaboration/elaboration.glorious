@@ -3,6 +3,7 @@
 
 use super::lexer::TokenKind;
 use super::resolution::ResolvedTarget;
+use super::resolution::ResolvedPatternBinder;
 
 pub struct TypeTag {}
 pub type TypeId = Id<TypeTag>;
@@ -165,6 +166,14 @@ struct ConstructionFieldRange { start: u32, count: u32 }
 
 impl Use<[0, *]> for ConstructionFieldRange {}
 
+struct MatchArmRange { start: u32, count: u32 }
+
+impl Use<[0, *]> for MatchArmRange {}
+
+struct MatchBindingRange { start: u32, count: u32 }
+
+impl Use<[0, *]> for MatchBindingRange {}
+
 struct CheckedRangeWords { start: u32, count: u32 }
 
 impl Use<[0, *]> for CheckedRangeWords {}
@@ -180,7 +189,8 @@ enum CoreComputationKind {
     Pure(CoreValueId),
     Let(CoreLocalId, CoreComputationId, CoreComputationId),
     Call(u32, OperandRange),
-    Construct(ConstructionFlavor, ConstructionFieldRange)
+    Construct(ConstructionFlavor, ConstructionFieldRange),
+    Match(CoreValueId, MatchArmRange)
 }
 
 impl Use<[0, *]> for CoreComputationKind {}
@@ -192,6 +202,22 @@ impl Use<[0, *]> for CoreComputation {}
 pub struct ConstructionField { field: u32, value: CoreValueId }
 
 impl Use<[0, *]> for ConstructionField {}
+
+pub struct CoreMatchArm {
+    variant: u32,
+    bindings: MatchBindingRange,
+    body: CoreComputationId
+}
+
+impl Use<[0, *]> for CoreMatchArm {}
+
+pub struct CoreMatchBinding {
+    field: u32,
+    local: Option<CoreLocalId>,
+    ty: TypeId
+}
+
+impl Use<[0, *]> for CoreMatchBinding {}
 
 struct IntegerConstant { low0: u32, low1: u32, high0: u32, high1: u32 }
 
@@ -206,6 +232,8 @@ pub struct TypedBody {
     computations: Arena<CoreComputationTag, CoreComputation>,
     operands: Vec<CoreValueId>,
     construction_fields: Vec<ConstructionField>,
+    match_arms: Vec<CoreMatchArm>,
+    match_bindings: Vec<CoreMatchBinding>,
     integer_constants: Arena<IntegerConstantTag, IntegerConstant>
 }
 
@@ -257,7 +285,8 @@ pub enum CoreComputationView<'a> {
     Pure(TypeId, CoreValueId),
     Let(TypeId, CoreLocalId, CoreComputationId, CoreComputationId),
     Call(TypeId, u32, Slice<'a, CoreValueId>),
-    Construct(TypeId, ConstructionFlavor, Slice<'a, ConstructionField>)
+    Construct(TypeId, ConstructionFlavor, Slice<'a, ConstructionField>),
+    Match(TypeId, CoreValueId, Slice<'a, CoreMatchArm>)
 }
 
 impl<'a> Use<[0, *]> for CoreComputationView<'a> {}
@@ -282,7 +311,23 @@ enum ElaborationTarget {
 
 impl Use<[0, *]> for ElaborationTarget {}
 
-struct ResolutionMap { targets: Vec<ElaborationTarget> }
+struct ElaborationBinderRange { start: u32, count: u32 }
+
+impl Use<[0, *]> for ElaborationBinderRange {}
+
+struct ElaborationHandleArm {
+    variant: u32,
+    binders: ElaborationBinderRange
+}
+
+impl Use<[0, *]> for ElaborationHandleArm {}
+
+struct ResolutionMap {
+    targets: Vec<ElaborationTarget>,
+    handle_arms:
+        IndexVec<super::bodies::HandleArmTag, ElaborationHandleArm>,
+    pattern_binders: Vec<super::resolution::ResolvedPatternBinder>
+}
 
 struct BodyBuilder {
     parameter_count: u32,
@@ -294,6 +339,8 @@ struct BodyBuilder {
     computations: Arena<CoreComputationTag, CoreComputation>,
     operands: Vec<CoreValueId>,
     construction_fields: Vec<ConstructionField>,
+    match_arms: Vec<CoreMatchArm>,
+    match_bindings: Vec<CoreMatchBinding>,
     integer_constants: Arena<IntegerConstantTag, IntegerConstant>
 }
 
@@ -571,6 +618,15 @@ core_local_id_from_u32(value: u32) -> CoreLocalId {
 }
 
 integer_constant_id_from_usize(value: usize) -> IntegerConstantId {
+    handle Id::from_usize(value) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(id) => id
+    }
+}
+
+handle_arm_id_from_usize(
+    value: usize
+) -> super::bodies::HandleArmId {
     handle Id::from_usize(value) {
         Result::Err(_) => unreachable(),
         Result::Ok(id) => id
@@ -979,6 +1035,56 @@ typed_body_construction_fields<'a>(
     }
 }
 
+typed_body_match_arms<'a>(
+    value: &'a TypedBody,
+    range: MatchArmRange
+) -> Slice<'a, CoreMatchArm> {
+    handle Slice::subslice(
+        Vec::as_slice(&value.match_arms),
+        usize_from_u32(range.start),
+        usize_from_u32(range.count)
+    ) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+pub core_match_arm_variant(value: &CoreMatchArm) -> u32 {
+    value.variant
+}
+
+pub core_match_arm_body(value: &CoreMatchArm) -> CoreComputationId {
+    value.body
+}
+
+pub core_match_arm_bindings<'a>(
+    body: &'a TypedBody,
+    value: &CoreMatchArm
+) -> Slice<'a, CoreMatchBinding> {
+    handle Slice::subslice(
+        Vec::as_slice(&body.match_bindings),
+        usize_from_u32(value.bindings.start),
+        usize_from_u32(value.bindings.count)
+    ) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+pub core_match_binding_field(value: &CoreMatchBinding) -> u32 {
+    value.field
+}
+
+pub core_match_binding_local(
+    value: &CoreMatchBinding
+) -> Option<CoreLocalId> {
+    value.local
+}
+
+pub core_match_binding_type(value: &CoreMatchBinding) -> TypeId {
+    value.ty
+}
+
 pub typed_body_computation_at<'a>(
     value: &'a TypedBody,
     id: CoreComputationId
@@ -1006,6 +1112,12 @@ pub typed_body_computation_at<'a>(
                 ty,
                 flavor,
                 typed_body_construction_fields(value, range)
+            ),
+        CoreComputationKind::Match(subject, range) =>
+            CoreComputationView::Match(
+                ty,
+                subject,
+                typed_body_match_arms(value, range)
             )
     }
 }
@@ -1159,6 +1271,37 @@ append_construction_fields(
     } else { () }
 }
 
+append_match_bindings(
+    output: &mut Vec<CoreMatchBinding>,
+    source: &Vec<CoreMatchBinding>,
+    index: usize
+) {
+    if(index < Vec::len(source)) {
+        Vec::push(&mut *output, *Vec::index(source, index));
+        append_match_bindings(output, source, index + 1)
+    } else { () }
+}
+
+append_match_arms_rebased(
+    output: &mut Vec<CoreMatchArm>,
+    source: &Vec<CoreMatchArm>,
+    binding_base: u32,
+    index: usize
+) {
+    if(index < Vec::len(source)) {
+        let arm = Vec::index(source, index);
+        Vec::push(&mut *output, CoreMatchArm {
+            variant: arm.variant,
+            bindings: MatchBindingRange {
+                start: binding_base + arm.bindings.start,
+                count: arm.bindings.count
+            },
+            body: arm.body
+        });
+        append_match_arms_rebased(output, source, binding_base, index + 1)
+    } else { () }
+}
+
 checked_range_words(start: usize, count: usize) -> CheckedRangeWords {
     let end = handle checked_usize_add(start, count) {
         Result::Err(_) => unreachable(),
@@ -1190,6 +1333,16 @@ construction_field_range(
 ) -> ConstructionFieldRange {
     let words = checked_range_words(start, count);
     ConstructionFieldRange { start: words.start, count: words.count }
+}
+
+match_arm_range(start: usize, count: usize) -> MatchArmRange {
+    let words = checked_range_words(start, count);
+    MatchArmRange { start: words.start, count: words.count }
+}
+
+match_binding_range(start: usize, count: usize) -> MatchBindingRange {
+    let words = checked_range_words(start, count);
+    MatchBindingRange { start: words.start, count: words.count }
 }
 
 type_to_scalar_kind(type_id: u32) -> u8 {
@@ -2766,6 +2919,13 @@ elaboration_target_at(
     *Vec::index(&map.targets, usize_from_u32(expression))
 }
 
+elaboration_handle_arm<'a>(
+    map: &'a ResolutionMap,
+    id: super::bodies::HandleArmId
+) -> &'a ElaborationHandleArm {
+    IndexVec::index(&map.handle_arms, id)
+}
+
 elaboration_target_kind(target: ElaborationTarget) -> u32 {
     handle target {
         ElaborationTarget::Missing => 0,
@@ -2832,18 +2992,81 @@ build_resolution_map(
     } else { Result::Ok(()) }
 }
 
+append_resolved_pattern_binders<'a>(
+    output: &mut Vec<super::resolution::ResolvedPatternBinder>,
+    source: Slice<'a, super::resolution::ResolvedPatternBinder>,
+    index: usize
+) {
+    if(index < Slice::len(source)) {
+        Vec::push(
+            &mut *output,
+            *handle Slice::get(source, index) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            }
+        );
+        append_resolved_pattern_binders(output, source, index + 1)
+    } else { () }
+}
+
+build_handle_resolution_map(
+    resolved: &super::resolution::ResolvedBody,
+    count: usize,
+    index: usize,
+    output: &mut ResolutionMap
+) {
+    if(index < count) {
+        let id = handle_arm_id_from_usize(index);
+        let source = super::resolution::resolved_handle_arm(resolved, id);
+        let binders = super::resolution::resolved_handle_binders(
+            resolved,
+            source
+        );
+        let start = Vec::len(&output.pattern_binders);
+        append_resolved_pattern_binders(
+            &mut output.pattern_binders,
+            binders,
+            0
+        );
+        let arm = ElaborationHandleArm {
+            variant: super::resolution::resolved_handle_variant(source),
+            binders: ElaborationBinderRange {
+                start: u32_from_usize(start),
+                count: u32_from_usize(Slice::len(binders))
+            }
+        };
+        handle IndexVec::push(&mut output.handle_arms, arm) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(_) => build_handle_resolution_map(
+                resolved,
+                count,
+                index + 1,
+                output
+            )
+        }
+    } else { () }
+}
+
 resolution_map(
     body: &super::bodies::ParsedBody,
     resolved: &super::resolution::ResolvedBody
 ) -> Result<ResolutionMap, ElaborationError> {
     let count = super::bodies::expression_count(body);
     let output = ResolutionMap {
-        targets: Vec::new()
+        targets: Vec::new(),
+        handle_arms: IndexVec::new(),
+        pattern_binders: Vec::new()
     };
     push_missing_targets(&mut output.targets, count);
     try(
         build_resolution_map(resolved, count, 0, &mut output),
         @resolution_map
+    );
+    build_handle_resolution_map(
+        resolved,
+        super::bodies::handle_arm_count(body),
+        0,
+        &mut output
     );
     Result::Ok( output)
 }
@@ -4481,6 +4704,362 @@ elaborate_projection(
     }
 }
 
+push_match_variant_flags(output: &mut Vec<Bool>, remaining: u32) {
+    if(remaining == 0) { () } else {
+        Vec::push(&mut *output, false);
+        push_match_variant_flags(output, remaining - 1)
+    }
+}
+
+match_variants_complete(
+    variants: &Vec<Bool>,
+    index: usize
+) -> Bool {
+    if(index < Vec::len(variants)) {
+        if(*Vec::index(variants, index)) {
+            match_variants_complete(variants, index + 1)
+        } else { false }
+    } else { true }
+}
+
+elaborate_handle_binders(
+    value: &mut BodyBuilder,
+    interfaces: &TypedInterfaces,
+    map: &ResolutionMap,
+    binders: ElaborationBinderRange,
+    payloads: VariantPayloadRange,
+    ordinal: u32,
+    output: &mut Vec<CoreMatchBinding>
+) {
+    if(ordinal < payloads.count) {
+        let ty = variant_payload_type_at(
+            interfaces,
+            usize_from_u32(payloads.start + ordinal)
+        );
+        let binder = *Vec::index(
+            &map.pattern_binders,
+            usize_from_u32(binders.start + ordinal)
+        );
+        let local = handle binder {
+            ResolvedPatternBinder::Wildcard => None,
+            ResolvedPatternBinder::Local(source) => {
+                let core = core_local_id_from_u32(
+                    value.parameter_count + Id::to_u32(source)
+                );
+                *IndexVec::index_mut(
+                    &mut value.local_types,
+                    core
+                ) = Option::Some(ty);
+                Option::Some(core)
+            }
+        };
+        Vec::push(&mut *output, CoreMatchBinding {
+            field: ordinal,
+            local: local,
+            ty: ty
+        });
+        elaborate_handle_binders(
+            value,
+            interfaces,
+            map,
+            binders,
+            payloads,
+            ordinal + 1,
+            output
+        )
+    } else { () }
+}
+
+elaborate_handle_arms(
+    original: &String,
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::bodies::ParsedBody,
+    map: &ResolutionMap,
+    value: &mut BodyBuilder,
+    expression: u32,
+    nominal: InterfaceNominalId,
+    variants: InterfaceVariantRange,
+    ordinal: usize,
+    expected: Option<TypeId>,
+    seen: &mut Vec<Bool>,
+    output_arms: &mut Vec<CoreMatchArm>,
+    output_bindings: &mut Vec<CoreMatchBinding>
+) -> Result<TypeId, ElaborationError> {
+    let source_arms = super::bodies::expression_handle_arms(
+        body,
+        expression
+    );
+    if(ordinal < Slice::len(source_arms)) {
+        let source_arm = handle Slice::get(source_arms, ordinal) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let arm_id = super::bodies::expression_handle_arm_id(
+            body,
+            expression,
+            ordinal
+        );
+        let arm = elaboration_handle_arm(map, arm_id);
+        let variant_index = arm.variant;
+        let token = super::bodies::handle_arm_variant_token(source_arm);
+        if(usize_from_u32(variant_index) < interface_variant_count(
+            &*interfaces
+        )) {
+            let variant = *interface_variant_at(
+                &*interfaces,
+                interface_variant_id_from_u32(variant_index)
+            );
+            if(bool_and(
+                variant.owner == nominal,
+                bool_and(
+                    variants.start <= variant_index,
+                    variant_index < variants.start + variants.count
+                )
+            )) {
+                let variant_ordinal = variant_index - variants.start;
+                if(*Vec::index(seen, usize_from_u32(variant_ordinal))) {
+                    Result::Err(error(
+                        4,
+                        token,
+                        token,
+                        variants.count,
+                        u32_from_usize(Slice::len(source_arms))
+                    ))
+                } else {
+                    let binders = arm.binders;
+                    if(binders.count
+                        == variant.payloads.count) {
+                        *Vec::index_mut(
+                            &mut *seen,
+                            usize_from_u32(variant_ordinal)
+                        ) = true;
+                        let binding_start = Vec::len(output_bindings);
+                        elaborate_handle_binders(
+                            value,
+                            &*interfaces,
+                            map,
+                            binders,
+                            variant.payloads,
+                            0,
+                            output_bindings
+                        );
+                        let arm_body = try(elaborate_expression(
+                            original,
+                            headers,
+                            declarations,
+                            interfaces,
+                            body,
+                            map,
+                            value,
+                            Id::to_u32(
+                                super::bodies::handle_arm_body(source_arm)
+                            ),
+                            expected
+                        ), @elaborate_handle_arms);
+                        let arm_type = arm_body.type_id;
+                        let arm_computation = as_computation(value, arm_body);
+                        Vec::push(&mut *output_arms, CoreMatchArm {
+                            variant: variant_ordinal,
+                            bindings: match_binding_range(
+                                binding_start,
+                                usize_from_u32(variant.payloads.count)
+                            ),
+                            body: arm_computation
+                        });
+                        elaborate_handle_arms(
+                            original,
+                            headers,
+                            declarations,
+                            interfaces,
+                            body,
+                            map,
+                            value,
+                            expression,
+                            nominal,
+                            variants,
+                            ordinal + 1,
+                            Option::Some(arm_type),
+                            seen,
+                            output_arms,
+                            output_bindings
+                        )
+                    } else { Result::Err(error(
+                            4,
+                            token,
+                            token,
+                            variant.payloads.count,
+                            binders.count
+                        )) }
+                }
+            } else { Result::Err(error(
+                    3,
+                    token,
+                    token,
+                    Id::to_u32(nominal),
+                    Id::to_u32(variant.owner)
+                )) }
+        } else { Result::Err(error(
+                7,
+                token,
+                token,
+                0,
+                variant_index
+            )) }
+    } else {
+        handle expected {
+            Result::Err(_) => Result::Err(error(
+                4,
+                super::bodies::expression_token_start_at(body, expression),
+                super::bodies::expression_token_start_at(body, expression),
+                variants.count,
+                0
+            )),
+            Result::Ok(found) => Result::Ok(found)
+        }
+    }
+}
+
+elaborate_handle(
+    original: &String,
+    headers: &super::headers::ParsedHeaders,
+    declarations: &super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::bodies::ParsedBody,
+    map: &ResolutionMap,
+    value: &mut BodyBuilder,
+    expression: u32,
+    expected: Option<TypeId>
+) -> Result<Elaborated, ElaborationError> {
+    let token = super::bodies::expression_token_start_at(body, expression);
+    let subject = try(elaborate_expression(
+        original,
+        headers,
+        declarations,
+        interfaces,
+        body,
+        map,
+        value,
+        super::bodies::expression_child_at(body, expression, 0),
+        None
+    ), @elaborate_handle);
+    handle type_kind_at(&*interfaces, subject.type_id) {
+        TypeKind::Nominal(nominal) => {
+            let nominal_node = *interface_nominal_at(&*interfaces, nominal);
+            handle nominal_node.kind {
+                InterfaceNominalKind::Struct(_) => Result::Err(error(
+                    3,
+                    token,
+                    token,
+                    0,
+                    Id::to_u32(subject.type_id)
+                )),
+                InterfaceNominalKind::Enum(variants) => {
+                    let source_arms =
+                        super::bodies::expression_handle_arms(
+                            body,
+                            expression
+                        );
+                    if(u32_from_usize(Slice::len(source_arms))
+                        == variants.count) {
+                        let wrappers = Vec::new();
+                        let subject_value = materialize_operand(
+                            value,
+                            subject,
+                            &mut wrappers
+                        );
+                        let seen = Vec::new();
+                        push_match_variant_flags(
+                            &mut seen,
+                            variants.count
+                        );
+                        let arms = Vec::new();
+                        let bindings = Vec::new();
+                        let result_type = try(elaborate_handle_arms(
+                            original,
+                            headers,
+                            declarations,
+                            interfaces,
+                            body,
+                            map,
+                            value,
+                            expression,
+                            nominal,
+                            variants,
+                            0,
+                            expected,
+                            &mut seen,
+                            &mut arms,
+                            &mut bindings
+                        ), @elaborate_handle);
+                        if(match_variants_complete(&seen, 0)) {
+                            // Parent ranges are appended only after all arm
+                            // bodies, so nested matches retain contiguous
+                            // ranges in the same flattened arenas.
+                            let binding_start =
+                                Vec::len(&value.match_bindings);
+                            append_match_bindings(
+                                &mut value.match_bindings,
+                                &bindings,
+                                0
+                            );
+                            let arm_start = Vec::len(&value.match_arms);
+                            append_match_arms_rebased(
+                                &mut value.match_arms,
+                                &arms,
+                                u32_from_usize(binding_start),
+                                0
+                            );
+                            let match_computation = push_computation(
+                                value,
+                                result_type,
+                                CoreComputationKind::Match(
+                                    subject_value,
+                                    match_arm_range(
+                                        arm_start,
+                                        Vec::len(&arms)
+                                    )
+                                )
+                            );
+                            let root = wrap_lets_reverse(
+                                value,
+                                &wrappers,
+                                Vec::len(&wrappers),
+                                match_computation,
+                                result_type
+                            );
+                            Result::Ok(Elaborated {
+                                type_id: result_type,
+                                form: ElaboratedForm::Computation(root)
+                            })
+                        } else { Result::Err(error(
+                                4,
+                                token,
+                                token,
+                                variants.count,
+                                u32_from_usize(Slice::len(source_arms))
+                            )) }
+                    } else { Result::Err(error(
+                            4,
+                            token,
+                            token,
+                            variants.count,
+                            u32_from_usize(Slice::len(source_arms))
+                        )) }
+                }
+            }
+        },
+        _ => Result::Err(error(
+            3,
+            token,
+            token,
+            0,
+            Id::to_u32(subject.type_id)
+        ))
+    }
+}
+
 elaborate_expression(
     original: &String,
     headers: &super::headers::ParsedHeaders,
@@ -4608,6 +5187,17 @@ elaborate_expression(
             expected
         ),
         11 => elaborate_projection(
+            original,
+            headers,
+            declarations,
+            interfaces,
+            body,
+            map,
+            value,
+            expression,
+            expected
+        ),
+        12 => elaborate_handle(
             original,
             headers,
             declarations,
@@ -5196,6 +5786,8 @@ pub elaborate_function_body(
                 computations: Arena::new(),
                 operands: Vec::new(),
                 construction_fields: Vec::new(),
+                match_arms: Vec::new(),
+                match_bindings: Vec::new(),
                 integer_constants: Arena::new()
             };
             let root = try(elaborate_expression(
@@ -5227,6 +5819,8 @@ pub elaborate_function_body(
                 operands: move builder.operands,
                 construction_fields:
                     move builder.construction_fields,
+                match_arms: move builder.match_arms,
+                match_bindings: move builder.match_bindings,
                 integer_constants:
                     move builder.integer_constants
             })
@@ -5421,6 +6015,25 @@ operands_use_local(
             ) } } else { false }
 }
 
+match_arms_use_local(
+    body: &TypedBody,
+    range: MatchArmRange,
+    ordinal: u32,
+    local: CoreLocalId
+) -> Bool {
+    if(ordinal < range.count) {
+        let arm = Vec::index(
+            &body.match_arms,
+            usize_from_u32(range.start + ordinal)
+        );
+        if(computation_uses_local(body, arm.body, local)) {
+            true
+        } else {
+            match_arms_use_local(body, range, ordinal + 1, local)
+        }
+    } else { false }
+}
+
 computation_uses_local(
     body: &TypedBody,
     computation: CoreComputationId,
@@ -5449,7 +6062,13 @@ computation_uses_local(
             range.count,
             0,
             local
-        )
+        ),
+        CoreComputationKind::Match(subject, range) =>
+            if(value_uses_local(body, subject, local)) {
+                true
+            } else {
+                match_arms_use_local(body, range, 0, local)
+            }
     }
 }
 
@@ -5744,7 +6363,16 @@ write_computation_expression(
                 range.count,
                 0
             )
-        }
+        },
+        // The legacy Stage-A typed-Core wire format predates direct Match.
+        // Backend consumers use CoreComputationView::Match instead.
+        CoreComputationKind::Match(_, _) => Result::Err(error(
+            2,
+            Id::to_usize(computation),
+            Id::to_usize(computation),
+            0,
+            12
+        ))
     }
 }
 

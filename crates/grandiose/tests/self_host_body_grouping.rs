@@ -7,7 +7,7 @@ use std::{
 
 use grandiose::{
     CompileOptions, LlvmOptions, OptimizationLevel,
-    ast::{BinaryOp, Expr, ExprKind, FixityKind, Program, Stmt, UnaryOp},
+    ast::{BinaryOp, Expr, ExprKind, FixityKind, Pattern, PatternKind, Program, Stmt, UnaryOp},
     source_bundle::{Segment, SourceBundle},
 };
 use grandiose_vm::{SystemHost, Value, Vm, verify};
@@ -141,12 +141,142 @@ fn encode_statement(
     }
 }
 
+fn variable_named(expression: &Expr, expected: &str) -> bool {
+    matches!(
+        &expression.kind,
+        ExprKind::Variable(path)
+            if matches!(path.as_ref(), [name] if name.as_ref() == expected)
+    )
+}
+
+fn single_context_expression(expression: &Expr) -> Option<&Expr> {
+    let ExprKind::ContextBlock(statements) = &expression.kind else {
+        return None;
+    };
+    let [Stmt::Expr(expression)] = statements.as_slice() else {
+        return None;
+    };
+    Some(expression)
+}
+
+fn collect_completion_arms<'a>(
+    expression: &'a Expr,
+    binding: &str,
+    output: &mut Vec<(&'a Pattern, &'a Expr)>,
+) -> Option<()> {
+    let ExprKind::Call(else_callee, else_arguments) = &expression.kind else {
+        return variable_named(expression, "unreachable").then_some(());
+    };
+    if variable_named(else_callee, "unreachable") && else_arguments.is_empty() {
+        return Some(());
+    }
+    if !variable_named(else_callee, "else") {
+        return None;
+    }
+    let [conditional, negative] = else_arguments.as_slice() else {
+        return None;
+    };
+    let ExprKind::Call(if_callee, if_arguments) = &conditional.kind else {
+        return None;
+    };
+    if !variable_named(if_callee, "if") {
+        return None;
+    }
+    let [condition, positive] = if_arguments.as_slice() else {
+        return None;
+    };
+    let ExprKind::Is { subject, pattern } = &condition.kind else {
+        return None;
+    };
+    if !variable_named(subject, binding) {
+        return None;
+    }
+    output.push((pattern, single_context_expression(positive)?));
+    collect_completion_arms(single_context_expression(negative)?, binding, output)
+}
+
+fn normalized_direct_enum_handle(expression: &Expr) -> Option<(&Expr, Vec<(&Pattern, &Expr)>)> {
+    let ExprKind::Block(statements) = &expression.kind else {
+        return None;
+    };
+    let [
+        Stmt::Let {
+            name,
+            value: subject,
+            ..
+        },
+        Stmt::Expr(completion),
+    ] = statements.as_slice()
+    else {
+        return None;
+    };
+    if !name.starts_with("$handle$result$") {
+        return None;
+    }
+    let mut arms = Vec::new();
+    collect_completion_arms(completion, name, &mut arms)?;
+    Some((subject, arms))
+}
+
+fn encode_enum_arm(
+    output: &mut Vec<u8>,
+    program: &Program,
+    source: &str,
+    pattern: &Pattern,
+    body: &Expr,
+) -> Result<(), ()> {
+    let PatternKind::Variant {
+        path,
+        fields,
+        rest: None,
+    } = &pattern.kind
+    else {
+        return Err(());
+    };
+    let [enum_name, variant_name] = path.segments.as_slice() else {
+        return Err(());
+    };
+    push_string(output, enum_name);
+    push_string(output, variant_name);
+    push_u32(output, fields.len().try_into().map_err(|_| ())?);
+    for field in fields {
+        match &field.kind {
+            PatternKind::Wildcard => output.push(0),
+            PatternKind::Binding(name) => {
+                output.push(1);
+                push_string(output, name);
+            }
+            _ => return Err(()),
+        }
+    }
+    encode_expression(output, program, source, body)
+}
+
+fn encode_direct_enum_handle(
+    output: &mut Vec<u8>,
+    program: &Program,
+    source: &str,
+    computation: &Expr,
+    arms: &[(&Pattern, &Expr)],
+) -> Result<(), ()> {
+    output.push(12);
+    encode_expression(output, program, source, computation)?;
+    push_u32(output, arms.len().try_into().map_err(|_| ())?);
+    for (pattern, body) in arms {
+        encode_enum_arm(output, program, source, pattern, body)?;
+    }
+    Ok(())
+}
+
 fn encode_expression(
     output: &mut Vec<u8>,
     program: &Program,
     source: &str,
     expression: &Expr,
 ) -> Result<(), ()> {
+    if let Some((computation, arms)) = normalized_direct_enum_handle(expression) {
+        return encode_direct_enum_handle(output, program, source, computation, &arms);
+    }
     match &expression.kind {
         ExprKind::Variable(path) => {
             output.push(1);
@@ -305,6 +435,13 @@ fn corpus(directory: &Path) -> Vec<PathBuf> {
         "probe_struct() { Pair { right: second, left: first } }",
         "probe_projection() { value.field.0 }",
         "probe_variant_path() { Choice::Some(value) }",
+        "probe_enum_handle() { \
+            handle value { \
+                Choice::Empty => 0, \
+                Choice::Number(found) => found, \
+                Choice::Pair(left, _) => left \
+            } \
+        }",
     ];
     let malformed = [
         "infixl 10 op; probe_missing_operand() { a op }",

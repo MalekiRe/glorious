@@ -1495,7 +1495,7 @@ struct CoreLowerer<'a> {
     /// Nonescaping closures that mention a static label. These are
     /// beta-reduced in the destination frame for the same reason as generic
     /// label helpers.
-    static_closures: BTreeMap<String, Expr>,
+    static_closures: BTreeMap<String, (Expr, Option<TypeId>)>,
     recursive_receiver: Option<RecursiveReceiverContext>,
 }
 
@@ -10389,6 +10389,39 @@ pub(crate) fn normalize_ground_trait_methods(
         }
     }
 
+    fn contextual_expression_receiver(
+        program: &Program,
+        expression: &Expr,
+        locals: &BTreeMap<String, ReceiverType>,
+    ) -> Option<ReceiverType> {
+        match &expression.kind {
+            ExprKind::Variable(path) if path.len() == 1 => locals.get(path[0].as_ref()).cloned(),
+            ExprKind::Move(value) => contextual_expression_receiver(program, value, locals),
+            ExprKind::Field(subject, field) => {
+                let subject = contextual_expression_receiver(program, subject, locals)?;
+                projected_receiver_type(program, receiver_subject_type(&subject).clone(), field)
+            }
+            ExprKind::Unary {
+                op: UnaryOp::BorrowShared,
+                operand,
+            } => contextual_expression_receiver(program, operand, locals)
+                .map(|receiver| ReceiverType::Shared(Box::new(receiver))),
+            ExprKind::Unary {
+                op: UnaryOp::BorrowUnique,
+                operand,
+            } => contextual_expression_receiver(program, operand, locals)
+                .map(|receiver| ReceiverType::Unique(Box::new(receiver))),
+            ExprKind::Unary {
+                op: UnaryOp::Dereference,
+                operand,
+            } => match contextual_expression_receiver(program, operand, locals)? {
+                ReceiverType::Shared(referent) | ReceiverType::Unique(referent) => Some(*referent),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn rewrite(
         expression: &mut Expr,
@@ -10742,43 +10775,48 @@ pub(crate) fn normalize_ground_trait_methods(
                     }
                     _ => None,
                 };
-                let operator_argument_expected = match &callee.kind {
-                    ExprKind::Variable(path)
-                        if path.len() == 2
-                            && matches!(
-                                path[0].as_ref(),
-                                "Add" | "Subtract" | "Multiply" | "Divide" | "Remainder"
-                            ) =>
-                    {
-                        args.iter()
-                            .filter(|argument| !two_phase_contextual_numeric_literal(argument))
-                            .find_map(|argument| match &argument.kind {
-                                ExprKind::Variable(path) if path.len() == 1 => {
-                                    locals.get(path[0].as_ref()).cloned()
-                                }
-                                _ => {
-                                    concrete_call_result(program, argument, trusted_standard_range)
-                                }
-                            })
-                            .or_else(|| expected.cloned())
-                    }
-                    ExprKind::Variable(path)
-                        if path.len() == 2
-                            && matches!(path[0].as_ref(), "Equal" | "Less" | "Greater") =>
-                    {
-                        args.iter()
-                            .filter(|argument| !two_phase_contextual_numeric_literal(argument))
-                            .find_map(|argument| match &argument.kind {
-                                ExprKind::Variable(path) if path.len() == 1 => {
-                                    locals.get(path[0].as_ref()).cloned()
-                                }
-                                _ => {
-                                    concrete_call_result(program, argument, trusted_standard_range)
-                                }
-                            })
-                    }
-                    _ => None,
-                };
+                let operator_argument_expected =
+                    match &callee.kind {
+                        ExprKind::Variable(path)
+                            if path.len() == 2
+                                && matches!(
+                                    path[0].as_ref(),
+                                    "Add" | "Subtract" | "Multiply" | "Divide" | "Remainder"
+                                ) =>
+                        {
+                            args.iter()
+                                .filter(|argument| !two_phase_contextual_numeric_literal(argument))
+                                .find_map(|argument| {
+                                    contextual_expression_receiver(program, argument, locals)
+                                        .or_else(|| {
+                                            concrete_call_result(
+                                                program,
+                                                argument,
+                                                trusted_standard_range,
+                                            )
+                                        })
+                                })
+                                .or_else(|| expected.cloned())
+                        }
+                        ExprKind::Variable(path)
+                            if path.len() == 2
+                                && matches!(path[0].as_ref(), "Equal" | "Less" | "Greater") =>
+                        {
+                            args.iter()
+                                .filter(|argument| !two_phase_contextual_numeric_literal(argument))
+                                .find_map(|argument| {
+                                    contextual_expression_receiver(program, argument, locals)
+                                        .or_else(|| {
+                                            concrete_call_result(
+                                                program,
+                                                argument,
+                                                trusted_standard_range,
+                                            )
+                                        })
+                                })
+                        }
+                        _ => None,
+                    };
                 let ordinary_argument_expectations = (|| {
                     let ExprKind::Variable(path) = &callee.kind else {
                         return Vec::new();
@@ -10813,12 +10851,10 @@ pub(crate) fn normalize_ground_trait_methods(
                         {
                             continue;
                         }
-                        let actual = match &argument.kind {
-                            ExprKind::Variable(path) if path.len() == 1 => {
-                                locals.get(path[0].as_ref()).cloned()
-                            }
-                            _ => concrete_call_result(program, argument, trusted_standard_range),
-                        };
+                        let actual = contextual_expression_receiver(program, argument, locals)
+                            .or_else(|| {
+                                concrete_call_result(program, argument, trusted_standard_range)
+                            });
                         let (Some(pattern), Some(actual)) =
                             (source_receiver_type(program, &parameter.ty), actual)
                         else {
@@ -10885,12 +10921,10 @@ pub(crate) fn normalize_ground_trait_methods(
                         ) {
                             continue;
                         }
-                        let actual = match &argument.kind {
-                            ExprKind::Variable(path) if path.len() == 1 => {
-                                locals.get(path[0].as_ref()).cloned()
-                            }
-                            _ => concrete_call_result(program, argument, trusted_standard_range),
-                        };
+                        let actual = contextual_expression_receiver(program, argument, locals)
+                            .or_else(|| {
+                                concrete_call_result(program, argument, trusted_standard_range)
+                            });
                         let (Some(pattern), Some(actual)) =
                             (source_receiver_type(program, &parameter.ty), actual)
                         else {
@@ -25883,9 +25917,10 @@ impl<'a> CoreLowerer<'a> {
             {
                 Some(expression.clone())
             }
-            ExprKind::Variable(path) if path.len() == 1 => {
-                self.static_closures.get(path[0].as_ref()).cloned()
-            }
+            ExprKind::Variable(path) if path.len() == 1 => self
+                .static_closures
+                .get(path[0].as_ref())
+                .map(|(closure, _)| closure.clone()),
             ExprKind::Move(value) => self.static_closure_argument(value),
             _ => None,
         }
@@ -26251,6 +26286,41 @@ impl<'a> CoreLowerer<'a> {
             )]);
         }
         for (parameter, argument) in function.params.iter().zip(arguments) {
+            let direct_borrow = match (&parameter.ty.kind, &argument.kind) {
+                (
+                    TypeSyntaxKind::SharedReference { referent, .. },
+                    ExprKind::Unary {
+                        op: UnaryOp::BorrowShared,
+                        operand,
+                    },
+                )
+                | (
+                    TypeSyntaxKind::UniqueReference { referent, .. },
+                    ExprKind::Unary {
+                        op: UnaryOp::BorrowUnique,
+                        operand,
+                    },
+                ) => self
+                    .static_local_expression_type(operand)
+                    .map(|actual| (referent.as_ref(), actual)),
+                _ => None,
+            };
+            if let Some((referent, actual)) = direct_borrow {
+                if !self.infer_late_substitutions(
+                    referent,
+                    actual,
+                    &generic_binders,
+                    &mut substitutions,
+                ) {
+                    return Err(vec![type_error(
+                        argument.span,
+                        format!(
+                            "type mismatch: generic callable `{name}` has contradictory borrowed argument-type evidence"
+                        ),
+                    )]);
+                }
+                continue;
+            }
             let Some(actual) = self.static_local_expression_type(argument) else {
                 continue;
             };
@@ -26269,20 +26339,20 @@ impl<'a> CoreLowerer<'a> {
             }
         }
         // A late-inlined generic can still declare a ground result when its
-        // caller supplies no contextual expectation. Preserve that result as
-        // context for nested generic calls and nominal constructors cloned
-        // from the template body.
+        // caller supplies no contextual expectation. Resolve the declaration
+        // through the TypeId substitutions already inferred above: control
+        // inlining deliberately removes static callable/label arguments, but
+        // must not also discard their enclosing generic result context.
+        //
+        // In particular, the source-defined `if` returns `Result<B, E>`.
+        // When its lazy body transports an outer static label, the call is
+        // inlined instead of using its ordinary specialization. Keeping the
+        // substituted result here lets `Result::Ok(body())` select the exact
+        // sealed nominal instance just as the ordinary specialization does.
         let declared_result = function
             .return_type
             .as_ref()
-            .filter(|result| {
-                !type_syntax_any(result, |syntax| {
-                    syntax
-                        .simple_name()
-                        .is_some_and(|name| generic_binders.contains(name))
-                })
-            })
-            .and_then(|result| self.ground_source_type(result))
+            .and_then(|result| self.substituted_source_type(result, &substitutions))
             .or(Some(UNIT).filter(|_| function.return_type.is_none()));
         let expected = expected.or(declared_result);
         if !self.late_inline_stack.insert(name.to_owned()) {
@@ -26325,6 +26395,29 @@ impl<'a> CoreLowerer<'a> {
                 _ => self.static_closure_argument(argument),
             })
             .collect::<Vec<_>>();
+        let closure_results = function
+            .params
+            .iter()
+            .map(|parameter| {
+                let binder = parameter.ty.simple_name()?;
+                let output = function
+                    .where_clause
+                    .iter()
+                    .flat_map(|clause| &clause.goals)
+                    .find(|goal| {
+                        goal.subject.simple_name() == Some(binder)
+                            && goal.relation.path.len() == 1
+                            && goal.relation.path[0].name == "Fn"
+                    })?
+                    .relation
+                    .bindings
+                    .iter()
+                    .find(|binding| binding.name == "Output")?
+                    .value
+                    .as_type()?;
+                self.substituted_source_type(output, &substitutions)
+            })
+            .collect::<Vec<_>>();
         let parameter_expectations = function
             .params
             .iter()
@@ -26338,7 +26431,7 @@ impl<'a> CoreLowerer<'a> {
                         "{name}::{binder}"
                     )))
                 } else {
-                    self.ground_source_type(&parameter.ty)
+                    self.substituted_source_type(&parameter.ty, &substitutions)
                         .map(LateInlineLetExpectation::Fixed)
                 }
             })
@@ -26415,15 +26508,19 @@ impl<'a> CoreLowerer<'a> {
             ));
         }
         let mut previous_closures = Vec::new();
-        for (param, closure) in function
+        for (param, closure, result) in function
             .params
             .iter()
             .zip(closure_arguments)
-            .filter_map(|(param, closure)| closure.map(|closure| (param, closure)))
+            .zip(closure_results)
+            .filter_map(|((param, closure), result)| {
+                closure.map(|closure| (param, closure, result))
+            })
         {
             previous_closures.push((
                 param.name.clone(),
-                self.static_closures.insert(param.name.clone(), closure),
+                self.static_closures
+                    .insert(param.name.clone(), (closure, result)),
             ));
         }
         let mut previous_let_expectations = Vec::with_capacity(let_expectations.len());
@@ -26585,10 +26682,24 @@ impl<'a> CoreLowerer<'a> {
             .cloned()
     }
 
-    fn ground_source_type(&self, syntax: &TypeSyntax) -> Option<TypeId> {
+    fn substituted_source_type(
+        &self,
+        syntax: &TypeSyntax,
+        substitutions: &BTreeMap<String, TypeId>,
+    ) -> Option<TypeId> {
+        // Give the ordinary source-type resolver a local view in which each
+        // inferred generic binder names its exact runtime type. This preserves
+        // all existing nominal, alias, array, tuple, and reference resolution
+        // rules instead of reimplementing a second late-generic type grammar.
+        let mut ids = self
+            .nominal_ids
+            .iter()
+            .map(|(name, id)| (*name, *id))
+            .collect::<BTreeMap<&str, TypeId>>();
+        ids.extend(substitutions.iter().map(|(name, id)| (name.as_str(), *id)));
         let resolved = resolve_source_type(
             syntax,
-            self.nominal_ids,
+            &ids,
             self.aliases,
             self.runtime_bindings.array_name(),
         )
@@ -33285,8 +33396,13 @@ impl<'a> CoreLowerer<'a> {
                     };
                     return self.expression(&transfer, expected);
                 }
-                if let Some(closure) = self.static_closures.get(source_name).cloned() {
-                    return self.inline_static_closure(&closure, arguments, span, expected);
+                if let Some((closure, result)) = self.static_closures.get(source_name).cloned() {
+                    return self.inline_static_closure(
+                        &closure,
+                        arguments,
+                        span,
+                        expected.or(result),
+                    );
                 }
                 if source_name == "try"
                     && let [_, label_argument] = arguments.as_slice()
@@ -33338,7 +33454,19 @@ impl<'a> CoreLowerer<'a> {
                     && if_path[0].as_ref() == "if"
                     && let [condition, _] = if_arguments.as_slice()
                 {
-                    self.provisional_handler_result(condition.span)
+                    matches!(
+                        condition.kind,
+                        ExprKind::Binary {
+                            op: BinaryOp::Eq
+                                | BinaryOp::NotEq
+                                | BinaryOp::Lt
+                                | BinaryOp::LtEq
+                                | BinaryOp::Gt
+                                | BinaryOp::GtEq,
+                            ..
+                        }
+                    ) || self
+                        .provisional_handler_result(condition.span)
                         .is_some_and(|ty| self.is_source_bool_type(ty))
                 } else {
                     false
