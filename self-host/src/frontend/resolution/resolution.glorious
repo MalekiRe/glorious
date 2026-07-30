@@ -55,7 +55,36 @@ pub struct ResolvedBody {
     pattern_binders: Vec<ResolvedPatternBinder>
 }
 
-pub struct ResolutionError { code: u8, token: usize, related: usize }
+pub enum ResolutionError {
+    UnknownFunction(usize),
+    UnknownStruct(usize),
+    UnknownEnum(usize),
+    UnknownVariant(usize),
+    InvalidNamePath(usize),
+    AmbiguousFunction(usize, usize),
+    AmbiguousStruct(usize, usize),
+    AmbiguousEnum(usize, usize),
+    DuplicateParameter(usize, usize),
+    MissingCallableHeader(usize),
+    MissingDeclarationShell(usize, usize),
+    MissingStructHeader(usize, usize),
+    MissingEnumHeader(usize, usize),
+    MissingVariantHeader(usize, usize),
+    CorruptFunctionSearch(usize),
+    CorruptStructSearch(usize),
+    CorruptEnumSearch(usize),
+    MissingLetBinderMetadata(usize),
+    LocalIdExhausted(usize, usize),
+    ExpectedBindingIdentifier(usize),
+    UnexpectedBlockChildMetadata(usize, usize),
+    UnexpectedBlockEdge(usize, usize),
+    UnexpectedHandleTarget(usize, usize),
+    MissingParameterHeader(usize),
+    MissingBodyShell(usize),
+    MissingBodyCallable(usize),
+    MissingParameterRange(usize),
+    BodyParseFailure(usize)
+}
 
 struct FunctionSearch { first: Option<u32>, count: u32 }
 struct NominalSearch { first: Option<u32>, count: u32 }
@@ -68,12 +97,85 @@ pub struct ResolutionIndex {
 impl Use<[0, *]> for Binding {}
 impl Use<[0, *]> for FunctionSearch {}
 
-pub resolution_error_code(value: &ResolutionError) -> u8 { value.code }
+pub resolution_error_code(value: &ResolutionError) -> u8 {
+    handle *value {
+        ResolutionError::UnknownFunction(_) => 1,
+        ResolutionError::UnknownStruct(_) => 1,
+        ResolutionError::UnknownEnum(_) => 1,
+        ResolutionError::UnknownVariant(_) => 4,
+        ResolutionError::InvalidNamePath(_) => 1,
+        ResolutionError::AmbiguousFunction(_, _) => 2,
+        ResolutionError::AmbiguousStruct(_, _) => 2,
+        ResolutionError::AmbiguousEnum(_, _) => 2,
+        ResolutionError::DuplicateParameter(_, _) => 2,
+        _ => 3
+    }
+}
 
-pub resolution_error_token(value: &ResolutionError) -> usize { value.token }
+pub resolution_error_token(value: &ResolutionError) -> usize {
+    handle *value {
+        ResolutionError::UnknownFunction(token) => token,
+        ResolutionError::UnknownStruct(token) => token,
+        ResolutionError::UnknownEnum(token) => token,
+        ResolutionError::UnknownVariant(token) => token,
+        ResolutionError::InvalidNamePath(token) => token,
+        ResolutionError::AmbiguousFunction(token, _) => token,
+        ResolutionError::AmbiguousStruct(token, _) => token,
+        ResolutionError::AmbiguousEnum(token, _) => token,
+        ResolutionError::DuplicateParameter(token, _) => token,
+        ResolutionError::MissingCallableHeader(index) => index,
+        ResolutionError::MissingDeclarationShell(token, _) => token,
+        ResolutionError::MissingStructHeader(token, _) => token,
+        ResolutionError::MissingEnumHeader(token, _) => token,
+        ResolutionError::MissingVariantHeader(token, _) => token,
+        ResolutionError::CorruptFunctionSearch(token) => token,
+        ResolutionError::CorruptStructSearch(token) => token,
+        ResolutionError::CorruptEnumSearch(token) => token,
+        ResolutionError::MissingLetBinderMetadata(token) => token,
+        ResolutionError::LocalIdExhausted(token, _) => token,
+        ResolutionError::ExpectedBindingIdentifier(token) => token,
+        ResolutionError::UnexpectedBlockChildMetadata(token, _) => token,
+        ResolutionError::UnexpectedBlockEdge(token, _) => token,
+        ResolutionError::UnexpectedHandleTarget(token, _) => token,
+        ResolutionError::MissingParameterHeader(index) => index,
+        ResolutionError::MissingBodyShell(shell) => shell,
+        ResolutionError::MissingBodyCallable(shell) => shell,
+        ResolutionError::MissingParameterRange(shell) => shell,
+        ResolutionError::BodyParseFailure(shell) => shell
+    }
+}
 
 pub resolution_error_related(value: &ResolutionError) -> usize {
-    value.related
+    handle *value {
+        ResolutionError::UnknownFunction(token) => token,
+        ResolutionError::UnknownStruct(token) => token,
+        ResolutionError::UnknownEnum(token) => token,
+        ResolutionError::UnknownVariant(token) => token,
+        ResolutionError::InvalidNamePath(token) => token,
+        ResolutionError::AmbiguousFunction(_, related) => related,
+        ResolutionError::AmbiguousStruct(_, related) => related,
+        ResolutionError::AmbiguousEnum(_, related) => related,
+        ResolutionError::DuplicateParameter(_, related) => related,
+        ResolutionError::MissingCallableHeader(index) => index,
+        ResolutionError::MissingDeclarationShell(_, shell) => shell,
+        ResolutionError::MissingStructHeader(_, index) => index,
+        ResolutionError::MissingEnumHeader(_, index) => index,
+        ResolutionError::MissingVariantHeader(_, index) => index,
+        ResolutionError::CorruptFunctionSearch(token) => token,
+        ResolutionError::CorruptStructSearch(token) => token,
+        ResolutionError::CorruptEnumSearch(token) => token,
+        ResolutionError::MissingLetBinderMetadata(_) => 0,
+        ResolutionError::LocalIdExhausted(_, count) => count,
+        ResolutionError::ExpectedBindingIdentifier(token) => token,
+        ResolutionError::UnexpectedBlockChildMetadata(_, metadata) => metadata,
+        ResolutionError::UnexpectedBlockEdge(_, metadata) => metadata,
+        ResolutionError::UnexpectedHandleTarget(_, enum_token) => enum_token,
+        ResolutionError::MissingParameterHeader(index) => index,
+        ResolutionError::MissingBodyShell(shell) => shell,
+        ResolutionError::MissingBodyCallable(shell) => shell,
+        ResolutionError::MissingParameterRange(shell) => shell,
+        ResolutionError::BodyParseFailure(shell) => shell
+    }
 }
 
 pub resolved_name_count(value: &ResolvedBody) -> usize {
@@ -132,10 +234,6 @@ pub resolved_handle_binders<'a>(
         Result::Err(_) => unreachable(),
         Result::Ok(found) => found
     }
-}
-
-resolution_error(code: u8, token: usize, related: usize) -> ResolutionError {
-    ResolutionError { code: code, token:  token, related:  related }
 }
 
 shell_parent_module(
@@ -200,11 +298,9 @@ index_callable(
 ) -> Result<(), ResolutionError> {
     let callable = handle super::headers::callable_at(headers, ordinal) {
         Result::Err(_) =>
-            @index_callable(Result::Err(resolution_error(
-                3,
-                ordinal,
-                ordinal
-            ))),
+            @index_callable(Result::Err(
+                ResolutionError::MissingCallableHeader(ordinal)
+            )),
         Result::Ok(callable) => callable
     };
     let shell_index = super::headers::callable_shell(callable);
@@ -213,11 +309,12 @@ index_callable(
         usize_from_u32(shell_index)
     ) {
         Result::Err(_) =>
-            @index_callable(Result::Err(resolution_error(
-                3,
-                usize_from_u32(shell_index),
-                usize_from_u32(shell_index)
-            ))),
+            @index_callable(Result::Err(
+                ResolutionError::MissingDeclarationShell(
+                    usize_from_u32(shell_index),
+                    usize_from_u32(shell_index)
+                )
+            )),
         Result::Ok(shell) => shell
     };
     let key = (
@@ -333,31 +430,35 @@ finish_function_name(
     token: usize
 ) -> Result<ResolvedTarget, ResolutionError> {
     handle found.count {
-        0 => Result::Err(resolution_error(1, token, token)),
+        0 => Result::Err(ResolutionError::UnknownFunction(token)),
         1 => handle found.first {
-            Result::Err(_) => Result::Err(resolution_error(3, token, token)),
+            Result::Err(_) =>
+                Result::Err(ResolutionError::CorruptFunctionSearch(token)),
             Result::Ok(shell_index) => {
                 handle super::scanner::shell_at(
                     declarations,
                     usize_from_u32(shell_index)
                 ) {
-                    Result::Err(_) => Result::Err(resolution_error(
-                        3,
-                        token,
-                        usize_from_u32(shell_index)
-                    )),
+                    Result::Err(_) => Result::Err(
+                        ResolutionError::MissingDeclarationShell(
+                            token,
+                            usize_from_u32(shell_index)
+                        )
+                    ),
                     Result::Ok(shell) =>
                         Result::Ok(ResolvedTarget::Function(shell_index))
                 }
             }
         },
         _ => handle found.first {
-            Result::Err(_) => Result::Err(resolution_error(3, token, token)),
-            Result::Ok(shell_index) => Result::Err(resolution_error(
-                2,
-                token,
-                usize_from_u32(shell_index)
-            ))
+            Result::Err(_) =>
+                Result::Err(ResolutionError::CorruptFunctionSearch(token)),
+            Result::Ok(shell_index) => Result::Err(
+                ResolutionError::AmbiguousFunction(
+                    token,
+                    usize_from_u32(shell_index)
+                )
+            )
         }
     }
 }
@@ -401,19 +502,21 @@ search_structs(
         found,
         { found, current => handle
             super::headers::struct_at(nominal, current) {
-            Result::Err(_) =>
-                Result::Err(resolution_error(3, token, current)),
+            Result::Err(_) => Result::Err(
+                ResolutionError::MissingStructHeader(token, current)
+            ),
             Result::Ok(header) => {
                 let shell_index = super::headers::struct_shell(header);
                 handle super::scanner::shell_at(
                     declarations,
                     usize_from_u32(shell_index)
                 ) {
-                    Result::Err(_) => Result::Err(resolution_error(
-                        3,
-                        token,
-                        usize_from_u32(shell_index)
-                    )),
+                    Result::Err(_) => Result::Err(
+                        ResolutionError::MissingDeclarationShell(
+                            token,
+                            usize_from_u32(shell_index)
+                        )
+                    ),
                     Result::Ok(shell) =>
                         if(super::headers::struct_name_raw(header) == name
                             and {
@@ -444,16 +547,20 @@ finish_struct_name(
     token: usize
 ) -> Result<ResolvedTarget, ResolutionError> {
     handle found.count {
-        0 => Result::Err(resolution_error(1, token, token)),
+        0 => Result::Err(ResolutionError::UnknownStruct(token)),
         1 => handle found.first {
-            Result::Err(_) => Result::Err(resolution_error(3, token, token)),
+            Result::Err(_) =>
+                Result::Err(ResolutionError::CorruptStructSearch(token)),
             Result::Ok(index) => {
                 handle super::headers::struct_at(
                     nominal,
                     usize_from_u32(index)
                 ) {
                     Result::Err(_) => Result::Err(
-                        resolution_error(3, token, usize_from_u32(index))
+                        ResolutionError::MissingStructHeader(
+                            token,
+                            usize_from_u32(index)
+                        )
                     ),
                     Result::Ok(_) => Result::Ok(
                         ResolvedTarget::Struct(index)
@@ -462,12 +569,14 @@ finish_struct_name(
             }
         },
         _ => handle found.first {
-            Result::Err(_) => Result::Err(resolution_error(3, token, token)),
-            Result::Ok(index) => Result::Err(resolution_error(
-                2,
-                token,
-                usize_from_u32(index)
-            ))
+            Result::Err(_) =>
+                Result::Err(ResolutionError::CorruptStructSearch(token)),
+            Result::Ok(index) => Result::Err(
+                ResolutionError::AmbiguousStruct(
+                    token,
+                    usize_from_u32(index)
+                )
+            )
         }
     }
 }
@@ -533,19 +642,21 @@ search_enums(
         found,
         { found, current => handle
             super::headers::enum_at(nominal, current) {
-            Result::Err(_) =>
-                Result::Err(resolution_error(3, token, current)),
+            Result::Err(_) => Result::Err(
+                ResolutionError::MissingEnumHeader(token, current)
+            ),
             Result::Ok(header) => {
                 let shell_index = super::headers::enum_shell(header);
                 handle super::scanner::shell_at(
                     declarations,
                     usize_from_u32(shell_index)
                 ) {
-                    Result::Err(_) => Result::Err(resolution_error(
-                        3,
-                        token,
-                        usize_from_u32(shell_index)
-                    )),
+                    Result::Err(_) => Result::Err(
+                        ResolutionError::MissingDeclarationShell(
+                            token,
+                            usize_from_u32(shell_index)
+                        )
+                    ),
                     Result::Ok(shell) =>
                         if(super::headers::enum_name_raw(header) == name
                             and {
@@ -584,11 +695,12 @@ find_variant(
             nominal,
             usize_from_u32(index)
         ) {
-            Result::Err(_) => Result::Err(resolution_error(
-                3,
-                token,
-                usize_from_u32(index)
-            )),
+            Result::Err(_) => Result::Err(
+                ResolutionError::MissingVariantHeader(
+                    token,
+                    usize_from_u32(index)
+                )
+            ),
             Result::Ok(variant) => if(super::headers::variant_name_raw(variant) == name) {
                 Result::Ok(index)
             } else {
@@ -606,7 +718,7 @@ find_variant(
         // The enum namespace resolved, but its value member did not. Keep
         // this distinct from an unknown namespace so the full compiler can
         // classify the failure at its typed-construction boundary.
-        Result::Err(resolution_error(4, token, token))
+        Result::Err(ResolutionError::UnknownVariant(token))
     }
 }
 
@@ -618,20 +730,21 @@ finish_variant_name(
     variant_token: usize
 ) -> Result<ResolvedTarget, ResolutionError> {
     handle found.count {
-        0 => Result::Err(resolution_error(1, enum_token, enum_token)),
+        0 => Result::Err(ResolutionError::UnknownEnum(enum_token)),
         1 => handle found.first {
             Result::Err(_) =>
-                Result::Err(resolution_error(3, enum_token, enum_token)),
+                Result::Err(ResolutionError::CorruptEnumSearch(enum_token)),
             Result::Ok(enum_index) => {
                 handle super::headers::enum_at(
                     nominal,
                     usize_from_u32(enum_index)
                 ) {
-                    Result::Err(_) => Result::Err(resolution_error(
-                        3,
-                        enum_token,
-                        usize_from_u32(enum_index)
-                    )),
+                    Result::Err(_) => Result::Err(
+                        ResolutionError::MissingEnumHeader(
+                            enum_token,
+                            usize_from_u32(enum_index)
+                        )
+                    ),
                     Result::Ok(header) => {
                         let variants = super::headers::enum_variants(header);
                         let variant = try(
@@ -652,12 +765,13 @@ finish_variant_name(
         },
         _ => handle found.first {
             Result::Err(_) =>
-                Result::Err(resolution_error(3, enum_token, enum_token)),
-            Result::Ok(enum_index) => Result::Err(resolution_error(
-                2,
-                enum_token,
-                usize_from_u32(enum_index)
-            ))
+                Result::Err(ResolutionError::CorruptEnumSearch(enum_token)),
+            Result::Ok(enum_index) => Result::Err(
+                ResolutionError::AmbiguousEnum(
+                    enum_token,
+                    usize_from_u32(enum_index)
+                )
+            )
         }
     }
 }
@@ -774,7 +888,7 @@ resolve_identifier(
             );
             Result::Ok(())
         },
-        _ => Result::Err(resolution_error(1, token, token))
+        _ => Result::Err(ResolutionError::InvalidNamePath(token))
     }
 }
 
@@ -862,11 +976,14 @@ resolve_block_children(
             );
             handle position {
                 1 => if(metadata == 0) {
-                    Result::Err(resolution_error(
-                        3,
-                        super::bodies::expression_token_start_at(body, value),
-                        usize_from_u32(metadata)
-                    ))
+                    Result::Err(
+                        ResolutionError::MissingLetBinderMetadata(
+                            super::bodies::expression_token_start_at(
+                                body,
+                                value
+                            )
+                        )
+                    )
                 } else {
                     let token = usize_from_u32(metadata - 1);
                         handle super::lexer::token_kind_at(
@@ -883,8 +1000,7 @@ resolve_block_children(
                                     Vec::len(&output.locals)
                                 ) {
                                     Result::Err(_) => Result::Err(
-                                        resolution_error(
-                                            3,
+                                        ResolutionError::LocalIdExhausted(
                                             token,
                                             Vec::len(&output.locals)
                                         )
@@ -918,7 +1034,11 @@ resolve_block_children(
                                     }
                                 }
                             },
-                            _ => Result::Err(resolution_error(3, token, token))
+                            _ => Result::Err(
+                                ResolutionError::ExpectedBindingIdentifier(
+                                    token
+                                )
+                            )
                         }
                 },
                 2 => if(metadata == 0) {
@@ -933,17 +1053,22 @@ resolve_block_children(
                         module
                     )
                 } else {
-                    Result::Err(resolution_error(
-                        3,
+                    Result::Err(
+                        ResolutionError::UnexpectedBlockChildMetadata(
+                            super::bodies::expression_token_start_at(
+                                body,
+                                value
+                            ),
+                            usize_from_u32(metadata)
+                        )
+                    )
+                },
+                _ => Result::Err(
+                    ResolutionError::UnexpectedBlockEdge(
                         super::bodies::expression_token_start_at(body, value),
                         usize_from_u32(metadata)
-                    ))
-                },
-                _ => Result::Err(resolution_error(
-                    3,
-                    super::bodies::expression_token_start_at(body, value),
-                    usize_from_u32(metadata)
-                ))
+                    )
+                )
             }
         } }
     )
@@ -1005,8 +1130,7 @@ resolve_pattern_binders<'a>(
                 ) {
                     Result::Err(_) =>
                         @resolve_pattern_binders(Result::Err(
-                            resolution_error(
-                                3,
+                            ResolutionError::LocalIdExhausted(
                                 token,
                                 Vec::len(&output.locals)
                             )
@@ -1061,11 +1185,12 @@ resolve_handle_arm(
     ), @resolve_handle_arm);
     let variant = handle target {
         ResolvedTarget::Variant(found) => found,
-        _ => @resolve_handle_arm(Result::Err(resolution_error(
-            3,
-            super::bodies::handle_arm_variant_token(arm),
-            super::bodies::handle_arm_enum_token(arm)
-        )))
+        _ => @resolve_handle_arm(Result::Err(
+            ResolutionError::UnexpectedHandleTarget(
+                super::bodies::handle_arm_variant_token(arm),
+                super::bodies::handle_arm_enum_token(arm)
+            )
+        ))
     };
     let mark = Vec::len(&*bindings);
     let binder_start = Vec::len(&output.pattern_binders);
@@ -1264,22 +1389,23 @@ add_parameters(
     if(ordinal < super::headers::range_count(parameters)) {
         let index = super::headers::range_start(parameters) + ordinal;
             handle super::headers::parameter_at(headers, usize_from_u32(index)) {
-                Result::Err(_) => Result::Err(resolution_error(
-                    3,
-                    usize_from_u32(index),
-                    usize_from_u32(index)
-                )),
+                Result::Err(_) => Result::Err(
+                    ResolutionError::MissingParameterHeader(
+                        usize_from_u32(index)
+                    )
+                ),
                 Result::Ok(parameter) => handle duplicate_parameter_token(
                     headers,
                     super::headers::range_start(parameters),
                     super::headers::parameter_name_raw(parameter),
                     ordinal
                 ) {
-                    Result::Ok(earlier) => Result::Err(resolution_error(
-                        2,
-                        super::headers::parameter_name_token(parameter),
-                        earlier
-                    )),
+                    Result::Ok(earlier) => Result::Err(
+                        ResolutionError::DuplicateParameter(
+                            super::headers::parameter_name_token(parameter),
+                            earlier
+                        )
+                    ),
                     Result::Err(_) => {
                         push_binding(
                             bindings,
@@ -1373,21 +1499,21 @@ pub resolve_function_body_indexed(
         declarations,
         usize_from_u32(shell_index)
     ) {
-        Result::Err(_) => Result::Err(resolution_error(
-            3,
-            usize_from_u32(shell_index),
-            usize_from_u32(shell_index)
-        )),
+        Result::Err(_) => Result::Err(
+            ResolutionError::MissingBodyShell(
+                usize_from_u32(shell_index)
+            )
+        ),
         Result::Ok(shell) => handle body_callable(
             index,
             headers_index,
             shell_index
         ) {
-            Result::Err(_) => Result::Err(resolution_error(
-                3,
-                usize_from_u32(shell_index),
-                usize_from_u32(shell_index)
-            )),
+            Result::Err(_) => Result::Err(
+                ResolutionError::MissingBodyCallable(
+                    usize_from_u32(shell_index)
+                )
+            ),
             Result::Ok(callable) => {
                 let bindings = Vec::new();
                 let output = ResolvedBody {
@@ -1728,7 +1854,7 @@ write_resolved_function(
     let source = super::headers::parsed_source(headers);
     handle find_parameter_range(index, u32_from_usize(shell_index), 0) {
         Result::Err(_) => Result::Err(
-            resolution_error(3, shell_index, shell_index)
+            ResolutionError::MissingParameterRange(shell_index)
         ),
         Result::Ok(parameters) => {
             let parameter_count = parameters.count;
@@ -1739,7 +1865,7 @@ write_resolved_function(
                 shell_index
             ) {
             Result::Err(_) => Result::Err(
-                resolution_error(3, shell_index, shell_index)
+                ResolutionError::BodyParseFailure(shell_index)
             ),
             Result::Ok(body) => {
                 let resolved = try(

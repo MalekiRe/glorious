@@ -4,6 +4,7 @@
 use super::lexer::TokenKind;
 use super::resolution::ResolvedTarget;
 use super::resolution::ResolvedPatternBinder;
+use super::resolution::ResolutionError;
 
 pub struct TypeTag {}
 pub type TypeId = Id<TypeTag>;
@@ -6542,8 +6543,11 @@ write_function(
                     declarations,
                     &parsed
                 ) {
-                Result::Err(found) => if(super::resolution::resolution_error_code(&found)
-                        == 4) { Result::Err(4) } else { Result::Err(3) },
+                Result::Err(found) => handle found {
+                    super::resolution::ResolutionError::UnknownVariant(_) =>
+                        Result::Err(4),
+                    _ => Result::Err(3)
+                },
                 Result::Ok(resolved) => handle elaborate_function_body(
                     original,
                     headers,
