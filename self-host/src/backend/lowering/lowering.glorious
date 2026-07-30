@@ -14,9 +14,12 @@ use super::super::frontend::elaboration::CoreValueId;
 use super::super::frontend::elaboration::ConstructionField;
 use super::super::frontend::elaboration::ConstructionFlavor;
 use super::super::frontend::elaboration::IntegerConstantId;
+use super::super::frontend::elaboration::InterfaceCallableId;
+use super::super::frontend::elaboration::InterfaceCallableTag;
 use super::super::frontend::elaboration::InterfaceNominalView;
 use super::super::frontend::elaboration::InterfaceTypeView;
 use super::super::frontend::elaboration::TypeId;
+use super::super::frontend::scanner::ShellId;
 
 pub struct RegisterTag {}
 pub type RegisterId = Id<RegisterTag>;
@@ -24,8 +27,11 @@ pub type RegisterId = Id<RegisterTag>;
 pub struct RegisterPackTag {}
 pub type RegisterPackId = Id<RegisterPackTag>;
 
-pub struct StageFunctionTag {}
-pub type StageFunctionId = Id<StageFunctionTag>;
+// Every interface callable has exactly one stage function. Sharing the tag
+// makes that identity structural: calls cannot accidentally index a separately
+// ordered function arena.
+pub type StageFunctionTag = InterfaceCallableTag;
+pub type StageFunctionId = InterfaceCallableId;
 
 pub struct StageTypeTag {}
 pub type StageTypeId = Id<StageTypeTag>;
@@ -136,7 +142,7 @@ pub enum LoweringError {
     MissingLocal(CoreLocalId),
     MissingProjectionSource(CoreValueId),
     MissingValue(CoreValueId),
-    UnknownCallable(u32),
+    UnknownCallable(ShellId),
     InvalidConstructionType(TypeId),
     ConstructionFieldCount(TypeId, u32, u32),
     UnexpectedVariant(TypeId, u32),
@@ -1430,7 +1436,7 @@ lower_computation(
                     emit_call(
                         value,
                         target,
-                        Id::from_u32(function),
+                        function,
                         arguments
                     );
                     Result::Ok(target)
@@ -1608,17 +1614,11 @@ lower_product_fields<'a>(
 parameter_types(
     interfaces:
         &super::super::frontend::elaboration::TypedInterfaces,
-    function: usize,
+    function: InterfaceCallableId,
     index: u32,
     count: u32,
     output: &mut Vec<ArtifactTypeId>
 ) {
-    let start =
-        super::super::frontend::elaboration::
-            interface_callable_parameter_start_at(
-                interfaces,
-                function
-            );
     for_range(Range::new(
         usize_from_u32(index),
         usize_from_u32(count)
@@ -1626,11 +1626,12 @@ parameter_types(
         Vec::push(
             &mut *output,
             artifact_type_id(
-                super::super::frontend::elaboration::
+                Id::to_u32(super::super::frontend::elaboration::
                     interface_callable_parameter_at(
                         interfaces,
-                        usize_from_u32(start) + current
-                    )
+                        function,
+                        current
+                    ))
             )
         )
     })
@@ -1641,11 +1642,11 @@ pub lower_function(
     interfaces:
         &super::super::frontend::elaboration::TypedInterfaces,
     body: &super::super::frontend::elaboration::TypedBody,
-    function: usize
+    function: InterfaceCallableId
 ) -> Result<StageFunction, LoweringError> {
     let parameter_count =
         super::super::frontend::elaboration::
-            interface_callable_parameter_count_at(interfaces, function);
+            interface_callable_parameter_count(interfaces, function);
     let parameters = Vec::new();
     parameter_types(
         interfaces,

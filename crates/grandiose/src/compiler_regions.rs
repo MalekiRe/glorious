@@ -4710,7 +4710,22 @@ fn join_states(
             }
         }
     };
+    let recompute_suspensions = |loans: &mut BTreeMap<Register, LiveLoan>| {
+        let parents = loans
+            .values()
+            .filter_map(|loan| loan.parent)
+            .collect::<Vec<_>>();
+        for loan in loans.values_mut() {
+            loan.suspended = 0;
+        }
+        for parent in parents {
+            if let Some(loan) = loans.get_mut(&parent) {
+                loan.suspended += 1;
+            }
+        }
+    };
     retain_live_loans(&mut joined.loans, &joined_live);
+    recompute_suspensions(&mut joined.loans);
     for (reference, loan) in &mut joined.loans {
         if loan.external && loan.id == u32::MAX && loan.parent.is_none() {
             loan.borrowed = Place::local(*reference);
@@ -4726,6 +4741,7 @@ fn join_states(
         .collect::<Vec<_>>();
     let mut incoming_loans = incoming.loans.clone();
     retain_live_loans(&mut incoming_loans, &incoming_live);
+    recompute_suspensions(&mut incoming_loans);
     for (reference, loan) in &mut incoming_loans {
         if loan.external && loan.id == u32::MAX && loan.parent.is_none() {
             loan.borrowed = Place::local(*reference);
@@ -7725,6 +7741,40 @@ mod ownership_engine_tests {
             &types,
         );
         solve_function(&disjoint, &types).expect("disjoint unique loans are legal");
+    }
+
+    #[test]
+    fn cleanup_frontiers_end_reborrowed_leaves_before_named_parents() {
+        let (types, shared, _) = reference_types();
+        let function = exported_function(
+            vec![UNIT, I64, shared, shared],
+            1,
+            vec![block(
+                0,
+                vec![
+                    statement(InstructionKind::Borrow {
+                        dst: 2,
+                        src: 1,
+                        unique: false,
+                    }),
+                    statement(InstructionKind::Reborrow {
+                        dst: 3,
+                        src: 2,
+                        unique: false,
+                    }),
+                    statement(InstructionKind::EndBorrow { reference: 3 }),
+                    statement(InstructionKind::EndBorrow { reference: 2 }),
+                    statement(InstructionKind::Drop {
+                        owner: move_operand(1),
+                    }),
+                ],
+                Terminator::Return { value: None },
+            )],
+            &types,
+        );
+
+        solve_function(&function, &types)
+            .expect("a cleanup frontier must retire its reborrowed leaf before its named parent");
     }
 
     #[test]

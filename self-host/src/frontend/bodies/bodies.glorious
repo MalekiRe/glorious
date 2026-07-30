@@ -4,6 +4,7 @@
 // construction, projection, grouping, and declared prefix/infix operators.
 
 use super::lexer::{Keyword, TokenKind};
+use super::scanner::ShellId;
 
 pub struct ExprTag {}
 
@@ -61,7 +62,7 @@ pub struct ExprNode {
 }
 
 pub struct ParsedBody {
-    shell: u32,
+    shell: ShellId,
     root: ExprId,
     nodes: Arena<ExprTag, ExprNode>,
     edges: Vec<ExprEdge>,
@@ -78,7 +79,7 @@ pub enum BodyError {
     NonAssociativeChain(usize, usize),
     ConflictingFixity(usize, usize),
     ExpressionDepthLimit(usize, usize),
-    MissingBodyShell(usize, usize),
+    MissingBodyShell(ShellId),
     InvalidEncodedExpression(usize, usize),
     ExpectedCallClose(usize, usize),
     InvalidLetSyntax(usize, usize),
@@ -142,7 +143,7 @@ pub error_code(value: &BodyError) -> u8 {
         BodyError::NonAssociativeChain(_, _) => 4,
         BodyError::ConflictingFixity(_, _) => 5,
         BodyError::ExpressionDepthLimit(_, _) => 6,
-        BodyError::MissingBodyShell(_, _) => 7,
+        BodyError::MissingBodyShell(_) => 7,
         BodyError::InvalidEncodedExpression(_, _) => 9,
         BodyError::ExpectedCallClose(_, _) => 10,
         BodyError::InvalidLetSyntax(_, _) => 11,
@@ -165,7 +166,7 @@ pub error_token(value: &BodyError) -> usize {
         BodyError::NonAssociativeChain(token, _) => token,
         BodyError::ConflictingFixity(token, _) => token,
         BodyError::ExpressionDepthLimit(token, _) => token,
-        BodyError::MissingBodyShell(token, _) => token,
+        BodyError::MissingBodyShell(shell) => Id::to_usize(shell),
         BodyError::InvalidEncodedExpression(token, _) => token,
         BodyError::ExpectedCallClose(token, _) => token,
         BodyError::InvalidLetSyntax(token, _) => token,
@@ -188,7 +189,7 @@ pub error_related(value: &BodyError) -> usize {
         BodyError::NonAssociativeChain(_, related) => related,
         BodyError::ConflictingFixity(_, related) => related,
         BodyError::ExpressionDepthLimit(_, related) => related,
-        BodyError::MissingBodyShell(_, related) => related,
+        BodyError::MissingBodyShell(shell) => Id::to_usize(shell),
         BodyError::InvalidEncodedExpression(_, related) => related,
         BodyError::ExpectedCallClose(_, related) => related,
         BodyError::InvalidLetSyntax(_, related) => related,
@@ -231,7 +232,7 @@ pub expression_at<'a>(
     }
 }
 
-pub body_shell(value: &ParsedBody) -> u32 { value.shell }
+pub body_shell(value: &ParsedBody) -> ShellId { value.shell }
 
 pub body_root_index(value: &ParsedBody) -> u32 { Id::to_u32(value.root) }
 
@@ -859,8 +860,8 @@ push_block(
 
 shell_owner(
     declarations: &super::scanner::DeclarationIndex,
-    shell: usize
-) -> Option<usize> {
+    shell: ShellId
+) -> Option<ShellId> {
     handle super::scanner::shell_at(declarations, shell) {
         Result::Err(_) => Result::Err(()),
         Result::Ok(found) => *super::scanner::shell_parent(found)
@@ -870,14 +871,11 @@ shell_owner(
 fixity_owner(
     declarations: &super::scanner::DeclarationIndex,
     value: &super::headers::FixityHeader
-) -> Option<usize> {
-    shell_owner(
-        declarations,
-        usize_from_u32(super::headers::fixity_shell(value))
-    )
+) -> Option<ShellId> {
+    shell_owner(declarations, super::headers::fixity_shell(value))
 }
 
-same_owner(left: Option<usize>, right: Option<usize>) -> Bool {
+same_owner(left: Option<ShellId>, right: Option<ShellId>) -> Bool {
     left == right
 }
 
@@ -945,7 +943,7 @@ lookup_scope(
     nominal: &super::headers::NominalIndex,
     operator: &BodyTokenRange,
     prefix: Bool,
-    owner: Option<usize>,
+    owner: Option<ShellId>,
     index: usize,
     selected: Option<u32>
 ) -> Result<Option<u32>, BodyError> {
@@ -1047,7 +1045,7 @@ lookup_fixity(
     nominal: &super::headers::NominalIndex,
     operator: &BodyTokenRange,
     prefix: Bool,
-    owner: Option<usize>
+    owner: Option<ShellId>
 ) -> Result<Option<u32>, BodyError> {
     let found = try(
         lookup_scope(
@@ -1090,7 +1088,7 @@ peek_operator(
     nominal: &super::headers::NominalIndex,
     value: &BodyParser,
     prefix: Bool,
-    owner: Option<usize>
+    owner: Option<ShellId>
 ) -> Result<Option<OperatorUse>, BodyError> {
     handle operator_range(source, value.cursor, value.limit) {
         Result::Err(_) => Result::Ok(Result::Err(())),
@@ -1136,7 +1134,7 @@ parse_primary(
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
-    owner: Option<usize>,
+    owner: Option<ShellId>,
     depth: u16
 ) -> Result<ExprId, BodyError> {
     if(depth < 128) {
@@ -1302,7 +1300,7 @@ parse_tuple_tail(
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
-    owner: Option<usize>,
+    owner: Option<ShellId>,
     depth: u16,
     start: usize,
     elements: &mut Vec<ExprId>
@@ -1500,7 +1498,7 @@ parse_handle_arm(
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
-    owner: Option<usize>,
+    owner: Option<ShellId>,
     depth: u16
 ) -> Result<PendingHandleArm, BodyError> {
     let enum_token = value.cursor;
@@ -1588,7 +1586,7 @@ parse_handle_arms(
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
-    owner: Option<usize>,
+    owner: Option<ShellId>,
     depth: u16,
     open: usize,
     output: &mut Vec<PendingHandleArm>
@@ -1725,7 +1723,7 @@ parse_handle(
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
-    owner: Option<usize>,
+    owner: Option<ShellId>,
     depth: u16,
     start: usize
 ) -> Result<ExprId, BodyError> {
@@ -1774,7 +1772,7 @@ parse_atom(
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
-    owner: Option<usize>,
+    owner: Option<ShellId>,
     depth: u16
 ) -> Result<ExprId, BodyError> {
     let start = value.cursor;
@@ -1908,7 +1906,7 @@ parse_call_arguments(
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
-    owner: Option<usize>,
+    owner: Option<ShellId>,
     depth: u16,
     arguments: &mut Vec<ExprId>,
     open: usize
@@ -1977,7 +1975,7 @@ parse_struct_fields(
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
-    owner: Option<usize>,
+    owner: Option<ShellId>,
     depth: u16,
     constructor: ExprId,
     start: usize,
@@ -2200,7 +2198,7 @@ parse_postfix(
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
-    owner: Option<usize>,
+    owner: Option<ShellId>,
     depth: u16,
     callee: ExprId
 ) -> Result<ExprId, BodyError> {
@@ -2362,7 +2360,7 @@ parse_chain(
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
-    owner: Option<usize>,
+    owner: Option<ShellId>,
     minimum: u8,
     depth: u16,
     output: &mut Vec<ExprId>,
@@ -2514,7 +2512,7 @@ parse_expression(
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
-    owner: Option<usize>,
+    owner: Option<ShellId>,
     minimum: u8,
     depth: u16
 ) -> Result<ExprId, BodyError> {
@@ -2553,7 +2551,7 @@ parse_block_statement(
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
-    owner: Option<usize>,
+    owner: Option<ShellId>,
     depth: u16,
     statements: &mut Vec<PendingStatement>
 ) -> Result<(), BodyError> {
@@ -2640,7 +2638,7 @@ parse_block_after_statement(
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
-    owner: Option<usize>,
+    owner: Option<ShellId>,
     depth: u16,
     start: usize,
     close_code: u16,
@@ -2711,7 +2709,7 @@ parse_block_contents(
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
     value: &mut BodyParser,
-    owner: Option<usize>,
+    owner: Option<ShellId>,
     depth: u16,
     start: usize,
     close_code: u16,
@@ -2801,16 +2799,16 @@ pub parse_function_body(
     original: &String,
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex,
-    shell: usize
+    shell: ShellId
 ) -> Result<ParsedBody, BodyError> {
     handle super::scanner::shell_at(declarations, shell) {
         Result::Err(_) =>
-            Result::Err(BodyError::MissingBodyShell(shell, shell)),
+            Result::Err(BodyError::MissingBodyShell(shell)),
         Result::Ok(declaration) => if(super::scanner::shell_kind_code(declaration) == 12) {
             handle
                 super::scanner::shell_body_range(declaration) {
                 Result::Err(_) =>
-                    Result::Err(BodyError::MissingBodyShell(shell, shell)),
+                    Result::Err(BodyError::MissingBodyShell(shell)),
                 Result::Ok(body) => {
                     let start = super::scanner::range_start(&body);
                     let end = super::scanner::range_end(&body);
@@ -2851,7 +2849,7 @@ pub parse_function_body(
                         pattern_binders
                     } = parser;
                     Result::Ok(ParsedBody {
-                        shell: u32_from_usize(shell),
+                        shell: shell,
                         root: root,
                         nodes: nodes,
                         edges: edges,
@@ -2862,7 +2860,7 @@ pub parse_function_body(
                 }
             }
         } else {
-            Result::Err(BodyError::MissingBodyShell(shell, shell))
+            Result::Err(BodyError::MissingBodyShell(shell))
         }
     }
 }
@@ -3301,26 +3299,15 @@ write_expression(
 }
 
 function_count(
-    declarations: &super::scanner::DeclarationIndex,
-    index: usize,
-    count: usize
+    declarations: &super::scanner::DeclarationIndex
 ) -> usize {
-    if(index < super::scanner::shell_count(declarations)) {
-        handle super::scanner::shell_at(declarations, index) {
-            Result::Err(_) => count,
-            Result::Ok(shell) => function_count(
-                declarations,
-                index + 1,
-                if(super::scanner::shell_kind_code(shell) == 12) {
-                    count + 1
-                } else {
-                    count
-                }
-            )
+    super::scanner::fold_shells(declarations, 0, { count, _, shell =>
+        if(super::scanner::shell_kind_code(shell) == 12) {
+            count + 1
+        } else {
+            count
         }
-    } else {
-        count
-    }
+    })
 }
 
 write_function_name(
@@ -3341,54 +3328,36 @@ write_functions(
     output: &mut ByteBuf,
     original: &String,
     headers: &super::headers::ParsedHeaders,
-    declarations: &super::scanner::DeclarationIndex,
-    index: usize
+    declarations: &super::scanner::DeclarationIndex
 ) -> Result<(), BodyError> {
-    if(index < super::scanner::shell_count(declarations)) {
-        handle super::scanner::shell_at(declarations, index) {
-            Result::Err(_) => Result::Ok(()),
-            Result::Ok(shell) => if(super::scanner::shell_kind_code(shell) == 12) {
-                let body = try(
-                        parse_function_body(
-                            original,
-                            headers,
-                            declarations,
-                            index
-                        ),
-                        @write_functions
-                    );
-                    let source = super::headers::parsed_source(headers);
-                    write_function_name(&mut *output, source, shell);
-                    try(
-                        write_expression(
-                            &mut *output,
-                            original,
-                            source,
-                            &body,
-                            body.root
-                        ),
-                        @write_functions
-                    );
-                    write_functions(
-                         output,
-                        original,
-                        headers,
-                        declarations,
-                        index + 1
-                    )
-            } else {
-                write_functions(
-                    output,
+    super::scanner::try_for_each_shell(declarations, { id, shell => {
+        if(super::scanner::shell_kind_code(shell) == 12) {
+            let body = try(
+                parse_function_body(
                     original,
                     headers,
                     declarations,
-                    index + 1
-                )
-            }
-        }
-    } else {
+                    id
+                ),
+                @write_functions
+            );
+            let source = super::headers::parsed_source(headers);
+            write_function_name(&mut *output, source, shell);
+            try(
+                write_expression(
+                    &mut *output,
+                    original,
+                    source,
+                    &body,
+                    body.root
+                ),
+                @write_functions
+            );
+        } else {
+            ()
+        };
         Result::Ok(())
-    }
+    }})
 }
 
 encode_source(output: &mut ByteBuf, source_text_value: String) {
@@ -3406,16 +3375,13 @@ encode_source(output: &mut ByteBuf, source_text_value: String) {
                     let encoded = ByteBuf::new();
                     ByteBuf::write_u32_le(
                         &mut encoded,
-                        u32_from_usize(
-                            function_count(&declarations, 0, 0)
-                        )
+                        u32_from_usize(function_count(&declarations))
                     );
                     handle write_functions(
                         &mut encoded,
                         &source_text_value,
                         &headers,
-                        &declarations,
-                        0
+                        &declarations
                     ) {
                         Result::Err(_) => ByteBuf::push( output, 3),
                         Result::Ok(_) => {

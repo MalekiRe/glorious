@@ -24,6 +24,10 @@ pub enum DeclarationKind {
 
 impl Use<[0, *]> for DeclarationKind {}
 
+pub struct ShellTag {}
+
+pub type ShellId = Id<ShellTag>;
+
 pub struct DeclarationShell {
     kind: DeclarationKind,
     kind_code: u8,
@@ -32,10 +36,12 @@ pub struct DeclarationShell {
     header: TokenRange,
     body: Option<TokenRange>,
     whole: TokenRange,
-    parent: Option<usize>
+    parent: Option<ShellId>
 }
 
-pub struct DeclarationIndex { shells: Vec<DeclarationShell> }
+pub struct DeclarationIndex {
+    shells: IndexVec<ShellTag, DeclarationShell>
+}
 
 pub enum ScanError {
     UnexpectedClosingDelimiter(usize, usize),
@@ -43,7 +49,8 @@ pub enum ScanError {
     UnclosedDelimiter(usize, usize),
     InvalidDeclarationStart(usize, usize),
     IncompleteDeclaration(usize, usize),
-    ExpectedDeclarationName(usize, usize)
+    ExpectedDeclarationName(usize, usize),
+    DeclarationIdExhausted(usize, usize)
 }
 
 struct OpenDelimiter { kind: u8, token: usize }
@@ -65,28 +72,77 @@ struct ScanStep {
 struct ScanScope {
     cursor: usize,
     limit: usize,
-    parent: Option<usize>
+    parent: Option<ShellId>
 }
 
 struct ScanState {
     cursor: usize,
     limit: usize,
-    parent: Option<usize>,
+    parent: Option<ShellId>,
     scopes: Vec<ScanScope>,
-    output: Vec<DeclarationShell>
+    output: IndexVec<ShellTag, DeclarationShell>
 }
 
 pub range_start(value: &TokenRange) -> usize { value.start }
 
 pub range_end(value: &TokenRange) -> usize { value.end }
 
-pub shell_count(value: &DeclarationIndex) -> usize { Vec::len(&value.shells) }
+pub shell_count(value: &DeclarationIndex) -> usize {
+    IndexVec::len(&value.shells)
+}
+
+pub shell_id_at_ordinal(
+    value: &DeclarationIndex,
+    index: usize
+) -> Option<ShellId> {
+    let id = try(Id::from_usize(index), @shell_id_at_ordinal);
+    handle IndexVec::get(&value.shells, id) {
+        Result::Err(_) => None,
+        Result::Ok(_) => Option::Some(id)
+    }
+}
 
 pub shell_at<'a>(
     value: &'a DeclarationIndex,
-    index: usize
+    id: ShellId
 ) -> Option<&'a DeclarationShell> {
-    Vec::get(&value.shells, index)
+    IndexVec::get(&value.shells, id)
+}
+
+pub for_each_shell<'a, F, e: EffectRow>(
+    value: &'a DeclarationIndex,
+    body: F
+)
+where F: Fn<(ShellId, &'a DeclarationShell), Output=(), Effects={| e}>,
+F: Use<[0, 0]> {
+    IndexVec::for_each(&value.shells, body)
+}
+
+pub try_for_each_shell<'a, E, F, e: EffectRow>(
+    value: &'a DeclarationIndex,
+    body: F
+) -> Result<(), E>
+where F: Fn<
+    (ShellId, &'a DeclarationShell),
+    Output=Result<(), E>,
+    Effects={| e}
+>,
+F: Use<[0, 0]> {
+    IndexVec::try_for_each(&value.shells, body)
+}
+
+pub fold_shells<'a, A, F, e: EffectRow>(
+    value: &'a DeclarationIndex,
+    initial: A,
+    body: F
+) -> A
+where F: Fn<
+    (A, ShellId, &'a DeclarationShell),
+    Output=A,
+    Effects={| e}
+>,
+F: Use<[0, 0]> {
+    IndexVec::fold(&value.shells, initial, body)
 }
 
 pub shell_kind(value: &DeclarationShell) -> &DeclarationKind { &value.kind }
@@ -108,7 +164,9 @@ pub shell_body_range(value: &DeclarationShell) -> Option<TokenRange> {
 
 pub shell_whole(value: &DeclarationShell) -> &TokenRange { &value.whole }
 
-pub shell_parent(value: &DeclarationShell) -> &Option<usize> { &value.parent }
+pub shell_parent(value: &DeclarationShell) -> &Option<ShellId> {
+    &value.parent
+}
 
 pub scan_error_code(value: &ScanError) -> u8 {
     handle *value {
@@ -117,7 +175,8 @@ pub scan_error_code(value: &ScanError) -> u8 {
         ScanError::UnclosedDelimiter(_, _) => 3,
         ScanError::InvalidDeclarationStart(_, _) => 4,
         ScanError::IncompleteDeclaration(_, _) => 5,
-        ScanError::ExpectedDeclarationName(_, _) => 6
+        ScanError::ExpectedDeclarationName(_, _) => 6,
+        ScanError::DeclarationIdExhausted(_, _) => 7
     }
 }
 
@@ -128,7 +187,8 @@ pub scan_error_token(value: &ScanError) -> usize {
         ScanError::UnclosedDelimiter(token, _) => token,
         ScanError::InvalidDeclarationStart(token, _) => token,
         ScanError::IncompleteDeclaration(token, _) => token,
-        ScanError::ExpectedDeclarationName(token, _) => token
+        ScanError::ExpectedDeclarationName(token, _) => token,
+        ScanError::DeclarationIdExhausted(token, _) => token
     }
 }
 
@@ -139,7 +199,8 @@ pub scan_error_related(value: &ScanError) -> usize {
         ScanError::UnclosedDelimiter(_, related) => related,
         ScanError::InvalidDeclarationStart(_, related) => related,
         ScanError::IncompleteDeclaration(_, related) => related,
-        ScanError::ExpectedDeclarationName(_, related) => related
+        ScanError::ExpectedDeclarationName(_, related) => related,
+        ScanError::DeclarationIdExhausted(_, related) => related
     }
 }
 
@@ -643,7 +704,7 @@ scan_semicolon_shell(
     limit: usize,
     public: Bool,
     classification: Classification,
-    parent: Option<usize>
+    parent: Option<ShellId>
 ) -> Result<ScanStep, ScanError> {
     let Classification {
         kind,
@@ -727,7 +788,7 @@ scan_braced_shell(
     limit: usize,
     public: Bool,
     classification: Classification,
-    parent: Option<usize>,
+    parent: Option<ShellId>,
     function: Bool
 ) -> Result<ScanStep, ScanError> {
     let Classification {
@@ -776,7 +837,7 @@ scan_one(
     value: &super::lexer::LexedSource,
     start: usize,
     limit: usize,
-    parent: Option<usize>
+    parent: Option<ShellId>
 ) -> Result<ScanStep, ScanError> {
     let public = ident_is(value, start, &"pub");
     let cursor = if(public) {
@@ -855,7 +916,7 @@ find_module_style(
 
 scan_loop_error(
     scopes: Vec<ScanScope>,
-    output: Vec<DeclarationShell>,
+    output: IndexVec<ShellTag, DeclarationShell>,
     error: ScanError
 ) -> Result<DeclarationIndex, ScanError> {
     Result::Err( error)
@@ -864,7 +925,7 @@ scan_loop_error(
 scan_complete(
     value: &super::lexer::LexedSource,
     scopes: Vec<ScanScope>,
-    output: Vec<DeclarationShell>
+    output: IndexVec<ShellTag, DeclarationShell>
 ) -> Result<DeclarationIndex, ScanError> {
     let remaining =  scopes;
     handle Vec::pop(&mut remaining) {
@@ -911,32 +972,40 @@ scan_loop(
                         nested_end,
                         declaration
                     } = step;
-                    let shell = Vec::len(&output);
-                    Vec::push(&mut output, declaration);
-                    handle nested_start {
-                        Result::Err(_) => scan_loop(value, ScanState {
-                            cursor: next,
-                            limit: limit,
-                            parent: parent,
-                            scopes:  scopes,
-                            output:  output
-                        }),
-                        Result::Ok(nested) => {
-                            Vec::push(&mut scopes, ScanScope {
+                    handle IndexVec::push(&mut output, declaration) {
+                        Result::Err(rejected) => {
+                            let token = rejected.whole.start;
+                            scan_loop_error(
+                                scopes,
+                                output,
+                                ScanError::DeclarationIdExhausted(token, token)
+                            )
+                        },
+                        Result::Ok(shell) => handle nested_start {
+                            Result::Err(_) => scan_loop(value, ScanState {
                                 cursor: next,
                                 limit: limit,
-                                parent: parent
-                            });
-                            scan_loop(
-                                value,
-                                ScanState {
-                                    cursor: nested,
-                                    limit: nested_end,
-                                    parent: Result::Ok(shell),
-                                    scopes:  scopes,
-                                    output:  output
-                                }
-                            )
+                                parent: parent,
+                                scopes:  scopes,
+                                output:  output
+                            }),
+                            Result::Ok(nested) => {
+                                Vec::push(&mut scopes, ScanScope {
+                                    cursor: next,
+                                    limit: limit,
+                                    parent: parent
+                                });
+                                scan_loop(
+                                    value,
+                                    ScanState {
+                                        cursor: nested,
+                                        limit: nested_end,
+                                        parent: Option::Some(shell),
+                                        scopes:  scopes,
+                                        output:  output
+                                    }
+                                )
+                            }
                         }
                     }
                 }
@@ -951,7 +1020,7 @@ pub scan(
         limit: super::lexer::token_count(value),
         parent: Result::Err(()),
         scopes: Vec::new(),
-        output: Vec::new()
+        output: IndexVec::new()
     })
 }
 
@@ -1006,14 +1075,14 @@ write_optional_range(output: &mut ByteBuf, value: &Option<TokenRange>) {
     }
 }
 
-write_optional_parent(output: &mut ByteBuf, value: &Option<usize>) {
+write_optional_parent(output: &mut ByteBuf, value: &Option<ShellId>) {
     handle Option::as_ref(value) {
         Result::Err(_) => ByteBuf::push( output, 0),
         Result::Ok(parent) => {
             ByteBuf::push(&mut *output, 1);
             ByteBuf::write_u32_le(
                  output,
-                wrapping_convert_to_u32(*parent)
+                Id::to_u32(*parent)
             )
         }
     }
@@ -1022,11 +1091,9 @@ write_optional_parent(output: &mut ByteBuf, value: &Option<usize>) {
 write_shells(
     output: &mut ByteBuf,
     lexed: &super::lexer::LexedSource,
-    value: &DeclarationIndex,
-    index: usize
+    value: &DeclarationIndex
 ) {
-    for_range(Range::new(index, Vec::len(&value.shells)), { current => {
-        let shell = Vec::index(&value.shells, current);
+    for_each_shell(value, { _, shell => {
         ByteBuf::push(&mut *output, shell.kind_code);
         ByteBuf::push(&mut *output, bool_code(shell.public));
         write_optional_name(&mut *output, lexed, &shell.name);
@@ -1058,9 +1125,9 @@ encode_scan(
             ByteBuf::push(&mut *output, 0);
             ByteBuf::write_u32_le(
                 &mut *output,
-                wrapping_convert_to_u32(Vec::len(&index.shells))
+                wrapping_convert_to_u32(shell_count(&index))
             );
-            write_shells( output, &lexed, &index, 0)
+            write_shells(output, &lexed, &index)
         }
     }
 }

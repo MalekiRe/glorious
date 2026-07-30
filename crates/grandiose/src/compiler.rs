@@ -10145,8 +10145,24 @@ pub(crate) fn normalize_ground_trait_methods(
                     }
                 }
             }
-            PatternKind::Struct { .. }
-            | PatternKind::Variant { .. }
+            PatternKind::Struct { name, fields, .. } => {
+                let matches = match &ty {
+                    ReceiverType::Name(actual) => actual == name,
+                    ReceiverType::Application(constructor, _) => {
+                        constructor.as_ref() == &ReceiverType::Name(name.clone())
+                    }
+                    _ => false,
+                };
+                if !matches {
+                    return;
+                }
+                for field in fields {
+                    if let Some(ty) = projected_receiver_type(program, ty.clone(), &field.field) {
+                        bind_refinement_pattern(program, &field.pattern, &ty, locals);
+                    }
+                }
+            }
+            PatternKind::Variant { .. }
             | PatternKind::Wildcard
             | PatternKind::Unit
             | PatternKind::Int(_)
@@ -10632,53 +10648,137 @@ pub(crate) fn normalize_ground_trait_methods(
         (!receiver_mentions_binder(&result, &binders)).then_some(result)
     }
 
-    fn bind_handler_clause_patterns(
+    fn effect_operation_receiver_shape(
         program: &Program,
-        clause: &crate::ast::HandlerClause,
-        computation: &ReceiverType,
-        locals: &mut BTreeMap<String, ReceiverType>,
-    ) {
-        let computation = expand_receiver_alias(program, computation, &mut BTreeSet::new());
-        let (name, arguments) = match &computation {
-            ReceiverType::Name(name) => (name.as_str(), &[][..]),
-            ReceiverType::Application(constructor, arguments) => {
-                let ReceiverType::Name(name) = constructor.as_ref() else {
-                    return;
-                };
-                (name.as_str(), arguments.as_slice())
-            }
-            _ => return,
-        };
-        if clause.effect != name {
-            return;
-        }
-        let Some(declaration) = program.enums.iter().find(|item| item.name == name) else {
-            return;
-        };
-        let Some(variant) = declaration
-            .variants
+        site: Span,
+        effect: &str,
+        operation: &str,
+    ) -> Option<(Vec<ReceiverType>, ReceiverType)> {
+        let declaration = program.effects.iter().find(|item| item.name == effect)?;
+        let operation = declaration
+            .operations
             .iter()
-            .find(|item| item.name == clause.operation)
-        else {
-            return;
-        };
+            .find(|item| item.name == operation)?;
+        let effect_arguments = program
+            .effect_paths
+            .iter()
+            .find(|path| path.site == site)
+            .and_then(|path| source_receiver_type(program, &path.effect))
+            .and_then(|effect| match effect {
+                ReceiverType::Name(_) => Some(Vec::new()),
+                ReceiverType::Application(_, arguments) => Some(arguments),
+                _ => None,
+            })
+            .unwrap_or_default();
         let substitutions = declaration
             .generics
             .iter()
             .flat_map(|generics| &generics.params)
-            .map(|parameter| parameter.name.clone())
-            .zip(arguments.iter().cloned())
+            // ReceiverType retains const/effect-row application slots but
+            // intentionally erases lifetime arguments. Remove only lifetime
+            // binders before the positional zip, then select type bindings.
+            .filter(|parameter| parameter.kind != crate::ast::GenericParamKind::Lifetime)
+            .zip(effect_arguments)
+            .filter_map(|(parameter, argument)| {
+                (parameter.kind == crate::ast::GenericParamKind::Type)
+                    .then(|| (parameter.name.clone(), argument))
+            })
             .collect::<BTreeMap<_, _>>();
-        for (pattern, field) in clause.patterns.iter().zip(&variant.fields) {
-            if let Some(ty) = source_receiver_type(program, field) {
-                bind_refinement_pattern(
-                    program,
-                    pattern,
-                    &substitute_receiver(&ty, &substitutions),
-                    locals,
-                );
+        let canonical = |ty: &TypeSyntax| {
+            let ty = source_receiver_type(program, ty)?;
+            let ty = substitute_receiver(&ty, &substitutions);
+            Some(expand_receiver_alias(program, &ty, &mut BTreeSet::new()))
+        };
+        let parameters = operation
+            .params
+            .iter()
+            .map(|parameter| canonical(&parameter.ty))
+            .collect::<Option<Vec<_>>>()?;
+        let result = operation
+            .return_type
+            .as_ref()
+            .and_then(canonical)
+            .unwrap_or_else(|| ReceiverType::Name("Unit".into()));
+        Some((parameters, result))
+    }
+
+    fn bind_handler_clause_patterns(
+        program: &Program,
+        clause: &crate::ast::HandlerClause,
+        computation: Option<&ReceiverType>,
+        locals: &mut BTreeMap<String, ReceiverType>,
+    ) -> Option<ReceiverType> {
+        if let Some(computation) = computation {
+            let computation = expand_receiver_alias(program, computation, &mut BTreeSet::new());
+            let (name, arguments) = match &computation {
+                ReceiverType::Name(name) => Some((name.as_str(), &[][..])),
+                ReceiverType::Application(constructor, arguments) => {
+                    let ReceiverType::Name(name) = constructor.as_ref() else {
+                        return None;
+                    };
+                    Some((name.as_str(), arguments.as_slice()))
+                }
+                _ => None,
+            }
+            .unwrap_or(("", &[]));
+            if clause.effect == name
+                && let Some(declaration) = program.enums.iter().find(|item| item.name == name)
+                && let Some(variant) = declaration
+                    .variants
+                    .iter()
+                    .find(|item| item.name == clause.operation)
+            {
+                let substitutions = declaration
+                    .generics
+                    .iter()
+                    .flat_map(|generics| &generics.params)
+                    .map(|parameter| parameter.name.clone())
+                    .zip(arguments.iter().cloned())
+                    .collect::<BTreeMap<_, _>>();
+                for (pattern, field) in clause.patterns.iter().zip(&variant.fields) {
+                    if let Some(ty) = source_receiver_type(program, field) {
+                        bind_refinement_pattern(
+                            program,
+                            pattern,
+                            &substitute_receiver(&ty, &substitutions),
+                            locals,
+                        );
+                    }
+                }
+                return None;
             }
         }
+
+        let (parameters, result) = effect_operation_receiver_shape(
+            program,
+            clause.span,
+            &clause.effect,
+            &clause.operation,
+        )?;
+        for (pattern, parameter) in clause.patterns.iter().zip(&parameters) {
+            bind_refinement_pattern(program, pattern, parameter, locals);
+        }
+        Some(result)
+    }
+
+    fn resumption_receiver(argument: ReceiverType, result: ReceiverType) -> ReceiverType {
+        ReceiverType::Application(
+            Box::new(ReceiverType::Name("$resumption".into())),
+            vec![argument, result],
+        )
+    }
+
+    fn resumption_parts(receiver: ReceiverType) -> Option<(ReceiverType, ReceiverType)> {
+        let ReceiverType::Application(constructor, mut arguments) = receiver else {
+            return None;
+        };
+        if constructor.as_ref() != &ReceiverType::Name("$resumption".into()) || arguments.len() != 2
+        {
+            return None;
+        }
+        let result = arguments.pop().unwrap();
+        let argument = arguments.pop().unwrap();
+        Some((argument, result))
     }
 
     fn later_binding_receiver_type(
@@ -11969,8 +12069,14 @@ pub(crate) fn normalize_ground_trait_methods(
                     .collect();
                 Some(ReceiverType::Tuple(elements))
             }
-            ExprKind::Perform { args, .. } => {
-                for value in Rc::make_mut(args) {
+            ExprKind::Perform {
+                effect,
+                operation,
+                args,
+            } => {
+                let shape =
+                    effect_operation_receiver_shape(program, expression_span, effect, operation);
+                for (index, value) in Rc::make_mut(args).iter_mut().enumerate() {
                     rewrite(
                         value,
                         locals,
@@ -11981,11 +12087,13 @@ pub(crate) fn normalize_ground_trait_methods(
                         dot_methods,
                         deferred_evidence,
                         trusted_standard_range,
-                        None,
+                        shape
+                            .as_ref()
+                            .and_then(|(parameters, _)| parameters.get(index)),
                         errors,
                     );
                 }
-                None
+                shape.map(|(_, result)| result)
             }
             ExprKind::Handle {
                 computation,
@@ -12007,8 +12115,22 @@ pub(crate) fn normalize_ground_trait_methods(
                 let mut result = None;
                 for clause in Rc::make_mut(clauses) {
                     let saved = locals.clone();
-                    if let Some(computation_ty) = &computation_ty {
-                        bind_handler_clause_patterns(program, clause, computation_ty, locals);
+                    let resumption_argument = bind_handler_clause_patterns(
+                        program,
+                        clause,
+                        computation_ty.as_ref(),
+                        locals,
+                    );
+                    let clause_expected = result
+                        .as_ref()
+                        .or(expected)
+                        .or_else(|| resumption_argument.as_ref().and(computation_ty.as_ref()));
+                    if let (Some(name), Some(argument), Some(result)) = (
+                        clause.resumption.as_ref(),
+                        resumption_argument,
+                        clause_expected,
+                    ) {
+                        locals.insert(name.clone(), resumption_receiver(argument, result.clone()));
                     }
                     let clause_result = rewrite(
                         &mut clause.body,
@@ -12020,7 +12142,7 @@ pub(crate) fn normalize_ground_trait_methods(
                         dot_methods,
                         deferred_evidence,
                         trusted_standard_range,
-                        result.as_ref().or(expected),
+                        clause_expected,
                         errors,
                     );
                     if result.is_none() {
@@ -12126,7 +12248,7 @@ pub(crate) fn normalize_ground_trait_methods(
             )
             .and_then(|receiver| projected_receiver_type(program, receiver, field)),
             ExprKind::Resume { resumption, value } | ExprKind::TailResume { resumption, value } => {
-                rewrite(
+                let resumption = rewrite(
                     Rc::make_mut(resumption),
                     locals,
                     program,
@@ -12139,21 +12261,40 @@ pub(crate) fn normalize_ground_trait_methods(
                     None,
                     errors,
                 );
-                value.as_mut().and_then(|value| {
-                    rewrite(
-                        Rc::make_mut(value),
-                        locals,
-                        program,
-                        methods,
-                        receiverless_methods,
-                        generic_methods,
-                        dot_methods,
-                        deferred_evidence,
-                        trusted_standard_range,
-                        None,
-                        errors,
-                    )
-                })
+                if let Some((argument, result)) = resumption.and_then(resumption_parts) {
+                    if let Some(value) = value.as_mut() {
+                        rewrite(
+                            Rc::make_mut(value),
+                            locals,
+                            program,
+                            methods,
+                            receiverless_methods,
+                            generic_methods,
+                            dot_methods,
+                            deferred_evidence,
+                            trusted_standard_range,
+                            Some(&argument),
+                            errors,
+                        );
+                    }
+                    Some(result)
+                } else {
+                    value.as_mut().and_then(|value| {
+                        rewrite(
+                            Rc::make_mut(value),
+                            locals,
+                            program,
+                            methods,
+                            receiverless_methods,
+                            generic_methods,
+                            dot_methods,
+                            deferred_evidence,
+                            trusted_standard_range,
+                            None,
+                            errors,
+                        )
+                    })
+                }
             }
             ExprKind::Cancel { resumption } => rewrite(
                 Rc::make_mut(resumption),
@@ -27343,7 +27484,24 @@ impl<'a> CoreLowerer<'a> {
         }
         let mut args = Vec::with_capacity(loop_context.runtime_parameters.len());
         for (index, ty) in loop_context.runtime_parameters {
-            args.push(self.expression(&arguments[index], Some(ty))?);
+            let argument = &arguments[index];
+            let transfer_reference = matches!(
+                self.resolved_type(ty),
+                ResolvedType::Shared(_) | ResolvedType::Unique(_)
+            ) && matches!(&argument.kind, ExprKind::Variable(path) if path.len() == 1);
+            if transfer_reference {
+                // A continue is terminal for the current iteration. Relocate a
+                // directly forwarded reference handle into the loop header
+                // instead of manufacturing a child reborrow whose parent is
+                // retired by this edge's cleanup.
+                let moved = Expr {
+                    span: argument.span,
+                    kind: ExprKind::Move(Rc::new(argument.clone())),
+                };
+                args.push(self.expression(&moved, Some(ty))?);
+            } else {
+                args.push(self.expression(argument, Some(ty))?);
+            }
         }
         Ok(self.typed(
             span,
@@ -27691,15 +27849,6 @@ impl<'a> CoreLowerer<'a> {
                 _ => None,
             })
             .collect::<Option<Vec<_>>>();
-        let loans_are_external = self.locals.values().all(|local| {
-            !local.owns_loan
-                || ((local.reference.is_some() || !local.reference_fields.is_empty())
-                    && local
-                        .reference
-                        .iter()
-                        .chain(local.reference_fields.values())
-                        .all(|origin| origin.external))
-        });
         let mut continuation_locals = self
             .late_inline_continuation_locals
             .last()
@@ -27726,69 +27875,63 @@ impl<'a> CoreLowerer<'a> {
         let control_context = (recursive_occurrences != 0
             && tail_recursive
             && can_bind_directly
-            && runtime_parameters.is_some()
-            // External reference parameters and captures are ordinary SSA
-            // values whose loan facts follow edge renaming. A locally issued
-            // loan additionally needs its lexical borrow state carried around
-            // the backedge, which this first control-loop form does not yet
-            // represent.
-            && loans_are_external)
-            .then(|| {
-                let control = core::ControlLoopId(self.next_control_loop);
-                self.next_control_loop += 1;
-                ActiveLateControlLoop {
-                    control,
-                    inline_depth: self.late_inline_stack.len(),
-                    runtime_parameters: runtime_parameters.expect("checked above"),
-                    static_labels: label_arguments
-                        .iter()
-                        .map(|label| label.as_ref().map(|label| label.name.to_string()))
-                        .collect(),
-                    static_closures: closure_arguments
-                        .iter()
-                        .map(|closure| {
-                            closure
-                                .as_ref()
-                                .map(|closure| (closure.source.span.start, closure.source.span.end))
-                        })
-                        .collect(),
-                    outer_locals: self
-                        .locals
-                        .values()
-                        .map(|binding| {
-                            (
-                                binding.local,
-                                self.actual_uses.get(&binding.local).copied().unwrap_or(0),
-                                matches!(
-                                    self.references.resolved(binding.ty),
-                                    ResolvedType::Shared(_) | ResolvedType::Unique(_)
-                                ) || self.loans.contains_key(&binding.local)
-                                    || self.suspended.contains(&binding.local),
-                            )
-                        })
-                        .chain(
-                            continuation_locals
-                                .iter()
-                                .filter(|local| !visible_locals.contains(local))
-                                .filter_map(|local| {
-                                    let ty = self.owner_types.get(local).copied()?;
-                                    Some((
-                                        *local,
-                                        self.actual_uses.get(local).copied().unwrap_or(0),
-                                        matches!(
-                                            self.references.resolved(ty),
-                                            ResolvedType::Shared(_) | ResolvedType::Unique(_)
-                                        ) || self.loans.contains_key(local)
-                                            || self.suspended.contains(local),
-                                    ))
-                                }),
+            && runtime_parameters.is_some())
+        .then(|| {
+            let control = core::ControlLoopId(self.next_control_loop);
+            self.next_control_loop += 1;
+            ActiveLateControlLoop {
+                control,
+                inline_depth: self.late_inline_stack.len(),
+                runtime_parameters: runtime_parameters.expect("checked above"),
+                static_labels: label_arguments
+                    .iter()
+                    .map(|label| label.as_ref().map(|label| label.name.to_string()))
+                    .collect(),
+                static_closures: closure_arguments
+                    .iter()
+                    .map(|closure| {
+                        closure
+                            .as_ref()
+                            .map(|closure| (closure.source.span.start, closure.source.span.end))
+                    })
+                    .collect(),
+                outer_locals: self
+                    .locals
+                    .values()
+                    .map(|binding| {
+                        (
+                            binding.local,
+                            self.actual_uses.get(&binding.local).copied().unwrap_or(0),
+                            matches!(
+                                self.references.resolved(binding.ty),
+                                ResolvedType::Shared(_) | ResolvedType::Unique(_)
+                            ) || self.loans.contains_key(&binding.local)
+                                || self.suspended.contains(&binding.local),
                         )
-                        .collect::<BTreeSet<_>>()
-                        .into_iter()
-                        .collect(),
-                    continuation_locals: continuation_locals.clone(),
-                }
-            });
+                    })
+                    .chain(
+                        continuation_locals
+                            .iter()
+                            .filter(|local| !visible_locals.contains(local))
+                            .filter_map(|local| {
+                                let ty = self.owner_types.get(local).copied()?;
+                                Some((
+                                    *local,
+                                    self.actual_uses.get(local).copied().unwrap_or(0),
+                                    matches!(
+                                        self.references.resolved(ty),
+                                        ResolvedType::Shared(_) | ResolvedType::Unique(_)
+                                    ) || self.loans.contains_key(local)
+                                        || self.suspended.contains(local),
+                                ))
+                            }),
+                    )
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+                continuation_locals: continuation_locals.clone(),
+            }
+        });
         let mut statements = Vec::with_capacity(arguments.len() * 2 + 1);
         let mut let_expectations = Vec::new();
         if can_bind_directly {
@@ -35991,12 +36134,13 @@ impl<'a> CoreLowerer<'a> {
                     }
                     let mut positive_moved = self.moved.clone();
                     let mut positive_moved_paths = self.moved_paths.clone();
-                    let positive_empty_referents = self.empty_referents.clone();
-                    let positive_loans = self.loans.clone();
-                    let positive_projected_loans = self.projected_loans.clone();
-                    let positive_suspended = self.suspended.clone();
-                    let positive_uniquely_suspended = self.uniquely_suspended.clone();
-                    let positive_active_variant_proofs = self.active_variant_proofs.clone();
+                    let mut positive_empty_referents = self.empty_referents.clone();
+                    let mut positive_loans = self.loans.clone();
+                    let mut positive_projected_loans = self.projected_loans.clone();
+                    let mut positive_suspended = self.suspended.clone();
+                    let mut positive_uniquely_suspended = self.uniquely_suspended.clone();
+                    let mut positive_active_variant_proofs =
+                        self.active_variant_proofs.clone();
                     let mut positive_actual_uses = self.actual_uses.clone();
                     let mut positive_actual_use_lowers = self.actual_use_lowers.clone();
 
@@ -36033,6 +36177,46 @@ impl<'a> CoreLowerer<'a> {
                         branch_expected.or_else(|| (positive.ty != NEVER).then_some(positive.ty));
                     let negative = self.expression(negative_source, negative_expected)?;
                     self.defer_branch_region_ends -= 1;
+
+                    // A terminal branch has no state at the join. In
+                    // particular, a fused ControlContinue transfers loop
+                    // parameters on its backedge, while the sibling result
+                    // arm remains the only path reaching this expression's
+                    // continuation. Compare and retain only reachable join
+                    // states instead of requiring the dead edge to preserve
+                    // owners it deliberately transported.
+                    match (positive.ty == NEVER, negative.ty == NEVER) {
+                        (true, false) => {
+                            positive_moved = self.moved.clone();
+                            positive_moved_paths = self.moved_paths.clone();
+                            positive_empty_referents = self.empty_referents.clone();
+                            positive_loans = self.loans.clone();
+                            positive_projected_loans = self.projected_loans.clone();
+                            positive_suspended = self.suspended.clone();
+                            positive_uniquely_suspended = self.uniquely_suspended.clone();
+                            positive_active_variant_proofs =
+                                self.active_variant_proofs.clone();
+                            positive_actual_uses = self.actual_uses.clone();
+                            positive_actual_use_lowers =
+                                self.actual_use_lowers.clone();
+                        }
+                        (false, true) | (true, true) => {
+                            self.moved = positive_moved.clone();
+                            self.moved_paths = positive_moved_paths.clone();
+                            self.empty_referents = positive_empty_referents.clone();
+                            self.loans = positive_loans.clone();
+                            self.projected_loans = positive_projected_loans.clone();
+                            self.suspended = positive_suspended.clone();
+                            self.uniquely_suspended =
+                                positive_uniquely_suspended.clone();
+                            self.active_variant_proofs =
+                                positive_active_variant_proofs.clone();
+                            self.actual_uses = positive_actual_uses.clone();
+                            self.actual_use_lowers =
+                                positive_actual_use_lowers.clone();
+                        }
+                        (false, false) => {}
+                    }
 
                     let baseline_ids = baseline_locals
                         .values()
@@ -41747,6 +41931,15 @@ impl MirLowerer {
     }
 
     fn destroy(&mut self, register: u32, span: Span) {
+        self.destroy_with_protected_parents(register, span, &BTreeSet::new());
+    }
+
+    fn destroy_with_protected_parents(
+        &mut self,
+        register: u32,
+        span: Span,
+        protected: &BTreeSet<u32>,
+    ) {
         if self.borrowed.remove(&register) {
             self.push(
                 span,
@@ -41755,7 +41948,7 @@ impl MirLowerer {
                 },
             );
             if let Some(parent) = self.borrow_parents.remove(&register) {
-                self.release_borrow_parent(parent, span);
+                self.release_borrow_parent_with_protection(parent, span, protected);
             }
         } else if self
             .duplicable_types
@@ -41791,6 +41984,34 @@ impl MirLowerer {
                     owner: Self::operand(register, mir::UseMode::Move),
                 },
             );
+        }
+    }
+
+    /// Clean an ownership frontier deepest-loan-first while keeping every
+    /// explicitly scheduled parent alive until its own turn. Generated
+    /// projection carriers still collapse recursively, but a named reference
+    /// which is also present in the cleanup frontier must not be ended by its
+    /// child's cascade and then ended a second time by the frontier itself.
+    fn cleanup_registers(&mut self, registers: impl IntoIterator<Item = u32>, span: Span) {
+        let mut registers = registers.into_iter().collect::<Vec<_>>();
+        let protected = registers.iter().copied().collect::<BTreeSet<_>>();
+        let depth = |reference| {
+            let mut depth = 0usize;
+            let mut register = reference;
+            let mut seen = BTreeSet::new();
+            while let Some(parent) = self.tracked_borrow_parent(register) {
+                if !seen.insert(parent) {
+                    break;
+                }
+                depth += 1;
+                register = parent;
+            }
+            depth
+        };
+        registers.sort_by_key(|register| std::cmp::Reverse(depth(*register)));
+        for register in registers {
+            self.destroy_with_protected_parents(register, span, &protected);
+            self.transfer_owner(register);
         }
     }
 
@@ -41947,12 +42168,22 @@ impl MirLowerer {
     /// the atomic split-borrow representation used by the existing one-field
     /// MIR and bytecode projection instructions.
     fn release_borrow_parent(&mut self, parent: u32, span: Span) {
+        self.release_borrow_parent_with_protection(parent, span, &BTreeSet::new());
+    }
+
+    fn release_borrow_parent_with_protection(
+        &mut self,
+        parent: u32,
+        span: Span,
+        protected: &BTreeSet<u32>,
+    ) {
         if !self
             .borrow_parents
             .values()
             .any(|candidate| *candidate == parent)
+            && !protected.contains(&parent)
         {
-            self.destroy(parent, span);
+            self.destroy_with_protected_parents(parent, span, protected);
         }
     }
 
@@ -43324,8 +43555,19 @@ impl MirLowerer {
                     }));
                 }
                 let incoming_set = incoming.iter().copied().collect::<BTreeSet<_>>();
+                let mut carried = incoming_set.clone();
+                for mut register in incoming.iter().copied() {
+                    let mut seen = BTreeSet::new();
+                    while let Some(parent) = self.tracked_borrow_parent(register) {
+                        if !seen.insert(parent) {
+                            break;
+                        }
+                        carried.insert(parent);
+                        register = parent;
+                    }
+                }
                 for owner in self.owned.clone().into_iter().rev() {
-                    if !incoming_set.contains(&owner) {
+                    if !carried.contains(&owner) {
                         self.destroy(owner, expression.span);
                         self.transfer_owner(owner);
                     }
@@ -43455,6 +43697,9 @@ impl MirLowerer {
                 let mut positive_reaches_join = false;
                 let mut positive_edge_item = None;
                 let mut positive_sources = Vec::new();
+                let mut negative_sources = Vec::new();
+                let mut joined_borrow_parent_edges = Vec::new();
+                let mut joined_loan_edges = Vec::new();
                 if let MirFlow::Value(value) = self.expression(positive) {
                     positive_reaches_join = true;
                     let value = self.materialize(value, positive.span);
@@ -43519,6 +43764,18 @@ impl MirLowerer {
                         .filter(|reference| !survivors.contains(reference))
                         .copied()
                         .collect();
+                    joined_borrow_parent_edges.extend(sources.iter().filter_map(|source| {
+                        self.borrow_parents
+                            .get(source)
+                            .copied()
+                            .map(|parent| (*source, parent))
+                    }));
+                    joined_loan_edges.extend(sources.iter().filter_map(|source| {
+                        self.loan_of
+                            .get(source)
+                            .copied()
+                            .map(|loan| (*source, loan))
+                    }));
                     let mut args = vec![Self::operand(value, mir::UseMode::Move)];
                     positive_sources = sources.clone();
                     args.extend(sources.into_iter().map(|source| self.join_operand(source)));
@@ -43874,6 +44131,19 @@ impl MirLowerer {
                         joined_entry_borrowed = negative_entry_borrowed;
                     }
                     let mut args = vec![Self::operand(value, mir::UseMode::Move)];
+                    negative_sources = sources.clone();
+                    joined_borrow_parent_edges.extend(sources.iter().filter_map(|source| {
+                        self.borrow_parents
+                            .get(source)
+                            .copied()
+                            .map(|parent| (*source, parent))
+                    }));
+                    joined_loan_edges.extend(sources.iter().filter_map(|source| {
+                        self.loan_of
+                            .get(source)
+                            .copied()
+                            .map(|loan| (*source, loan))
+                    }));
                     args.extend(sources.into_iter().map(|source| self.join_operand(source)));
                     self.terminate(mir::Terminator::Goto(mir::Edge { target: join, args }));
                 }
@@ -43924,12 +44194,57 @@ impl MirLowerer {
                         .zip(join_borrowed)
                         .filter_map(|(register, borrowed)| borrowed.then_some(*register)),
                 );
-                self.borrow_parents = entry_borrow_parents;
-                self.borrow_parents
-                    .retain(|reference, _| self.borrowed.contains(reference));
-                self.loan_of = entry_loan_of;
-                self.loan_of
-                    .retain(|reference, _| self.borrowed.contains(reference));
+                let mut source_to_join = BTreeMap::new();
+                for sources in [&positive_sources, &negative_sources] {
+                    if sources.is_empty() {
+                        continue;
+                    }
+                    assert_eq!(
+                        sources.len(),
+                        join_registers.len(),
+                        "reaching refinement predecessor has the wrong join arity"
+                    );
+                    for (source, joined) in sources.iter().zip(&join_registers) {
+                        if let Some(previous) = source_to_join.insert(*source, *joined) {
+                            assert_eq!(
+                                previous, *joined,
+                                "one refinement source maps to two join registers"
+                            );
+                        }
+                    }
+                }
+                let mut joined_parents = BTreeMap::new();
+                for (reference, parent) in entry_borrow_parents
+                    .into_iter()
+                    .chain(joined_borrow_parent_edges)
+                {
+                    let reference = source_to_join.get(&reference).copied().unwrap_or(reference);
+                    if !self.borrowed.contains(&reference) {
+                        continue;
+                    }
+                    let parent = source_to_join.get(&parent).copied().unwrap_or(parent);
+                    if let Some(previous) = joined_parents.insert(reference, parent) {
+                        assert_eq!(
+                            previous, parent,
+                            "refinement predecessors disagree on a joined reference parent"
+                        );
+                    }
+                }
+                self.borrow_parents = joined_parents;
+                let mut joined_loans = BTreeMap::new();
+                for (reference, loan) in entry_loan_of.into_iter().chain(joined_loan_edges) {
+                    let reference = source_to_join.get(&reference).copied().unwrap_or(reference);
+                    if !self.borrowed.contains(&reference) {
+                        continue;
+                    }
+                    if let Some(previous) = joined_loans.insert(reference, loan) {
+                        assert_eq!(
+                            previous, loan,
+                            "refinement predecessors disagree on a joined loan identity"
+                        );
+                    }
+                }
+                self.loan_of = joined_loans;
                 if let Some(parent) =
                     join_result_parent.and_then(|position| join_registers.get(position).copied())
                 {
@@ -44824,14 +45139,12 @@ impl MirLowerer {
                     let value = self.materialize(value, body.span);
                     self.transfer_owner(value);
                     let outer_owned = self.active_labels[label].outer_owned.clone();
-                    for register in
+                    self.cleanup_registers(
                         self.owned.clone().into_iter().rev().filter(|register| {
                             *function_boundary || !outer_owned.contains(register)
-                        })
-                    {
-                        self.destroy(register, expression.span);
-                        self.transfer_owner(register);
-                    }
+                        }),
+                        expression.span,
+                    );
                     self.push(
                         expression.span,
                         mir::InstructionKind::LabelPop {
@@ -44875,12 +45188,12 @@ impl MirLowerer {
                     self.register_types[value_register as usize]
                 );
                 self.transfer_owner(value_register);
-                for register in self.owned.clone().into_iter().rev().filter(|register| {
-                    destination.function_boundary || !destination.outer_owned.contains(register)
-                }) {
-                    self.destroy(register, expression.span);
-                    self.transfer_owner(register);
-                }
+                self.cleanup_registers(
+                    self.owned.clone().into_iter().rev().filter(|register| {
+                        destination.function_boundary || !destination.outer_owned.contains(register)
+                    }),
+                    expression.span,
+                );
                 self.terminate(mir::Terminator::Leave {
                     label: destination.label,
                     target: mir::Edge {

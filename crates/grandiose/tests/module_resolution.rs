@@ -65,6 +65,50 @@ fn external_modules_resolve_from_the_crate_root_exception() {
 }
 
 #[test]
+fn unresolved_qualified_root_call_is_rejected_during_module_resolution() {
+    let bundle = bundle(
+        (
+            "/work/src/main.glorious",
+            r#"
+            mod frontend;
+            mod backend;
+            main() -> { () }
+            "#,
+        ),
+        &[
+            (
+                "/work/src/frontend/frontend.glorious",
+                "pub existing() -> { () }",
+            ),
+            ("/work/src/backend/backend.glorious", "pub mod lowering;"),
+            (
+                "/work/src/backend/lowering/lowering.glorious",
+                r#"
+                pub probe() -> {
+                    super::super::frontend::missing()
+                }
+                "#,
+            ),
+        ],
+    );
+    let errors = compile_bundle_to_bytecode(&bundle)
+        .expect_err("an unresolved root-package module call must fail during name resolution");
+    assert!(
+        errors.iter().any(|error| {
+            error.code.as_deref() == Some("G1MOD001")
+                && error.message.contains("super::super::frontend::missing")
+        }),
+        "{errors:#?}"
+    );
+    assert!(
+        errors
+            .iter()
+            .all(|error| error.code.as_deref() != Some("G1BC001")),
+        "{errors:#?}"
+    );
+}
+
+#[test]
 fn implicit_function_labels_follow_canonical_module_names() {
     let bundle = bundle(
         (

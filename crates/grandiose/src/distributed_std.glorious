@@ -9662,6 +9662,148 @@ __g1_index_vec_replace<I, T>(value: &mut IndexVec<I, T>, id: Id<I>, incoming: T)
     }
 }
 
+// IndexVec traversal exposes the canonical branded ID beside each borrowed
+// element. The collection invariant established by push means every visited
+// ordinal has an exact u32 representation; callers never need to reconstruct
+// that relationship through integer conversions and a second lookup.
+__g1_index_vec_for_each_step<'a, I, T, F, e: EffectRow>(
+    base: &'a Array<T>,
+    index: usize,
+    length: usize,
+    body: F
+)
+where F: Fn<(Id<I>, &'a T), Output=(), Effects={| e}>,
+F: Use<[0, 0]> {
+    if(index < length) {
+        body(
+            Id { raw: wrapping_convert_to_u32(index) },
+            __g1_array_get_borrow_shared(base, index)
+        );
+        __g1_index_vec_for_each_step(base, index + 1, length, body)
+    } else {
+        ()
+    }
+}
+
+__g1_index_vec_for_each<'a, I, T, F, e: EffectRow>(
+    value: &'a IndexVec<I, T>,
+    body: F
+)
+where F: Fn<(Id<I>, &'a T), Output=(), Effects={| e}>,
+F: Use<[0, 0]> {
+    __g1_index_vec_for_each_step(&value.values.storage, 0, value.length, body)
+}
+
+__g1_index_vec_try_for_each_step<'a, I, T, E, F, e: EffectRow>(
+    base: &'a Array<T>,
+    index: usize,
+    length: usize,
+    body: F
+) -> Result<(), E>
+where F: Fn<(Id<I>, &'a T), Output=Result<(), E>, Effects={| e}>,
+F: Use<[0, 0]> {
+    if(index < length) {
+        handle body(
+            Id { raw: wrapping_convert_to_u32(index) },
+            __g1_array_get_borrow_shared(base, index)
+        ) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(_) => __g1_index_vec_try_for_each_step(
+                base,
+                index + 1,
+                length,
+                body
+            )
+        }
+    } else {
+        Result::Ok(())
+    }
+}
+
+__g1_index_vec_try_for_each<'a, I, T, E, F, e: EffectRow>(
+    value: &'a IndexVec<I, T>,
+    body: F
+) -> Result<(), E>
+where F: Fn<(Id<I>, &'a T), Output=Result<(), E>, Effects={| e}>,
+F: Use<[0, 0]> {
+    __g1_index_vec_try_for_each_step(&value.values.storage, 0, value.length, body)
+}
+
+__g1_index_vec_fold_step<'a, I, T, A, F, e: EffectRow>(
+    base: &'a Array<T>,
+    index: usize,
+    length: usize,
+    accumulator: A,
+    body: F
+) -> A
+where F: Fn<(A, Id<I>, &'a T), Output=A, Effects={| e}>,
+F: Use<[0, 0]> {
+    if(index < length) {
+        __g1_index_vec_fold_step(
+            base,
+            index + 1,
+            length,
+            body(
+                accumulator,
+                Id { raw: wrapping_convert_to_u32(index) },
+                __g1_array_get_borrow_shared(base, index)
+            ),
+            body
+        )
+    } else {
+        accumulator
+    }
+}
+
+__g1_index_vec_fold<'a, I, T, A, F, e: EffectRow>(
+    value: &'a IndexVec<I, T>,
+    seed: A,
+    body: F
+) -> A
+where F: Fn<(A, Id<I>, &'a T), Output=A, Effects={| e}>,
+F: Use<[0, 0]> {
+    __g1_index_vec_fold_step(&value.values.storage, 0, value.length, seed, body)
+}
+
+__g1_index_vec_try_fold_step<'a, I, T, A, E, F, e: EffectRow>(
+    base: &'a Array<T>,
+    index: usize,
+    length: usize,
+    accumulator: A,
+    body: F
+) -> Result<A, E>
+where F: Fn<(A, Id<I>, &'a T), Output=Result<A, E>, Effects={| e}>,
+F: Use<[0, 0]> {
+    if(index < length) {
+        handle body(
+            accumulator,
+            Id { raw: wrapping_convert_to_u32(index) },
+            __g1_array_get_borrow_shared(base, index)
+        ) {
+            Result::Err(error) => Result::Err(error),
+            Result::Ok(next) => __g1_index_vec_try_fold_step(
+                base,
+                index + 1,
+                length,
+                next,
+                body
+            )
+        }
+    } else {
+        Result::Ok(accumulator)
+    }
+}
+
+__g1_index_vec_try_fold<'a, I, T, A, E, F, e: EffectRow>(
+    value: &'a IndexVec<I, T>,
+    seed: A,
+    body: F
+) -> Result<A, E>
+where F: Fn<(A, Id<I>, &'a T), Output=Result<A, E>, Effects={| e}>,
+F: Use<[0, 0]> {
+    __g1_index_vec_try_fold_step(&value.values.storage, 0, value.length, seed, body)
+}
+
 let IndexVec::new = __g1_index_vec_new;
 let IndexVec::len = __g1_index_vec_len;
 let IndexVec::is_empty = __g1_index_vec_is_empty;
@@ -9673,6 +9815,10 @@ let IndexVec::index_mut = __g1_index_vec_index_mut;
 let IndexVec::pop = __g1_index_vec_pop;
 let IndexVec::get_copy = __g1_index_vec_get_copy;
 let IndexVec::replace = __g1_index_vec_replace;
+let IndexVec::for_each = __g1_index_vec_for_each;
+let IndexVec::try_for_each = __g1_index_vec_try_for_each;
+let IndexVec::fold = __g1_index_vec_fold;
+let IndexVec::try_fold = __g1_index_vec_try_fold;
 struct Arena<I, T> { private values: IndexVec<I, T>, private length: usize }
 
 __g1_arena_new<I, T>() -> Arena<I, T> { Arena { values: IndexVec::new(), length: 0 } }

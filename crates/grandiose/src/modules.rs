@@ -710,13 +710,30 @@ impl AstRewriter<'_> {
                                 .map(Rc::<str>::from)
                                 .collect::<Vec<_>>(),
                         );
-                    } else if package_root(self.resolution, self.current) != ModuleId(0) {
+                    } else {
+                        let module_qualified = names.len() > 1
+                            && (matches!(
+                                names.first().map(String::as_str),
+                                Some("crate" | "self" | "super")
+                            ) || !resolve_module_path(
+                                self.resolution,
+                                self.scopes,
+                                self.current,
+                                &names[..names.len() - 1],
+                            )
+                            .is_empty());
+                        let dependency = package_root(self.resolution, self.current) != ModuleId(0);
+                        if !module_qualified && !dependency {
+                            return;
+                        }
+                        let context = if dependency {
+                            " in dependency package"
+                        } else {
+                            ""
+                        };
                         self.errors.push(error(
                             expression.span,
-                            format!(
-                                "unresolved value path `{}` in dependency package",
-                                names.join("::")
-                            ),
+                            format!("unresolved value path `{}`{context}", names.join("::")),
                         ));
                     }
                 }

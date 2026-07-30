@@ -10622,6 +10622,41 @@ struct CarrierLoan {
 
 type CarrierLoans = Vec<CarrierLoan>;
 
+/// Registers whose loans form the authority chain for an access through
+/// `source`. A child unique reference suspends its parent handle rather than
+/// creating an unrelated alias, so accesses through that child must exempt the
+/// whole chain while continuing to compare against every other carrier.
+fn authorized_carrier_chain(source: u32, loans: &[CarrierLoans]) -> BTreeSet<u32> {
+    let mut authorized = BTreeSet::new();
+    let mut carrier = Some(source);
+    while let Some(register) = carrier {
+        if !authorized.insert(register) {
+            break;
+        }
+        carrier = loans
+            .get(register as usize)
+            .and_then(|loans| match loans.as_slice() {
+                [loan] => loan.loan.suspended_parent,
+                _ => None,
+            });
+    }
+    authorized
+}
+
+fn conflicts_outside_authorized_chain(
+    place: &BorrowedPlace,
+    unique: bool,
+    authorized: &BTreeSet<u32>,
+    loans: &[CarrierLoans],
+) -> bool {
+    loans
+        .iter()
+        .enumerate()
+        .filter(|(register, _)| !authorized.contains(&(*register as u32)))
+        .flat_map(|(_, loans)| loans)
+        .any(|loan| places_overlap(place, &loan.loan.place) && (unique || loan.loan.unique))
+}
+
 /// Merge loans carried by mutually exclusive enum alternatives at a CFG join.
 ///
 /// Enum reference leaves are prefixed with `u32::MAX - variant`.  A branch may
@@ -11443,7 +11478,13 @@ fn verify_loans(
                         instruction: pc,
                         register: *src,
                     })?;
-                if conflicts(&source.loan.place, false, Some(*src), &loans) {
+                let authorized = authorized_carrier_chain(*src, &loans);
+                if conflicts_outside_authorized_chain(
+                    &source.loan.place,
+                    false,
+                    &authorized,
+                    &loans,
+                ) {
                     return Err(conflict(*src));
                 }
                 loans[*dst as usize] = vec![CarrierLoan {
@@ -11474,7 +11515,9 @@ fn verify_loans(
                         instruction: pc,
                         register: *src,
                     })?;
-                if conflicts(&source.loan.place, true, Some(*src), &loans) {
+                let authorized = authorized_carrier_chain(*src, &loans);
+                if conflicts_outside_authorized_chain(&source.loan.place, true, &authorized, &loans)
+                {
                     return Err(conflict(*src));
                 }
                 loans[*dst as usize] = vec![CarrierLoan {
@@ -11504,11 +11547,47 @@ fn verify_loans(
                 let authenticated_relocation = parallel_move_members[pc as usize]
                     .as_ref()
                     .is_some_and(|members| {
+                        let relocated_authority = members
+                            .iter()
+                            .flat_map(|member| authorized_carrier_chain(*member, &loans))
+                            .collect::<BTreeSet<_>>();
+                        let relocated_places = members
+                            .iter()
+                            .flat_map(|member| {
+                                loans
+                                    .get(*member as usize)
+                                    .into_iter()
+                                    .flatten()
+                                    .filter(|loan| loan.loan.place.owner == *src)
+                                    .map(|loan| &loan.loan.place)
+                            })
+                            .collect::<Vec<_>>();
                         members.contains(src)
                             && members.contains(dst)
-                            && borrowed_place_dependents
-                                .iter()
-                                .all(|carrier| members.contains(carrier))
+                            && borrowed_place_dependents.iter().all(|carrier| {
+                                if relocated_authority.contains(carrier) {
+                                    return true;
+                                }
+                                let [stationary] = loans[*carrier as usize].as_slice() else {
+                                    return false;
+                                };
+                                if stationary.loan.unique {
+                                    return false;
+                                }
+                                let place = &stationary.loan.place;
+                                let proper_prefix =
+                                    |left: &BorrowedPlace, right: &BorrowedPlace| {
+                                        left.owner == right.owner
+                                            && left.projections.len() < right.projections.len()
+                                            && right.projections.starts_with(&left.projections)
+                                    };
+                                relocated_places
+                                    .iter()
+                                    .any(|ancestor| proper_prefix(ancestor, place))
+                                    && relocated_places
+                                        .iter()
+                                        .any(|descendant| proper_prefix(place, descendant))
+                            })
                     });
                 if conflicts(&whole(*src), true, Some(*src), &loans) && !authenticated_relocation {
                     return Err(conflict(*src));
@@ -11928,10 +12007,20 @@ fn verify_loans(
             Instruction::ProjectBorrowShared { dst, src, field }
             | Instruction::ProjectBorrowUnique { dst, src, field } => {
                 let unique = matches!(instruction, Instruction::ProjectBorrowUnique { .. });
-                let inherited = loans[*src as usize]
-                    .first()
-                    .filter(|_| loans[*src as usize].len() == 1)
-                    .cloned();
+                // Only a direct reference handle authorizes a projection into
+                // its referent. An aggregate can itself carry one stored
+                // reference loan, but borrowing that aggregate's field must
+                // still borrow storage rooted at the aggregate register.
+                let source_is_reference = matches!(
+                    type_at(a, f.register_types[*src as usize]),
+                    Ok(Type::RefShared { .. } | Type::RefUnique { .. })
+                );
+                let inherited = source_is_reference
+                    .then(|| match loans[*src as usize].as_slice() {
+                        [loan] if loan.path.is_empty() => Some(loan.clone()),
+                        _ => None,
+                    })
+                    .flatten();
                 if inherited
                     .as_ref()
                     .is_some_and(|loan| !loan.loan.referent_initialized)
@@ -11950,27 +12039,12 @@ fn verify_loans(
                 // in the chain names the same root place and would otherwise
                 // conflict with the child it is authorizing. Exempt only those
                 // exact carriers; unrelated aliases still conflict.
-                let mut authorized = std::collections::BTreeSet::new();
-                if inherited.is_some() {
-                    let mut carrier = Some(*src);
-                    while let Some(register) = carrier {
-                        if !authorized.insert(register) {
-                            break;
-                        }
-                        carrier = loans[register as usize]
-                            .first()
-                            .filter(|_| loans[register as usize].len() == 1)
-                            .and_then(|loan| loan.loan.suspended_parent);
-                    }
-                }
-                let has_conflict = loans
-                    .iter()
-                    .enumerate()
-                    .filter(|(register, _)| !authorized.contains(&(*register as u32)))
-                    .flat_map(|(_, loans)| loans)
-                    .any(|loan| {
-                        places_overlap(&place, &loan.loan.place) && (unique || loan.loan.unique)
-                    });
+                let authorized = inherited
+                    .is_some()
+                    .then(|| authorized_carrier_chain(*src, &loans))
+                    .unwrap_or_default();
+                let has_conflict =
+                    conflicts_outside_authorized_chain(&place, unique, &authorized, &loans);
                 if has_conflict {
                     return Err(conflict(*src));
                 }
@@ -16272,6 +16346,151 @@ mod tests {
     }
 
     #[test]
+    fn parallel_edge_relocation_carries_an_implicit_projected_parent() {
+        let inner = Type::predefined().len() as TypeId;
+        let outer = inner + 1;
+        let outer_reference = outer + 1;
+        let inner_reference = outer_reference + 1;
+        let leaf_reference = inner_reference + 1;
+        let mut artifact = base(
+            vec![
+                Instruction::BorrowShared { dst: 2, src: 1 },
+                Instruction::ProjectBorrowShared {
+                    dst: 3,
+                    src: 2,
+                    field: 0,
+                },
+                Instruction::ProjectBorrowShared {
+                    dst: 4,
+                    src: 3,
+                    field: 0,
+                },
+                // The intermediate projected carrier r3 dominates the edge
+                // and therefore needs no SSA destination of its own.
+                Instruction::Move { dst: 7, src: 4 },
+                Instruction::Move { dst: 5, src: 1 },
+                Instruction::Move { dst: 6, src: 2 },
+                Instruction::Jump { target: 7 },
+                Instruction::EndBorrow { reference: 7 },
+                Instruction::EndBorrow { reference: 3 },
+                Instruction::EndBorrow { reference: 6 },
+                Instruction::Drop { register: 5 },
+                Instruction::Return { src: None },
+            ],
+            vec![
+                UNIT,
+                outer,
+                outer_reference,
+                inner_reference,
+                leaf_reference,
+                outer,
+                outer_reference,
+                leaf_reference,
+            ],
+        );
+        artifact.types.extend([
+            Type::Tuple {
+                fields: vec![I64],
+                copy: false,
+            }
+            .restricted(false, true),
+            Type::Tuple {
+                fields: vec![inner],
+                copy: false,
+            }
+            .restricted(false, true),
+            Type::RefShared { referent: outer },
+            Type::RefShared { referent: inner },
+            Type::RefShared { referent: I64 },
+        ]);
+        artifact.functions[0].params = vec![outer];
+        artifact.functions[0].return_type = UNIT;
+        artifact.required_features =
+            crate::bytecode::used_features(&artifact.types, &artifact.code, false, false);
+
+        verify(artifact)
+            .expect("an unchanged projected parent remains part of the relocated authority chain");
+    }
+
+    #[test]
+    fn parallel_edge_relocation_rejects_an_unrelated_stationary_sibling() {
+        let inner = Type::predefined().len() as TypeId;
+        let outer = inner + 1;
+        let outer_reference = outer + 1;
+        let inner_reference = outer_reference + 1;
+        let leaf_reference = inner_reference + 1;
+        let mut artifact = base(
+            vec![
+                Instruction::BorrowShared { dst: 2, src: 1 },
+                Instruction::ProjectBorrowShared {
+                    dst: 3,
+                    src: 2,
+                    field: 0,
+                },
+                Instruction::ProjectBorrowShared {
+                    dst: 4,
+                    src: 3,
+                    field: 0,
+                },
+                Instruction::ProjectBorrowShared {
+                    dst: 8,
+                    src: 2,
+                    field: 1,
+                },
+                Instruction::Move { dst: 7, src: 4 },
+                Instruction::Move { dst: 5, src: 1 },
+                Instruction::Move { dst: 6, src: 2 },
+                Instruction::Jump { target: 8 },
+                Instruction::EndBorrow { reference: 7 },
+                Instruction::EndBorrow { reference: 3 },
+                Instruction::EndBorrow { reference: 8 },
+                Instruction::EndBorrow { reference: 6 },
+                Instruction::Drop { register: 5 },
+                Instruction::Return { src: None },
+            ],
+            vec![
+                UNIT,
+                outer,
+                outer_reference,
+                inner_reference,
+                leaf_reference,
+                outer,
+                outer_reference,
+                leaf_reference,
+                inner_reference,
+            ],
+        );
+        artifact.types.extend([
+            Type::Tuple {
+                fields: vec![I64],
+                copy: false,
+            }
+            .restricted(false, true),
+            Type::Tuple {
+                fields: vec![inner, inner],
+                copy: false,
+            }
+            .restricted(false, true),
+            Type::RefShared { referent: outer },
+            Type::RefShared { referent: inner },
+            Type::RefShared { referent: I64 },
+        ]);
+        artifact.functions[0].params = vec![outer];
+        artifact.functions[0].return_type = UNIT;
+        artifact.required_features =
+            crate::bytecode::used_features(&artifact.types, &artifact.code, false, false);
+
+        assert!(matches!(
+            verify(artifact),
+            Err(VerifyError::BorrowConflict {
+                function: 0,
+                instruction: 5,
+                register: 1,
+            })
+        ));
+    }
+
+    #[test]
     fn lone_move_cannot_relocate_a_borrowed_owner() {
         let reference = Type::predefined().len() as TypeId;
         let mut artifact = base(
@@ -19167,6 +19386,178 @@ mod tests {
         assert!(matches!(
             verify(nested_split_borrow_artifact(0)),
             Err(VerifyError::BorrowConflict { register: 2, .. })
+        ));
+    }
+
+    fn projected_unique_reborrow_artifact(reborrow_unique: bool) -> Artifact {
+        let mut types = Type::predefined();
+        types.push(Type::Struct {
+            name: "Cell".into(),
+            fields: vec![Field {
+                name: "value".into(),
+                ty: I64,
+            }],
+            copy: false,
+        });
+        types.push(Type::RefUnique { referent: 19 });
+        types.push(Type::RefUnique { referent: I64 });
+        types.push(Type::RefShared { referent: I64 });
+        let reborrow_type = if reborrow_unique { 21 } else { 22 };
+        Artifact {
+            types,
+            functions: vec![Function {
+                flags: 0,
+                name: "project_then_reborrow".into(),
+                params: vec![19],
+                return_type: 19,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, 19, 20, 21, reborrow_type],
+                code_start: 0,
+                code_len: 7,
+                label_slot_count: 0,
+            }],
+            code: vec![
+                Instruction::BorrowUnique { dst: 2, src: 1 },
+                Instruction::ProjectBorrowUnique {
+                    dst: 3,
+                    src: 2,
+                    field: 0,
+                },
+                if reborrow_unique {
+                    Instruction::ReborrowUnique { dst: 4, src: 3 }
+                } else {
+                    Instruction::ReborrowShared { dst: 4, src: 3 }
+                },
+                Instruction::EndBorrow { reference: 4 },
+                Instruction::EndBorrow { reference: 3 },
+                Instruction::EndBorrow { reference: 2 },
+                Instruction::Return { src: Some(1) },
+            ],
+            required_features: 1 | (1 << 1),
+            ..Artifact::default()
+        }
+    }
+
+    #[test]
+    fn projected_unique_reference_authorizes_nested_shared_reborrow() {
+        verify(projected_unique_reborrow_artifact(false))
+            .expect("a projected unique child must authorize its shared reborrow");
+    }
+
+    #[test]
+    fn projected_unique_reference_authorizes_nested_unique_reborrow() {
+        verify(projected_unique_reborrow_artifact(true))
+            .expect("a projected unique child must authorize its unique reborrow");
+    }
+
+    #[test]
+    fn authorized_reborrow_chain_does_not_exempt_an_unrelated_overlapping_alias() {
+        let place = BorrowedPlace {
+            owner: 9,
+            projections: vec![0],
+        };
+        let loan = |place: BorrowedPlace, unique, suspended_parent| CarrierLoan {
+            path: vec![],
+            loan: Loan {
+                place,
+                unique,
+                suspended_parent,
+                referent_initialized: true,
+            },
+        };
+        let loans = vec![
+            vec![loan(
+                BorrowedPlace {
+                    owner: 9,
+                    projections: vec![],
+                },
+                true,
+                None,
+            )],
+            vec![loan(place.clone(), true, Some(0))],
+            vec![loan(place.clone(), false, None)],
+        ];
+        let authorized = authorized_carrier_chain(1, &loans);
+        assert_eq!(authorized, BTreeSet::from([0, 1]));
+        assert!(conflicts_outside_authorized_chain(
+            &place,
+            true,
+            &authorized,
+            &loans,
+        ));
+    }
+
+    fn aggregate_stored_reference_field_borrow_artifact(unique: bool) -> Artifact {
+        let mut types = Type::predefined();
+        types.push(Type::RefShared { referent: I64 });
+        types.push(Type::Struct {
+            name: "Holder".into(),
+            fields: vec![Field {
+                name: "link".into(),
+                ty: 19,
+            }],
+            copy: false,
+        });
+        types.push(Type::RefShared { referent: 19 });
+        types.push(Type::RefUnique { referent: 19 });
+        Artifact {
+            types,
+            functions: vec![Function {
+                flags: 0,
+                name: "move_holder_while_field_borrowed".into(),
+                params: vec![20],
+                return_type: UNIT,
+                outward_protocols: vec![],
+                receiver_mode: None,
+                register_types: vec![UNIT, 20, if unique { 22 } else { 21 }, 20],
+                code_start: 0,
+                code_len: 3,
+                label_slot_count: 0,
+            }],
+            code: vec![
+                if unique {
+                    Instruction::ProjectBorrowUnique {
+                        dst: 2,
+                        src: 1,
+                        field: 0,
+                    }
+                } else {
+                    Instruction::ProjectBorrowShared {
+                        dst: 2,
+                        src: 1,
+                        field: 0,
+                    }
+                },
+                Instruction::Move { dst: 3, src: 1 },
+                Instruction::Abort { message: None },
+            ],
+            required_features: 1 | (1 << 1),
+            ..Artifact::default()
+        }
+    }
+
+    #[test]
+    fn aggregate_shared_field_borrow_does_not_inherit_stored_referent_authority() {
+        assert!(matches!(
+            verify(aggregate_stored_reference_field_borrow_artifact(false)),
+            Err(VerifyError::BorrowConflict {
+                function: 0,
+                instruction: 1,
+                register: 1,
+            })
+        ));
+    }
+
+    #[test]
+    fn aggregate_unique_field_borrow_does_not_inherit_stored_referent_authority() {
+        assert!(matches!(
+            verify(aggregate_stored_reference_field_borrow_artifact(true)),
+            Err(VerifyError::BorrowConflict {
+                function: 0,
+                instruction: 1,
+                register: 1,
+            })
         ));
     }
 

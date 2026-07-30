@@ -73,10 +73,18 @@ fn terminal_outward_callable_is_closed_by_a_lexical_handler() {
         .find(|function| function.name == body_name)
         .unwrap();
     assert_eq!(body.outward_protocols, [stop]);
+    // The optimizer may preserve the outward call, turn it into a tail call,
+    // or inline `stop_with` and leave its terminal perform directly in the
+    // generated handler body. Every valid shape retains an outward operation.
     assert!(
         artifact.code[body.code_start as usize..(body.code_start + body.code_len) as usize]
             .iter()
-            .any(|instruction| matches!(instruction, Instruction::Call { .. }))
+            .any(|instruction| matches!(
+                instruction,
+                Instruction::Call { .. }
+                    | Instruction::TailCall { .. }
+                    | Instruction::Perform { .. }
+            ))
     );
     let test = artifact
         .functions
@@ -775,16 +783,15 @@ fn named_rows_are_canonical_and_phase_fingerprints_are_deterministic() {
 
 #[test]
 fn outward_call_bundle_and_interpreter_match_the_vm() {
-    let bundle = SourceBundle::new(
+    let bundle = SourceBundle::distributed(
         Segment::new("effects.glorious", "effect Ask { [1,1] ask() -> i64 }"),
-        Segment::new(
-            "library.glorious",
-            "leaf() -> i64 / {Ask} { perform Ask::ask() } test() -> i64 { handle { let value = leaf(); value + 2 } { Ask::ask() with k => resume(k, 40) } }",
-        ),
-        [Segment::new(
-            "entry.glorious",
-            "main() -> { let result = test(); () }",
-        )],
+        [
+            Segment::new(
+                "library.glorious",
+                "leaf() -> i64 / {Ask} { perform Ask::ask() } test() -> i64 { handle { let value = leaf(); value + 2 } { Ask::ask() with k => resume(k, 40) } }",
+            ),
+            Segment::new("entry.glorious", "main() -> { let result = test(); () }"),
+        ],
     );
     let first = compile_bundle_to_bytecode(&bundle).unwrap();
     let second = compile_bundle_to_bytecode(&bundle).unwrap();

@@ -7,6 +7,7 @@ use super::super::frontend::elaboration::ElaborationError;
 use super::super::frontend::resolution::ResolutionError;
 use super::super::frontend::headers::HeaderError;
 use super::super::frontend::scanner::ScanError;
+use super::super::frontend::scanner::ShellId;
 use super::super::frontend::bodies::BodyError;
 use super::super::frontend::lexer::LexError;
 use super::lowering::LoweringError;
@@ -18,11 +19,11 @@ pub enum CompileError {
     Headers(HeaderError),
     ResolutionIndex(ResolutionError),
     InterfaceCollection(ElaborationError),
-    DeclarationName(u32),
-    BodyParse(u32, BodyError),
-    BodyResolution(u32, ResolutionError),
-    BodyElaboration(u32, ElaborationError),
-    Lowering(u32, LoweringError),
+    DeclarationName(ShellId),
+    BodyParse(ShellId, BodyError),
+    BodyResolution(ShellId, ResolutionError),
+    BodyElaboration(ShellId, ElaborationError),
+    Lowering(ShellId, LoweringError),
     InterfaceName(u32),
     UnsupportedInterfaceType(usize),
     Emission(EmissionError)
@@ -41,11 +42,11 @@ function_name(
         &super::super::frontend::headers::ParsedHeaders,
     declarations:
         &super::super::frontend::scanner::DeclarationIndex,
-    shell: u32
+    shell: ShellId
 ) -> Result<String, CompileError> {
     handle super::super::frontend::scanner::shell_at(
         declarations,
-        usize_from_u32(shell)
+        shell
     ) {
         Result::Err(_) =>
             Result::Err(CompileError::DeclarationName(shell)),
@@ -87,9 +88,15 @@ lower_functions(
         super::super::frontend::elaboration::
             interface_callable_count(&*interfaces)
     ), { current => {
+        let callable = handle
+            super::super::frontend::elaboration::
+                interface_callable_id_at(&*interfaces, current) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
         let shell =
             super::super::frontend::elaboration::
-                interface_callable_shell_at(&*interfaces, current);
+                interface_callable_shell(&*interfaces, callable);
         let name = try(
             function_name(headers, declarations, shell),
             @lower_functions
@@ -100,7 +107,7 @@ lower_functions(
                     original,
                     headers,
                     declarations,
-                    usize_from_u32(shell)
+                    shell
                 ),
                 { found => CompileError::BodyParse(shell, found) }
             ),
@@ -142,7 +149,7 @@ lower_functions(
                     name,
                     &*interfaces,
                     &body,
-                    current
+                    callable
                 ),
                 { found => CompileError::Lowering(shell, found) }
             ),
@@ -150,7 +157,9 @@ lower_functions(
         );
         handle Arena::alloc(&mut *output, function) {
             Result::Err(_) => unreachable(),
-            Result::Ok(_) => ()
+            Result::Ok(staged) => if(staged == callable) {
+                ()
+            } else { unreachable() }
         };
         Result::Ok(())
     } })
