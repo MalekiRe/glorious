@@ -157,6 +157,74 @@ fn bare_final_copy_use_lowers_as_transfer() {
 }
 
 #[test]
+fn locals_introduced_by_nested_blocks_infer_their_final_transfer() {
+    let source = r#"
+        answer() -> i64 {
+            {
+                let value = 42;
+                move value
+            }
+        }
+        main() -> { () }
+    "#;
+    let phases = compile_source_to_phases("nested-local-final-use.glorious", source).unwrap();
+    let fix = phases
+        .diagnostics
+        .iter()
+        .find(|diagnostic| diagnostic.code.as_deref() == Some(REDUNDANT_MOVE_CODE))
+        .and_then(|diagnostic| diagnostic.fix.as_ref())
+        .expect("a nested block's own final local use has an exact fix");
+    assert_eq!(&source[fix.span.range()], "move");
+    assert!(fix.replacement.is_empty());
+}
+
+#[test]
+fn outer_locals_transfer_only_when_a_nested_use_is_final() {
+    let source = r#"
+        nested_final(value: i64) -> i64 {
+            { move value }
+        }
+        nested_then_later(value: i64) -> i64 {
+            { value; };
+            move value
+        }
+        main() -> { () }
+    "#;
+    let phases = compile_source_to_phases("nested-outer-final-use.glorious", source).unwrap();
+    let fixes = phases
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code.as_deref() == Some(REDUNDANT_MOVE_CODE))
+        .filter_map(|diagnostic| diagnostic.fix.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(fixes.len(), 2);
+    assert!(fixes.iter().all(|fix| &source[fix.span.range()] == "move"));
+}
+
+#[test]
+fn mutually_exclusive_if_arms_each_infer_their_final_transfer() {
+    let source = r#"
+        choose(condition: Bool, value: i64) -> i64 {
+            if(condition) { move value } else { move value }
+        }
+        branch_then_later(condition: Bool, value: i64) -> i64 {
+            if(condition) { value } else { value };
+            move value
+        }
+        main() -> { () }
+    "#;
+    let phases = compile_source_to_phases("branch-final-use.glorious", source).unwrap();
+    let fixes = phases
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code.as_deref() == Some(REDUNDANT_MOVE_CODE))
+        .filter_map(|diagnostic| diagnostic.fix.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(fixes.len(), 3);
+    assert!(fixes.iter().all(|fix| &source[fix.span.range()] == "move"));
+}
+
+#[test]
 fn compiler_owned_try_wrappers_preserve_final_use_transfer() {
     let source = r#"
         struct Relevant { value: i64 }
@@ -240,17 +308,39 @@ fn compiler_owned_try_wrappers_preserve_final_use_transfer() {
 }
 
 #[test]
-fn final_use_inference_does_not_cross_completion_match_branches() {
+fn completion_match_arms_each_infer_their_final_transfer() {
     let source = r#"
         preserve(value: Bool) -> Bool {
             handle value {
+                Result::Ok(_) => move value,
+                Result::Err(_) => move value
+            }
+        }
+        preserve_after_match(value: Bool) -> Bool {
+            handle value {
                 Result::Ok(_) => value,
                 Result::Err(_) => value
-            }
+            };
+            move value
         }
         main() -> { () }
     "#;
-    compile_source_to_phases("final-use-control.glorious", source).unwrap();
+    let phases = compile_source_to_phases("final-use-control.glorious", source).unwrap();
+    let fixes = phases
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.code.as_deref() == Some(REDUNDANT_MOVE_CODE))
+        .filter_map(|diagnostic| diagnostic.fix.as_ref())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        fixes.len(),
+        3,
+        "{:?}",
+        fixes
+            .iter()
+            .map(|fix| (fix.span, &source[fix.span.range()]))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]

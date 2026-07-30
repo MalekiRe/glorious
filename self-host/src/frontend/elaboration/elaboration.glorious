@@ -5397,6 +5397,7 @@ straight_line_expression(
         4 => straight_line_children(body, expression, 0),
         5 => straight_line_children(body, expression, 0),
         7 => straight_line_call_arguments(body, expression),
+        8 => straight_line_children(body, expression, 0),
         9 => straight_line_children(body, expression, 0),
         10 => straight_line_children(body, expression, 0),
         _ => false

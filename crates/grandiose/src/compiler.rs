@@ -1340,6 +1340,7 @@ enum ResolvedNominalKind {
 struct CoreLocal {
     local: core::LocalId,
     ty: TypeId,
+    declaration_block_depth: usize,
     reference: Option<core::ReferenceOrigin>,
     reference_fields: BTreeMap<Vec<u32>, core::ReferenceOrigin>,
     owns_loan: bool,
@@ -1427,6 +1428,7 @@ struct CoreLowerer<'a> {
     expression_ordinals: BTreeMap<usize, u32>,
     expression_span_ordinals: BTreeMap<(usize, usize), u32>,
     inferred_final_uses: BTreeSet<(String, usize, usize)>,
+    inherited_final_uses: Vec<BTreeSet<(String, usize, usize)>>,
     transparent_final_use_limits: Vec<TransparentFinalUseLimit>,
     final_use_control_spans: BTreeSet<(usize, usize)>,
     final_use_barrier_depth: usize,
@@ -10942,10 +10944,12 @@ pub(crate) fn normalize_ground_trait_methods(
                         .collect::<BTreeSet<_>>();
                     let mut substitutions = BTreeMap::new();
                     for (parameter, argument) in function.params.iter().zip(args.iter()) {
-                        if matches!(
-                            argument.kind,
-                            ExprKind::Closure { .. } | ExprKind::TypedClosure { .. }
-                        ) {
+                        if two_phase_contextual_numeric_literal(argument)
+                            || matches!(
+                                argument.kind,
+                                ExprKind::Closure { .. } | ExprKind::TypedClosure { .. }
+                            )
+                        {
                             continue;
                         }
                         let actual = contextual_expression_receiver(program, argument, locals)
@@ -10972,6 +10976,43 @@ pub(crate) fn normalize_ground_trait_methods(
                     ) {
                         let mut candidate = substitutions.clone();
                         if !matches_receiver(&result, expected, &binders, &mut candidate) {
+                            return BTreeMap::new();
+                        }
+                        substitutions = candidate;
+                    }
+                    // Numeric literals normally take their type from a
+                    // parameter that other arguments or the expected result
+                    // have already grounded. When a callback's input binders
+                    // are determined only by literal arguments, however, the
+                    // closure still needs those defaults before its body can
+                    // resolve operators such as `x + y`.
+                    for (parameter, argument) in function.params.iter().zip(args.iter()) {
+                        fn numeric_default(expression: &Expr) -> Option<ReceiverType> {
+                            match &expression.kind {
+                                ExprKind::Int(_) => Some(ReceiverType::Name("i64".into())),
+                                ExprKind::Float(_) => Some(ReceiverType::Name("f64".into())),
+                                ExprKind::Unary {
+                                    op: UnaryOp::Negate,
+                                    operand,
+                                } => numeric_default(operand),
+                                _ => None,
+                            }
+                        }
+
+                        let Some(actual) = numeric_default(argument) else {
+                            continue;
+                        };
+                        let Some(pattern) = source_receiver_type(program, &parameter.ty) else {
+                            continue;
+                        };
+                        if !receiver_mentions_binder(
+                            &substitute_receiver(&pattern, &substitutions),
+                            &binders,
+                        ) {
+                            continue;
+                        }
+                        let mut candidate = substitutions.clone();
+                        if !matches_receiver(&pattern, &actual, &binders, &mut candidate) {
                             return BTreeMap::new();
                         }
                         substitutions = candidate;
@@ -21792,7 +21833,23 @@ fn straight_line_final_uses(
                 }
             }
             ExprKind::Call(callee, arguments)
-                if !matches!(callee.kind, ExprKind::LabelReference(_)) =>
+                if !matches!(callee.kind, ExprKind::LabelReference(_))
+                    && !matches!(
+                        &callee.kind,
+                        ExprKind::Variable(path)
+                            if path.len() == 1
+                                && path[0].as_ref() == "else"
+                                && matches!(
+                                    arguments.first().map(|argument| &argument.kind),
+                                    Some(ExprKind::Call(if_callee, _))
+                                        if matches!(
+                                            &if_callee.kind,
+                                            ExprKind::Variable(if_path)
+                                                if if_path.len() == 1
+                                                    && if_path[0].as_ref() == "if"
+                                        )
+                                )
+                    ) =>
             {
                 // Callable receiver ownership is selected from its Fn mode
                 // and specialization plan, not ordinary local liveness.
@@ -21804,6 +21861,16 @@ fn straight_line_final_uses(
             ExprKind::Binary { lhs, rhs, .. } => {
                 collect(lhs, uses, program) && collect(rhs, uses, program)
             }
+            ExprKind::Block(statements) => statements.iter().all(|statement| match statement {
+                Stmt::Let { value, .. } | Stmt::Deconstruct { value, .. } | Stmt::Expr(value) => {
+                    collect(value, uses, program)
+                }
+                // Assignment updates place state as well as evaluating its
+                // rvalue. Keep the complete containing expression
+                // conservative until place-sensitive continuation liveness
+                // represents that write explicitly.
+                Stmt::Assign { .. } => false,
+            }),
             ExprKind::Unit
             | ExprKind::Int(_)
             | ExprKind::Float(_)
@@ -21815,7 +21882,6 @@ fn straight_line_final_uses(
             ExprKind::Closure { .. }
             | ExprKind::TypedClosure { .. }
             | ExprKind::Field(_, _)
-            | ExprKind::Block(_)
             | ExprKind::ContextBlock(_)
             | ExprKind::Perform { .. }
             | ExprKind::Handle { .. }
@@ -24348,6 +24414,7 @@ impl<'a> CoreLowerer<'a> {
                     CoreLocal {
                         local,
                         ty: *ty,
+                        declaration_block_depth: 0,
                         reference,
                         reference_fields,
                         owns_loan: false,
@@ -24395,6 +24462,7 @@ impl<'a> CoreLowerer<'a> {
                     CoreLocal {
                         local,
                         ty: *ty,
+                        declaration_block_depth: 0,
                         reference: reference.clone(),
                         reference_fields: singleton_reference_fields(reference),
                         owns_loan: false,
@@ -24448,6 +24516,7 @@ impl<'a> CoreLowerer<'a> {
                 expression_ordinals,
                 expression_span_ordinals,
                 inferred_final_uses: BTreeSet::new(),
+                inherited_final_uses: Vec::new(),
                 transparent_final_use_limits: Vec::new(),
                 final_use_control_spans,
                 final_use_barrier_depth: 0,
@@ -24542,6 +24611,7 @@ impl<'a> CoreLowerer<'a> {
                     CoreLocal {
                         local,
                         ty: *ty,
+                        declaration_block_depth: 0,
                         reference: reference.clone(),
                         reference_fields,
                         owns_loan: false,
@@ -24583,6 +24653,7 @@ impl<'a> CoreLowerer<'a> {
                     CoreLocal {
                         local,
                         ty: *ty,
+                        declaration_block_depth: 0,
                         reference: reference.clone(),
                         reference_fields,
                         owns_loan: false,
@@ -24653,6 +24724,7 @@ impl<'a> CoreLowerer<'a> {
                 expression_ordinals: BTreeMap::new(),
                 expression_span_ordinals: BTreeMap::new(),
                 inferred_final_uses: BTreeSet::new(),
+                inherited_final_uses: Vec::new(),
                 transparent_final_use_limits: Vec::new(),
                 final_use_control_spans: BTreeSet::new(),
                 final_use_barrier_depth: 0,
@@ -25355,6 +25427,7 @@ impl<'a> CoreLowerer<'a> {
                     CoreLocal {
                         local,
                         ty: pattern.ty,
+                        declaration_block_depth: 0,
                         reference,
                         owns_loan: !reference_fields.is_empty(),
                         reference_fields,
@@ -25446,6 +25519,7 @@ impl<'a> CoreLowerer<'a> {
                     CoreLocal {
                         local: subject,
                         ty,
+                        declaration_block_depth: 0,
                         reference,
                         reference_fields,
                         owns_loan: false,
@@ -27801,6 +27875,105 @@ impl<'a> CoreLowerer<'a> {
             })
     }
 
+    fn structural_else_parts<'expression>(
+        &mut self,
+        expression: &'expression Expr,
+    ) -> Option<(&'expression Expr, &'expression Expr, &'expression Expr)> {
+        let ExprKind::Call(else_callee, else_arguments) = &expression.kind else {
+            return None;
+        };
+        let ExprKind::Variable(else_path) = &else_callee.kind else {
+            return None;
+        };
+        let [if_expression, negative] = else_arguments.as_slice() else {
+            return None;
+        };
+        let ExprKind::Call(if_callee, if_arguments) = &if_expression.kind else {
+            return None;
+        };
+        let ExprKind::Variable(if_path) = &if_callee.kind else {
+            return None;
+        };
+        let [condition, positive] = if_arguments.as_slice() else {
+            return None;
+        };
+        let syntactic_standard_shape = else_path.len() == 1
+            && else_path[0].as_ref() == "else"
+            && if_path.len() == 1
+            && if_path[0].as_ref() == "if";
+        let source_bool = matches!(
+            condition.kind,
+            ExprKind::Binary {
+                op: BinaryOp::Eq
+                    | BinaryOp::NotEq
+                    | BinaryOp::Lt
+                    | BinaryOp::LtEq
+                    | BinaryOp::Gt
+                    | BinaryOp::GtEq,
+                ..
+            }
+        ) || self
+            .provisional_handler_result(condition.span)
+            .is_some_and(|ty| self.is_source_bool_type(ty));
+        (syntactic_standard_shape
+            && (matches!(condition.kind, ExprKind::Is { .. })
+                || self.planned_structural_else(expression)
+                || source_bool))
+            .then_some((condition, positive, negative))
+    }
+
+    fn final_uses_for_expression(
+        &mut self,
+        expression: &Expr,
+        live_after: &BTreeSet<String>,
+    ) -> BTreeSet<(String, usize, usize)> {
+        let completion_tail = match &expression.kind {
+            ExprKind::Block(statements)
+                if matches!(
+                    statements.first(),
+                    Some(Stmt::Let { name, .. }) if name.starts_with("$handle$result$")
+                ) =>
+            {
+                statements.last().and_then(|statement| match statement {
+                    Stmt::Expr(tail) => Some(tail),
+                    _ => None,
+                })
+            }
+            _ => None,
+        };
+        let structural_parts = self
+            .structural_else_parts(expression)
+            .or_else(|| completion_tail.and_then(|tail| self.structural_else_parts(tail)));
+        if let Some((_condition, positive, negative)) = structural_parts {
+            let mut final_uses = self.final_uses_for_branch(positive, live_after);
+            final_uses.extend(self.final_uses_for_branch(negative, live_after));
+            final_uses
+        } else {
+            straight_line_final_uses(expression, live_after, self.program)
+        }
+    }
+
+    fn final_uses_for_branch(
+        &mut self,
+        branch: &Expr,
+        live_after: &BTreeSet<String>,
+    ) -> BTreeSet<(String, usize, usize)> {
+        if let ExprKind::Block(statements) | ExprKind::ContextBlock(statements) = &branch.kind
+            && let [Stmt::Expr(inner)] = statements.as_slice()
+        {
+            return self.final_uses_for_expression(inner, live_after);
+        }
+        if let ExprKind::ContextBlock(statements) = &branch.kind {
+            let direct_block = Expr {
+                kind: ExprKind::Block(statements.clone()),
+                span: branch.span,
+            };
+            straight_line_final_uses(&direct_block, live_after, self.program)
+        } else {
+            self.final_uses_for_expression(branch, live_after)
+        }
+    }
+
     fn planned_indirect_call_set(
         &self,
         expression: &Expr,
@@ -28567,12 +28740,19 @@ impl<'a> CoreLowerer<'a> {
 
     fn inferred_final_transfer(&self, name: &str, span: Span, local: &CoreLocal) -> bool {
         let occurrence = (name.to_string(), span.start, span.end);
-        let ordinary_straight_line = self.final_use_barrier_depth == 0
-            && self.final_use_block_depth == 1
-            && !self
-                .final_use_control_spans
+        let inherited = !self.inherited_final_uses.is_empty()
+            && self
+                .inherited_final_uses
                 .iter()
-                .any(|(start, end)| *start <= span.start && span.end <= *end);
+                .all(|uses| uses.contains(&occurrence));
+        let ordinary_straight_line = self.final_use_barrier_depth == 0
+            && (inherited
+                || ((self.final_use_block_depth == 1
+                    || local.declaration_block_depth == self.final_use_block_depth)
+                    && !self
+                        .final_use_control_spans
+                        .iter()
+                        .any(|(start, end)| *start <= span.start && span.end <= *end)));
         let branch_local = self
             .branch_final_use_scopes
             .iter()
@@ -38078,9 +38258,18 @@ impl<'a> CoreLowerer<'a> {
         expected: Option<TypeId>,
     ) -> Result<core::Expr, Vec<Diagnostic>> {
         let saved_final_uses = std::mem::take(&mut self.inferred_final_uses);
+        let nested = self.final_use_block_depth != 0;
+        if nested {
+            self.inherited_final_uses.push(saved_final_uses.clone());
+        }
         self.final_use_block_depth += 1;
         let result = self.block_inner(statements, span, expected);
         self.final_use_block_depth -= 1;
+        if nested {
+            self.inherited_final_uses
+                .pop()
+                .expect("nested final-use authorization stack must remain balanced");
+        }
         self.inferred_final_uses = saved_final_uses;
         result
     }
@@ -38210,11 +38399,9 @@ impl<'a> CoreLowerer<'a> {
                 Stmt::Let { value, .. }
                 | Stmt::Deconstruct { value, .. }
                 | Stmt::Expr(value)
-                | Stmt::Assign { value, .. } => straight_line_final_uses(
-                    value,
-                    &liveness.live_out[&points[index]],
-                    self.program,
-                ),
+                | Stmt::Assign { value, .. } => {
+                    self.final_uses_for_expression(value, &liveness.live_out[&points[index]])
+                }
             };
             match statement {
                 Stmt::Let { name, value, span } => {
@@ -38291,6 +38478,7 @@ impl<'a> CoreLowerer<'a> {
                         CoreLocal {
                             local,
                             ty: value.ty,
+                            declaration_block_depth: self.final_use_block_depth,
                             reference: value.reference.clone(),
                             reference_fields: value.reference_fields.clone(),
                             owns_loan,
@@ -38389,6 +38577,7 @@ impl<'a> CoreLowerer<'a> {
                         let source = CoreLocal {
                             local,
                             ty: temporary_value.ty,
+                            declaration_block_depth: 0,
                             reference: temporary_value.reference.clone(),
                             reference_fields: temporary_value.reference_fields.clone(),
                             owns_loan,
@@ -38668,6 +38857,7 @@ impl<'a> CoreLowerer<'a> {
                                 CoreLocal {
                                     local,
                                     ty: *field_ty,
+                                    declaration_block_depth: 0,
                                     reference,
                                     reference_fields: field_references.clone(),
                                     owns_loan: carries_origin && source.owns_loan,
