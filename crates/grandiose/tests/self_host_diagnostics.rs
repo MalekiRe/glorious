@@ -29,7 +29,10 @@ fn diagnostic_bundle() -> SourceBundle {
             mod diagnostics;
 
             use compiler::CompileError;
+            use frontend::bodies::BodyError;
             use frontend::scanner::ScanError;
+            use frontend::resolution::ResolutionError;
+            use frontend::elaboration::ElaborationError;
             use backend::lowering::LoweringError;
             use backend::emission::EmissionError;
 
@@ -113,6 +116,60 @@ fn diagnostic_bundle() -> SourceBundle {
                 );
                 let value = diagnostics::compile_error_diagnostic(&error);
                 diagnostics::diagnostic_code(&value)
+            }
+
+            site_fingerprint(
+                error: CompileError
+            ) -> u64 {
+                let value = diagnostics::compile_error_diagnostic(&error);
+                wrapping_convert_to_u64(
+                    diagnostics::diagnostic_class_code(&value)
+                ) * 100000000000000000
+                    + wrapping_convert_to_u64(
+                        diagnostics::diagnostic_code(&value)
+                    ) * 10000000000000
+                    + wrapping_convert_to_u64(
+                        diagnostics::diagnostic_primary_space_code(&value)
+                    ) * 100000000000
+                    + wrapping_convert_to_u64(
+                        diagnostics::diagnostic_primary_start(&value)
+                    ) * 1000000000
+                    + wrapping_convert_to_u64(
+                        diagnostics::diagnostic_related_space_code(&value)
+                    ) * 10000000
+                    + wrapping_convert_to_u64(
+                        diagnostics::diagnostic_related_start(&value)
+                    ) * 100000
+                    + wrapping_convert_to_u64(
+                        diagnostics::diagnostic_owner_space_code(&value)
+                    ) * 1000
+                    + wrapping_convert_to_u64(
+                        diagnostics::diagnostic_owner_start(&value)
+                    )
+            }
+
+            body_internal_site() -> u64 {
+                site_fingerprint(CompileError::BodyParse(
+                    Id::from_u32(2),
+                    BodyError::MissingBodyShell(Id::from_u32(8))
+                ))
+            }
+
+            resolution_ambiguous_site() -> u64 {
+                site_fingerprint(CompileError::BodyResolution(
+                    Id::from_u32(2),
+                    ResolutionError::AmbiguousFunction(
+                        9,
+                        Id::from_u32(4)
+                    )
+                ))
+            }
+
+            elaboration_internal_site() -> u64 {
+                site_fingerprint(CompileError::BodyElaboration(
+                    Id::from_u32(2),
+                    ElaborationError::InvalidResolvedExpression(5, 7)
+                ))
             }
 
             diagnostic_matrix() -> u64 {
@@ -225,6 +282,18 @@ fn self_host_diagnostics_normalize_frontend_and_backend_failures() {
                     "[G2007] self-host compiler: declaration scanning failed (token 3); related token 4"
                         .into()
                 )
+            );
+            assert_eq!(
+                run(&artifact, "body_internal_site", vec![]),
+                Value::U64(700_700_308_000_003_002)
+            );
+            assert_eq!(
+                run(&artifact, "resolution_ambiguous_site", vec![]),
+                Value::U64(200_200_209_030_403_002)
+            );
+            assert_eq!(
+                run(&artifact, "elaboration_internal_site", vec![]),
+                Value::U64(700_900_705_070_703_002)
             );
         })
         .unwrap()
