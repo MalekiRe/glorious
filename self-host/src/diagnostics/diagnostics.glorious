@@ -1,6 +1,6 @@
 // The public diagnostic boundary for the self-hosted compiler.
 
-mod model;
+pub mod model;
 mod source_errors;
 mod backend_errors;
 
