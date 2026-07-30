@@ -37,9 +37,13 @@ pub struct HandleArm {
     body: ExprId
 }
 
-// Repeating compact expression-name records use kind 1 for an interned
-// identifier and kind 2 for a numeric tuple field. The value is respectively
-// the raw interned identity or the exact u32 field index.
+enum ExpressionName {
+    Identifier(Id<String>, usize),
+    TupleField(u32, usize)
+}
+
+impl Use<[0, *]> for ExpressionName {}
+
 pub struct ExprNode {
     kind_code: u8,
     tokens: BodyTokenRange,
@@ -54,8 +58,7 @@ pub struct ParsedBody {
     root: ExprId,
     nodes: Arena<ExprTag, ExprNode>,
     edges: Vec<ExprEdge>,
-    // Repeating [kind, value, token].
-    names: Vec<u32>,
+    names: Vec<ExpressionName>,
     handle_arms: Vec<HandleArm>,
     pattern_binders: Vec<PatternBinder>
 }
@@ -67,7 +70,7 @@ struct BodyParser {
     limit: usize,
     nodes: Arena<ExprTag, ExprNode>,
     edges: Vec<ExprEdge>,
-    names: Vec<u32>,
+    names: Vec<ExpressionName>,
     handle_arms: Vec<HandleArm>,
     pattern_binders: Vec<PatternBinder>
 }
@@ -159,12 +162,13 @@ pub expression_name_kind_at(
     ordinal: u32
 ) -> u8 {
     let node = arena_node_at_raw(&value.nodes, index);
-    u8_from_u32(*Vec::index(
+    handle *Vec::index(
         &value.names,
-        usize_from_u32(
-            (node.names.start + ordinal) * 3
-        )
-    ))
+        usize_from_u32(node.names.start + ordinal)
+    ) {
+        ExpressionName::Identifier(_, _) => 1,
+        ExpressionName::TupleField(_, _) => 2
+    }
 }
 
 pub expression_name_value_at(
@@ -173,12 +177,13 @@ pub expression_name_value_at(
     ordinal: u32
 ) -> u32 {
     let node = arena_node_at_raw(&value.nodes, index);
-    *Vec::index(
+    handle *Vec::index(
         &value.names,
-        usize_from_u32(
-            (node.names.start + ordinal) * 3 + 1
-        )
-    )
+        usize_from_u32(node.names.start + ordinal)
+    ) {
+        ExpressionName::Identifier(name, _) => Id::to_u32(name),
+        ExpressionName::TupleField(field, _) => field
+    }
 }
 
 pub expression_name_token_at(
@@ -187,12 +192,13 @@ pub expression_name_token_at(
     ordinal: u32
 ) -> usize {
     let node = arena_node_at_raw(&value.nodes, index);
-    usize_from_u32(*Vec::index(
+    handle *Vec::index(
         &value.names,
-        usize_from_u32(
-            (node.names.start + ordinal) * 3 + 2
-        )
-    ))
+        usize_from_u32(node.names.start + ordinal)
+    ) {
+        ExpressionName::Identifier(_, token) => token,
+        ExpressionName::TupleField(_, token) => token
+    }
 }
 
 expression_edges<'a>(
@@ -379,14 +385,12 @@ expression_range(start: usize, end: usize) -> ExprRange {
     }
 }
 
-name_count(value: &Vec<u32>) -> usize {
-    Vec::len(value) / 3
+name_count(value: &Vec<ExpressionName>) -> usize {
+    Vec::len(value)
 }
 
-push_name(value: &mut Vec<u32>, kind: u8, found: u32, token: usize) {
-    push_word(&mut *value, u32_from_u8(kind));
-    push_word(&mut *value, found);
-    push_word( value, u32_from_usize(token))
+push_name(value: &mut Vec<ExpressionName>, name: ExpressionName) {
+    Vec::push(&mut *value, name)
 }
 
 word_count(value: &Vec<u32>) -> usize { Vec::len(value) }
@@ -552,34 +556,16 @@ push_named_leaf(
     )
 }
 
-node_name_kind_at(value: &BodyParser, id: ExprId, ordinal: u32) -> u8 {
+node_name_at(
+    value: &BodyParser,
+    id: ExprId,
+    ordinal: u32
+) -> &ExpressionName {
     let node = Arena::index(&value.nodes, id);
-    u8_from_u32(*Vec::index(
+    Vec::index(
         &value.names,
-        usize_from_u32(
-            (node.names.start + ordinal) * 3
-        )
-    ))
-}
-
-node_name_value_at(value: &BodyParser, id: ExprId, ordinal: u32) -> u32 {
-    let node = Arena::index(&value.nodes, id);
-    *Vec::index(
-        &value.names,
-        usize_from_u32(
-            (node.names.start + ordinal) * 3 + 1
-        )
+        usize_from_u32(node.names.start + ordinal)
     )
-}
-
-node_name_token_at(value: &BodyParser, id: ExprId, ordinal: u32) -> usize {
-    let node = Arena::index(&value.nodes, id);
-    usize_from_u32(*Vec::index(
-        &value.names,
-        usize_from_u32(
-            (node.names.start + ordinal) * 3 + 2
-        )
-    ))
 }
 
 node_name_count(value: &BodyParser, id: ExprId) -> u32 {
@@ -727,12 +713,10 @@ push_struct_fields(
 ) {
     for_range(Range::new(index, field_count(fields)), { current => {
         let base = current * 3;
-        push_name(
-            &mut value.names,
-            1,
-            word_at(fields, base),
+        push_name(&mut value.names, ExpressionName::Identifier(
+            Id::from_u32(word_at(fields, base)),
             usize_from_u32(word_at(fields, base + 1))
-        );
+        ));
         Vec::push(
             &mut value.edges,
             ExprEdge {
@@ -753,15 +737,8 @@ push_struct(
     end: usize
 ) -> ExprId {
     let name_start = name_count(&value.names);
-    let constructor_kind = node_name_kind_at(&*value, constructor, 0);
-    let constructor_value = node_name_value_at(&*value, constructor, 0);
-    let constructor_token = node_name_token_at(&*value, constructor, 0);
-    push_name(
-        &mut value.names,
-        constructor_kind,
-        constructor_value,
-        constructor_token
-    );
+    let constructor_name = *node_name_at(&*value, constructor, 0);
+    push_name(&mut value.names, constructor_name);
     let edge_start = Vec::len(&value.edges);
     push_struct_fields(value, fields, 0);
     push_node(
@@ -777,14 +754,16 @@ push_struct(
 push_projection(
     value: &mut BodyParser,
     subject: ExprId,
-    name_kind: u8,
-    name_value: u32,
-    name_token: usize,
+    name: ExpressionName,
     end: usize
 ) -> ExprId {
     let start = node_tokens(&*value, subject).start;
     let name_start = name_count(&value.names);
-    push_name(&mut value.names, name_kind, name_value, name_token);
+    let name_token = handle name {
+        ExpressionName::Identifier(_, token) => token,
+        ExpressionName::TupleField(_, token) => token
+    };
+    push_name(&mut value.names, name);
     let edge_start = Vec::len(&value.edges);
     Vec::push(
         &mut value.edges,
@@ -1221,7 +1200,10 @@ push_identifier_name(
 ) -> Result<(), BodyError> {
     handle super::lexer::token_kind_at(source, token) {
         TokenKind::Ident(name) => {
-            push_name(&mut value.names, 1, Id::to_u32(move name), token);
+            push_name(
+                &mut value.names,
+                ExpressionName::Identifier(move name, token)
+            );
             Result::Ok(())
         },
         _ => Result::Err(body_error(13, token, related))
@@ -2108,9 +2090,7 @@ parse_projection_name(
                 Result::Ok(push_projection(
                     value,
                     subject,
-                    1,
-                    Id::to_u32(move name),
-                    token,
+                    ExpressionName::Identifier(move name, token),
                     value.cursor
                 ))
             },
@@ -2131,9 +2111,10 @@ parse_projection_name(
                                 Result::Ok(push_projection(
                                     value,
                                     subject,
-                                    2,
-                                    wrapping_convert_to_u32(field),
-                                    token,
+                                    ExpressionName::TupleField(
+                                        wrapping_convert_to_u32(field),
+                                        token
+                                    ),
                                     value.cursor
                                 ))
                         } else {
@@ -2882,21 +2863,16 @@ write_node_name(
     ordinal: u32
 ) -> Result<(), BodyError> {
     let at = node.names.start + ordinal;
-    let base = usize_from_u32(at * 3);
-    let kind = u8_from_u32(*Vec::index(&value.names, base));
-    let found = *Vec::index(&value.names, base + 1);
-    let token = usize_from_u32(
-        *Vec::index(&value.names, base + 2)
-    );
-    handle kind {
-        1 => handle super::lexer::lexeme(source, Id::from_u32(found)) {
+    handle *Vec::index(&value.names, usize_from_u32(at)) {
+        ExpressionName::Identifier(name, token) =>
+            handle super::lexer::lexeme(source, name) {
             Result::Err(_) => Result::Err(body_error(11, token, token)),
             Result::Ok(text) => {
                 write_string( output, text);
                 Result::Ok(())
             }
         },
-        2 => {
+        ExpressionName::TupleField(_, token) => {
             let text = range_text(
                 original,
                 source,
@@ -2905,8 +2881,7 @@ write_node_name(
             );
             write_string( output, &text);
             Result::Ok(())
-        },
-        _ => Result::Err(body_error(11, token, token))
+        }
     }
 }
 

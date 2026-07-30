@@ -1236,32 +1236,26 @@ project_match_fields<'a>(
     index: usize,
     output: &mut Vec<RegisterId>
 ) -> Result<(), LoweringError> {
-    if(index < Slice::len(bindings)) {
-        let binding = handle Slice::get(bindings, index) {
+    try_for_range(Range::new(index, Slice::len(bindings)), { current => {
+        let binding = handle Slice::get(bindings, current) {
             Result::Err(_) => unreachable(),
             Result::Ok(found) => found
         };
         let field =
             super::super::frontend::elaboration::
                 core_match_binding_field(binding);
-        if(field == checked_u32(index)) {
+        if(field == checked_u32(current)) {
             let target = alloc_register(value);
             emit_project_move(value, target, subject, field);
             Vec::push(&mut *output, target);
-            project_match_fields(
-                value,
-                subject,
-                bindings,
-                index + 1,
-                output
-            )
+            Result::Ok(())
         } else {
             Result::Err(LoweringError::ConstructionFieldOrder(
-                checked_u32(index),
+                checked_u32(current),
                 field
             ))
         }
-    } else { Result::Ok(()) }
+    } })
 }
 
 install_match_bindings_reverse<'a>(
