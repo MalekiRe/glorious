@@ -643,19 +643,16 @@ push_argument_edges(
     arguments: &Vec<u32>,
     index: usize
 ) {
-    if(index < word_count(arguments)) {
-            Vec::push(
-                &mut value.edges,
-                ExprEdge {
-                    value: expr_id_at(arguments, index),
-                    position: 1,
-                    metadata: 0
-                }
-            );
-            push_argument_edges(value, arguments, index + 1)
-    } else {
-        ()
-    }
+    for_range(Range::new(index, word_count(arguments)), { current =>
+        Vec::push(
+            &mut value.edges,
+            ExprEdge {
+                value: expr_id_at(arguments, current),
+                position: 1,
+                metadata: 0
+            }
+        )
+    })
 }
 
 push_call(
@@ -688,24 +685,16 @@ push_expression_edges(
     index: usize,
     position: u8
 ) {
-    if(index < word_count(expressions)) {
-            Vec::push(
-                &mut value.edges,
-                ExprEdge {
-                    value: expr_id_at(expressions, index),
-                    position: position,
-                    metadata: u32_from_usize(index)
-                }
-            );
-            push_expression_edges(
-                value,
-                expressions,
-                index + 1,
-                position
-            )
-    } else {
-        ()
-    }
+    for_range(Range::new(index, word_count(expressions)), { current =>
+        Vec::push(
+            &mut value.edges,
+            ExprEdge {
+                value: expr_id_at(expressions, current),
+                position: position,
+                metadata: u32_from_usize(current)
+            }
+        )
+    })
 }
 
 push_tuple(
@@ -736,30 +725,24 @@ push_struct_fields(
     fields: &Vec<u32>,
     index: usize
 ) {
-    if(index < field_count(fields)) {
-            let base = index * 3;
-            push_name(
-                &mut value.names,
-                1,
-                word_at(fields, base),
-                usize_from_u32(word_at(fields, base + 1))
-            );
-            Vec::push(
-                &mut value.edges,
-                ExprEdge {
-                    value: Id::from_u32(word_at(
-                        fields,
-                        base + 2
-                    )),
-                    position: 1,
-                    // Name zero is the constructed nominal.
-                    metadata: u32_from_usize(index) + 1
-                }
-            );
-            push_struct_fields(value, fields, index + 1)
-    } else {
-        ()
-    }
+    for_range(Range::new(index, field_count(fields)), { current => {
+        let base = current * 3;
+        push_name(
+            &mut value.names,
+            1,
+            word_at(fields, base),
+            usize_from_u32(word_at(fields, base + 1))
+        );
+        Vec::push(
+            &mut value.edges,
+            ExprEdge {
+                value: Id::from_u32(word_at(fields, base + 2)),
+                position: 1,
+                // Name zero is the constructed nominal.
+                metadata: u32_from_usize(current) + 1
+            }
+        )
+    } })
 }
 
 push_struct(
@@ -845,20 +828,17 @@ push_statement_edges(
     statements: &Vec<PendingStatement>,
     index: usize
 ) {
-    if(index < Vec::len(statements)) {
-            let statement = Vec::index(statements, index);
-            Vec::push(
-                &mut value.edges,
-                ExprEdge {
-                    value: statement.expression,
-                    position: statement.position,
-                    metadata: statement_metadata(&statement.binding_token)
-                }
-            );
-            push_statement_edges(value, statements, index + 1)
-    } else {
-        ()
-    }
+    for_range(Range::new(index, Vec::len(statements)), { current => {
+        let statement = Vec::index(statements, current);
+        Vec::push(
+            &mut value.edges,
+            ExprEdge {
+                value: statement.expression,
+                position: statement.position,
+                metadata: statement_metadata(&statement.binding_token)
+            }
+        )
+    } })
 }
 
 push_block(

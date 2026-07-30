@@ -974,10 +974,9 @@ consume_arguments(
     arguments: &Vec<RegisterId>,
     index: usize
 ) {
-    if(index < Vec::len(arguments)) {
-        consume_live(value, *Vec::index(arguments, index));
-        consume_arguments(value, arguments, index + 1)
-    } else { () }
+    for_range(Range::new(index, Vec::len(arguments)), { current =>
+        consume_live(value, *Vec::index(arguments, current))
+    })
 }
 
 emit_call(
@@ -1121,10 +1120,9 @@ append_optional_registers(
     output: &mut Vec<Option<RegisterId>>,
     index: usize
 ) {
-    if(index < Vec::len(source)) {
-        Vec::push(&mut *output, *Vec::index(source, index));
-        append_optional_registers(source, output, index + 1)
-    } else { () }
+    for_range(Range::new(index, Vec::len(source)), { current =>
+        Vec::push(&mut *output, *Vec::index(source, current))
+    })
 }
 
 append_registers(
@@ -1132,10 +1130,9 @@ append_registers(
     output: &mut Vec<RegisterId>,
     index: usize
 ) {
-    if(index < Vec::len(source)) {
-        Vec::push(&mut *output, *Vec::index(source, index));
-        append_registers(source, output, index + 1)
-    } else { () }
+    for_range(Range::new(index, Vec::len(source)), { current =>
+        Vec::push(&mut *output, *Vec::index(source, current))
+    })
 }
 
 snapshot_locals(value: &FunctionBuilder) -> Vec<Option<RegisterId>> {
@@ -1198,10 +1195,9 @@ alloc_match_blocks(
     index: usize,
     output: &mut Vec<StageBlockId>
 ) {
-    if(index < count) {
-        Vec::push(&mut *output, alloc_block(value));
-        alloc_match_blocks(value, count, index + 1, output)
-    } else { () }
+    for_range(Range::new(index, count), { _ =>
+        Vec::push(&mut *output, alloc_block(value))
+    })
 }
 
 build_match_switch_cases<'a>(
