@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - agent/self-host-architecture-stage-two
+  pull_request:
+    branches:
+      - master
 
 permissions:
   contents: read
