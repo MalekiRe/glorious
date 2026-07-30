@@ -300,7 +300,7 @@ pub emission_diagnostic(error: &EmissionError) -> CompilerDiagnostic {
             DiagnosticClass::Emission,
             2,
             "self-host compiler: emitted switch constant is missing from the canonical pool",
-            model::site(DiagnosticSpace::RegisterPack, Id::to_usize(pack)),
+            model::site(DiagnosticSpace::SwitchPack, Id::to_usize(pack)),
             Option::Some(model::site(DiagnosticSpace::Variant, variant)),
             None,
             0,
