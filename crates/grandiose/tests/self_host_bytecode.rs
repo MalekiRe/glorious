@@ -81,6 +81,7 @@ fn self_host_bundle() -> SourceBundle {
             mod frontend;
             mod backend;
             mod compiler;
+            mod diagnostics;
             use compiler::CompileError;
 
             classify_compile_error(source: String) -> u8 {
@@ -104,7 +105,7 @@ fn self_host_bundle() -> SourceBundle {
                 }
             }
 
-            main() { run_compiler_host(compiler::application) }
+            main() { run_compiler_host(diagnostics::application) }
         "#,
     );
     let paths = [
@@ -120,6 +121,10 @@ fn self_host_bundle() -> SourceBundle {
         root.join("backend/lowering/lowering.glorious"),
         root.join("backend/emission/emission.glorious"),
         root.join("compiler/compiler.glorious"),
+        root.join("diagnostics/diagnostics.glorious"),
+        root.join("diagnostics/model/model.glorious"),
+        root.join("diagnostics/source_errors/source_errors.glorious"),
+        root.join("diagnostics/backend_errors/backend_errors.glorious"),
     ];
     SourceBundle::distributed(
         primary,
