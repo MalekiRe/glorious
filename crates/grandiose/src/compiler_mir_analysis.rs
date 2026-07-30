@@ -542,6 +542,65 @@ impl RegisterIntervals {
         for &register in &function.return_cleanup {
             touch(register, position, None)?;
         }
+        drop(touch);
+
+        // Loan-proof erasure can remove the instruction-level activity of a
+        // borrowed place while leaving its reference value live in lowered
+        // MIR. Register compaction must retain that place (and any suspended
+        // parent loan) because the exported loan still names it. Compute the
+        // transitive set, then pin every retained referent as addressable.
+        let mut retained = bounds
+            .iter()
+            .enumerate()
+            .filter_map(|(register, bound)| bound.is_some().then_some(register as Register))
+            .collect::<BTreeSet<_>>();
+        loop {
+            let mut changed = false;
+            for loan in &function.flow.loans {
+                if !retained.contains(&loan.reference) {
+                    continue;
+                }
+                changed |= retained.insert(loan.borrowed.base);
+                if let Some(parent) = loan.parent
+                    && let Some(parent) = function.flow.loans.get(parent.index())
+                {
+                    changed |= retained.insert(parent.reference);
+                    changed |= retained.insert(parent.borrowed.base);
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        for loan in &function.flow.loans {
+            if retained.contains(&loan.reference) {
+                let Some(addressable) = addressable.get_mut(loan.borrowed.base as usize) else {
+                    return Err(AnalysisError {
+                        function: function.name.clone(),
+                        kind: AnalysisErrorKind::InvalidCfg(format!(
+                            "loan references out-of-range borrowed register r{}",
+                            loan.borrowed.base
+                        )),
+                    });
+                };
+                *addressable = true;
+            }
+        }
+        for register in retained {
+            let Some(bound) = bounds.get_mut(register as usize) else {
+                return Err(AnalysisError {
+                    function: function.name.clone(),
+                    kind: AnalysisErrorKind::InvalidCfg(format!(
+                        "loan references out-of-range register r{register}"
+                    )),
+                });
+            };
+            if bound.is_none() {
+                meter.step()?;
+                *bound = Some((position, position));
+                activity_blocks[register as usize] = Some(None);
+            }
+        }
         let mut intervals = Vec::new();
         for (register, bound) in bounds.into_iter().enumerate() {
             let Some((start, end)) = bound else { continue };
@@ -1361,5 +1420,40 @@ mod tests {
         );
         assert!(RegisterIntervals::invalidated_by(analysis::VALUES));
         assert!(!RegisterIntervals::invalidated_by(analysis::COST));
+    }
+
+    #[test]
+    fn register_intervals_retain_exported_referents_after_borrow_proof_erasure() {
+        let mut types = Type::predefined();
+        let shared = types.len() as TypeId;
+        types.push(Type::RefShared { referent: I64 });
+        let mut entry = block(0, Terminator::Return { value: None });
+        entry.statements.push(Instruction {
+            span: Span::default(),
+            kind: InstructionKind::EndBorrow { reference: 2 },
+        });
+        let mut body = function(vec![entry]);
+        body.register_types = vec![I64, I64, shared];
+        body.flow.loans.push(crate::compiler_mir::LoanFact {
+            kind: crate::compiler_mir::LoanKind::Shared,
+            reference: 2,
+            borrowed: crate::compiler_mir::Place {
+                base: 1,
+                projection: vec![],
+            },
+            parent: None,
+            region: crate::compiler_mir::RegionId(0),
+            issued_block: 0,
+            source: crate::compiler_mir::SourceInfoId(0),
+        });
+
+        let intervals = RegisterIntervals::compute(&body, &types, 1_000).unwrap();
+        let by_register = intervals
+            .intervals()
+            .iter()
+            .map(|interval| (interval.register, interval))
+            .collect::<BTreeMap<_, _>>();
+        assert!(by_register.contains_key(&2));
+        assert!(by_register[&1].addressable);
     }
 }

@@ -1428,6 +1428,14 @@ struct StaticClosure {
     /// Lexical free-name bindings captured before generic helper parameters
     /// can shadow them during static beta reduction.
     captures: BTreeMap<String, CoreLocal>,
+    /// Original call-site identities for expressions cloned into the static
+    /// callback body. Span fallback alone is intentionally ambiguous when a
+    /// helper expansion repeats source syntax.
+    expression_ordinals: BTreeMap<(usize, usize), u32>,
+    /// Specialization discovery analyzes a closure body under its own body
+    /// instance even when the closure is later proven static and beta-reduced
+    /// into its caller.
+    body_instance: Option<specialization::BodyInstanceKey>,
 }
 
 struct CoreLowerer<'a> {
@@ -26470,6 +26478,24 @@ impl<'a> CoreLowerer<'a> {
     }
 
     fn capture_static_closure(&self, expression: &Expr) -> StaticClosure {
+        struct OrdinalCollector<'lowerer, 'program> {
+            lowerer: &'lowerer CoreLowerer<'program>,
+            ordinals: BTreeMap<(usize, usize), u32>,
+            ambiguous: BTreeSet<(usize, usize)>,
+        }
+        impl<'ast> ExprVisitor<'ast> for OrdinalCollector<'_, '_> {
+            type Break = ();
+
+            fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<()> {
+                let span = (expression.span.start, expression.span.end);
+                if let Some(ordinal) = self.lowerer.expression_ordinal(expression)
+                    && self.ordinals.insert(span, ordinal).is_some()
+                {
+                    self.ambiguous.insert(span);
+                }
+                walk_expr(self, expression)
+            }
+        }
         let (parameters, body) = match &expression.kind {
             ExprKind::Closure { params, body } => (
                 params.iter().map(ToString::to_string).collect::<Vec<_>>(),
@@ -26490,10 +26516,29 @@ impl<'a> CoreLowerer<'a> {
             .into_iter()
             .filter_map(|(name, _)| self.locals.get(&name).cloned().map(|local| (name, local)))
             .collect();
+        let mut ordinals = OrdinalCollector {
+            lowerer: self,
+            ordinals: BTreeMap::new(),
+            ambiguous: BTreeSet::new(),
+        };
+        let _ = ordinals.visit_expr(expression);
+        for span in ordinals.ambiguous {
+            ordinals.ordinals.remove(&span);
+        }
+        let body_instance = self
+            .planned_static_closure_body(expression)
+            .or_else(|| self.planned_closure_value(expression))
+            .map(specialization::BodyInstanceKey::Closure)
+            .or_else(|| {
+                self.planned_late_closure(expression)
+                    .map(|plan| specialization::BodyInstanceKey::Closure(plan.request))
+            });
         StaticClosure {
             source: expression.clone(),
             result: None,
             captures,
+            expression_ordinals: ordinals.ordinals,
+            body_instance,
         }
     }
 
@@ -26816,6 +26861,8 @@ impl<'a> CoreLowerer<'a> {
             &statements,
             arguments.len(),
             &closure.captures,
+            &closure.expression_ordinals,
+            closure.body_instance.as_ref(),
             span,
             expected,
         );
@@ -28121,6 +28168,21 @@ impl<'a> CoreLowerer<'a> {
                 expression_ordinal,
             })
             .cloned()
+    }
+
+    fn planned_static_closure_body(
+        &self,
+        expression: &Expr,
+    ) -> Option<specialization::ClosureRequest> {
+        let body = self.body_instance.clone()?;
+        let expression_ordinal = self.expression_ordinal(expression)?;
+        self.specialization_graph
+            .static_closure_bodies
+            .get(&specialization::CallSiteKey {
+                body,
+                expression_ordinal,
+            })
+            .map(|plan| plan.request.clone())
     }
 
     fn planned_late_closure(&self, expression: &Expr) -> Option<specialization::LateClosurePlan> {
@@ -39772,6 +39834,8 @@ impl<'a> CoreLowerer<'a> {
         statements: &[Stmt],
         parameter_count: usize,
         captures: &BTreeMap<String, CoreLocal>,
+        expression_ordinals: &BTreeMap<(usize, usize), u32>,
+        body_instance: Option<&specialization::BodyInstanceKey>,
         span: Span,
         expected: Option<TypeId>,
     ) -> Result<core::Expr, Vec<Diagnostic>> {
@@ -39784,7 +39848,12 @@ impl<'a> CoreLowerer<'a> {
         self.final_use_block_depth += 1;
         let result = self.block_inner(
             statements,
-            Some((parameter_count, captures)),
+            Some((
+                parameter_count,
+                captures,
+                expression_ordinals,
+                body_instance,
+            )),
             span,
             expected,
         );
@@ -39802,7 +39871,37 @@ impl<'a> CoreLowerer<'a> {
     fn block_inner(
         &mut self,
         statements: &[Stmt],
-        static_capture_overlay: Option<(usize, &BTreeMap<String, CoreLocal>)>,
+        static_capture_overlay: Option<(
+            usize,
+            &BTreeMap<String, CoreLocal>,
+            &BTreeMap<(usize, usize), u32>,
+            Option<&specialization::BodyInstanceKey>,
+        )>,
+        span: Span,
+        expected: Option<TypeId>,
+    ) -> Result<core::Expr, Vec<Diagnostic>> {
+        let saved_body_instance = self.body_instance.clone();
+        let saved_expression_span_ordinals = self.expression_span_ordinals.clone();
+        let result = self.block_inner_with_planning_context(
+            statements,
+            static_capture_overlay,
+            span,
+            expected,
+        );
+        self.body_instance = saved_body_instance;
+        self.expression_span_ordinals = saved_expression_span_ordinals;
+        result
+    }
+
+    fn block_inner_with_planning_context(
+        &mut self,
+        statements: &[Stmt],
+        static_capture_overlay: Option<(
+            usize,
+            &BTreeMap<String, CoreLocal>,
+            &BTreeMap<(usize, usize), u32>,
+            Option<&specialization::BodyInstanceKey>,
+        )>,
         span: Span,
         expected: Option<TypeId>,
     ) -> Result<core::Expr, Vec<Diagnostic>> {
@@ -39830,7 +39929,7 @@ impl<'a> CoreLowerer<'a> {
             })
             .collect::<Vec<_>>();
         let mut names = self.locals.keys().cloned().collect::<BTreeSet<_>>();
-        if let Some((_, captures)) = static_capture_overlay {
+        if let Some((_, captures, _, _)) = static_capture_overlay {
             names.extend(captures.keys().cloned());
         }
         for statement in statements {
@@ -39901,7 +40000,8 @@ impl<'a> CoreLowerer<'a> {
         };
         let liveness = point_graph.solve();
         for (index, statement) in statements.iter().enumerate() {
-            if let Some((overlay_at, captures)) = static_capture_overlay
+            if let Some((overlay_at, captures, expression_ordinals, body_instance)) =
+                static_capture_overlay
                 && index == overlay_at
             {
                 self.locals.extend(
@@ -39909,6 +40009,14 @@ impl<'a> CoreLowerer<'a> {
                         .iter()
                         .map(|(name, local)| (name.clone(), local.clone())),
                 );
+                self.expression_span_ordinals.extend(
+                    expression_ordinals
+                        .iter()
+                        .map(|(span, ordinal)| (*span, *ordinal)),
+                );
+                if let Some(body_instance) = body_instance {
+                    self.body_instance = Some(body_instance.clone());
+                }
             }
             self.current_point = points[index];
             self.current_live_after = liveness.live_out[&points[index]].clone();

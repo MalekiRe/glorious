@@ -1603,15 +1603,16 @@ lower_product_fields<'a>(
             super::super::frontend::elaboration::
                 construction_field_value(entry);
         if(field == checked_u32(Vec::len(output))) {
-            handle lower_value(interfaces, body, value, operand) {
-                Result::Err(found) => Result::Err(found),
-                Result::Ok(lowered) => handle lowered {
-                    Result::Err(_) =>
-                        Result::Err(LoweringError::MissingValue(operand)),
-                    Result::Ok(register) => {
-                        Vec::push(&mut *output, register);
-                        Result::Ok(())
-                    }
+            let lowered = try(
+                lower_value(interfaces, body, value, operand),
+                @lower_product_fields
+            );
+            handle lowered {
+                Result::Err(_) =>
+                    Result::Err(LoweringError::MissingValue(operand)),
+                Result::Ok(register) => {
+                    Vec::push(&mut *output, register);
+                    Result::Ok(())
                 }
             }
         } else {

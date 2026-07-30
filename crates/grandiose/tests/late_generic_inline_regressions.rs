@@ -101,6 +101,65 @@ fn static_control_closure_preserves_colliding_mutable_capture() {
 }
 
 #[test]
+fn static_control_closure_preserves_planned_calls_in_branch_conditions() {
+    let source = r#"
+        values() -> Vec<usize> {
+            let output = Vec::new();
+            Vec::push(&mut output, 2);
+            Vec::push(&mut output, 3);
+            Vec::push(&mut output, 5);
+            output
+        }
+
+        accept(
+            value: &mut Vec<usize>,
+            item: &usize
+        ) -> Result<usize, usize> {
+            Vec::push(&mut *value, *item);
+            if(*item == 5) {
+                Result::Err(*item)
+            } else {
+                Result::Ok(*item)
+            }
+        }
+
+        collect(
+            value: &mut Vec<usize>,
+            output: &mut Vec<usize>,
+            source: &Vec<usize>
+        ) -> Result<(), usize> {
+            Slice::try_for_each(Vec::as_slice(source), { item => {
+                if(Vec::len(output) < 2) {
+                    let found = try(accept(value, item), @collect);
+                    Vec::push(&mut *output, found);
+                    Result::Ok(())
+                } else {
+                    Result::Err(99)
+                }
+            }})
+        }
+
+        answer() -> usize {
+            let source = values();
+            let visited = Vec::new();
+            let output = Vec::new();
+            handle collect(&mut visited, &mut output, &source) {
+                Result::Err(error) =>
+                    error * 100 + Vec::len(&visited) * 10 + Vec::len(&output),
+                Result::Ok(_) => 900
+            }
+        }
+
+        main() -> { () }
+    "#;
+
+    assert_eq!(
+        run("static-control-planned-call.glorious", source, "answer"),
+        Value::U64(9922)
+    );
+}
+
+#[test]
 fn late_generic_inline_evaluates_each_argument_once() {
     let source = r#"
         effect Ask { [0,1] ask() -> i64 }

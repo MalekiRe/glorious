@@ -429,6 +429,10 @@ pub(crate) struct RequestGraph {
     pub(crate) callable_calls: BTreeMap<CallSiteKey, ClosureRequest>,
     /// First-class closure construction sites retained as runtime values.
     pub(crate) closure_values: BTreeMap<CallSiteKey, ClosureRequest>,
+    /// Exact source closure bodies available for static beta reduction. This
+    /// is separate from `closure_values`: a callback can require complete
+    /// nested-call planning without ever becoming a runtime callable.
+    pub(crate) static_closure_bodies: BTreeMap<CallSiteKey, LateClosurePlan>,
     /// Calls through a retained closure local rather than a scalarized wrapper.
     pub(crate) indirect_calls: BTreeMap<CallSiteKey, ClosureRequest>,
     /// Canonical finite producer sets selected by ordinary source control.
@@ -504,6 +508,9 @@ impl RequestGraph {
         }
         for value in &self.closure_values {
             writeln!(output, "closure-value {value:?}").unwrap();
+        }
+        for body in &self.static_closure_bodies {
+            writeln!(output, "static-closure-body {body:?}").unwrap();
         }
         for call in &self.indirect_calls {
             writeln!(output, "indirect-call {call:?}").unwrap();
@@ -5648,14 +5655,16 @@ impl<'a> Walker<'a> {
         if self.recording {
             if late {
                 let call_site = self.call_site(expression)?;
-                self.discovery.graph.late_closures.insert(
-                    call_site,
-                    LateClosurePlan {
-                        request: request.clone(),
-                        body_kind,
-                        recursive_self: self.active_recursive_self.clone(),
-                    },
-                );
+                let plan = LateClosurePlan {
+                    request: request.clone(),
+                    body_kind,
+                    recursive_self: self.active_recursive_self.clone(),
+                };
+                self.discovery
+                    .graph
+                    .static_closure_bodies
+                    .insert(call_site.clone(), plan.clone());
+                self.discovery.graph.late_closures.insert(call_site, plan);
             } else {
                 self.discovery
                     .graph
@@ -6672,6 +6681,7 @@ impl<'a> Walker<'a> {
             .cloned()
             .collect::<BTreeSet<_>>();
         let mut closures = BTreeSet::new();
+        let mut static_closure_arguments = Vec::new();
         let mut exact_callable_arguments = BTreeMap::<GenericParamKey, Vec<ClosureRequest>>::new();
         if let Some(expected) = expected
             // A monomorphic nested call can provide evidence for inference
@@ -6803,7 +6813,32 @@ impl<'a> Walker<'a> {
                     closure
                 } else {
                     match self.contextual_closure(argument, shape, &mut substitutions)? {
-                        PlannedClosure::Exact(closure) => closure,
+                        PlannedClosure::Exact(closure) => {
+                            if self.recording {
+                                let body_kind = match argument.kind {
+                                    ExprKind::Closure { .. } | ExprKind::TypedClosure { .. } => {
+                                        ClosureBodyKind::Explicit
+                                    }
+                                    ExprKind::Block(_) | ExprKind::ContextBlock(_) => {
+                                        ClosureBodyKind::ContextualBlock
+                                    }
+                                    _ => unreachable!(
+                                        "contextual_closure accepted only source closure syntax"
+                                    ),
+                                };
+                                if let Some(site) = self.call_site(argument) {
+                                    static_closure_arguments.push((
+                                        site,
+                                        LateClosurePlan {
+                                            request: closure.clone(),
+                                            body_kind,
+                                            recursive_self: self.active_recursive_self.clone(),
+                                        },
+                                    ));
+                                }
+                            }
+                            closure
+                        }
                         // The call itself must remain on the late path because
                         // an emitted specialization key cannot name the
                         // handler-site callable identity yet.
@@ -7178,6 +7213,10 @@ impl<'a> Walker<'a> {
                 .graph
                 .direct_calls
                 .insert(call_site.clone(), key.clone());
+            self.discovery
+                .graph
+                .static_closure_bodies
+                .extend(static_closure_arguments);
             if let Some(binder) = &template.result_binder
                 && let Some(mut producers) = exact_callable_arguments.get(binder).cloned()
             {
@@ -9359,6 +9398,17 @@ pub(crate) fn merge_drop_reachable(base: &mut Discovery, discovered: &Discovery)
                 reachable_closures.insert(closure.clone());
             }
         }
+        for (site, plan) in &discovered.graph.static_closure_bodies {
+            let body_reachable = match &site.body {
+                BodyInstanceKey::Drop(_) => true,
+                BodyInstanceKey::Specialization(parent) => reachable_keys.contains(parent),
+                BodyInstanceKey::Closure(closure) => reachable_closures.contains(closure),
+                BodyInstanceKey::Root(_) => false,
+            };
+            if body_reachable {
+                reachable_closures.insert(plan.request.clone());
+            }
+        }
         if (reachable_keys.len(), reachable_closures.len()) == before {
             break;
         }
@@ -9432,6 +9482,19 @@ pub(crate) fn merge_drop_reachable(base: &mut Discovery, discovered: &Discovery)
                 BodyInstanceKey::Root(_) => false,
             })
             .map(|(site, closure)| (site.clone(), closure.clone())),
+    );
+    base.graph.static_closure_bodies.extend(
+        discovered
+            .graph
+            .static_closure_bodies
+            .iter()
+            .filter(|(site, _)| match &site.body {
+                BodyInstanceKey::Drop(_) => true,
+                BodyInstanceKey::Specialization(key) => reachable_keys.contains(key),
+                BodyInstanceKey::Closure(closure) => reachable_closures.contains(closure),
+                BodyInstanceKey::Root(_) => false,
+            })
+            .map(|(site, plan)| (site.clone(), plan.clone())),
     );
     base.graph.indirect_calls.extend(
         discovered
@@ -9889,12 +9952,26 @@ pub(crate) fn discover_with_traits_and_budgets_from(
             let result = substitute(&template.result, &substitutions);
             walker.expression(&function.body, result.as_ref());
         }
-        while let Some((closure, body_kind)) = discovery
+        while let Some((closure, body_kind, planned_recursive_self)) = discovery
             .graph
             .closure_bodies
             .iter()
             .find(|(closure, _)| !processed_closures.contains(*closure))
-            .map(|(closure, kind)| (closure.clone(), *kind))
+            .map(|(closure, kind)| (closure.clone(), *kind, None))
+            .or_else(|| {
+                discovery
+                    .graph
+                    .static_closure_bodies
+                    .values()
+                    .find(|plan| !processed_closures.contains(&plan.request))
+                    .map(|plan| {
+                        (
+                            plan.request.clone(),
+                            plan.body_kind,
+                            plan.recursive_self.clone(),
+                        )
+                    })
+            })
         {
             processed_closures.insert(closure.clone());
             let root = body_root(program, &closure.site.owner);
@@ -9916,7 +9993,12 @@ pub(crate) fn discover_with_traits_and_budgets_from(
                         .map(|(name, ty)| (name.clone(), LocalBinding::Type(ty.clone()))),
                 )
                 .collect();
-            let recursive_self = discovery.graph.recursive_closures.get(&closure).cloned();
+            let recursive_self = discovery
+                .graph
+                .recursive_closures
+                .get(&closure)
+                .cloned()
+                .or(planned_recursive_self);
             if let Some(recursive_self) = &recursive_self {
                 locals.insert(
                     recursive_self.binding.clone(),
@@ -9953,8 +10035,21 @@ pub(crate) fn discover_with_traits_and_budgets_from(
             };
             walker.expression(body, Some(&closure.shape.result));
         }
+        let planned_closure_count = discovery
+            .graph
+            .closure_bodies
+            .keys()
+            .chain(
+                discovery
+                    .graph
+                    .static_closure_bodies
+                    .values()
+                    .map(|plan| &plan.request),
+            )
+            .collect::<BTreeSet<_>>()
+            .len();
         if processed.len() == discovery.graph.requests.len()
-            && processed_closures.len() == discovery.graph.closure_bodies.len()
+            && processed_closures.len() == planned_closure_count
         {
             break;
         }
@@ -10349,6 +10444,7 @@ mod tests {
     fn callable_zero_use_evidence_rejects_a_must_move_capture() {
         let discovery = parse_discovery(
             "struct Ticket { serial: i64 }
+             impl Use<[1,1]> for Ticket {}
              discard<F>(body: F) -> () where F: Fn<(), Output=i64>, F: Use<[0,0]> { () }
              bad(ticket: Ticket) -> () { discard({ move ticket; 1 }) }
              main() -> () { () }",
