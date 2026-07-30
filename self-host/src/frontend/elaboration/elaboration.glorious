@@ -1620,7 +1620,7 @@ type_name_target_in(
                 ))
             }
         };
-        handle move shell_and_name {
+        handle shell_and_name {
             Result::Err(_) => type_name_target_in(
                 headers,
                 declarations,
@@ -2434,7 +2434,7 @@ predeclare_nominals(
             },
             _ => Result::Ok((0, 0))
         };
-        handle move declaration {
+        handle declaration {
             Result::Err(_) => Result::Err(
                 ElaborationError::MissingNominalDeclaration(ordinal)
             ),
@@ -2948,7 +2948,7 @@ nominal_copyable(
                     token
                 )
             };
-            let flag = try(move copy, @nominal_copyable);
+            let flag = try(copy, @nominal_copyable);
             let shell = node.shell;
             let ty = handle interface_type_for_shell(&*output, shell) {
                 Result::Err(_) => unreachable(),
@@ -3439,7 +3439,7 @@ parse_digits(
                 let maximum = bit_not(wrapping_convert_to_u128(0));
                 if(accumulator
                     <= (maximum - wide_digit) / wide_base) { parse_digits(
-                        move bytes,
+                        bytes,
                         cursor + 1,
                         end,
                         base,
@@ -3879,7 +3879,7 @@ elaborate_block_statements(
                     child,
                     if(is_final) { expected } else { None }
                 ), @elaborate_block_statements);
-                if(is_final) { Result::Ok(move found) } else {
+                if(is_final) { Result::Ok(found) } else {
                     handle found.form {
                         ElaboratedForm::Value(_) => (),
                         ElaboratedForm::Computation(computation) => {
@@ -4779,7 +4779,7 @@ elaborate_projection(
                   } else { Result::Err(()) },
                 _ => Result::Err(())
     };
-            handle move field {
+            handle field {
                 Result::Err(_) => Result::Err(
                     ElaborationError::UnknownProjectionField(
                         token,
@@ -5934,20 +5934,31 @@ pub elaborate_function_body(
                 &mut local_types,
                 0
             );
+            let BodyBuilder {
+                parameter_count: _,
+                next_source_local: _,
+                final_transfer_expressions: _,
+                local_types: _,
+                values,
+                computations,
+                operands,
+                construction_fields,
+                match_arms,
+                match_bindings,
+                integer_constants
+            } = builder;
             Result::Ok(TypedBody {
                 shell: shell,
                 result_type: result,
                 root: computation,
                 local_types: local_types,
-                values: move builder.values,
-                computations: move builder.computations,
-                operands: move builder.operands,
-                construction_fields:
-                    move builder.construction_fields,
-                match_arms: move builder.match_arms,
-                match_bindings: move builder.match_bindings,
-                integer_constants:
-                    move builder.integer_constants
+                values: values,
+                computations: computations,
+                operands: operands,
+                construction_fields: construction_fields,
+                match_arms: match_arms,
+                match_bindings: match_bindings,
+                integer_constants: integer_constants
             })
         }
     }
@@ -5964,7 +5975,7 @@ write_name_id(
     source: &super::lexer::LexedSource,
     name: Id<String>
 ) {
-    handle super::lexer::lexeme(source, move name) {
+    handle super::lexer::lexeme(source, name) {
         Result::Err(_) => unreachable(),
         Result::Ok(text) => write_string( output, text)
     }
@@ -6902,7 +6913,7 @@ process_inputs(
     if(index < Vec::len(arguments)) {
         let path = *Vec::index(arguments, index);
         let bytes = read_file(path);
-        handle String::from_utf8(move bytes) {
+        handle String::from_utf8(bytes) {
             Result::Err(_) => ByteBuf::push(&mut *output, 1),
             Result::Ok(source) => encode_source(&mut *output, source)
         };

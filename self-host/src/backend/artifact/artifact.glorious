@@ -282,9 +282,9 @@ pub set_section(
     let previous = replace(
         Vec::index_mut(
             &mut writer.sections,
-            section_ordinal(move section)
+            section_ordinal(section)
         ),
-        move payload
+        payload
     );
     previous;
     ()
@@ -441,7 +441,7 @@ pub encode_writer(
 ) -> Result<Bytes, ArtifactWriteError> {
     encode(
         &writer.sections,
-        move entry_function,
-        move required_features
+        entry_function,
+        required_features
     )
 }

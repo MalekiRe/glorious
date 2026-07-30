@@ -794,7 +794,7 @@ parse_path(value: &mut Parser, related: usize) -> Result<TypeId, HeaderError> {
     let start = value.cursor;
     let name_start = Vec::len(&value.output.names);
     let name = try(ident(value, related), @parse_path);
-    Vec::push(&mut value.output.names, move name);
+    Vec::push(&mut value.output.names, name);
     parse_path_tail(value, related, start, name_start)
 }
 
@@ -806,7 +806,7 @@ parse_path_tail(
 ) -> Result<TypeId, HeaderError> {
     if(eat_code(value, 19)) {
         let name = try(ident(value, related), @parse_path_tail);
-        Vec::push(&mut value.output.names, move name);
+        Vec::push(&mut value.output.names, name);
         parse_path_tail(value, related, start, name_start)
     } else {
         let name_end = Vec::len(&value.output.names);
@@ -860,7 +860,7 @@ parse_application(
                 edge_start,
                 Vec::len(&value.output.type_edges)
             ),
-            Result::Ok(move constructor),
+            Result::Ok(constructor),
             Result::Err(())
         )
         } } else { Result::Ok(constructor) }
@@ -880,11 +880,11 @@ take_lifetime(value: &mut Parser) -> Option<NameUse> {
     let limit = value.limit;
     let kind = if(cursor < limit) { super::lexer::token_kind_at(&value.source, cursor) } else { TokenKind::Eof };
     if(cursor < limit) {
-        handle move kind {
+        handle kind {
             TokenKind::Lifetime(name) => {
                 let token = cursor;
                 value.cursor = token + 1;
-                Result::Ok(NameUse { name: move name, token: token })
+                Result::Ok(NameUse { name: name, token: token })
             },
             _ => Result::Err(())
         }
@@ -903,7 +903,7 @@ parse_reference_referent(
             value,
             related,
             start,
-            move lifetime,
+            lifetime,
             3
         )
     } else { parse_reference_kind(
@@ -926,7 +926,7 @@ parse_reference_kind(
     let edge_start = Vec::len(&value.output.type_edges);
     Vec::push(
         &mut value.output.type_edges,
-        TypeEdge { value: move referent, position: 0 }
+        TypeEdge { value: referent, position: 0 }
     );
     push_type(
         value,
@@ -951,7 +951,7 @@ parse_tuple(
         let first = try(parse_type(value, related), @parse_tuple);
         if(eat_code(value, 17)) {
             let elements = Vec::new();
-            Vec::push(&mut elements, move first);
+            Vec::push(&mut elements, first);
             try(
                 parse_type_values(value, 12, related, &mut elements),
                 @parse_tuple
@@ -960,7 +960,7 @@ parse_tuple(
             finish_tuple(value, start, related, elements)
         } else {
             try(expect_right_parenthesis(value, related), @parse_tuple);
-            Result::Ok(move first)
+            Result::Ok(first)
         }
     }
 }
@@ -1016,7 +1016,7 @@ parse_generic_items(
         )
     } else {
         let found = try(parse_one_generic(value, related), @parse_generic_items);
-        Vec::push(&mut value.output.generic_params, move found);
+        Vec::push(&mut value.output.generic_params, found);
         if(eat_code(value, 17)) { if(at_code(&*value, 36)) { finish_generics(value, related, start) } else { parse_generic_items(
                     value,
                     related,
@@ -1034,7 +1034,7 @@ parse_one_generic(
         TokenKind::Lifetime(name) => {
             value.cursor = token + 1;
             Result::Ok(GenericParam {
-                name: move name,
+                name: name,
                 kind_code: 2,
                 tokens: token_range(token, value.cursor)
             })
@@ -1091,7 +1091,7 @@ parse_parameter_items(
         Parameter {
             name: name.name,
             name_token: name.token,
-            ty: move ty
+            ty: ty
         }
     );
     if(eat_code(value, 17)) { if(at_code(&*value, 12)) { Result::Ok(header_range(
@@ -1178,7 +1178,7 @@ finish_effects(
     );
     Result::Ok(EffectRow {
         effects: header_range(edge_start, Vec::len(&value.output.type_edges)),
-        row_tail: move row_tail,
+        row_tail: row_tail,
         tokens: token_range(start, value.cursor)
     })
 }
@@ -1311,11 +1311,11 @@ finish_callable(
             CallableHeader {
                 shell: shell,
                 name: name.name,
-                public: move public,
-                generics: move generics,
-                parameters: move parameters,
-                result: move result,
-                effects: move effects,
+                public: public,
+                generics: generics,
+                parameters: parameters,
+                result: result,
+                effects: effects,
                 tokens: token_range(start, limit)
             }
         );
@@ -1446,10 +1446,10 @@ parse_fixity(
                 &mut fixities.values,
                 FixityHeader {
                     shell: shell,
-                    public: move public,
+                    public: public,
                     form: form,
                     precedence: precedence,
-                    operator: move operator,
+                    operator: operator,
                     tokens: token_range(start, whole_end)
                 }
             );
@@ -1543,9 +1543,9 @@ finish_alias(
         TypeAliasHeader {
             shell: shell,
             name: name.name,
-            public: move public,
-            generics: move generics,
-            target: move target,
+            public: public,
+            generics: generics,
+            target: target,
             tokens: token_range(start, whole_end)
         }
     );
@@ -1584,11 +1584,11 @@ parse_struct(
             order_kinds,
             order_indices,
             shell,
-            move public,
+            public,
             start,
             whole_end,
-            move name,
-            move generics,
+            name,
+            generics,
             field_start
         )
     } else { Result::Err(
@@ -1616,7 +1616,7 @@ parse_fields(
                     name: name.name,
                     name_token: name.token,
                     private: private,
-                    ty: move ty
+                    ty: ty
                 }
             );
             eat_code(value, 17);
@@ -1644,8 +1644,8 @@ finish_struct(
         StructHeader {
             shell: shell,
             name: name.name,
-            public: move public,
-            generics: move generics,
+            public: public,
+            generics: generics,
             fields: header_range(field_start, field_end),
             tokens: token_range(start, whole_end)
         }
@@ -1752,14 +1752,14 @@ parse_variants(
                     value,
                     variants,
                     related,
-                    move name,
+                    name,
                      fields
                 )
             } else { finish_variant(
                     value,
                     variants,
                     related,
-                    move name,
+                    name,
                      fields
                 ) }
     } else { Result::Ok(()) }
@@ -1812,8 +1812,8 @@ finish_enum(
         EnumHeader {
             shell: shell,
             name: name.name,
-            public: move public,
-            generics: move generics,
+            public: public,
+            generics: generics,
             variants: header_range(variant_start, variant_end),
             tokens: token_range(start, whole_end)
         }
@@ -1839,11 +1839,17 @@ parse_shells(
                 let start = bounds.start;
                 let limit = bounds.end;
                 let whole_end = whole.end;
+                let Parser {
+                    source,
+                    cursor: _,
+                    limit: _,
+                    output
+                } = parser;
                 let next = Parser {
-                    source: move parser.source,
+                    source: source,
                     cursor: start,
                     limit: limit,
-                    output: move parser.output
+                    output: output
                 };
                 let parsed = handle super::scanner::shell_kind_code(shell) {
                     12 => {
@@ -1908,7 +1914,7 @@ parse_shells(
                     ),
                     _ => Result::Ok(())
                 };
-                try(move parsed, @parse_shells);
+                try(parsed, @parse_shells);
                 parse_shells(
                     original,
                     declarations,
@@ -1921,9 +1927,15 @@ parse_shells(
 }
 
 finish_parser(value: Parser, nominal: NominalIndex) -> ParsedHeaders {
+    let Parser {
+        source,
+        cursor: _,
+        limit: _,
+        output
+    } = value;
     ParsedHeaders {
-        source: move value.source,
-        index: move value.output,
+        source: source,
+        index: output,
         nominal:  nominal
     }
 }
@@ -1977,7 +1989,7 @@ write_name(
     source: &super::lexer::LexedSource,
     name: Id<String>
 ) {
-    handle super::lexer::lexeme(source, move name) {
+    handle super::lexer::lexeme(source, name) {
         Result::Err(_) => unreachable(),
         Result::Ok(text) => write_string( output, text)
     }
@@ -2183,7 +2195,7 @@ write_common(
     generics: &HeaderRange
 ) {
     ByteBuf::push(&mut *output, bool_code( public));
-    write_name(&mut *output, &parsed.source, move name);
+    write_name(&mut *output, &parsed.source, name);
     ByteBuf::write_u32_le(&mut *output, generics.count);
     write_generics( output, parsed, generics, 0)
 }
@@ -2285,7 +2297,7 @@ parsed_token_span(
     value: &ParsedHeaders,
     index: usize
 ) -> super::lexer::Span {
-    handle super::lexer::token_at(&value.source, move index) {
+    handle super::lexer::token_at(&value.source, index) {
         Result::Err(_) => unreachable(),
         Result::Ok(token) => super::lexer::token_span(token)
     }
@@ -2421,7 +2433,7 @@ process_inputs(
     if(index < Vec::len(arguments)) {
             let path = *Vec::index(arguments, index);
             let bytes = read_file(path);
-            handle String::from_utf8(move bytes) {
+            handle String::from_utf8(bytes) {
                 Result::Err(_) => ByteBuf::push(&mut *output, 1),
                 Result::Ok(source) => encode_source(&mut *output,  source)
             };
@@ -2441,7 +2453,7 @@ process_interface_inputs(
     if(index < Vec::len(arguments)) {
             let path = *Vec::index(arguments, index);
             let bytes = read_file(path);
-            handle String::from_utf8(move bytes) {
+            handle String::from_utf8(bytes) {
                 Result::Err(_) => ByteBuf::push(&mut *output, 1),
                 Result::Ok(source) => encode_interface_source(
                     &mut *output,
@@ -2500,5 +2512,5 @@ pub interface_application() / {
 }
 
 bool_code(value: Bool) -> u8 {
-    if(move value) { 1 } else { 0 }
+    if(value) { 1 } else { 0 }
 }
