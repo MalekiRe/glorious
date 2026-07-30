@@ -1,0 +1,176 @@
+// Frontend phase errors are normalized without changing phase-local APIs.
+
+use super::model;
+use super::model::CompilerDiagnostic;
+use super::model::DiagnosticClass;
+use super::model::DiagnosticPhase;
+use super::model::DiagnosticSpace;
+use super::super::frontend::bodies;
+use super::super::frontend::elaboration;
+use super::super::frontend::headers;
+use super::super::frontend::lexer;
+use super::super::frontend::resolution;
+use super::super::frontend::scanner;
+use super::super::frontend::bodies::BodyError;
+use super::super::frontend::elaboration::ElaborationError;
+use super::super::frontend::headers::HeaderError;
+use super::super::frontend::lexer::LexError;
+use super::super::frontend::resolution::ResolutionError;
+use super::super::frontend::scanner::ScanError;
+use super::super::frontend::scanner::ShellId;
+
+pub lex_diagnostic(error: &LexError) -> CompilerDiagnostic {
+    let span = lexer::error_span(error);
+    let class = if(*lexer::error_kind(error) is lexer::LexErrorKind::ResourceLimit) {
+        DiagnosticClass::ResourceLimit
+    } else {
+        DiagnosticClass::Syntax
+    };
+    model::make_diagnostic(
+        DiagnosticPhase::Lex,
+        class,
+        wrapping_convert_to_u32(lexer::error_code(error)),
+        "self-host compiler: lexical analysis failed",
+        model::span_site(
+            DiagnosticSpace::SourceByte,
+            lexer::span_start(&span),
+            lexer::span_end(&span)
+        ),
+        None,
+        None,
+        0,
+        0
+    )
+}
+
+pub scan_diagnostic(error: &ScanError) -> CompilerDiagnostic {
+    let primary = scanner::scan_error_token(error);
+    let related = scanner::scan_error_related(error);
+    let class = if(*error is ScanError::DeclarationIdExhausted(_, _)) {
+        DiagnosticClass::ResourceLimit
+    } else {
+        DiagnosticClass::Syntax
+    };
+    model::make_diagnostic(
+        DiagnosticPhase::Scan,
+        class,
+        wrapping_convert_to_u32(scanner::scan_error_code(error)),
+        "self-host compiler: declaration scanning failed",
+        model::site(DiagnosticSpace::Token, primary),
+        model::related_site(DiagnosticSpace::Token, primary, related),
+        None,
+        0,
+        0
+    )
+}
+
+pub header_diagnostic(error: &HeaderError) -> CompilerDiagnostic {
+    let primary = headers::error_token(error);
+    let related = headers::error_related(error);
+    let class = if(*error is HeaderError::TypeArenaExhausted(_, _)) {
+        DiagnosticClass::ResourceLimit
+    } else {
+        DiagnosticClass::Syntax
+    };
+    model::make_diagnostic(
+        DiagnosticPhase::Headers,
+        class,
+        wrapping_convert_to_u32(headers::error_code(error)),
+        "self-host compiler: declaration header parsing failed",
+        model::site(DiagnosticSpace::Token, primary),
+        model::related_site(DiagnosticSpace::Token, primary, related),
+        None,
+        0,
+        0
+    )
+}
+
+pub body_diagnostic(
+    shell: ShellId,
+    error: &BodyError
+) -> CompilerDiagnostic {
+    let primary = bodies::error_token(error);
+    let related = bodies::error_related(error);
+    let class = if(*error is BodyError::ExpressionDepthLimit(_, _)) {
+        DiagnosticClass::ResourceLimit
+    } else {
+        DiagnosticClass::Syntax
+    };
+    model::make_diagnostic(
+        DiagnosticPhase::BodyParse,
+        class,
+        wrapping_convert_to_u32(bodies::error_code(error)),
+        "self-host compiler: body parsing failed",
+        model::site(DiagnosticSpace::Token, primary),
+        model::related_site(DiagnosticSpace::Token, primary, related),
+        model::owner_site(shell),
+        0,
+        0
+    )
+}
+
+pub resolution_diagnostic(
+    phase: DiagnosticPhase,
+    shell: Option<ShellId>,
+    error: &ResolutionError
+) -> CompilerDiagnostic {
+    let primary = resolution::resolution_error_token(error);
+    let related = resolution::resolution_error_related(error);
+    let class = if(*error is ResolutionError::LocalIdExhausted(_, _)) {
+        DiagnosticClass::ResourceLimit
+    } else {
+        DiagnosticClass::Resolution
+    };
+    let owner = handle shell {
+        Result::Err(_) => None,
+        Result::Ok(found) => model::owner_site(found)
+    };
+    model::make_diagnostic(
+        phase,
+        class,
+        wrapping_convert_to_u32(resolution::resolution_error_code(error)),
+        if(phase is DiagnosticPhase::ResolutionIndex) {
+            "self-host compiler: declaration indexing failed"
+        } else {
+            "self-host compiler: body resolution failed"
+        },
+        model::site(DiagnosticSpace::Token, primary),
+        model::related_site(DiagnosticSpace::Token, primary, related),
+        owner,
+        0,
+        0
+    )
+}
+
+pub elaboration_diagnostic(
+    phase: DiagnosticPhase,
+    shell: Option<ShellId>,
+    error: &ElaborationError
+) -> CompilerDiagnostic {
+    let primary = elaboration::elaboration_error_token(error);
+    let related = elaboration::elaboration_error_related(error);
+    let class = if(*error is ElaborationError::IntegerEncodingOverflow(_, _)) {
+        DiagnosticClass::ResourceLimit
+    } else {
+        DiagnosticClass::Type
+    };
+    let owner = handle shell {
+        Result::Err(_) => None,
+        Result::Ok(found) => model::owner_site(found)
+    };
+    model::make_diagnostic(
+        phase,
+        class,
+        wrapping_convert_to_u32(elaboration::elaboration_error_code(error)),
+        if(phase is DiagnosticPhase::InterfaceCollection) {
+            "self-host compiler: interface collection failed"
+        } else {
+            "self-host compiler: body elaboration failed"
+        },
+        model::site(DiagnosticSpace::Token, primary),
+        model::related_site(DiagnosticSpace::Token, primary, related),
+        owner,
+        elaboration::elaboration_error_expected(error),
+        elaboration::elaboration_error_found(error)
+    )
+}
