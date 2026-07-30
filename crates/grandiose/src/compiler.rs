@@ -24,7 +24,7 @@ use grandiose_vm::{
 
 use crate::{
     ast::{
-        AssignmentPlace, AssignmentPlaceKind, BinaryOp, EffectRowSyntax, Expr, ExprKind,
+        AssignmentPlace, AssignmentPlaceKind, BinaryOp, EffectRowSyntax, EnumDecl, Expr, ExprKind,
         ExprVisitor, FieldVisibility, Function, GenericParamKind, GlobalBinding, GoalArgument,
         GoalPolarity, HandlerClause, Param, PatternKind, Program, Stmt, StructDecl, TypeSyntax,
         TypeSyntaxKind, UnaryOp, pattern_field_index, walk_expr,
@@ -127,9 +127,35 @@ struct NominalPrivacy {
 struct LateNominalInfo {
     declaration: String,
     arguments: Vec<TypeId>,
-    fields: Vec<(String, TypeId)>,
+    kind: NominalKind,
     privacy: NominalPrivacy,
     principal: UseInterval,
+}
+
+impl LateNominalInfo {
+    fn struct_fields(&self) -> Option<&[(String, TypeId)]> {
+        match &self.kind {
+            NominalKind::Struct(fields) => Some(fields),
+            NominalKind::Enum(_) => None,
+        }
+    }
+
+    fn enum_variants(&self) -> Option<&[(String, Vec<TypeId>)]> {
+        match &self.kind {
+            NominalKind::Struct(_) => None,
+            NominalKind::Enum(variants) => Some(variants),
+        }
+    }
+
+    fn field_types(&self) -> Vec<TypeId> {
+        match &self.kind {
+            NominalKind::Struct(fields) => fields.iter().map(|(_, ty)| *ty).collect(),
+            NominalKind::Enum(variants) => variants
+                .iter()
+                .flat_map(|(_, fields)| fields.iter().copied())
+                .collect(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -886,7 +912,7 @@ impl ReferenceTypes {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 enum NominalKind {
     Struct(Vec<(String, TypeId)>),
     Enum(Vec<(String, Vec<TypeId>)>),
@@ -1396,6 +1422,7 @@ struct CoreLowerer<'a> {
     aliases: &'a BTreeMap<String, ResolvedType>,
     function_templates: &'a [Function],
     nominal_templates: &'a [StructDecl],
+    enum_templates: &'a [EnumDecl],
     signatures: &'a BTreeMap<String, Signature>,
     globals: &'a BTreeMap<String, Signature>,
     nominals: &'a BTreeMap<String, NominalInfo>,
@@ -1519,6 +1546,7 @@ struct CoreTables<'a> {
     aliases: &'a BTreeMap<String, ResolvedType>,
     function_templates: &'a [Function],
     nominal_templates: &'a [StructDecl],
+    enum_templates: &'a [EnumDecl],
     signatures: &'a BTreeMap<String, Signature>,
     globals: &'a BTreeMap<String, Signature>,
     nominals: &'a BTreeMap<String, NominalInfo>,
@@ -4635,6 +4663,7 @@ fn compile_program_with_phases(
         Some(&discovery_roots),
     );
     let nominal_templates = program.structs.clone();
+    let enum_templates = program.enums.clone();
     let mut rounds = 0_usize;
     let normalized_program = loop {
         let normalized = instantiate_ground_nominals(
@@ -6962,6 +6991,7 @@ fn compile_program_with_phases(
         aliases: &alias_shapes,
         function_templates: &program.functions,
         nominal_templates: &nominal_templates,
+        enum_templates: &enum_templates,
         signatures: &signatures,
         globals: &global_signatures,
         nominals: &nominals,
@@ -24097,17 +24127,25 @@ impl<'a> CoreLowerer<'a> {
     }
 
     fn is_source_bool_type(&self, ty: TypeId) -> bool {
-        self.nominals
-            .values()
-            .find(|info| info.id == ty)
-            .is_some_and(|info| {
-                matches!(
-                    &info.kind,
-                    NominalKind::Enum(variants)
-                        if variants.len() == 2
-                            && variants.iter().all(|(_, fields)| fields == &[UNIT])
-                )
+        self.effects
+            .late_nominals
+            .get(&ty)
+            .and_then(LateNominalInfo::enum_variants)
+            .is_some_and(|variants| {
+                variants.len() == 2 && variants.iter().all(|(_, fields)| fields == &[UNIT])
             })
+            || self
+                .nominals
+                .values()
+                .find(|info| info.id == ty)
+                .is_some_and(|info| {
+                    matches!(
+                        &info.kind,
+                        NominalKind::Enum(variants)
+                            if variants.len() == 2
+                                && variants.iter().all(|(_, fields)| fields == &[UNIT])
+                    )
+                })
     }
 
     /// Resolve an ordinary frozen structural type, or intern a late structural
@@ -24502,6 +24540,7 @@ impl<'a> CoreLowerer<'a> {
                 aliases: tables.aliases,
                 function_templates: tables.function_templates,
                 nominal_templates: tables.nominal_templates,
+                enum_templates: tables.enum_templates,
                 signatures: tables.signatures,
                 globals: tables.globals,
                 nominals: tables.nominals,
@@ -24710,6 +24749,7 @@ impl<'a> CoreLowerer<'a> {
                 aliases: tables.aliases,
                 function_templates: tables.function_templates,
                 nominal_templates: tables.nominal_templates,
+                enum_templates: tables.enum_templates,
                 signatures: tables.signatures,
                 globals: tables.globals,
                 nominals: tables.nominals,
@@ -24988,6 +25028,19 @@ impl<'a> CoreLowerer<'a> {
                     route.source.parameter == local as usize
                         && route.source.path.starts_with(prefix)
                 })
+            })
+    }
+
+    fn runtime_nominal_kind(&self, ty: TypeId) -> Option<(String, NominalKind)> {
+        self.effects
+            .late_nominals
+            .get(&ty)
+            .map(|info| (info.declaration.clone(), info.kind.clone()))
+            .or_else(|| {
+                self.nominals
+                    .values()
+                    .find(|info| info.id == ty)
+                    .map(|info| (info.name.clone(), info.kind.clone()))
             })
     }
 
@@ -25310,6 +25363,7 @@ impl<'a> CoreLowerer<'a> {
                     declared
                 } else if let Some(late) = self.effects.late_nominals.get(&ty).cloned()
                     && late.declaration == *name
+                    && let Some(fields) = late.struct_fields().map(|fields| fields.to_vec())
                 {
                     if !self
                         .privacy_domains
@@ -25323,7 +25377,7 @@ impl<'a> CoreLowerer<'a> {
                             ),
                         )]);
                     }
-                    late.fields
+                    fields
                 } else {
                     return Err(vec![type_error(
                         pattern.span,
@@ -25342,19 +25396,27 @@ impl<'a> CoreLowerer<'a> {
                 core::DecisionPatternKind::Aggregate { fields: resolved }
             }
             PatternKind::Variant { path, fields, rest } => {
-                let Some(info) = self.nominals.values().find(|info| info.id == ty).cloned() else {
+                let (enum_name, variants, late) = if let Some(info) =
+                    self.nominals.values().find(|info| info.id == ty).cloned()
+                {
+                    let NominalKind::Enum(variants) = info.kind else {
+                        return Err(vec![type_error(
+                            pattern.span,
+                            "variant pattern requires an enum",
+                        )]);
+                    };
+                    (info.name, variants, false)
+                } else if let Some(info) = self.effects.late_nominals.get(&ty).cloned()
+                    && let Some(variants) = info.enum_variants().map(|variants| variants.to_vec())
+                {
+                    (info.declaration, variants, true)
+                } else {
                     return Err(vec![type_error(
                         pattern.span,
                         "variant pattern requires an enum",
                     )]);
                 };
-                let NominalKind::Enum(variants) = info.kind else {
-                    return Err(vec![type_error(
-                        pattern.span,
-                        "variant pattern requires an enum",
-                    )]);
-                };
-                if path.len() != 2 || path[0] != info.name {
+                if path.len() != 2 || path[0] != enum_name {
                     return Err(vec![type_error(
                         pattern.span,
                         "variant pattern type mismatch",
@@ -25373,7 +25435,7 @@ impl<'a> CoreLowerer<'a> {
                         "variant pattern has the wrong arity",
                     )]);
                 }
-                if let Some(error) = self.private_deconstruction_error(ty, pattern.span) {
+                if !late && let Some(error) = self.private_deconstruction_error(ty, pattern.span) {
                     return Err(vec![error]);
                 }
                 let mut supplied = vec![None; field_types.len()];
@@ -25717,6 +25779,7 @@ impl<'a> CoreLowerer<'a> {
                     declared
                 } else if let Some(late) = self.effects.late_nominals.get(&ty).cloned()
                     && late.declaration == *name
+                    && let Some(fields) = late.struct_fields().map(|fields| fields.to_vec())
                 {
                     if !self
                         .privacy_domains
@@ -25730,7 +25793,7 @@ impl<'a> CoreLowerer<'a> {
                             ),
                         )]);
                     }
-                    late.fields
+                    fields
                 } else {
                     return Err(vec![type_error(
                         pattern.span,
@@ -25805,22 +25868,30 @@ impl<'a> CoreLowerer<'a> {
                 }
             }
             PatternKind::Variant { path, fields, rest } => {
-                let Some(info) = self.nominals.values().find(|info| info.id == ty).cloned() else {
+                let (enum_name, variants, late) = if let Some(info) =
+                    self.nominals.values().find(|info| info.id == ty).cloned()
+                {
+                    let NominalKind::Enum(variants) = info.kind else {
+                        return Err(vec![type_error(
+                            pattern.span,
+                            format!("`{}` is not an enum", info.name),
+                        )]);
+                    };
+                    (info.name, variants, false)
+                } else if let Some(info) = self.effects.late_nominals.get(&ty).cloned()
+                    && let Some(variants) = info.enum_variants().map(|variants| variants.to_vec())
+                {
+                    (info.declaration, variants, true)
+                } else {
                     return Err(vec![type_error(
                         pattern.span,
                         "enum variant pattern requires a nominal enum payload",
                     )]);
                 };
-                let NominalKind::Enum(variants) = info.kind else {
+                if path.len() != 2 || path[0] != enum_name {
                     return Err(vec![type_error(
                         pattern.span,
-                        format!("`{}` is not an enum", info.name),
-                    )]);
-                };
-                if path.len() != 2 || path[0] != info.name {
-                    return Err(vec![type_error(
-                        pattern.span,
-                        format!("variant pattern must name a variant of `{}`", info.name),
+                        format!("variant pattern must name a variant of `{enum_name}`"),
                     )]);
                 }
                 let Some((variant, (_, field_types))) = variants
@@ -25830,7 +25901,7 @@ impl<'a> CoreLowerer<'a> {
                 else {
                     return Err(vec![type_error(
                         pattern.span,
-                        format!("enum `{}` has no variant `{}`", info.name, path[1]),
+                        format!("enum `{enum_name}` has no variant `{}`", path[1]),
                     )]);
                 };
                 if fields.len() > field_types.len() {
@@ -25838,7 +25909,7 @@ impl<'a> CoreLowerer<'a> {
                         pattern.span,
                         format!(
                             "variant `{}::{}` expects {} field pattern(s), got {}",
-                            info.name,
+                            enum_name,
                             path[1],
                             field_types.len(),
                             fields.len()
@@ -25849,12 +25920,11 @@ impl<'a> CoreLowerer<'a> {
                     return Err(vec![type_error(
                         pattern.span,
                         format!(
-                            "cannot use an ownership pattern on enum `{}` because it has a custom Drop hook",
-                            info.name
+                            "cannot use an ownership pattern on enum `{enum_name}` because it has a custom Drop hook"
                         ),
                     )]);
                 }
-                if let Some(error) = self.private_deconstruction_error(ty, pattern.span) {
+                if !late && let Some(error) = self.private_deconstruction_error(ty, pattern.span) {
                     return Err(vec![error]);
                 }
                 let required = u64::from(self.use_interval(ty).lower);
@@ -26646,6 +26716,7 @@ impl<'a> CoreLowerer<'a> {
                     },
                 ) => self
                     .static_local_expression_type(operand)
+                    .or_else(|| self.planned_direct_call_result(operand))
                     .map(|actual| (referent.as_ref(), actual)),
                 _ => None,
             };
@@ -26665,7 +26736,10 @@ impl<'a> CoreLowerer<'a> {
                 }
                 continue;
             }
-            let Some(actual) = self.static_local_expression_type(argument) else {
+            let Some(actual) = self
+                .static_local_expression_type(argument)
+                .or_else(|| self.planned_direct_call_result(argument))
+            else {
                 continue;
             };
             if !self.infer_late_substitutions(
@@ -26678,6 +26752,61 @@ impl<'a> CoreLowerer<'a> {
                     argument.span,
                     format!(
                         "type mismatch: generic callable `{name}` has contradictory argument-type evidence"
+                    ),
+                )]);
+            }
+        }
+        for (parameter, argument) in function.params.iter().zip(arguments) {
+            let Some(callable_binder) = parameter.ty.simple_name() else {
+                continue;
+            };
+            let Some(output) = function
+                .where_clause
+                .iter()
+                .flat_map(|clause| &clause.goals)
+                .find(|goal| {
+                    goal.subject.simple_name() == Some(callable_binder)
+                        && goal.relation.path.len() == 1
+                        && goal.relation.path[0].name == "Fn"
+                })
+                .and_then(|goal| {
+                    goal.relation
+                        .bindings
+                        .iter()
+                        .find(|binding| binding.name == "Output")
+                })
+                .and_then(|binding| binding.value.as_type())
+                .cloned()
+            else {
+                continue;
+            };
+            let planned_result = self
+                .planned_closure_value(argument)
+                .map(|request| request.shape.result.clone())
+                .or_else(|| {
+                    self.planned_late_closure(argument)
+                        .map(|plan| plan.request.shape.result.clone())
+                });
+            let planned_result =
+                planned_result.and_then(|result| self.late_closure_type_id(&result));
+            let provisional_result = match &argument.kind {
+                ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
+                    self.provisional_handler_result(body.span)
+                }
+                ExprKind::Block(_) | ExprKind::ContextBlock(_) => {
+                    self.provisional_handler_result(argument.span)
+                }
+                _ => None,
+            };
+            let Some(actual) = planned_result.or(provisional_result) else {
+                continue;
+            };
+            if !self.infer_late_substitutions(&output, actual, &generic_binders, &mut substitutions)
+            {
+                return Err(vec![type_error(
+                    argument.span,
+                    format!(
+                        "type mismatch: generic callable `{name}` has contradictory callback-result evidence"
                     ),
                 )]);
             }
@@ -27167,7 +27296,7 @@ impl<'a> CoreLowerer<'a> {
     }
 
     fn substituted_source_type(
-        &self,
+        &mut self,
         syntax: &TypeSyntax,
         substitutions: &BTreeMap<String, TypeId>,
     ) -> Option<TypeId> {
@@ -27187,8 +27316,132 @@ impl<'a> CoreLowerer<'a> {
             self.aliases,
             self.runtime_bindings.array_name(),
         )
-        .ok()?;
-        self.existing_structural_type_id(&resolved)
+        .ok();
+        if let Some(id) = resolved
+            .as_ref()
+            .and_then(|resolved| self.existing_structural_type_id(resolved))
+        {
+            return Some(id);
+        }
+
+        // Static control inlining can discover a concrete generic result
+        // after specialization discovery has frozen the ordinary nominal
+        // table. Intern that exact enum instance here instead of requiring a
+        // source-level annotation or an otherwise-unused specialization.
+        let TypeSyntaxKind::Application {
+            constructor,
+            arguments,
+            lifetime_arguments,
+        } = &syntax.kind
+        else {
+            return None;
+        };
+        if !lifetime_arguments.is_empty() {
+            return None;
+        }
+        let declaration_name = constructor.simple_name()?;
+        let argument_ids = arguments
+            .iter()
+            .map(|argument| self.substituted_source_type(argument, substitutions))
+            .collect::<Option<Vec<_>>>()?;
+        if let Some(id) = self.effects.late_nominals.iter().find_map(|(id, info)| {
+            (info.declaration == declaration_name && info.arguments == argument_ids).then_some(*id)
+        }) {
+            return Some(id);
+        }
+        let declaration = self
+            .enum_templates
+            .iter()
+            .find(|declaration| {
+                declaration.name == declaration_name && declaration.generics.is_some()
+            })?
+            .clone();
+        let parameters = declaration
+            .generics
+            .as_ref()?
+            .params
+            .iter()
+            .filter(|parameter| parameter.kind == GenericParamKind::Type)
+            .collect::<Vec<_>>();
+        if parameters.len() != argument_ids.len()
+            || declaration
+                .generics
+                .as_ref()?
+                .params
+                .iter()
+                .any(|parameter| parameter.kind != GenericParamKind::Type)
+        {
+            return None;
+        }
+        let nominal_substitutions = parameters
+            .iter()
+            .zip(&argument_ids)
+            .map(|(parameter, argument)| (parameter.name.clone(), *argument))
+            .collect::<BTreeMap<_, _>>();
+        let variants = declaration
+            .variants
+            .iter()
+            .map(|variant| {
+                let fields = variant
+                    .fields
+                    .iter()
+                    .map(|field| self.substituted_source_type(field, &nominal_substitutions))
+                    .collect::<Option<Vec<_>>>()?;
+                Some((variant.name.clone(), fields))
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let principal = variants
+            .iter()
+            .flat_map(|(_, fields)| fields)
+            .map(|field| self.structural_use_interval(*field))
+            .try_fold(UseInterval::UNRESTRICTED, UseInterval::intersect)?;
+        let copy = principal.duplicable();
+        let zero_use_allowed = principal.lower == 0;
+        let identity = argument_ids
+            .iter()
+            .map(|argument| format!("t{argument}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let base = Type::Enum {
+            name: format!("{declaration_name}<{identity}>"),
+            variants: variants
+                .iter()
+                .map(|(name, fields)| EnumVariant {
+                    name: name.clone(),
+                    fields: fields
+                        .iter()
+                        .enumerate()
+                        .map(|(index, ty)| Field {
+                            name: index.to_string(),
+                            ty: *ty,
+                        })
+                        .collect(),
+                })
+                .collect(),
+            copy,
+        };
+        let descriptor = if base.claimed_duplicable() == copy
+            && base.claimed_zero_use_allowed() == zero_use_allowed
+        {
+            base
+        } else {
+            base.restricted(copy, zero_use_allowed)
+        };
+        let ty = self.effects.allocate_type(descriptor);
+        self.effects.late_nominals.insert(
+            ty,
+            LateNominalInfo {
+                declaration: declaration.name,
+                arguments: argument_ids,
+                kind: NominalKind::Enum(variants),
+                privacy: NominalPrivacy {
+                    declaration: declaration.span,
+                    private_fields: BTreeSet::new(),
+                },
+                principal,
+            },
+        );
+        Some(ty)
     }
 
     fn monomorphic_source_type(&mut self, syntax: &TypeSyntax) -> Option<TypeId> {
@@ -28958,11 +29211,19 @@ impl<'a> CoreLowerer<'a> {
                 self.is_multishot_capture_safe(self.structural_id(&element), visiting)
             }
             ResolvedType::Concrete(_) if (ty as usize) < Type::predefined().len() => ty != NEVER,
-            ResolvedType::Concrete(_) => self
-                .nominals
-                .values()
-                .find(|info| info.id == ty)
-                .is_some_and(|info| match &info.kind {
+            ResolvedType::Concrete(_) => {
+                let kind = self
+                    .effects
+                    .late_nominals
+                    .get(&ty)
+                    .map(|info| &info.kind)
+                    .or_else(|| {
+                        self.nominals
+                            .values()
+                            .find(|info| info.id == ty)
+                            .map(|info| &info.kind)
+                    });
+                kind.is_some_and(|kind| match kind {
                     NominalKind::Struct(fields) => fields
                         .iter()
                         .all(|(_, field)| self.is_multishot_capture_safe(*field, visiting)),
@@ -28971,7 +29232,8 @@ impl<'a> CoreLowerer<'a> {
                             .iter()
                             .all(|field| self.is_multishot_capture_safe(*field, visiting))
                     }),
-                }),
+                })
+            }
         };
         visiting.remove(&ty);
         safe
@@ -28992,9 +29254,9 @@ impl<'a> CoreLowerer<'a> {
             }),
             ResolvedType::Concrete(_) => {
                 if let Some(late) = self.effects.late_nominals.get(&ty) {
-                    late.fields
-                        .iter()
-                        .any(|(_, field)| self.contains_snapshot_array(*field, visiting))
+                    late.field_types()
+                        .into_iter()
+                        .any(|field| self.contains_snapshot_array(field, visiting))
                 } else {
                     self.nominals
                         .values()
@@ -29039,9 +29301,9 @@ impl<'a> CoreLowerer<'a> {
             ResolvedType::Concrete(_) if (ty as usize) < Type::predefined().len() => true,
             ResolvedType::Concrete(_) => {
                 if let Some(late) = self.effects.late_nominals.get(&ty) {
-                    late.fields
-                        .iter()
-                        .all(|(_, field)| self.is_acyclic_snapshot_shape(*field, visiting))
+                    late.field_types()
+                        .into_iter()
+                        .all(|field| self.is_acyclic_snapshot_shape(field, visiting))
                 } else {
                     self.nominals
                         .values()
@@ -29112,11 +29374,21 @@ impl<'a> CoreLowerer<'a> {
         if moved.is_empty() || self.custom_drop_types.contains(&ty) {
             return false;
         }
-        let Some(NominalInfo {
-            kind: NominalKind::Enum(variants),
-            ..
-        }) = self.nominals.values().find(|info| info.id == ty)
-        else {
+        let variants = self
+            .effects
+            .late_nominals
+            .get(&ty)
+            .and_then(LateNominalInfo::enum_variants)
+            .or_else(|| {
+                self.nominals
+                    .values()
+                    .find(|info| info.id == ty)
+                    .and_then(|info| match &info.kind {
+                        NominalKind::Enum(variants) => Some(variants.as_slice()),
+                        NominalKind::Struct(_) => None,
+                    })
+            });
+        let Some(variants) = variants else {
             return false;
         };
         let Some((_, fields)) = variants.get(variant as usize) else {
@@ -29199,7 +29471,11 @@ impl<'a> CoreLowerer<'a> {
                         })
                         .unwrap_or(usize::MAX)
                 },
-                |late| late.fields.len(),
+                |late| {
+                    late.struct_fields()
+                        .map(|fields| fields.len())
+                        .unwrap_or(usize::MAX)
+                },
             ),
             _ => usize::MAX,
         };
@@ -29255,7 +29531,10 @@ impl<'a> CoreLowerer<'a> {
                             NominalKind::Enum(_) => None,
                         })
                 },
-                |late| Some(late.fields.iter().map(|(_, ty)| *ty).collect()),
+                |late| {
+                    late.struct_fields()
+                        .map(|fields| fields.iter().map(|(_, ty)| *ty).collect())
+                },
             ),
             _ => None,
         }
@@ -30175,7 +30454,12 @@ impl<'a> CoreLowerer<'a> {
     }
 
     fn private_field_error(&self, ty: TypeId, field: &str, use_site: Span) -> Option<Diagnostic> {
-        let privacy = self.nominal_privacy.get(&ty)?;
+        let privacy = self.nominal_privacy.get(&ty).or_else(|| {
+            self.effects
+                .late_nominals
+                .get(&ty)
+                .map(|info| &info.privacy)
+        })?;
         (privacy.private_fields.contains(field)
             && !self
                 .privacy_domains
@@ -30195,7 +30479,12 @@ impl<'a> CoreLowerer<'a> {
     }
 
     fn private_deconstruction_error(&self, ty: TypeId, use_site: Span) -> Option<Diagnostic> {
-        let privacy = self.nominal_privacy.get(&ty)?;
+        let privacy = self.nominal_privacy.get(&ty).or_else(|| {
+            self.effects
+                .late_nominals
+                .get(&ty)
+                .map(|info| &info.privacy)
+        })?;
         (!privacy.private_fields.is_empty()
             && !self
                 .privacy_domains
@@ -30245,30 +30534,60 @@ impl<'a> CoreLowerer<'a> {
             }
             ResolvedType::Concrete(_) => {
                 if let Some(late) = self.effects.late_nominals.get(&referent).cloned() {
-                    let Some((field_id, (_, ty))) = late
-                        .fields
-                        .iter()
-                        .enumerate()
-                        .find(|(_, (field, _))| field == name)
-                    else {
-                        return Err(vec![type_error(
-                            use_site,
-                            format!("struct `{}` has no field `{name}`", late.declaration),
-                        )]);
-                    };
-                    if late.privacy.private_fields.contains(name)
-                        && !self
-                            .privacy_domains
-                            .same_domain(late.privacy.declaration, use_site)
-                    {
-                        return Err(vec![type_error(
-                            use_site,
-                            format!(
-                                "private field `{name}` is accessible only within its defining source segment"
-                            ),
-                        )]);
+                    match &late.kind {
+                        NominalKind::Struct(fields) => {
+                            let Some((field_id, (_, ty))) = fields
+                                .iter()
+                                .enumerate()
+                                .find(|(_, (field, _))| field == name)
+                            else {
+                                return Err(vec![type_error(
+                                    use_site,
+                                    format!("struct `{}` has no field `{name}`", late.declaration),
+                                )]);
+                            };
+                            if late.privacy.private_fields.contains(name)
+                                && !self
+                                    .privacy_domains
+                                    .same_domain(late.privacy.declaration, use_site)
+                            {
+                                return Err(vec![type_error(
+                                    use_site,
+                                    format!(
+                                        "private field `{name}` is accessible only within its defining source segment"
+                                    ),
+                                )]);
+                            }
+                            Ok((field_id as u32, *ty, None))
+                        }
+                        NominalKind::Enum(variants) => {
+                            let Some(variant) = active_variant else {
+                                return Err(vec![type_error(
+                                    use_site,
+                                    "enum payload projection requires a dominating active-variant proof",
+                                )]);
+                            };
+                            let Some((_, fields)) = variants.get(variant as usize) else {
+                                return Err(vec![type_error(
+                                    use_site,
+                                    format!("enum variant proof {variant} is out of bounds"),
+                                )]);
+                            };
+                            let field = name.parse::<u32>().map_err(|_| {
+                                vec![type_error(
+                                    use_site,
+                                    "enum payload projection requires a numeric field index",
+                                )]
+                            })?;
+                            let Some(ty) = fields.get(field as usize) else {
+                                return Err(vec![type_error(
+                                    use_site,
+                                    format!("enum variant has no payload field `{field}`"),
+                                )]);
+                            };
+                            Ok((field, *ty, Some(variant)))
+                        }
                     }
-                    Ok((field_id as u32, *ty, None))
                 } else {
                     let Some((_, info)) =
                         self.nominals.iter().find(|(_, info)| info.id == referent)
@@ -30955,6 +31274,13 @@ impl<'a> CoreLowerer<'a> {
             ExprKind::Variable(path) if path.len() == 1 => {
                 self.locals.get(path[0].as_ref()).map(|local| local.ty)
             }
+            ExprKind::Call(callee, _) => match &callee.kind {
+                ExprKind::Variable(path) if path.len() == 1 => self
+                    .signatures
+                    .get(path[0].as_ref())
+                    .map(|signature| signature.result),
+                _ => None,
+            },
             ExprKind::Move(value) => self.static_local_expression_type(value),
             ExprKind::Unary {
                 op: UnaryOp::Dereference,
@@ -30985,7 +31311,7 @@ impl<'a> CoreLowerer<'a> {
                         })
                         .or_else(|| {
                             self.effects.late_nominals.get(&ty).and_then(|info| {
-                                info.fields
+                                info.struct_fields()?
                                     .iter()
                                     .find_map(|(name, ty)| (name == field).then_some(*ty))
                             })
@@ -31161,6 +31487,26 @@ impl<'a> CoreLowerer<'a> {
                         lowerer.effects.extra_type(ty)
                     {
                         collect(lowerer, *capture_type, visiting, path, leaves);
+                    } else if let Some(info) = lowerer.effects.late_nominals.get(&ty) {
+                        match &info.kind {
+                            NominalKind::Struct(fields) => {
+                                for (field, (_, child)) in fields.iter().enumerate() {
+                                    path.push(field as u32);
+                                    collect(lowerer, *child, visiting, path, leaves);
+                                    path.pop();
+                                }
+                            }
+                            NominalKind::Enum(variants) => {
+                                for (variant, (_, fields)) in variants.iter().enumerate() {
+                                    for (field, child) in fields.iter().enumerate() {
+                                        path.extend([u32::MAX - variant as u32, field as u32]);
+                                        collect(lowerer, *child, visiting, path, leaves);
+                                        path.pop();
+                                        path.pop();
+                                    }
+                                }
+                            }
+                        }
                     } else if let Some(info) = lowerer.nominals.values().find(|info| info.id == ty)
                     {
                         match &info.kind {
@@ -31229,8 +31575,20 @@ impl<'a> CoreLowerer<'a> {
                     }
                 }
                 ResolvedType::Concrete(_) => {
-                    if let Some(info) = lowerer.nominals.values().find(|info| info.id == ty) {
-                        match &info.kind {
+                    let kind = lowerer
+                        .effects
+                        .late_nominals
+                        .get(&ty)
+                        .map(|info| &info.kind)
+                        .or_else(|| {
+                            lowerer
+                                .nominals
+                                .values()
+                                .find(|info| info.id == ty)
+                                .map(|info| &info.kind)
+                        });
+                    if let Some(kind) = kind {
+                        match kind {
                             NominalKind::Struct(fields) => {
                                 for (_, field) in fields {
                                     collect(lowerer, *field, visiting, leaves);
@@ -31564,6 +31922,20 @@ impl<'a> CoreLowerer<'a> {
                     })
                     .is_some_and(|capture_type| self.contains_reference(capture_type, visiting))
                     || self
+                        .effects
+                        .late_nominals
+                        .get(&ty)
+                        .is_some_and(|info| match &info.kind {
+                            NominalKind::Struct(fields) => fields
+                                .iter()
+                                .any(|(_, field)| self.contains_reference(*field, visiting)),
+                            NominalKind::Enum(variants) => variants.iter().any(|(_, fields)| {
+                                fields
+                                    .iter()
+                                    .any(|field| self.contains_reference(*field, visiting))
+                            }),
+                        })
+                    || self
                         .nominals
                         .values()
                         .find(|info| info.id == ty)
@@ -31598,11 +31970,19 @@ impl<'a> CoreLowerer<'a> {
             ResolvedType::Array(element) => {
                 self.contains_custom_drop(self.structural_id(&element), visiting)
             }
-            ResolvedType::Concrete(_) => self
-                .nominals
-                .values()
-                .find(|info| info.id == ty)
-                .is_some_and(|info| match &info.kind {
+            ResolvedType::Concrete(_) => {
+                let kind = self
+                    .effects
+                    .late_nominals
+                    .get(&ty)
+                    .map(|info| &info.kind)
+                    .or_else(|| {
+                        self.nominals
+                            .values()
+                            .find(|info| info.id == ty)
+                            .map(|info| &info.kind)
+                    });
+                kind.is_some_and(|kind| match kind {
                     NominalKind::Struct(fields) => fields
                         .iter()
                         .any(|(_, field)| self.contains_custom_drop(*field, visiting)),
@@ -31611,7 +31991,8 @@ impl<'a> CoreLowerer<'a> {
                             .iter()
                             .any(|field| self.contains_custom_drop(*field, visiting))
                     }),
-                }),
+                })
+            }
         };
         visiting.remove(&ty);
         contains
@@ -31882,7 +32263,7 @@ impl<'a> CoreLowerer<'a> {
         let enum_name = path[0].as_ref();
         let variant_name = path[1].as_ref();
         let planned = self.planned_construction(expression);
-        let info = expected
+        let ordinary = expected
             .and_then(|expected| {
                 self.nominals.iter().find_map(|(name, info)| {
                     (info.id == expected
@@ -31897,16 +32278,27 @@ impl<'a> CoreLowerer<'a> {
             })
             .or_else(|| self.nominals.get(enum_name))
             .cloned();
-        let Some(info) = info else {
+        let late = expected.or(planned).and_then(|ty| {
+            self.effects
+                .late_nominals
+                .get(&ty)
+                .filter(|info| info.declaration == enum_name)
+                .and_then(|info| info.enum_variants().map(|variants| (ty, variants.to_vec())))
+        });
+        let (ty, variants) = if let Some(info) = ordinary {
+            let NominalKind::Enum(variants) = info.kind else {
+                return Err(vec![type_error(
+                    span,
+                    format!("`{enum_name}` is a struct, not an enum"),
+                )]);
+            };
+            (info.id, variants)
+        } else if let Some(late) = late {
+            late
+        } else {
             return Err(vec![type_error(
                 span,
                 format!("unknown enum `{enum_name}` in variant construction"),
-            )]);
-        };
-        let NominalKind::Enum(variants) = &info.kind else {
-            return Err(vec![type_error(
-                span,
-                format!("`{enum_name}` is a struct, not an enum"),
             )]);
         };
         let Some((variant, (_, payloads))) = variants
@@ -31948,12 +32340,12 @@ impl<'a> CoreLowerer<'a> {
                 value,
             });
         }
-        self.check(span, expected, info.id)?;
+        self.check(span, expected, ty)?;
         let mut expression = self.typed(
             span,
-            info.id,
+            ty,
             core::ExprKind::Construct {
-                nominal: info.id,
+                nominal: ty,
                 variant: Some(variant as u32),
                 fields,
             },
@@ -32748,6 +33140,13 @@ impl<'a> CoreLowerer<'a> {
                         .and_then(|expected| self.effects.late_nominals.get(&expected))
                         .filter(|late| late.declaration == declaration.name)
                         .cloned();
+                    let expected_sealed = expected.and_then(|expected| {
+                        self.nominals.iter().find_map(|(name, info)| {
+                            let instance = decode_nominal_instance(name)?;
+                            (info.id == expected && instance.declaration.0 == declaration.name)
+                                .then_some((expected, instance))
+                        })
+                    });
                     if let Some(late) = &expected_late {
                         let binders = declaration
                             .generics
@@ -32766,17 +33165,35 @@ impl<'a> CoreLowerer<'a> {
                             );
                         }
                     }
-                    let expected_sealed = expected.filter(|expected| {
-                        self.nominals.iter().any(|(name, info)| {
-                            info.id == *expected
-                                && decode_nominal_instance(name).is_some_and(|instance| {
-                                    instance.declaration.0 == declaration.name
-                                })
-                        })
-                    });
+                    if let Some((_, instance)) = &expected_sealed {
+                        let arguments = declaration
+                            .generics
+                            .iter()
+                            .flat_map(|generics| &generics.params)
+                            .filter(|parameter| {
+                                matches!(
+                                    parameter.kind,
+                                    GenericParamKind::Type | GenericParamKind::Const(_)
+                                )
+                            })
+                            .zip(&instance.arguments)
+                            .filter(|(parameter, _)| parameter.kind == GenericParamKind::Type)
+                            .map(|(parameter, argument)| {
+                                (parameter.name.clone(), argument.clone())
+                            })
+                            .collect::<Vec<_>>();
+                        for (parameter, argument) in arguments {
+                            if let Some(argument) = self.late_closure_type_id(&argument) {
+                                substitutions.insert(parameter, argument);
+                            }
+                        }
+                    }
+                    let expected_sealed = expected_sealed.map(|(expected, _)| expected);
                     let expected_fields = expected_late
                         .as_ref()
-                        .map(|late| late.fields.clone())
+                        .and_then(|late| {
+                            late.struct_fields().map(|fields| fields.to_vec())
+                        })
                         .or_else(|| {
                             let expected = expected_sealed?;
                             self.nominals.iter().find_map(|(name, info)| {
@@ -32921,7 +33338,7 @@ impl<'a> CoreLowerer<'a> {
                                 .filter(|param| param.kind == GenericParamKind::Type)
                                 .map(|param| substitutions[&param.name])
                                 .collect(),
-                            fields: runtime_fields,
+                            kind: NominalKind::Struct(runtime_fields),
                             privacy: NominalPrivacy {
                                 declaration: declaration.span,
                                 private_fields: declaration
@@ -33239,10 +33656,9 @@ impl<'a> CoreLowerer<'a> {
                     && path.len() == 1
                     && let Some(local) = self.locals.get(path[0].as_ref()).cloned()
                     && let Some(referent) = self.reference_referent(local.ty)
-                    && let Some((_, info)) =
-                        self.nominals.iter().find(|(_, info)| info.id == referent)
+                    && let Some((nominal_name, kind)) = self.runtime_nominal_kind(referent)
                 {
-                    let (field_id, ty, projected_variant) = match &info.kind {
+                    let (field_id, ty, projected_variant) = match &kind {
                         NominalKind::Struct(fields) => {
                             let Some((field_id, (_, ty))) = fields
                                 .iter()
@@ -33251,10 +33667,10 @@ impl<'a> CoreLowerer<'a> {
                             else {
                                 return Err(vec![type_error(
                                     span,
-                                    format!("struct `{}` has no field `{field}`", info.name),
+                                    format!("struct `{nominal_name}` has no field `{field}`"),
                                 )]);
                             };
-                            if let Some(error) = self.private_field_error(info.id, field, span) {
+                            if let Some(error) = self.private_field_error(referent, field, span) {
                                 return Err(vec![error]);
                             }
                             (field_id as u32, *ty, None)
@@ -33365,37 +33781,74 @@ impl<'a> CoreLowerer<'a> {
                     && let Some(local) = self.locals.get(path[0].as_ref()).cloned()
                     && let Some(late) = self.effects.late_nominals.get(&local.ty).cloned()
                 {
-                    let Some((field_id, (_, ty))) = late
-                        .fields
-                        .iter()
-                        .enumerate()
-                        .find(|(_, (name, _))| name == field)
-                    else {
-                        return Err(vec![type_error(
-                            span,
-                            format!("struct `{}` has no field `{field}`", late.declaration),
-                        )]);
+                    let (field_id, ty, projected_variant) = match &late.kind {
+                        NominalKind::Struct(fields) => {
+                            let Some((field_id, (_, ty))) = fields
+                                .iter()
+                                .enumerate()
+                                .find(|(_, (name, _))| name == field)
+                            else {
+                                return Err(vec![type_error(
+                                    span,
+                                    format!(
+                                        "struct `{}` has no field `{field}`",
+                                        late.declaration
+                                    ),
+                                )]);
+                            };
+                            if late.privacy.private_fields.contains(field)
+                                && !self
+                                    .privacy_domains
+                                    .same_domain(late.privacy.declaration, span)
+                            {
+                                return Err(vec![type_error(
+                                    span,
+                                    format!(
+                                        "private field `{field}` is accessible only within its defining source segment"
+                                    ),
+                                )]);
+                            }
+                            (field_id as u32, *ty, None)
+                        }
+                        NominalKind::Enum(variants) => {
+                            let Some(variant) =
+                                self.active_variant_proofs.get(&local.local).copied()
+                            else {
+                                return Err(vec![type_error(
+                                    span,
+                                    "enum payload field access requires a dominating active-variant proof",
+                                )]);
+                            };
+                            let Some((_, fields)) = variants.get(variant as usize) else {
+                                return Err(vec![type_error(
+                                    span,
+                                    format!("enum variant proof {variant} is out of bounds"),
+                                )]);
+                            };
+                            let field_id = field.parse::<u32>().map_err(|_| {
+                                vec![type_error(
+                                    span,
+                                    "enum payload field access requires a numeric field index",
+                                )]
+                            })?;
+                            let Some(ty) = fields.get(field_id as usize) else {
+                                return Err(vec![type_error(
+                                    span,
+                                    format!("enum variant has no payload field `{field_id}`"),
+                                )]);
+                            };
+                            (field_id, *ty, Some(variant))
+                        }
                     };
-                    if late.privacy.private_fields.contains(field)
-                        && !self
-                            .privacy_domains
-                            .same_domain(late.privacy.declaration, span)
-                    {
-                        return Err(vec![type_error(
-                            span,
-                            format!(
-                                "private field `{field}` is accessible only within its defining source segment"
-                            ),
-                        )]);
-                    }
-                    let field_id = field_id as u32;
-                    let ty = *ty;
+                    let prefix = projected_variant
+                        .map(|variant| vec![u32::MAX - variant, field_id])
+                        .unwrap_or_else(|| vec![field_id]);
                     let name = path[0].as_ref();
                     if self.moved.contains(&local.local)
                         || self
                             .moved_paths
                             .get(&local.local)
-                            .is_some_and(|paths| paths.contains(&[field_id][..]))
+                            .is_some_and(|paths| paths.contains(&prefix))
                     {
                         return Err(self.borrow_error(
                             span,
@@ -33439,14 +33892,14 @@ impl<'a> CoreLowerer<'a> {
                         self.moved_paths
                             .entry(local.local)
                             .or_default()
-                            .insert(vec![field_id]);
+                            .insert(prefix.clone());
                     }
-                    let mut projected_references = Self::projected_reference_fields(
+                    let mut projected_references = Self::projected_reference_path(
                         &Self::local_reference_fields(&local),
-                        field_id,
+                        &prefix,
                     );
                     let authorized_return_projection =
-                        self.authorized_return_projection(local.local, &[field_id]);
+                        self.authorized_return_projection(local.local, &prefix);
                     for origin in projected_references.values_mut() {
                         if origin.region == 0
                             && self.reference_referent(ty).is_some()
@@ -33482,7 +33935,7 @@ impl<'a> CoreLowerer<'a> {
                             subject: Box::new(place),
                             field: field_id,
                             copy,
-                            variant: None,
+                            variant: projected_variant,
                         },
                     );
                     for origin in projected_references.values() {
@@ -34467,9 +34920,8 @@ impl<'a> CoreLowerer<'a> {
                     }
                     let mut negative_variant = None;
                     if let Some((local, excluded_variant)) = refined_variant
-                        && let Some(info) =
-                            self.nominals.values().find(|info| info.id == decision_ty)
-                        && let NominalKind::Enum(variants) = &info.kind
+                        && let Some((_, NominalKind::Enum(variants))) =
+                            self.runtime_nominal_kind(decision_ty)
                         && variants.len() == 2
                     {
                         // Failure of an exact variant test on a two-variant
@@ -38216,10 +38668,8 @@ impl<'a> CoreLowerer<'a> {
             && owner.is_some_and(|owner| self.active_variant_proofs.contains_key(&owner))
             && matches!(self.resolved_type(base_ty), ResolvedType::Concrete(_))
             && self
-                .nominals
-                .values()
-                .find(|info| info.id == base_ty)
-                .is_some_and(|info| matches!(info.kind, NominalKind::Enum(_)));
+                .runtime_nominal_kind(base_ty)
+                .is_some_and(|(_, kind)| matches!(kind, NominalKind::Enum(_)));
         if direct_local {
             let owner = owner.expect("a local assignment has an owner");
             let whole = self.loans.get(&owner).copied().unwrap_or_default();
@@ -38764,6 +39214,7 @@ impl<'a> CoreLowerer<'a> {
                         } else if let Some(late) =
                             self.effects.late_nominals.get(&source.ty).cloned()
                             && late.declaration == *ty
+                            && let Some(fields) = late.struct_fields().map(|fields| fields.to_vec())
                         {
                             if !self
                                 .privacy_domains
@@ -38777,7 +39228,7 @@ impl<'a> CoreLowerer<'a> {
                                     ),
                                 )]);
                             }
-                            (late.fields, format!("struct `{ty}`"), Some(source.ty))
+                            (fields, format!("struct `{ty}`"), Some(source.ty))
                         } else {
                             return Err(vec![type_error(
                                 *span,

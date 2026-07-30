@@ -651,6 +651,61 @@ fn range_callback_infers_nested_vec_constructors() {
 }
 
 #[test]
+fn range_callback_infers_map_err_input_from_direct_call() {
+    let source = r#"
+        enum SourceError { Rejected }
+        enum TargetError { Rejected(usize) }
+
+        read(index: usize, rejected: usize) -> Result<u32, SourceError> {
+            if(index == rejected) {
+                Result::Err(SourceError::Rejected)
+            } else {
+                Result::Ok(wrapping_convert_to_u32(index))
+            }
+        }
+
+        walk(rejected: usize) -> Result<(), TargetError> {
+            try_for_range(Range::new(0, 4), { index => {
+                let value = try(
+                    Result::map_err(
+                        read(index, rejected),
+                        { _ => TargetError::Rejected(index) }
+                    ),
+                    @walk
+                );
+                value;
+                Result::Ok(())
+            } })
+        }
+
+        success() -> usize {
+            handle walk(9) {
+                Result::Ok(_) => 42,
+                Result::Err(TargetError::Rejected(index)) => index
+            }
+        }
+
+        failure() -> usize {
+            handle walk(2) {
+                Result::Ok(_) => 90,
+                Result::Err(TargetError::Rejected(index)) => index
+            }
+        }
+
+        main() -> { () }
+    "#;
+
+    assert_eq!(
+        run("range-callback-map-err-call.glorious", source, "success"),
+        Value::U64(42)
+    );
+    assert_eq!(
+        run("range-callback-map-err-call.glorious", source, "failure"),
+        Value::U64(2)
+    );
+}
+
+#[test]
 fn late_generic_inline_does_not_bypass_private_deconstruction_authority() {
     let bundle = SourceBundle::new(
         Segment::new(

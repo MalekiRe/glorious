@@ -85,13 +85,14 @@ lower_functions(
         super::lowering::StageFunction
     >
 ) -> Result<(), CompileError> {
-    if(index <
+    try_for_range(Range::new(
+        index,
         super::super::frontend::elaboration::
             interface_callable_count(&*interfaces)
-    ) {
+    ), { current => {
         let shell =
             super::super::frontend::elaboration::
-                interface_callable_shell_at(&*interfaces, index);
+                interface_callable_shell_at(&*interfaces, current);
         let name = try(
             function_name(headers, declarations, shell),
             @lower_functions
@@ -144,7 +145,7 @@ lower_functions(
                     name,
                     &*interfaces,
                     &body,
-                    index
+                    current
                 ),
                 { found => CompileError::Lowering(shell, found) }
             ),
@@ -154,16 +155,8 @@ lower_functions(
             Result::Err(_) => unreachable(),
             Result::Ok(_) => ()
         };
-        lower_functions(
-            original,
-            headers,
-            resolution_index,
-            declarations,
-            interfaces,
-            index + 1,
-            output
-        )
-    } else { Result::Ok(()) }
+        Result::Ok(())
+    } })
 }
 
 find_entry(
