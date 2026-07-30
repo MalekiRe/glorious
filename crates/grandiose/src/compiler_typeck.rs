@@ -807,6 +807,7 @@ struct CachedTypedBody {
     fingerprint: u64,
     body: TypedExpr,
     refinements: Vec<RefinementEvidence>,
+    label_results: BTreeMap<(usize, usize), ProvisionalType>,
     assignment_reference_requirements: BTreeSet<ProvisionalType>,
 }
 
@@ -1797,7 +1798,7 @@ fn provisional_label_type(syntax: Option<&TypeSyntax>) -> Option<ProvisionalType
     }
 }
 
-fn provisional_contains_references(ty: &ProvisionalType) -> bool {
+pub(crate) fn provisional_contains_references(ty: &ProvisionalType) -> bool {
     match ty {
         ProvisionalType::Shared(_) | ProvisionalType::Unique(_) => true,
         ProvisionalType::Tuple(elements) => elements.iter().any(provisional_contains_references),
@@ -1926,7 +1927,7 @@ pub(crate) fn type_program_incremental(
     let mut tables = tables.clone();
     let mut bodies = BTreeMap::new();
     let mut refinements = BTreeMap::new();
-    let labels = program
+    let mut labels = program
         .globals
         .iter()
         .map(|global| {
@@ -1939,6 +1940,26 @@ pub(crate) fn type_program_incremental(
             (owner.clone(), collect_label_evidence(owner, &body))
         }))
         .collect::<BTreeMap<_, _>>();
+    let apply_label_results =
+        |labels: &mut BTreeMap<DeclarationKey, Vec<LabelEvidence>>,
+         owner: &DeclarationKey,
+         results: &BTreeMap<(usize, usize), ProvisionalType>| {
+            let Some(evidence) = labels.get_mut(owner) else {
+                return;
+            };
+            for label in evidence {
+                let key = (label.binder_span.start, label.binder_span.end);
+                let Some(result) = results.get(&key) else {
+                    continue;
+                };
+                label.destination_result = Some(result.clone());
+                label.result_contains_references = provisional_contains_references(result);
+                for leave in &mut label.leaves {
+                    leave.result = result.clone();
+                    leave.result_contains_references = provisional_contains_references(result);
+                }
+            }
+        };
     let mut assignment_reference_requirements = BTreeSet::new();
     // Global source types are inferred symbolically as well. This deliberately
     // accepts only whatever the ordinary expression typer can prove; the existing
@@ -1961,7 +1982,9 @@ pub(crate) fn type_program_incremental(
             if let Some(ty) = body.ty.clone() {
                 let global_reference_requirements = typer.assignment_reference_requirements.clone();
                 let global_refinements = std::mem::take(&mut typer.refinements);
+                let global_label_results = std::mem::take(&mut typer.label_results);
                 drop(typer);
+                apply_label_results(&mut labels, &key, &global_label_results);
                 assignment_reference_requirements.extend(global_reference_requirements);
                 tables.globals.insert(global.name.clone(), ty);
                 bodies.insert(key, body);
@@ -1990,6 +2013,7 @@ pub(crate) fn type_program_incremental(
             && let Some(cached) = cache.bodies.get(&shape.declaration)
             && cached.fingerprint == fingerprint
         {
+            apply_label_results(&mut labels, &shape.declaration, &cached.label_results);
             assignment_reference_requirements
                 .extend(cached.assignment_reference_requirements.iter().cloned());
             refinements.insert(shape.declaration.clone(), cached.refinements.clone());
@@ -2009,7 +2033,9 @@ pub(crate) fn type_program_incremental(
         }
         let body = typer.expression(&labeled_body, Some(&shape.result));
         let body_refinements = std::mem::take(&mut typer.refinements);
+        let body_label_results = std::mem::take(&mut typer.label_results);
         let body_requirements = typer.assignment_reference_requirements.clone();
+        apply_label_results(&mut labels, &shape.declaration, &body_label_results);
         assignment_reference_requirements.extend(body_requirements.iter().cloned());
         refinements.insert(shape.declaration.clone(), body_refinements.clone());
         bodies.insert(shape.declaration.clone(), body.clone());
@@ -2022,6 +2048,7 @@ pub(crate) fn type_program_incremental(
                     fingerprint,
                     body,
                     refinements: body_refinements,
+                    label_results: body_label_results,
                     assignment_reference_requirements: body_requirements,
                 },
             );
@@ -2047,6 +2074,7 @@ struct Typer<'a> {
     expression_ordinals: BTreeMap<usize, u32>,
     assignment_reference_requirements: BTreeSet<ProvisionalType>,
     active_labels: BTreeMap<String, Option<ProvisionalType>>,
+    label_results: BTreeMap<(usize, usize), ProvisionalType>,
     refinements: Vec<RefinementEvidence>,
 }
 
@@ -2385,6 +2413,7 @@ impl<'a> Typer<'a> {
             expression_ordinals: crate::compiler_specialization::expression_ordinals(root),
             assignment_reference_requirements: BTreeSet::new(),
             active_labels: BTreeMap::new(),
+            label_results: BTreeMap::new(),
             refinements: Vec::new(),
         }
     }
@@ -2877,8 +2906,13 @@ impl<'a> Typer<'a> {
             }
             ExprKind::Variable(_) => self.node(source, None, TypedExprKind::Unsupported(vec![])),
             ExprKind::LabelDestination { label, ty, body } => {
-                let result =
-                    provisional_label_type(ty.as_deref()).unwrap_or_else(|| predefined(UNIT));
+                let result = ty
+                    .as_deref()
+                    .and_then(|ty| provisional_label_type(Some(ty)))
+                    .or_else(|| expected.cloned())
+                    .unwrap_or_else(|| predefined(UNIT));
+                self.label_results
+                    .insert((label.span.start, label.span.end), result.clone());
                 let previous = self
                     .active_labels
                     .insert(label.name.to_string(), Some(result.clone()));
@@ -3849,6 +3883,45 @@ mod tests {
             labels[1].destination_result,
             Some(ProvisionalType::Predefined("Unit".into()))
         );
+    }
+
+    #[test]
+    fn inferred_label_destination_uses_its_contextual_result_type() {
+        let program = crate::parser::parse(
+            crate::lexer::lex(
+                "enum Result<T,E>{Ok(T),Err(E)}
+                 answer()->Result<i64,()>{@done:{@done(Result::Ok(42))}}
+                 main()->{()}",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let owner = DeclarationKey::Function("answer".into());
+        let result = ProvisionalType::Nominal(NominalInstanceKey {
+            declaration: NominalKey("Result".into()),
+            arguments: vec![predefined(I64), predefined(UNIT)],
+        });
+        let tables = Tables {
+            functions: BTreeMap::from([(
+                "answer".into(),
+                FunctionShape {
+                    declaration: owner.clone(),
+                    params: vec![],
+                    result: result.clone(),
+                },
+            )]),
+            ..Tables::default()
+        };
+
+        let typed = type_program(&program, &tables, &BTreeMap::new(), &BTreeMap::new());
+        let explicit = typed.labels[&owner]
+            .iter()
+            .find(|label| label.name == "done")
+            .expect("explicit inferred label should have evidence");
+
+        assert_eq!(explicit.destination_result.as_ref(), Some(&result));
+        assert_eq!(explicit.leaves.len(), 1);
+        assert_eq!(explicit.leaves[0].result, result);
     }
 
     #[test]

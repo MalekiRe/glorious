@@ -1380,6 +1380,15 @@ enum LateInlineLetExpectation {
     Binder(String),
 }
 
+#[derive(Clone)]
+struct ActiveLateControlLoop {
+    control: core::ControlLoopId,
+    inline_depth: usize,
+    runtime_parameters: Vec<(usize, TypeId)>,
+    static_labels: Vec<Option<String>>,
+    static_closures: Vec<Option<(usize, usize)>>,
+}
+
 struct CoreLowerer<'a> {
     program: &'a Program,
     nominal_ids: &'a BTreeMap<&'a str, TypeId>,
@@ -1480,6 +1489,8 @@ struct CoreLowerer<'a> {
     /// state for observational `is` decisions.
     defer_branch_region_ends: u32,
     late_inline_stack: BTreeSet<String>,
+    next_control_loop: u32,
+    active_late_control_loops: BTreeMap<String, ActiveLateControlLoop>,
     /// Expected types for argument-evaluation lets synthesized while a late
     /// generic call is control-inlined. Source spans uniquely identify those
     /// synthetic lets without imposing their context on user-written lets.
@@ -7155,7 +7166,23 @@ fn compile_program_with_phases(
         // it must not erase declaration-only capabilities or sibling generic
         // effect instances from the artifact signature.
         let emitted_outward_protocols = signature.outward_protocols.clone();
-        let mut body = if let Some(primitive) = primitive_leaf {
+        // A closure carrying a lexical label is proof-only: every valid use is
+        // beta-reduced in that destination frame. Discovery remains
+        // deliberately conservative and may reserve an ABI slot for it, so
+        // retain the stable declaration id but do not lower the impossible
+        // out-of-frame body. Any compiler bug that makes the slot reachable
+        // fails closed instead of manufacturing a runtime label value.
+        let static_control_closure =
+            matches!(emission, Emission::Closure { .. }) && contains_label_reference(body);
+        let mut body = if static_control_closure {
+            lowerer.typed(
+                body.span,
+                NEVER,
+                core::ExprKind::Abort {
+                    message: Some("statically inlined control closure escaped".into()),
+                },
+            )
+        } else if let Some(primitive) = primitive_leaf {
             lowerer.primitive_leaf_body(primitive, &core_params, signature.result, body.span)?
         } else if host_leaf.is_some() {
             lowerer.typed(body.span, NEVER, core::ExprKind::HostLeafStub)
@@ -21867,6 +21894,22 @@ fn final_use_control_spans(root: &Expr) -> BTreeSet<(usize, usize)> {
     collector.spans
 }
 
+fn contains_label_reference(expression: &Expr) -> bool {
+    struct Finder;
+    impl<'ast> ExprVisitor<'ast> for Finder {
+        type Break = ();
+
+        fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<()> {
+            if matches!(expression.kind, ExprKind::LabelReference(_)) {
+                ControlFlow::Break(())
+            } else {
+                walk_expr(self, expression)
+            }
+        }
+    }
+    Finder.visit_expr(expression).is_break()
+}
+
 fn expression_uses_name(expression: &Expr, searched: &str) -> bool {
     match &expression.kind {
         ExprKind::Variable(path) => path.len() == 1 && path[0].as_ref() == searched,
@@ -24448,6 +24491,8 @@ impl<'a> CoreLowerer<'a> {
                 current_point: 0,
                 defer_branch_region_ends: 0,
                 late_inline_stack: BTreeSet::new(),
+                next_control_loop: 0,
+                active_late_control_loops: BTreeMap::new(),
                 late_inline_let_expectations: BTreeMap::new(),
                 late_inline_type_substitutions: BTreeMap::new(),
                 active_labels: BTreeMap::new(),
@@ -24640,6 +24685,8 @@ impl<'a> CoreLowerer<'a> {
                 current_point: 0,
                 defer_branch_region_ends: 0,
                 late_inline_stack: BTreeSet::new(),
+                next_control_loop: 0,
+                active_late_control_loops: BTreeMap::new(),
                 late_inline_let_expectations: BTreeMap::new(),
                 late_inline_type_substitutions: BTreeMap::new(),
                 active_labels: BTreeMap::new(),
@@ -24662,8 +24709,14 @@ impl<'a> CoreLowerer<'a> {
         }
     }
 
-    fn direct_label_evidence(&self, name: &str, binder: Span) -> Option<typeck::LabelEvidence> {
-        self.label_evidence
+    fn direct_label_evidence(
+        &self,
+        source: &Expr,
+        name: &str,
+        binder: Span,
+    ) -> Option<typeck::LabelEvidence> {
+        let mut evidence = self
+            .label_evidence
             .values()
             .flatten()
             .find(|evidence| {
@@ -24671,7 +24724,25 @@ impl<'a> CoreLowerer<'a> {
                     && evidence.binder_span == binder
                     && evidence.destination_result.is_some()
             })
-            .cloned()
+            .cloned()?;
+        if let (Some(body), Some(expression_ordinal)) =
+            (self.body_instance.clone(), self.expression_ordinal(source))
+            && let Some(result) =
+                self.specialization_graph
+                    .label_results
+                    .get(&specialization::CallSiteKey {
+                        body,
+                        expression_ordinal,
+                    })
+        {
+            evidence.destination_result = Some(result.clone());
+            evidence.result_contains_references = typeck::provisional_contains_references(result);
+            for leave in &mut evidence.leaves {
+                leave.result = result.clone();
+                leave.result_contains_references = typeck::provisional_contains_references(result);
+            }
+        }
+        Some(evidence)
     }
 
     fn validate_leave_cleanup(
@@ -26233,6 +26304,190 @@ impl<'a> CoreLowerer<'a> {
         self.transparent_block(statements, span, expected)
     }
 
+    /// Count direct self-recursive occurrences and prove that each is in a
+    /// source position which remains tail after the compiler's static-control
+    /// beta reductions. This deliberately recognizes only the small control
+    /// vocabulary used by the distributed range walkers; an ordinary call
+    /// argument, initializer, assignment, or nested runtime closure is not a
+    /// tail position.
+    fn late_control_recursion_shape(expression: &Expr, name: &str) -> (usize, bool) {
+        fn visit(expression: &Expr, name: &str, tail: bool, found: &mut usize, valid: &mut bool) {
+            match &expression.kind {
+                ExprKind::Call(callee, arguments) => {
+                    let direct = matches!(&callee.kind, ExprKind::Variable(path)
+                        if path.len() == 1 && path[0].as_ref() == name);
+                    if direct {
+                        *found += 1;
+                        *valid &= tail;
+                        for argument in arguments.iter() {
+                            visit(argument, name, false, found, valid);
+                        }
+                        return;
+                    }
+                    visit(callee, name, false, found, valid);
+                    let static_control = match &callee.kind {
+                        ExprKind::Variable(path) if path.len() == 1 => {
+                            Some(path[0].as_ref()).filter(|name| matches!(*name, "if" | "else"))
+                        }
+                        _ => None,
+                    };
+                    for (index, argument) in arguments.iter().enumerate() {
+                        let static_tail = tail
+                            && static_control.is_some_and(|control| {
+                                (control == "if" && index == 1)
+                                    || (control == "else" && matches!(index, 0 | 1))
+                            });
+                        match &argument.kind {
+                            ExprKind::Closure { body, .. }
+                            | ExprKind::TypedClosure { body, .. }
+                                if static_tail =>
+                            {
+                                visit(body, name, true, found, valid)
+                            }
+                            ExprKind::Block(_) | ExprKind::ContextBlock(_) if static_tail => {
+                                visit(argument, name, true, found, valid)
+                            }
+                            _ if static_tail => visit(argument, name, true, found, valid),
+                            _ => visit(argument, name, false, found, valid),
+                        }
+                    }
+                }
+                ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                    for (index, statement) in statements.iter().enumerate() {
+                        let last = index + 1 == statements.len();
+                        match statement {
+                            Stmt::Expr(value) => visit(value, name, tail && last, found, valid),
+                            Stmt::Let { value, .. } | Stmt::Deconstruct { value, .. } => {
+                                visit(value, name, false, found, valid)
+                            }
+                            Stmt::Assign {
+                                destination, value, ..
+                            } => {
+                                visit(value, name, false, found, valid);
+                                if let Some(reference) = assignment_place_reference(destination) {
+                                    visit(reference, name, false, found, valid);
+                                }
+                            }
+                        }
+                    }
+                }
+                ExprKind::Handle {
+                    computation,
+                    clauses,
+                } => {
+                    visit(computation, name, false, found, valid);
+                    for clause in clauses.iter() {
+                        visit(&clause.body, name, tail, found, valid);
+                    }
+                }
+                ExprKind::LabelDestination { body, .. } => visit(body, name, tail, found, valid),
+                ExprKind::Closure { body, .. } | ExprKind::TypedClosure { body, .. } => {
+                    visit(body, name, false, found, valid)
+                }
+                ExprKind::List(values) | ExprKind::Tuple(values) => {
+                    for value in values.iter() {
+                        visit(value, name, false, found, valid);
+                    }
+                }
+                ExprKind::Struct { fields, .. } => {
+                    for (_, value) in fields.iter() {
+                        visit(value, name, false, found, valid);
+                    }
+                }
+                ExprKind::Field(subject, _)
+                | ExprKind::Move(subject)
+                | ExprKind::Is { subject, .. }
+                | ExprKind::Unary {
+                    operand: subject, ..
+                } => visit(subject, name, false, found, valid),
+                ExprKind::Binary { lhs, rhs, .. } => {
+                    visit(lhs, name, false, found, valid);
+                    visit(rhs, name, false, found, valid);
+                }
+                ExprKind::Perform { args, .. } => {
+                    for argument in args.iter() {
+                        visit(argument, name, false, found, valid);
+                    }
+                }
+                ExprKind::Resume { resumption, value }
+                | ExprKind::TailResume { resumption, value } => {
+                    visit(resumption, name, false, found, valid);
+                    if let Some(value) = value {
+                        visit(value, name, false, found, valid);
+                    }
+                }
+                ExprKind::Cancel { resumption } => visit(resumption, name, false, found, valid),
+                ExprKind::Unit
+                | ExprKind::Int(_)
+                | ExprKind::Float(_)
+                | ExprKind::Char(_)
+                | ExprKind::Byte(_)
+                | ExprKind::ByteString(_)
+                | ExprKind::String(_)
+                | ExprKind::Variable(_)
+                | ExprKind::LabelReference(_) => {}
+            }
+        }
+        let mut found = 0;
+        let mut valid = true;
+        visit(expression, name, true, &mut found, &mut valid);
+        (found, valid)
+    }
+
+    fn continue_late_control_loop(
+        &mut self,
+        name: &str,
+        arguments: &[Expr],
+        label_arguments: &[Option<crate::ast::LabelSyntax>],
+        closure_arguments: &[Option<Expr>],
+        span: Span,
+    ) -> Result<core::Expr, Vec<Diagnostic>> {
+        let loop_context = self.active_late_control_loops[name].clone();
+        if self.late_inline_stack.len() != loop_context.inline_depth {
+            return Err(vec![unsupported(
+                span,
+                "mutually recursive late generic specialization",
+                "the first control-loop lowering supports direct tail recursion only",
+            )]);
+        }
+        for (index, expected) in loop_context.static_labels.iter().enumerate() {
+            let actual = label_arguments[index]
+                .as_ref()
+                .map(|label| label.name.to_string());
+            if &actual != expected {
+                return Err(vec![unsupported(
+                    arguments[index].span,
+                    "changing a static label across tail recursion",
+                    "every control-loop iteration must target the same statically branded destination",
+                )]);
+            }
+        }
+        for (index, expected) in loop_context.static_closures.iter().enumerate() {
+            let actual = closure_arguments[index]
+                .as_ref()
+                .map(|closure| (closure.span.start, closure.span.end));
+            if &actual != expected {
+                return Err(vec![unsupported(
+                    arguments[index].span,
+                    "changing a static closure across tail recursion",
+                    "every control-loop iteration must retain the same statically inlined callback",
+                )]);
+            }
+        }
+        let mut args = Vec::with_capacity(loop_context.runtime_parameters.len());
+        for (index, ty) in loop_context.runtime_parameters {
+            args.push(self.expression(&arguments[index], Some(ty))?);
+        }
+        Ok(self.typed(
+            span,
+            NEVER,
+            core::ExprKind::ControlContinue {
+                control: loop_context.control,
+                args,
+            },
+        ))
+    }
+
     fn inline_late_generic_call(
         &mut self,
         name: &str,
@@ -26355,13 +26610,6 @@ impl<'a> CoreLowerer<'a> {
             .and_then(|result| self.substituted_source_type(result, &substitutions))
             .or(Some(UNIT).filter(|_| function.return_type.is_none()));
         let expected = expected.or(declared_result);
-        if !self.late_inline_stack.insert(name.to_owned()) {
-            return Err(vec![unsupported(
-                span,
-                "recursive late generic specialization",
-                "recursive generic calls transporting a label or handler resumption cannot be control-inlined to one static destination frame",
-            )]);
-        }
         let label_arguments = arguments
             .iter()
             .map(|argument| self.static_label_argument(argument))
@@ -26395,6 +26643,25 @@ impl<'a> CoreLowerer<'a> {
                 _ => self.static_closure_argument(argument),
             })
             .collect::<Vec<_>>();
+        if self.late_inline_stack.contains(name) {
+            if self.active_late_control_loops.contains_key(name) {
+                return self.continue_late_control_loop(
+                    name,
+                    arguments,
+                    &label_arguments,
+                    &closure_arguments,
+                    span,
+                );
+            }
+            return Err(vec![unsupported(
+                span,
+                "recursive late generic specialization",
+                "recursive generic calls transporting a label or handler resumption require direct, statically invariant tail recursion",
+            )]);
+        }
+        if !self.late_inline_stack.insert(name.to_owned()) {
+            unreachable!("the recursive late-inline case returned above")
+        }
         let closure_results = function
             .params
             .iter()
@@ -26441,6 +26708,57 @@ impl<'a> CoreLowerer<'a> {
                 .iter()
                 .skip(index + 1)
                 .all(|argument| !expression_mentions_name(argument, &param.name))
+        });
+        let (recursive_occurrences, tail_recursive) =
+            Self::late_control_recursion_shape(&function.body, name);
+        let runtime_parameters = parameter_expectations
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| {
+                label_arguments[*index].is_none() && closure_arguments[*index].is_none()
+            })
+            .map(|(index, expectation)| match expectation {
+                Some(LateInlineLetExpectation::Fixed(ty))
+                    if !matches!(
+                        self.references.resolved(*ty),
+                        ResolvedType::Shared(_) | ResolvedType::Unique(_)
+                    ) =>
+                {
+                    Some((index, *ty))
+                }
+                _ => None,
+            })
+            .collect::<Option<Vec<_>>>();
+        let control_context = (recursive_occurrences != 0
+            && tail_recursive
+            && can_bind_directly
+            && runtime_parameters.is_some()
+            // External reference parameters and captures are ordinary SSA
+            // values whose loan facts follow edge renaming. A locally issued
+            // loan additionally needs its lexical borrow state carried around
+            // the backedge, which this first control-loop form does not yet
+            // represent.
+            && self.locals.values().all(|local| !local.owns_loan))
+        .then(|| {
+            let control = core::ControlLoopId(self.next_control_loop);
+            self.next_control_loop += 1;
+            ActiveLateControlLoop {
+                control,
+                inline_depth: self.late_inline_stack.len(),
+                runtime_parameters: runtime_parameters.expect("checked above"),
+                static_labels: label_arguments
+                    .iter()
+                    .map(|label| label.as_ref().map(|label| label.name.to_string()))
+                    .collect(),
+                static_closures: closure_arguments
+                    .iter()
+                    .map(|closure| {
+                        closure
+                            .as_ref()
+                            .map(|closure| (closure.span.start, closure.span.end))
+                    })
+                    .collect(),
+            }
         });
         let mut statements = Vec::with_capacity(arguments.len() * 2 + 1);
         let mut let_expectations = Vec::new();
@@ -26538,7 +26856,12 @@ impl<'a> CoreLowerer<'a> {
             }
             previous_type_substitutions.push((key, previous));
         }
+        if let Some(context) = &control_context {
+            self.active_late_control_loops
+                .insert(name.to_owned(), context.clone());
+        }
         let result = self.block(&statements, span, expected);
+        self.active_late_control_loops.remove(name);
         for (key, previous) in previous_type_substitutions.into_iter().rev() {
             if let Some(previous) = previous {
                 self.late_inline_type_substitutions.insert(key, previous);
@@ -26568,7 +26891,79 @@ impl<'a> CoreLowerer<'a> {
             }
         }
         self.late_inline_stack.remove(name);
-        result
+        let result = result?;
+        let Some(control_context) = control_context else {
+            return Ok(result);
+        };
+        let core::Expr {
+            ty,
+            span: body_span,
+            reference,
+            reference_fields,
+            kind:
+                core::ExprKind::Block {
+                    mut statements,
+                    tail,
+                },
+        } = result
+        else {
+            return Err(vec![unsupported(
+                span,
+                "tail-recursive late generic control lowering",
+                "the inlined helper did not lower to its canonical argument block",
+            )]);
+        };
+        let mut initial_args = Vec::with_capacity(control_context.runtime_parameters.len());
+        let mut params = Vec::with_capacity(control_context.runtime_parameters.len());
+        for (source_index, expected_ty) in &control_context.runtime_parameters {
+            let Some(core::Stmt::Let {
+                local,
+                name: parameter_name,
+                ty: parameter_ty,
+                span: parameter_span,
+                value,
+            }) = statements.first().cloned()
+            else {
+                return Err(vec![unsupported(
+                    span,
+                    "tail-recursive late generic control lowering",
+                    "runtime arguments were not represented by canonical leading bindings",
+                )]);
+            };
+            if parameter_ty != *expected_ty || parameter_name != function.params[*source_index].name
+            {
+                return Err(vec![unsupported(
+                    parameter_span,
+                    "tail-recursive late generic control lowering",
+                    "runtime parameter binding did not retain its inferred ground type and source identity",
+                )]);
+            }
+            statements.remove(0);
+            initial_args.push(value);
+            params.push(core::ControlLoopParam {
+                local,
+                name: parameter_name,
+                ty: parameter_ty,
+                span: parameter_span,
+            });
+        }
+        let body = if statements.is_empty() {
+            *tail
+        } else {
+            self.typed(body_span, ty, core::ExprKind::Block { statements, tail })
+        };
+        Ok(core::Expr {
+            ty,
+            span: body_span,
+            reference,
+            reference_fields,
+            kind: core::ExprKind::ControlLoop {
+                control: control_context.control,
+                initial_args,
+                params,
+                body: Box::new(body),
+            },
+        })
     }
 
     fn late_manifest_types(&mut self, name: &str) -> Option<(Vec<Option<TypeId>>, Option<TypeId>)> {
@@ -35724,7 +36119,7 @@ impl<'a> CoreLowerer<'a> {
             }),
             ExprKind::LabelDestination { label, body, .. } => {
                 let evidence = self
-                    .direct_label_evidence(label.name.as_ref(), label.span)
+                    .direct_label_evidence(expression, label.name.as_ref(), label.span)
                     .ok_or_else(|| {
                         vec![type_error(
                             label.span,
@@ -38507,6 +38902,7 @@ struct MirLowerer {
     loan_of: BTreeMap<u32, mir::LoanId>,
     current_block: u32,
     active_labels: BTreeMap<core::LabelId, ActiveMirLabel>,
+    active_control_loops: BTreeMap<core::ControlLoopId, ActiveMirControlLoop>,
 }
 
 #[derive(Clone)]
@@ -38521,6 +38917,13 @@ struct ActiveMirLabel {
     /// activation, so its parameters must be cleaned on both normal and leave
     /// paths rather than preserved for code after the destination.
     function_boundary: bool,
+}
+
+#[derive(Clone)]
+struct ActiveMirControlLoop {
+    header: u32,
+    parameter_types: Vec<TypeId>,
+    outer_locals: Vec<(core::LocalId, TypeId)>,
 }
 
 enum MirBuilderItem {
@@ -38765,6 +39168,7 @@ impl MirLowerer {
             loan_of: BTreeMap::new(),
             current_block: 0,
             active_labels: BTreeMap::new(),
+            active_control_loops: BTreeMap::new(),
         };
         lowerer.flow.provenance = mir::FlowProvenance::Exported;
         lowerer.flow.sources.push(Span::default());
@@ -40656,6 +41060,156 @@ impl MirLowerer {
                     },
                 );
                 MirFlow::Value(Some(dst))
+            }
+            core::ExprKind::ControlLoop {
+                control,
+                initial_args,
+                params,
+                body,
+            } => {
+                debug_assert_eq!(initial_args.len(), params.len());
+                let saved_locals = self.locals.clone();
+                let mut incoming = Vec::with_capacity(initial_args.len());
+                for argument in initial_args {
+                    let MirFlow::Value(value) = self.expression(argument) else {
+                        return MirFlow::Diverged;
+                    };
+                    incoming.push(self.materialize(value, argument.span));
+                }
+                let incoming_set = incoming.iter().copied().collect::<BTreeSet<_>>();
+                let outer_locals = self
+                    .locals
+                    .iter()
+                    .filter_map(|(local, register)| {
+                        (self.owned.contains(register) && !incoming_set.contains(register))
+                            .then_some((*local, self.register_types[*register as usize]))
+                    })
+                    .collect::<Vec<_>>();
+                for (local, _) in &outer_locals {
+                    incoming.push(self.locals[local]);
+                }
+                let header = self.label();
+                self.terminate(mir::Terminator::Goto(mir::Edge {
+                    target: header,
+                    args: incoming
+                        .iter()
+                        .map(|register| Self::operand(*register, mir::UseMode::Move))
+                        .collect(),
+                }));
+                for register in &incoming {
+                    self.transfer_owner(*register);
+                }
+                let parameter_registers = params
+                    .iter()
+                    .map(|parameter| self.allocate(parameter.ty))
+                    .collect::<Vec<_>>();
+                let outer_registers = outer_locals
+                    .iter()
+                    .map(|(_, ty)| self.allocate(*ty))
+                    .collect::<Vec<_>>();
+                self.mark_with_params(
+                    header,
+                    params
+                        .iter()
+                        .zip(&parameter_registers)
+                        .map(|(parameter, register)| mir::BlockParam {
+                            register: *register,
+                            ty: parameter.ty,
+                            role: mir::BlockParamRole::Ordinary,
+                        })
+                        .chain(outer_locals.iter().zip(&outer_registers).map(
+                            |((_, ty), register)| mir::BlockParam {
+                                register: *register,
+                                ty: *ty,
+                                role: mir::BlockParamRole::Ordinary,
+                            },
+                        ))
+                        .collect(),
+                );
+                self.owned = parameter_registers
+                    .iter()
+                    .chain(&outer_registers)
+                    .copied()
+                    .collect();
+                for (parameter, register) in params.iter().zip(&parameter_registers) {
+                    self.locals.insert(parameter.local, *register);
+                }
+                for ((local, _), register) in outer_locals.iter().zip(&outer_registers) {
+                    self.locals.insert(*local, *register);
+                }
+                self.active_control_loops.insert(
+                    *control,
+                    ActiveMirControlLoop {
+                        header,
+                        parameter_types: params.iter().map(|parameter| parameter.ty).collect(),
+                        outer_locals: outer_locals.clone(),
+                    },
+                );
+                let value = self.expression(body);
+                self.active_control_loops.remove(control);
+                if let MirFlow::Value(result) = value {
+                    let mut protected = result.into_iter().collect::<BTreeSet<_>>();
+                    protected.extend(
+                        outer_locals
+                            .iter()
+                            .filter_map(|(local, _)| self.locals.get(local))
+                            .copied(),
+                    );
+                    for owner in self.owned.clone().into_iter().rev() {
+                        if !protected.contains(&owner) {
+                            self.destroy(owner, body.span);
+                            self.transfer_owner(owner);
+                        }
+                    }
+                    self.locals
+                        .retain(|local, _| saved_locals.contains_key(local));
+                    MirFlow::Value(result)
+                } else {
+                    self.locals = saved_locals;
+                    MirFlow::Diverged
+                }
+            }
+            core::ExprKind::ControlContinue { control, args } => {
+                let context = self
+                    .active_control_loops
+                    .get(control)
+                    .cloned()
+                    .expect("Core continue must target its lexically active control loop");
+                debug_assert_eq!(args.len(), context.parameter_types.len());
+                let mut incoming = Vec::with_capacity(args.len());
+                for (argument, expected) in args.iter().zip(&context.parameter_types) {
+                    debug_assert_eq!(argument.ty, *expected);
+                    let MirFlow::Value(value) = self.expression(argument) else {
+                        return MirFlow::Diverged;
+                    };
+                    incoming.push(self.materialize(value, argument.span));
+                }
+                for (local, _) in &context.outer_locals {
+                    incoming.push(
+                        *self
+                            .locals
+                            .get(local)
+                            .expect("a control-loop outer local remains live at its backedge"),
+                    );
+                }
+                let incoming_set = incoming.iter().copied().collect::<BTreeSet<_>>();
+                for owner in self.owned.clone().into_iter().rev() {
+                    if !incoming_set.contains(&owner) {
+                        self.destroy(owner, expression.span);
+                        self.transfer_owner(owner);
+                    }
+                }
+                self.terminate(mir::Terminator::Goto(mir::Edge {
+                    target: context.header,
+                    args: incoming
+                        .iter()
+                        .map(|register| Self::operand(*register, mir::UseMode::Move))
+                        .collect(),
+                }));
+                for register in incoming {
+                    self.transfer_owner(register);
+                }
+                MirFlow::Diverged
             }
             core::ExprKind::Receiver => {
                 let dst = self.allocate(expression.ty);
@@ -46499,6 +47053,10 @@ fn drop_body_reaches_unsafe_control(expression: &core::Expr, unsafe_calls: &BTre
                 || any(args)
         }
         core::ExprKind::CallSelf { args } | core::ExprKind::TailCallSelf { args } => any(args),
+        core::ExprKind::ControlLoop {
+            initial_args, body, ..
+        } => any(initial_args) || drop_body_reaches_unsafe_control(body, unsafe_calls),
+        core::ExprKind::ControlContinue { .. } => true,
         core::ExprKind::MakeCallable { .. }
         | core::ExprKind::CallIndirect { .. }
         | core::ExprKind::TailCallIndirect { .. }
@@ -46600,6 +47158,13 @@ fn validate_drop_core(
                 "effect or nonlocal control in Drop::drop",
                 "Drop hooks must be pure, non-suspending, and locally returning",
             )]),
+            core::ExprKind::ControlLoop { .. } | core::ExprKind::ControlContinue { .. } => {
+                Err(vec![unsupported(
+                    expression.span,
+                    "compiler-owned looping control in Drop::drop",
+                    "Drop hooks cannot contain synthesized nonlocal control loops",
+                )])
+            }
             core::ExprKind::Project { subject, copy, .. } => {
                 if !copy {
                     return Err(vec![unsupported(

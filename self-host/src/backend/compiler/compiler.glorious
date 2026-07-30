@@ -96,68 +96,73 @@ lower_functions(
             function_name(headers, declarations, shell),
             @lower_functions
         );
-        handle
-            super::super::frontend::bodies::parse_function_body(
-                original,
-                headers,
-                declarations,
-                usize_from_u32(shell)
-            ) {
-            Result::Err(found) =>
-                Result::Err(CompileError::BodyParse(shell, found)),
-            Result::Ok(parsed) => handle
+        let parsed = try(
+            Result::map_err(
+                super::super::frontend::bodies::parse_function_body(
+                    original,
+                    headers,
+                    declarations,
+                    usize_from_u32(shell)
+                ),
+                { found => CompileError::BodyParse(shell, found) }
+            ),
+            @lower_functions
+        );
+        let resolved = try(
+            Result::map_err(
                 super::super::frontend::resolution::
                     resolve_function_body_indexed(
                         resolution_index,
                         headers,
                         declarations,
                         &parsed
-                    ) {
-                Result::Err(found) =>
-                    Result::Err(CompileError::BodyResolution(shell, found)),
-                Result::Ok(resolved) => handle
-                    super::super::frontend::elaboration::
-                        elaborate_function_body(
-                            original,
-                            headers,
-                            declarations,
-                            interfaces,
-                            &parsed,
-                            &resolved
-                        ) {
-                    Result::Err(found) =>
-                        Result::Err(CompileError::BodyElaboration(
-                            shell,
-                            found
-                        )),
-                    Result::Ok(body) => handle
-                        super::lowering::lower_function(
-                            name,
-                            &*interfaces,
-                            &body,
-                            index
-                        ) {
-                        Result::Err(found) =>
-                            Result::Err(CompileError::Lowering(shell, found)),
-                        Result::Ok(function) => {
-                            handle Arena::alloc(&mut *output, function) {
-                                Result::Err(_) => unreachable(),
-                                Result::Ok(_) => ()
-                            };
-                            lower_functions(
-                                original,
-                                headers,
-                                resolution_index,
-                                declarations,
-                                interfaces,
-                                index + 1,
-                                output
-                            )
-                        }
-                    }
+                    ),
+                { found => CompileError::BodyResolution(shell, found) }
+            ),
+            @lower_functions
+        );
+        let body = try(
+            Result::map_err(
+                super::super::frontend::elaboration::
+                    elaborate_function_body(
+                        original,
+                        headers,
+                        declarations,
+                        interfaces,
+                        &parsed,
+                        &resolved
+                    ),
+                { found =>
+                    CompileError::BodyElaboration(shell, found)
                 }
-            }
-        }
+            ),
+            @lower_functions
+        );
+        let function = try(
+            Result::map_err(
+                super::lowering::lower_function(
+                    name,
+                    &*interfaces,
+                    &body,
+                    index
+                ),
+                { found => CompileError::Lowering(shell, found) }
+            ),
+            @lower_functions
+        );
+        handle Arena::alloc(&mut *output, function) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(_) => ()
+        };
+        lower_functions(
+            original,
+            headers,
+            resolution_index,
+            declarations,
+            interfaces,
+            index + 1,
+            output
+        )
     } else { Result::Ok(()) }
 }
 
@@ -543,11 +548,10 @@ compile_interfaces(
         type_names
     );
     let entry = find_entry(&program, 0);
-    handle super::emission::encode(&program, entry) {
-        Result::Err(found) =>
-            Result::Err(CompileError::Emission(found)),
-        Result::Ok(bytes) => Result::Ok(bytes)
-    }
+    Result::map_err(
+        super::emission::encode(&program, entry),
+        { found => CompileError::Emission(found) }
+    )
 }
 
 compile_headers(
@@ -557,28 +561,33 @@ compile_headers(
     declarations:
         &super::super::frontend::scanner::DeclarationIndex
 ) -> Result<Bytes, CompileError> {
-    handle super::super::frontend::resolution::build_resolution_index(
+    let resolution_index = try(
+        Result::map_err(
+            super::super::frontend::resolution::build_resolution_index(
+                &headers,
+                declarations
+            ),
+            { found => CompileError::ResolutionIndex(found) }
+        ),
+        @compile_headers
+    );
+    let interfaces = try(
+        Result::map_err(
+            super::super::frontend::elaboration::collect_interfaces(
+                &headers,
+                declarations
+            ),
+            { found => CompileError::InterfaceCollection(found) }
+        ),
+        @compile_headers
+    );
+    compile_interfaces(
+        original,
         &headers,
-        declarations
-    ) {
-        Result::Err(found) =>
-            Result::Err(CompileError::ResolutionIndex(found)),
-        Result::Ok(resolution_index) => handle
-        super::super::frontend::elaboration::collect_interfaces(
-            &headers,
-            declarations
-        ) {
-        Result::Err(found) =>
-            Result::Err(CompileError::InterfaceCollection(found)),
-        Result::Ok(interfaces) => compile_interfaces(
-            original,
-            &headers,
-            &resolution_index,
-            declarations,
-            interfaces
-        )
-        }
-    }
+        &resolution_index,
+        declarations,
+        interfaces
+    )
 }
 
 compile_declarations(
@@ -587,36 +596,36 @@ compile_declarations(
     declarations:
         super::super::frontend::scanner::DeclarationIndex
 ) -> Result<Bytes, CompileError> {
-    handle super::super::frontend::headers::parse(
-        original,
-        source,
-        &declarations
-    ) {
-        Result::Err(found) =>
-            Result::Err(CompileError::Headers(found)),
-        Result::Ok(headers) => compile_headers(
-            original,
-            headers,
-            &declarations
-        )
-    }
+    let headers = try(
+        Result::map_err(
+            super::super::frontend::headers::parse(
+                original,
+                source,
+                &declarations
+            ),
+            { found => CompileError::Headers(found) }
+        ),
+        @compile_declarations
+    );
+    compile_headers(original, headers, &declarations)
 }
 
 pub compile_source(original: &String) -> Result<Bytes, CompileError> {
-    handle super::super::frontend::lexer::lex(original) {
-        Result::Err(found) =>
-            Result::Err(CompileError::Lex(found)),
-        Result::Ok(source) => handle
-            super::super::frontend::scanner::scan(&source) {
-            Result::Err(found) =>
-                Result::Err(CompileError::Scan(found)),
-            Result::Ok(declarations) => compile_declarations(
-                original,
-                source,
-                declarations
-            )
-        }
-    }
+    let source = try(
+        Result::map_err(
+            super::super::frontend::lexer::lex(original),
+            { found => CompileError::Lex(found) }
+        ),
+        @compile_source
+    );
+    let declarations = try(
+        Result::map_err(
+            super::super::frontend::scanner::scan(&source),
+            { found => CompileError::Scan(found) }
+        ),
+        @compile_source
+    );
+    compile_declarations(original, source, declarations)
 }
 
 pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {

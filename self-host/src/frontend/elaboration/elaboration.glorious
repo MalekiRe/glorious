@@ -3280,22 +3280,20 @@ parse_digits(
                     end,
                     base,
                     accumulator
-                ) } else { handle digit_value(byte) {
-                    Result::Err(_) => Result::Err(()),
-                    Result::Ok(digit) => {
-                        let wide_base = wrapping_convert_to_u128(base);
-                        let wide_digit = wrapping_convert_to_u128(digit);
-                        let maximum = bit_not(wrapping_convert_to_u128(0));
-                        if(accumulator
-                            <= (maximum - wide_digit) / wide_base) { parse_digits(
-                                move bytes,
-                                cursor + 1,
-                                end,
-                                base,
-                                accumulator * wide_base + wide_digit
-                            ) } else { Result::Err(()) }
-                    }
-                } }
+                ) } else {
+                let digit = try(digit_value(byte), @parse_digits);
+                let wide_base = wrapping_convert_to_u128(base);
+                let wide_digit = wrapping_convert_to_u128(digit);
+                let maximum = bit_not(wrapping_convert_to_u128(0));
+                if(accumulator
+                    <= (maximum - wide_digit) / wide_base) { parse_digits(
+                        move bytes,
+                        cursor + 1,
+                        end,
+                        base,
+                        accumulator * wide_base + wide_digit
+                    ) } else { Result::Err(()) }
+            }
         } } else { Result::Ok(accumulator) }
 }
 

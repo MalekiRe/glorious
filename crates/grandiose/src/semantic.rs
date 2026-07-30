@@ -495,6 +495,7 @@ fn expression_children(expression: &Expr) -> Vec<&Expr> {
         | ExprKind::TailCall { args, .. }
         | ExprKind::CallSelf { args }
         | ExprKind::TailCallSelf { args }
+        | ExprKind::ControlContinue { args, .. }
         | ExprKind::MakeCallable { captures: args, .. }
         | ExprKind::Primitive { args, .. }
         | ExprKind::HostCall { args, .. }
@@ -538,6 +539,12 @@ fn expression_children(expression: &Expr) -> Vec<&Expr> {
                 Stmt::Deconstruct { .. } | Stmt::EndBorrow { .. } => None,
             })
             .chain(std::iter::once(tail.as_ref()))
+            .collect(),
+        ExprKind::ControlLoop {
+            initial_args, body, ..
+        } => initial_args
+            .iter()
+            .chain(std::iter::once(body.as_ref()))
             .collect(),
         ExprKind::Unit
         | ExprKind::Constant(_)

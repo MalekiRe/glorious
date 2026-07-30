@@ -14,6 +14,9 @@ pub type RegionId = u32;
 pub type PointId = u32;
 /// Generative identity of one source-level label binder within a body.
 pub type LabelId = u32;
+/// Function-local identity of a compiler-owned control loop.
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct ControlLoopId(pub u32);
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Program {
@@ -62,6 +65,15 @@ pub struct RegionFact {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Param {
+    pub local: LocalId,
+    pub name: String,
+    pub ty: TypeId,
+    pub span: Span,
+}
+
+/// One loop-carried value owned by a compiler-generated control loop.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ControlLoopParam {
     pub local: LocalId,
     pub name: String,
     pub ty: TypeId,
@@ -167,6 +179,18 @@ pub enum ExprKind {
     TailCallKnownReceiver {
         declaration: DeclarationId,
         receiver: Box<Expr>,
+        args: Vec<Expr>,
+    },
+    /// Enter a compiler-owned local loop with its initial carried values.
+    ControlLoop {
+        control: ControlLoopId,
+        initial_args: Vec<Expr>,
+        params: Vec<ControlLoopParam>,
+        body: Box<Expr>,
+    },
+    /// Continue a compiler-owned local loop with replacement carried values.
+    ControlContinue {
+        control: ControlLoopId,
         args: Vec<Expr>,
     },
     MakeCallable {
@@ -599,6 +623,39 @@ impl Expr {
             } => {
                 writeln!(output, "tail-call-known-receiver fn#{declaration}").unwrap();
                 receiver.write(output, depth + 1);
+                args.iter().for_each(|arg| arg.write(output, depth + 1));
+            }
+            ExprKind::ControlLoop {
+                control,
+                initial_args,
+                params,
+                body,
+            } => {
+                writeln!(
+                    output,
+                    "control-loop control#{} params={} initial={}",
+                    control.0,
+                    params.len(),
+                    initial_args.len()
+                )
+                .unwrap();
+                for param in params {
+                    writeln!(
+                        output,
+                        "{pad}  param l{} {:?}:t{} @{}..{}",
+                        param.local, param.name, param.ty, param.span.start, param.span.end
+                    )
+                    .unwrap();
+                }
+                for initial in initial_args {
+                    writeln!(output, "{pad}  initial").unwrap();
+                    initial.write(output, depth + 2);
+                }
+                writeln!(output, "{pad}  body").unwrap();
+                body.write(output, depth + 1);
+            }
+            ExprKind::ControlContinue { control, args } => {
+                writeln!(output, "control-continue control#{}", control.0).unwrap();
                 args.iter().for_each(|arg| arg.write(output, depth + 1));
             }
             ExprKind::MakeCallable {

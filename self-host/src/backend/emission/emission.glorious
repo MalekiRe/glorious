@@ -458,8 +458,8 @@ write_named_type_fields(
         super::lowering::stage_program_type_field_count_at(program, type_index);
     let type_id =
         super::lowering::stage_type_id_from_usize(type_index);
-    try_for_range(Range::new(field_index, end), { current =>
-        handle require_program_name(
+    try_for_range(Range::new(field_index, end), { current => {
+        let field_name = try(require_program_name(
             program,
             names,
             super::lowering::stage_program_type_field_name_index_at(
@@ -468,24 +468,20 @@ write_named_type_fields(
                 current
             ),
             EmissionName::StructField(type_id, current)
-        ) {
-            Result::Err(error) => Result::Err(error),
-            Result::Ok(field_name) => {
-                ByteBuf::write_u32_le(&mut *output, field_name);
-                ByteBuf::write_u32_le(
-                    &mut *output,
-                    super::lowering::artifact_type_raw(
-                        super::lowering::stage_program_type_field_type_at(
-                            program,
-                            type_index,
-                            current
-                        )
-                    )
-                );
-                Result::Ok(())
-            }
-        }
-    })
+        ), @write_named_type_fields);
+        ByteBuf::write_u32_le(&mut *output, field_name);
+        ByteBuf::write_u32_le(
+            &mut *output,
+            super::lowering::artifact_type_raw(
+                super::lowering::stage_program_type_field_type_at(
+                    program,
+                    type_index,
+                    current
+                )
+            )
+        );
+        Result::Ok(())
+    } })
 }
 
 custom_type_flags(
@@ -603,8 +599,8 @@ write_enum_variant_fields(
     output: &mut ByteBuf
 ) -> Result<(), EmissionError> {
     let end = super::lowering::stage_variant_field_count(variant);
-    try_for_range(Range::new(index, end), { current =>
-        handle require_program_name(
+    try_for_range(Range::new(index, end), { current => {
+        let field_name = try(require_program_name(
             program,
             names,
             super::lowering::stage_variant_field_name_index_at(
@@ -616,23 +612,19 @@ write_enum_variant_fields(
                 variant_index,
                 current
             )
-        ) {
-            Result::Err(error) => Result::Err(error),
-            Result::Ok(field_name) => {
-                ByteBuf::write_u32_le(&mut *output, field_name);
-                ByteBuf::write_u32_le(
-                    &mut *output,
-                    super::lowering::artifact_type_raw(
-                        super::lowering::stage_variant_field_type_at(
-                            variant,
-                            current
-                        )
-                    )
-                );
-                Result::Ok(())
-            }
-        }
-    })
+        ), @write_enum_variant_fields);
+        ByteBuf::write_u32_le(&mut *output, field_name);
+        ByteBuf::write_u32_le(
+            &mut *output,
+            super::lowering::artifact_type_raw(
+                super::lowering::stage_variant_field_type_at(
+                    variant,
+                    current
+                )
+            )
+        );
+        Result::Ok(())
+    } })
 }
 
 write_enum_variants(
@@ -770,15 +762,15 @@ custom_type_records(
     output: &mut Vec<super::artifact::Record>
 ) -> Result<(), EmissionError> {
     let end = super::lowering::stage_program_type_count(program);
-    try_for_range(Range::new(index, end), { current =>
-        handle custom_type_record(program, names, current) {
-            Result::Err(error) => Result::Err(error),
-            Result::Ok(record) => {
-                Vec::push(&mut *output, record);
-                Result::Ok(())
-            }
-        }
-    })
+    try_for_range(Range::new(index, end), { current => {
+        let record = try(custom_type_record(
+            program,
+            names,
+            current
+        ), @custom_type_records);
+        Vec::push(&mut *output, record);
+        Result::Ok(())
+    } })
 }
 
 type_section(

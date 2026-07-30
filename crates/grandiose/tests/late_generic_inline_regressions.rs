@@ -566,6 +566,51 @@ fn recursive_late_generic_inline_reports_a_source_diagnostic() {
 }
 
 #[test]
+fn range_callback_branded_try_leaves_the_enclosing_function() {
+    let source = r#"
+        check_index(index: usize, rejected: usize) -> Result<(), usize> {
+            if(index == rejected) {
+                Result::Err(index)
+            } else {
+                Result::Ok(())
+            }
+        }
+
+        walk(limit: usize, rejected: usize) -> Result<(), usize> {
+            try_for_range(Range::new(0, limit), { index => {
+                try(check_index(index, rejected), @walk);
+                Result::Ok(())
+            } })
+        }
+
+        success() -> usize {
+            handle walk(4, 9) {
+                Result::Ok(_) => 42,
+                Result::Err(error) => error
+            }
+        }
+
+        failure() -> usize {
+            handle walk(4, 2) {
+                Result::Ok(_) => 90,
+                Result::Err(error) => error
+            }
+        }
+
+        main() -> { () }
+    "#;
+
+    assert_eq!(
+        run("range-callback-branded-try.glorious", source, "success"),
+        Value::U64(42)
+    );
+    assert_eq!(
+        run("range-callback-branded-try.glorious", source, "failure"),
+        Value::U64(2)
+    );
+}
+
+#[test]
 fn late_generic_inline_does_not_bypass_private_deconstruction_authority() {
     let bundle = SourceBundle::new(
         Segment::new(

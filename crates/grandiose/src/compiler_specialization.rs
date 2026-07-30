@@ -458,6 +458,11 @@ pub(crate) struct RequestGraph {
     /// callable value. Core chooses CallSelf versus TailCallSelf from position.
     pub(crate) recursive_self_calls: BTreeMap<CallSiteKey, RecursiveSelfCall>,
     pub(crate) erased_callable_aliases: BTreeSet<CallSiteKey>,
+    /// Contextually inferred result of a generative label destination. The
+    /// body instance is part of the site because one source label inside a
+    /// generic closure may acquire a different ground payload per
+    /// specialization.
+    pub(crate) label_results: BTreeMap<CallSiteKey, ProvisionalType>,
     pub(crate) constructions: BTreeMap<CallSiteKey, NominalInstanceKey>,
     pub(crate) constructed_nominals: BTreeSet<NominalInstanceKey>,
     pub(crate) closure_bodies: BTreeMap<ClosureRequest, ClosureBodyKind>,
@@ -541,6 +546,9 @@ impl RequestGraph {
         }
         for alias in &self.erased_callable_aliases {
             writeln!(output, "erased-callable-alias {alias:?}").unwrap();
+        }
+        for result in &self.label_results {
+            writeln!(output, "label-result {result:?}").unwrap();
         }
         for construction in &self.constructions {
             writeln!(output, "construction {construction:?}").unwrap();
@@ -8594,7 +8602,22 @@ impl<'a> Walker<'a> {
                 let result = ty
                     .as_deref()
                     .and_then(|ty| self.source_type(ty))
+                    // An inferred label is an ordinary contextual expression:
+                    // its destination payload is the surrounding expected
+                    // type, not unconditionally Unit. This matters when a
+                    // Result-returning iterator callback uses a local branded
+                    // `try`; the callback signature fixes the whole
+                    // Result<T, E> even though the label has no annotation.
+                    .or_else(|| expected.cloned())
                     .unwrap_or_else(|| ProvisionalType::Predefined("Unit".into()));
+                if self.recording
+                    && let Some(site) = self.call_site(source)
+                {
+                    self.discovery
+                        .graph
+                        .label_results
+                        .insert(site, result.clone());
+                }
                 let label_type = label_provisional_type(&self.owner, label, result.clone());
                 let previous = self
                     .active_labels
@@ -9498,6 +9521,19 @@ pub(crate) fn merge_drop_reachable(base: &mut Discovery, discovered: &Discovery)
     base.graph
         .erased_callable_aliases
         .retain(|site| !base.graph.closure_values.contains_key(site));
+    base.graph.label_results.extend(
+        discovered
+            .graph
+            .label_results
+            .iter()
+            .filter(|(site, _)| match &site.body {
+                BodyInstanceKey::Drop(_) => true,
+                BodyInstanceKey::Specialization(key) => reachable_keys.contains(key),
+                BodyInstanceKey::Closure(closure) => reachable_closures.contains(closure),
+                BodyInstanceKey::Root(_) => false,
+            })
+            .map(|(site, result)| (site.clone(), result.clone())),
+    );
     for (site, instance) in
         discovered
             .graph
@@ -10540,6 +10576,49 @@ mod tests {
             })
             .collect::<BTreeSet<_>>();
         assert_eq!(sites.len(), 2);
+    }
+
+    #[test]
+    fn inferred_label_inside_contextual_closure_keeps_the_callable_result() {
+        let discovery = parse_discovery(
+            "enum Result<T,E>{Ok(T),Err(E)}
+             apply<F>(
+                 body:F
+             )->Result<i64,()>
+             where F:Fn<(),Output=Result<i64,()>>{
+                 body()
+             }
+             use()->Result<i64,()>{
+                 apply({@done:{@done(Result::Ok(42))}})
+             }",
+        );
+        let result = ProvisionalType::Nominal(NominalInstanceKey {
+            declaration: NominalKey("Result".into()),
+            arguments: vec![
+                ProvisionalType::Predefined("i64".into()),
+                ProvisionalType::Predefined("Unit".into()),
+            ],
+        });
+
+        assert!(discovery.errors.is_empty(), "{:#?}", discovery.errors);
+        assert!(
+            discovery
+                .graph
+                .label_results
+                .values()
+                .any(|inferred| inferred == &result),
+            "{}",
+            discovery.graph.canonical_text()
+        );
+        assert!(
+            discovery
+                .graph
+                .label_results
+                .values()
+                .all(|inferred| inferred != &ProvisionalType::Predefined("Unit".into())),
+            "{}",
+            discovery.graph.canonical_text()
+        );
     }
 
     #[test]
