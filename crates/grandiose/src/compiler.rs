@@ -32468,7 +32468,7 @@ impl<'a> CoreLowerer<'a> {
                         .with_help(
                             "remove `move`; keep it for intentional early consumption or syntax-sensitive ownership",
                         )
-                        .with_fix(Span::new(span.start, span.start + 4), ""),
+                        .with_fix(Span::new(span.start, operand.span.start), ""),
                     );
                 }
                 self.check(span, expected, local.ty)?;

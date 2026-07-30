@@ -271,9 +271,9 @@ byte_at_most(value: &u8, upper: u8) -> Bool {
 split_byte(value: u8, upper: u8) -> Result<u8, u8> {
     let retained = value;
     if(byte_at_most(&value, upper)) {
-        Result::Ok(move retained)
+        Result::Ok(retained)
     } else {
-        Result::Err(move retained)
+        Result::Err(retained)
     }
 }
 
@@ -336,7 +336,7 @@ peek(value: &Lexer, offset: usize) -> Option<u8> {
 
 peek_is(value: &Lexer, offset: usize, expected: u8) -> Bool {
     if(peek(value, move offset) is Result::Ok(actual)) {
-        actual == move expected
+        actual == expected
     } else {
         false
     }
@@ -434,7 +434,7 @@ keyword_named(
     code: u8
 ) -> Option<RecognizedKeyword> {
     if(String::eq(value, spelling)) {
-        Option::Some(recognized_keyword(move found, move code))
+        Option::Some(recognized_keyword(found, code))
     } else {
         None
     }
@@ -562,7 +562,7 @@ scan_block_comment(value: &mut Lexer, start: usize, depth: usize) -> Result<(), 
 
                         } else {
                         advance(&mut *value, 1);
-                        scan_block_comment( value, start, move depth)
+                        scan_block_comment( value, start, depth)
 
                         }
                     } else {
@@ -573,12 +573,12 @@ scan_block_comment(value: &mut Lexer, start: usize, depth: usize) -> Result<(), 
 
                         } else {
                         advance(&mut *value, 1);
-                        scan_block_comment( value, start, move depth)
+                        scan_block_comment( value, start, depth)
 
                         }
                         } else {
                         advance(&mut *value, 1);
-                        scan_block_comment( value, start, move depth)
+                        scan_block_comment( value, start, depth)
 
                         }
                     }
@@ -699,7 +699,7 @@ structural_one(value: u8) -> Option<CodedTokenKind> {
 
 structural_two_exists(first: u8, second: u8) -> Bool {
     handle move second {
-        46 => move first == byte_value(46),
+        46 => first == byte_value(46),
         61 => handle move first {
             33 => true,
             60 => true,
@@ -817,7 +817,7 @@ scan_digit_tail(
                 }
             }
         },
-        Result::Err(_) => Result::Ok(move last_separator)
+        Result::Err(_) => Result::Ok(last_separator)
     }
 }
 
@@ -1039,8 +1039,8 @@ scan_exponent_after_marker(value: &mut Lexer) -> Result<Option<NumberExponent>, 
             );
             Result::Ok(
                 Option::Some(NumberExponent {
-                    negative: move negative,
-                    digits: move found
+                    negative: negative,
+                    digits: found
                 })
             )
 
@@ -1371,8 +1371,8 @@ scan_string(value: &mut Lexer) -> Result<(), LexError> {
     try(scan_string_tail(&mut *value, start, &mut decoded), @scan_string);
     handle StringBuilder::finish( decoded) {
         Result::Ok(text) => {
-            let id = intern_text(&mut *value, move text);
-            push( value, TokenKind::String(move id), 5, start);
+            let id = intern_text(&mut *value, text);
+            push( value, TokenKind::String(id), 5, start);
             Result::Ok(())
         },
         Result::Err(_) => unreachable()
@@ -1411,7 +1411,7 @@ scan_byte_string_tail(
         Result::Ok(byte) => handle split_byte(move byte, byte_value(127)) {
             Result::Ok(byte) => {
                 advance(&mut *value, 1);
-                Vec::push(&mut *decoded, move byte);
+                Vec::push(&mut *decoded, byte);
                 scan_byte_string_tail( value, start,  decoded)
             },
             Result::Err(_) => handle char_decode_utf8(&bytes, cursor) {
@@ -1479,7 +1479,7 @@ scan_byte_literal(value: &mut Lexer) -> Result<(), LexError> {
         Result::Ok(byte) => handle split_byte(move byte, byte_value(127)) {
             Result::Ok(byte) => {
                 advance(&mut *value, 1);
-                byte_ok(move byte)
+                byte_ok(byte)
             },
             Result::Err(_) => handle char_decode_utf8(&bytes, content_cursor) {
                 Result::Ok(character) => Result::Err(
@@ -1502,7 +1502,7 @@ scan_byte_literal(value: &mut Lexer) -> Result<(), LexError> {
     let byte = try( decoded, @scan_byte_literal);
     if(peek_is(&*value, 0, 39)) {
             advance(&mut *value, 1);
-            push( value, TokenKind::Byte(move byte), 7, start);
+            push( value, TokenKind::Byte(byte), 7, start);
             Result::Ok(())
 
     } else {
@@ -1653,7 +1653,7 @@ pub lex(source: &String) -> Result<LexedSource, LexError> {
         Result::Ok(_) => {
             let lexer = Lexer {
                 source: *source,
-                bytes: move bytes,
+                bytes: bytes,
                 cursor: 0,
                 tokens: Vec::new(),
                 lexemes: Interner::new(),
@@ -1695,23 +1695,23 @@ run_one(value: Lexer) -> Result<LexedSource, LexError> {
             run( value)
 
     } else {
-        run_byte( value, move byte, move start)
+        run_byte( value, byte, start)
     }
 }
 
 run_byte(value: Lexer, byte: u8, start: usize) -> Result<LexedSource, LexError> {
     handle split_byte(move byte, byte_value(58)) {
-        Result::Ok(byte) => run_byte_low( value,  byte, move start),
-        Result::Err(byte) => run_byte_high( value,  byte, move start)
+        Result::Ok(byte) => run_byte_low( value,  byte, start),
+        Result::Err(byte) => run_byte_high( value,  byte, start)
     }
 }
 
 run_byte_low(value: Lexer, byte: u8, start: usize) -> Result<LexedSource, LexError> {
     handle split_byte(move byte, byte_value(39)) {
-        Result::Ok(byte) => run_byte_low_39( value,  byte, move start),
+        Result::Ok(byte) => run_byte_low_39( value,  byte, start),
         Result::Err(byte) => handle split_byte(move byte, byte_value(47)) {
-            Result::Ok(byte) => run_byte_low_47( value,  byte, move start),
-            Result::Err(byte) => run_byte_low_58( value,  byte, move start)
+            Result::Ok(byte) => run_byte_low_47( value,  byte, start),
+            Result::Err(byte) => run_byte_low_58( value,  byte, start)
         }
     }
 }
@@ -1723,9 +1723,9 @@ run_byte_low_39(
 ) -> Result<LexedSource, LexError> {
     handle byte {
         34 => run_string_token( value),
-        36 => run_dollar_token( value, move start),
+        36 => run_dollar_token( value, start),
         39 => run_char_or_lifetime_token( value),
-        _ => run_general_byte( value, move byte, move start)
+        _ => run_general_byte( value, byte, start)
     }
 }
 
@@ -1735,10 +1735,10 @@ run_byte_low_47(
     start: usize
 ) -> Result<LexedSource, LexError> {
     handle split_byte(move byte, byte_value(44)) {
-        Result::Ok(byte) => run_byte_low_44( value,  byte, move start),
+        Result::Ok(byte) => run_byte_low_44( value,  byte, start),
         Result::Err(byte) => handle byte {
-            47 => run_slash_token( value, move start),
-            _ => run_general_byte( value, move byte, move start)
+            47 => run_slash_token( value, start),
+            _ => run_general_byte( value, byte, start)
         }
     }
 }
@@ -1749,10 +1749,10 @@ run_byte_low_44(
     start: usize
 ) -> Result<LexedSource, LexError> {
     handle byte {
-        40 => run_structural( value, TokenKind::LParen, 11, move start),
-        41 => run_structural( value, TokenKind::RParen, 12, move start),
-        44 => run_structural( value, TokenKind::Comma, 17, move start),
-        _ => run_general_byte( value, move byte, move start)
+        40 => run_structural( value, TokenKind::LParen, 11, start),
+        41 => run_structural( value, TokenKind::RParen, 12, start),
+        44 => run_structural( value, TokenKind::Comma, 17, start),
+        _ => run_general_byte( value, byte, start)
     }
 }
 
@@ -1762,15 +1762,15 @@ run_byte_low_58(
     start: usize
 ) -> Result<LexedSource, LexError> {
     handle byte {
-        58 => run_colon_token( value, move start),
-        _ => run_general_byte( value, move byte, move start)
+        58 => run_colon_token( value, start),
+        _ => run_general_byte( value, byte, start)
     }
 }
 
 run_byte_high(value: Lexer, byte: u8, start: usize) -> Result<LexedSource, LexError> {
     handle split_byte(move byte, byte_value(93)) {
-        Result::Ok(byte) => run_byte_high_93( value,  byte, move start),
-        Result::Err(byte) => run_byte_above_93( value,  byte, move start)
+        Result::Ok(byte) => run_byte_high_93( value,  byte, start),
+        Result::Err(byte) => run_byte_above_93( value,  byte, start)
     }
 }
 
@@ -1781,14 +1781,14 @@ run_byte_high_93(
 ) -> Result<LexedSource, LexError> {
     handle split_byte(move byte, byte_value(64)) {
         Result::Ok(byte) => handle byte {
-            59 => run_structural( value, TokenKind::Semicolon, 22, move start),
+            59 => run_structural( value, TokenKind::Semicolon, 22, start),
             64 => run_label_token( value),
-            _ => run_general_byte( value, move byte, move start)
+            _ => run_general_byte( value, byte, start)
         },
         Result::Err(byte) => handle byte {
-            91 => run_structural( value, TokenKind::LBracket, 15, move start),
-            93 => run_structural( value, TokenKind::RBracket, 16, move start),
-            _ => run_general_byte( value, move byte, move start)
+            91 => run_structural( value, TokenKind::LBracket, 15, start),
+            93 => run_structural( value, TokenKind::RBracket, 16, start),
+            _ => run_general_byte( value, byte, start)
         }
     }
 }
@@ -1801,12 +1801,12 @@ run_byte_above_93(
     handle split_byte(move byte, byte_value(98)) {
         Result::Ok(byte) => handle byte {
             98 => run_byte_prefix( value),
-            _ => run_general_byte( value, move byte, move start)
+            _ => run_general_byte( value, byte, start)
         },
         Result::Err(byte) => handle byte {
-            123 => run_structural( value, TokenKind::LBrace, 13, move start),
-            125 => run_structural( value, TokenKind::RBrace, 14, move start),
-            _ => run_general_byte( value, move byte, move start)
+            123 => run_structural( value, TokenKind::LBrace, 13, start),
+            125 => run_structural( value, TokenKind::RBrace, 14, start),
+            _ => run_general_byte( value, byte, start)
         }
     }
 }
@@ -1820,7 +1820,7 @@ run_slash_token(value: Lexer, start: usize) -> Result<LexedSource, LexError> {
         if(peek_is(&value, 1, 42)) {
         advance(&mut value, 2);
         try(
-        scan_block_comment(&mut value, move start, 1),
+        scan_block_comment(&mut value, start, 1),
         @run_slash_token
         );
         run( value)
@@ -1830,7 +1830,7 @@ run_slash_token(value: Lexer, start: usize) -> Result<LexedSource, LexError> {
         value,
         TokenKind::Slash,
         25,
-        move start
+        start
         )
         }
     }
@@ -1844,10 +1844,10 @@ run_colon_token(value: Lexer, start: usize) -> Result<LexedSource, LexError> {
     advance(&mut value, 1);
     if(peek_is(&value, 0, 58)) {
             advance(&mut value, 1);
-            push(&mut value, TokenKind::DoubleColon, 19, move start)
+            push(&mut value, TokenKind::DoubleColon, 19, start)
 
     } else {
-        push(&mut value, TokenKind::Colon, 18, move start)
+        push(&mut value, TokenKind::Colon, 18, start)
     };
     run( value)
 }
@@ -1968,10 +1968,10 @@ normalized_span_len(bytes: &Bytes, cursor: usize, end: usize, count: usize) -> u
                        } else {
                            count + 1
                        };
-            normalized_span_len(bytes, cursor + 1, end, move next)
+            normalized_span_len(bytes, cursor + 1, end, next)
 
     } else {
-        move count
+        count
     }
 }
 
@@ -2045,7 +2045,7 @@ write_number(
     handle Option::as_ref(&value.fraction) {
         Result::Ok(fraction) => {
             ByteBuf::push(&mut *output, 1);
-            write_normalized_span(&mut *output, source, move fraction)
+            write_normalized_span(&mut *output, source, fraction)
         },
         Result::Err(_) => ByteBuf::push(&mut *output, 0)
     };
@@ -2055,7 +2055,7 @@ write_number(
             let digits = exponent_digits(exponent);
             ByteBuf::push(&mut *output, 1);
             ByteBuf::push(&mut *output, wrapping_convert_to_u8(
-                bool_value(move negative)
+                bool_value(negative)
             ));
             write_normalized_span( output, source, &digits)
         },
@@ -2114,7 +2114,7 @@ write_tokens(
                 &mut *output,
                 wrapping_convert_to_u64(token.span.end)
             );
-            write_token_payload(&mut *output, source, value, move token);
+            write_token_payload(&mut *output, source, value, token);
             write_tokens( output, source, value, index + 1)
 
     } else {
@@ -2148,7 +2148,7 @@ encode_result(
 process_inputs(arguments: &Vec<String>, index: usize, output: &mut ByteBuf) / FileRead {
     if(index < Vec::len(arguments)) {
             let path = *Vec::index(arguments, index);
-            let bytes = read_file(move path);
+            let bytes = read_file(path);
             handle String::from_utf8(move bytes) {
                 Result::Ok(source) => encode_result(
                     &mut *output,
@@ -2183,7 +2183,7 @@ pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
                 )
             );
             process_inputs(&arguments, 1, &mut encoded);
-            write_file(move output_path, ByteBuf::finish( encoded))
+            write_file(output_path, ByteBuf::finish( encoded))
 
     }
 }

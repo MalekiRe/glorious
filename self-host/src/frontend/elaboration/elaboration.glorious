@@ -3169,9 +3169,9 @@ check_expected(
     token: usize
 ) -> Result<Elaborated, ElaborationError> {
     handle expected {
-        Result::Err(_) => Result::Ok(move found),
+        Result::Err(_) => Result::Ok(found),
         Result::Ok(ty) =>
-            if(found.type_id == ty) { Result::Ok(move found) } else { Result::Err(error(
+            if(found.type_id == ty) { Result::Ok(found) } else { Result::Err(error(
                 3,
                 token,
                 token,
@@ -3275,7 +3275,7 @@ parse_digits(
     if(cursor < end) { handle Bytes::get(&bytes, cursor) {
             Result::Err(_) => Result::Err(()),
             Result::Ok(byte) => if(byte == 95) { parse_digits(
-                    move bytes,
+                    bytes,
                     cursor + 1,
                     end,
                     base,
@@ -5903,7 +5903,7 @@ write_module_components(
                     declarations,
                     parent
                 );
-                write_name_id( output, source, move name)
+                write_name_id( output, source, name)
             }
         }
     }
@@ -5930,7 +5930,7 @@ write_function_identity(
                 declarations,
                 parent
             );
-            write_name_id( output, source, move name)
+            write_name_id( output, source, name)
         }
     }
 }
@@ -6775,7 +6775,7 @@ process_inputs(
 ) / FileRead {
     if(index < Vec::len(arguments)) {
         let path = *Vec::index(arguments, index);
-        let bytes = read_file(move path);
+        let bytes = read_file(path);
         handle String::from_utf8(move bytes) {
             Result::Err(_) => ByteBuf::push(&mut *output, 1),
             Result::Ok(source) => encode_source(&mut *output, source)
@@ -6801,7 +6801,7 @@ pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
             u32_from_usize(count - 1)
         );
         process_inputs(&arguments, 1, &mut encoded);
-        write_file(move output_path, ByteBuf::finish( encoded))
+        write_file(output_path, ByteBuf::finish( encoded))
     }
 }
 
@@ -6816,9 +6816,9 @@ u32_from_u8(value: u8) -> u32 { wrapping_convert_to_u32( value) }
 u8_from_u32(value: u32) -> u8 { wrapping_convert_to_u8( value) }
 
 bool_and(left: Bool, right: Bool) -> Bool {
-    if(move left) { move right } else { false }
+    if(move left) { right } else { false }
 }
 
 bool_or(left: Bool, right: Bool) -> Bool {
-    if(move left) { true } else { move right }
+    if(move left) { true } else { right }
 }

@@ -980,7 +980,7 @@ lookup_scope(
 ) -> Result<Option<u32>, BodyError> {
     if(index < super::headers::fixity_count(nominal)) {
         handle super::headers::fixity_at(nominal, index) {
-            Result::Err(_) => Result::Ok(move selected),
+            Result::Err(_) => Result::Ok(selected),
             Result::Ok(fixity) => {
                 let form = super::headers::fixity_form_code(fixity);
                 let fixity_scope = fixity_owner(declarations, fixity);
@@ -1067,7 +1067,7 @@ lookup_scope(
             }
         }
     } else {
-        Result::Ok(move selected)
+        Result::Ok(selected)
     }
 }
 
@@ -3476,7 +3476,7 @@ process_inputs(
 ) / FileRead {
     if(index < Vec::len(arguments)) {
         let path = *Vec::index(arguments, index);
-            let bytes = read_file(move path);
+            let bytes = read_file(path);
             handle String::from_utf8(move bytes) {
                 Result::Err(_) => ByteBuf::push(&mut *output, 1),
                 Result::Ok(source) => encode_source(&mut *output,  source)
@@ -3506,7 +3506,7 @@ pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
                 u32_from_usize(count - 1)
             );
             process_inputs(&arguments, 1, &mut encoded);
-            write_file(move output_path, ByteBuf::finish( encoded))
+            write_file(output_path, ByteBuf::finish( encoded))
     }
 }
 

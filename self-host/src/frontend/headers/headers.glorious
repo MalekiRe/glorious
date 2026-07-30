@@ -630,7 +630,7 @@ parse_type_values(
         Result::Ok(())
     } else {
         let ty = try(parse_type(value, related), @parse_type_values);
-        Vec::push(&mut *values, move ty);
+        Vec::push(&mut *values, ty);
         if(eat_code(value, 17)) { if(at_code(&*value, closing_code)) { Result::Ok(()) } else { parse_type_values(
                     value,
                     closing_code,
@@ -674,7 +674,7 @@ parse_path_tail(
             ),
             @parse_path_tail
         );
-        parse_application(value, related, start, move path)
+        parse_application(value, related, start, path)
     }
 }
 
@@ -713,7 +713,7 @@ parse_application(
             Result::Ok(move constructor),
             Result::Err(())
         )
-        } } else { Result::Ok(move constructor) }
+        } } else { Result::Ok(constructor) }
 }
 
 parse_reference(
@@ -760,7 +760,7 @@ parse_reference_referent(
             value,
             related,
             start,
-            move lifetime,
+            lifetime,
             2
         ) }
 }
@@ -958,7 +958,7 @@ parse_effect_row(value: &mut Parser, related: usize) -> Result<EffectRow, Header
     let effects = Vec::new();
     if(eat_code(value, 13)) { parse_effect_items(value, related, start,  effects) } else {
         let found_effect = try(parse_type(value, related), @parse_effect_row);
-        Vec::push(&mut effects, move found_effect);
+        Vec::push(&mut effects, found_effect);
         finish_effects(
             value,
             start,
@@ -981,7 +981,7 @@ parse_effect_items(
             value,
             start,
              effects,
-            Result::Ok(move row_tail)
+            Result::Ok(row_tail)
         )
     } else { if(eat_code(value, 14)) { finish_effects(
                 value,
@@ -994,7 +994,7 @@ parse_effect_items(
                 @parse_effect_items
             );
             let next =  effects;
-            Vec::push(&mut next, move found_effect);
+            Vec::push(&mut next, found_effect);
             if(eat_code(value, 17)) { parse_effect_items(
                     value,
                     related,
@@ -1067,11 +1067,11 @@ parse_callable_suffix(
     if(eat_code(value, 23)) { if(at_code(&*value, 25)) { parse_callable_effects(
                 value,
                 shell,
-                move public,
+                public,
                 start,
-                move name,
-                move generics,
-                move parameters,
+                name,
+                generics,
+                parameters,
                 Result::Err(())
             ) } else {
             let parsed_result = try(
@@ -1081,21 +1081,21 @@ parse_callable_suffix(
             parse_callable_effects(
                 value,
                 shell,
-                move public,
+                public,
                 start,
-                move name,
-                move generics,
-                move parameters,
-                Result::Ok(move parsed_result)
+                name,
+                generics,
+                parameters,
+                Result::Ok(parsed_result)
             )
         } } else { parse_callable_effects(
             value,
             shell,
-            move public,
+            public,
             start,
-            move name,
-            move generics,
-            move parameters,
+            name,
+            generics,
+            parameters,
             Result::Err(())
         ) }
 }
@@ -1118,23 +1118,23 @@ parse_callable_effects(
         finish_callable(
             value,
             shell,
-            move public,
+            public,
             start,
-            move name,
-            move generics,
-            move parameters,
-            move result,
-            Result::Ok(move parsed_effects)
+            name,
+            generics,
+            parameters,
+            result,
+            Result::Ok(parsed_effects)
         )
     } else { finish_callable(
             value,
             shell,
-            move public,
+            public,
             start,
-            move name,
-            move generics,
-            move parameters,
-            move result,
+            name,
+            generics,
+            parameters,
+            result,
             Result::Err(())
         ) }
 }
@@ -1349,12 +1349,12 @@ parse_alias_name(
             order_kinds,
             order_indices,
             shell,
-            move public,
+            public,
             start,
             whole_end,
-            move name,
-            move generics,
-            move target
+            name,
+            generics,
+            target
         ) } else { Result::Err(
             header_error(9, value.cursor, start)
         ) }
@@ -1515,12 +1515,12 @@ parse_sum_header(
             order_kinds,
             order_indices,
             shell,
-            move public,
+            public,
             start,
             header_end,
             whole_end,
-            move name,
-            move generics
+            name,
+            generics
         ) } else { Result::Err(
             header_error(9, value.cursor, start)
         ) }
@@ -2259,7 +2259,7 @@ process_inputs(
 ) / FileRead {
     if(index < Vec::len(arguments)) {
             let path = *Vec::index(arguments, index);
-            let bytes = read_file(move path);
+            let bytes = read_file(path);
             handle String::from_utf8(move bytes) {
                 Result::Err(_) => ByteBuf::push(&mut *output, 1),
                 Result::Ok(source) => encode_source(&mut *output,  source)
@@ -2279,7 +2279,7 @@ process_interface_inputs(
 ) / FileRead {
     if(index < Vec::len(arguments)) {
             let path = *Vec::index(arguments, index);
-            let bytes = read_file(move path);
+            let bytes = read_file(path);
             handle String::from_utf8(move bytes) {
                 Result::Err(_) => ByteBuf::push(&mut *output, 1),
                 Result::Ok(source) => encode_interface_source(
@@ -2310,7 +2310,7 @@ pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
             wrapping_convert_to_u32(count - 1)
         );
         process_inputs(&arguments, 1, &mut encoded);
-        write_file(move output_path, ByteBuf::finish( encoded))
+        write_file(output_path, ByteBuf::finish( encoded))
     }
 }
 
@@ -2334,7 +2334,7 @@ pub interface_application() / {
             wrapping_convert_to_u32(count - 1)
         );
         process_interface_inputs(&arguments, 1, &mut encoded);
-        write_file(move output_path, ByteBuf::finish( encoded))
+        write_file(output_path, ByteBuf::finish( encoded))
     }
 }
 

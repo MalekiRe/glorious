@@ -20,7 +20,7 @@ fn monomorphic_noncopy_move_has_an_exact_machine_fix() {
         .fix
         .as_ref()
         .expect("the advice should be machine-applicable");
-    assert_eq!(&source[fix.span.range()], "move");
+    assert_eq!(&source[fix.span.range()], "move ");
     assert_eq!(fix.replacement, "");
 
     let mut fixed = source.to_owned();
@@ -174,7 +174,7 @@ fn locals_introduced_by_nested_blocks_infer_their_final_transfer() {
         .find(|diagnostic| diagnostic.code.as_deref() == Some(REDUNDANT_MOVE_CODE))
         .and_then(|diagnostic| diagnostic.fix.as_ref())
         .expect("a nested block's own final local use has an exact fix");
-    assert_eq!(&source[fix.span.range()], "move");
+    assert_eq!(&source[fix.span.range()], "move ");
     assert!(fix.replacement.is_empty());
 }
 
@@ -198,7 +198,7 @@ fn outer_locals_transfer_only_when_a_nested_use_is_final() {
         .filter_map(|diagnostic| diagnostic.fix.as_ref())
         .collect::<Vec<_>>();
     assert_eq!(fixes.len(), 2);
-    assert!(fixes.iter().all(|fix| &source[fix.span.range()] == "move"));
+    assert!(fixes.iter().all(|fix| &source[fix.span.range()] == "move "));
 }
 
 #[test]
@@ -221,7 +221,7 @@ fn mutually_exclusive_if_arms_each_infer_their_final_transfer() {
         .filter_map(|diagnostic| diagnostic.fix.as_ref())
         .collect::<Vec<_>>();
     assert_eq!(fixes.len(), 3);
-    assert!(fixes.iter().all(|fix| &source[fix.span.range()] == "move"));
+    assert!(fixes.iter().all(|fix| &source[fix.span.range()] == "move "));
 }
 
 #[test]
@@ -269,7 +269,7 @@ fn compiler_owned_try_wrappers_preserve_final_use_transfer() {
         .fix
         .as_ref()
         .expect("the advice should be exactly machine-applicable");
-    assert_eq!(&source[fix.span.range()], "move");
+    assert_eq!(&source[fix.span.range()], "move ");
     assert_eq!(fix.replacement, "");
     for name in ["forward", "combine"] {
         let function = phases

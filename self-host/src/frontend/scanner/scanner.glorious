@@ -427,7 +427,7 @@ classify(
             Result::Ok(Classification {
                 kind: DeclarationKind::TypeAlias,
                 kind_code: 3,
-                name: Result::Ok(move name),
+                name: Result::Ok(name),
                 style: 1
             })
         },
@@ -439,7 +439,7 @@ classify(
             Result::Ok(Classification {
                 kind: DeclarationKind::Global,
                 kind_code: 5,
-                name: Result::Ok(move name),
+                name: Result::Ok(name),
                 style: 1
             })
         },
@@ -531,7 +531,7 @@ classify_ident(
         Result::Ok(Classification {
             kind: DeclarationKind::Module,
             kind_code: 1,
-            name: Result::Ok(move found),
+            name: Result::Ok(found),
             style: 4
         })
     } else { if(ident_is(value, cursor, &"use")) { if(import_declaration(value, cursor)) {
@@ -541,7 +541,7 @@ classify_ident(
                     name: token_ident(value, cursor + 1),
                     style: 1
                 })
-            } else { function_classification(move name) } } else { if(ident_is(value, cursor, &"cases")) {
+            } else { function_classification(name) } } else { if(ident_is(value, cursor, &"cases")) {
                 let found = try(
                     name_at(value, cursor + 1, start),
                     @classify_ident
@@ -549,7 +549,7 @@ classify_ident(
                 Result::Ok(Classification {
                     kind: DeclarationKind::EffectRowAlias,
                     kind_code: 4,
-                    name: Result::Ok(move found),
+                    name: Result::Ok(found),
                     style: 1
                 })
             } else { if(fixity_declaration(value, cursor)) {
@@ -559,7 +559,7 @@ classify_ident(
                         name: token_ident(value, cursor + 2),
                         style: 1
                     })
-                } else { function_classification(move name) } } } }
+                } else { function_classification(name) } } } }
 }
 
 function_classification(name: Id<String>) -> Result<Classification, ScanError> {
@@ -610,8 +610,8 @@ scan_semicolon_shell(
     let name = move classification.name;
     handle find_semicolon(value, cursor, limit, start) {
         Result::Err(error) => scan_state_error(
-            move kind,
-            move name,
+            kind,
+            name,
              error
         ),
         Result::Ok(end) => {
@@ -692,8 +692,8 @@ scan_braced_shell(
     let name = move classification.name;
     handle find_body(value, cursor, limit, start, function) {
         Result::Err(error) => scan_state_error(
-            move kind,
-            move name,
+            kind,
+            name,
              error
         ),
         Result::Ok(bounds) => {
@@ -744,7 +744,7 @@ scan_one(
             cursor + 1,
             limit,
             public,
-            move classification,
+            classification,
             parent
         ) } else { if(u8_equal(style, 4)) {
             let style = try(
@@ -775,7 +775,7 @@ scan_one(
                 cursor + 1,
                 limit,
                 public,
-                move classification,
+                classification,
                 parent,
                 u8_equal(style, 3)
             ) } }
@@ -945,7 +945,7 @@ write_optional_range(output: &mut ByteBuf, value: &Option<TokenRange>) {
         Result::Err(_) => ByteBuf::push( output, 0),
         Result::Ok(range) => {
             ByteBuf::push(&mut *output, 1);
-            write_range( output, move range)
+            write_range( output, range)
         }
     }
 }
@@ -1013,7 +1013,7 @@ encode_scan(
 process_inputs(arguments: &Vec<String>, index: usize, output: &mut ByteBuf) / FileRead {
     if(index < Vec::len(arguments)) {
             let path = *Vec::index(arguments, index);
-            let bytes = read_file(move path);
+            let bytes = read_file(path);
             handle String::from_utf8(move bytes) {
                 Result::Err(_) => ByteBuf::push(&mut *output, 1),
                 Result::Ok(source) => handle super::lexer::lex(&source) {
@@ -1040,6 +1040,6 @@ pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
             wrapping_convert_to_u32(argument_count - 1)
         );
         process_inputs(&arguments, 1, &mut encoded);
-        write_file(move output_path, ByteBuf::finish( encoded))
+        write_file(output_path, ByteBuf::finish( encoded))
     }
 }

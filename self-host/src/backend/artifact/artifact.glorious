@@ -429,8 +429,8 @@ pub encode(
     } else if(fixed_sections_valid(sections, 0)) {
         Result::Ok(encode_valid(
             sections,
-            move entry_function,
-            move required_features
+            entry_function,
+            required_features
         ))
     } else {
         Result::Err(ArtifactWriteError::InvalidFixedSectionLength)
