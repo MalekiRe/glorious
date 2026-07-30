@@ -1,0 +1,175 @@
+// The public diagnostic boundary for the self-hosted compiler.
+
+mod model;
+mod source_errors;
+mod backend_errors;
+
+use super::compiler;
+use super::compiler::CompileError;
+use model::CompilerDiagnostic;
+use model::DiagnosticClass;
+use model::DiagnosticPhase;
+use model::DiagnosticSpace;
+
+pub compile_error_diagnostic(value: &CompileError) -> CompilerDiagnostic {
+    handle *value {
+        CompileError::Lex(error) => source_errors::lex_diagnostic(&error),
+        CompileError::Scan(error) => source_errors::scan_diagnostic(&error),
+        CompileError::Headers(error) => source_errors::header_diagnostic(&error),
+        CompileError::ResolutionIndex(error) => source_errors::resolution_diagnostic(
+            DiagnosticPhase::ResolutionIndex,
+            None,
+            &error
+        ),
+        CompileError::InterfaceCollection(error) => source_errors::elaboration_diagnostic(
+            DiagnosticPhase::InterfaceCollection,
+            None,
+            &error
+        ),
+        CompileError::DeclarationName(shell) => model::make_diagnostic(
+            DiagnosticPhase::Declaration,
+            DiagnosticClass::Internal,
+            1,
+            "self-host compiler: declaration name lookup failed",
+            model::site(DiagnosticSpace::Declaration, Id::to_usize(shell)),
+            None,
+            None,
+            0,
+            0
+        ),
+        CompileError::BodyParse(shell, error) =>
+            source_errors::body_diagnostic(shell, &error),
+        CompileError::BodyResolution(shell, error) => source_errors::resolution_diagnostic(
+            DiagnosticPhase::BodyResolution,
+            Option::Some(shell),
+            &error
+        ),
+        CompileError::BodyElaboration(shell, error) => source_errors::elaboration_diagnostic(
+            DiagnosticPhase::BodyElaboration,
+            Option::Some(shell),
+            &error
+        ),
+        CompileError::Lowering(shell, error) =>
+            backend_errors::lowering_diagnostic(shell, &error),
+        CompileError::InterfaceName(detail) => model::make_diagnostic(
+            DiagnosticPhase::InterfaceExport,
+            DiagnosticClass::Internal,
+            1,
+            "self-host compiler: interface name lookup failed",
+            model::site(
+                DiagnosticSpace::Interface,
+                wrapping_convert_to_usize(detail)
+            ),
+            None,
+            None,
+            0,
+            detail
+        ),
+        CompileError::UnsupportedInterfaceType(index) => model::make_diagnostic(
+            DiagnosticPhase::InterfaceExport,
+            DiagnosticClass::Emission,
+            2,
+            "self-host compiler: interface contains an unsupported type",
+            model::site(DiagnosticSpace::Type, index),
+            None,
+            None,
+            0,
+            wrapping_convert_to_u32(index)
+        ),
+        CompileError::Emission(error) => backend_errors::emission_diagnostic(&error)
+    }
+}
+
+pub diagnostic_phase_code(value: &CompilerDiagnostic) -> u32 {
+    model::diagnostic_phase_code(value)
+}
+
+pub diagnostic_class_code(value: &CompilerDiagnostic) -> u32 {
+    model::diagnostic_class_code(value)
+}
+
+pub diagnostic_code(value: &CompilerDiagnostic) -> u32 {
+    model::diagnostic_code(value)
+}
+
+pub diagnostic_message(value: &CompilerDiagnostic) -> String {
+    model::diagnostic_message(value)
+}
+
+pub diagnostic_primary_space_code(value: &CompilerDiagnostic) -> u32 {
+    model::diagnostic_primary_space_code(value)
+}
+
+pub diagnostic_primary_start(value: &CompilerDiagnostic) -> usize {
+    model::diagnostic_primary_start(value)
+}
+
+pub diagnostic_primary_end(value: &CompilerDiagnostic) -> usize {
+    model::diagnostic_primary_end(value)
+}
+
+pub diagnostic_related_space_code(value: &CompilerDiagnostic) -> u32 {
+    model::diagnostic_related_space_code(value)
+}
+
+pub diagnostic_related_start(value: &CompilerDiagnostic) -> usize {
+    model::diagnostic_related_start(value)
+}
+
+pub diagnostic_related_end(value: &CompilerDiagnostic) -> usize {
+    model::diagnostic_related_end(value)
+}
+
+pub diagnostic_owner_space_code(value: &CompilerDiagnostic) -> u32 {
+    model::diagnostic_owner_space_code(value)
+}
+
+pub diagnostic_owner_start(value: &CompilerDiagnostic) -> usize {
+    model::diagnostic_owner_start(value)
+}
+
+pub diagnostic_owner_end(value: &CompilerDiagnostic) -> usize {
+    model::diagnostic_owner_end(value)
+}
+
+pub diagnostic_expected(value: &CompilerDiagnostic) -> u32 {
+    model::diagnostic_expected(value)
+}
+
+pub diagnostic_found(value: &CompilerDiagnostic) -> u32 {
+    model::diagnostic_found(value)
+}
+
+pub render_diagnostic(value: &CompilerDiagnostic) -> String {
+    model::render_diagnostic(value)
+}
+
+pub compile_source(original: &String) -> Result<Bytes, CompilerDiagnostic> {
+    Result::map_err(
+        compiler::compile_source(original),
+        { found => compile_error_diagnostic(&found) }
+    )
+}
+
+pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
+    let arguments = process_args();
+    if(Vec::len(&arguments) < 2) {
+        write_diagnostic(
+            "usage: grandiose-self-host-compiler <output.grbc> <input.glorious>"
+        )
+    } else {
+        let output_path = *Vec::index(&arguments, 0);
+        let input_path = *Vec::index(&arguments, 1);
+        let bytes = read_file(input_path);
+        handle String::from_utf8(bytes) {
+            Result::Err(_) =>
+                write_diagnostic("self-host compiler: input is not UTF-8"),
+            Result::Ok(source) => handle compile_source(&source) {
+                Result::Err(diagnostic) =>
+                    write_diagnostic(render_diagnostic(&diagnostic)),
+                Result::Ok(artifact_bytes) =>
+                    write_file(output_path, artifact_bytes)
+            }
+        }
+    }
+}
