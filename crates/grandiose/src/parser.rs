@@ -4125,18 +4125,28 @@ fn normalize_effect_surface(program: &mut Program) -> Vec<Diagnostic> {
         }
     }
 
-    fn completion_pattern(mut clause: HandlerClause) -> Option<(Pattern, Expr)> {
+    fn completion_pattern(
+        mut clause: HandlerClause,
+        qualified_owner: Option<Vec<String>>,
+    ) -> Option<(Pattern, Expr)> {
         if clause.effect.is_empty() {
             let [pattern] = clause.patterns.as_slice() else {
                 return None;
             };
             return Some((pattern.clone(), clause.body));
         }
+        let path = match qualified_owner {
+            Some(mut owner) if owner.len() > 1 => {
+                owner.push(clause.operation);
+                owner
+            }
+            _ => vec![clause.effect, clause.operation],
+        };
         Some((
             Pattern {
                 kind: PatternKind::Variant {
                     path: crate::ast::PatternPath {
-                        segments: vec![clause.effect, clause.operation],
+                        segments: path,
                         span: clause.span,
                     },
                     fields: std::mem::take(&mut clause.patterns),
@@ -4231,6 +4241,18 @@ fn normalize_effect_surface(program: &mut Program) -> Vec<Diagnostic> {
                         .copied()
                     else {
                         completion_sites.insert((clause.span.start, clause.span.end));
+                        let qualified_owner = effect_paths
+                            .iter()
+                            .find(|path| path.site == clause.span)
+                            .and_then(|path| match &path.effect.kind {
+                                TypeSyntaxKind::Path(segments) => Some(
+                                    segments
+                                        .iter()
+                                        .map(|segment| segment.name.clone())
+                                        .collect(),
+                                ),
+                                _ => None,
+                            });
                         normalize(
                             &mut clause.body,
                             operations,
@@ -4239,7 +4261,7 @@ fn normalize_effect_surface(program: &mut Program) -> Vec<Diagnostic> {
                             completion_sites,
                             errors,
                         );
-                        if let Some(arm) = completion_pattern(clause) {
+                        if let Some(arm) = completion_pattern(clause, qualified_owner) {
                             completion_arms.push(arm);
                         }
                         continue;

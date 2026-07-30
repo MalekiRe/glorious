@@ -73,11 +73,8 @@ pub enum ResolutionError {
     CorruptFunctionSearch(usize),
     CorruptStructSearch(usize),
     CorruptEnumSearch(usize),
-    MissingLetBinderMetadata(usize),
     LocalIdExhausted(usize, usize),
     ExpectedBindingIdentifier(usize),
-    UnexpectedBlockChildMetadata(usize, usize),
-    UnexpectedBlockEdge(usize, usize),
     UnexpectedHandleTarget(usize, usize),
     MissingParameterHeader(usize),
     MissingBodyShell(usize),
@@ -131,11 +128,8 @@ pub resolution_error_token(value: &ResolutionError) -> usize {
         ResolutionError::CorruptFunctionSearch(token) => token,
         ResolutionError::CorruptStructSearch(token) => token,
         ResolutionError::CorruptEnumSearch(token) => token,
-        ResolutionError::MissingLetBinderMetadata(token) => token,
         ResolutionError::LocalIdExhausted(token, _) => token,
         ResolutionError::ExpectedBindingIdentifier(token) => token,
-        ResolutionError::UnexpectedBlockChildMetadata(token, _) => token,
-        ResolutionError::UnexpectedBlockEdge(token, _) => token,
         ResolutionError::UnexpectedHandleTarget(token, _) => token,
         ResolutionError::MissingParameterHeader(index) => index,
         ResolutionError::MissingBodyShell(shell) => shell,
@@ -164,11 +158,8 @@ pub resolution_error_related(value: &ResolutionError) -> usize {
         ResolutionError::CorruptFunctionSearch(token) => token,
         ResolutionError::CorruptStructSearch(token) => token,
         ResolutionError::CorruptEnumSearch(token) => token,
-        ResolutionError::MissingLetBinderMetadata(_) => 0,
         ResolutionError::LocalIdExhausted(_, count) => count,
         ResolutionError::ExpectedBindingIdentifier(token) => token,
-        ResolutionError::UnexpectedBlockChildMetadata(_, metadata) => metadata,
-        ResolutionError::UnexpectedBlockEdge(_, metadata) => metadata,
         ResolutionError::UnexpectedHandleTarget(_, enum_token) => enum_token,
         ResolutionError::MissingParameterHeader(index) => index,
         ResolutionError::MissingBodyShell(shell) => shell,
@@ -963,23 +954,9 @@ resolve_block_children(
     Slice::try_for_each(
         super::bodies::expression_children(body, expression),
         { edge => {
-            let position = super::bodies::expression_edge_position(edge);
-            let metadata = super::bodies::expression_edge_metadata(edge);
-            let value = Id::to_u32(
-                super::bodies::expression_edge_value(edge)
-            );
-            handle position {
-                1 => if(metadata == 0) {
-                    Result::Err(
-                        ResolutionError::MissingLetBinderMetadata(
-                            super::bodies::expression_token_start_at(
-                                body,
-                                value
-                            )
-                        )
-                    )
-                } else {
-                    let token = usize_from_u32(metadata - 1);
+            handle super::bodies::block_statement_view(edge) {
+                super::bodies::BlockStatementView::Let(id, token) => {
+                    let value = Id::to_u32(id);
                         handle super::lexer::token_kind_at(
                             super::headers::parsed_source(headers),
                             token
@@ -1035,7 +1012,7 @@ resolve_block_children(
                             )
                         }
                 },
-                2 => if(metadata == 0) {
+                super::bodies::BlockStatementView::Expression(id) => {
                     resolve_expression(
                         headers,
                         index,
@@ -1043,26 +1020,10 @@ resolve_block_children(
                         body,
                         bindings,
                         output,
-                        value,
+                        Id::to_u32(id),
                         module
                     )
-                } else {
-                    Result::Err(
-                        ResolutionError::UnexpectedBlockChildMetadata(
-                            super::bodies::expression_token_start_at(
-                                body,
-                                value
-                            ),
-                            usize_from_u32(metadata)
-                        )
-                    )
-                },
-                _ => Result::Err(
-                    ResolutionError::UnexpectedBlockEdge(
-                        super::bodies::expression_token_start_at(body, value),
-                        usize_from_u32(metadata)
-                    )
-                )
+                }
             }
         } }
     )

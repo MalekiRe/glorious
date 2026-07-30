@@ -17,6 +17,13 @@ pub struct ExprRange { start: u32, count: u32 }
 
 pub struct ExprEdge { value: ExprId, position: u8, metadata: u32 }
 
+pub enum BlockStatementView {
+    Let(ExprId, usize),
+    Expression(ExprId)
+}
+
+impl Use<[0, *]> for BlockStatementView {}
+
 pub struct BodyTokenRange { start: usize, end: usize }
 
 impl Use<[0, *]> for BodyTokenRange {}
@@ -102,10 +109,9 @@ struct OperatorUse {
     precedence: u8
 }
 
-struct PendingStatement {
-    position: u8,
-    binding_token: Option<usize>,
-    expression: ExprId
+enum PendingStatement {
+    Let(usize, ExprId),
+    Expression(ExprId)
 }
 
 struct PendingHandleArm {
@@ -376,12 +382,19 @@ pub expression_edge_value(value: &ExprEdge) -> ExprId {
     value.value
 }
 
-pub expression_edge_position(value: &ExprEdge) -> u8 {
-    value.position
+expression_edge_metadata(value: &ExprEdge) -> u32 {
+    value.metadata
 }
 
-pub expression_edge_metadata(value: &ExprEdge) -> u32 {
-    value.metadata
+pub block_statement_view(value: &ExprEdge) -> BlockStatementView {
+    handle value.position {
+        1 => BlockStatementView::Let(
+            value.value,
+            usize_from_u32(value.metadata)
+        ),
+        2 => BlockStatementView::Expression(value.value),
+        _ => unreachable()
+    }
 }
 
 // Transitional scalar accessors remain for elaboration's ordinal-sensitive
@@ -402,28 +415,6 @@ pub expression_child_at(
         expression_children(value, expression),
         usize_from_u32(child)
     )))
-}
-
-pub expression_child_position_at(
-    value: &ParsedBody,
-    expression: u32,
-    child: u32
-) -> u8 {
-    expression_edge_position(edge_in_slice(
-        expression_children(value, expression),
-        usize_from_u32(child)
-    ))
-}
-
-pub expression_child_metadata_at(
-    value: &ParsedBody,
-    expression: u32,
-    child: u32
-) -> u32 {
-    expression_edge_metadata(edge_in_slice(
-        expression_children(value, expression),
-        usize_from_u32(child)
-    ))
 }
 
 edge_in_slice<'a>(
@@ -493,16 +484,14 @@ expr_id_at(value: &Vec<u32>, index: usize) -> ExprId {
 }
 
 pop_operator(value: &mut Vec<OperatorUse>) -> OperatorUse {
-    let index = Vec::len(&*value) - 1;
-    handle Vec::remove(&mut *value, index) {
+    handle Vec::pop(&mut *value) {
         Result::Err(_) => unreachable(),
         Result::Ok(found) => found
     }
 }
 
 pop_expr(value: &mut Vec<ExprId>) -> ExprId {
-    let index = Vec::len(&*value) - 1;
-    handle Vec::remove(&mut *value, index) {
+    handle Vec::pop(&mut *value) {
         Result::Err(_) => unreachable(),
         Result::Ok(found) => found
     }
@@ -839,29 +828,6 @@ push_projection(
     )
 }
 
-push_statement(
-    value: &mut Vec<PendingStatement>,
-    position: u8,
-    binding_token: Option<usize>,
-    expression: ExprId
-) {
-    Vec::push(
-        &mut *value,
-        PendingStatement {
-            position: position,
-            binding_token: binding_token,
-            expression: expression
-        }
-    )
-}
-
-statement_metadata(value: &Option<usize>) -> u32 {
-    handle Option::as_ref(value) {
-        Result::Err(_) => 0,
-        Result::Ok(token) => u32_from_usize(*token) + 1
-    }
-}
-
 push_statement_edges(
     value: &mut BodyParser,
     statements: &Vec<PendingStatement>,
@@ -869,14 +835,24 @@ push_statement_edges(
 ) {
     for_range(Range::new(index, Vec::len(statements)), { current => {
         let statement = Vec::index(statements, current);
-        Vec::push(
-            &mut value.edges,
-            ExprEdge {
-                value: statement.expression,
-                position: statement.position,
-                metadata: statement_metadata(&statement.binding_token)
-            }
-        )
+        handle *statement {
+            PendingStatement::Let(token, expression) => Vec::push(
+                &mut value.edges,
+                ExprEdge {
+                    value: expression,
+                    position: 1,
+                    metadata: u32_from_usize(token)
+                }
+            ),
+            PendingStatement::Expression(expression) => Vec::push(
+                &mut value.edges,
+                ExprEdge {
+                    value: expression,
+                    position: 2,
+                    metadata: 0
+                }
+            )
+        }
     } })
 }
 
@@ -2633,11 +2609,12 @@ parse_block_statement(
                                         ),
                                         @parse_block_statement
                                     );
-                                    push_statement(
+                                    Vec::push(
                                         &mut *statements,
-                                        1,
-                                        Option::Some(name_token),
-                                        initializer
+                                        PendingStatement::Let(
+                                            name_token,
+                                            initializer
+                                        )
                                     );
                                     Result::Ok(())
                             } else {
@@ -2673,7 +2650,10 @@ parse_block_statement(
                 ),
                 @parse_block_statement
             );
-            push_statement(&mut *statements, 2, None, expression);
+            Vec::push(
+                &mut *statements,
+                PendingStatement::Expression(expression)
+            );
             Result::Ok(())
         }
     }
@@ -3101,32 +3081,31 @@ write_block_statements<'a>(
     statements: Slice<'a, ExprEdge>
 ) -> Result<(), BodyError> {
     Slice::try_for_each(statements, { statement =>
-        handle expression_edge_position(statement) {
-            1 => {
+        handle block_statement_view(statement) {
+            BlockStatementView::Let(expression, token) => {
                 ByteBuf::push(&mut *output, 1);
-                let metadata = expression_edge_metadata(statement);
                 write_name_token(
                     &mut *output,
                     source,
-                    usize_from_u32(metadata - 1)
+                    token
                 ) and {
                     write_expression(
                         &mut *output,
                         original,
                         source,
                         value,
-                        expression_edge_value(statement)
+                        expression
                     )
                 }
             },
-            _ => {
+            BlockStatementView::Expression(expression) => {
                 ByteBuf::push(&mut *output, 2);
                 write_expression(
-                            &mut *output,
-                            original,
-                            source,
-                            value,
-                    expression_edge_value(statement)
+                    &mut *output,
+                    original,
+                    source,
+                    value,
+                    expression
                 )
             }
         }

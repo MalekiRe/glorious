@@ -96,6 +96,44 @@ fn implicit_function_labels_follow_canonical_module_names() {
 }
 
 #[test]
+fn qualified_sibling_enum_patterns_survive_completion_normalization() {
+    let bundle = bundle(
+        (
+            "/work/src/main.glorious",
+            r#"
+            mod model;
+            mod consumer;
+            use consumer::inspect;
+            probe() -> i64 {
+                inspect(model::View::Number(42))
+            }
+            main() -> { () }
+            "#,
+        ),
+        &[
+            (
+                "/work/src/model/model.glorious",
+                r#"
+                pub enum View { Number(i64) }
+                impl Use<[0, *]> for View {}
+                "#,
+            ),
+            (
+                "/work/src/consumer/consumer.glorious",
+                r#"
+                pub inspect(value: super::model::View) -> i64 {
+                    handle value {
+                        super::model::View::Number(value) => value
+                    }
+                }
+                "#,
+            ),
+        ],
+    );
+    assert_eq!(run_root_i64(&bundle, "probe"), 42);
+}
+
+#[test]
 fn nested_external_and_inline_modules_use_the_logical_module_directory() {
     let bundle = bundle(
         (

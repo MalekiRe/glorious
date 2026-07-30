@@ -3785,7 +3785,7 @@ elaborate_call(
     }
 }
 
-elaborate_block_statements(
+elaborate_block_statements<'a>(
     original: &String,
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex,
@@ -3794,24 +3794,20 @@ elaborate_block_statements(
     map: &ResolutionMap,
     value: &mut BodyBuilder,
     expression: u32,
+    statements: Slice<'a, super::bodies::ExprEdge>,
     expected: Option<TypeId>,
-    ordinal: u32,
+    ordinal: usize,
     lets: &mut Vec<LetWrapper>
 ) -> Result<Elaborated, ElaborationError> {
-    let count = super::bodies::expression_child_count_at(body, expression);
+    let count = Slice::len(statements);
     if(ordinal < count) {
-        let child = super::bodies::expression_child_at(
-            body,
-            expression,
-            ordinal
-        );
-        let position = super::bodies::expression_child_position_at(
-            body,
-            expression,
-            ordinal
-        );
-        handle position {
-            1 => {
+        let statement = handle Slice::get(statements, ordinal) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        handle super::bodies::block_statement_view(statement) {
+            super::bodies::BlockStatementView::Let(id, _) => {
+                let child = Id::to_u32(id);
                 let local = core_local_id_from_u32(
                     value.parameter_count + value.next_source_local
                 );
@@ -3846,12 +3842,14 @@ elaborate_block_statements(
                     map,
                     value,
                     expression,
+                    statements,
                     expected,
                     ordinal + 1,
                     lets
                 )
             },
-            2 => {
+            super::bodies::BlockStatementView::Expression(id) => {
+                let child = Id::to_u32(id);
                 let is_final = ordinal + 1 == count;
                 let found = try(elaborate_expression(
                     original,
@@ -3887,16 +3885,13 @@ elaborate_block_statements(
                         map,
                         value,
                         expression,
+                        statements,
                         expected,
                         ordinal + 1,
                         lets
                     )
                 }
-            },
-            _ => Result::Err(ElaborationError::InvalidTupleElement(
-                super::bodies::expression_token_start_at(body, child),
-                usize_from_u8(position)
-            ))
+            }
         }
     } else {
         let token = super::bodies::expression_token_end_at(body, expression);
@@ -3937,6 +3932,7 @@ elaborate_block(
         map,
         value,
         expression,
+        super::bodies::expression_children(body, expression),
         expected,
         0,
         &mut lets
