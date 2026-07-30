@@ -200,7 +200,7 @@ alloc_node(
     value: &mut Arena<ExprTag, ExprNode>,
     node: ExprNode
 ) -> ExprId {
-    handle Arena::alloc(value, move node) {
+    handle Arena::alloc(value, node) {
         Result::Err(_) => unreachable(),
         Result::Ok(id) => id
     }
@@ -535,7 +535,7 @@ last_expr(value: &Vec<u32>) -> ExprId {
 }
 
 source_text(value: &String, start: usize, end: usize) -> String {
-    handle String::slice(value, Range { start: move start, end: move end }) {
+    handle String::slice(value, Range { start: start, end: end }) {
         Result::Err(_) => unreachable(),
         Result::Ok(found) =>  found
     }
@@ -589,8 +589,8 @@ push_node(
         &mut value.nodes,
         ExprNode {
             kind_code: kind_code,
-            tokens: move tokens,
-            operator: move operator,
+            tokens: tokens,
+            operator: operator,
             names: expression_range(name_start, name_end),
             children: expression_range(edge_start, edge_end),
             handle_arms: ExprRange { start: 0, count: 0 }
@@ -1027,7 +1027,7 @@ lookup_scope(
                         )
                     };
                 if(matches) {
-                    handle move selected {
+                    handle selected {
                         Result::Err(_) => lookup_scope(
                             original,
                             source,
@@ -1090,7 +1090,7 @@ lookup_scope(
                         prefix,
                         owner,
                         index + 1,
-                        move selected
+                        selected
                     )
                 }
             }
@@ -1123,7 +1123,7 @@ lookup_fixity(
         ),
         @lookup_fixity
     );
-    handle move found {
+    handle found {
         Result::Ok(index) => Result::Ok(Result::Ok(index)),
         Result::Err(_) => if(Option::is_none(&owner)) {
             Result::Ok(Result::Err(()))
@@ -1167,7 +1167,7 @@ peek_operator(
                 ),
                 @peek_operator
             );
-            handle move found {
+            handle found {
                 Result::Err(_) => Result::Ok(Result::Err(())),
                 Result::Ok(index) => {
                     let header_index = usize_from_u32(index);
@@ -1212,7 +1212,7 @@ parse_primary(
                 ),
                 @parse_primary
             );
-            handle move prefix {
+            handle prefix {
                 Result::Ok(operator) => {
                     value.cursor = operator.end;
                     let child = try(
@@ -1281,7 +1281,7 @@ push_identifier_name(
         TokenKind::Ident(name) => {
             push_name(
                 &mut value.names,
-                ExpressionName::Identifier(move name, token)
+                ExpressionName::Identifier(name, token)
             );
             Result::Ok(())
         },
@@ -1722,7 +1722,7 @@ append_handle_arms(
                 variant_token,
                 binders,
                 body
-            } = move arm;
+            } = arm;
             let binder_start = Vec::len(&value.pattern_binders);
             let binder_count = Vec::len(&binders);
             append_pattern_binders(
@@ -2082,7 +2082,7 @@ parse_struct_fields(
                                     );
                                     push_word(
                                         &mut *fields,
-                                        Id::to_u32(move name)
+                                        Id::to_u32(name)
                                     );
                                     push_word(
                                         &mut *fields,
@@ -2183,7 +2183,7 @@ parse_projection_name(
                 Result::Ok(push_projection(
                     value,
                     subject,
-                    ExpressionName::Identifier(move name, token),
+                    ExpressionName::Identifier(name, token),
                     value.cursor
                 ))
             },
@@ -2447,7 +2447,7 @@ parse_chain(
         ),
         @parse_chain
     );
-    handle move found {
+    handle found {
             Result::Err(_) => finish_chain(value, output, pending),
             Result::Ok(operator) => if(operator.precedence < minimum) {
                 finish_chain(value, output, pending)
@@ -2921,14 +2921,23 @@ pub parse_function_body(
                         ),
                         @parse_function_body
                     );
+                    let BodyParser {
+                        cursor: _,
+                        limit: _,
+                        nodes,
+                        edges,
+                        names,
+                        handle_arms,
+                        pattern_binders
+                    } = parser;
                     Result::Ok(ParsedBody {
                         shell: u32_from_usize(shell),
                         root: root,
-                        nodes: move parser.nodes,
-                        edges: move parser.edges,
-                        names: move parser.names,
-                        handle_arms: move parser.handle_arms,
-                        pattern_binders: move parser.pattern_binders
+                        nodes: nodes,
+                        edges: edges,
+                        names: names,
+                        handle_arms: handle_arms,
+                        pattern_binders: pattern_binders
                     })
                 }
             }
@@ -3541,7 +3550,7 @@ process_inputs(
     if(index < Vec::len(arguments)) {
         let path = *Vec::index(arguments, index);
             let bytes = read_file(path);
-            handle String::from_utf8(move bytes) {
+            handle String::from_utf8(bytes) {
                 Result::Err(_) => ByteBuf::push(&mut *output, 1),
                 Result::Ok(source) => encode_source(&mut *output,  source)
             };

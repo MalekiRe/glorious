@@ -569,18 +569,18 @@ whole_bounds(value: &super::scanner::DeclarationShell) -> HeaderBounds {
 }
 
 token_code(value: &Parser, index: usize) -> u16 {
-    super::lexer::token_code_at(&value.source, move index)
+    super::lexer::token_code_at(&value.source, index)
 }
 
 token_span_at(value: &Parser, index: usize) -> super::lexer::Span {
-    handle super::lexer::token_at(&value.source, move index) {
+    handle super::lexer::token_at(&value.source, index) {
         Result::Err(_) => unreachable(),
         Result::Ok(token) => super::lexer::token_span(token)
     }
 }
 
 source_text(value: &String, start: usize, end: usize) -> String {
-    handle String::slice(value, Range { start: move start, end: move end }) {
+    handle String::slice(value, Range { start: start, end: end }) {
         Result::Err(_) => unreachable(),
         Result::Ok(found) =>  found
     }
@@ -687,7 +687,7 @@ ident(value: &mut Parser, related: usize) -> Result<NameUse, HeaderError> {
     if(value.cursor < value.limit) { handle super::lexer::token_kind_at(&value.source, token) {
             TokenKind::Ident(name) => {
                 value.cursor = token + 1;
-                Result::Ok(NameUse { name: move name, token: token })
+                Result::Ok(NameUse { name: name, token: token })
             },
             _ => Result::Err(HeaderError::ExpectedIdentifier(token, related))
         } } else {
@@ -734,10 +734,10 @@ push_type(
         TypeNode {
             kind_code: kind_code,
             tokens: token_range(start, end),
-            names: move names,
-            children: move children,
-            constructor: move constructor,
-            lifetime: move lifetime
+            names: names,
+            children: children,
+            constructor: constructor,
+            lifetime: lifetime
         }
     ) {
         Result::Err(_) => Result::Err(

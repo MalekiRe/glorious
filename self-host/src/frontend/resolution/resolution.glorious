@@ -336,10 +336,10 @@ index_callable(
     };
     let previous = HashMap::insert(
         &mut index.functions,
-        move key,
-        move updated
+        key,
+        updated
     );
-    handle move previous {
+    handle previous {
         Result::Err(_) => (),
         Result::Ok(previous) => {
             previous;
@@ -1577,7 +1577,7 @@ write_name_id(
     source: &super::lexer::LexedSource,
     name: Id<String>
 ) {
-    handle super::lexer::lexeme(source, move name) {
+    handle super::lexer::lexeme(source, name) {
         Result::Err(_) => unreachable(),
         Result::Ok(text) => write_string( output, text)
     }
@@ -2040,7 +2040,7 @@ process_inputs(
     if(index < Vec::len(arguments)) {
         let path = *Vec::index(arguments, index);
             let bytes = read_file(path);
-            handle String::from_utf8(move bytes) {
+            handle String::from_utf8(bytes) {
                 Result::Err(_) => ByteBuf::push(&mut *output, 1),
                 Result::Ok(source) => encode_source(&mut *output, source)
             };

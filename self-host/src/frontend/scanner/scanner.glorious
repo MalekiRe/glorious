@@ -146,7 +146,7 @@ pub scan_error_related(value: &ScanError) -> usize {
 u8_equal(left: u8, right: u8) -> Bool {  left ==  right }
 
 delimiter_open(value: TokenKind) -> u8 {
-    handle move value {
+    handle value {
         TokenKind::LParen => 1,
         TokenKind::LBrace => 2,
         TokenKind::LBracket => 3,
@@ -155,7 +155,7 @@ delimiter_open(value: TokenKind) -> u8 {
 }
 
 delimiter_close(value: TokenKind) -> u8 {
-    handle move value {
+    handle value {
         TokenKind::RParen => 1,
         TokenKind::RBrace => 2,
         TokenKind::RBracket => 3,
@@ -645,9 +645,12 @@ scan_semicolon_shell(
     classification: Classification,
     parent: Option<usize>
 ) -> Result<ScanStep, ScanError> {
-    let kind_code = classification.kind_code;
-    let kind = move classification.kind;
-    let name = move classification.name;
+    let Classification {
+        kind,
+        kind_code,
+        name,
+        style: _
+    } = classification;
     handle find_semicolon(value, cursor, limit, start) {
         Result::Err(error) => scan_state_error(
             kind,
@@ -661,8 +664,8 @@ scan_semicolon_shell(
                     end
                 ) {
                     Result::Err(_) => scan_state_error(
-                        move kind,
-                        move name,
+                        kind,
+                        name,
                         ScanError::IncompleteDeclaration(end, start)
                     ),
                     Result::Ok(equal) => {
@@ -675,10 +678,10 @@ scan_semicolon_shell(
                             nested_start: Result::Err(()),
                             nested_end: 0,
                             declaration: DeclarationShell {
-                                kind: move kind,
+                                kind: kind,
                                 kind_code: kind_code,
                                 public: public,
-                                name: move name,
+                                name: name,
                                 header: TokenRange {
                                     start: start,
                                     end: equal + 1
@@ -687,7 +690,7 @@ scan_semicolon_shell(
                                     start: equal + 1,
                                     end: end
                                 }),
-                                whole: move whole,
+                                whole: whole,
                                 parent: parent
                             }
                         })
@@ -699,16 +702,16 @@ scan_semicolon_shell(
                     nested_start: Result::Err(()),
                     nested_end: 0,
                     declaration: DeclarationShell {
-                        kind: move kind,
+                        kind: kind,
                         kind_code: kind_code,
                         public: public,
-                        name: move name,
+                        name: name,
                         header: TokenRange {
                             start: whole.start,
                             end: whole.end
                         },
                         body: Result::Err(()),
-                        whole: move whole,
+                        whole: whole,
                         parent: parent
                     }
                 })
@@ -727,9 +730,12 @@ scan_braced_shell(
     parent: Option<usize>,
     function: Bool
 ) -> Result<ScanStep, ScanError> {
-    let kind_code = classification.kind_code;
-    let kind = move classification.kind;
-    let name = move classification.name;
+    let Classification {
+        kind,
+        kind_code,
+        name,
+        style: _
+    } = classification;
     handle find_body(value, cursor, limit, start, function) {
         Result::Err(error) => scan_state_error(
             kind,
@@ -746,10 +752,10 @@ scan_braced_shell(
                 } else { Result::Err(()) },
                 nested_end: close,
                 declaration: DeclarationShell {
-                    kind: move kind,
+                    kind: kind,
                     kind_code: kind_code,
                     public: public,
-                    name: move name,
+                    name: name,
                     header: TokenRange { start: start, end: open },
                     body: Result::Ok(TokenRange {
                         start: open + 1,
@@ -797,7 +803,7 @@ scan_one(
                     cursor + 1,
                     limit,
                     public,
-                    move classification,
+                    classification,
                     parent
                 ) } else { scan_braced_shell(
                     value,
@@ -805,7 +811,7 @@ scan_one(
                     cursor + 1,
                     limit,
                     public,
-                    move classification,
+                    classification,
                     parent,
                     false
                 ) }
@@ -863,13 +869,16 @@ scan_complete(
     let remaining =  scopes;
     handle Vec::pop(&mut remaining) {
         Result::Err(_) => Result::Ok(DeclarationIndex { shells:  output }),
-        Result::Ok(scope) => scan_loop(value, ScanState {
-            cursor: scope.cursor,
-            limit: scope.limit,
-            parent: move scope.parent,
-            scopes:  remaining,
-            output:  output
-        })
+        Result::Ok(scope) => {
+            let ScanScope { cursor, limit, parent } = scope;
+            scan_loop(value, ScanState {
+                cursor: cursor,
+                limit: limit,
+                parent: parent,
+                scopes: remaining,
+                output: output
+            })
+        }
     }
 }
 
@@ -877,11 +886,13 @@ scan_loop(
     value: &super::lexer::LexedSource,
     state: ScanState
 ) -> Result<DeclarationIndex, ScanError> {
-    let cursor = state.cursor;
-    let limit = state.limit;
-    let parent = move state.parent;
-    let scopes = move state.scopes;
-    let output = move state.output;
+    let ScanState {
+        cursor,
+        limit,
+        parent,
+        scopes,
+        output
+    } = state;
     if(cursor < limit) { if(token_is_eof(value, cursor)) { scan_complete(value,  scopes,  output) } else { handle scan_one(
                 value,
                 cursor,
@@ -894,12 +905,15 @@ scan_loop(
                      error
                 ),
                 Result::Ok(step) => {
-                    let next = step.next;
-                    let nested_end = step.nested_end;
-                    let nested_start = move step.nested_start;
+                    let ScanStep {
+                        next,
+                        nested_start,
+                        nested_end,
+                        declaration
+                    } = step;
                     let shell = Vec::len(&output);
-                    Vec::push(&mut output, move step.declaration);
-                    handle move nested_start {
+                    Vec::push(&mut output, declaration);
+                    handle nested_start {
                         Result::Err(_) => scan_loop(value, ScanState {
                             cursor: next,
                             limit: limit,
@@ -942,7 +956,7 @@ pub scan(
 }
 
 bool_code(value: Bool) -> u8 {
-    if(move value) { 1 } else { 0 }
+    if(value) { 1 } else { 0 }
 }
 
 write_string(output: &mut ByteBuf, value: &String) {
@@ -1056,7 +1070,7 @@ process_inputs(arguments: &Vec<String>, index: usize, output: &mut ByteBuf) / Fi
     if(index < Vec::len(arguments)) {
             let path = *Vec::index(arguments, index);
             let bytes = read_file(path);
-            handle String::from_utf8(move bytes) {
+            handle String::from_utf8(bytes) {
                 Result::Err(_) => ByteBuf::push(&mut *output, 1),
                 Result::Ok(source) => handle super::lexer::lex(&source) {
                     Result::Err(_) => ByteBuf::push(&mut *output, 1),

@@ -347,21 +347,21 @@ advance(value: &mut Lexer, amount: usize) {
 }
 
 text_slice_result(result: Result<String, TextRangeError>) -> String {
-    handle move result {
+    handle result {
         Result::Ok(text) =>  text,
         Result::Err(_) => unreachable()
     }
 }
 
 interned_id(result: Result<Id<String>, String>) -> Id<String> {
-    handle move result {
+    handle result {
         Result::Ok(id) =>  id,
         Result::Err(_) => unreachable()
     }
 }
 
 present_byte(result: Option<u8>) -> u8 {
-    handle move result {
+    handle result {
         Result::Ok(byte) =>  byte,
         Result::Err(_) => unreachable()
     }
@@ -374,12 +374,12 @@ text_slice(source: &String, start: usize, end: usize) -> String {
 }
 
 source_slice(value: &Lexer, start: usize, end: usize) -> String {
-    text_slice(&value.source, move start, move end)
+    text_slice(&value.source, start, end)
 }
 
 intern_slice(value: &mut Lexer, start: usize, end: usize) -> Id<String> {
     let text = source_slice(&*value,  start,  end);
-    handle Interner::intern_string(&mut value.lexemes, move text) {
+    handle Interner::intern_string(&mut value.lexemes, text) {
         Result::Ok(id) =>  id,
         // `lex` rejects a source longer than the u32 ID space. There can be no
         // more distinct source lexemes than source bytes, so exhaustion here
@@ -389,7 +389,7 @@ intern_slice(value: &mut Lexer, start: usize, end: usize) -> Id<String> {
 }
 
 intern_text(value: &mut Lexer, text: String) -> Id<String> {
-    interned_id(Interner::intern_string(&mut value.lexemes, move text))
+    interned_id(Interner::intern_string(&mut value.lexemes, text))
 }
 
 push_with_metadata(
@@ -404,10 +404,10 @@ push_with_metadata(
     Vec::push(
         &mut value.tokens,
         Token {
-            kind: move kind,
-            code: move code,
-            keyword_code: move keyword_code,
-            span: span(move start, move end)
+            kind: kind,
+            code: code,
+            keyword_code: keyword_code,
+            span: span(start, end)
         }
     );
     (*value).after_projection_dot =  after_dot;

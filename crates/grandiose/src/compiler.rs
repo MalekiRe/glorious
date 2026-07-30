@@ -34560,6 +34560,7 @@ impl<'a> CoreLowerer<'a> {
                             .entry(local.local)
                             .or_default()
                             .insert(vec![field_id]);
+                        self.finish_projected_owner_if_exhausted(local.local, local.ty);
                     }
                     let mut place = self.typed(
                         subject.span,
@@ -34830,6 +34831,7 @@ impl<'a> CoreLowerer<'a> {
                             .entry(local.local)
                             .or_default()
                             .insert(prefix.clone());
+                        self.finish_projected_owner_if_exhausted(local.local, local.ty);
                     }
                     let mut projected_references = Self::projected_reference_path(
                         &Self::local_reference_fields(&local),
@@ -35033,6 +35035,7 @@ impl<'a> CoreLowerer<'a> {
                             .entry(local.local)
                             .or_default()
                             .insert(vec![field_id]);
+                        self.finish_projected_owner_if_exhausted(local.local, local.ty);
                     }
                     let mut place = self.typed(
                         subject.span,

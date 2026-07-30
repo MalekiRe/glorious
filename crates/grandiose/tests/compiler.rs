@@ -6842,6 +6842,42 @@ fn nested_disjoint_unique_borrows_share_one_atomic_prefix() {
 }
 
 #[test]
+fn implicit_noncopy_field_moves_finish_an_exhausted_owner() {
+    let source = r#"
+        struct Ticket { value: i64 }
+        impl Use<[1,1]> for Ticket {}
+        struct Pair { left: Ticket, right: Ticket }
+
+        drain(pair: Pair) -> i64 {
+            let left = pair.left;
+            let right = pair.right;
+            let Ticket { value: left_value } = left;
+            let Ticket { value: right_value } = right;
+            left_value + right_value
+        }
+
+        main() -> () {
+            drain(Pair {
+                left: Ticket { value: 40 },
+                right: Ticket { value: 2 }
+            });
+            ()
+        }
+    "#;
+
+    let phases =
+        compile_source_to_phases("implicit-exhaustive-projection.glorious", source).unwrap();
+    assert_eq!(
+        phases
+            .core
+            .canonical_text()
+            .matches("project field#")
+            .count(),
+        2
+    );
+}
+
+#[test]
 fn nested_projected_place_overlap_and_move_boundaries_are_structured() {
     let cases = [
         "struct Inner { pair: (i64, i64) } struct Outer { inner: Inner } bad(value: Outer) -> { let ancestor = &value.inner; let child = &mut value.inner.pair.0; ancestor; () } main() -> { () }",
