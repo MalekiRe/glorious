@@ -2767,22 +2767,26 @@ pub(crate) fn recursive_closure_binding(value: &Expr, name: &str) -> bool {
 }
 
 /// Infer the closed direct outward row of an anonymous body in declaration
-/// space. Calls are checked from their generated signatures later; this pass
-/// exists to seal an omitted `Fn::Effects` projection without protocol-table
-/// allocation identities. A handled protocol is removed only for the body of
-/// that handler; final coverage checking remains authoritative in Core lowering.
+/// space. Direct performs and the exact outward rows recorded by ordinary call
+/// resolution participate, so an open `Fn::Effects` projection can bind before
+/// generated signatures exist. A handled protocol is removed only for the body
+/// of that handler; final coverage checking remains authoritative in Core
+/// lowering.
 fn direct_closure_effects(
     expression: &Expr,
     resolve: &impl Fn(crate::span::Span, &str) -> Option<crate::compiler_typeck::CallableEffect>,
+    resolve_call: &impl Fn(&Expr) -> BTreeSet<crate::compiler_typeck::CallableEffect>,
 ) -> BTreeSet<crate::compiler_typeck::CallableEffect> {
-    struct Collector<'a, R> {
+    struct Collector<'a, R, C> {
         resolve: &'a R,
+        resolve_call: &'a C,
         output: BTreeSet<crate::compiler_typeck::CallableEffect>,
     }
 
-    impl<'ast, R> ExprVisitor<'ast> for Collector<'_, R>
+    impl<'ast, R, C> ExprVisitor<'ast> for Collector<'_, R, C>
     where
         R: Fn(crate::span::Span, &str) -> Option<crate::compiler_typeck::CallableEffect>,
+        C: Fn(&Expr) -> BTreeSet<crate::compiler_typeck::CallableEffect>,
     {
         type Break = ();
 
@@ -2800,6 +2804,7 @@ fn direct_closure_effects(
                 } => {
                     let mut nested = Collector {
                         resolve: self.resolve,
+                        resolve_call: self.resolve_call,
                         output: BTreeSet::new(),
                     };
                     nested.visit_expr(computation)?;
@@ -2811,6 +2816,10 @@ fn direct_closure_effects(
                     }
                     self.output.extend(nested.output);
                 }
+                ExprKind::Call(_, _) => {
+                    walk_expr(self, expression)?;
+                    self.output.extend((self.resolve_call)(expression));
+                }
                 // Nested anonymous callables have independent outward rows.
                 ExprKind::Closure { .. } | ExprKind::TypedClosure { .. } => {}
                 _ => walk_expr(self, expression)?,
@@ -2821,6 +2830,7 @@ fn direct_closure_effects(
 
     let mut collector = Collector {
         resolve,
+        resolve_call,
         output: BTreeSet::new(),
     };
     let _ = collector.visit_expr(expression);
@@ -2863,8 +2873,14 @@ struct ContextualValidationKey {
 }
 
 enum ContextualValidation {
-    InProgress(ProvisionalType),
-    Complete(ProvisionalType),
+    InProgress(
+        ProvisionalType,
+        BTreeSet<crate::compiler_typeck::CallableEffect>,
+    ),
+    Complete(
+        ProvisionalType,
+        BTreeSet<crate::compiler_typeck::CallableEffect>,
+    ),
 }
 
 #[cfg(test)]
@@ -3101,6 +3117,8 @@ struct Walker<'a> {
     symbolic_validation: bool,
     active_recursive_self: Option<RecursiveSelf>,
     contextual_validations: &'a mut BTreeMap<ContextualValidationKey, ContextualValidation>,
+    resolved_call_effects:
+        &'a mut BTreeMap<usize, BTreeSet<crate::compiler_typeck::CallableEffect>>,
 }
 
 impl<'a> Walker<'a> {
@@ -4195,6 +4213,27 @@ impl<'a> Walker<'a> {
         })
     }
 
+    fn record_call_effects(
+        &mut self,
+        source: &Expr,
+        effects: impl IntoIterator<Item = crate::compiler_typeck::CallableEffect>,
+    ) {
+        self.resolved_call_effects.insert(
+            std::ptr::from_ref(source) as usize,
+            effects.into_iter().collect(),
+        );
+    }
+
+    fn resolved_effects_at(
+        &self,
+        source: &Expr,
+    ) -> BTreeSet<crate::compiler_typeck::CallableEffect> {
+        self.resolved_call_effects
+            .get(&(std::ptr::from_ref(source) as usize))
+            .cloned()
+            .unwrap_or_default()
+    }
+
     fn operation_at(
         &self,
         site: crate::span::Span,
@@ -5147,12 +5186,6 @@ impl<'a> Walker<'a> {
         let Some(row) = &function.outward_effects else {
             return Some(Vec::new());
         };
-        if row.tail.is_some() {
-            self.error(format!(
-                "generic function item `{target}` has an unresolved outward effect-row tail"
-            ));
-            return None;
-        }
         let owner = DeclarationKey::Function(target.to_owned());
         let generic_map = function
             .generics
@@ -5184,7 +5217,7 @@ impl<'a> Walker<'a> {
                 return None;
             }
         }
-        effects
+        let mut effects = effects
             .into_iter()
             .map(|effect| {
                 Some(crate::compiler_typeck::CallableEffect {
@@ -5196,7 +5229,24 @@ impl<'a> Walker<'a> {
                         .collect::<Option<Vec<_>>>()?,
                 })
             })
-            .collect()
+            .collect::<Option<BTreeSet<_>>>()?;
+        if let Some(tail) = &row.tail {
+            let Some(key) = generic_map.get(tail.name.as_str()) else {
+                self.error(format!(
+                    "function `{target}` has an unknown outward effect-row tail"
+                ));
+                return None;
+            };
+            let Some(SpecializationArgument::EffectRow(tail_effects)) = substitutions.get(key)
+            else {
+                self.error(format!(
+                    "call to `{target}` leaves its outward effect-row tail unresolved"
+                ));
+                return None;
+            };
+            effects.extend(tail_effects.iter().cloned());
+        }
+        Some(effects.into_iter().collect())
     }
 
     fn resolve_deferred_function_item(
@@ -5481,32 +5531,59 @@ impl<'a> Walker<'a> {
             self.contextual_validations
                 .get(key)
                 .map(|validation| match validation {
-                    ContextualValidation::InProgress(expected)
-                    | ContextualValidation::Complete(expected) => expected.clone(),
+                    ContextualValidation::InProgress(expected, effects) => {
+                        (expected.clone(), effects.clone())
+                    }
+                    ContextualValidation::Complete(expected, effects) => {
+                        (expected.clone(), effects.clone())
+                    }
                 })
         });
         #[cfg(test)]
         if cached_result.is_some() {
             CONTEXTUAL_VALIDATION_CACHE_HITS.with(|hits| hits.set(hits.get() + 1));
         }
-        let actual_result = cached_result.map(Some).unwrap_or_else(|| {
-            if let Some(key) = &validation_key {
-                self.contextual_validations.insert(
-                    key.clone(),
-                    ContextualValidation::InProgress(expected_result.clone()),
-                );
-            }
-            let result = self.expression(body, Some(&expected_result));
-            if let Some(key) = &validation_key {
-                if let Some(result) = &result {
-                    self.contextual_validations
-                        .insert(key.clone(), ContextualValidation::Complete(result.clone()));
-                } else {
-                    self.contextual_validations.remove(key);
+        let (actual_result, inferred_effects) = cached_result
+            .map(|(result, effects)| (Some(result), effects))
+            .unwrap_or_else(|| {
+                if let Some(key) = &validation_key {
+                    // Recursive contextual validation may observe this entry
+                    // before call resolution completes. Preserve the direct
+                    // syntactic performs while withholding any stale
+                    // pointer-keyed call facts.
+                    let direct_performs = direct_closure_effects(
+                        body,
+                        &|site, effect| self.effect_instance(site, effect),
+                        &|_| BTreeSet::new(),
+                    );
+                    self.contextual_validations.insert(
+                        key.clone(),
+                        ContextualValidation::InProgress(expected_result.clone(), direct_performs),
+                    );
                 }
-            }
-            result
-        });
+                let result = self.expression(body, Some(&expected_result));
+                let effects = result
+                    .as_ref()
+                    .map(|_| {
+                        direct_closure_effects(
+                            body,
+                            &|site, effect| self.effect_instance(site, effect),
+                            &|call| self.resolved_effects_at(call),
+                        )
+                    })
+                    .unwrap_or_default();
+                if let Some(key) = &validation_key {
+                    if let Some(result) = &result {
+                        self.contextual_validations.insert(
+                            key.clone(),
+                            ContextualValidation::Complete(result.clone(), effects.clone()),
+                        );
+                    } else {
+                        self.contextual_validations.remove(key);
+                    }
+                }
+                (result, effects)
+            });
         self.recording = saved_recording;
         self.locals = saved;
         self.bindings = saved_bindings;
@@ -5521,8 +5598,6 @@ impl<'a> Walker<'a> {
             });
             return None;
         }
-        let inferred_effects =
-            direct_closure_effects(body, &|site, effect| self.effect_instance(site, effect));
         let actual_effects = if let Some(declared) = &declared {
             let declared_effects = declared.effects.iter().cloned().collect::<BTreeSet<_>>();
             if !inferred_effects.is_subset(&declared_effects) {
@@ -6118,9 +6193,11 @@ impl<'a> Walker<'a> {
             inferred = CallableShape {
                 params: vec![],
                 result: result?,
-                effects: direct_closure_effects(body, &|site, effect| {
-                    self.effect_instance(site, effect)
-                })
+                effects: direct_closure_effects(
+                    body,
+                    &|site, effect| self.effect_instance(site, effect),
+                    &|call| self.resolved_effects_at(call),
+                )
                 .into_iter()
                 .collect(),
                 effect_tail: None,
@@ -6391,6 +6468,10 @@ impl<'a> Walker<'a> {
         expected: Option<&ProvisionalType>,
         requested_receiver_mode: Option<u32>,
     ) -> Option<ProvisionalType> {
+        // Resolution may revisit this syntax under a different contextual
+        // callable shape. Clear the previous fact before recording the exact
+        // target selected by this attempt.
+        self.record_call_effects(source, []);
         if let Some(LocalBinding::DeferredFunctionItem(item)) = self.locals.get(name).cloned() {
             return self.resolve_deferred_function_item(
                 source,
@@ -6460,12 +6541,14 @@ impl<'a> Walker<'a> {
                 ));
                 return None;
             }
+            self.record_call_effects(source, shape.effects.iter().cloned());
             return Some(shape.result);
         }
         if let Some(LocalBinding::RecursiveSelf(recursive_self, shape)) =
             self.locals.get(name).cloned()
         {
             let result = shape.result.clone();
+            let effects = shape.effects.clone();
             if args.len() != shape.params.len() {
                 self.error(format!(
                     "recursive callable `{name}` has an unresolved argument count"
@@ -6500,12 +6583,14 @@ impl<'a> Walker<'a> {
                     },
                 );
             }
+            self.record_call_effects(source, effects);
             return Some(result);
         }
         if let Some(LocalBinding::ClosureSet(closures)) = self.locals.get(name).cloned() {
             let first = closures.first()?;
             let shape = &first.shape;
             let result = shape.result.clone();
+            let effects = shape.effects.clone();
             if args.len() != shape.params.len() {
                 self.error(format!(
                     "callable local `{name}` has an unresolved argument count"
@@ -6539,11 +6624,13 @@ impl<'a> Walker<'a> {
                         .insert(call_site, mode);
                 }
             }
+            self.record_call_effects(source, effects);
             return Some(result);
         }
         if let Some(LocalBinding::Closure(closure)) = self.locals.get(name).cloned() {
             let shape = &closure.shape;
             let result = shape.result.clone();
+            let effects = shape.effects.clone();
             if args.len() != shape.params.len() {
                 self.error(format!(
                     "callable local `{name}` has an unresolved argument count"
@@ -6586,6 +6673,7 @@ impl<'a> Walker<'a> {
                     .callable_calls
                     .insert(call_site, closure);
             }
+            self.record_call_effects(source, effects);
             return Some(result);
         }
         if name.starts_with("$trait_deferred$") {
@@ -7155,6 +7243,8 @@ impl<'a> Walker<'a> {
                 return None;
             }
         }
+        let call_effects = self.specialized_function_effects(name, &substitutions)?;
+        self.record_call_effects(source, call_effects);
         if template.generic_params.is_empty() {
             return result;
         }
@@ -9691,6 +9781,7 @@ pub(crate) fn discover_with_traits_and_budgets_from(
         errors,
     };
     let mut contextual_validations = BTreeMap::new();
+    let mut resolved_call_effects = BTreeMap::new();
     for global in &program.globals {
         let owner = DeclarationKey::Global(global.name.clone());
         let expression_ordinals = expression_ordinals(&global.value);
@@ -9717,6 +9808,7 @@ pub(crate) fn discover_with_traits_and_budgets_from(
             symbolic_validation: false,
             active_recursive_self: None,
             contextual_validations: &mut contextual_validations,
+            resolved_call_effects: &mut resolved_call_effects,
         };
         walker.expression(&global.value, None);
     }
@@ -9803,6 +9895,7 @@ pub(crate) fn discover_with_traits_and_budgets_from(
             symbolic_validation: symbolic,
             active_recursive_self: None,
             contextual_validations: &mut contextual_validations,
+            resolved_call_effects: &mut resolved_call_effects,
         };
         walker.expression(&function.body, Some(&template.result));
         if symbolic
@@ -9852,6 +9945,7 @@ pub(crate) fn discover_with_traits_and_budgets_from(
             symbolic_validation: false,
             active_recursive_self: None,
             contextual_validations: &mut contextual_validations,
+            resolved_call_effects: &mut resolved_call_effects,
         };
         walker.expression(
             &declaration.body,
@@ -9948,6 +10042,7 @@ pub(crate) fn discover_with_traits_and_budgets_from(
                 symbolic_validation: false,
                 active_recursive_self: None,
                 contextual_validations: &mut contextual_validations,
+                resolved_call_effects: &mut resolved_call_effects,
             };
             let result = substitute(&template.result, &substitutions);
             walker.expression(&function.body, result.as_ref());
@@ -10032,6 +10127,7 @@ pub(crate) fn discover_with_traits_and_budgets_from(
                 symbolic_validation: false,
                 active_recursive_self: recursive_self,
                 contextual_validations: &mut contextual_validations,
+                resolved_call_effects: &mut resolved_call_effects,
             };
             walker.expression(body, Some(&closure.shape.result));
         }
@@ -10524,7 +10620,7 @@ mod tests {
                     .collect::<Option<Vec<_>>>()?,
             })
         };
-        let row = direct_closure_effects(body, &resolve);
+        let row = direct_closure_effects(body, &resolve, &|_| BTreeSet::new());
         assert_eq!(row.len(), 1);
         let remaining = row.iter().next().unwrap();
         assert_eq!(remaining.declaration.0, "Fail");

@@ -2015,19 +2015,16 @@ write_type_edges(
     range: &HeaderRange,
     index: u32
 ) {
-    if(index < range.count) {
-            let edge = Vec::index(
-                &parsed.index.type_edges,
-                wrapping_convert_to_usize(range.start + index)
-            );
-            write_type(output, parsed, &edge.value);
-            write_type_edges(
-                 output,
-                parsed,
-                range,
-                index + wrapping_convert_to_u32(1)
-            )
-    } else { () }
+    for_range(Range::new(
+        wrapping_convert_to_usize(index),
+        wrapping_convert_to_usize(range.count)
+    ), { current => {
+        let edge = Vec::index(
+            &parsed.index.type_edges,
+            wrapping_convert_to_usize(range.start) + current
+        );
+        write_type(&mut *output, parsed, &edge.value)
+    } })
 }
 
 write_path_names(
@@ -2036,19 +2033,16 @@ write_path_names(
     range: &HeaderRange,
     index: u32
 ) {
-    if(index < range.count) {
-            let name = Vec::index(
-                &parsed.index.names,
-                wrapping_convert_to_usize(range.start + index)
-            );
-            write_name(&mut *output, &parsed.source, name.name);
-            write_path_names(
-                 output,
-                parsed,
-                range,
-                index + wrapping_convert_to_u32(1)
-            )
-    } else { () }
+    for_range(Range::new(
+        wrapping_convert_to_usize(index),
+        wrapping_convert_to_usize(range.count)
+    ), { current => {
+        let name = Vec::index(
+            &parsed.index.names,
+            wrapping_convert_to_usize(range.start) + current
+        );
+        write_name(&mut *output, &parsed.source, name.name)
+    } })
 }
 
 write_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: &TypeId) {
@@ -2093,20 +2087,17 @@ write_generics(
     range: &HeaderRange,
     index: u32
 ) {
-    if(index < range.count) {
-            let parameter = Vec::index(
-                &parsed.index.generic_params,
-                wrapping_convert_to_usize(range.start + index)
-            );
-            ByteBuf::push(&mut *output, parameter.kind_code);
-            write_name(&mut *output, &parsed.source, parameter.name);
-            write_generics(
-                 output,
-                parsed,
-                range,
-                index + wrapping_convert_to_u32(1)
-            )
-    } else { () }
+    for_range(Range::new(
+        wrapping_convert_to_usize(index),
+        wrapping_convert_to_usize(range.count)
+    ), { current => {
+        let parameter = Vec::index(
+            &parsed.index.generic_params,
+            wrapping_convert_to_usize(range.start) + current
+        );
+        ByteBuf::push(&mut *output, parameter.kind_code);
+        write_name(&mut *output, &parsed.source, parameter.name)
+    } })
 }
 
 write_parameters(
@@ -2115,20 +2106,17 @@ write_parameters(
     range: &HeaderRange,
     index: u32
 ) {
-    if(index < range.count) {
-            let parameter = Vec::index(
-                &parsed.index.parameters,
-                wrapping_convert_to_usize(range.start + index)
-            );
-            write_name(&mut *output, &parsed.source, parameter.name);
-            write_type(&mut *output, parsed, &parameter.ty);
-            write_parameters(
-                 output,
-                parsed,
-                range,
-                index + wrapping_convert_to_u32(1)
-            )
-    } else { () }
+    for_range(Range::new(
+        wrapping_convert_to_usize(index),
+        wrapping_convert_to_usize(range.count)
+    ), { current => {
+        let parameter = Vec::index(
+            &parsed.index.parameters,
+            wrapping_convert_to_usize(range.start) + current
+        );
+        write_name(&mut *output, &parsed.source, parameter.name);
+        write_type(&mut *output, parsed, &parameter.ty)
+    } })
 }
 
 write_callable(

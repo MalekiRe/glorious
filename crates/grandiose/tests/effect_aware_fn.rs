@@ -306,6 +306,131 @@ fn open_fn_effect_rows_bind_canonical_residuals_without_dropping_the_prefix() {
 }
 
 #[test]
+fn open_effect_row_flows_through_statically_inlined_mutable_callback() {
+    let source = r#"
+        walk_step<F, e: EffectRow>(current: usize, end: usize, body: F)
+        where F: Fn<(usize), Output=(), Effects={| e}>,
+              F: Use<[0,0]> {
+            if(current < end) {
+                body(current);
+                walk_step(current + 1, end, body)
+            } else {
+                ()
+            }
+        }
+
+        walk<F, e: EffectRow>(end: usize, body: F)
+        where F: Fn<(usize), Output=(), Effects={| e}>,
+              F: Use<[0,0]> {
+            walk_step(0, end, body)
+        }
+
+        collect(output: &mut Vec<usize>) / {FileRead} {
+            walk(2, { _ => {
+                let bytes = read_file("input");
+                Vec::push(&mut *output, Bytes::len(&bytes))
+            }})
+        }
+
+        main() -> { () }
+    "#;
+
+    compile_source_to_bytecode("static-open-effect-row.glorious", source).unwrap();
+}
+
+#[test]
+fn matching_handler_subtracts_named_closed_effect_call_from_callback_row() {
+    let source = r#"
+        effect Ask { [1,1] ask() -> i64 }
+
+        ask_value() -> i64 / {Ask} {
+            perform Ask::ask()
+        }
+
+        invoke<F, e: EffectRow>(body: F)
+        where F: Fn<(), Output=(), Effects={| e}>,
+              F: Use<[0,0]> {
+            body()
+        }
+
+        collect(output: &mut Vec<i64>) {
+            invoke({ => {
+                let value = handle ask_value() {
+                    Ask::ask() => 7
+                };
+                Vec::push(&mut *output, value)
+            }})
+        }
+
+        main() -> { () }
+    "#;
+
+    compile_source_to_bytecode("handled-named-effect-call.glorious", source).unwrap();
+}
+
+#[test]
+fn local_callable_shadowing_does_not_inherit_top_level_effects() {
+    let source = r#"
+        effect Ask { [1,1] ask() -> i64 }
+
+        target() -> i64 / {Ask} {
+            perform Ask::ask()
+        }
+
+        invoke<F, e: EffectRow>(body: F) -> i64
+        where F: Fn<(), Output=i64, Effects={| e}>,
+              F: Use<[0,0]>
+        {
+            body()
+        }
+
+        pure() -> i64 {
+            invoke({ => {
+                let target = { => 42 };
+                target()
+            }})
+        }
+        main() -> { () }
+    "#;
+
+    let artifact =
+        compile_source_to_bytecode("shadowed-effectful-target.glorious", source).unwrap();
+    assert!(
+        artifact.functions[function_id(&artifact, "pure") as usize]
+            .outward_protocols
+            .is_empty()
+    );
+}
+
+#[test]
+fn generic_named_call_substitutes_effect_arguments_in_callback_row() {
+    let source = r#"
+        effect Fail<E> { fail(error: E) -> ! }
+
+        raise<E>(error: E) -> ! / {Fail<E>} {
+            perform Fail<E>::fail(error)
+        }
+
+        invoke<F, e: EffectRow>(body: F)
+        where F: Fn<(), Output=(), Effects={| e}>,
+              F: Use<[0,0]> {
+            body()
+        }
+
+        collect(value: i64) / {Fail<i64>} {
+            invoke({ => {
+                raise(value);
+                ()
+            }})
+        }
+
+        main() -> { () }
+    "#;
+
+    compile_source_to_bytecode("generic-call-effect-substitution.glorious", source).unwrap();
+}
+
+#[test]
 fn repeated_open_row_variables_require_equal_residuals() {
     let shared = r#"
         effect Ask { [1,1] ask() -> i64 }

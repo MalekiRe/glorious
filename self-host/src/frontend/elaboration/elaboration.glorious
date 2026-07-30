@@ -1362,58 +1362,45 @@ push_word(value: &mut Vec<u32>, word: u32) {
 }
 
 push_zeroes(value: &mut Vec<u32>, remaining: usize) {
-    if(remaining == 0) { () } else {
-        push_word(&mut *value, 0);
-        push_zeroes( value, remaining - 1)
-    }
+    for_range(Range::new(0, remaining), { _ =>
+        push_word(&mut *value, 0)
+    })
 }
 
 push_missing_nominal_ids(
     value: &mut Vec<Option<InterfaceNominalId>>,
     remaining: usize
 ) {
-    if(remaining == 0) {
-        ()
-    } else {
-        Vec::push(&mut *value, None);
-        push_missing_nominal_ids(value, remaining - 1)
-    }
+    for_range(Range::new(0, remaining), { _ =>
+        Vec::push(&mut *value, None)
+    })
 }
 
 push_missing_callable_ids(
     value: &mut Vec<Option<InterfaceCallableId>>,
     remaining: usize
 ) {
-    if(remaining == 0) {
-        ()
-    } else {
-        Vec::push(&mut *value, None);
-        push_missing_callable_ids(value, remaining - 1)
-    }
+    for_range(Range::new(0, remaining), { _ =>
+        Vec::push(&mut *value, None)
+    })
 }
 
 push_missing_type_ids(
     value: &mut Vec<Option<TypeId>>,
     remaining: usize
 ) {
-    if(remaining == 0) {
-        ()
-    } else {
-        Vec::push(&mut *value, None);
-        push_missing_type_ids(value, remaining - 1)
-    }
+    for_range(Range::new(0, remaining), { _ =>
+        Vec::push(&mut *value, None)
+    })
 }
 
 push_unresolved_aliases(
     value: &mut Vec<AliasResolutionState>,
     remaining: usize
 ) {
-    if(remaining == 0) {
-        ()
-    } else {
-        Vec::push(&mut *value, AliasResolutionState::Unresolved);
-        push_unresolved_aliases(value, remaining - 1)
-    }
+    for_range(Range::new(0, remaining), { _ =>
+        Vec::push(&mut *value, AliasResolutionState::Unresolved)
+    })
 }
 
 append_core_values(
@@ -1827,13 +1814,12 @@ append_type_ids(
     source: &Vec<u32>,
     index: usize
 ) {
-    if(index < Vec::len(source)) {
+    for_range(Range::new(index, Vec::len(source)), { current =>
         Vec::push(
             &mut *output,
-            type_id_from_u32(*Vec::index(source, index))
-        );
-        append_type_ids(output, source, index + 1)
-    } else { () }
+            type_id_from_u32(*Vec::index(source, current))
+        )
+    })
 }
 
 intern_tuple_type(output: &mut TypedInterfaces, elements: &Vec<u32>) -> u32 {
@@ -3151,16 +3137,15 @@ append_resolved_pattern_binders<'a>(
     source: Slice<'a, super::resolution::ResolvedPatternBinder>,
     index: usize
 ) {
-    if(index < Slice::len(source)) {
+    for_range(Range::new(index, Slice::len(source)), { current =>
         Vec::push(
             &mut *output,
-            *handle Slice::get(source, index) {
+            *handle Slice::get(source, current) {
                 Result::Err(_) => unreachable(),
                 Result::Ok(found) => found
             }
-        );
-        append_resolved_pattern_binders(output, source, index + 1)
-    } else { () }
+        )
+    })
 }
 
 build_handle_resolution_map(
@@ -4284,27 +4269,26 @@ append_ordered_fields(
     values: &Vec<Option<CoreValueId>>,
     ordinal: usize
 ) {
-    if(ordinal < Vec::len(values)) {
-        let value = handle optional_core_value_at(values, ordinal) {
+    for_range(Range::new(ordinal, Vec::len(values)), { current => {
+        let value = handle optional_core_value_at(values, current) {
             Result::Err(_) => unreachable(),
             Result::Ok(found) => found
         };
         Vec::push(&mut *output, ConstructionField {
-            field: u32_from_usize(ordinal),
+            field: u32_from_usize(current),
             value: value
         });
-        append_ordered_fields(output, values, ordinal + 1)
-    } else { () }
+        ()
+    }})
 }
 
 push_missing_core_values(
     values: &mut Vec<Option<CoreValueId>>,
     count: usize
 ) {
-    if(Vec::len(&*values) < count) {
-        Vec::push(&mut *values, None);
-        push_missing_core_values(values, count)
-    } else { () }
+    for_range(Range::new(Vec::len(&*values), count), { _ =>
+        Vec::push(&mut *values, None)
+    })
 }
 
 elaborate_struct_fields(
@@ -6343,13 +6327,17 @@ write_construct_fields(
     count: u32,
     ordinal: u32
 ) -> Result<(), ElaborationError> {
-    if(ordinal < count) {
+    try_for_range(Range::new(
+        usize_from_u32(ordinal),
+        usize_from_u32(count)
+    ), { current => {
+        let current = u32_from_usize(current);
         let field = construction_field_at(
             &body.construction_fields,
-            usize_from_u32(start + ordinal)
+            usize_from_u32(start + current)
         );
         ByteBuf::write_u32_le(&mut *output, field.field);
-        try(write_operand_expression(
+        write_operand_expression(
             output,
             source,
             declarations,
@@ -6357,19 +6345,8 @@ write_construct_fields(
             body,
             field.value,
             source_local_limit
-        ), @write_construct_fields);
-        write_construct_fields(
-            output,
-            source,
-            declarations,
-            resolved,
-            body,
-            source_local_limit,
-            start,
-            count,
-            ordinal + 1
         )
-    } else { Result::Ok(()) }
+    }})
 }
 
 write_call_operands(
@@ -6383,8 +6360,11 @@ write_call_operands(
     count: u32,
     ordinal: u32
 ) -> Result<(), ElaborationError> {
-    if(ordinal < count) {
-        try(write_operand_expression(
+    try_for_range(Range::new(
+        usize_from_u32(ordinal),
+        usize_from_u32(count)
+    ), { current =>
+        write_operand_expression(
             output,
             source,
             declarations,
@@ -6392,22 +6372,11 @@ write_call_operands(
             body,
             *Vec::index(
                 &body.operands,
-                usize_from_u32(start + ordinal)
+                usize_from_u32(start + u32_from_usize(current))
             ),
             source_local_limit
-        ), @write_call_operands);
-        write_call_operands(
-            output,
-            source,
-            declarations,
-            resolved,
-            body,
-            source_local_limit,
-            start,
-            count,
-            ordinal + 1
         )
-    } else { Result::Ok(()) }
+    })
 }
 
 leading_let_count(

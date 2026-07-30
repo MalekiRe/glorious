@@ -3055,23 +3055,13 @@ write_struct_fields<'a>(
 write_pattern_binders<'a>(
     output: &mut ByteBuf,
     source: &super::lexer::LexedSource,
-    binders: Slice<'a, PatternBinder>,
-    index: usize
+    binders: Slice<'a, PatternBinder>
 ) -> Result<(), BodyError> {
-    if(index < Slice::len(binders)) {
-        let binder = handle Slice::get(binders, index) {
-            Result::Err(_) => unreachable(),
-            Result::Ok(found) => found
-        };
+    Slice::try_for_each(binders, { binder =>
         handle *binder {
             PatternBinder::Wildcard(_) => {
                 ByteBuf::push(&mut *output, 0);
-                write_pattern_binders(
-                    output,
-                    source,
-                    binders,
-                    index + 1
-                )
+                Result::Ok(())
             },
             PatternBinder::Binding(name, token) => {
                 ByteBuf::push(&mut *output, 1);
@@ -3083,17 +3073,12 @@ write_pattern_binders<'a>(
                         )),
                     Result::Ok(text) => {
                         write_string(&mut *output, text);
-                        write_pattern_binders(
-                            output,
-                            source,
-                            binders,
-                            index + 1
-                        )
+                        Result::Ok(())
                     }
                 }
             }
         }
-    } else { Result::Ok(()) }
+    })
 }
 
 write_handle_arms<'a>(
@@ -3101,14 +3086,9 @@ write_handle_arms<'a>(
     original: &String,
     source: &super::lexer::LexedSource,
     value: &ParsedBody,
-    arms: Slice<'a, HandleArm>,
-    index: usize
+    arms: Slice<'a, HandleArm>
 ) -> Result<(), BodyError> {
-    if(index < Slice::len(arms)) {
-        let arm = handle Slice::get(arms, index) {
-            Result::Err(_) => unreachable(),
-            Result::Ok(found) => found
-        };
+    Slice::try_for_each(arms, { arm =>
         handle super::lexer::lexeme(source, arm.enum_name) {
             Result::Err(_) => Result::Err(BodyError::MissingEncodedName(
                 arm.enum_token,
@@ -3131,8 +3111,7 @@ write_handle_arms<'a>(
                         try(write_pattern_binders(
                             &mut *output,
                             source,
-                            binders,
-                            0
+                            binders
                         ), @write_handle_arms);
                         try(write_expression(
                             &mut *output,
@@ -3141,19 +3120,12 @@ write_handle_arms<'a>(
                             value,
                             arm.body
                         ), @write_handle_arms);
-                        write_handle_arms(
-                            output,
-                            original,
-                            source,
-                            value,
-                            arms,
-                            index + 1
-                        )
+                        Result::Ok(())
                     }
                 }
             }
         }
-    } else { Result::Ok(()) }
+    })
 }
 
 write_block_statements<'a>(
@@ -3399,8 +3371,7 @@ write_expression(
                 original,
                 source,
                 value,
-                arms,
-                0
+                arms
             )
         },
         _ => Result::Err(BodyError::InvalidEncodedExpression(

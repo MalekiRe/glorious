@@ -571,12 +571,10 @@ push_missing_locals(
     output: &mut Vec<Option<RegisterId>>,
     remaining: usize
 ) {
-    if(remaining == 0) {
-        ()
-    } else {
+    for_range(Range::new(0, remaining), { _ => {
         Vec::push(&mut *output, None);
-        push_missing_locals(output, remaining - 1)
-    }
+        ()
+    } })
 }
 
 push_parameter_locals(
@@ -585,17 +583,14 @@ push_parameter_locals(
     index: u32,
     count: u32
 ) {
-    if(index < count) {
-        let register = Id::from_u32(index + 1);
+    for_range(Range::new(
+        usize_from_u32(index),
+        usize_from_u32(count)
+    ), { current => {
+        let register = Id::from_u32(checked_u32(current) + 1);
         Vec::push(&mut *output, Option::Some(register));
-        Vec::push(&mut *live, register);
-        push_parameter_locals(
-            output,
-            live,
-            index + 1,
-            count
-        )
-    } else { () }
+        Vec::push(&mut *live, register)
+    } })
 }
 
 reverse_registers(
@@ -603,19 +598,12 @@ reverse_registers(
     output: &mut Vec<RegisterId>,
     remaining: usize
 ) {
-    if(remaining == 0) {
-        ()
-    } else {
+    for_range(Range::new(0, remaining), { current =>
         Vec::push(
             &mut *output,
-            *Vec::index(source, remaining - 1)
-        );
-        reverse_registers(
-            source,
-            output,
-            remaining - 1
+            *Vec::index(source, remaining - current - 1)
         )
-    }
+    })
 }
 
 record_cleanup(value: &mut FunctionBuilder) {
@@ -1087,8 +1075,8 @@ build_match_switch_cases<'a>(
     index: usize,
     output: &mut Vec<StageSwitchCase>
 ) {
-    if(index < count) {
-        let arm = handle Slice::get(arms, index) {
+    for_range(Range::new(index, count), { current => {
+        let arm = handle Slice::get(arms, current) {
             Result::Err(_) => unreachable(),
             Result::Ok(found) => found
         };
@@ -1097,16 +1085,9 @@ build_match_switch_cases<'a>(
                 super::super::frontend::elaboration::
                     core_match_arm_variant(arm)
             ),
-            target: *Vec::index(blocks, index)
-        });
-        build_match_switch_cases(
-            arms,
-            blocks,
-            count,
-            index + 1,
-            output
-        )
-    } else { () }
+            target: *Vec::index(blocks, current)
+        })
+    } })
 }
 
 project_match_fields<'a>(
@@ -1632,31 +1613,27 @@ parameter_types(
     count: u32,
     output: &mut Vec<ArtifactTypeId>
 ) {
-    if(index < count) {
-        let start =
-            super::super::frontend::elaboration::
-                interface_callable_parameter_start_at(
-                    interfaces,
-                    function
-                );
+    let start =
+        super::super::frontend::elaboration::
+            interface_callable_parameter_start_at(
+                interfaces,
+                function
+            );
+    for_range(Range::new(
+        usize_from_u32(index),
+        usize_from_u32(count)
+    ), { current =>
         Vec::push(
             &mut *output,
             artifact_type_id(
                 super::super::frontend::elaboration::
                     interface_callable_parameter_at(
                         interfaces,
-                        usize_from_u32(start + index)
+                        usize_from_u32(start) + current
                     )
             )
-        );
-        parameter_types(
-            interfaces,
-            function,
-            index + 1,
-            count,
-            output
         )
-    } else { () }
+    })
 }
 
 pub lower_function(
@@ -1733,8 +1710,11 @@ collect_instruction_constants(
     index: usize,
     output: &mut Vec<Vec<u8>>
 ) {
-    if(index < Vec::len(&function.instructions)) {
-        handle Vec::index(&function.instructions, index) {
+    for_range(Range::new(
+        index,
+        Vec::len(&function.instructions)
+    ), { current => {
+        handle Vec::index(&function.instructions, current) {
             StageInstruction::Const(_, key) =>
                 Vec::push(&mut *output, Bytes::to_vec(key)),
             StageInstruction::Switch(_, pack, _) =>
@@ -1745,13 +1725,8 @@ collect_instruction_constants(
                     output
                 ),
             _ => ()
-        };
-        collect_instruction_constants(
-            function,
-            index + 1,
-            output
-        )
-    } else { () }
+        }
+    } })
 }
 
 collect_switch_case_constants(
@@ -1761,20 +1736,17 @@ collect_switch_case_constants(
     output: &mut Vec<Vec<u8>>
 ) {
     let cases = Arena::index(&value.switch_packs, pack);
-    if(index < Vec::len(&cases.cases)) {
-        let case = Vec::index(&cases.cases, index);
+    for_range(Range::new(
+        index,
+        Vec::len(&cases.cases)
+    ), { current => {
+        let case = Vec::index(&cases.cases, current);
         let key = stage_switch_case_key(case);
         Vec::push(
             &mut *output,
             Bytes::to_vec(*key)
-        );
-        collect_switch_case_constants(
-            value,
-            pack,
-            index + 1,
-            output
         )
-    } else { () }
+    } })
 }
 
 collect_function_constants(
@@ -1782,22 +1754,17 @@ collect_function_constants(
     index: usize,
     output: &mut Vec<Vec<u8>>
 ) {
-    if(index < Arena::len(functions)) {
+    for_range(Range::new(index, Arena::len(functions)), { current => {
         let function = Arena::index(
             functions,
-            stage_function_id_from_usize(index)
+            stage_function_id_from_usize(current)
         );
         collect_instruction_constants(
             function,
             0,
             output
-        );
-        collect_function_constants(
-            functions,
-            index + 1,
-            output
         )
-    } else { () }
+    } })
 }
 
 store_constants(

@@ -1025,17 +1025,16 @@ write_shells(
     value: &DeclarationIndex,
     index: usize
 ) {
-    if(index < Vec::len(&value.shells)) {
-            let shell = Vec::index(&value.shells, index);
-            ByteBuf::push(&mut *output, shell.kind_code);
-            ByteBuf::push(&mut *output, bool_code(shell.public));
-            write_optional_name(&mut *output, lexed, &shell.name);
-            write_range(&mut *output, &shell.header);
-            write_optional_range(&mut *output, &shell.body);
-            write_range(&mut *output, &shell.whole);
-            write_optional_parent(&mut *output, &shell.parent);
-            write_shells( output, lexed, value, index + 1)
-    } else { () }
+    for_range(Range::new(index, Vec::len(&value.shells)), { current => {
+        let shell = Vec::index(&value.shells, current);
+        ByteBuf::push(&mut *output, shell.kind_code);
+        ByteBuf::push(&mut *output, bool_code(shell.public));
+        write_optional_name(&mut *output, lexed, &shell.name);
+        write_range(&mut *output, &shell.header);
+        write_optional_range(&mut *output, &shell.body);
+        write_range(&mut *output, &shell.whole);
+        write_optional_parent(&mut *output, &shell.parent)
+    }})
 }
 
 encode_scan(
@@ -1067,18 +1066,17 @@ encode_scan(
 }
 
 process_inputs(arguments: &Vec<String>, index: usize, output: &mut ByteBuf) / FileRead {
-    if(index < Vec::len(arguments)) {
-            let path = *Vec::index(arguments, index);
-            let bytes = read_file(path);
-            handle String::from_utf8(bytes) {
+    for_range(Range::new(index, Vec::len(arguments)), { current => {
+        let path = *Vec::index(arguments, current);
+        let bytes = read_file(path);
+        handle String::from_utf8(bytes) {
+            Result::Err(_) => ByteBuf::push(&mut *output, 1),
+            Result::Ok(source) => handle super::lexer::lex(&source) {
                 Result::Err(_) => ByteBuf::push(&mut *output, 1),
-                Result::Ok(source) => handle super::lexer::lex(&source) {
-                    Result::Err(_) => ByteBuf::push(&mut *output, 1),
-                    Result::Ok(lexed) => encode_scan(&mut *output,  lexed)
-                }
-            };
-            process_inputs(arguments, index + 1,  output)
-    } else { () }
+                Result::Ok(lexed) => encode_scan(&mut *output, lexed)
+            }
+        }
+    }})
 }
 
 pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {

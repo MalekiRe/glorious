@@ -1966,21 +1966,17 @@ write_source_span(output: &mut ByteBuf, source: &String, value: &Span) {
 }
 
 normalized_span_len(bytes: &Bytes, cursor: usize, end: usize, count: usize) -> usize {
-    if(cursor < end) {
-            let byte = handle Bytes::get(bytes, cursor) {
-                Result::Ok(found) => byte_value( found),
-                Result::Err(_) => unreachable()
-            };
-            let next = if(byte == byte_value(95)) {
-                           count
-                       } else {
-                           count + 1
-                       };
-            normalized_span_len(bytes, cursor + 1, end, next)
-
-    } else {
-        count
-    }
+    fold_range(Range::new(cursor, end), count, { current_count, current => {
+        let byte = handle Bytes::get(bytes, current) {
+            Result::Ok(found) => byte_value(found),
+            Result::Err(_) => unreachable()
+        };
+        if(byte == byte_value(95)) {
+            current_count
+        } else {
+            current_count + 1
+        }
+    }})
 }
 
 write_normalized_span_bytes(
@@ -1989,26 +1985,17 @@ write_normalized_span_bytes(
     cursor: usize,
     end: usize
 ) {
-    if(cursor < end) {
-            let byte = handle Bytes::get(bytes, cursor) {
-                Result::Ok(found) => byte_value( found),
-                Result::Err(_) => unreachable()
-            };
-            if(byte == byte_value(95)) {
-                ()
-            } else {
-                ByteBuf::push(&mut *output, byte)
-            };
-            write_normalized_span_bytes(
-                 output,
-                bytes,
-                cursor + 1,
-                end
-            )
-
-    } else {
-        ()
-    }
+    for_range(Range::new(cursor, end), { current => {
+        let byte = handle Bytes::get(bytes, current) {
+            Result::Ok(found) => byte_value(found),
+            Result::Err(_) => unreachable()
+        };
+        if(byte == byte_value(95)) {
+            ()
+        } else {
+            ByteBuf::push(&mut *output, byte)
+        }
+    }})
 }
 
 write_normalized_span(
@@ -2111,23 +2098,19 @@ write_tokens(
     value: &LexedSource,
     index: usize
 ) {
-    if(index < Vec::len(&value.tokens)) {
-            let token = Vec::index(&value.tokens, index);
-            ByteBuf::write_u16_le(&mut *output, token.code);
-            ByteBuf::write_u64_le(
-                &mut *output,
-                wrapping_convert_to_u64(token.span.start)
-            );
-            ByteBuf::write_u64_le(
-                &mut *output,
-                wrapping_convert_to_u64(token.span.end)
-            );
-            write_token_payload(&mut *output, source, value, token);
-            write_tokens( output, source, value, index + 1)
-
-    } else {
-        ()
-    }
+    for_range(Range::new(index, Vec::len(&value.tokens)), { current => {
+        let token = Vec::index(&value.tokens, current);
+        ByteBuf::write_u16_le(&mut *output, token.code);
+        ByteBuf::write_u64_le(
+            &mut *output,
+            wrapping_convert_to_u64(token.span.start)
+        );
+        ByteBuf::write_u64_le(
+            &mut *output,
+            wrapping_convert_to_u64(token.span.end)
+        );
+        write_token_payload(&mut *output, source, value, token)
+    }})
 }
 
 encode_result(
@@ -2154,24 +2137,20 @@ encode_result(
 }
 
 process_inputs(arguments: &Vec<String>, index: usize, output: &mut ByteBuf) / FileRead {
-    if(index < Vec::len(arguments)) {
-            let path = *Vec::index(arguments, index);
-            let bytes = read_file(path);
-            handle String::from_utf8(bytes) {
-                Result::Ok(source) => encode_result(
+    for_range(Range::new(index, Vec::len(arguments)), { current => {
+        let path = *Vec::index(arguments, current);
+        let bytes = read_file(path);
+        handle String::from_utf8(bytes) {
+            Result::Ok(source) => encode_result(
                     &mut *output,
                     &source,
                     lex(&source)
                 ),
                 Result::Err(_) => {
-                    ByteBuf::push(&mut *output, 2)
-                }
-            };
-            process_inputs(arguments, index + 1,  output)
-
-    } else {
-        ()
-    }
+                ByteBuf::push(&mut *output, 2)
+            }
+        }
+    }})
 }
 
 pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
