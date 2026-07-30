@@ -26,8 +26,8 @@ use crate::{
     ast::{
         AssignmentPlace, AssignmentPlaceKind, BinaryOp, EffectRowSyntax, EnumDecl, Expr, ExprKind,
         ExprVisitor, FieldVisibility, Function, GenericParamKind, GlobalBinding, GoalArgument,
-        GoalPolarity, HandlerClause, Param, PatternKind, Program, Stmt, StructDecl, TypeSyntax,
-        TypeSyntaxKind, UnaryOp, pattern_field_index, walk_expr,
+        GoalPolarity, HandlerClause, Param, Pattern, PatternKind, Program, Stmt, StructDecl,
+        TypeSyntax, TypeSyntaxKind, UnaryOp, pattern_field_index, walk_expr,
     },
     ast_visit::{TypeSyntaxFolder, TypeSyntaxVisitor, type_syntax_any},
     compiler_core as core, compiler_mir as mir, compiler_regions,
@@ -2032,6 +2032,24 @@ fn generic_ast_reference_return_plans(
             .collect()
     }
 
+    fn pattern_binds(pattern: &Pattern) -> bool {
+        match &pattern.kind {
+            PatternKind::Binding(_) => true,
+            PatternKind::Variant { fields, .. } => fields.iter().any(pattern_binds),
+            PatternKind::Tuple { elements, .. } => elements.iter().any(pattern_binds),
+            PatternKind::Struct { fields, .. } => {
+                fields.iter().any(|field| pattern_binds(&field.pattern))
+            }
+            PatternKind::Wildcard
+            | PatternKind::Unit
+            | PatternKind::Int(_)
+            | PatternKind::Float(_)
+            | PatternKind::String(_)
+            | PatternKind::Char(_)
+            | PatternKind::Byte(_) => false,
+        }
+    }
+
     fn expression_plan(
         program: &Program,
         expression: &Expr,
@@ -2109,10 +2127,17 @@ fn generic_ast_reference_return_plans(
                 Some(result)
             }
             ExprKind::Field(subject, field) => {
-                let index = field.parse::<u32>().ok().or_else(|| {
+                let parameter_field = match &subject.kind {
+                    ExprKind::Variable(path) if path.len() == 1 => nominal_fields
+                        .get(&format!("$parameter${}", path[0]))
+                        .and_then(|fields| fields.get(field).copied()),
+                    _ => None,
+                };
+                let index = field.parse::<u32>().ok().or(parameter_field).or_else(|| {
                     let indices = nominal_fields
-                        .values()
-                        .filter_map(|fields| fields.get(field).copied())
+                        .iter()
+                        .filter(|(name, _)| !name.starts_with("$parameter$"))
+                        .filter_map(|(_, fields)| fields.get(field).copied())
                         .collect::<BTreeSet<_>>();
                     (indices.len() == 1).then(|| *indices.iter().next().unwrap())
                 })?;
@@ -2133,7 +2158,90 @@ fn generic_ast_reference_return_plans(
                 let ExprKind::Variable(path) = &callee.kind else {
                     return None;
                 };
+                if path.len() >= 2 {
+                    let enum_name = path[path.len() - 2].as_ref();
+                    let enum_leaf = enum_name.rsplit(':').next().unwrap_or(enum_name);
+                    let variant_name = path[path.len() - 1].as_ref();
+                    if let Some((variant, declaration)) = program
+                        .enums
+                        .iter()
+                        .find(|declaration| {
+                            declaration.name == enum_name
+                                || declaration
+                                    .name
+                                    .rsplit(':')
+                                    .next()
+                                    .is_some_and(|name| name == enum_leaf)
+                        })
+                        .and_then(|declaration| {
+                            declaration
+                                .variants
+                                .iter()
+                                .enumerate()
+                                .find(|(_, variant)| variant.name == variant_name)
+                        })
+                        && declaration.fields.len() == arguments.len()
+                    {
+                        let mut result = Vec::new();
+                        for (field, value) in arguments.iter().enumerate() {
+                            for mut route in expression_plan(
+                                program,
+                                value,
+                                environment,
+                                known,
+                                nominal_fields,
+                                callback_wrappers,
+                                single_reference_parameters,
+                            )? {
+                                route.result_prefix.insert(0, field as u32);
+                                route.result_prefix.insert(0, u32::MAX - variant as u32);
+                                result.push(route);
+                            }
+                        }
+                        return Some(result);
+                    }
+                }
                 let name = path.last()?.as_ref();
+                if program.functions.iter().any(|function| {
+                    function.name == name
+                        && matches!(
+                            function.return_type.as_ref().map(|ty| &ty.kind),
+                            Some(TypeSyntaxKind::Never)
+                        )
+                }) {
+                    // A nonreturning branch contributes no reference-return
+                    // route to an enclosing source-defined control join.
+                    return Some(Vec::new());
+                }
+                if name == "else"
+                    && let [selected, fallback] = arguments.as_slice()
+                    && let ExprKind::Call(selected_callee, selected_arguments) = &selected.kind
+                    && let ExprKind::Variable(selected_path) = &selected_callee.kind
+                    && selected_path
+                        .last()
+                        .is_some_and(|name| name.as_ref() == "if")
+                    && let [_, body] = selected_arguments.as_slice()
+                {
+                    let mut result = expression_plan(
+                        program,
+                        body,
+                        environment,
+                        known,
+                        nominal_fields,
+                        callback_wrappers,
+                        single_reference_parameters,
+                    )?;
+                    result.extend(expression_plan(
+                        program,
+                        fallback,
+                        environment,
+                        known,
+                        nominal_fields,
+                        callback_wrappers,
+                        single_reference_parameters,
+                    )?);
+                    return Some(result);
+                }
                 if matches!(
                     name,
                     "__g1_array_get_borrow_shared" | "__g1_array_get_borrow_unique"
@@ -2304,6 +2412,26 @@ fn generic_ast_reference_return_plans(
                 computation,
                 clauses,
             } => {
+                if clauses.iter().all(|clause| {
+                    clause.effect.is_empty()
+                        && clause.operation.is_empty()
+                        && clause.resumption.is_none()
+                        && matches!(clause.patterns.as_slice(), [pattern] if !pattern_binds(pattern))
+                }) {
+                    let mut result = Vec::new();
+                    for clause in clauses.iter() {
+                        result.extend(expression_plan(
+                            program,
+                            &clause.body,
+                            environment,
+                            known,
+                            nominal_fields,
+                            callback_wrappers,
+                            single_reference_parameters,
+                        )?);
+                    }
+                    return Some(result);
+                }
                 // A direct performed computation with one lexical clause has
                 // an exact result route when that clause resumes it. Keep the
                 // shape deliberately narrow: additional computation after the
@@ -2384,7 +2512,7 @@ fn generic_ast_reference_return_plans(
                     .iter()
                     .enumerate()
                     .map(|(index, field)| (field.name.clone(), index as u32))
-                    .collect(),
+                    .collect::<BTreeMap<_, _>>(),
             )
         })
         .collect::<BTreeMap<_, _>>();
@@ -2487,6 +2615,112 @@ fn generic_ast_reference_return_plans(
             TypeSyntaxKind::Application { .. } | TypeSyntaxKind::Projection { .. } => None,
         }
     }
+    fn type_is_enum(program: &Program, ty: &TypeSyntax, visiting: &mut BTreeSet<String>) -> bool {
+        match &ty.kind {
+            TypeSyntaxKind::Application { constructor, .. } => {
+                type_is_enum(program, constructor, visiting)
+            }
+            TypeSyntaxKind::Path(path) => {
+                let Some(name) = path.last().map(|segment| segment.name.as_str()) else {
+                    return false;
+                };
+                if program
+                    .enums
+                    .iter()
+                    .any(|declaration| declaration.name == name)
+                {
+                    return true;
+                }
+                if !visiting.insert(name.to_string()) {
+                    return false;
+                }
+                let result = program
+                    .type_aliases
+                    .iter()
+                    .find(|alias| alias.name == name)
+                    .is_some_and(|alias| type_is_enum(program, &alias.target, visiting));
+                visiting.remove(name);
+                result
+            }
+            TypeSyntaxKind::SharedReference { .. }
+            | TypeSyntaxKind::UniqueReference { .. }
+            | TypeSyntaxKind::Tuple(_)
+            | TypeSyntaxKind::Projection { .. }
+            | TypeSyntaxKind::Never => false,
+        }
+    }
+    fn parameter_references_enum(program: &Program, ty: &TypeSyntax) -> bool {
+        match &ty.kind {
+            TypeSyntaxKind::SharedReference { referent, .. }
+            | TypeSyntaxKind::UniqueReference { referent, .. } => {
+                type_is_enum(program, referent, &mut BTreeSet::new())
+            }
+            TypeSyntaxKind::Path(path) => {
+                let Some(name) = path.last().map(|segment| segment.name.as_str()) else {
+                    return false;
+                };
+                program
+                    .type_aliases
+                    .iter()
+                    .find(|alias| alias.name == name)
+                    .is_some_and(|alias| parameter_references_enum(program, &alias.target))
+            }
+            TypeSyntaxKind::Application { constructor, .. } => {
+                parameter_references_enum(program, constructor)
+            }
+            TypeSyntaxKind::Tuple(_)
+            | TypeSyntaxKind::Projection { .. }
+            | TypeSyntaxKind::Never => false,
+        }
+    }
+    fn referenced_struct_name(
+        program: &Program,
+        ty: &TypeSyntax,
+        visiting: &mut BTreeSet<String>,
+    ) -> Option<String> {
+        match &ty.kind {
+            TypeSyntaxKind::SharedReference { referent, .. }
+            | TypeSyntaxKind::UniqueReference { referent, .. }
+            | TypeSyntaxKind::Application {
+                constructor: referent,
+                ..
+            } => referenced_struct_name(program, referent, visiting),
+            TypeSyntaxKind::Path(path) => {
+                let name = path.last()?.name.as_str();
+                let leaf = name.rsplit(':').next().unwrap_or(name);
+                if let Some(declaration) = program.structs.iter().find(|declaration| {
+                    declaration.name == name
+                        || declaration
+                            .name
+                            .rsplit(':')
+                            .next()
+                            .is_some_and(|candidate| candidate == leaf)
+                }) {
+                    return Some(declaration.name.clone());
+                }
+                if !visiting.insert(name.to_string()) {
+                    return None;
+                }
+                let result = program
+                    .type_aliases
+                    .iter()
+                    .find(|alias| {
+                        alias.name == name
+                            || alias
+                                .name
+                                .rsplit(':')
+                                .next()
+                                .is_some_and(|candidate| candidate == leaf)
+                    })
+                    .and_then(|alias| referenced_struct_name(program, &alias.target, visiting));
+                visiting.remove(name);
+                result
+            }
+            TypeSyntaxKind::Tuple(_)
+            | TypeSyntaxKind::Projection { .. }
+            | TypeSyntaxKind::Never => None,
+        }
+    }
     // An empty provisional plan carries no route evidence. Keep it out of the
     // fixed-point table so generic source structure can establish a route;
     // non-empty typed plans remain authoritative seeds.
@@ -2563,6 +2797,15 @@ fn generic_ast_reference_return_plans(
                     )
                 })
                 .collect();
+            let mut function_nominal_fields = nominal_fields.clone();
+            for param in &function.params {
+                if let Some(name) = referenced_struct_name(program, &param.ty, &mut BTreeSet::new())
+                    && let Some(fields) = nominal_fields.get(&name)
+                {
+                    function_nominal_fields
+                        .insert(format!("$parameter${}", param.name), fields.clone());
+                }
+            }
             let single_reference_parameters = function
                 .params
                 .iter()
@@ -2573,15 +2816,37 @@ fn generic_ast_reference_return_plans(
                     .then_some(parameter)
                 })
                 .collect::<BTreeSet<_>>();
-            let inferred = expression_plan(
+            let mut inferred = expression_plan(
                 program,
                 &function.body,
                 &environment,
                 &known,
-                &nominal_fields,
+                &function_nominal_fields,
                 &callback_wrappers,
                 &single_reference_parameters,
             );
+            let enum_reference_parameters = function
+                .params
+                .iter()
+                .enumerate()
+                .filter_map(|(parameter, param)| {
+                    parameter_references_enum(program, &param.ty).then_some(parameter)
+                })
+                .collect::<BTreeSet<_>>();
+            if inferred.as_ref().is_some_and(|plan| {
+                plan.iter().any(|route| {
+                    enum_reference_parameters.contains(&route.source.parameter)
+                        && !route.source.path.is_empty()
+                        && route.source.path[0] <= u32::MAX / 2
+                })
+            }) {
+                // A field projected through a reference to an enum requires
+                // the active variant marker in its source path.  The source
+                // AST's `.0` syntax does not retain that proof, so leave this
+                // plan to typed/body-derived analysis instead of emitting an
+                // apparently precise but invalid route.
+                inferred = None;
+            }
             if let Some(mut plan) = inferred {
                 plan.sort_by(|left, right| {
                     (

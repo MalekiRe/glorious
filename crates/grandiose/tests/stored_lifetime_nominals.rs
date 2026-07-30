@@ -206,6 +206,59 @@ fn enum_alternatives_can_borrow_distinct_fields_of_one_parameter() {
 }
 
 #[test]
+fn enum_alternatives_can_borrow_same_typed_distinct_fields() {
+    let source = r#"
+        struct Sources {
+            left: Vec<u32>,
+            right: Vec<u32>
+        }
+
+        enum BorrowedChoice<'a> {
+            Left(Slice<'a, u32>),
+            Right(Slice<'a, u32>)
+        }
+
+        borrow_choice<'a>(
+            sources: &'a Sources,
+            choose_left: Bool
+        ) -> BorrowedChoice<'a> {
+            if(choose_left) {
+                BorrowedChoice::Left(Vec::as_slice(&sources.left))
+            } else {
+                BorrowedChoice::Right(Vec::as_slice(&sources.right))
+            }
+        }
+
+        main() -> () { () }
+    "#;
+
+    let artifact = compile_source_to_bytecode("same-typed-borrowed-choice.glorious", source)
+        .unwrap_or_else(|errors| panic!("{errors:#?}"));
+    let function = artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "borrow_choice")
+        .unwrap() as u32;
+    let contract = artifact
+        .reference_return_contracts
+        .iter()
+        .find(|contract| contract.function == function)
+        .expect("the compiler emitted an aggregate lifetime contract");
+    assert_eq!(contract.routes.len(), 2);
+    for route in &contract.routes {
+        let source_path = match &route.origin {
+            grandiose_vm::bytecode::ReferenceReturnOrigin::Parameter { parameter: 0, path } => {
+                path.clone()
+            }
+            origin => panic!("unexpected reference-return origin: {origin:?}"),
+        };
+        let variant = u32::MAX - route.result_path[0];
+        assert_eq!(source_path, vec![variant, 0]);
+    }
+    verify(artifact).expect("same-typed alternatives retain distinct source fields");
+}
+
+#[test]
 fn generic_borrowed_payload_accepts_a_monomorphic_alias_argument() {
     let source = r#"
         struct ItemTag {}
