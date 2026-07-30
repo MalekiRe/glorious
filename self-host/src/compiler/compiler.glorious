@@ -110,8 +110,8 @@ compile_error_message(value: &CompileError) -> String {
     }
 }
 
-function_name(
-    session: &CompilerSession,
+function_name<'a>(
+    session: &CompilerSession<'a>,
     shell: u32
 ) -> Result<String, CompileError> {
     handle scanner::shell_at(
@@ -136,8 +136,8 @@ function_name(
     }
 }
 
-prepare_body(
-    session: &CompilerSession,
+prepare_body<'a>(
+    session: &CompilerSession<'a>,
     callable: usize
 ) -> Result<BodyCompilation, CompileError> {
     let shell = elaboration::interface_callable_shell_at(
@@ -181,8 +181,8 @@ prepare_body(
     })
 }
 
-lower_body(
-    session: &mut CompilerSession,
+lower_body<'a>(
+    session: &mut CompilerSession<'a>,
     body: BodyCompilation
 ) -> Result<lowering::StageFunction, CompileError> {
     let BodyCompilation {
@@ -190,7 +190,7 @@ lower_body(
         callable,
         name,
         syntax,
-        resolution: resolved
+        resolution
     } = move body;
     let typed = try(
         Result::map_err(
@@ -200,7 +200,7 @@ lower_body(
                 &session.declarations,
                 &mut session.interfaces,
                 &syntax,
-                &resolved
+                &resolution
             ),
             { found => CompileError::BodyElaboration(shell, found) }
         ),
@@ -217,8 +217,8 @@ lower_body(
     )
 }
 
-lower_functions(
-    session: &mut CompilerSession,
+lower_functions<'a>(
+    session: &mut CompilerSession<'a>,
     index: usize,
     output: &mut StageFunctionArena
 ) -> Result<(), CompileError> {
@@ -268,8 +268,8 @@ find_entry(
     }
 }
 
-interface_name(
-    session: &CompilerSession,
+interface_name<'a>(
+    session: &CompilerSession<'a>,
     raw: u32,
     detail: u32
 ) -> Result<String, CompileError> {
@@ -283,8 +283,8 @@ interface_name(
     }
 }
 
-collect_struct_fields(
-    session: &CompilerSession,
+collect_struct_fields<'a>(
+    session: &CompilerSession<'a>,
     start: u32,
     count: u32,
     ordinal: u32,
@@ -355,8 +355,8 @@ collect_variant_payloads<'a>(
     } })
 }
 
-collect_enum_variants(
-    session: &CompilerSession,
+collect_enum_variants<'a>(
+    session: &CompilerSession<'a>,
     start: u32,
     count: u32,
     ordinal: u32,
@@ -402,8 +402,8 @@ collect_enum_variants(
     } })
 }
 
-collect_types(
-    session: &CompilerSession,
+collect_types<'a>(
+    session: &CompilerSession<'a>,
     index: usize,
     output: &mut StageTypeArena,
     type_names: &mut Vec<String>
