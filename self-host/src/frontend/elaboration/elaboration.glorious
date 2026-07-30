@@ -5426,67 +5426,32 @@ record_last_local_expressions(
                 }
             }
         },
-        _ => record_last_local_expression_children(
-            body,
-            map,
-            parameter_count,
-            expression,
-            0,
-            last_expressions
+        _ => Slice::for_each(
+            super::bodies::expression_children(body, expression),
+            { edge => record_last_local_expressions(
+                body,
+                map,
+                parameter_count,
+                Id::to_u32(super::bodies::expression_edge_value(edge)),
+                &mut *last_expressions
+            ) }
         )
     }
 }
 
-record_last_local_expression_children(
+straight_line_children<'a>(
     body: &super::bodies::ParsedBody,
-    map: &ResolutionMap,
-    parameter_count: u32,
-    expression: u32,
-    ordinal: u32,
-    last_expressions: &mut Vec<Option<super::bodies::ExprId>>
-) {
-    if(ordinal < super::bodies::expression_child_count_at(
-        body,
-        expression
-    )) {
-        record_last_local_expressions(
-            body,
-            map,
-            parameter_count,
-            super::bodies::expression_child_at(
-                body,
-                expression,
-                ordinal
-            ),
-            last_expressions
-        );
-        record_last_local_expression_children(
-            body,
-            map,
-            parameter_count,
-            expression,
-            ordinal + 1,
-            last_expressions
-        )
-    } else { () }
-}
-
-straight_line_children(
-    body: &super::bodies::ParsedBody,
-    expression: u32,
-    ordinal: u32
+    children: Slice<'a, super::bodies::ExprEdge>
 ) -> Bool {
-    if(ordinal < super::bodies::expression_child_count_at(
-        body,
-        expression
-    )) { if(straight_line_expression(
+    handle Slice::find(children, { edge =>
+        if(straight_line_expression(
             body,
-            super::bodies::expression_child_at(body, expression, ordinal)
-        )) { straight_line_children(
-                body,
-                expression,
-                ordinal + 1
-            ) } else { false } } else { true }
+            Id::to_u32(super::bodies::expression_edge_value(edge))
+        )) { false } else { true }
+    }) {
+        Result::Err(_) => true,
+        Result::Ok(_) => false
+    }
 }
 
 straight_line_call_arguments(
@@ -5495,7 +5460,20 @@ straight_line_call_arguments(
 ) -> Bool {
     // Child zero is the callable receiver. Its ownership follows Fn mode,
     // rather than ordinary final-use inference.
-    straight_line_children(body, expression, 1)
+    let children = super::bodies::expression_children(body, expression);
+    if(Slice::len(children) == 0) {
+        true
+    } else {
+        let arguments = handle Slice::subslice(
+            children,
+            1,
+            Slice::len(children) - 1
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        straight_line_children(body, arguments)
+    }
 }
 
 straight_line_expression(
@@ -5506,12 +5484,27 @@ straight_line_expression(
         1 => true,
         2 => true,
         3 => true,
-        4 => straight_line_children(body, expression, 0),
-        5 => straight_line_children(body, expression, 0),
+        4 => straight_line_children(
+            body,
+            super::bodies::expression_children(body, expression)
+        ),
+        5 => straight_line_children(
+            body,
+            super::bodies::expression_children(body, expression)
+        ),
         7 => straight_line_call_arguments(body, expression),
-        8 => straight_line_children(body, expression, 0),
-        9 => straight_line_children(body, expression, 0),
-        10 => straight_line_children(body, expression, 0),
+        8 => straight_line_children(
+            body,
+            super::bodies::expression_children(body, expression)
+        ),
+        9 => straight_line_children(
+            body,
+            super::bodies::expression_children(body, expression)
+        ),
+        10 => straight_line_children(
+            body,
+            super::bodies::expression_children(body, expression)
+        ),
         _ => false
     }
 }
@@ -5533,42 +5526,18 @@ local_occurrences_in_expression(
             Result::Ok(found) =>
                 if(found == local) { 1 } else { 0 }
         },
-        _ => local_occurrences_in_children(
-            body,
-            map,
-            parameter_count,
-            expression,
+        _ => Slice::fold(
+            super::bodies::expression_children(body, expression),
             0,
-            local
+            { count, edge => count + local_occurrences_in_expression(
+                body,
+                map,
+                parameter_count,
+                Id::to_u32(super::bodies::expression_edge_value(edge)),
+                local
+            ) }
         )
     }
-}
-
-local_occurrences_in_children(
-    body: &super::bodies::ParsedBody,
-    map: &ResolutionMap,
-    parameter_count: u32,
-    expression: u32,
-    ordinal: u32,
-    local: CoreLocalId
-) -> u32 {
-    if(ordinal < super::bodies::expression_child_count_at(
-        body,
-        expression
-    )) { local_occurrences_in_expression(
-            body,
-            map,
-            parameter_count,
-            super::bodies::expression_child_at(body, expression, ordinal),
-            local
-        ) + local_occurrences_in_children(
-            body,
-            map,
-            parameter_count,
-            expression,
-            ordinal + 1,
-            local
-        ) } else { 0 }
 }
 
 struct_has_repeated_local(
@@ -5611,41 +5580,23 @@ expression_contains_repeated_struct_local(
             0,
             local_count
         )
-    }) { true } else { expression_children_contain_repeated_struct_local(
-            body,
-            map,
-            parameter_count,
-            expression,
-            0,
-            local_count
-        ) }
-}
-
-expression_children_contain_repeated_struct_local(
-    body: &super::bodies::ParsedBody,
-    map: &ResolutionMap,
-    parameter_count: u32,
-    expression: u32,
-    ordinal: u32,
-    local_count: usize
-) -> Bool {
-    if(ordinal < super::bodies::expression_child_count_at(
-        body,
-        expression
-    )) { if(expression_contains_repeated_struct_local(
-            body,
-            map,
-            parameter_count,
-            super::bodies::expression_child_at(body, expression, ordinal),
-            local_count
-        )) { true } else { expression_children_contain_repeated_struct_local(
-                    body,
-                    map,
-                    parameter_count,
-                    expression,
-                    ordinal + 1,
-                    local_count
-                ) } } else { false }
+    }) {
+        true
+    } else {
+        handle Slice::find(
+            super::bodies::expression_children(body, expression),
+            { edge => expression_contains_repeated_struct_local(
+                body,
+                map,
+                parameter_count,
+                Id::to_u32(super::bodies::expression_edge_value(edge)),
+                local_count
+            ) }
+        ) {
+            Result::Err(_) => false,
+            Result::Ok(_) => true
+        }
+    }
 }
 
 mark_final_transfer_candidates(
@@ -5653,7 +5604,6 @@ mark_final_transfer_candidates(
     map: &ResolutionMap,
     parameter_count: u32,
     expression: u32,
-    ordinal: u32,
     last_expressions: &Vec<Option<super::bodies::ExprId>>,
     output: &mut IndexVec<super::bodies::ExprTag, Bool>
 ) {
@@ -5683,62 +5633,46 @@ mark_final_transfer_candidates(
             }
         },
         7 => {
-            let argument = if(ordinal < 1) { 1 } else { ordinal };
-            if(argument < super::bodies::expression_child_count_at(
+            let children = super::bodies::expression_children(
                 body,
                 expression
-            )) {
-                mark_final_transfer_candidates(
-                    body,
-                    map,
-                    parameter_count,
-                    super::bodies::expression_child_at(
-                        body,
-                        expression,
-                        argument
-                    ),
-                    0,
-                    last_expressions,
-                    output
-                );
-                mark_final_transfer_candidates(
-                    body,
-                    map,
-                    parameter_count,
-                    expression,
-                    argument + 1,
-                    last_expressions,
-                    output
-                )
-            } else { () }
-        },
-        _ => if(ordinal < super::bodies::expression_child_count_at(
-            body,
-            expression
-        )) {
-            mark_final_transfer_candidates(
-                body,
-                map,
-                parameter_count,
-                super::bodies::expression_child_at(
-                    body,
-                    expression,
-                    ordinal
-                ),
-                0,
-                last_expressions,
-                output
             );
-            mark_final_transfer_candidates(
+            if(Slice::len(children) == 0) {
+                ()
+            } else {
+                let arguments = handle Slice::subslice(
+                    children,
+                    1,
+                    Slice::len(children) - 1
+                ) {
+                    Result::Err(_) => unreachable(),
+                    Result::Ok(found) => found
+                };
+                Slice::for_each(arguments, { edge =>
+                    mark_final_transfer_candidates(
+                        body,
+                        map,
+                        parameter_count,
+                        Id::to_u32(
+                            super::bodies::expression_edge_value(edge)
+                        ),
+                        last_expressions,
+                        &mut *output
+                    )
+                })
+            }
+        },
+        _ => Slice::for_each(
+            super::bodies::expression_children(body, expression),
+            { edge => mark_final_transfer_candidates(
                 body,
                 map,
                 parameter_count,
-                expression,
-                ordinal + 1,
+                Id::to_u32(super::bodies::expression_edge_value(edge)),
                 last_expressions,
-                output
-            )
-        } else { () }
+                &mut *output
+            ) }
+        )
     }
 }
 
@@ -5747,41 +5681,37 @@ mark_root_statement_candidates(
     map: &ResolutionMap,
     parameter_count: u32,
     root: u32,
-    ordinal: u32,
     last_expressions: &Vec<Option<super::bodies::ExprId>>,
     output: &mut IndexVec<super::bodies::ExprTag, Bool>
 ) {
-    if(ordinal < super::bodies::expression_child_count_at(body, root)) {
-        let expression = super::bodies::expression_child_at(
-            body,
-            root,
-            ordinal
-        );
-        if(straight_line_expression(body, expression)) { if(expression_contains_repeated_struct_local(
+    Slice::for_each(
+        super::bodies::expression_children(body, root),
+        { edge => {
+            let expression = Id::to_u32(
+                super::bodies::expression_edge_value(edge)
+            );
+            if(straight_line_expression(body, expression)) {
+                if(expression_contains_repeated_struct_local(
                     body,
                     map,
                     parameter_count,
                     expression,
                     Vec::len(last_expressions)
-                )) { () } else { mark_final_transfer_candidates(
-                    body,
-                    map,
-                    parameter_count,
-                    expression,
-                    0,
-                    last_expressions,
-                    output
-                ) } } else { () };
-        mark_root_statement_candidates(
-            body,
-            map,
-            parameter_count,
-            root,
-            ordinal + 1,
-            last_expressions,
-            output
-        )
-    } else { () }
+                )) {
+                    ()
+                } else {
+                    mark_final_transfer_candidates(
+                        body,
+                        map,
+                        parameter_count,
+                        expression,
+                        last_expressions,
+                        &mut *output
+                    )
+                }
+            } else { () }
+        } }
+    )
 }
 
 push_missing_expressions(
@@ -5839,7 +5769,6 @@ final_transfer_expressions(
             map,
             parameter_count,
             root,
-            0,
             &last_expressions,
             &mut output
         ) } else { () };

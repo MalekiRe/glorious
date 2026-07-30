@@ -492,46 +492,28 @@ expr_id_at(value: &Vec<u32>, index: usize) -> ExprId {
     Id::from_u32(word_at(value, index))
 }
 
-operator_push(value: &mut Vec<u32>, operator: OperatorUse) {
-    push_word(&mut *value, operator.fixity);
-    push_word(&mut *value, u32_from_usize(operator.start));
-    push_word(&mut *value, u32_from_usize(operator.end));
-    push_word(&mut *value, u32_from_u8(operator.form));
-    push_word(&mut *value, u32_from_u8(operator.precedence))
-}
-
-operator_at(value: &Vec<u32>, index: usize) -> OperatorUse {
-    let base = index * 5;
-    OperatorUse {
-        fixity: word_at(value, base),
-        start: usize_from_u32(word_at(
-            value,
-            base + 1
-        )),
-        end: usize_from_u32(word_at(
-            value,
-            base + 2
-        )),
-        form: u8_from_u32(word_at(
-            value,
-            base + 3
-        )),
-        precedence: u8_from_u32(word_at(
-            value,
-            base + 4
-        ))
+pop_operator(value: &mut Vec<OperatorUse>) -> OperatorUse {
+    let index = Vec::len(&*value) - 1;
+    handle Vec::remove(&mut *value, index) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
     }
 }
 
-last_operator(value: &Vec<u32>) -> OperatorUse {
-    operator_at(
-        value,
-        word_count(value) / 5 - 1
-    )
+pop_expr(value: &mut Vec<ExprId>) -> ExprId {
+    let index = Vec::len(&*value) - 1;
+    handle Vec::remove(&mut *value, index) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
 }
 
-last_expr(value: &Vec<u32>) -> ExprId {
-    expr_id_at(value, word_count(value) - 1)
+last_operator(value: &Vec<OperatorUse>) -> OperatorUse {
+    *Vec::index(value, Vec::len(value) - 1)
+}
+
+last_expr(value: &Vec<ExprId>) -> ExprId {
+    *Vec::index(value, Vec::len(value) - 1)
 }
 
 source_text(value: &String, start: usize, end: usize) -> String {
@@ -2432,8 +2414,8 @@ parse_chain(
     owner: Option<usize>,
     minimum: u8,
     depth: u16,
-    output: &mut Vec<u32>,
-    pending: &mut Vec<u32>
+    output: &mut Vec<ExprId>,
+    pending: &mut Vec<OperatorUse>
 ) -> Result<ExprId, BodyError> {
     let found = try(
         peek_operator(
@@ -2476,14 +2458,8 @@ parse_chain(
                                 ),
                                 @parse_chain
                             );
-                            operator_push(
-                                &mut *pending,
-                                operator
-                            );
-                            push_word(
-                                &mut *output,
-                                Id::to_u32(operand)
-                            );
+                            Vec::push(&mut *pending, operator);
+                            Vec::push(&mut *output, operand);
                             parse_chain(
                                 original,
                                 source,
@@ -2505,34 +2481,23 @@ parse_chain(
 
 reduce_once(
     value: &mut BodyParser,
-    output: &mut Vec<u32>,
-    pending: &mut Vec<u32>
+    output: &mut Vec<ExprId>,
+    pending: &mut Vec<OperatorUse>
 ) {
-    let precedence = pop_word(&mut *pending);
-    let form = pop_word(&mut *pending);
-    let end = pop_word(&mut *pending);
-    let start = pop_word(&mut *pending);
-    let fixity = pop_word(&mut *pending);
-    let operator = OperatorUse {
-        fixity: fixity,
-        start: usize_from_u32(start),
-        end: usize_from_u32(end),
-        form: u8_from_u32(form),
-        precedence: u8_from_u32(precedence)
-    };
-    let right = Id::from_u32(pop_word(&mut *output));
-    let left = Id::from_u32(pop_word(&mut *output));
+    let operator = pop_operator(&mut *pending);
+    let right = pop_expr(&mut *output);
+    let left = pop_expr(&mut *output);
     let grouped = push_binary(value, operator, left, right);
-    push_word(&mut *output, Id::to_u32(grouped))
+    Vec::push(&mut *output, grouped)
 }
 
 prepare_operator(
     value: &mut BodyParser,
-    output: &mut Vec<u32>,
-    pending: &mut Vec<u32>,
+    output: &mut Vec<ExprId>,
+    pending: &mut Vec<OperatorUse>,
     incoming: OperatorUse
 ) -> Result<(), BodyError> {
-    if(word_count(&*pending) == 0) {
+    if(Vec::len(&*pending) == 0) {
         Result::Ok(())
     } else {
         let top = last_operator(&*pending);
@@ -2581,11 +2546,11 @@ prepare_operator(
 
 finish_chain(
     value: &mut BodyParser,
-    output: &mut Vec<u32>,
-    pending: &mut Vec<u32>
+    output: &mut Vec<ExprId>,
+    pending: &mut Vec<OperatorUse>
 ) -> Result<ExprId, BodyError> {
-    if(word_count(&*pending) == 0) {
-        Result::Ok(Id::from_u32(pop_word(&mut *output)))
+    if(Vec::len(&*pending) == 0) {
+        Result::Ok(pop_expr(&mut *output))
     } else {
         reduce_once(&mut *value, &mut *output, &mut *pending);
             finish_chain(value, output, pending)
@@ -2616,7 +2581,7 @@ parse_expression(
     );
     let output = Vec::new();
     let pending = Vec::new();
-    push_word(&mut output, Id::to_u32(first));
+    Vec::push(&mut output, first);
     parse_chain(
         original,
         source,

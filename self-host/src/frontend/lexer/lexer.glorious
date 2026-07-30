@@ -130,7 +130,7 @@ pub enum LexErrorKind {
     ResourceLimit
 }
 
-pub struct LexError { kind: LexErrorKind, code: u16, span: Span }
+pub struct LexError { kind: LexErrorKind, span: Span }
 
 pub token_count(value: &LexedSource) -> usize { Vec::len(&value.tokens) }
 
@@ -229,7 +229,36 @@ pub lexeme<'a>(value: &'a LexedSource, id: Id<String>) -> Option<&'a String> {
 
 pub error_kind(value: &LexError) -> &LexErrorKind { &value.kind }
 
-pub error_code(value: &LexError) -> u16 { value.code }
+pub error_code(value: &LexError) -> u16 {
+    handle *error_kind(value) {
+        LexErrorKind::UnexpectedCharacter => 1,
+        LexErrorKind::UnfinishedComment => 2,
+        LexErrorKind::InvalidLabel => 3,
+        LexErrorKind::InvalidDigit => 4,
+        LexErrorKind::MisplacedDigitSeparator => 5,
+        LexErrorKind::ExpectedDigits => 6,
+        LexErrorKind::MalformedFloatExponent => 7,
+        LexErrorKind::UnfinishedEscape => 8,
+        LexErrorKind::InvalidCharacterEscape => 9,
+        LexErrorKind::UnknownEscape => 10,
+        LexErrorKind::MalformedHexEscape => 11,
+        LexErrorKind::MalformedUnicodeEscape => 12,
+        LexErrorKind::UnfinishedUnicodeEscape => 13,
+        LexErrorKind::InvalidUnicodeScalar => 14,
+        LexErrorKind::InvalidByteEscape => 15,
+        LexErrorKind::UnfinishedString => 16,
+        LexErrorKind::InvalidByteStringCharacter => 17,
+        LexErrorKind::UnfinishedByteString => 18,
+        LexErrorKind::EmptyByteLiteral => 19,
+        LexErrorKind::InvalidByteLiteral => 20,
+        LexErrorKind::UnfinishedByteLiteral => 21,
+        LexErrorKind::UnfinishedCharacterLiteral => 22,
+        LexErrorKind::EmptyCharacterLiteral => 23,
+        LexErrorKind::InvalidLifetimeIdentifier => 24,
+        LexErrorKind::InvalidCharacterLiteral => 25,
+        LexErrorKind::ResourceLimit => 26
+    }
+}
 
 pub error_span(value: &LexError) -> Span {
     Span { start: value.span.start, end: value.span.end }
@@ -246,10 +275,9 @@ struct Lexer {
 
 span(start: usize, end: usize) -> Span { Span { start:  start, end:  end } }
 
-lex_error(kind: LexErrorKind, code: u16, start: usize, end: usize) -> LexError {
+lex_error(kind: LexErrorKind, start: usize, end: usize) -> LexError {
     LexError {
         kind:  kind,
-        code:  code,
         span: span( start,  end)
     }
 }
@@ -585,7 +613,7 @@ scan_block_comment(value: &mut Lexer, start: usize, depth: usize) -> Result<(), 
 
             } else {
                 Result::Err(
-                lex_error(LexErrorKind::UnfinishedComment, 2, start, Bytes::len(&value.bytes))
+                lex_error(LexErrorKind::UnfinishedComment, start, Bytes::len(&value.bytes))
                 )
             }
 
@@ -629,12 +657,12 @@ scan_label(value: &mut Lexer) -> Result<(), LexError> {
 
             } else {
                 Result::Err(
-                lex_error(LexErrorKind::InvalidLabel, 3, start, value.cursor)
+                lex_error(LexErrorKind::InvalidLabel, start, value.cursor)
                 )
             }
         },
         Result::Err(_) => Result::Err(
-            lex_error(LexErrorKind::InvalidLabel, 3, start, value.cursor)
+            lex_error(LexErrorKind::InvalidLabel, start, value.cursor)
         )
     }
 }
@@ -805,7 +833,7 @@ scan_digit_tail(
                 if(byte_is_digit(byte)) {
                 Result::Err(
                 lex_error(
-                LexErrorKind::InvalidDigit, 4,
+                LexErrorKind::InvalidDigit,
                 value.cursor,
                 value.cursor + 1
                 )
@@ -833,7 +861,7 @@ scan_digits(
     handle last_separator {
         Result::Ok(position) => Result::Err(
             lex_error(
-                LexErrorKind::MisplacedDigitSeparator, 5,
+                LexErrorKind::MisplacedDigitSeparator,
                 position,
                 position + 1
             )
@@ -841,7 +869,7 @@ scan_digits(
         Result::Err(_) => if(value.cursor == component_start) {
                               Result::Err(
                               lex_error(
-                              LexErrorKind::ExpectedDigits, 6,
+                              LexErrorKind::ExpectedDigits,
                               component_start,
                               component_start
                               )
@@ -890,11 +918,11 @@ scan_number(value: &mut Lexer) -> Result<(), LexError> {
                                         scan_digits(&mut *value, base_code, digits_start)
                                     } else {
                                         Result::Err(
-                                        lex_error(LexErrorKind::ExpectedDigits, 6, start, value.cursor)
+                                        lex_error(LexErrorKind::ExpectedDigits, start, value.cursor)
                                         )
                                     },
                 Result::Err(_) => Result::Err(
-                    lex_error(LexErrorKind::ExpectedDigits, 6, start, value.cursor)
+                    lex_error(LexErrorKind::ExpectedDigits, start, value.cursor)
                 )
             }
 
@@ -916,7 +944,7 @@ scan_number(value: &mut Lexer) -> Result<(), LexError> {
                                     if(byte_is_alphanumeric(byte)) {
                                         Result::Err(
                                         lex_error(
-                                        LexErrorKind::InvalidDigit, 4,
+                                        LexErrorKind::InvalidDigit,
                                         value.cursor,
                                         value.cursor + 1
                                         )
@@ -925,7 +953,7 @@ scan_number(value: &mut Lexer) -> Result<(), LexError> {
                                         if(byte == byte_value(95)) {
                                         Result::Err(
                                         lex_error(
-                                        LexErrorKind::InvalidDigit, 4,
+                                        LexErrorKind::InvalidDigit,
                                         value.cursor,
                                         value.cursor + 1
                                         )
@@ -1047,7 +1075,7 @@ scan_exponent_after_marker(value: &mut Lexer) -> Result<Option<NumberExponent>, 
     } else {
         Result::Err(
         lex_error(
-        LexErrorKind::MalformedFloatExponent, 7,
+        LexErrorKind::MalformedFloatExponent,
         marker,
         marker + 1 + sign
         )
@@ -1107,7 +1135,7 @@ hex_pair(value: &mut Lexer, backslash: usize) -> Result<u8, LexError> {
                                  } else {
                                  Result::Err(
                                  lex_error(
-                                 LexErrorKind::MalformedHexEscape, 11,
+                                 LexErrorKind::MalformedHexEscape,
                                  backslash,
                                  value.cursor + 1
                                  )
@@ -1115,7 +1143,7 @@ hex_pair(value: &mut Lexer, backslash: usize) -> Result<u8, LexError> {
                                  },
                                  Result::Err(_) => Result::Err(
                                  lex_error(
-                                 LexErrorKind::MalformedHexEscape, 11,
+                                 LexErrorKind::MalformedHexEscape,
                                  backslash,
                                  value.cursor
                                  )
@@ -1124,14 +1152,14 @@ hex_pair(value: &mut Lexer, backslash: usize) -> Result<u8, LexError> {
                              } else {
                                  Result::Err(
                                  lex_error(
-                                 LexErrorKind::MalformedHexEscape, 11,
+                                 LexErrorKind::MalformedHexEscape,
                                  backslash,
                                  value.cursor
                                  )
                                  )
                              },
         Result::Err(_) => Result::Err(
-            lex_error(LexErrorKind::MalformedHexEscape, 11, backslash, value.cursor)
+            lex_error(LexErrorKind::MalformedHexEscape, backslash, value.cursor)
         )
     }
 }
@@ -1148,7 +1176,7 @@ unicode_digits(
             if(digits == 0) {
                 Result::Err(
                 lex_error(
-                LexErrorKind::MalformedUnicodeEscape, 12,
+                LexErrorKind::MalformedUnicodeEscape,
                 backslash,
                 value.cursor
                 )
@@ -1158,7 +1186,7 @@ unicode_digits(
                 Result::Ok(character) => scalar_ok( character),
                 Result::Err(_) => Result::Err(
                 lex_error(
-                LexErrorKind::InvalidUnicodeScalar, 14,
+                LexErrorKind::InvalidUnicodeScalar,
                 backslash,
                 value.cursor
                 )
@@ -1170,7 +1198,7 @@ unicode_digits(
                                 if(digits == 6) {
                                 Result::Err(
                                 lex_error(
-                                LexErrorKind::MalformedUnicodeEscape, 12,
+                                LexErrorKind::MalformedUnicodeEscape,
                                 backslash,
                                 value.cursor + 1
                                 )
@@ -1188,7 +1216,7 @@ unicode_digits(
                             } else {
                                 Result::Err(
                                 lex_error(
-                                LexErrorKind::MalformedUnicodeEscape, 12,
+                                LexErrorKind::MalformedUnicodeEscape,
                                 value.cursor,
                                 value.cursor + 1
                                 )
@@ -1196,7 +1224,7 @@ unicode_digits(
                             },
         Result::Err(_) => Result::Err(
             lex_error(
-                LexErrorKind::UnfinishedUnicodeEscape, 13,
+                LexErrorKind::UnfinishedUnicodeEscape,
                 backslash,
                 Bytes::len(&value.bytes)
             )
@@ -1212,7 +1240,7 @@ unicode_escape(value: &mut Lexer, backslash: usize) -> Result<char, LexError> {
     } else {
         Result::Err(
         lex_error(
-        LexErrorKind::MalformedUnicodeEscape, 12,
+        LexErrorKind::MalformedUnicodeEscape,
         backslash,
         value.cursor
         )
@@ -1226,7 +1254,7 @@ scalar_escape(value: &mut Lexer, backslash: usize) -> Result<char, LexError> {
     handle peek(&*value, 0) {
         Result::Err(_) => Result::Err(
             lex_error(
-                LexErrorKind::UnfinishedEscape, 8,
+                LexErrorKind::UnfinishedEscape,
                 backslash,
                 Bytes::len(&value.bytes)
             )
@@ -1255,7 +1283,7 @@ scalar_escape(value: &mut Lexer, backslash: usize) -> Result<char, LexError> {
                         },
                         Result::Err(_) => Result::Err(
                             lex_error(
-                                LexErrorKind::InvalidCharacterEscape, 9,
+                                LexErrorKind::InvalidCharacterEscape,
                                 backslash,
                                 value.cursor
                             )
@@ -1265,7 +1293,7 @@ scalar_escape(value: &mut Lexer, backslash: usize) -> Result<char, LexError> {
                 117 => unicode_escape( value, backslash),
                 _ => Result::Err(
                     lex_error(
-                        LexErrorKind::UnknownEscape, 10,
+                        LexErrorKind::UnknownEscape,
                         backslash,
                         value.cursor
                     )
@@ -1281,7 +1309,7 @@ byte_escape(value: &mut Lexer, backslash: usize) -> Result<u8, LexError> {
     handle peek(&*value, 0) {
         Result::Err(_) => Result::Err(
             lex_error(
-                LexErrorKind::UnfinishedEscape, 8,
+                LexErrorKind::UnfinishedEscape,
                 backslash,
                 Bytes::len(&value.bytes)
             )
@@ -1299,14 +1327,14 @@ byte_escape(value: &mut Lexer, backslash: usize) -> Result<u8, LexError> {
                 120 => hex_pair( value, backslash),
                 117 => Result::Err(
                     lex_error(
-                        LexErrorKind::InvalidByteEscape, 15,
+                        LexErrorKind::InvalidByteEscape,
                         backslash,
                         value.cursor
                     )
                 ),
                 _ => Result::Err(
                     lex_error(
-                        LexErrorKind::UnknownEscape, 10,
+                        LexErrorKind::UnknownEscape,
                         backslash,
                         value.cursor
                     )
@@ -1324,7 +1352,7 @@ scan_string_tail(
     handle peek(&*value, 0) {
         Result::Err(_) => Result::Err(
             lex_error(
-                LexErrorKind::UnfinishedString, 16,
+                LexErrorKind::UnfinishedString,
                 start,
                 Bytes::len(&value.bytes)
             )
@@ -1354,7 +1382,7 @@ scan_string_tail(
             },
             Result::Err(_) => Result::Err(
                 lex_error(
-                    LexErrorKind::UnexpectedCharacter, 1,
+                    LexErrorKind::UnexpectedCharacter,
                     value.cursor,
                     value.cursor + 1
                 )
@@ -1389,7 +1417,7 @@ scan_byte_string_tail(
     handle peek(&*value, 0) {
         Result::Err(_) => Result::Err(
             lex_error(
-                LexErrorKind::UnfinishedByteString, 18,
+                LexErrorKind::UnfinishedByteString,
                 start,
                 Bytes::len(&bytes)
             )
@@ -1417,14 +1445,14 @@ scan_byte_string_tail(
             Result::Err(_) => handle char_decode_utf8(&bytes, cursor) {
                 Result::Ok(character) => Result::Err(
                     lex_error(
-                        LexErrorKind::InvalidByteStringCharacter, 17,
+                        LexErrorKind::InvalidByteStringCharacter,
                         value.cursor,
                         character.next
                     )
                 ),
                 Result::Err(_) => Result::Err(
                     lex_error(
-                        LexErrorKind::InvalidByteStringCharacter, 17,
+                        LexErrorKind::InvalidByteStringCharacter,
                         value.cursor,
                         value.cursor + 1
                     )
@@ -1459,14 +1487,14 @@ scan_byte_literal(value: &mut Lexer) -> Result<(), LexError> {
     let decoded = handle peek(&*value, 0) {
         Result::Err(_) => Result::Err(
             lex_error(
-                LexErrorKind::UnfinishedByteLiteral, 21,
+                LexErrorKind::UnfinishedByteLiteral,
                 start,
                 Bytes::len(&bytes)
             )
         ),
         Result::Ok(39) => Result::Err(
             lex_error(
-                LexErrorKind::EmptyByteLiteral, 19,
+                LexErrorKind::EmptyByteLiteral,
                 start,
                 value.cursor + 1
             )
@@ -1484,14 +1512,14 @@ scan_byte_literal(value: &mut Lexer) -> Result<(), LexError> {
             Result::Err(_) => handle char_decode_utf8(&bytes, content_cursor) {
                 Result::Ok(character) => Result::Err(
                     lex_error(
-                        LexErrorKind::InvalidByteLiteral, 20,
+                        LexErrorKind::InvalidByteLiteral,
                         value.cursor,
                         character.next
                     )
                 ),
                 Result::Err(_) => Result::Err(
                     lex_error(
-                        LexErrorKind::InvalidByteLiteral, 20,
+                        LexErrorKind::InvalidByteLiteral,
                         value.cursor,
                         value.cursor + 1
                     )
@@ -1508,7 +1536,7 @@ scan_byte_literal(value: &mut Lexer) -> Result<(), LexError> {
     } else {
         Result::Err(
         lex_error(
-        LexErrorKind::UnfinishedByteLiteral, 21,
+        LexErrorKind::UnfinishedByteLiteral,
         start,
         value.cursor
         )
@@ -1521,7 +1549,7 @@ scan_char_or_lifetime(value: &mut Lexer) -> Result<(), LexError> {
     handle peek(&*value, 1) {
         Result::Err(_) => Result::Err(
             lex_error(
-                LexErrorKind::InvalidLifetimeIdentifier, 24,
+                LexErrorKind::InvalidLifetimeIdentifier,
                 start,
                 start + 1
             )
@@ -1540,7 +1568,7 @@ scan_char_or_lifetime(value: &mut Lexer) -> Result<(), LexError> {
             } else {
                 Result::Err(
                 lex_error(
-                LexErrorKind::UnfinishedCharacterLiteral, 22,
+                LexErrorKind::UnfinishedCharacterLiteral,
                 start,
                 value.cursor
                 )
@@ -1549,7 +1577,7 @@ scan_char_or_lifetime(value: &mut Lexer) -> Result<(), LexError> {
         },
         Result::Ok(39) => Result::Err(
             lex_error(
-                LexErrorKind::EmptyCharacterLiteral, 23,
+                LexErrorKind::EmptyCharacterLiteral,
                 start,
                 start + 2
             )
@@ -1559,7 +1587,7 @@ scan_char_or_lifetime(value: &mut Lexer) -> Result<(), LexError> {
             handle char_decode_utf8(&bytes, start + 1) {
             Result::Err(_) => Result::Err(
                 lex_error(
-                    LexErrorKind::InvalidLifetimeIdentifier, 24,
+                    LexErrorKind::InvalidLifetimeIdentifier,
                     start,
                     start + 1
                 )
@@ -1605,7 +1633,7 @@ scan_lifetime(value: &mut Lexer, start: usize) -> Result<(), LexError> {
                 if(peek_is(&*value, 0, 39)) {
                     Result::Err(
                     lex_error(
-                    LexErrorKind::InvalidCharacterLiteral, 25,
+                    LexErrorKind::InvalidCharacterLiteral,
                     start,
                     value.cursor + 1
                     )
@@ -1621,7 +1649,7 @@ scan_lifetime(value: &mut Lexer, start: usize) -> Result<(), LexError> {
                             } else {
                                 Result::Err(
                                 lex_error(
-                                LexErrorKind::InvalidLifetimeIdentifier, 24,
+                                LexErrorKind::InvalidLifetimeIdentifier,
                                 start,
                                 value.cursor
                                 )
@@ -1629,7 +1657,7 @@ scan_lifetime(value: &mut Lexer, start: usize) -> Result<(), LexError> {
                             },
         Result::Err(_) => Result::Err(
             lex_error(
-                LexErrorKind::InvalidLifetimeIdentifier, 24,
+                LexErrorKind::InvalidLifetimeIdentifier,
                 start,
                 value.cursor
             )
@@ -1645,7 +1673,7 @@ pub lex(source: &String) -> Result<LexedSource, LexError> {
     handle checked_usize_to_u32(Bytes::len(&bytes)) {
         Result::Err(_) => Result::Err(
             lex_error(
-                LexErrorKind::ResourceLimit, 26,
+                LexErrorKind::ResourceLimit,
                 0,
                 Bytes::len(&bytes)
             )
@@ -1918,14 +1946,14 @@ run_general_byte(
         handle char_decode_utf8(&value.bytes, start) {
         Result::Ok(character) => Result::Err(
         lex_error(
-        LexErrorKind::UnexpectedCharacter, 1,
+        LexErrorKind::UnexpectedCharacter,
         start,
         character.next
         )
         ),
         Result::Err(_) => Result::Err(
         lex_error(
-        LexErrorKind::UnexpectedCharacter, 1,
+        LexErrorKind::UnexpectedCharacter,
         start,
         start + 1
         )
@@ -2121,7 +2149,7 @@ encode_result(
     handle  result {
         Result::Err(error) => {
             ByteBuf::push(&mut *output, 1);
-            ByteBuf::write_u16_le(&mut *output, error.code);
+            ByteBuf::write_u16_le(&mut *output, error_code(&error));
             ByteBuf::write_u64_le(&mut *output, wrapping_convert_to_u64(error.span.start));
             ByteBuf::write_u64_le( output, wrapping_convert_to_u64(error.span.end))
         },
