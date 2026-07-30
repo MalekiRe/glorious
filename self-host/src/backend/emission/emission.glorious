@@ -1,6 +1,8 @@
 // Canonical assembly of straight-line Stage-A bytecode into GRBC sections.
 
 use super::lowering::StageInstruction;
+use super::lowering::StageTypeView;
+use super::lowering::StageVariantView;
 
 struct FunctionSpans {
     code_start: u32,
@@ -66,6 +68,13 @@ checked_u32(value: usize) -> u32 {
 
 usize_from_u32(value: u32) -> usize {
     wrapping_convert_to_usize(value)
+}
+
+slice_at<'a, T>(value: Slice<'a, T>, index: usize) -> &'a T {
+    handle Slice::get(value, index) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
 }
 
 copy_bytes_after(
@@ -143,106 +152,56 @@ collect_names(
     })
 }
 
-collect_stage_field_names(
+collect_stage_field_names<'a>(
     program: &super::lowering::StageProgram,
-    stage_type: &super::lowering::StageType,
+    field_names: Slice<'a, u32>,
     index: usize,
     output: &mut Vec<String>
 ) {
-    if(index <
-        super::lowering::stage_type_field_name_count(stage_type)
-    ) {
+    let end = Slice::len(field_names);
+    for_range(Range::new(index, end), { current =>
         Vec::push(
             &mut *output,
             *super::lowering::stage_program_type_name_at(
                 program,
-                usize_from_u32(
-                    super::lowering::stage_type_field_name_index_at(
-                        stage_type,
-                        index
-                    )
-                )
+                usize_from_u32(*slice_at(field_names, current))
             )
-        );
-        collect_stage_field_names(
-            program,
-            stage_type,
-            index + 1,
-            output
         )
-    } else { () }
+    })
 }
 
-collect_stage_variant_field_names(
+collect_stage_variant_names<'a>(
     program: &super::lowering::StageProgram,
-    variant: &super::lowering::StageVariant,
+    variants: Slice<'a, super::lowering::StageVariant>,
     index: usize,
     output: &mut Vec<String>
 ) {
-    if(index <
-        super::lowering::stage_variant_field_name_count(variant)
-    ) {
-        Vec::push(
-            &mut *output,
-            *super::lowering::stage_program_type_name_at(
-                program,
-                usize_from_u32(
-                    super::lowering::stage_variant_field_name_index_at(
-                        variant,
-                        index
+    let end = Slice::len(variants);
+    for_range(Range::new(index, end), { current =>
+        handle super::lowering::stage_variant_view(
+            slice_at(variants, current)
+        ) {
+            super::lowering::StageVariantView::Variant(
+                name_index,
+                field_names,
+                _
+            ) => {
+                Vec::push(
+                    &mut *output,
+                    *super::lowering::stage_program_type_name_at(
+                        program,
+                        usize_from_u32(name_index)
                     )
+                );
+                collect_stage_field_names(
+                    program,
+                    field_names,
+                    0,
+                    output
                 )
-            )
-        );
-        collect_stage_variant_field_names(
-            program,
-            variant,
-            index + 1,
-            output
-        )
-    } else { () }
-}
-
-collect_stage_variant_names(
-    program: &super::lowering::StageProgram,
-    type_index: usize,
-    index: usize,
-    output: &mut Vec<String>
-) {
-    if(index <
-        super::lowering::stage_program_type_variant_count_at(
-            program,
-            type_index
-        )
-    ) {
-        let variant =
-            super::lowering::stage_program_type_variant_at(
-                program,
-                type_index,
-                index
-            );
-        Vec::push(
-            &mut *output,
-            *super::lowering::stage_program_type_name_at(
-                program,
-                usize_from_u32(
-                    super::lowering::stage_variant_name_index(variant)
-                )
-            )
-        );
-        collect_stage_variant_field_names(
-            program,
-            variant,
-            0,
-            output
-        );
-        collect_stage_variant_names(
-            program,
-            type_index,
-            index + 1,
-            output
-        )
-    } else { () }
+            }
+        }
+    })
 }
 
 collect_type_names(
@@ -250,48 +209,65 @@ collect_type_names(
     index: usize,
     output: &mut Vec<String>
 ) {
-    if(index < super::lowering::stage_program_type_count(program)) {
-        let stage_type =
-            super::lowering::stage_program_type_at(
-                program,
-                super::lowering::stage_type_id_from_usize(index)
-            );
-        let tag = super::lowering::stage_type_tag(stage_type);
-        if(tag == 1 or { tag == 2 }) {
-            Vec::push(
-                &mut *output,
-                *super::lowering::stage_program_type_name_at(
-                    program,
-                    usize_from_u32(
-                        super::lowering::stage_type_name_index(stage_type)
-                    )
-                )
-            );
-            if(tag == 1) {
-                collect_stage_field_names(program, stage_type, 0, output)
-            } else {
-                collect_stage_variant_names(program, index, 0, output)
-            }
-        } else {
-            ()
-        };
-        collect_type_names(
+    let end = super::lowering::stage_program_type_count(program);
+    for_range(Range::new(index, end), { current =>
+        handle super::lowering::stage_program_type_view(
             program,
-            index + 1,
-            output
-        )
-    } else { () }
+            super::lowering::stage_type_id_from_usize(current)
+        ) {
+            super::lowering::StageTypeView::Struct(
+                name_index,
+                field_names,
+                _,
+                _
+            ) => {
+                Vec::push(
+                    &mut *output,
+                    *super::lowering::stage_program_type_name_at(
+                        program,
+                        usize_from_u32(name_index)
+                    )
+                );
+                collect_stage_field_names(
+                    program,
+                    field_names,
+                    0,
+                    output
+                )
+            },
+            super::lowering::StageTypeView::Enum(
+                name_index,
+                variants,
+                _
+            ) => {
+                Vec::push(
+                    &mut *output,
+                    *super::lowering::stage_program_type_name_at(
+                        program,
+                        usize_from_u32(name_index)
+                    )
+                );
+                collect_stage_variant_names(
+                    program,
+                    variants,
+                    0,
+                    output
+                )
+            },
+            _ => ()
+        }
+    })
 }
 
-aggregate_zero_sized_flag(
+aggregate_zero_sized_flag<'a>(
     program: &super::lowering::StageProgram,
-    fields: &Vec<super::lowering::ArtifactTypeId>,
+    fields: Slice<'a, super::lowering::ArtifactTypeId>,
     index: usize
 ) -> u32 {
-    if(index < Vec::len(fields)) {
+    if(index < Slice::len(fields)) {
         if(type_zero_sized_flag(
             program,
-            *Vec::index(fields, index)
+            *slice_at(fields, index)
         ) == 2) {
             aggregate_zero_sized_flag(
                 program,
@@ -302,22 +278,22 @@ aggregate_zero_sized_flag(
     } else { 2 }
 }
 
-enum_variants_zero_sized_flag(
+enum_variants_zero_sized_flag<'a>(
     program: &super::lowering::StageProgram,
-    stage_type: &super::lowering::StageType,
+    variants: Slice<'a, super::lowering::StageVariant>,
     index: usize
 ) -> u32 {
-    if(index < super::lowering::stage_type_variant_count(stage_type)) {
-        if(aggregate_zero_sized_flag(
-            program,
-            super::lowering::stage_variant_fields(
-                super::lowering::stage_type_variant_at(stage_type, index)
-            ),
-            0
-        ) == 2) {
+    if(index < Slice::len(variants)) {
+        let flag = handle super::lowering::stage_variant_view(
+            slice_at(variants, index)
+        ) {
+            super::lowering::StageVariantView::Variant(_, _, fields) =>
+                aggregate_zero_sized_flag(program, fields, 0)
+        };
+        if(flag == 2) {
             enum_variants_zero_sized_flag(
                 program,
-                stage_type,
+                variants,
                 index + 1
             )
         } else { 0 }
@@ -336,36 +312,34 @@ type_zero_sized_flag(
             if(raw == 1) { 2 } else { 0 }
         }
     } else {
-        let stage_type =
-            super::lowering::stage_program_type_at(
-                program,
-                super::lowering::stage_type_id_from_usize(
-                    usize_from_u32(raw - 19)
-                )
-            );
-        if(super::lowering::stage_type_tag(stage_type) == 2) {
-            if(super::lowering::stage_type_variant_count(stage_type) <= 1) {
-                enum_variants_zero_sized_flag(program, stage_type, 0)
-            } else { 0 }
-        } else {
-            aggregate_zero_sized_flag(
-                program,
-                super::lowering::stage_type_fields(stage_type),
-                0
+        handle super::lowering::stage_program_type_view(
+            program,
+            super::lowering::stage_type_id_from_usize(
+                usize_from_u32(raw - 19)
             )
+        ) {
+            super::lowering::StageTypeView::Tuple(fields, _) =>
+                aggregate_zero_sized_flag(program, fields, 0),
+            super::lowering::StageTypeView::Struct(_, _, fields, _) =>
+                aggregate_zero_sized_flag(program, fields, 0),
+            super::lowering::StageTypeView::Enum(_, variants, _) =>
+                if(Slice::len(variants) <= 1) {
+                    enum_variants_zero_sized_flag(program, variants, 0)
+                } else { 0 },
+            super::lowering::StageTypeView::Unsupported(_) => 0
         }
     }
 }
 
-aggregate_zero_use_flag(
+aggregate_zero_use_flag<'a>(
     program: &super::lowering::StageProgram,
-    fields: &Vec<super::lowering::ArtifactTypeId>,
+    fields: Slice<'a, super::lowering::ArtifactTypeId>,
     index: usize
 ) -> u32 {
-    if(index < Vec::len(fields)) {
+    if(index < Slice::len(fields)) {
         if(type_zero_use_flag(
             program,
-            *Vec::index(fields, index)
+            *slice_at(fields, index)
         ) == 16) {
             aggregate_zero_use_flag(
                 program,
@@ -376,22 +350,22 @@ aggregate_zero_use_flag(
     } else { 16 }
 }
 
-enum_variants_zero_use_flag(
+enum_variants_zero_use_flag<'a>(
     program: &super::lowering::StageProgram,
-    stage_type: &super::lowering::StageType,
+    variants: Slice<'a, super::lowering::StageVariant>,
     index: usize
 ) -> u32 {
-    if(index < super::lowering::stage_type_variant_count(stage_type)) {
-        if(aggregate_zero_use_flag(
-            program,
-            super::lowering::stage_variant_fields(
-                super::lowering::stage_type_variant_at(stage_type, index)
-            ),
-            0
-        ) == 16) {
+    if(index < Slice::len(variants)) {
+        let flag = handle super::lowering::stage_variant_view(
+            slice_at(variants, index)
+        ) {
+            super::lowering::StageVariantView::Variant(_, _, fields) =>
+                aggregate_zero_use_flag(program, fields, 0)
+        };
+        if(flag == 16) {
             enum_variants_zero_use_flag(
                 program,
-                stage_type,
+                variants,
                 index + 1
             )
         } else { 0 }
@@ -406,78 +380,61 @@ type_zero_use_flag(
     if(raw < 19) {
         if(raw == 1) { 0 } else { 16 }
     } else {
-        let stage_type =
-            super::lowering::stage_program_type_at(
-                program,
-                super::lowering::stage_type_id_from_usize(
-                    usize_from_u32(raw - 19)
-                )
-            );
-        if(super::lowering::stage_type_tag(stage_type) == 2) {
-            enum_variants_zero_use_flag(program, stage_type, 0)
-        } else {
-            aggregate_zero_use_flag(
-                program,
-                super::lowering::stage_type_fields(stage_type),
-                0
+        handle super::lowering::stage_program_type_view(
+            program,
+            super::lowering::stage_type_id_from_usize(
+                usize_from_u32(raw - 19)
             )
+        ) {
+            super::lowering::StageTypeView::Tuple(fields, _) =>
+                aggregate_zero_use_flag(program, fields, 0),
+            super::lowering::StageTypeView::Struct(_, _, fields, _) =>
+                aggregate_zero_use_flag(program, fields, 0),
+            super::lowering::StageTypeView::Enum(_, variants, _) =>
+                enum_variants_zero_use_flag(program, variants, 0),
+            super::lowering::StageTypeView::Unsupported(_) => 0
         }
     }
 }
 
-write_type_fields(
+write_type_fields<'a>(
     output: &mut ByteBuf,
-    program: &super::lowering::StageProgram,
-    type_index: usize,
+    fields: Slice<'a, super::lowering::ArtifactTypeId>,
     field_index: usize
 ) {
-    let end =
-        super::lowering::stage_program_type_field_count_at(program, type_index);
+    let end = Slice::len(fields);
     for_range(Range::new(field_index, end), { current =>
         ByteBuf::write_u32_le(
             &mut *output,
             super::lowering::artifact_type_raw(
-                super::lowering::stage_program_type_field_type_at(
-                    program,
-                    type_index,
-                    current
-                )
+                *slice_at(fields, current)
             )
         )
     })
 }
 
-write_named_type_fields(
+write_named_type_fields<'a>(
     program: &super::lowering::StageProgram,
     names: &Vec<String>,
-    type_index: usize,
+    type_id: super::lowering::StageTypeId,
+    field_names: Slice<'a, u32>,
+    fields: Slice<'a, super::lowering::ArtifactTypeId>,
     field_index: usize,
     output: &mut ByteBuf
 ) -> Result<(), EmissionError> {
-    let end =
-        super::lowering::stage_program_type_field_count_at(program, type_index);
-    let type_id =
-        super::lowering::stage_type_id_from_usize(type_index);
+    let end = Slice::len(fields);
     try_for_range(Range::new(field_index, end), { current => {
         let field_name = try(require_program_name(
             program,
             names,
-            super::lowering::stage_program_type_field_name_index_at(
-                program,
-                type_index,
-                current
-            ),
+            *slice_at(field_names, current),
             EmissionName::StructField(type_id, current)
         ), @write_named_type_fields);
         ByteBuf::write_u32_le(&mut *output, field_name);
         ByteBuf::write_u32_le(
             &mut *output,
             super::lowering::artifact_type_raw(
-                super::lowering::stage_program_type_field_type_at(
-                    program,
-                    type_index,
-                    current
-                )
+                *slice_at(fields, current)
             )
         );
         Result::Ok(())
@@ -486,127 +443,127 @@ write_named_type_fields(
 
 custom_type_flags(
     program: &super::lowering::StageProgram,
-    index: usize
+    index: usize,
+    copy_flag: u32
 ) -> u32 {
     let type_id = super::lowering::stage_type_artifact_id(
         super::lowering::stage_type_id_from_usize(index)
     );
-    super::lowering::stage_program_type_copy_flag_at(program, index)
+    copy_flag
         + type_zero_sized_flag(program, type_id)
         + type_zero_use_flag(program, type_id)
 }
 
-tuple_type_record(
+tuple_type_record<'a>(
     program: &super::lowering::StageProgram,
-    index: usize
+    index: usize,
+    fields: Slice<'a, super::lowering::ArtifactTypeId>,
+    copy_flag: u32
 ) -> super::artifact::Record {
     let payload = ByteBuf::new();
     ByteBuf::write_u32_le(
         &mut payload,
-        checked_u32(
-            super::lowering::
-                stage_program_type_field_count_at(program, index)
-        )
+        checked_u32(Slice::len(fields))
     );
-    write_type_fields(&mut payload, program, index, 0);
+    write_type_fields(&mut payload, fields, 0);
     super::artifact::record(
         32,
-        wrapping_convert_to_u8(custom_type_flags(program, index)),
+        wrapping_convert_to_u8(custom_type_flags(
+            program,
+            index,
+            copy_flag
+        )),
         ByteBuf::finish(payload)
     )
 }
 
-valid_struct_type_record(
+valid_struct_type_record<'a>(
     program: &super::lowering::StageProgram,
     names: &Vec<String>,
-    index: usize
+    index: usize,
+    name_index: u32,
+    field_names: Slice<'a, u32>,
+    fields: Slice<'a, super::lowering::ArtifactTypeId>,
+    copy_flag: u32
 ) -> Result<super::artifact::Record, EmissionError> {
-    let type_id = super::lowering::stage_type_artifact_id(
-        super::lowering::stage_type_id_from_usize(index)
-    );
+    let stage_type_id = super::lowering::stage_type_id_from_usize(index);
     let type_name = try(require_program_name(
         program,
         names,
-        super::lowering::stage_program_type_name_index_at(
-            program,
-            index
-        ),
-        EmissionName::Type(
-            super::lowering::stage_type_id_from_usize(index)
-        )
+        name_index,
+        EmissionName::Type(stage_type_id)
     ), @valid_struct_type_record);
     let payload = ByteBuf::new();
     ByteBuf::write_u32_le(&mut payload, type_name);
     ByteBuf::write_u32_le(
         &mut payload,
-        checked_u32(
-            super::lowering::
-                stage_program_type_field_count_at(program, index)
-        )
+        checked_u32(Slice::len(fields))
     );
     try(write_named_type_fields(
         program,
         names,
-        index,
+        stage_type_id,
+        field_names,
+        fields,
         0,
         &mut payload
     ), @valid_struct_type_record);
     let payload_bytes = ByteBuf::finish( payload);
     Result::Ok(super::artifact::record(
         34,
-        wrapping_convert_to_u8(custom_type_flags(program, index)),
+        wrapping_convert_to_u8(custom_type_flags(
+            program,
+            index,
+            copy_flag
+        )),
         payload_bytes
     ))
 }
 
-struct_type_record(
+struct_type_record<'a>(
     program: &super::lowering::StageProgram,
     names: &Vec<String>,
-    index: usize
+    index: usize,
+    name_index: u32,
+    field_names: Slice<'a, u32>,
+    fields: Slice<'a, super::lowering::ArtifactTypeId>,
+    copy_flag: u32
 ) -> Result<super::artifact::Record, EmissionError> {
-    if(
-        super::lowering::stage_program_type_field_name_count_at(
+    if(Slice::len(field_names) == Slice::len(fields)) {
+        valid_struct_type_record(
             program,
-            index
-        ) == super::lowering::stage_program_type_field_count_at(
-            program,
-            index
+            names,
+            index,
+            name_index,
+            field_names,
+            fields,
+            copy_flag
         )
-    ) {
-        valid_struct_type_record(program, names, index)
     } else {
         Result::Err(EmissionError::StructFieldNameCount(
             super::lowering::stage_type_id_from_usize(index),
-            super::lowering::stage_program_type_field_count_at(
-                program,
-                index
-            ),
-            super::lowering::stage_program_type_field_name_count_at(
-                program,
-                index
-            )
+            Slice::len(fields),
+            Slice::len(field_names)
         ))
     }
 }
 
-write_enum_variant_fields(
+write_enum_variant_fields<'a>(
     program: &super::lowering::StageProgram,
     names: &Vec<String>,
-    variant: &super::lowering::StageVariant,
     type_id: super::lowering::StageTypeId,
     variant_index: usize,
+    field_names: Slice<'a, u32>,
+    fields: Slice<'a, super::lowering::ArtifactTypeId>,
     index: usize,
     output: &mut ByteBuf
 ) -> Result<(), EmissionError> {
-    let end = super::lowering::stage_variant_field_count(variant);
+    let end = Slice::len(fields);
     try_for_range(Range::new(index, end), { current => {
         let field_name = try(require_program_name(
             program,
             names,
-            super::lowering::stage_variant_field_name_index_at(
-                variant,
-                current
-            ),
+            *slice_at(field_names, current),
             EmissionName::VariantField(
                 type_id,
                 variant_index,
@@ -617,123 +574,109 @@ write_enum_variant_fields(
         ByteBuf::write_u32_le(
             &mut *output,
             super::lowering::artifact_type_raw(
-                super::lowering::stage_variant_field_type_at(
-                    variant,
-                    current
-                )
+                *slice_at(fields, current)
             )
         );
         Result::Ok(())
     } })
 }
 
-write_enum_variants(
+write_enum_variants<'a>(
     program: &super::lowering::StageProgram,
     names: &Vec<String>,
-    type_index: usize,
+    type_id: super::lowering::StageTypeId,
+    variants: Slice<'a, super::lowering::StageVariant>,
     index: usize,
     output: &mut ByteBuf
 ) -> Result<(), EmissionError> {
-    if(index <
-        super::lowering::stage_program_type_variant_count_at(
-            program,
-            type_index
-        )
-    ) {
-        let type_id =
-            super::lowering::stage_type_id_from_usize(type_index);
-        let variant =
-            super::lowering::stage_program_type_variant_at(
-                program,
-                type_index,
-                index
-            );
-        if(
-            super::lowering::stage_variant_field_name_count(variant)
-                == super::lowering::stage_variant_field_count(variant)
+    if(index < Slice::len(variants)) {
+        handle super::lowering::stage_variant_view(
+            slice_at(variants, index)
         ) {
-            let variant_name = try(require_program_name(
-                program,
-                names,
-                super::lowering::stage_variant_name_index(variant),
-                EmissionName::Variant(type_id, index)
-            ), @write_enum_variants);
-            ByteBuf::write_u32_le(&mut *output, variant_name);
-            ByteBuf::write_u32_le(
-                &mut *output,
-                checked_u32(
-                    super::lowering::stage_variant_field_count(variant)
+            super::lowering::StageVariantView::Variant(
+                name_index,
+                field_names,
+                fields
+            ) => if(Slice::len(field_names) == Slice::len(fields)) {
+                let variant_name = try(require_program_name(
+                    program,
+                    names,
+                    name_index,
+                    EmissionName::Variant(type_id, index)
+                ), @write_enum_variants);
+                ByteBuf::write_u32_le(&mut *output, variant_name);
+                ByteBuf::write_u32_le(
+                    &mut *output,
+                    checked_u32(Slice::len(fields))
+                );
+                try(write_enum_variant_fields(
+                    program,
+                    names,
+                    type_id,
+                    index,
+                    field_names,
+                    fields,
+                    0,
+                    output
+                ), @write_enum_variants);
+                write_enum_variants(
+                    program,
+                    names,
+                    type_id,
+                    variants,
+                    index + 1,
+                    output
                 )
-            );
-            try(write_enum_variant_fields(
-                program,
-                names,
-                variant,
-                type_id,
-                index,
-                0,
-                output
-            ), @write_enum_variants);
-            write_enum_variants(
-                program,
-                names,
-                type_index,
-                index + 1,
-                output
-            )
-        } else {
-            Result::Err(EmissionError::VariantFieldNameCount(
-                type_id,
-                index,
-                super::lowering::stage_variant_field_count(variant),
-                super::lowering::stage_variant_field_name_count(variant)
-            ))
+            } else {
+                Result::Err(EmissionError::VariantFieldNameCount(
+                    type_id,
+                    index,
+                    Slice::len(fields),
+                    Slice::len(field_names)
+                ))
+            }
         }
     } else {
         Result::Ok(())
     }
 }
 
-enum_type_record(
+enum_type_record<'a>(
     program: &super::lowering::StageProgram,
     names: &Vec<String>,
-    index: usize
+    index: usize,
+    name_index: u32,
+    variants: Slice<'a, super::lowering::StageVariant>,
+    copy_flag: u32
 ) -> Result<super::artifact::Record, EmissionError> {
-    let type_id = super::lowering::stage_type_artifact_id(
-        super::lowering::stage_type_id_from_usize(index)
-    );
+    let stage_type_id = super::lowering::stage_type_id_from_usize(index);
     let type_name = try(require_program_name(
         program,
         names,
-        super::lowering::stage_program_type_name_index_at(
-            program,
-            index
-        ),
-        EmissionName::Type(
-            super::lowering::stage_type_id_from_usize(index)
-        )
+        name_index,
+        EmissionName::Type(stage_type_id)
     ), @enum_type_record);
     let payload = ByteBuf::new();
     ByteBuf::write_u32_le(&mut payload, type_name);
     ByteBuf::write_u32_le(
         &mut payload,
-        checked_u32(
-            super::lowering::stage_program_type_variant_count_at(
-                program,
-                index
-            )
-        )
+        checked_u32(Slice::len(variants))
     );
     try(write_enum_variants(
         program,
         names,
-        index,
+        stage_type_id,
+        variants,
         0,
         &mut payload
     ), @enum_type_record);
     Result::Ok(super::artifact::record(
         35,
-        wrapping_convert_to_u8(custom_type_flags(program, index)),
+        wrapping_convert_to_u8(custom_type_flags(
+            program,
+            index,
+            copy_flag
+        )),
         ByteBuf::finish(payload)
     ))
 }
@@ -743,12 +686,45 @@ custom_type_record(
     names: &Vec<String>,
     index: usize
 ) -> Result<super::artifact::Record, EmissionError> {
-    let tag = super::lowering::stage_program_type_tag_at(program, index);
-    handle tag {
-        0 => Result::Ok(tuple_type_record(program, index)),
-        1 => struct_type_record(program, names, index),
-        2 => enum_type_record(program, names, index),
-        _ => Result::Err(EmissionError::UnsupportedType(
+    handle super::lowering::stage_program_type_view(
+        program,
+        super::lowering::stage_type_id_from_usize(index)
+    ) {
+        super::lowering::StageTypeView::Tuple(fields, copy_flag) =>
+            Result::Ok(tuple_type_record(
+                program,
+                index,
+                fields,
+                copy_flag
+            )),
+        super::lowering::StageTypeView::Struct(
+            name_index,
+            field_names,
+            fields,
+            copy_flag
+        ) => struct_type_record(
+            program,
+            names,
+            index,
+            name_index,
+            field_names,
+            fields,
+            copy_flag
+        ),
+        super::lowering::StageTypeView::Enum(
+            name_index,
+            variants,
+            copy_flag
+        ) => enum_type_record(
+            program,
+            names,
+            index,
+            name_index,
+            variants,
+            copy_flag
+        ),
+        super::lowering::StageTypeView::Unsupported(tag) =>
+            Result::Err(EmissionError::UnsupportedType(
             super::lowering::stage_type_id_from_usize(index),
             tag
         ))

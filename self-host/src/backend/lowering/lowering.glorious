@@ -80,6 +80,30 @@ pub struct StageType {
     copy_flag: u32
 }
 
+pub enum StageTypeView<'a> {
+    Tuple(Slice<'a, ArtifactTypeId>, u32),
+    Struct(
+        u32,
+        Slice<'a, u32>,
+        Slice<'a, ArtifactTypeId>,
+        u32
+    ),
+    Enum(u32, Slice<'a, StageVariant>, u32),
+    Unsupported(u8)
+}
+
+impl<'a> Use<[0, *]> for StageTypeView<'a> {}
+
+pub enum StageVariantView<'a> {
+    Variant(
+        u32,
+        Slice<'a, u32>,
+        Slice<'a, ArtifactTypeId>
+    )
+}
+
+impl<'a> Use<[0, *]> for StageVariantView<'a> {}
+
 pub struct RegisterPack { registers: Vec<RegisterId> }
 
 pub struct StageCleanup {
@@ -164,11 +188,11 @@ pub stage_program_type_count(value: &StageProgram) -> usize {
     Arena::len(&value.types)
 }
 
-pub stage_program_type_at<'a>(
+pub stage_program_type_view<'a>(
     value: &'a StageProgram,
     id: StageTypeId
-) -> &'a StageType {
-    Arena::index(&value.types, id)
+) -> StageTypeView<'a> {
+    stage_type_view(Arena::index(&value.types, id))
 }
 
 pub stage_program_type_name_at(
@@ -176,105 +200,6 @@ pub stage_program_type_name_at(
     index: usize
 ) -> &String {
     Vec::index(&value.type_names, index)
-}
-
-pub stage_program_type_tag_at(value: &StageProgram, index: usize) -> u8 {
-    stage_type_tag(stage_program_type_at(
-        value,
-        stage_type_id_from_usize(index)
-    ))
-}
-
-pub stage_program_type_copy_flag_at(
-    value: &StageProgram,
-    index: usize
-) -> u32 {
-    stage_type_copy_flag(stage_program_type_at(
-        value,
-        stage_type_id_from_usize(index)
-    ))
-}
-
-pub stage_program_type_field_count_at(
-    value: &StageProgram,
-    index: usize
-) -> usize {
-    stage_type_field_count(stage_program_type_at(
-        value,
-        stage_type_id_from_usize(index)
-    ))
-}
-
-pub stage_program_type_field_name_count_at(
-    value: &StageProgram,
-    index: usize
-) -> usize {
-    stage_type_field_name_count(stage_program_type_at(
-        value,
-        stage_type_id_from_usize(index)
-    ))
-}
-
-pub stage_program_type_field_type_at(
-    value: &StageProgram,
-    type_index: usize,
-    field_index: usize
-) -> ArtifactTypeId {
-    stage_type_field_type_at(
-        stage_program_type_at(
-            value,
-            stage_type_id_from_usize(type_index)
-        ),
-        field_index
-    )
-}
-
-pub stage_program_type_name_index_at(
-    value: &StageProgram,
-    index: usize
-) -> u32 {
-    stage_type_name_index(stage_program_type_at(
-        value,
-        stage_type_id_from_usize(index)
-    ))
-}
-
-pub stage_program_type_field_name_index_at(
-    value: &StageProgram,
-    type_index: usize,
-    field_index: usize
-) -> u32 {
-    stage_type_field_name_index_at(
-        stage_program_type_at(
-            value,
-            stage_type_id_from_usize(type_index)
-        ),
-        field_index
-    )
-}
-
-pub stage_program_type_variant_count_at(
-    value: &StageProgram,
-    type_index: usize
-) -> usize {
-    stage_type_variant_count(stage_program_type_at(
-        value,
-        stage_type_id_from_usize(type_index)
-    ))
-}
-
-pub stage_program_type_variant_at<'a>(
-    value: &'a StageProgram,
-    type_index: usize,
-    variant_index: usize
-) -> &'a StageVariant {
-    stage_type_variant_at(
-        stage_program_type_at(
-            value,
-            stage_type_id_from_usize(type_index)
-        ),
-        variant_index
-    )
 }
 
 pub tuple_type(
@@ -334,81 +259,35 @@ pub enum_type(
     }
 }
 
-pub stage_type_fields(value: &StageType) -> &Vec<ArtifactTypeId> {
-    &value.fields
+stage_type_view<'a>(value: &'a StageType) -> StageTypeView<'a> {
+    handle value.tag {
+        0 => StageTypeView::Tuple(
+            Vec::as_slice(&value.fields),
+            value.copy_flag
+        ),
+        1 => StageTypeView::Struct(
+            value.name_index,
+            Vec::as_slice(&value.field_names),
+            Vec::as_slice(&value.fields),
+            value.copy_flag
+        ),
+        2 => StageTypeView::Enum(
+            value.name_index,
+            Vec::as_slice(&value.variants),
+            value.copy_flag
+        ),
+        tag => StageTypeView::Unsupported(tag)
+    }
 }
 
-pub stage_type_field_count(value: &StageType) -> usize {
-    Vec::len(&value.fields)
-}
-
-pub stage_type_field_type_at(
-    value: &StageType,
-    index: usize
-) -> ArtifactTypeId {
-    *Vec::index(&value.fields, index)
-}
-
-pub stage_type_copy_flag(value: &StageType) -> u32 { value.copy_flag }
-
-pub stage_type_tag(value: &StageType) -> u8 { value.tag }
-
-pub stage_type_name_index(value: &StageType) -> u32 {
-    value.name_index
-}
-
-pub stage_type_field_name_count(value: &StageType) -> usize {
-    Vec::len(&value.field_names)
-}
-
-pub stage_type_variant_count(value: &StageType) -> usize {
-    Vec::len(&value.variants)
-}
-
-pub stage_type_variant_at<'a>(
-    value: &'a StageType,
-    index: usize
-) -> &'a StageVariant {
-    Vec::index(&value.variants, index)
-}
-
-pub stage_type_field_name_index_at(
-    value: &StageType,
-    index: usize
-) -> u32 {
-    *Vec::index(&value.field_names, index)
-}
-
-pub stage_variant_name_index(value: &StageVariant) -> u32 {
-    value.name_index
-}
-
-pub stage_variant_field_count(value: &StageVariant) -> usize {
-    Vec::len(&value.fields)
-}
-
-pub stage_variant_field_name_count(value: &StageVariant) -> usize {
-    Vec::len(&value.field_names)
-}
-
-pub stage_variant_field_name_index_at(
-    value: &StageVariant,
-    index: usize
-) -> u32 {
-    *Vec::index(&value.field_names, index)
-}
-
-pub stage_variant_field_type_at(
-    value: &StageVariant,
-    index: usize
-) -> ArtifactTypeId {
-    *Vec::index(&value.fields, index)
-}
-
-pub stage_variant_fields(
-    value: &StageVariant
-) -> &Vec<ArtifactTypeId> {
-    &value.fields
+pub stage_variant_view<'a>(
+    value: &'a StageVariant
+) -> StageVariantView<'a> {
+    StageVariantView::Variant(
+        value.name_index,
+        Vec::as_slice(&value.field_names),
+        Vec::as_slice(&value.fields)
+    )
 }
 
 pub stage_function_name(value: &StageFunction) -> &String { &value.name }
