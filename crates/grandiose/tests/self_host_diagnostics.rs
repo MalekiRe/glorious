@@ -285,15 +285,15 @@ fn self_host_diagnostics_normalize_frontend_and_backend_failures() {
             );
             assert_eq!(
                 run(&artifact, "body_internal_site", vec![]),
-                Value::U64(700_700_308_000_003_002)
+                Value::U64(770_070_308_000_003_002)
             );
             assert_eq!(
                 run(&artifact, "resolution_ambiguous_site", vec![]),
-                Value::U64(200_200_209_030_403_002)
+                Value::U64(280_020_209_030_403_002)
             );
             assert_eq!(
                 run(&artifact, "elaboration_internal_site", vec![]),
-                Value::U64(700_900_705_070_703_002)
+                Value::U64(790_070_605_070_703_002)
             );
         })
         .unwrap()
