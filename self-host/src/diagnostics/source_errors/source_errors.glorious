@@ -1,0 +1,911 @@
+// Frontend phase errors are normalized without changing phase-local APIs.
+
+use super::model;
+use super::model::CompilerDiagnostic;
+use super::model::DiagnosticClass;
+use super::model::DiagnosticPhase;
+use super::model::DiagnosticSite;
+use super::model::DiagnosticSpace;
+use super::super::frontend::bodies;
+use super::super::frontend::elaboration;
+use super::super::frontend::headers;
+use super::super::frontend::lexer;
+use super::super::frontend::resolution;
+use super::super::frontend::scanner;
+use super::super::frontend::bodies::BodyError;
+use super::super::frontend::elaboration::ElaborationError;
+use super::super::frontend::headers::HeaderError;
+use super::super::frontend::lexer::LexError;
+use super::super::frontend::resolution::ResolutionError;
+use super::super::frontend::scanner::ScanError;
+use super::super::frontend::scanner::ShellId;
+
+struct DiagnosticShape {
+    class: DiagnosticClass,
+    primary: DiagnosticSite,
+    related: Option<DiagnosticSite>,
+    expected: u32,
+    found: u32
+}
+
+impl Use<[0, *]> for DiagnosticShape {}
+
+shape(
+    class: DiagnosticClass,
+    primary: DiagnosticSite,
+    related: Option<DiagnosticSite>,
+    expected: u32,
+    found: u32
+) -> DiagnosticShape {
+    DiagnosticShape {
+        class: class,
+        primary: primary,
+        related: related,
+        expected: expected,
+        found: found
+    }
+}
+
+token_shape(
+    class: DiagnosticClass,
+    token: usize,
+    expected: u32,
+    found: u32
+) -> DiagnosticShape {
+    shape(
+        class,
+        model::site(DiagnosticSpace::Token, token),
+        None,
+        expected,
+        found
+    )
+}
+
+token_pair_shape(
+    class: DiagnosticClass,
+    token: usize,
+    related: usize,
+    expected: u32,
+    found: u32
+) -> DiagnosticShape {
+    shape(
+        class,
+        model::site(DiagnosticSpace::Token, token),
+        model::related_site(DiagnosticSpace::Token, token, related),
+        expected,
+        found
+    )
+}
+
+indexed_shape(
+    class: DiagnosticClass,
+    space: DiagnosticSpace,
+    index: usize,
+    expected: u32,
+    found: u32
+) -> DiagnosticShape {
+    shape(
+        class,
+        model::site(space, index),
+        None,
+        expected,
+        found
+    )
+}
+
+owner_from_shell(shell: Option<ShellId>) -> Option<DiagnosticSite> {
+    handle shell {
+        Result::Err(_) => None,
+        Result::Ok(found) => model::owner_site(found)
+    }
+}
+
+make_frontend_diagnostic(
+    phase: DiagnosticPhase,
+    local_code: u32,
+    message: String,
+    owner: Option<DiagnosticSite>,
+    value: DiagnosticShape
+) -> CompilerDiagnostic {
+    let DiagnosticShape {
+        class,
+        primary,
+        related,
+        expected,
+        found
+    } = value;
+    model::make_diagnostic(
+        phase,
+        class,
+        local_code,
+        message,
+        primary,
+        related,
+        owner,
+        expected,
+        found
+    )
+}
+
+pub lex_diagnostic(error: &LexError) -> CompilerDiagnostic {
+    let span = lexer::error_span(error);
+    let class = if(*lexer::error_kind(error) is lexer::LexErrorKind::ResourceLimit) {
+        DiagnosticClass::ResourceLimit
+    } else {
+        DiagnosticClass::Syntax
+    };
+    model::make_diagnostic(
+        DiagnosticPhase::Lex,
+        class,
+        wrapping_convert_to_u32(lexer::error_code(error)),
+        "self-host compiler: lexical analysis failed",
+        model::span_site(
+            DiagnosticSpace::SourceByte,
+            lexer::span_start(&span),
+            lexer::span_end(&span)
+        ),
+        None,
+        None,
+        0,
+        0
+    )
+}
+
+pub scan_diagnostic(error: &ScanError) -> CompilerDiagnostic {
+    let primary = scanner::scan_error_token(error);
+    let related = scanner::scan_error_related(error);
+    let class = handle *error {
+        ScanError::DeclarationIdExhausted(_, _) =>
+            DiagnosticClass::ResourceLimit,
+        ScanError::UnexpectedClosingDelimiter(_, _) => DiagnosticClass::Syntax,
+        ScanError::MismatchedClosingDelimiter(_, _) => DiagnosticClass::Syntax,
+        ScanError::UnclosedDelimiter(_, _) => DiagnosticClass::Syntax,
+        ScanError::InvalidDeclarationStart(_, _) => DiagnosticClass::Syntax,
+        ScanError::IncompleteDeclaration(_, _) => DiagnosticClass::Syntax,
+        ScanError::ExpectedDeclarationName(_, _) => DiagnosticClass::Syntax
+    };
+    model::make_diagnostic(
+        DiagnosticPhase::Scan,
+        class,
+        wrapping_convert_to_u32(scanner::scan_error_code(error)),
+        "self-host compiler: declaration scanning failed",
+        model::site(DiagnosticSpace::Token, primary),
+        model::related_site(DiagnosticSpace::Token, primary, related),
+        None,
+        0,
+        0
+    )
+}
+
+pub header_diagnostic(error: &HeaderError) -> CompilerDiagnostic {
+    let primary = headers::error_token(error);
+    let related = headers::error_related(error);
+    let class = handle *error {
+        HeaderError::TypeArenaExhausted(_, _) =>
+            DiagnosticClass::ResourceLimit,
+        HeaderError::ExpectedIdentifier(_, _) => DiagnosticClass::Syntax,
+        HeaderError::ExpectedLeftParenthesis(_, _) => DiagnosticClass::Syntax,
+        HeaderError::ExpectedRightParenthesis(_, _) => DiagnosticClass::Syntax,
+        HeaderError::ExpectedRightAngle(_, _) => DiagnosticClass::Syntax,
+        HeaderError::EmptyTypeArguments(_, _) => DiagnosticClass::Syntax,
+        HeaderError::EmptyGenericParameters(_, _) => DiagnosticClass::Syntax,
+        HeaderError::UnsupportedGenericParameterKind(_, _) =>
+            DiagnosticClass::Syntax,
+        HeaderError::ExpectedColon(_, _) => DiagnosticClass::Syntax,
+        HeaderError::ExpectedRightBrace(_, _) => DiagnosticClass::Syntax,
+        HeaderError::ExpectedSemicolon(_, _) => DiagnosticClass::Syntax,
+        HeaderError::UnexpectedTrailingHeaderToken(_, _) =>
+            DiagnosticClass::Syntax,
+        HeaderError::ExpectedEquals(_, _) => DiagnosticClass::Syntax,
+        HeaderError::ExpectedIntegerPrecedence(_, _) =>
+            DiagnosticClass::Syntax,
+        HeaderError::PrecedenceOutOfRange(_, _) => DiagnosticClass::Syntax,
+        HeaderError::ExpectedOperator(_, _) => DiagnosticClass::Syntax,
+        HeaderError::InvalidFixityForm(_, _) => DiagnosticClass::Syntax
+    };
+    model::make_diagnostic(
+        DiagnosticPhase::Headers,
+        class,
+        wrapping_convert_to_u32(headers::error_code(error)),
+        "self-host compiler: declaration header parsing failed",
+        model::site(DiagnosticSpace::Token, primary),
+        model::related_site(DiagnosticSpace::Token, primary, related),
+        None,
+        0,
+        0
+    )
+}
+
+body_shape(error: &BodyError) -> DiagnosticShape {
+    handle *error {
+        BodyError::ExpectedExpression(token, related) => token_pair_shape(
+            DiagnosticClass::Syntax,
+            token,
+            related,
+            0,
+            0
+        ),
+        BodyError::ExpectedGroupingClose(token, related) => token_pair_shape(
+            DiagnosticClass::Syntax,
+            token,
+            related,
+            0,
+            0
+        ),
+        BodyError::DuplicatePatternBinder(token, related) => token_pair_shape(
+            DiagnosticClass::Syntax,
+            token,
+            related,
+            0,
+            0
+        ),
+        BodyError::IncompatibleAssociativity(token, related) => token_pair_shape(
+            DiagnosticClass::Syntax,
+            token,
+            related,
+            0,
+            0
+        ),
+        BodyError::NonAssociativeChain(token, related) => token_pair_shape(
+            DiagnosticClass::Syntax,
+            token,
+            related,
+            0,
+            0
+        ),
+        BodyError::ConflictingFixity(token, related) => token_pair_shape(
+            DiagnosticClass::Syntax,
+            token,
+            related,
+            0,
+            0
+        ),
+        BodyError::ExpressionDepthLimit(token, related) => token_pair_shape(
+            DiagnosticClass::ResourceLimit,
+            token,
+            related,
+            0,
+            0
+        ),
+        BodyError::MissingBodyShell(shell) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::Declaration,
+            Id::to_usize(shell),
+            0,
+            0
+        ),
+        BodyError::InvalidEncodedExpression(token, related) => token_pair_shape(
+            DiagnosticClass::Internal,
+            token,
+            related,
+            0,
+            0
+        ),
+        BodyError::ExpectedCallClose(token, related) => token_pair_shape(
+            DiagnosticClass::Syntax,
+            token,
+            related,
+            0,
+            0
+        ),
+        BodyError::InvalidLetSyntax(token, related) => token_pair_shape(
+            DiagnosticClass::Syntax,
+            token,
+            related,
+            0,
+            0
+        ),
+        BodyError::MissingEncodedName(token, related) => token_pair_shape(
+            DiagnosticClass::Internal,
+            token,
+            related,
+            0,
+            0
+        ),
+        BodyError::ExpectedBlockClose(token, related) => token_pair_shape(
+            DiagnosticClass::Syntax,
+            token,
+            related,
+            0,
+            0
+        ),
+        BodyError::ExpectedIdentifier(token, related) => token_pair_shape(
+            DiagnosticClass::Syntax,
+            token,
+            related,
+            0,
+            0
+        ),
+        BodyError::ExpectedTupleDelimiter(token, related) => token_pair_shape(
+            DiagnosticClass::Syntax,
+            token,
+            related,
+            0,
+            0
+        ),
+        BodyError::InvalidHandleArm(token, related) => token_pair_shape(
+            DiagnosticClass::Syntax,
+            token,
+            related,
+            0,
+            0
+        ),
+        BodyError::InvalidStructField(token, related) => token_pair_shape(
+            DiagnosticClass::Syntax,
+            token,
+            related,
+            0,
+            0
+        ),
+        BodyError::ExpectedProjectionName(token, related) => token_pair_shape(
+            DiagnosticClass::Syntax,
+            token,
+            related,
+            0,
+            0
+        )
+    }
+}
+
+pub body_diagnostic(
+    shell: ShellId,
+    error: &BodyError
+) -> CompilerDiagnostic {
+    make_frontend_diagnostic(
+        DiagnosticPhase::BodyParse,
+        wrapping_convert_to_u32(bodies::error_code(error)),
+        "self-host compiler: body parsing failed",
+        model::owner_site(shell),
+        body_shape(error)
+    )
+}
+
+resolution_shape(error: &ResolutionError) -> DiagnosticShape {
+    handle *error {
+        ResolutionError::UnknownFunction(token) => token_shape(
+            DiagnosticClass::Resolution,
+            token,
+            0,
+            0
+        ),
+        ResolutionError::UnknownStruct(token) => token_shape(
+            DiagnosticClass::Resolution,
+            token,
+            0,
+            0
+        ),
+        ResolutionError::UnknownEnum(token) => token_shape(
+            DiagnosticClass::Resolution,
+            token,
+            0,
+            0
+        ),
+        ResolutionError::UnknownVariant(token) => token_shape(
+            DiagnosticClass::Resolution,
+            token,
+            0,
+            0
+        ),
+        ResolutionError::InvalidNamePath(token) => token_shape(
+            DiagnosticClass::Resolution,
+            token,
+            0,
+            0
+        ),
+        ResolutionError::AmbiguousFunction(token, declaration) => shape(
+            DiagnosticClass::Resolution,
+            model::site(DiagnosticSpace::Token, token),
+            Option::Some(model::site(
+                DiagnosticSpace::Declaration,
+                Id::to_usize(declaration)
+            )),
+            0,
+            0
+        ),
+        ResolutionError::AmbiguousStruct(token, interface) => shape(
+            DiagnosticClass::Resolution,
+            model::site(DiagnosticSpace::Token, token),
+            Option::Some(model::site(DiagnosticSpace::Interface, interface)),
+            0,
+            0
+        ),
+        ResolutionError::AmbiguousEnum(token, interface) => shape(
+            DiagnosticClass::Resolution,
+            model::site(DiagnosticSpace::Token, token),
+            Option::Some(model::site(DiagnosticSpace::Interface, interface)),
+            0,
+            0
+        ),
+        ResolutionError::DuplicateParameter(token, related) => token_pair_shape(
+            DiagnosticClass::Resolution,
+            token,
+            related,
+            0,
+            0
+        ),
+        ResolutionError::MissingCallableHeader(index) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::Interface,
+            index,
+            0,
+            0
+        ),
+        ResolutionError::MissingDeclarationShell(token, declaration) => shape(
+            DiagnosticClass::Internal,
+            model::site(DiagnosticSpace::Token, token),
+            Option::Some(model::site(
+                DiagnosticSpace::Declaration,
+                Id::to_usize(declaration)
+            )),
+            0,
+            0
+        ),
+        ResolutionError::MissingStructHeader(token, interface) => shape(
+            DiagnosticClass::Internal,
+            model::site(DiagnosticSpace::Token, token),
+            Option::Some(model::site(DiagnosticSpace::Interface, interface)),
+            0,
+            0
+        ),
+        ResolutionError::MissingEnumHeader(token, interface) => shape(
+            DiagnosticClass::Internal,
+            model::site(DiagnosticSpace::Token, token),
+            Option::Some(model::site(DiagnosticSpace::Interface, interface)),
+            0,
+            0
+        ),
+        ResolutionError::MissingVariantHeader(token, interface) => shape(
+            DiagnosticClass::Internal,
+            model::site(DiagnosticSpace::Token, token),
+            Option::Some(model::site(DiagnosticSpace::Interface, interface)),
+            0,
+            0
+        ),
+        ResolutionError::CorruptFunctionSearch(token) => token_shape(
+            DiagnosticClass::Internal,
+            token,
+            0,
+            0
+        ),
+        ResolutionError::CorruptStructSearch(token) => token_shape(
+            DiagnosticClass::Internal,
+            token,
+            0,
+            0
+        ),
+        ResolutionError::CorruptEnumSearch(token) => token_shape(
+            DiagnosticClass::Internal,
+            token,
+            0,
+            0
+        ),
+        ResolutionError::LocalIdExhausted(token, count) => token_shape(
+            DiagnosticClass::ResourceLimit,
+            token,
+            0,
+            wrapping_convert_to_u32(count)
+        ),
+        ResolutionError::ExpectedBindingIdentifier(token) => token_shape(
+            DiagnosticClass::Resolution,
+            token,
+            0,
+            0
+        ),
+        ResolutionError::UnexpectedHandleTarget(token, related) => token_pair_shape(
+            DiagnosticClass::Resolution,
+            token,
+            related,
+            0,
+            0
+        ),
+        ResolutionError::MissingParameterHeader(index) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::Interface,
+            index,
+            0,
+            0
+        ),
+        ResolutionError::MissingBodyShell(shell) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::Declaration,
+            Id::to_usize(shell),
+            0,
+            0
+        ),
+        ResolutionError::MissingBodyCallable(shell) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::Declaration,
+            Id::to_usize(shell),
+            0,
+            0
+        ),
+        ResolutionError::MissingParameterRange(shell) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::Declaration,
+            Id::to_usize(shell),
+            0,
+            0
+        ),
+        ResolutionError::BodyParseFailure(shell) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::Declaration,
+            Id::to_usize(shell),
+            0,
+            0
+        )
+    }
+}
+
+resolution_message(phase: DiagnosticPhase) -> String {
+    if(phase is DiagnosticPhase::ResolutionIndex) {
+        "self-host compiler: declaration indexing failed"
+    } else {
+        "self-host compiler: body resolution failed"
+    }
+}
+
+pub resolution_diagnostic(
+    phase: DiagnosticPhase,
+    shell: Option<ShellId>,
+    error: &ResolutionError
+) -> CompilerDiagnostic {
+    make_frontend_diagnostic(
+        phase,
+        wrapping_convert_to_u32(resolution::resolution_error_code(error)),
+        resolution_message(phase),
+        owner_from_shell(shell),
+        resolution_shape(error)
+    )
+}
+
+elaboration_shape(error: &ElaborationError) -> DiagnosticShape {
+    let expected = elaboration::elaboration_error_expected(error);
+    let found = elaboration::elaboration_error_found(error);
+    handle *error {
+        ElaborationError::CyclicTypeAlias(token) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::MissingAliasHeader(index) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::Interface,
+            index,
+            expected,
+            found
+        ),
+        ElaborationError::MissingDeclarationShell(index) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::Declaration,
+            index,
+            expected,
+            found
+        ),
+        ElaborationError::GenericTypeAliasUnsupported(token) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::MissingNominalType(token) => token_shape(
+            DiagnosticClass::Internal,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::UnknownTypeName(token) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::UnknownTypeModule(token) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::NamedReferenceLifetimeUnsupported(token) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::InvalidSignatureType(token) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::MissingParameterHeader(index) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::Interface,
+            index,
+            expected,
+            found
+        ),
+        ElaborationError::MissingCallableHeader(index) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::Interface,
+            index,
+            expected,
+            found
+        ),
+        ElaborationError::UnsupportedCallableSignature(shell) => indexed_shape(
+            DiagnosticClass::Type,
+            DiagnosticSpace::Declaration,
+            Id::to_usize(shell),
+            expected,
+            found
+        ),
+        ElaborationError::MissingCallableType(shell) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::Declaration,
+            Id::to_usize(shell),
+            expected,
+            found
+        ),
+        ElaborationError::MissingNominalDeclaration(index) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::Interface,
+            index,
+            expected,
+            found
+        ),
+        ElaborationError::MissingFieldHeader(index) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::Interface,
+            index,
+            expected,
+            found
+        ),
+        ElaborationError::MissingVariantHeader(index) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::Interface,
+            index,
+            expected,
+            found
+        ),
+        ElaborationError::MissingStructHeader(shell) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::Declaration,
+            Id::to_usize(shell),
+            expected,
+            found
+        ),
+        ElaborationError::MissingEnumHeader(shell) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::Declaration,
+            Id::to_usize(shell),
+            expected,
+            found
+        ),
+        ElaborationError::CyclicNominalType(token, nominal) => shape(
+            DiagnosticClass::Type,
+            model::site(DiagnosticSpace::Token, token),
+            Option::Some(model::site(
+                DiagnosticSpace::Type,
+                wrapping_convert_to_usize(nominal)
+            )),
+            expected,
+            found
+        ),
+        ElaborationError::InvalidResolvedExpression(expression, occurrence) => shape(
+            DiagnosticClass::Internal,
+            model::site(DiagnosticSpace::Expression, expression),
+            Option::Some(model::site(
+                DiagnosticSpace::ResolutionOccurrence,
+                occurrence
+            )),
+            expected,
+            found
+        ),
+        ElaborationError::TypeMismatch(token, _, _) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::FloatLiteralUnsupported(token) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::IntegerLiteralOutOfRange(token, _) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::UnexpectedExpressionToken(token) => token_shape(
+            DiagnosticClass::Internal,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::FunctionUsedAsValue(token) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::MissingLocalType(token) => token_shape(
+            DiagnosticClass::Internal,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::MissingCallableInterface(token, shell) => shape(
+            DiagnosticClass::Internal,
+            model::site(DiagnosticSpace::Token, token),
+            Option::Some(model::site(
+                DiagnosticSpace::Declaration,
+                Id::to_usize(shell)
+            )),
+            expected,
+            found
+        ),
+        ElaborationError::ArgumentCountMismatch(token, _, _) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::InvalidCallTarget(token, _) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::InvalidTupleElement(token, position) => shape(
+            DiagnosticClass::Internal,
+            model::site(DiagnosticSpace::Token, token),
+            Option::Some(model::site(DiagnosticSpace::Field, position)),
+            expected,
+            found
+        ),
+        ElaborationError::MissingTupleElement(token, _) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::ExpectedTupleType(token, _) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::UnknownStructField(token, _) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::DuplicateOrInaccessibleField(token, _) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::StructFieldCountMismatch(token, _, _) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::InvalidStructTarget(token, _) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::VariantPayloadCountMismatch(token, _, _) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::MissingVariant(token, _) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::UnknownProjectionField(token, _, _) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::DuplicateMatchVariant(token, _, _) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::VariantOwnerMismatch(token, _, _) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::MissingMatchVariants(token, _, _) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::ExpectedEnumType(token, _) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::UnsupportedExpression(token) => token_shape(
+            DiagnosticClass::Type,
+            token,
+            expected,
+            found
+        ),
+        ElaborationError::MissingBodyCallable(shell) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::Declaration,
+            Id::to_usize(shell),
+            expected,
+            found
+        ),
+        ElaborationError::IntegerEncodingOverflow(index, _) => indexed_shape(
+            DiagnosticClass::ResourceLimit,
+            DiagnosticSpace::Artifact,
+            index,
+            expected,
+            found
+        ),
+        ElaborationError::InvalidLocalReference(local, _, _) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::Local,
+            local,
+            expected,
+            found
+        ),
+        ElaborationError::EmbeddedValueSerializationUnsupported(value) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::CoreValue,
+            value,
+            expected,
+            found
+        ),
+        ElaborationError::MatchSerializationUnsupported(computation) => indexed_shape(
+            DiagnosticClass::Internal,
+            DiagnosticSpace::CoreComputation,
+            computation,
+            expected,
+            found
+        )
+    }
+}
+
+elaboration_message(phase: DiagnosticPhase) -> String {
+    if(phase is DiagnosticPhase::InterfaceCollection) {
+        "self-host compiler: interface collection failed"
+    } else {
+        "self-host compiler: body elaboration failed"
+    }
+}
+
+pub elaboration_diagnostic(
+    phase: DiagnosticPhase,
+    shell: Option<ShellId>,
+    error: &ElaborationError
+) -> CompilerDiagnostic {
+    make_frontend_diagnostic(
+        phase,
+        wrapping_convert_to_u32(elaboration::elaboration_error_code(error)),
+        elaboration_message(phase),
+        owner_from_shell(shell),
+        elaboration_shape(error)
+    )
+}

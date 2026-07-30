@@ -34,23 +34,26 @@ checking, diagnostics, cleanup, or artifact validation.
 
 ## Top-level ownership
 
-The source tree has three top-level implementation roles:
+The source tree has four top-level implementation roles:
 
 ```text
 main.glorious
     |
     v
-compiler/                orchestration, session ownership, host boundary
-    |\
-    | +-- frontend/       source-facing phase libraries
+diagnostics/             structured compiler boundary and host rendering
     |
-    +---- backend/        lowering and artifact phase libraries
+    +---- compiler/         orchestration and session ownership
+             |\
+             | +-- frontend/    source-facing phase libraries
+             |
+             +---- backend/     lowering and artifact phase libraries
 ```
 
 `frontend` and `backend` do not own the executable application. They expose
-phase operations. The top-level `compiler` module decides phase order, owns
-cross-phase state, and is the only self-host module called by the package entry
-point.
+phase operations. The top-level `compiler` module decides phase order and owns
+cross-phase state. The `diagnostics` module converts phase errors into the stable
+cross-phase diagnostic contract and owns host rendering. The package entry point
+calls that diagnostic boundary.
 
 This prevents filesystem, process-argument, and host-diagnostic capabilities
 from becoming ambient dependencies of semantic phase APIs.
@@ -173,46 +176,55 @@ cleanup implementation.
 
 ## Shared implementation substrate
 
-The next architecture stages should introduce a small compiler toolkit rather
-than feature-specific utility layers:
+The architecture stages introduce a small compiler toolkit rather than
+feature-specific utility layers:
 
 - `IdRange<Tag>` for typed contiguous arena ranges;
 - one source span and token span model;
 - one token cursor backed by a precomputed delimiter-pair table;
 - one lexical `ScopeMap` with journaled scope restoration;
-- one structured diagnostic model with primary and related spans;
+- one structured diagnostic model with typed primary, related, and owner sites;
 - one canonical pool abstraction with freeze-and-remap at serialization;
 - one body-local Core builder;
 - one checked MIR editor and analysis invalidation mask;
 - small worklist and fixed-point runners.
 
-These abstractions are justified only when they replace repeated mechanisms in
-at least two real compiler phases.
+The cross-phase diagnostic model is implemented. The remaining items continue to
+require at least two real compiler uses before becoming shared abstractions.
 
 ## Diagnostics and failure
 
-Compiler phases return structured errors or emit structured diagnostics. The
-host application is responsible for rendering them.
+Compiler phases return their own structured semantic errors. The diagnostic
+boundary normalizes those errors and the host application renders them.
 
-The target diagnostic model contains:
+The implemented cross-phase model contains:
 
 ```text
-Diagnostic
-    stable code
-    primary span
-    zero or more labeled related spans
-    typed formatting arguments
-    applicability when a fix is available
+CompilerDiagnostic
+    stable phase-local code
+    diagnostic class
+    typed primary site
+    optional typed related site
+    optional owning declaration
+    expected/found words
+    deterministic message
 ```
 
-Internal invariant failures remain distinct from source diagnostics. Resource
-limits are structured diagnostics rather than silent fallback or unbounded
-recursion.
+Location spaces distinguish source bytes, tokens, declarations, interfaces,
+expressions, resolution occurrences, types, locals, Core identities, backend
+identities, and artifact failures. Internal invariant failures remain distinct
+from source diagnostics. Resource limits are structured diagnostics rather than
+silent fallback or unbounded recursion.
 
-The stage-one session currently preserves the existing phase error enums while
-reporting the failing phase at the host boundary. A later migration will replace
-per-phase `code`, `token`, and `related` projection functions with the shared
-model.
+Phase-local error enums remain authoritative inside their phases. Exhaustive
+adapters convert every current phase variant into `CompilerDiagnostic`; adding a
+variant therefore requires updating the diagnostic contract. The command-line
+entry point and VM/LLVM self-host parity fixture both run through this boundary.
+See `DIAGNOSTICS.md` for stable codes, identity spaces, and extension rules.
+
+A later migration may replace phase `code`, `token`, and `related` projection
+functions with directly structured fields. That storage migration must preserve
+the current cross-phase diagnostic contract.
 
 ## Determinism
 
@@ -268,12 +280,23 @@ Implemented by the initial architecture change:
 
 ### Stage 2: shared substrate and direct semantic views
 
+Implemented diagnostic slice:
+
+- centralize stable cross-phase diagnostics and resource-limit reporting;
+- distinguish user errors, resource limits, emission failures, and internal
+  invariant failures;
+- attach typed primary, related, and owner identity spaces;
+- route the package host boundary through deterministic structured rendering;
+- validate the model through real frontend failures, synthetic backend failures,
+  and the VM/LLVM self-host parity path.
+
+Remaining Stage 2 work:
+
 - unify typed ranges and source spans;
 - add delimiter pairing and a shared token cursor;
 - replace duplicated numeric tags plus semantic enums with one source of truth;
 - replace adapter maps between resolution and elaboration with direct typed
   tables;
-- centralize diagnostics and resource-limit reporting;
 - extract phase snapshot applications into a test/probe layer.
 
 ### Stage 3: ownership/control MIR and PlaceFlow

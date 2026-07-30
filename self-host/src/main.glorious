@@ -1,5 +1,6 @@
 mod frontend;
 mod backend;
 mod compiler;
+mod diagnostics;
 
-main() { run_compiler_host(compiler::application) }
+main() { run_compiler_host(diagnostics::application) }

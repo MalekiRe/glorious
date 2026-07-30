@@ -1,0 +1,338 @@
+// Stable cross-phase diagnostic data and deterministic rendering.
+
+use super::super::frontend::scanner::ShellId;
+
+pub enum DiagnosticPhase {
+    Lex,
+    Scan,
+    Headers,
+    ResolutionIndex,
+    InterfaceCollection,
+    Declaration,
+    BodyParse,
+    BodyResolution,
+    BodyElaboration,
+    Lowering,
+    InterfaceExport,
+    Emission
+}
+
+impl Use<[0, *]> for DiagnosticPhase {}
+
+pub enum DiagnosticClass {
+    Syntax,
+    Resolution,
+    Type,
+    Ownership,
+    ResourceLimit,
+    Emission,
+    Internal
+}
+
+impl Use<[0, *]> for DiagnosticClass {}
+
+pub enum DiagnosticSpace {
+    SourceByte,
+    Token,
+    Declaration,
+    Interface,
+    Type,
+    Expression,
+    ResolutionOccurrence,
+    Local,
+    CoreValue,
+    CoreComputation,
+    Register,
+    RegisterPack,
+    SwitchPack,
+    Block,
+    Function,
+    StageType,
+    Variant,
+    Field,
+    Artifact
+}
+
+impl Use<[0, *]> for DiagnosticSpace {}
+
+pub struct DiagnosticSite {
+    space: DiagnosticSpace,
+    start: usize,
+    end: usize
+}
+
+impl Use<[0, *]> for DiagnosticSite {}
+
+pub struct CompilerDiagnostic {
+    phase: DiagnosticPhase,
+    class: DiagnosticClass,
+    code: u32,
+    message: String,
+    primary: DiagnosticSite,
+    related: Option<DiagnosticSite>,
+    owner: Option<DiagnosticSite>,
+    expected: u32,
+    found: u32
+}
+
+pub phase_code(value: DiagnosticPhase) -> u32 {
+    handle value {
+        DiagnosticPhase::Lex => 1,
+        DiagnosticPhase::Scan => 2,
+        DiagnosticPhase::Headers => 3,
+        DiagnosticPhase::ResolutionIndex => 4,
+        DiagnosticPhase::InterfaceCollection => 5,
+        DiagnosticPhase::Declaration => 6,
+        DiagnosticPhase::BodyParse => 7,
+        DiagnosticPhase::BodyResolution => 8,
+        DiagnosticPhase::BodyElaboration => 9,
+        DiagnosticPhase::Lowering => 10,
+        DiagnosticPhase::InterfaceExport => 11,
+        DiagnosticPhase::Emission => 12
+    }
+}
+
+pub class_code(value: DiagnosticClass) -> u32 {
+    handle value {
+        DiagnosticClass::Syntax => 1,
+        DiagnosticClass::Resolution => 2,
+        DiagnosticClass::Type => 3,
+        DiagnosticClass::Ownership => 4,
+        DiagnosticClass::ResourceLimit => 5,
+        DiagnosticClass::Emission => 6,
+        DiagnosticClass::Internal => 7
+    }
+}
+
+pub space_code(value: DiagnosticSpace) -> u32 {
+    handle value {
+        DiagnosticSpace::SourceByte => 1,
+        DiagnosticSpace::Token => 2,
+        DiagnosticSpace::Declaration => 3,
+        DiagnosticSpace::Interface => 4,
+        DiagnosticSpace::Type => 5,
+        DiagnosticSpace::Expression => 6,
+        DiagnosticSpace::ResolutionOccurrence => 7,
+        DiagnosticSpace::Local => 8,
+        DiagnosticSpace::CoreValue => 9,
+        DiagnosticSpace::CoreComputation => 10,
+        DiagnosticSpace::Register => 11,
+        DiagnosticSpace::RegisterPack => 12,
+        DiagnosticSpace::SwitchPack => 13,
+        DiagnosticSpace::Block => 14,
+        DiagnosticSpace::Function => 15,
+        DiagnosticSpace::StageType => 16,
+        DiagnosticSpace::Variant => 17,
+        DiagnosticSpace::Field => 18,
+        DiagnosticSpace::Artifact => 19
+    }
+}
+
+pub site(space: DiagnosticSpace, index: usize) -> DiagnosticSite {
+    DiagnosticSite {
+        space: space,
+        start: index,
+        end: index + 1
+    }
+}
+
+pub span_site(
+    space: DiagnosticSpace,
+    start: usize,
+    end: usize
+) -> DiagnosticSite {
+    DiagnosticSite { space: space, start: start, end: end }
+}
+
+pub related_site(
+    space: DiagnosticSpace,
+    primary: usize,
+    related: usize
+) -> Option<DiagnosticSite> {
+    if(primary == related) { None } else { Option::Some(site(space, related)) }
+}
+
+pub make_diagnostic(
+    phase: DiagnosticPhase,
+    class: DiagnosticClass,
+    local_code: u32,
+    message: String,
+    primary: DiagnosticSite,
+    related: Option<DiagnosticSite>,
+    owner: Option<DiagnosticSite>,
+    expected: u32,
+    found: u32
+) -> CompilerDiagnostic {
+    CompilerDiagnostic {
+        phase: phase,
+        class: class,
+        code: phase_code(phase) * 1000 + local_code,
+        message: message,
+        primary: primary,
+        related: related,
+        owner: owner,
+        expected: expected,
+        found: found
+    }
+}
+
+pub owner_site(shell: ShellId) -> Option<DiagnosticSite> {
+    Option::Some(site(DiagnosticSpace::Declaration, Id::to_usize(shell)))
+}
+
+pub diagnostic_phase_code(value: &CompilerDiagnostic) -> u32 {
+    phase_code(value.phase)
+}
+
+pub diagnostic_class_code(value: &CompilerDiagnostic) -> u32 {
+    class_code(value.class)
+}
+
+pub diagnostic_code(value: &CompilerDiagnostic) -> u32 { value.code }
+
+pub diagnostic_message(value: &CompilerDiagnostic) -> String {
+    *(&value.message)
+}
+
+pub diagnostic_primary_space_code(value: &CompilerDiagnostic) -> u32 {
+    space_code(value.primary.space)
+}
+
+pub diagnostic_primary_start(value: &CompilerDiagnostic) -> usize {
+    value.primary.start
+}
+
+pub diagnostic_primary_end(value: &CompilerDiagnostic) -> usize {
+    value.primary.end
+}
+
+pub diagnostic_related_space_code(value: &CompilerDiagnostic) -> u32 {
+    handle value.related {
+        Result::Err(_) => 0,
+        Result::Ok(found) => space_code(found.space)
+    }
+}
+
+pub diagnostic_related_start(value: &CompilerDiagnostic) -> usize {
+    handle value.related {
+        Result::Err(_) => 0,
+        Result::Ok(found) => found.start
+    }
+}
+
+pub diagnostic_related_end(value: &CompilerDiagnostic) -> usize {
+    handle value.related {
+        Result::Err(_) => 0,
+        Result::Ok(found) => found.end
+    }
+}
+
+pub diagnostic_owner_space_code(value: &CompilerDiagnostic) -> u32 {
+    handle value.owner {
+        Result::Err(_) => 0,
+        Result::Ok(found) => space_code(found.space)
+    }
+}
+
+pub diagnostic_owner_start(value: &CompilerDiagnostic) -> usize {
+    handle value.owner {
+        Result::Err(_) => 0,
+        Result::Ok(found) => found.start
+    }
+}
+
+pub diagnostic_owner_end(value: &CompilerDiagnostic) -> usize {
+    handle value.owner {
+        Result::Err(_) => 0,
+        Result::Ok(found) => found.end
+    }
+}
+
+pub diagnostic_expected(value: &CompilerDiagnostic) -> u32 { value.expected }
+
+pub diagnostic_found(value: &CompilerDiagnostic) -> u32 { value.found }
+
+space_name(value: DiagnosticSpace) -> String {
+    handle value {
+        DiagnosticSpace::SourceByte => "source byte",
+        DiagnosticSpace::Token => "token",
+        DiagnosticSpace::Declaration => "declaration",
+        DiagnosticSpace::Interface => "interface",
+        DiagnosticSpace::Type => "type",
+        DiagnosticSpace::Expression => "expression",
+        DiagnosticSpace::ResolutionOccurrence => "resolution occurrence",
+        DiagnosticSpace::Local => "local",
+        DiagnosticSpace::CoreValue => "Core value",
+        DiagnosticSpace::CoreComputation => "Core computation",
+        DiagnosticSpace::Register => "register",
+        DiagnosticSpace::RegisterPack => "register pack",
+        DiagnosticSpace::SwitchPack => "switch pack",
+        DiagnosticSpace::Block => "block",
+        DiagnosticSpace::Function => "function",
+        DiagnosticSpace::StageType => "Stage-A type",
+        DiagnosticSpace::Variant => "variant",
+        DiagnosticSpace::Field => "field",
+        DiagnosticSpace::Artifact => "artifact"
+    }
+}
+
+append_site(value: &mut Formatter, site_value: DiagnosticSite) {
+    let name = space_name(site_value.space);
+    Formatter::literal(&mut *value, &name);
+    Formatter::literal(&mut *value, &" ");
+    Formatter::append_u64(
+        &mut *value,
+        wrapping_convert_to_u64(site_value.start)
+    );
+    if(site_value.end != site_value.start + 1) {
+        Formatter::literal(&mut *value, &"..");
+        Formatter::append_u64(
+            &mut *value,
+            wrapping_convert_to_u64(site_value.end)
+        )
+    } else { () }
+}
+
+pub render_diagnostic(value: &CompilerDiagnostic) -> String {
+    let output = Formatter::new();
+    Formatter::literal(&mut output, &"[G");
+    Formatter::append_u64(
+        &mut output,
+        wrapping_convert_to_u64(value.code)
+    );
+    Formatter::literal(&mut output, &"] ");
+    Formatter::literal(&mut output, &value.message);
+    Formatter::literal(&mut output, &" (");
+    append_site(&mut output, value.primary);
+    Formatter::literal(&mut output, &")");
+    handle value.related {
+        Result::Err(_) => (),
+        Result::Ok(found) => {
+            Formatter::literal(&mut output, &"; related ");
+            append_site(&mut output, found)
+        }
+    };
+    handle value.owner {
+        Result::Err(_) => (),
+        Result::Ok(found) => {
+            Formatter::literal(&mut output, &"; owner ");
+            append_site(&mut output, found)
+        }
+    };
+    if(value.expected != 0 or { value.found != 0 }) {
+        Formatter::literal(&mut output, &"; expected ");
+        Formatter::append_u64(
+            &mut output,
+            wrapping_convert_to_u64(value.expected)
+        );
+        Formatter::literal(&mut output, &", found ");
+        Formatter::append_u64(
+            &mut output,
+            wrapping_convert_to_u64(value.found)
+        )
+    } else { () };
+    handle Formatter::finish(output) {
+        Result::Err(_) => "self-host compiler: diagnostic rendering failed",
+        Result::Ok(found) => found
+    }
+}

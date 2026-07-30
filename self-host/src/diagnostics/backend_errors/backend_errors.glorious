@@ -1,0 +1,390 @@
+// Lowering, emission, and artifact-writer errors are exhaustively normalized.
+
+use super::model;
+use super::model::CompilerDiagnostic;
+use super::model::DiagnosticClass;
+use super::model::DiagnosticPhase;
+use super::model::DiagnosticSpace;
+use super::super::backend::artifact;
+use super::super::backend::emission;
+use super::super::backend::emission::EmissionError;
+use super::super::backend::lowering::LoweringError;
+use super::super::frontend::scanner::ShellId;
+
+pub lowering_diagnostic(
+    shell: ShellId,
+    error: &LoweringError
+) -> CompilerDiagnostic {
+    let owner = model::owner_site(shell);
+    handle *error {
+        LoweringError::UnsupportedScalar(ty) => model::make_diagnostic(
+            DiagnosticPhase::Lowering,
+            DiagnosticClass::Ownership,
+            1,
+            "self-host compiler: unsupported scalar reached ownership lowering",
+            model::site(DiagnosticSpace::Type, Id::to_usize(ty)),
+            None,
+            owner,
+            0,
+            0
+        ),
+        LoweringError::MissingLocal(local) => model::make_diagnostic(
+            DiagnosticPhase::Lowering,
+            DiagnosticClass::Internal,
+            2,
+            "self-host compiler: ownership lowering is missing a local",
+            model::site(DiagnosticSpace::Local, Id::to_usize(local)),
+            None,
+            owner,
+            0,
+            0
+        ),
+        LoweringError::MissingProjectionSource(value) => model::make_diagnostic(
+            DiagnosticPhase::Lowering,
+            DiagnosticClass::Internal,
+            3,
+            "self-host compiler: ownership lowering is missing a projection source",
+            model::site(DiagnosticSpace::CoreValue, Id::to_usize(value)),
+            None,
+            owner,
+            0,
+            0
+        ),
+        LoweringError::MissingValue(value) => model::make_diagnostic(
+            DiagnosticPhase::Lowering,
+            DiagnosticClass::Internal,
+            4,
+            "self-host compiler: ownership lowering is missing a Core value",
+            model::site(DiagnosticSpace::CoreValue, Id::to_usize(value)),
+            None,
+            owner,
+            0,
+            0
+        ),
+        LoweringError::UnknownCallable(callable) => model::make_diagnostic(
+            DiagnosticPhase::Lowering,
+            DiagnosticClass::Internal,
+            5,
+            "self-host compiler: ownership lowering cannot resolve a callable",
+            model::site(DiagnosticSpace::Declaration, Id::to_usize(callable)),
+            None,
+            owner,
+            0,
+            0
+        ),
+        LoweringError::InvalidConstructionType(ty) => model::make_diagnostic(
+            DiagnosticPhase::Lowering,
+            DiagnosticClass::Ownership,
+            6,
+            "self-host compiler: invalid construction type reached lowering",
+            model::site(DiagnosticSpace::Type, Id::to_usize(ty)),
+            None,
+            owner,
+            0,
+            0
+        ),
+        LoweringError::ConstructionFieldCount(ty, expected, found) => model::make_diagnostic(
+            DiagnosticPhase::Lowering,
+            DiagnosticClass::Ownership,
+            7,
+            "self-host compiler: construction field count changed before lowering",
+            model::site(DiagnosticSpace::Type, Id::to_usize(ty)),
+            None,
+            owner,
+            expected,
+            found
+        ),
+        LoweringError::UnexpectedVariant(ty, variant) => model::make_diagnostic(
+            DiagnosticPhase::Lowering,
+            DiagnosticClass::Ownership,
+            8,
+            "self-host compiler: an unexpected enum variant reached lowering",
+            model::site(DiagnosticSpace::Type, Id::to_usize(ty)),
+            Option::Some(model::site(
+                DiagnosticSpace::Variant,
+                wrapping_convert_to_usize(variant)
+            )),
+            owner,
+            0,
+            variant
+        ),
+        LoweringError::MissingVariant(ty) => model::make_diagnostic(
+            DiagnosticPhase::Lowering,
+            DiagnosticClass::Ownership,
+            9,
+            "self-host compiler: enum construction is missing a variant",
+            model::site(DiagnosticSpace::Type, Id::to_usize(ty)),
+            None,
+            owner,
+            0,
+            0
+        ),
+        LoweringError::VariantOutOfRange(ty, variant) => model::make_diagnostic(
+            DiagnosticPhase::Lowering,
+            DiagnosticClass::Ownership,
+            10,
+            "self-host compiler: enum variant is out of range",
+            model::site(DiagnosticSpace::Type, Id::to_usize(ty)),
+            Option::Some(model::site(
+                DiagnosticSpace::Variant,
+                wrapping_convert_to_usize(variant)
+            )),
+            owner,
+            0,
+            variant
+        ),
+        LoweringError::ConstructionFieldOrder(expected, found) => model::make_diagnostic(
+            DiagnosticPhase::Lowering,
+            DiagnosticClass::Ownership,
+            11,
+            "self-host compiler: construction fields are not in canonical order",
+            model::site(
+                DiagnosticSpace::Field,
+                wrapping_convert_to_usize(found)
+            ),
+            Option::Some(model::site(
+                DiagnosticSpace::Field,
+                wrapping_convert_to_usize(expected)
+            )),
+            owner,
+            expected,
+            found
+        ),
+        LoweringError::MissingResult(ty) => model::make_diagnostic(
+            DiagnosticPhase::Lowering,
+            DiagnosticClass::Internal,
+            12,
+            "self-host compiler: ownership lowering did not produce a result",
+            model::site(DiagnosticSpace::Type, Id::to_usize(ty)),
+            None,
+            owner,
+            0,
+            0
+        ),
+        LoweringError::MissingMatchSubject(value) => model::make_diagnostic(
+            DiagnosticPhase::Lowering,
+            DiagnosticClass::Internal,
+            13,
+            "self-host compiler: match lowering is missing its subject",
+            model::site(DiagnosticSpace::CoreValue, Id::to_usize(value)),
+            None,
+            owner,
+            0,
+            0
+        ),
+        LoweringError::MissingMatchResult(computation) => model::make_diagnostic(
+            DiagnosticPhase::Lowering,
+            DiagnosticClass::Internal,
+            14,
+            "self-host compiler: match lowering is missing an arm result",
+            model::site(
+                DiagnosticSpace::CoreComputation,
+                Id::to_usize(computation)
+            ),
+            None,
+            owner,
+            0,
+            0
+        ),
+        LoweringError::InvalidMatchType(ty) => model::make_diagnostic(
+            DiagnosticPhase::Lowering,
+            DiagnosticClass::Ownership,
+            15,
+            "self-host compiler: invalid match type reached lowering",
+            model::site(DiagnosticSpace::Type, Id::to_usize(ty)),
+            None,
+            owner,
+            0,
+            0
+        ),
+        LoweringError::MatchBindingCount(ty, expected, found) => model::make_diagnostic(
+            DiagnosticPhase::Lowering,
+            DiagnosticClass::Ownership,
+            16,
+            "self-host compiler: match binding count changed before lowering",
+            model::site(DiagnosticSpace::Type, Id::to_usize(ty)),
+            None,
+            owner,
+            expected,
+            found
+        ),
+        LoweringError::MatchStateMismatch => model::make_diagnostic(
+            DiagnosticPhase::Lowering,
+            DiagnosticClass::Internal,
+            17,
+            "self-host compiler: match arms produced incompatible ownership state",
+            model::site(DiagnosticSpace::Artifact, 0),
+            None,
+            owner,
+            0,
+            0
+        )
+    }
+}
+
+emission_name_diagnostic(name: emission::EmissionName) -> CompilerDiagnostic {
+    handle name {
+        emission::EmissionName::Type(ty) => model::make_diagnostic(
+            DiagnosticPhase::Emission,
+            DiagnosticClass::Emission,
+            4,
+            "self-host compiler: emitted type name is missing from the canonical pool",
+            model::site(DiagnosticSpace::StageType, Id::to_usize(ty)),
+            None,
+            None,
+            0,
+            0
+        ),
+        emission::EmissionName::StructField(ty, field) => model::make_diagnostic(
+            DiagnosticPhase::Emission,
+            DiagnosticClass::Emission,
+            4,
+            "self-host compiler: emitted struct field name is missing from the canonical pool",
+            model::site(DiagnosticSpace::StageType, Id::to_usize(ty)),
+            Option::Some(model::site(DiagnosticSpace::Field, field)),
+            None,
+            0,
+            0
+        ),
+        emission::EmissionName::Variant(ty, variant) => model::make_diagnostic(
+            DiagnosticPhase::Emission,
+            DiagnosticClass::Emission,
+            4,
+            "self-host compiler: emitted variant name is missing from the canonical pool",
+            model::site(DiagnosticSpace::StageType, Id::to_usize(ty)),
+            Option::Some(model::site(DiagnosticSpace::Variant, variant)),
+            None,
+            0,
+            0
+        ),
+        emission::EmissionName::VariantField(ty, variant, field) => model::make_diagnostic(
+            DiagnosticPhase::Emission,
+            DiagnosticClass::Emission,
+            4,
+            "self-host compiler: emitted variant field name is missing from the canonical pool",
+            model::site(DiagnosticSpace::StageType, Id::to_usize(ty)),
+            Option::Some(model::site(DiagnosticSpace::Field, field)),
+            Option::Some(model::site(DiagnosticSpace::Variant, variant)),
+            0,
+            0
+        ),
+        emission::EmissionName::Function(function) => model::make_diagnostic(
+            DiagnosticPhase::Emission,
+            DiagnosticClass::Emission,
+            4,
+            "self-host compiler: emitted function name is missing from the canonical pool",
+            model::site(DiagnosticSpace::Function, Id::to_usize(function)),
+            None,
+            None,
+            0,
+            0
+        )
+    }
+}
+
+pub emission_diagnostic(error: &EmissionError) -> CompilerDiagnostic {
+    handle *error {
+        EmissionError::MissingConstant(register) => model::make_diagnostic(
+            DiagnosticPhase::Emission,
+            DiagnosticClass::Emission,
+            1,
+            "self-host compiler: emitted constant is missing from the canonical pool",
+            model::site(DiagnosticSpace::Register, Id::to_usize(register)),
+            None,
+            None,
+            0,
+            0
+        ),
+        EmissionError::MissingSwitchConstant(pack, variant) => model::make_diagnostic(
+            DiagnosticPhase::Emission,
+            DiagnosticClass::Emission,
+            2,
+            "self-host compiler: emitted switch constant is missing from the canonical pool",
+            model::site(DiagnosticSpace::SwitchPack, Id::to_usize(pack)),
+            Option::Some(model::site(DiagnosticSpace::Variant, variant)),
+            None,
+            0,
+            0
+        ),
+        EmissionError::UnsupportedInstruction => model::make_diagnostic(
+            DiagnosticPhase::Emission,
+            DiagnosticClass::Emission,
+            3,
+            "self-host compiler: Stage-A contains an unsupported instruction",
+            model::site(DiagnosticSpace::Artifact, 0),
+            None,
+            None,
+            0,
+            0
+        ),
+        EmissionError::MissingName(name) => emission_name_diagnostic(name),
+        EmissionError::MissingSignature(function) => model::make_diagnostic(
+            DiagnosticPhase::Emission,
+            DiagnosticClass::Emission,
+            5,
+            "self-host compiler: emitted function signature is missing from the canonical pool",
+            model::site(DiagnosticSpace::Function, Id::to_usize(function)),
+            None,
+            None,
+            0,
+            0
+        ),
+        EmissionError::StructFieldNameCount(ty, expected, found) => model::make_diagnostic(
+            DiagnosticPhase::Emission,
+            DiagnosticClass::Emission,
+            6,
+            "self-host compiler: struct field and field-name counts differ",
+            model::site(DiagnosticSpace::StageType, Id::to_usize(ty)),
+            None,
+            None,
+            wrapping_convert_to_u32(expected),
+            wrapping_convert_to_u32(found)
+        ),
+        EmissionError::VariantFieldNameCount(ty, variant, expected, found) => model::make_diagnostic(
+            DiagnosticPhase::Emission,
+            DiagnosticClass::Emission,
+            7,
+            "self-host compiler: variant field and field-name counts differ",
+            model::site(DiagnosticSpace::StageType, Id::to_usize(ty)),
+            Option::Some(model::site(DiagnosticSpace::Variant, variant)),
+            None,
+            wrapping_convert_to_u32(expected),
+            wrapping_convert_to_u32(found)
+        ),
+        EmissionError::UnsupportedType(ty, tag) => model::make_diagnostic(
+            DiagnosticPhase::Emission,
+            DiagnosticClass::Emission,
+            8,
+            "self-host compiler: Stage-A contains an unsupported type",
+            model::site(DiagnosticSpace::StageType, Id::to_usize(ty)),
+            None,
+            None,
+            0,
+            wrapping_convert_to_u32(tag)
+        ),
+        EmissionError::ArtifactWrite(error) => handle error {
+            artifact::ArtifactWriteError::InvalidSectionCount => model::make_diagnostic(
+                DiagnosticPhase::Emission,
+                DiagnosticClass::Emission,
+                9,
+                "self-host compiler: artifact section count is invalid",
+                model::site(DiagnosticSpace::Artifact, 0),
+                None,
+                None,
+                14,
+                0
+            ),
+            artifact::ArtifactWriteError::InvalidFixedSectionLength => model::make_diagnostic(
+                DiagnosticPhase::Emission,
+                DiagnosticClass::Emission,
+                10,
+                "self-host compiler: fixed artifact section length is invalid",
+                model::site(DiagnosticSpace::Artifact, 0),
+                None,
+                None,
+                0,
+                0
+            )
+        }
+    }
+}
