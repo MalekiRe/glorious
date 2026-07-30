@@ -4851,41 +4851,119 @@ fn named_generic_specialization_preserves_explicit_reference_regions() {
 }
 
 #[test]
-fn shared_projected_reborrows_allow_siblings_but_a_unique_parent_stays_suspended() {
+fn projected_reborrows_allow_disjoint_siblings_through_shared_and_unique_parents() {
     let positive = r#"
         struct Pair { left: i64, right: i64 }
-        read(value: &Pair) -> () {
+        read_shared(value: &Pair) -> () {
             let left = &value.left;
             let right = &value.right;
             left;
             right;
             ()
         }
-        main() -> { let pair = Pair { left: 40, right: 2 }; read(&pair) }
+        read_split(value: &mut Pair) -> () {
+            let left = &value.left;
+            let right = &mut value.right;
+            left;
+            right;
+            ()
+        }
+        main() -> {
+            let pair = Pair { left: 40, right: 2 };
+            read_shared(&pair);
+            read_split(&mut pair)
+        }
     "#;
     let artifact =
         compile_source_to_bytecode("shared-projected-siblings.glorious", positive).unwrap();
     verify(artifact).unwrap();
 
+    for (name, conflict) in [
+        (
+            "overlapping-parent-projected-conflict.glorious",
+            r#"
+                struct Pair { left: i64, right: i64 }
+                bad(value: &mut Pair) -> () {
+                    let shared = &value.left;
+                    let unique = &mut value.left;
+                    shared;
+                    unique;
+                    ()
+                }
+                main() -> { () }
+            "#,
+        ),
+        (
+            "whole-parent-projected-conflict.glorious",
+            r#"
+                struct Pair { left: i64, right: i64 }
+                write(value: &mut Pair) -> () { value; () }
+                bad(value: &mut Pair) -> () {
+                    let shared = &value.left;
+                    write(&mut *value);
+                    shared;
+                    ()
+                }
+                main() -> { () }
+            "#,
+        ),
+    ] {
+        let errors = compile_source_to_bytecode(name, conflict).unwrap_err();
+        assert!(
+            errors.iter().any(|error| {
+                error.message.contains("suspended")
+                    || error.message.contains("live loan")
+                    || error.message.contains("incompatible")
+            }),
+            "an overlapping child or whole-parent use must remain rejected: {errors:#?}"
+        );
+    }
+}
+
+#[test]
+fn releasing_one_projected_child_keeps_its_live_sibling_registered() {
     let conflict = r#"
         struct Pair { left: i64, right: i64 }
+        consume_shared(value: &i64) -> () { value; () }
         bad(value: &mut Pair) -> () {
-            let shared = &value.left;
-            let unique = &mut value.right;
-            shared;
-            unique;
+            let left = &value.left;
+            let right = &mut value.right;
+            consume_shared(left);
+            let overlap = &value.right;
+            right;
+            overlap;
             ()
         }
         main() -> { () }
     "#;
-    let errors = compile_source_to_bytecode("unique-parent-projected-conflict.glorious", conflict)
-        .unwrap_err();
+    let errors =
+        compile_source_to_bytecode("projected-sibling-release-conflict.glorious", conflict)
+            .unwrap_err();
     assert!(
         errors.iter().any(|error| {
-            error.message.contains("suspended") || error.message.contains("live loan")
+            error.message.contains("live loan") || error.message.contains("incompatible")
         }),
-        "a live child must suspend its unique parent reference: {errors:#?}"
+        "releasing one child must not retire a live sibling loan: {errors:#?}"
     );
+
+    let released = r#"
+        struct Pair { left: i64, right: i64 }
+        consume_shared(value: &i64) -> () { value; () }
+        consume_unique(value: &mut i64) -> () { value; () }
+        accepted(value: &mut Pair) -> () {
+            let left = &value.left;
+            let right = &mut value.right;
+            consume_shared(left);
+            consume_unique(right);
+            let next = &mut value.left;
+            consume_unique(next)
+        }
+        main() -> { () }
+    "#;
+    let artifact =
+        compile_source_to_bytecode("projected-sibling-release-complete.glorious", released)
+            .unwrap();
+    verify(artifact).unwrap();
 }
 
 #[test]

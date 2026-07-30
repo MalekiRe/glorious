@@ -41,6 +41,41 @@ fn mixed_lifetime_type_nominals_erase_regions_from_runtime_identity() {
 }
 
 #[test]
+fn lifetime_only_nominal_can_be_nested_in_a_runtime_generic_result() {
+    let source = r#"
+        struct Session<'a> { value: &'a i64 }
+
+        prepare<'a>(value: &'a i64) -> Result<Session<'a>, u8> {
+            Result::Ok(Session { value: value })
+        }
+
+        answer() -> i64 {
+            let value = 42;
+            handle prepare(&value) {
+                Result::Err(_) => 0,
+                Result::Ok(session) => *session.value
+            }
+        }
+
+        main() -> () { () }
+    "#;
+    for level in [
+        OptimizationLevel::O1,
+        OptimizationLevel::O2,
+        OptimizationLevel::O3,
+    ] {
+        compile_source_to_bytecode_with_options(
+            "nested-lifetime-only-nominal.glorious",
+            source,
+            CompileOptions {
+                optimization_level: level,
+            },
+        )
+        .unwrap_or_else(|errors| panic!("{level:?}: {errors:#?}"));
+    }
+}
+
+#[test]
 fn mixed_nominal_arguments_enforce_binder_kinds_arity_and_lifetime_scope() {
     let cases = [
         (

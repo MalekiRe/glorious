@@ -129,3 +129,64 @@ fn mixed_const_and_type_effect_arguments_keep_type_substitution_position() {
         Value::U64(6)
     );
 }
+
+#[test]
+fn result_handler_payload_is_inferred_through_alias_and_lifetime_only_context() {
+    let source = r#"
+        struct ItemTag {}
+        struct Item { value: usize }
+
+        type ItemId = Id<ItemTag>;
+        type ItemArena = Arena<ItemTag, Item>;
+
+        observe<'a>(output: &'a ItemArena, callable: ItemId) {
+            Arena::len(output);
+            Id::to_usize(callable);
+            ()
+        }
+
+        allocate(
+            output: &mut ItemArena,
+            item: Item
+        ) -> usize {
+            let callable = handle Id::from_usize(Arena::len(&*output)) {
+                None => unreachable(),
+                Option::Some(found) => found
+            };
+            observe(&*output, callable);
+            handle Arena::alloc(&mut *output, item) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(staged) => if(staged == callable) {
+                    41
+                } else {
+                    0
+                }
+            }
+        }
+
+        answer() -> usize {
+            let output = Arena::new();
+            handle Arena::alloc(&mut output, Item { value: 1 }) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(_) => ()
+            };
+            allocate(&mut output, Item { value: 7 })
+        }
+
+        main() -> () { () }
+    "#;
+
+    let artifact =
+        compile_source_to_bytecode("aliased-arena-handler-payload.glorious", source).unwrap();
+    let answer = artifact
+        .functions
+        .iter()
+        .position(|function| function.name == "answer")
+        .unwrap() as u32;
+    let verified = verify(artifact).unwrap();
+
+    assert_eq!(
+        Vm::new(verified).run(answer, vec![]).unwrap(),
+        Value::U64(41)
+    );
+}

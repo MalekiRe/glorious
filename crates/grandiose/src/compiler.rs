@@ -10610,11 +10610,16 @@ pub(crate) fn normalize_ground_trait_methods(
                 continue;
             };
             let pattern = source_receiver_type(program, &parameter.ty)?;
+            // Type aliases are transparent evidence for generic calls. Match
+            // their canonical shapes so a result-only binder such as
+            // `Arena::alloc`'s `Id<I>` remains available to a handler arm.
+            let pattern = expand_receiver_alias(program, &pattern, &mut BTreeSet::new());
+            let actual = expand_receiver_alias(program, actual, &mut BTreeSet::new());
             let defaulted_literal = matches!(argument.kind, ExprKind::Int(_) | ExprKind::Float(_));
             if defaulted_literal {
                 continue;
             }
-            if !matches_receiver(&pattern, actual, &binders, &mut substitutions) {
+            if !matches_receiver(&pattern, &actual, &binders, &mut substitutions) {
                 return None;
             }
         }
@@ -10628,6 +10633,8 @@ pub(crate) fn normalize_ground_trait_methods(
                 continue;
             };
             let pattern = source_receiver_type(program, &parameter.ty)?;
+            let pattern = expand_receiver_alias(program, &pattern, &mut BTreeSet::new());
+            let actual = expand_receiver_alias(program, actual, &mut BTreeSet::new());
             let specialized = substitute_receiver(&pattern, &substitutions);
             if !receiver_mentions_binder(&specialized, &binders) {
                 // Numeric literals take their parameter's already-ground
@@ -10635,12 +10642,17 @@ pub(crate) fn normalize_ground_trait_methods(
                 // otherwise-ground generic call such as `Vec::index(v, 0)`.
                 continue;
             }
-            if !matches_receiver(&pattern, actual, &binders, &mut substitutions) {
+            if !matches_receiver(&pattern, &actual, &binders, &mut substitutions) {
                 return None;
             }
         }
         if let Some(expected) = expected
-            && !matches_receiver(&result, expected, &binders, &mut substitutions)
+            && !matches_receiver(
+                &expand_receiver_alias(program, &result, &mut BTreeSet::new()),
+                &expand_receiver_alias(program, expected, &mut BTreeSet::new()),
+                &binders,
+                &mut substitutions,
+            )
         {
             return None;
         }
@@ -10830,7 +10842,16 @@ pub(crate) fn normalize_ground_trait_methods(
                         if let ExprKind::Variable(path) = &callee.kind
                             && path.len() == 1
                             && let Some(function) = self.program.functions.iter().find(|function| {
-                                function.name == path[0].as_ref() && function.generics.is_none()
+                                function.name == path[0].as_ref()
+                                    // Lifetimes have no runtime identity. A
+                                    // lifetime-only callable therefore gives
+                                    // the same concrete later-use context as a
+                                    // syntactically nongeneric callable.
+                                    && function.generics.as_ref().is_none_or(|generics| {
+                                        generics.params.iter().all(|parameter| {
+                                            parameter.kind == crate::ast::GenericParamKind::Lifetime
+                                        })
+                                    })
                             })
                         {
                             for (argument, parameter) in arguments.iter().zip(&function.params) {
@@ -15466,14 +15487,14 @@ fn instantiate_ground_nominals(
                 }
                 typeck::ProvisionalType::Const(_) => true,
                 typeck::ProvisionalType::Nominal(instance) => {
-                    if instance.arguments.is_empty() {
-                        monomorphic.contains(instance.declaration.0.as_str())
+                    let head = instance.declaration.0.as_str();
+                    if generic_heads.contains(head) {
+                        instance
+                            .arguments
+                            .iter()
+                            .all(|argument| supported(argument, monomorphic, generic_heads))
                     } else {
-                        generic_heads.contains(instance.declaration.0.as_str())
-                            && instance
-                                .arguments
-                                .iter()
-                                .all(|argument| supported(argument, monomorphic, generic_heads))
+                        instance.arguments.is_empty() && monomorphic.contains(head)
                     }
                 }
                 typeck::ProvisionalType::Tuple(elements) => elements
@@ -18029,7 +18050,11 @@ fn instantiate_ground_nominals(
         generic_heads: &BTreeSet<&str>,
         monomorphic: &BTreeSet<&str>,
     ) -> TypeSyntax {
-        fn from_type(ty: &typeck::ProvisionalType, span: Span) -> TypeSyntax {
+        fn from_type(
+            ty: &typeck::ProvisionalType,
+            span: Span,
+            generic_heads: &BTreeSet<&str>,
+        ) -> TypeSyntax {
             let kind = match ty {
                 typeck::ProvisionalType::Predefined(name) if name == "Never" => {
                     TypeSyntaxKind::Never
@@ -18047,10 +18072,10 @@ fn instantiate_ground_nominals(
                     }])
                 }
                 typeck::ProvisionalType::Nominal(instance) => {
-                    let name = if instance.arguments.is_empty() {
-                        instance.declaration.0.clone()
-                    } else {
+                    let name = if generic_heads.contains(instance.declaration.0.as_str()) {
                         encode_nominal_instance(instance)
+                    } else {
+                        instance.declaration.0.clone()
                     };
                     TypeSyntaxKind::Path(vec![crate::ast::TypePathSegment { name, span }])
                 }
@@ -18063,16 +18088,16 @@ fn instantiate_ground_nominals(
                 typeck::ProvisionalType::Tuple(elements) => TypeSyntaxKind::Tuple(
                     elements
                         .iter()
-                        .map(|element| from_type(element, span))
+                        .map(|element| from_type(element, span, generic_heads))
                         .collect(),
                 ),
                 typeck::ProvisionalType::Shared(referent) => TypeSyntaxKind::SharedReference {
                     lifetime: None,
-                    referent: Box::new(from_type(referent, span)),
+                    referent: Box::new(from_type(referent, span, generic_heads)),
                 },
                 typeck::ProvisionalType::Unique(referent) => TypeSyntaxKind::UniqueReference {
                     lifetime: None,
-                    referent: Box::new(from_type(referent, span)),
+                    referent: Box::new(from_type(referent, span, generic_heads)),
                 },
                 typeck::ProvisionalType::Param(_) | typeck::ProvisionalType::Callable(_) => {
                     unreachable!("validated ground nominal layout type")
@@ -18104,14 +18129,14 @@ fn instantiate_ground_nominals(
                         self.monomorphic,
                         self.generic_heads,
                     ) {
-                        return Ok(from_type(&ty, syntax.span));
+                        return Ok(from_type(&ty, syntax.span, self.generic_heads));
                     }
                 }
                 if let Some(value) = syntax
                     .simple_name()
                     .and_then(|name| self.substitutions.get(name))
                 {
-                    return Ok(from_type(value, syntax.span));
+                    return Ok(from_type(value, syntax.span, self.generic_heads));
                 }
                 if matches!(syntax.kind, TypeSyntaxKind::Projection { .. }) {
                     return Ok(syntax);
@@ -18127,6 +18152,7 @@ fn instantiate_ground_nominals(
                         return Ok(from_type(
                             &typeck::ProvisionalType::Nominal(instance),
                             syntax.span,
+                            self.generic_heads,
                         ));
                     }
                     Ok(syntax)
@@ -18824,6 +18850,7 @@ fn resolve_aliases(
     let mut visiting = BTreeSet::new();
 
     fn resolve_one(
+        program: &Program,
         name: &str,
         declarations: &BTreeMap<&str, &crate::ast::TypeAliasDecl>,
         nominal_ids: &BTreeMap<&str, TypeId>,
@@ -18848,6 +18875,7 @@ fn resolve_aliases(
             ));
         }
         fn target(
+            program: &Program,
             syntax: &TypeSyntax,
             alias_name: &str,
             declarations: &BTreeMap<&str, &crate::ast::TypeAliasDecl>,
@@ -18858,6 +18886,7 @@ fn resolve_aliases(
             match &syntax.kind {
                 TypeSyntaxKind::SharedReference { referent, .. } => {
                     Ok(ResolvedType::Shared(Box::new(target(
+                        program,
                         referent,
                         alias_name,
                         declarations,
@@ -18868,6 +18897,7 @@ fn resolve_aliases(
                 }
                 TypeSyntaxKind::UniqueReference { referent, .. } => {
                     Ok(ResolvedType::Unique(Box::new(target(
+                        program,
                         referent,
                         alias_name,
                         declarations,
@@ -18883,7 +18913,14 @@ fn resolve_aliases(
                     } else if let Some(ty) = nominal_ids.get(target) {
                         Ok(ResolvedType::Concrete(*ty))
                     } else if declarations.contains_key(target) {
-                        resolve_one(target, declarations, nominal_ids, resolved, visiting)
+                        resolve_one(
+                            program,
+                            target,
+                            declarations,
+                            nominal_ids,
+                            resolved,
+                            visiting,
+                        )
                     } else if target == "Never" {
                         Err(unsupported(
                             syntax.span,
@@ -18899,14 +18936,92 @@ fn resolve_aliases(
                         ))
                     }
                 }
+                TypeSyntaxKind::Application {
+                    constructor,
+                    arguments,
+                    lifetime_arguments,
+                } => {
+                    let Some(head) = constructor.simple_name() else {
+                        return Err(unsupported(
+                            syntax.span,
+                            "complex type alias constructor",
+                            "alias application constructors must resolve to a named generic nominal",
+                        ));
+                    };
+                    let const_arguments = program.type_const_arguments(syntax.span);
+                    let const_by_position = const_arguments
+                        .iter()
+                        .map(|argument| (argument.position, &argument.value))
+                        .collect::<BTreeMap<_, _>>();
+                    let lifetime_positions = lifetime_arguments
+                        .iter()
+                        .map(|argument| argument.position)
+                        .collect::<BTreeSet<_>>();
+                    let mut source_types = arguments.iter();
+                    let total = arguments.len() + const_arguments.len() + lifetime_arguments.len();
+                    let runtime_arguments = (0..total)
+                        .filter(|position| !lifetime_positions.contains(position))
+                        .map(|position| {
+                            if let Some(value) = const_by_position.get(&position) {
+                                const_nominal_identity(value).ok_or_else(|| {
+                                    unsupported(
+                                        syntax.span,
+                                        "unsupported const alias argument",
+                                        "const alias arguments must have a finite runtime identity",
+                                    )
+                                })
+                            } else {
+                                let Some(argument) = source_types.next() else {
+                                    return Err(type_error(
+                                        syntax.span,
+                                        format!(
+                                            "type alias `{alias_name}` has an incomplete application of `{head}`"
+                                        ),
+                                    ));
+                                };
+                                target(
+                                    program,
+                                    argument,
+                                    alias_name,
+                                    declarations,
+                                    nominal_ids,
+                                    resolved,
+                                    visiting,
+                                )
+                                .map(|argument| provisional_type(&argument, nominal_ids, None))
+                            }
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let requested = canonical_nominal_instance(&typeck::NominalInstanceKey {
+                        declaration: typeck::NominalKey(head.to_owned()),
+                        arguments: runtime_arguments,
+                    });
+                    nominal_ids
+                        .iter()
+                        .find_map(|(identity, id)| {
+                            let instance = decode_nominal_instance(identity)?;
+                            let same_head = instance.declaration.0 == head
+                                || instance.declaration.0.ends_with(&format!(":{head}"));
+                            (same_head && canonical_nominal_instance(&instance) == requested)
+                                .then_some(ResolvedType::Concrete(*id))
+                        })
+                        .ok_or_else(|| {
+                            unsupported(
+                                syntax.span,
+                                "complex type alias target",
+                                "alias targets must resolve to a finite ground generic nominal instance",
+                            )
+                        })
+                }
                 _ => Err(unsupported(
                     syntax.span,
                     "complex type alias target",
-                    "alias targets must be a supported path or reference type",
+                    "alias targets must be a supported path, tuple, reference, or ground generic nominal type",
                 )),
             }
         }
         let ty = target(
+            program,
             &declaration.target,
             name,
             declarations,
@@ -18922,6 +19037,7 @@ fn resolve_aliases(
     let mut errors = Vec::new();
     for name in declarations.keys().copied() {
         if let Err(error) = resolve_one(
+            program,
             name,
             &declarations,
             nominal_ids,
@@ -31499,72 +31615,102 @@ impl<'a> CoreLowerer<'a> {
         false
     }
 
-    fn register_loan(&mut self, origin: core::ReferenceOrigin) {
-        if origin.external {
-            if let Some(parent) = origin.parent {
-                self.suspended.insert(parent);
-                if origin.unique {
-                    self.uniquely_suspended.insert(parent);
-                }
-            }
-            return;
-        }
-        let loans = if !origin.path.is_empty() {
-            self.projected_loans
-                .entry(origin.root)
-                .or_default()
-                .entry(origin.path.clone())
-                .or_default()
+    fn register_local_loan(&mut self, local: core::LocalId, path: &[u32], unique: bool) {
+        let loans = if path.is_empty() {
+            self.loans.entry(local).or_default()
         } else {
-            self.loans.entry(origin.root).or_default()
+            self.projected_loans
+                .entry(local)
+                .or_default()
+                .entry(path.to_vec())
+                .or_default()
         };
-        if origin.unique {
+        if unique {
             loans.unique = true;
         } else {
             loans.shared += 1;
         }
-        if let Some(parent) = origin.parent {
-            self.suspended.insert(parent);
-            if origin.unique {
-                self.uniquely_suspended.insert(parent);
+    }
+
+    fn release_local_loan(&mut self, local: core::LocalId, path: &[u32], unique: bool) {
+        let loans = if path.is_empty() {
+            self.loans.get_mut(&local)
+        } else {
+            self.projected_loans
+                .get_mut(&local)
+                .and_then(|fields| fields.get_mut(path))
+        };
+        if let Some(loans) = loans {
+            if unique {
+                loans.unique = false;
+            } else {
+                loans.shared = loans.shared.saturating_sub(1);
             }
+            if loans.shared == 0 && !loans.unique {
+                if path.is_empty() {
+                    self.loans.remove(&local);
+                } else if let Some(fields) = self.projected_loans.get_mut(&local) {
+                    fields.remove(path);
+                    if fields.is_empty() {
+                        self.projected_loans.remove(&local);
+                    }
+                }
+            }
+        }
+    }
+
+    fn local_loan_conflicts(&self, local: core::LocalId, path: &[u32], unique: bool) -> bool {
+        let whole = self.loans.get(&local).copied().unwrap_or_default();
+        whole.unique
+            || unique && whole.shared != 0
+            || self.projected_loans.get(&local).is_some_and(|loans| {
+                loans.iter().any(|(existing, active)| {
+                    let overlap = path.starts_with(existing) || existing.starts_with(path);
+                    overlap && (unique || active.unique)
+                })
+            })
+    }
+
+    fn refresh_parent_suspension(&mut self, parent: core::LocalId) {
+        let whole = self.loans.get(&parent).copied().unwrap_or_default();
+        let projected = self.projected_loans.get(&parent);
+        let active =
+            whole.unique || whole.shared != 0 || projected.is_some_and(|loans| !loans.is_empty());
+        let unique =
+            whole.unique || projected.is_some_and(|loans| loans.values().any(|loan| loan.unique));
+        if active {
+            self.suspended.insert(parent);
+        } else {
+            self.suspended.remove(&parent);
+        }
+        if unique {
+            self.uniquely_suspended.insert(parent);
+        } else {
+            self.uniquely_suspended.remove(&parent);
+        }
+    }
+
+    fn register_loan(&mut self, origin: core::ReferenceOrigin) {
+        if !origin.external {
+            self.register_local_loan(origin.root, &origin.path, origin.unique);
+        }
+        if let Some(parent) = origin.parent {
+            if origin.external || parent != origin.root {
+                self.register_local_loan(parent, &origin.path, origin.unique);
+            }
+            self.refresh_parent_suspension(parent);
         }
     }
 
     fn release_loan(&mut self, origin: core::ReferenceOrigin) {
         if !origin.external {
-            let loans = if !origin.path.is_empty() {
-                self.projected_loans
-                    .get_mut(&origin.root)
-                    .and_then(|fields| fields.get_mut(&origin.path))
-            } else {
-                self.loans.get_mut(&origin.root)
-            };
-            if let Some(loans) = loans {
-                if origin.unique {
-                    loans.unique = false;
-                } else {
-                    loans.shared = loans.shared.saturating_sub(1);
-                }
-                if loans.shared == 0 && !loans.unique {
-                    if !origin.path.is_empty() {
-                        if let Some(fields) = self.projected_loans.get_mut(&origin.root) {
-                            fields.remove(&origin.path);
-                            if fields.is_empty() {
-                                self.projected_loans.remove(&origin.root);
-                            }
-                        }
-                    } else {
-                        self.loans.remove(&origin.root);
-                    }
-                }
-            }
+            self.release_local_loan(origin.root, &origin.path, origin.unique);
         }
         if let Some(parent) = origin.parent {
-            self.suspended.remove(&parent);
-            if origin.unique {
-                self.uniquely_suspended.remove(&parent);
+            if origin.external || parent != origin.root {
+                self.release_local_loan(parent, &origin.path, origin.unique);
             }
+            self.refresh_parent_suspension(parent);
         }
         self.end_region(origin.region);
     }
@@ -32084,13 +32230,10 @@ impl<'a> CoreLowerer<'a> {
                             format!("local `{}` is not a reference", base_path[0]),
                         ));
                     };
-                    if self.moved.contains(&local.local)
-                        || unique && self.suspended.contains(&local.local)
-                        || !unique && self.uniquely_suspended.contains(&local.local)
-                    {
+                    if self.moved.contains(&local.local) {
                         return Err(self.borrow_error(
                             operand.span,
-                            format!("reference `{}` is moved or suspended", base_path[0]),
+                            format!("reference `{}` is moved", base_path[0]),
                         ));
                     }
                     if unique && !parent.unique {
@@ -32147,15 +32290,11 @@ impl<'a> CoreLowerer<'a> {
                         ),
                     ));
                 }
-                let whole = self.loans.get(&local.local).copied().unwrap_or_default();
-                let conflict = !through_reference
-                    && self.projected_loans.get(&local.local).is_some_and(|loans| {
-                        loans.iter().any(|(existing, active)| {
-                            let overlap = path.starts_with(existing) || existing.starts_with(&path);
-                            overlap && (unique || active.unique)
-                        })
-                    });
-                if !through_reference && (whole.unique || unique && whole.shared != 0 || conflict) {
+                let mut origin_path = parent
+                    .as_ref()
+                    .map_or_else(Vec::new, |parent| parent.path.clone());
+                origin_path.extend(&path);
+                if self.local_loan_conflicts(local.local, &origin_path, unique) {
                     return Err(self.borrow_error(
                         operand.span,
                         format!(
@@ -32164,10 +32303,6 @@ impl<'a> CoreLowerer<'a> {
                         ),
                     ));
                 }
-                let mut origin_path = parent
-                    .as_ref()
-                    .map_or_else(Vec::new, |parent| parent.path.clone());
-                origin_path.extend(&path);
                 let mut projection_types = parent
                     .as_ref()
                     .map_or_else(Vec::new, |parent| parent.projection_types.clone());
