@@ -26156,6 +26156,235 @@ impl<'a> CoreLowerer<'a> {
         }
     }
 
+    /// Recognize a trusted generic control wrapper whose literal callback can
+    /// use the existing late-control loop lowering even though it carries no
+    /// label or other representation-late value.
+    ///
+    /// This is deliberately structural rather than a `for_range` name check:
+    /// the wrapper must consist solely of a tail call which forwards an
+    /// `Fn`-bound parameter into a trusted, directly tail-recursive generic
+    /// helper. Ordinary generic calls with literal closures retain their
+    /// normal specialization and callable representation.
+    fn trusted_literal_control_wrapper_call(&self, name: &str, arguments: &[Expr]) -> bool {
+        fn callable_parameter(function: &Function, index: usize) -> bool {
+            let Some(binder) = function
+                .params
+                .get(index)
+                .and_then(|parameter| parameter.ty.simple_name())
+            else {
+                return false;
+            };
+            function
+                .where_clause
+                .iter()
+                .flat_map(|clause| &clause.goals)
+                .any(|goal| {
+                    goal.subject.simple_name() == Some(binder)
+                        && goal.relation.path.len() == 1
+                        && goal.relation.path[0].name == "Fn"
+                })
+        }
+
+        fn unit(ty: &TypeSyntax) -> bool {
+            matches!(&ty.kind, TypeSyntaxKind::Tuple(elements) if elements.is_empty())
+                || ty.simple_name() == Some("Unit")
+        }
+
+        fn unit_or_result_unit(ty: &TypeSyntax) -> bool {
+            unit(ty)
+                || matches!(
+                    &ty.kind,
+                    TypeSyntaxKind::Application {
+                        constructor,
+                        arguments,
+                        ..
+                    } if constructor.simple_name() == Some("Result")
+                        && arguments.first().is_some_and(unit)
+                )
+        }
+
+        fn unit_callback_output(function: &Function, index: usize) -> bool {
+            let Some(binder) = function
+                .params
+                .get(index)
+                .and_then(|parameter| parameter.ty.simple_name())
+            else {
+                return false;
+            };
+            let output = function
+                .where_clause
+                .iter()
+                .flat_map(|clause| &clause.goals)
+                .find(|goal| {
+                    goal.subject.simple_name() == Some(binder)
+                        && goal.relation.path.len() == 1
+                        && goal.relation.path[0].name == "Fn"
+                })
+                .and_then(|goal| {
+                    goal.relation
+                        .bindings
+                        .iter()
+                        .find(|binding| binding.name == "Output")
+                })
+                .and_then(|binding| binding.value.as_type());
+            output.is_some_and(unit_or_result_unit)
+        }
+
+        fn unit_control_result(function: &Function) -> bool {
+            function
+                .return_type
+                .as_ref()
+                .is_none_or(unit_or_result_unit)
+        }
+
+        fn literal_callback(expression: &Expr) -> bool {
+            matches!(
+                expression.kind,
+                ExprKind::Closure { .. } | ExprKind::TypedClosure { .. }
+            )
+        }
+
+        fn direct_binding(expression: &Expr) -> Option<&str> {
+            match &expression.kind {
+                ExprKind::Variable(path) if path.len() == 1 => Some(path[0].as_ref()),
+                ExprKind::Move(value) => direct_binding(value),
+                _ => None,
+            }
+        }
+
+        fn sole_tail_expression(expression: &Expr) -> Option<&Expr> {
+            match &expression.kind {
+                ExprKind::Block(statements) | ExprKind::ContextBlock(statements) => {
+                    let [Stmt::Expr(tail)] = statements.as_slice() else {
+                        return None;
+                    };
+                    sole_tail_expression(tail)
+                }
+                _ => Some(expression),
+            }
+        }
+
+        fn recursion_forwards_callback_directly(
+            expression: &Expr,
+            target: &str,
+            binding: &str,
+        ) -> bool {
+            struct Checker<'a> {
+                target: &'a str,
+                binding: &'a str,
+                valid: bool,
+            }
+
+            impl<'ast> ExprVisitor<'ast> for Checker<'_> {
+                type Break = ();
+
+                fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<()> {
+                    let ExprKind::Call(callee, arguments) = &expression.kind else {
+                        return walk_expr(self, expression);
+                    };
+                    let direct_self_call = matches!(
+                        &callee.kind,
+                        ExprKind::Variable(path)
+                            if path.len() == 1 && path[0].as_ref() == self.target
+                    );
+                    if direct_self_call
+                        && arguments.iter().any(|argument| {
+                            expression_mentions_name(argument, self.binding)
+                                && direct_binding(argument) != Some(self.binding)
+                        })
+                    {
+                        self.valid = false;
+                        return ControlFlow::Break(());
+                    }
+                    walk_expr(self, expression)
+                }
+            }
+
+            let mut checker = Checker {
+                target,
+                binding,
+                valid: true,
+            };
+            let _ = checker.visit_expr(expression);
+            checker.valid
+        }
+
+        if !arguments.iter().any(literal_callback) {
+            return false;
+        }
+        let Some(wrapper) = self.function_templates.iter().find(|function| {
+            function.name == name
+                && function.generics.is_some()
+                && function.params.len() == arguments.len()
+        }) else {
+            return false;
+        };
+        if !self
+            .runtime_bindings
+            .is_trusted_standard_library_body(wrapper.span, self.privacy_domains)
+        {
+            return false;
+        }
+        let literal_parameters = arguments
+            .iter()
+            .enumerate()
+            .filter_map(|(index, argument)| {
+                (literal_callback(argument) && callable_parameter(wrapper, index))
+                    .then_some(wrapper.params[index].name.as_str())
+            })
+            .collect::<BTreeSet<_>>();
+        if literal_parameters.is_empty() {
+            return false;
+        }
+        let Some(Expr {
+            kind: ExprKind::Call(callee, forwarded),
+            ..
+        }) = sole_tail_expression(&wrapper.body)
+        else {
+            return false;
+        };
+        let ExprKind::Variable(path) = &callee.kind else {
+            return false;
+        };
+        let [target_name] = path.as_ref() else {
+            return false;
+        };
+        let Some(target) = self.function_templates.iter().find(|function| {
+            function.name == target_name.as_ref()
+                && function.generics.is_some()
+                && function.params.len() == forwarded.len()
+        }) else {
+            return false;
+        };
+        if !self
+            .runtime_bindings
+            .is_trusted_standard_library_body(target.span, self.privacy_domains)
+        {
+            return false;
+        }
+        let (recursive_occurrences, tail_recursive) =
+            Self::late_control_recursion_shape(&target.body, &target.name);
+        let forwarded_callbacks = forwarded
+            .iter()
+            .enumerate()
+            .filter_map(|(index, argument)| {
+                (callable_parameter(target, index) && unit_callback_output(target, index))
+                    .then(|| direct_binding(argument))
+                    .flatten()
+                    .filter(|binding| literal_parameters.contains(binding))
+                    .map(|_| target.params[index].name.as_str())
+            })
+            .collect::<Vec<_>>();
+        let eligible = recursive_occurrences != 0
+            && tail_recursive
+            && unit_control_result(target)
+            && !forwarded_callbacks.is_empty()
+            && forwarded_callbacks.iter().all(|binding| {
+                recursion_forwards_callback_directly(&target.body, &target.name, binding)
+            });
+        eligible
+    }
+
     fn inline_static_closure(
         &mut self,
         closure: &Expr,
@@ -26936,17 +27165,19 @@ impl<'a> CoreLowerer<'a> {
                 label_arguments[*index].is_none() && closure_arguments[*index].is_none()
             })
             .map(|(index, expectation)| match expectation {
-                Some(LateInlineLetExpectation::Fixed(ty))
-                    if !matches!(
-                        self.references.resolved(*ty),
-                        ResolvedType::Shared(_) | ResolvedType::Unique(_)
-                    ) =>
-                {
-                    Some((index, *ty))
-                }
+                Some(LateInlineLetExpectation::Fixed(ty)) => Some((index, *ty)),
                 _ => None,
             })
             .collect::<Option<Vec<_>>>();
+        let loans_are_external = self.locals.values().all(|local| {
+            !local.owns_loan
+                || ((local.reference.is_some() || !local.reference_fields.is_empty())
+                    && local
+                        .reference
+                        .iter()
+                        .chain(local.reference_fields.values())
+                        .all(|origin| origin.external))
+        });
         let control_context = (recursive_occurrences != 0
             && tail_recursive
             && can_bind_directly
@@ -26956,28 +27187,28 @@ impl<'a> CoreLowerer<'a> {
             // loan additionally needs its lexical borrow state carried around
             // the backedge, which this first control-loop form does not yet
             // represent.
-            && self.locals.values().all(|local| !local.owns_loan))
-        .then(|| {
-            let control = core::ControlLoopId(self.next_control_loop);
-            self.next_control_loop += 1;
-            ActiveLateControlLoop {
-                control,
-                inline_depth: self.late_inline_stack.len(),
-                runtime_parameters: runtime_parameters.expect("checked above"),
-                static_labels: label_arguments
-                    .iter()
-                    .map(|label| label.as_ref().map(|label| label.name.to_string()))
-                    .collect(),
-                static_closures: closure_arguments
-                    .iter()
-                    .map(|closure| {
-                        closure
-                            .as_ref()
-                            .map(|closure| (closure.span.start, closure.span.end))
-                    })
-                    .collect(),
-            }
-        });
+            && loans_are_external)
+            .then(|| {
+                let control = core::ControlLoopId(self.next_control_loop);
+                self.next_control_loop += 1;
+                ActiveLateControlLoop {
+                    control,
+                    inline_depth: self.late_inline_stack.len(),
+                    runtime_parameters: runtime_parameters.expect("checked above"),
+                    static_labels: label_arguments
+                        .iter()
+                        .map(|label| label.as_ref().map(|label| label.name.to_string()))
+                        .collect(),
+                    static_closures: closure_arguments
+                        .iter()
+                        .map(|closure| {
+                            closure
+                                .as_ref()
+                                .map(|closure| (closure.span.start, closure.span.end))
+                        })
+                        .collect(),
+                }
+            });
         let mut statements = Vec::with_capacity(arguments.len() * 2 + 1);
         let mut let_expectations = Vec::new();
         if can_bind_directly {
@@ -34587,16 +34818,19 @@ impl<'a> CoreLowerer<'a> {
                                     if path.len() == 1 && path[0].as_ref() == "if"
                             )
                     );
+                let trusted_literal_control_wrapper = self
+                    .trusted_literal_control_wrapper_call(source_name, arguments);
                 if !structural_else_candidate
                     && self.function_templates.iter().any(|function| {
                     function.name == source_name
                         && function.generics.is_some()
                         && function.params.len() == arguments.len()
                     })
-                    && arguments.iter().any(|argument| {
-                        self.static_label_argument(argument).is_some()
-                            || self.static_closure_argument(argument).is_some()
-                    })
+                    && (trusted_literal_control_wrapper
+                        || arguments.iter().any(|argument| {
+                            self.static_label_argument(argument).is_some()
+                                || self.static_closure_argument(argument).is_some()
+                        }))
                 {
                     return self.inline_late_generic_call(source_name, arguments, span, expected);
                 }
@@ -43970,7 +44204,12 @@ impl MirLowerer {
             }
             core::ExprKind::Block { statements, tail } => {
                 let saved = self.locals.clone();
-                let mut block_owned = Vec::new();
+                // Track lexical owners by Core identity rather than by their
+                // first MIR register. Nested control-flow joins and loops can
+                // legitimately phi-rename an outer local; lexical cleanup
+                // must end the current reference handle, not the consumed
+                // preheader/pre-branch register.
+                let mut block_owned = Vec::<core::LocalId>::new();
                 for statement in statements {
                     match statement {
                         core::Stmt::Let { local, value, .. } => {
@@ -43979,7 +44218,7 @@ impl MirLowerer {
                             let register = self.materialize(emitted, span);
                             self.locals.insert(*local, register);
                             self.owned.push(register);
-                            block_owned.push(register);
+                            block_owned.push(*local);
                         }
                         core::Stmt::Deconstruct {
                             source,
@@ -44005,7 +44244,7 @@ impl MirLowerer {
                                 if let Some(local) = field.local {
                                     self.locals.insert(local, dst);
                                     self.owned.push(dst);
-                                    block_owned.push(dst);
+                                    block_owned.push(local);
                                 } else {
                                     discarded.push((dst, field.span));
                                 }
@@ -44286,6 +44525,7 @@ impl MirLowerer {
                 }
                 let lexical_borrows = block_owned
                     .into_iter()
+                    .filter_map(|local| self.locals.get(&local).copied())
                     .filter(|register| self.borrowed.contains(register))
                     .collect::<Vec<_>>();
                 for register in lexical_borrows.into_iter().rev() {

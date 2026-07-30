@@ -1,5 +1,6 @@
 use grandiose::{
-    compile_bundle_to_bytecode, compile_source_to_bytecode,
+    compile_bundle_to_bytecode, compile_source_to_bytecode, compile_source_to_phases,
+    compiler_mir::Terminator,
     source_bundle::{Segment, SourceBundle},
 };
 use grandiose_vm::{Value, Vm, verify};
@@ -30,6 +31,25 @@ fn assert_stable_quantity_error(source_name: &str, source: &str) {
             .all(|error| error.code.as_deref() != Some("G1BC999")),
         "internal compiler diagnostic escaped: {errors:#?}"
     );
+}
+
+fn canonical_function_section<'a>(text: &'a str, name: &str) -> &'a str {
+    let marker = format!(" \"{name}\" ");
+    let start = text
+        .match_indices("fn#")
+        .find_map(|(start, _)| {
+            let end = text[start..]
+                .find('\n')
+                .map(|offset| start + offset)
+                .unwrap_or(text.len());
+            text[start..end].contains(&marker).then_some(start)
+        })
+        .unwrap_or_else(|| panic!("canonical output is missing function `{name}`"));
+    let end = text[start + 1..]
+        .find("\nfn#")
+        .map(|offset| start + 1 + offset)
+        .unwrap_or(text.len());
+    &text[start..end]
 }
 
 #[test]
@@ -702,6 +722,224 @@ fn range_callback_infers_map_err_input_from_direct_call() {
     assert_eq!(
         run("range-callback-map-err-call.glorious", source, "failure"),
         Value::U64(2)
+    );
+}
+
+#[test]
+fn pure_literal_range_callbacks_fuse_but_ordinary_generic_callbacks_do_not() {
+    let source = r#"
+        effect Stop { stop(index: usize) -> ! }
+
+        observe(index: usize) { index; () }
+
+        single_value() -> Vec<usize> {
+            let source = Vec::new();
+            Vec::push(&mut source, 17);
+            source
+        }
+
+        pure_range_impl(limit: usize) -> usize {
+            for_range(Range::new(0, limit), { index => {
+                observe(index)
+            } });
+            limit
+        }
+
+        pure_range() -> usize { pure_range_impl(5) }
+        empty_range() -> usize { pure_range_impl(0) }
+
+        observed_range() -> usize {
+            handle {
+                for_range(Range::new(0, 5), { index => {
+                    if(index == 3) {
+                        perform Stop::stop(index)
+                    } else {
+                        ()
+                    }
+                } });
+                90
+            } {
+                Stop::stop(index) => index
+            }
+        }
+
+        observed_slice() -> usize {
+            let source = single_value();
+            handle {
+                Slice::for_each(Vec::as_slice(&source), { item => {
+                    perform Stop::stop(*item)
+                } });
+                90
+            } {
+                Stop::stop(item) => item
+            }
+        }
+
+        completed_slice() -> usize {
+            let source = single_value();
+            Slice::for_each(Vec::as_slice(&source), { item => {
+                observe(*item)
+            } });
+            Vec::len(&source)
+        }
+
+        apply<F>(value: usize, body: F) -> usize
+        where F: Fn<(usize), Output=usize> {
+            body(value)
+        }
+
+        ordinary_generic() -> usize {
+            apply(41, { value => value + 1 })
+        }
+
+        main() -> { () }
+    "#;
+
+    assert_eq!(
+        run("pure-range-control-fusion.glorious", source, "pure_range"),
+        Value::U64(5)
+    );
+    assert_eq!(
+        run("empty-range-control-fusion.glorious", source, "empty_range"),
+        Value::U64(0)
+    );
+    assert_eq!(
+        run(
+            "observed-range-control-fusion.glorious",
+            source,
+            "observed_range"
+        ),
+        Value::U64(3)
+    );
+    assert_eq!(
+        run(
+            "ordinary-generic-control.glorious",
+            source,
+            "ordinary_generic"
+        ),
+        Value::U64(42)
+    );
+    assert_eq!(
+        run(
+            "borrowed-slice-control-fusion.glorious",
+            source,
+            "observed_slice"
+        ),
+        Value::U64(17)
+    );
+    assert_eq!(
+        run(
+            "completed-borrowed-slice-control-fusion.glorious",
+            source,
+            "completed_slice"
+        ),
+        Value::U64(1)
+    );
+
+    let phases = compile_source_to_phases("pure-range-control-fusion.glorious", source).unwrap();
+    let core = phases.core.canonical_text();
+    let pure_core = canonical_function_section(&core, "pure_range_impl");
+    assert!(pure_core.contains("control-loop"), "{pure_core}");
+    assert!(pure_core.contains("control-continue"), "{pure_core}");
+    let ordinary_core = canonical_function_section(&core, "ordinary_generic");
+    assert!(!ordinary_core.contains("control-loop"), "{ordinary_core}");
+    assert!(
+        !ordinary_core.contains("control-continue"),
+        "{ordinary_core}"
+    );
+
+    let names = phases
+        .mir
+        .functions
+        .iter()
+        .map(|function| (function.declaration, function.name.as_str()))
+        .collect::<std::collections::BTreeMap<_, _>>();
+    for (caller, forbidden) in [
+        ("pure_range_impl", vec!["for_range", "__g1_for_range_step"]),
+        (
+            "observed_slice",
+            vec!["slice_for_each", "__g1_slice_for_each_step"],
+        ),
+        ("ordinary_generic", vec!["__no_forbidden_target__"]),
+    ] {
+        let function = phases
+            .mir
+            .functions
+            .iter()
+            .find(|function| function.name == caller)
+            .unwrap();
+        let called = function
+            .blocks
+            .iter()
+            .filter_map(|block| match block.terminator {
+                Terminator::Call { function, .. } | Terminator::TailCall { function, .. } => {
+                    names.get(&function).copied()
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            forbidden
+                .iter()
+                .all(|forbidden| called.iter().all(|name| !name.contains(forbidden))),
+            "{caller} retained a range wrapper/step call: {called:?}"
+        );
+        if caller == "ordinary_generic" {
+            assert!(
+                called
+                    .iter()
+                    .any(|name| name.contains("$specialization$apply")),
+                "ordinary generic literal callback was unexpectedly fused: {called:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn fused_try_range_preserves_external_unique_capture_loan() {
+    let source = r#"
+        inspect(
+            input: &Vec<u32>,
+            limit: usize
+        ) -> Result<(), usize> {
+            let item = Vec::index(input, 0);
+            try_for_range(Range::new(0, limit), { _ => {
+                *item;
+                Result::Ok(())
+            } })
+        }
+
+        append(
+            output: &mut Vec<u32>,
+            limit: usize
+        ) -> Result<(), usize> {
+            try_for_range(Range::new(0, limit), { index => {
+                Vec::push(&mut *output, wrapping_convert_to_u32(index));
+                Result::Ok(())
+            } })
+        }
+
+        answer() -> usize {
+            let output = Vec::new();
+            handle append(&mut output, 3) {
+                Result::Err(error) => error,
+                Result::Ok(_) => handle inspect(&output, 3) {
+                    Result::Err(error) => error,
+                    Result::Ok(_) => Vec::len(&output)
+                }
+            }
+        }
+
+        main() -> { () }
+    "#;
+
+    assert_eq!(
+        run(
+            "fused-range-external-unique-capture.glorious",
+            source,
+            "answer"
+        ),
+        Value::U64(3)
     );
 }
 

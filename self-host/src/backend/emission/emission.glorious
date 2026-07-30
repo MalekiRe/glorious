@@ -1005,13 +1005,14 @@ append_switch_cases(
         function,
         pack_id
     );
-    if(index < super::lowering::stage_switch_pack_count(pack)) {
-        let case = super::lowering::stage_switch_pack_at(pack, index);
+    let end = super::lowering::stage_switch_pack_count(pack);
+    try_for_range(Range::new(index, end), { current => {
+        let case = super::lowering::stage_switch_pack_at(pack, current);
         let key = super::lowering::stage_switch_case_key(case);
         let words = Bytes::to_vec(*key);
         handle find_constant(program, &words, 0) {
             Result::Err(_) => Result::Err(
-                EmissionError::MissingSwitchConstant(pack_id, index)
+                EmissionError::MissingSwitchConstant(pack_id, current)
             ),
             Result::Ok(constant) => {
                 Vec::push(
@@ -1025,16 +1026,10 @@ append_switch_cases(
                         super::lowering::stage_switch_case_target(case)
                     )
                 );
-                append_switch_cases(
-                    program,
-                    function,
-                    pack_id,
-                    index + 1,
-                    output
-                )
+                Result::Ok(())
             }
         }
-    } else { Result::Ok(()) }
+    } })
 }
 
 write_instruction(
@@ -1298,11 +1293,12 @@ write_all_code(
     operands: &mut Vec<u32>,
     spans: &mut Vec<FunctionSpans>
 ) -> Result<(), EmissionError> {
-    if(index < super::lowering::stage_program_function_count(program)) {
+    let end = super::lowering::stage_program_function_count(program);
+    try_for_range(Range::new(index, end), { current => {
         let function =
             super::lowering::stage_program_function_at(
                 program,
-                super::lowering::stage_function_id_from_usize(index)
+                super::lowering::stage_function_id_from_usize(current)
             );
         let start = checked_u32(ByteBuf::len(&*code) / 4);
         try(write_function_code(
@@ -1319,14 +1315,8 @@ write_all_code(
             cleanup_start: 0,
             cleanup_count: 0
         });
-        write_all_code(
-            program,
-            index + 1,
-            code,
-            operands,
-            spans
-        )
-    } else { Result::Ok(()) }
+        Result::Ok(())
+    } })
 }
 
 append_cleanup_registers(
@@ -1450,15 +1440,16 @@ write_functions(
     index: usize,
     output: &mut ByteBuf
 ) -> Result<(), EmissionError> {
-    if(index < super::lowering::stage_program_function_count(program)) {
+    let end = super::lowering::stage_program_function_count(program);
+    try_for_range(Range::new(index, end), { current => {
         let function =
             super::lowering::stage_program_function_at(
                 program,
-                super::lowering::stage_function_id_from_usize(index)
+                super::lowering::stage_function_id_from_usize(current)
             );
         let signature = signature_key(function);
         let function_id =
-            super::lowering::stage_function_id_from_usize(index);
+            super::lowering::stage_function_id_from_usize(current);
         let name = try(require_name(
             names,
             super::lowering::stage_function_name(function),
@@ -1469,7 +1460,7 @@ write_functions(
             &signature,
             function_id
         ), @write_functions);
-        let span = Vec::index(spans, index);
+        let span = Vec::index(spans, current);
         ByteBuf::write_u32_le(&mut *output, name);
         ByteBuf::write_u32_le(&mut *output, signature_id);
         ByteBuf::write_u32_le(&mut *output, 0);
@@ -1492,15 +1483,8 @@ write_functions(
         ByteBuf::write_u32_le(&mut *output, 4294967295);
         ByteBuf::write_u64_le(&mut *output, 0);
         ByteBuf::write_u64_le(&mut *output, 0);
-        write_functions(
-            program,
-            names,
-            signatures,
-            spans,
-            index + 1,
-            output
-        )
-    } else { Result::Ok(()) }
+        Result::Ok(())
+    } })
 }
 
 pub encode(

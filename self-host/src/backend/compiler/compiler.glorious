@@ -344,12 +344,12 @@ collect_types(
     >,
     type_names: &mut Vec<String>
 ) -> Result<(), CompileError> {
-    if(index <
-        super::super::frontend::elaboration::interface_type_count(interfaces)
-    ) {
+    let end =
+        super::super::frontend::elaboration::interface_type_count(interfaces);
+    try_for_range(Range::new(index, end), { current => {
         handle super::super::frontend::elaboration::interface_type_at(
             interfaces,
-            index
+            current
         ) {
             InterfaceTypeView::Tuple(elements) => {
                 let fields = Vec::new();
@@ -367,7 +367,7 @@ collect_types(
                         fields,
                         if(
                             super::super::frontend::elaboration::
-                                interface_type_flags_at(interfaces, index)
+                                interface_type_flags_at(interfaces, current)
                                     % 2 == 1
                         ) { 1 } else { 0 }
                     )
@@ -375,14 +375,7 @@ collect_types(
                     Result::Err(_) => unreachable(),
                     Result::Ok(_) => ()
                 };
-                collect_types(
-                    headers,
-                    declarations,
-                    interfaces,
-                    index + 1,
-                    output,
-                    type_names
-                )
+                Result::Ok(())
             },
             InterfaceTypeView::Nominal(nominal) => handle
                 super::super::frontend::elaboration::
@@ -419,7 +412,7 @@ collect_types(
                                 super::super::frontend::elaboration::
                                     interface_type_flags_at(
                                         interfaces,
-                                        index
+                                        current
                                     ) % 2 == 1
                             ) { 1 } else { 0 }
                         )
@@ -427,14 +420,7 @@ collect_types(
                         Result::Err(_) => unreachable(),
                         Result::Ok(_) => ()
                     };
-                    collect_types(
-                        headers,
-                        declarations,
-                        interfaces,
-                        index + 1,
-                        output,
-                        type_names
-                    )
+                    Result::Ok(())
                 },
                 InterfaceNominalView::Enum(shell, start, count) => {
                     let name = try(
@@ -462,7 +448,7 @@ collect_types(
                                 super::super::frontend::elaboration::
                                     interface_type_flags_at(
                                         interfaces,
-                                        index
+                                        current
                                     ) % 2 == 1
                             ) { 1 } else { 0 }
                         )
@@ -470,23 +456,14 @@ collect_types(
                         Result::Err(_) => unreachable(),
                         Result::Ok(_) => ()
                     };
-                    collect_types(
-                        headers,
-                        declarations,
-                        interfaces,
-                        index + 1,
-                        output,
-                        type_names
-                    )
+                    Result::Ok(())
                 }
             },
             _ => Result::Err(
-                CompileError::UnsupportedInterfaceType(index)
+                CompileError::UnsupportedInterfaceType(current)
             )
         }
-    } else {
-        Result::Ok(())
-    }
+    } })
 }
 
 compile_interfaces(
