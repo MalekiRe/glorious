@@ -224,18 +224,22 @@ collect_struct_fields(
     names: &mut Vec<u32>,
     types: &mut Vec<super::lowering::ArtifactTypeId>
 ) -> Result<(), CompileError> {
-    if(ordinal < count) {
+    try_for_range(Range::new(
+        usize_from_u32(ordinal),
+        usize_from_u32(count)
+    ), { current => {
+        let current_ordinal = checked_u32(current);
         let field =
             super::super::frontend::elaboration::interface_field_at_view(
                 interfaces,
-                usize_from_u32(start + ordinal)
+                usize_from_u32(start + current_ordinal)
             );
         let name = try(interface_name(
-                headers,
-                super::super::frontend::elaboration::
-                    interface_field_view_name(&field),
-                start + ordinal
-            ), @collect_struct_fields);
+            headers,
+            super::super::frontend::elaboration::
+                interface_field_view_name(&field),
+            start + current_ordinal
+        ), @collect_struct_fields);
         Vec::push(
             &mut *names,
             checked_u32(Vec::len(&*type_names))
@@ -248,19 +252,8 @@ collect_struct_fields(
                     interface_field_view_type(&field)
             )
         );
-        collect_struct_fields(
-            headers,
-            interfaces,
-            start,
-            count,
-            ordinal + 1,
-            type_names,
-            names,
-            types
-        )
-    } else {
         Result::Ok(())
-    }
+    } })
 }
 
 ordinal_name(value: usize) -> String {
@@ -309,13 +302,17 @@ collect_enum_variants(
     type_names: &mut Vec<String>,
     output: &mut Vec<super::lowering::StageVariant>
 ) -> Result<(), CompileError> {
-    if(ordinal < count) {
-        let variant = usize_from_u32(start + ordinal);
+    try_for_range(Range::new(
+        usize_from_u32(ordinal),
+        usize_from_u32(count)
+    ), { current => {
+        let current_ordinal = checked_u32(current);
+        let variant = usize_from_u32(start + current_ordinal);
         let name = try(interface_name(
             headers,
             super::super::frontend::elaboration::
                 interface_variant_name_at(interfaces, variant),
-            start + ordinal
+            start + current_ordinal
         ), @collect_enum_variants);
         let name_index = checked_u32(Vec::len(&*type_names));
         Vec::push(&mut *type_names, name);
@@ -336,18 +333,8 @@ collect_enum_variants(
                 field_types
             )
         );
-        collect_enum_variants(
-            headers,
-            interfaces,
-            start,
-            count,
-            ordinal + 1,
-            type_names,
-            output
-        )
-    } else {
         Result::Ok(())
-    }
+    } })
 }
 
 collect_types(

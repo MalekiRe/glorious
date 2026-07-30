@@ -1254,10 +1254,9 @@ append_core_values(
     source: &Vec<CoreValueId>,
     index: usize
 ) {
-    if(index < Vec::len(source)) {
-        Vec::push(&mut *output, *Vec::index(source, index));
-        append_core_values(output, source, index + 1)
-    } else { () }
+    for_range(Range::new(index, Vec::len(source)), { current =>
+        Vec::push(&mut *output, *Vec::index(source, current))
+    })
 }
 
 append_construction_fields(
@@ -1265,10 +1264,9 @@ append_construction_fields(
     source: &Vec<ConstructionField>,
     index: usize
 ) {
-    if(index < Vec::len(source)) {
-        Vec::push(&mut *output, *Vec::index(source, index));
-        append_construction_fields(output, source, index + 1)
-    } else { () }
+    for_range(Range::new(index, Vec::len(source)), { current =>
+        Vec::push(&mut *output, *Vec::index(source, current))
+    })
 }
 
 append_match_bindings(
@@ -1276,10 +1274,9 @@ append_match_bindings(
     source: &Vec<CoreMatchBinding>,
     index: usize
 ) {
-    if(index < Vec::len(source)) {
-        Vec::push(&mut *output, *Vec::index(source, index));
-        append_match_bindings(output, source, index + 1)
-    } else { () }
+    for_range(Range::new(index, Vec::len(source)), { current =>
+        Vec::push(&mut *output, *Vec::index(source, current))
+    })
 }
 
 append_match_arms_rebased(
@@ -1288,8 +1285,8 @@ append_match_arms_rebased(
     binding_base: u32,
     index: usize
 ) {
-    if(index < Vec::len(source)) {
-        let arm = Vec::index(source, index);
+    for_range(Range::new(index, Vec::len(source)), { current => {
+        let arm = Vec::index(source, current);
         Vec::push(&mut *output, CoreMatchArm {
             variant: arm.variant,
             bindings: MatchBindingRange {
@@ -1297,9 +1294,8 @@ append_match_arms_rebased(
                 count: arm.bindings.count
             },
             body: arm.body
-        });
-        append_match_arms_rebased(output, source, binding_base, index + 1)
-    } else { () }
+        })
+    }})
 }
 
 checked_range_words(start: usize, count: usize) -> CheckedRangeWords {

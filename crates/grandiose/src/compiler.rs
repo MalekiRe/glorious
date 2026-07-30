@@ -24240,6 +24240,21 @@ impl<'a> CoreLowerer<'a> {
                     arguments,
                     ..
                 },
+                ResolvedType::Array(actual),
+            ) if constructor.simple_name() == self.runtime_bindings.array_name()
+                && arguments.len() == 1 =>
+            {
+                let Some(actual) = self.existing_structural_type_id(&actual) else {
+                    return false;
+                };
+                self.infer_late_substitutions(&arguments[0], actual, generic_names, substitutions)
+            }
+            (
+                TypeSyntaxKind::Application {
+                    constructor,
+                    arguments,
+                    ..
+                },
                 ResolvedType::Concrete(_),
             ) => {
                 fn ground_id(
@@ -28236,6 +28251,38 @@ impl<'a> CoreLowerer<'a> {
             matches!(&expression.kind, ExprKind::Variable(path) if path.len() == 1 && path[0].as_ref() == binding)
         }
 
+        fn argument_binding_expected_type(
+            lowerer: &CoreLowerer<'_>,
+            argument: &Expr,
+            parameter: TypeId,
+            binding: &str,
+        ) -> Option<TypeId> {
+            if direct_binding(argument, binding) {
+                return Some(parameter);
+            }
+            let ExprKind::Unary { op, operand } = &argument.kind else {
+                return None;
+            };
+            let expected_unique = match op {
+                UnaryOp::BorrowShared => false,
+                UnaryOp::BorrowUnique => true,
+                UnaryOp::Negate | UnaryOp::Dereference => return None,
+            };
+            if !direct_binding(operand, binding) {
+                return None;
+            }
+            let referent = match lowerer.resolved_type(parameter) {
+                ResolvedType::Shared(referent) if !expected_unique => referent,
+                ResolvedType::Unique(referent) if expected_unique => referent,
+                ResolvedType::Concrete(_)
+                | ResolvedType::Tuple(_)
+                | ResolvedType::Array(_)
+                | ResolvedType::Shared(_)
+                | ResolvedType::Unique(_) => return None,
+            };
+            lowerer.existing_structural_type_id(&referent)
+        }
+
         fn pattern_binds(pattern: &crate::ast::Pattern, binding: &str) -> bool {
             match &pattern.kind {
                 PatternKind::Binding(name) => name == binding,
@@ -28314,26 +28361,28 @@ impl<'a> CoreLowerer<'a> {
                     if let ExprKind::Variable(path) = &callee.kind
                         && path.len() == 1
                         && let Some(signature) = lowerer.signatures.get(path[0].as_ref())
-                        && let Some((_, ty)) = arguments
-                            .iter()
-                            .zip(&signature.params)
-                            .find(|(argument, _)| direct_binding(argument, binding))
+                        && let Some(ty) =
+                            arguments
+                                .iter()
+                                .zip(&signature.params)
+                                .find_map(|(argument, ty)| {
+                                    argument_binding_expected_type(lowerer, argument, *ty, binding)
+                                })
                     {
-                        return Some(*ty);
+                        return Some(ty);
                     }
                     if let Some((signature, runtime_arguments, _)) =
                         lowerer.planned_call(expression)
                         && let Some(ty) = runtime_arguments.iter().zip(&signature.params).find_map(
                             |(runtime, ty)| match runtime {
-                                GeneratedArgument::Source(index)
-                                    if arguments.get(*index).is_some_and(|argument| {
-                                        direct_binding(argument, binding)
-                                    }) =>
-                                {
-                                    Some(*ty)
+                                GeneratedArgument::Source(index) => {
+                                    arguments.get(*index).and_then(|argument| {
+                                        argument_binding_expected_type(
+                                            lowerer, argument, *ty, binding,
+                                        )
+                                    })
                                 }
-                                GeneratedArgument::Source(_)
-                                | GeneratedArgument::Capture { .. } => None,
+                                GeneratedArgument::Capture { .. } => None,
                             },
                         )
                     {
@@ -32687,6 +32736,63 @@ impl<'a> CoreLowerer<'a> {
                         return Err(errors);
                     }
                     let mut substitutions = BTreeMap::<String, TypeId>::new();
+                    // A generic nominal constructed inside a statically
+                    // inlined callback may have no specialization-graph entry
+                    // of its own even though its enclosing expression already
+                    // supplies the exact nominal result. Seed the nominal's
+                    // binders from that expected instance before checking its
+                    // fields. This gives nested constructors such as
+                    // `Vec { storage: __g1_array_empty() }` the concrete
+                    // `Array<T>` field expectation they require.
+                    let expected_late = expected
+                        .and_then(|expected| self.effects.late_nominals.get(&expected))
+                        .filter(|late| late.declaration == declaration.name)
+                        .cloned();
+                    if let Some(late) = &expected_late {
+                        let binders = declaration
+                            .generics
+                            .iter()
+                            .flat_map(|generics| &generics.params)
+                            .filter(|parameter| parameter.kind == GenericParamKind::Type)
+                            .collect::<Vec<_>>();
+                        if binders.len() == late.arguments.len() {
+                            substitutions.extend(
+                                binders
+                                    .into_iter()
+                                    .zip(&late.arguments)
+                                    .map(|(binder, argument)| {
+                                        (binder.name.clone(), *argument)
+                                    }),
+                            );
+                        }
+                    }
+                    let expected_sealed = expected.filter(|expected| {
+                        self.nominals.iter().any(|(name, info)| {
+                            info.id == *expected
+                                && decode_nominal_instance(name).is_some_and(|instance| {
+                                    instance.declaration.0 == declaration.name
+                                })
+                        })
+                    });
+                    let expected_fields = expected_late
+                        .as_ref()
+                        .map(|late| late.fields.clone())
+                        .or_else(|| {
+                            let expected = expected_sealed?;
+                            self.nominals.iter().find_map(|(name, info)| {
+                                if info.id != expected
+                                    || !decode_nominal_instance(name).is_some_and(|instance| {
+                                        instance.declaration.0 == declaration.name
+                                    })
+                                {
+                                    return None;
+                                }
+                                match &info.kind {
+                                    NominalKind::Struct(fields) => Some(fields.clone()),
+                                    NominalKind::Enum(_) => None,
+                                }
+                            })
+                        });
                     let mut core_fields = Vec::with_capacity(declaration.fields.len());
                     let mut runtime_fields = Vec::with_capacity(declaration.fields.len());
                     let mut aggregate_references = BTreeMap::new();
@@ -32695,14 +32801,28 @@ impl<'a> CoreLowerer<'a> {
                             .ty
                             .simple_name()
                             .filter(|name| generic_names.contains(*name));
-                        let field_expected = if let Some(binder) = binder {
-                            substitutions.get(binder).copied()
-                        } else {
-                            field.ty.simple_name().and_then(|name| {
-                                scalar_type(name)
-                                    .or_else(|| self.nominals.get(name).map(|info| info.id))
+                        let field_expected = expected_fields
+                            .as_ref()
+                            .and_then(|fields| {
+                                fields
+                                    .iter()
+                                    .find(|(name, _)| name == &field.name)
+                                    .map(|(_, ty)| *ty)
                             })
-                        };
+                            .or_else(|| {
+                                self.substituted_source_type(&field.ty, &substitutions)
+                            })
+                            .or_else(|| {
+                                if let Some(binder) = binder {
+                                    substitutions.get(binder).copied()
+                                } else {
+                                    field.ty.simple_name().and_then(|name| {
+                                        scalar_type(name).or_else(|| {
+                                            self.nominals.get(name).map(|info| info.id)
+                                        })
+                                    })
+                                }
+                            });
                         let value =
                             self.expression(supplied[field.name.as_str()], field_expected)?;
                         self.validate_anonymous_use(&value, 1, "struct field temporary")?;
@@ -32740,6 +32860,23 @@ impl<'a> CoreLowerer<'a> {
                             "late generic nominal construction",
                             "every generic parameter must occur directly in a field while transporting a resumption",
                         )]);
+                    }
+                    if let Some(ty) = expected_sealed {
+                        self.check(span, expected, ty)?;
+                        let mut expression = self.typed(
+                            span,
+                            ty,
+                            core::ExprKind::Construct {
+                                nominal: ty,
+                                variant: None,
+                                fields: core_fields,
+                            },
+                        );
+                        Self::set_expression_reference_fields(
+                            &mut expression,
+                            aggregate_references,
+                        );
+                        return Ok(expression);
                     }
                     let copy = runtime_fields.iter().all(|(_, ty)| self.is_copy(*ty));
                     let principal = runtime_fields
@@ -32790,7 +32927,9 @@ impl<'a> CoreLowerer<'a> {
                                 private_fields: declaration
                                     .fields
                                     .iter()
-                                    .filter(|field| field.visibility == FieldVisibility::Private)
+                                    .filter(|field| {
+                                        field.visibility == FieldVisibility::Private
+                                    })
                                     .map(|field| field.name.clone())
                                     .collect(),
                             },

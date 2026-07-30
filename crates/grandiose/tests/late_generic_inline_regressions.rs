@@ -611,6 +611,46 @@ fn range_callback_branded_try_leaves_the_enclosing_function() {
 }
 
 #[test]
+fn range_callback_infers_nested_vec_constructors() {
+    let source = r#"
+        consume(values: &mut Vec<u32>, value: u32) {
+            Vec::push(&mut *values, value)
+        }
+
+        checked(value: usize) -> Result<u32, usize> {
+            Result::Ok(wrapping_convert_to_u32(value))
+        }
+
+        walk() -> Result<(), usize> {
+            try_for_range(Range::new(0, 2), { index => {
+                let values = Vec::new();
+                let value = try(checked(index), @walk);
+                consume(&mut values, value);
+                Result::Ok(())
+            } })
+        }
+
+        answer() -> usize {
+            handle walk() {
+                Result::Ok(_) => 42,
+                Result::Err(error) => error
+            }
+        }
+
+        main() -> { () }
+    "#;
+
+    assert_eq!(
+        run(
+            "range-callback-nested-vec-inference.glorious",
+            source,
+            "answer"
+        ),
+        Value::U64(42)
+    );
+}
+
+#[test]
 fn late_generic_inline_does_not_bypass_private_deconstruction_authority() {
     let bundle = SourceBundle::new(
         Segment::new(
