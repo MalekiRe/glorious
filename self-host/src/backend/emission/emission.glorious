@@ -591,9 +591,9 @@ write_enum_variants<'a>(
     index: usize,
     output: &mut ByteBuf
 ) -> Result<(), EmissionError> {
-    if(index < Slice::len(variants)) {
+    try_for_range(Range::new(index, Slice::len(variants)), { current => {
         handle super::lowering::stage_variant_view(
-            slice_at(variants, index)
+            slice_at(variants, current)
         ) {
             super::lowering::StageVariantView::Variant(
                 name_index,
@@ -604,7 +604,7 @@ write_enum_variants<'a>(
                     program,
                     names,
                     name_index,
-                    EmissionName::Variant(type_id, index)
+                    EmissionName::Variant(type_id, current)
                 ), @write_enum_variants);
                 ByteBuf::write_u32_le(&mut *output, variant_name);
                 ByteBuf::write_u32_le(
@@ -615,32 +615,23 @@ write_enum_variants<'a>(
                     program,
                     names,
                     type_id,
-                    index,
+                    current,
                     field_names,
                     fields,
                     0,
                     output
                 ), @write_enum_variants);
-                write_enum_variants(
-                    program,
-                    names,
-                    type_id,
-                    variants,
-                    index + 1,
-                    output
-                )
+                Result::Ok(())
             } else {
                 Result::Err(EmissionError::VariantFieldNameCount(
                     type_id,
-                    index,
+                    current,
                     Slice::len(fields),
                     Slice::len(field_names)
                 ))
             }
         }
-    } else {
-        Result::Ok(())
-    }
+    } })
 }
 
 enum_type_record<'a>(
@@ -951,22 +942,20 @@ append_arguments(
     output: &mut Vec<u32>
 ) {
     let count = super::lowering::register_pack_count(arguments);
-    if(ordinal < count) {
+    for_range(Range::new(
+        usize_from_u32(ordinal),
+        usize_from_u32(count)
+    ), { current =>
         Vec::push(
             &mut *output,
             super::lowering::register_raw(
                 super::lowering::register_pack_at(
                     arguments,
-                    usize_from_u32(ordinal)
+                    current
                 )
             )
-        );
-        append_arguments(
-            arguments,
-            ordinal + 1,
-            output
         )
-    } else { () }
+    })
 }
 
 append_switch_cases(

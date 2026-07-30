@@ -3164,8 +3164,13 @@ fn higher_order_specialization_reference_plan(
     if callable_candidates.next().is_some() {
         return None;
     }
-    let specialization::SpecializationArgument::Closure(site, shape, captures, environment) =
-        substitutions.get(binder)?
+    let specialization::SpecializationArgument::Closure(
+        site,
+        shape,
+        captures,
+        environment,
+        active_labels,
+    ) = substitutions.get(binder)?
     else {
         return None;
     };
@@ -3174,6 +3179,7 @@ fn higher_order_specialization_reference_plan(
         shape: shape.clone(),
         captures: captures.clone(),
         param_env: environment.clone(),
+        active_labels: active_labels.clone(),
     };
     let kind = *closure_bodies.get(&request)?;
     let (closure_params, closure_body) = specialization::closure_body(program, &request, kind)?;
@@ -6483,7 +6489,7 @@ fn compile_program_with_phases(
                     }
                 };
                 for binder in &template.effectful_callable_binders {
-                    let Some(specialization::SpecializationArgument::Closure(_, shape, _, _)) =
+                    let Some(specialization::SpecializationArgument::Closure(_, shape, _, _, _)) =
                         substitutions.get(binder)
                     else {
                         continue;
@@ -21402,6 +21408,7 @@ fn generated_shapes(
                     shape,
                     captures,
                     environment,
+                    active_labels,
                 )) = substitutions.get(binder)
                 else {
                     return Err(vec![unsupported(
@@ -21415,6 +21422,7 @@ fn generated_shapes(
                     shape: shape.clone(),
                     captures: captures.clone(),
                     param_env: environment.clone(),
+                    active_labels: active_labels.clone(),
                 };
                 if template.result_binder.as_ref() == Some(binder)
                     || template
@@ -21509,24 +21517,25 @@ fn generated_shapes(
                 "the requested generic callable did not resolve to a fully ground signature",
             )]);
         };
-        let retained_request =
-            template.result_binder.as_ref().and_then(|binder| {
-                let specialization::SpecializationArgument::Closure(
-                    site,
-                    shape,
-                    captures,
-                    environment,
-                ) = substitutions.get(binder)?
-                else {
-                    return None;
-                };
-                Some(specialization::ClosureRequest {
-                    site: site.clone(),
-                    shape: shape.clone(),
-                    captures: captures.clone(),
-                    param_env: environment.clone(),
-                })
-            });
+        let retained_request = template.result_binder.as_ref().and_then(|binder| {
+            let specialization::SpecializationArgument::Closure(
+                site,
+                shape,
+                captures,
+                environment,
+                active_labels,
+            ) = substitutions.get(binder)?
+            else {
+                return None;
+            };
+            Some(specialization::ClosureRequest {
+                site: site.clone(),
+                shape: shape.clone(),
+                captures: captures.clone(),
+                param_env: environment.clone(),
+                active_labels: active_labels.clone(),
+            })
+        });
         let retained_nominal =
             template
                 .result_nominal_binders
@@ -21542,12 +21551,14 @@ fn generated_shapes(
                                     shape,
                                     captures,
                                     environment,
+                                    active_labels,
                                 ) => Some(specialization::ClosureTupleField::Closure(
                                     specialization::ClosureRequest {
                                         site: site.clone(),
                                         shape: shape.clone(),
                                         captures: captures.clone(),
                                         param_env: environment.clone(),
+                                        active_labels: active_labels.clone(),
                                     },
                                 )),
                                 specialization::SpecializationArgument::Type(ty) => {

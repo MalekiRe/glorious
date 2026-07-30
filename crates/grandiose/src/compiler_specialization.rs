@@ -49,6 +49,7 @@ pub(crate) enum SpecializationArgument {
         Box<CallableShape>,
         Vec<ClosureCapture>,
         ParamEnv,
+        BTreeMap<String, ProvisionalType>,
     ),
 }
 
@@ -101,6 +102,7 @@ pub(crate) struct ClosureRequest {
     pub(crate) shape: Box<CallableShape>,
     pub(crate) captures: Vec<ClosureCapture>,
     pub(crate) param_env: ParamEnv,
+    pub(crate) active_labels: BTreeMap<String, ProvisionalType>,
 }
 
 /// Stable source identity for a recursive closure binding. Recursive calls
@@ -163,12 +165,15 @@ fn compatible_sealed_producer_contracts(
     left_shape: &CallableShape,
     left_captures: &[ClosureCapture],
     left_environment: &ParamEnv,
+    left_labels: &BTreeMap<String, ProvisionalType>,
     right_shape: &CallableShape,
     right_captures: &[ClosureCapture],
     right_environment: &ParamEnv,
+    right_labels: &BTreeMap<String, ProvisionalType>,
 ) -> bool {
     left_shape == right_shape
         && left_environment == right_environment
+        && left_labels == right_labels
         && left_captures.len() == right_captures.len()
         && left_captures
             .iter()
@@ -652,10 +657,17 @@ fn specialization_argument_embeds(
             specialization_type_embeds(left, right)
         }
         (
-            SpecializationArgument::Closure(_, left, left_captures, left_environment),
-            SpecializationArgument::Closure(_, right, right_captures, right_environment),
+            SpecializationArgument::Closure(_, left, left_captures, left_environment, left_labels),
+            SpecializationArgument::Closure(
+                _,
+                right,
+                right_captures,
+                right_environment,
+                right_labels,
+            ),
         ) => {
             left_environment == right_environment
+                && left_labels == right_labels
                 && left_captures.len() == right_captures.len()
                 && left_captures
                     .iter()
@@ -2216,7 +2228,7 @@ impl ProvisionalTypeFolder for SubstitutionFolder<'_> {
             self.missing = MissingParameter::Preserve;
             let resolved = match &argument {
                 SpecializationArgument::Type(value) => self.fold_type(value),
-                SpecializationArgument::Closure(_, shape, _, _) => {
+                SpecializationArgument::Closure(_, shape, _, _, _) => {
                     Ok(ProvisionalType::Callable(shape.clone()))
                 }
                 SpecializationArgument::EffectRow(_) => Err(()),
@@ -2356,7 +2368,7 @@ fn bind(
     match formal {
         ProvisionalType::Param(key) => match substitutions.get(key) {
             Some(SpecializationArgument::Type(existing)) => existing == actual,
-            Some(SpecializationArgument::Closure(_, shape, _, _)) => {
+            Some(SpecializationArgument::Closure(_, shape, _, _, _)) => {
                 actual == &ProvisionalType::Callable(shape.clone())
             }
             Some(SpecializationArgument::EffectRow(_)) => false,
@@ -2410,7 +2422,7 @@ fn inference_occurs(
                 SpecializationArgument::Type(ty) => {
                     inference_occurs(key, ty, substitutions, visiting)
                 }
-                SpecializationArgument::Closure(_, shape, _, _) => {
+                SpecializationArgument::Closure(_, shape, _, _, _) => {
                     shape
                         .params
                         .iter()
@@ -2439,7 +2451,7 @@ fn unify_inference(
                 Some(SpecializationArgument::Type(value)) if value != ty => {
                     resolve(value, substitutions)
                 }
-                Some(SpecializationArgument::Closure(_, shape, _, _)) => {
+                Some(SpecializationArgument::Closure(_, shape, _, _, _)) => {
                     ProvisionalType::Callable(shape.clone())
                 }
                 _ => ty.clone(),
@@ -2837,6 +2849,42 @@ fn direct_closure_effects(
     collector.output
 }
 
+fn referenced_active_labels(
+    expression: &Expr,
+    active: &BTreeMap<String, ProvisionalType>,
+) -> BTreeMap<String, ProvisionalType> {
+    struct Collector<'a> {
+        active: &'a BTreeMap<String, ProvisionalType>,
+        output: BTreeMap<String, ProvisionalType>,
+    }
+
+    impl<'ast> ExprVisitor<'ast> for Collector<'_> {
+        type Break = ();
+
+        fn visit_expr(&mut self, expression: &'ast Expr) -> ControlFlow<()> {
+            match &expression.kind {
+                ExprKind::LabelReference(label) => {
+                    if let Some(ty) = self.active.get(label.name.as_ref()) {
+                        self.output.insert(label.name.to_string(), ty.clone());
+                    }
+                }
+                // A nested callable retains its own independently filtered
+                // static-label context when it is planned.
+                ExprKind::Closure { .. } | ExprKind::TypedClosure { .. } => {}
+                _ => walk_expr(self, expression)?,
+            }
+            ControlFlow::Continue(())
+        }
+    }
+
+    let mut collector = Collector {
+        active,
+        output: BTreeMap::new(),
+    };
+    let _ = collector.visit_expr(expression);
+    collector.output
+}
+
 #[derive(Clone)]
 enum LocalBinding {
     Type(ProvisionalType),
@@ -2854,6 +2902,7 @@ struct DeferredFunctionItem {
     site: ClosureSiteKey,
     value_site: CallSiteKey,
     params: Vec<String>,
+    active_labels: BTreeMap<String, ProvisionalType>,
     provisionally_called: bool,
 }
 
@@ -4914,7 +4963,7 @@ impl<'a> Walker<'a> {
             return Some(false);
         };
         let principal = match exact_argument {
-            Some(SpecializationArgument::Closure(_, shape, captures, _))
+            Some(SpecializationArgument::Closure(_, shape, captures, _, _))
                 if subject == &ProvisionalType::Callable(shape.clone()) =>
             {
                 let mut environment_zero_use = true;
@@ -5169,6 +5218,7 @@ impl<'a> Walker<'a> {
             site: self.closure_site(expression)?,
             value_site: self.call_site(expression)?,
             params: params.iter().map(ToString::to_string).collect(),
+            active_labels: referenced_active_labels(body, &self.active_labels),
             provisionally_called: false,
         })
     }
@@ -5296,6 +5346,7 @@ impl<'a> Walker<'a> {
             shape,
             captures: Vec::new(),
             param_env: self.param_env.clone(),
+            active_labels: item.active_labels,
         };
         self.discovery
             .graph
@@ -5703,6 +5754,7 @@ impl<'a> Walker<'a> {
             shape: Box::new(shape),
             captures,
             param_env: self.param_env.clone(),
+            active_labels: referenced_active_labels(body, &self.active_labels),
         };
         if let Some(recursive_self) = &self.active_recursive_self {
             let validation_body = self.body_instance.clone();
@@ -6156,7 +6208,7 @@ impl<'a> Walker<'a> {
             .iter()
             .map(|param| match substitutions.get(param)? {
                 SpecializationArgument::Type(ty) => Some(ty.clone()),
-                SpecializationArgument::Closure(_, shape, _, _) => {
+                SpecializationArgument::Closure(_, shape, _, _, _) => {
                     Some(ProvisionalType::Callable(shape.clone()))
                 }
                 SpecializationArgument::EffectRow(_) => None,
@@ -6294,6 +6346,7 @@ impl<'a> Walker<'a> {
                         closure.shape.clone(),
                         closure.captures.clone(),
                         closure.param_env.clone(),
+                        closure.active_labels.clone(),
                     ),
                 );
                 if let Some(ClosureTupleField::ClosureSet(closures)) = &exact_callable {
@@ -6333,7 +6386,7 @@ impl<'a> Walker<'a> {
                 {
                     Some(ty.clone())
                 }
-                Some(SpecializationArgument::Closure(_, shape, _, _)) => {
+                Some(SpecializationArgument::Closure(_, shape, _, _, _)) => {
                     Some(ProvisionalType::Callable(shape.clone()))
                 }
                 _ => None,
@@ -6362,14 +6415,19 @@ impl<'a> Walker<'a> {
                         SpecializationArgument::Type(ty) => {
                             Some(ClosureTupleField::Type(ty.clone()))
                         }
-                        SpecializationArgument::Closure(site, shape, captures, environment) => {
-                            Some(ClosureTupleField::Closure(ClosureRequest {
-                                site: site.clone(),
-                                shape: shape.clone(),
-                                captures: captures.clone(),
-                                param_env: environment.clone(),
-                            }))
-                        }
+                        SpecializationArgument::Closure(
+                            site,
+                            shape,
+                            captures,
+                            environment,
+                            active_labels,
+                        ) => Some(ClosureTupleField::Closure(ClosureRequest {
+                            site: site.clone(),
+                            shape: shape.clone(),
+                            captures: captures.clone(),
+                            param_env: environment.clone(),
+                            active_labels: active_labels.clone(),
+                        })),
                         SpecializationArgument::EffectRow(_) => None,
                     }
                 })
@@ -6949,13 +7007,16 @@ impl<'a> Walker<'a> {
                             existing_shape,
                             existing_captures,
                             existing_environment,
+                            existing_labels,
                         )) if !compatible_sealed_producer_contracts(
                             existing_shape,
                             existing_captures,
                             existing_environment,
+                            existing_labels,
                             &closure.shape,
                             &closure.captures,
                             &closure.param_env,
+                            &closure.active_labels,
                         ) =>
                         {
                             let message = "VM-sealed generic callable transport has incompatible producer signature/effect, receiver mode, capture layout, or lifetime environment";
@@ -6968,7 +7029,7 @@ impl<'a> Walker<'a> {
                             self.error(message);
                             return None;
                         }
-                        Some(SpecializationArgument::Closure(_, _, _, _)) => {
+                        Some(SpecializationArgument::Closure(..)) => {
                             // `T` denotes the callable contract, not one source
                             // producer identity. Keep the first producer as the
                             // deterministic specialization representative and
@@ -6987,6 +7048,7 @@ impl<'a> Walker<'a> {
                                     closure.shape.clone(),
                                     closure.captures.clone(),
                                     closure.param_env.clone(),
+                                    closure.active_labels.clone(),
                                 ),
                             );
                         }
@@ -7264,7 +7326,7 @@ impl<'a> Walker<'a> {
         };
         if arguments.iter().any(|argument| match argument {
             SpecializationArgument::Type(ty) => !ground(ty),
-            SpecializationArgument::Closure(_, shape, captures, _) => {
+            SpecializationArgument::Closure(_, shape, captures, _, _) => {
                 !shape.params.iter().all(ground)
                     || !ground(&shape.result)
                     || captures.iter().any(|capture| !ground(&capture.ty))
@@ -7318,9 +7380,11 @@ impl<'a> Walker<'a> {
                             &first.shape,
                             &first.captures,
                             &first.param_env,
+                            &first.active_labels,
                             &producer.shape,
                             &producer.captures,
                             &producer.param_env,
+                            &producer.active_labels,
                         )
                     })
                 });
@@ -7345,8 +7409,13 @@ impl<'a> Walker<'a> {
                     self.error(message);
                 }
             } else if let Some(binder) = &template.result_binder
-                && let Some(SpecializationArgument::Closure(site, shape, captures, environment)) =
-                    substitutions.get(binder)
+                && let Some(SpecializationArgument::Closure(
+                    site,
+                    shape,
+                    captures,
+                    environment,
+                    active_labels,
+                )) = substitutions.get(binder)
             {
                 self.discovery.graph.returned_closures.insert(
                     call_site.clone(),
@@ -7355,6 +7424,7 @@ impl<'a> Walker<'a> {
                         shape: shape.clone(),
                         captures: captures.clone(),
                         param_env: environment.clone(),
+                        active_labels: active_labels.clone(),
                     },
                 );
             }
@@ -7365,14 +7435,19 @@ impl<'a> Walker<'a> {
                         SpecializationArgument::Type(ty) => {
                             Some(ClosureTupleField::Type(ty.clone()))
                         }
-                        SpecializationArgument::Closure(site, shape, captures, environment) => {
-                            Some(ClosureTupleField::Closure(ClosureRequest {
-                                site: site.clone(),
-                                shape: shape.clone(),
-                                captures: captures.clone(),
-                                param_env: environment.clone(),
-                            }))
-                        }
+                        SpecializationArgument::Closure(
+                            site,
+                            shape,
+                            captures,
+                            environment,
+                            active_labels,
+                        ) => Some(ClosureTupleField::Closure(ClosureRequest {
+                            site: site.clone(),
+                            shape: shape.clone(),
+                            captures: captures.clone(),
+                            param_env: environment.clone(),
+                            active_labels: active_labels.clone(),
+                        })),
                         SpecializationArgument::EffectRow(_) => None,
                     })
                     .collect::<Option<Vec<_>>>();
@@ -7451,7 +7526,7 @@ impl<'a> Walker<'a> {
                     });
                 let ground_substitutions = substitutions.values().all(|argument| match argument {
                     SpecializationArgument::Type(ty) => ground(ty),
-                    SpecializationArgument::Closure(_, shape, captures, _) => {
+                    SpecializationArgument::Closure(_, shape, captures, _, _) => {
                         shape.params.iter().all(ground)
                             && ground(&shape.result)
                             && captures.iter().all(|capture| ground(&capture.ty))
@@ -9991,6 +10066,7 @@ pub(crate) fn discover_with_traits_and_budgets_from(
                             shape,
                             captures,
                             environment,
+                            active_labels,
                         )) = substitutions.get(binder)
                     {
                         return Some((
@@ -10000,6 +10076,7 @@ pub(crate) fn discover_with_traits_and_budgets_from(
                                 shape: shape.clone(),
                                 captures: captures.clone(),
                                 param_env: environment.clone(),
+                                active_labels: active_labels.clone(),
                             }),
                         ));
                     }
@@ -10117,7 +10194,7 @@ pub(crate) fn discover_with_traits_and_budgets_from(
                 locals,
                 bindings,
                 active_variants: BTreeMap::new(),
-                active_labels: BTreeMap::new(),
+                active_labels: closure.active_labels.clone(),
                 expression_ordinals: &expression_ordinals,
                 body_instance: BodyInstanceKey::Closure(closure.clone()),
                 recording: true,
@@ -10532,7 +10609,7 @@ mod tests {
         assert!(discovery.errors.is_empty(), "{:#?}", discovery.errors);
         assert!(discovery.graph.requests.keys().any(|request| matches!(
             request.arguments.first(),
-            Some(SpecializationArgument::Closure(_, _, captures, _)) if captures.is_empty()
+            Some(SpecializationArgument::Closure(_, _, captures, _, _)) if captures.is_empty()
         )));
     }
 
@@ -10572,7 +10649,7 @@ mod tests {
             }) || request.arguments.iter().any(|argument| {
                 matches!(
                     argument,
-                    SpecializationArgument::Closure(_, shape, _, _)
+                    SpecializationArgument::Closure(_, shape, _, _, _)
                         if shape.effects.iter().any(|effect| !effect.arguments.is_empty())
                 )
             })
@@ -10755,7 +10832,7 @@ mod tests {
             .requests
             .keys()
             .filter_map(|key| match &key.arguments[0] {
-                SpecializationArgument::Closure(site, shape, captures, _environment) => {
+                SpecializationArgument::Closure(site, shape, captures, _environment, _) => {
                     assert!(shape.params.is_empty());
                     assert!(captures.is_empty());
                     assert_eq!(shape.result, ProvisionalType::Predefined("i64".into()));
@@ -10808,6 +10885,54 @@ mod tests {
             "{}",
             discovery.graph.canonical_text()
         );
+    }
+
+    #[test]
+    fn planned_closure_rewalk_retains_referenced_static_label_destinations() {
+        let common = "
+            enum Result<T,E>{Ok(T),Err(E)}
+            enum Failure{Rejected}
+            checked()->Result<(),()>{Result::Err(())}
+            apply<F>(body:F)->Result<(),Failure>
+            where F:Fn<(),Output=Result<(),Failure>>{body()}
+        ";
+        let implicit = parse_discovery(&format!(
+            "{common}
+             outer()->Result<(),Failure>{{
+                 apply({{=>{{
+                     handle checked(){{
+                         Result::Err(_)=>
+                             @outer(Result::Err(Failure::Rejected)),
+                         Result::Ok(_)=>()
+                     }};
+                     Result::Ok(())
+                 }}}})
+             }}"
+        ));
+        assert!(implicit.errors.is_empty(), "{:#?}", implicit.errors);
+        assert!(implicit.graph.closure_bodies.keys().any(|closure| {
+            closure.active_labels.contains_key("outer") && closure.active_labels.len() == 1
+        }));
+
+        let local = parse_discovery(&format!(
+            "{common}
+             local()->Result<(),Failure>{{
+                 @done: Result<(),Failure>{{
+                     apply({{=>{{
+                         handle checked(){{
+                             Result::Err(_)=>
+                                 @done(Result::Err(Failure::Rejected)),
+                             Result::Ok(_)=>()
+                         }};
+                         Result::Ok(())
+                     }}}})
+                 }}
+             }}"
+        ));
+        assert!(local.errors.is_empty(), "{:#?}", local.errors);
+        assert!(local.graph.closure_bodies.keys().any(|closure| {
+            closure.active_labels.contains_key("done") && closure.active_labels.len() == 1
+        }));
     }
 
     #[test]

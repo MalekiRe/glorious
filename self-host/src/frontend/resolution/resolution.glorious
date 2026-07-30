@@ -360,12 +360,9 @@ index_callable(
 }
 
 fill_callable_slots(index: &mut ResolutionIndex, count: usize) {
-    if(count == 0) {
-        ()
-    } else {
-        Vec::push(&mut index.callable_by_shell, Result::Err(()));
-        fill_callable_slots(index, count - 1)
-    }
+    for_range(Range::new(0, count), { _ =>
+        Vec::push(&mut index.callable_by_shell, Result::Err(()))
+    })
 }
 
 index_callables(
@@ -374,15 +371,12 @@ index_callables(
     declarations: &super::scanner::DeclarationIndex,
     ordinal: usize
 ) -> Result<(), ResolutionError> {
-    if(ordinal < super::headers::callable_count(headers)) {
-        try(
-            index_callable(index, headers, declarations, ordinal),
-            @index_callables
-        );
-        index_callables(index, headers, declarations, ordinal + 1)
-    } else {
-        Result::Ok(())
-    }
+    try_for_range(Range::new(
+        ordinal,
+        super::headers::callable_count(headers)
+    ), { current =>
+        index_callable(index, headers, declarations, current)
+    })
 }
 
 pub build_resolution_index(
@@ -1113,8 +1107,8 @@ resolve_pattern_binders<'a>(
     values: Slice<'a, super::bodies::PatternBinder>,
     index: usize
 ) -> Result<(), ResolutionError> {
-    if(index < Slice::len(values)) {
-        let value = handle Slice::get(values, index) {
+    try_for_range(Range::new(index, Slice::len(values)), { current => {
+        let value = handle Slice::get(values, current) {
             Result::Err(_) => unreachable(),
             Result::Ok(found) => found
         };
@@ -1125,18 +1119,16 @@ resolve_pattern_binders<'a>(
                     ResolvedPatternBinder::Wildcard
                 ),
             PatternBinder::Binding(name, token) => {
-                let local = handle local_id_from_usize(
-                    Vec::len(&output.locals)
-                ) {
-                    Result::Err(_) =>
-                        @resolve_pattern_binders(Result::Err(
-                            ResolutionError::LocalIdExhausted(
+                let local = try(
+                    Result::map_err(
+                        local_id_from_usize(Vec::len(&output.locals)),
+                        { _ => ResolutionError::LocalIdExhausted(
                                 token,
                                 Vec::len(&output.locals)
-                            )
-                        )),
-                    Result::Ok(found) => found
-                };
+                        ) }
+                    ),
+                    @resolve_pattern_binders
+                );
                 Vec::push(&mut output.locals, LocalBinding {
                     name_token: token,
                     block_expression: scope
@@ -1152,14 +1144,8 @@ resolve_pattern_binders<'a>(
                 )
             }
         };
-        resolve_pattern_binders(
-            bindings,
-            output,
-            scope,
-            values,
-            index + 1
-        )
-    } else { Result::Ok(()) }
+        Result::Ok(())
+    }})
 }
 
 resolve_handle_arm(
@@ -1727,8 +1713,12 @@ write_parameters(
     count: u32,
     ordinal: u32
 ) {
-    if(ordinal < count) {
-        let at = start + ordinal;
+    for_range(Range::new(
+        usize_from_u32(ordinal),
+        usize_from_u32(count)
+    ), { current => {
+        let current = u32_from_usize(current);
+        let at = start + current;
             handle super::headers::parameter_at(index, usize_from_u32(at)) {
                 Result::Err(_) => unreachable(),
                 Result::Ok(parameter) => {
@@ -1737,20 +1727,10 @@ write_parameters(
                         &mut *output,
                         source,
                         super::headers::parameter_name_token(parameter)
-                    );
-                    write_parameters(
-                         output,
-                        source,
-                        index,
-                        start,
-                        count,
-                        ordinal + 1
                     )
                 }
             }
-    } else {
-        ()
-    }
+    }})
 }
 
 write_locals(

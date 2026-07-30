@@ -3518,21 +3518,14 @@ process_inputs(
     index: usize,
     output: &mut ByteBuf
 ) / FileRead {
-    if(index < Vec::len(arguments)) {
-        let path = *Vec::index(arguments, index);
-            let bytes = read_file(path);
-            handle String::from_utf8(bytes) {
-                Result::Err(_) => ByteBuf::push(&mut *output, 1),
-                Result::Ok(source) => encode_source(&mut *output,  source)
-            };
-            process_inputs(
-                arguments,
-                index + 1,
-                 output
-            )
-    } else {
-        ()
-    }
+    for_range(Range::new(index, Vec::len(arguments)), { current => {
+        let path = *Vec::index(arguments, current);
+        let bytes = read_file(path);
+        handle String::from_utf8(bytes) {
+            Result::Err(_) => ByteBuf::push(&mut *output, 1),
+            Result::Ok(source) => encode_source(&mut *output, source)
+        }
+    }})
 }
 
 pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {

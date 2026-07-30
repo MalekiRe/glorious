@@ -753,21 +753,15 @@ append_edges(
     index: usize,
     position: u32
 ) {
-    if(index < Vec::len(values)) {
+    for_range(Range::new(index, Vec::len(values)), { current => {
         Vec::push(
             &mut *output,
             TypeEdge {
-                value: *Vec::index(values, index),
-                position: position
+                value: *Vec::index(values, current),
+                position: position + wrapping_convert_to_u32(current - index)
             }
-        );
-        append_edges(
-             output,
-            values,
-            index + 1,
-            position + wrapping_convert_to_u32(1)
         )
-    } else { () }
+    }})
 }
 
 parse_type_values(
@@ -2161,18 +2155,13 @@ write_callables(
     parsed: &ParsedHeaders,
     index: usize
 ) {
-    if(index < Vec::len(&parsed.index.callables)) {
-            write_callable(
-                &mut *output,
-                parsed,
-                Vec::index(&parsed.index.callables, index)
-            );
-            write_callables(
-                 output,
-                parsed,
-                index + 1
-            )
-    } else { () }
+    for_range(Range::new(index, Vec::len(&parsed.index.callables)), { current => {
+        write_callable(
+            &mut *output,
+            parsed,
+            Vec::index(&parsed.index.callables, current)
+        )
+    }})
 }
 
 write_common(
@@ -2209,21 +2198,18 @@ write_fields(
     range: &HeaderRange,
     index: u32
 ) {
-    if(index < range.count) {
-            let field = Vec::index(
-                &parsed.nominal.fields.values,
-                wrapping_convert_to_usize(range.start + index)
-            );
-            if(field.private) { ByteBuf::push(&mut *output, 0) } else { ByteBuf::push(&mut *output, 1) };
-            write_name(&mut *output, &parsed.source, field.name);
-            write_type(&mut *output, parsed, &field.ty);
-            write_fields(
-                 output,
-                parsed,
-                range,
-                index + wrapping_convert_to_u32(1)
-            )
-    } else { () }
+    for_range(Range::new(
+        wrapping_convert_to_usize(index),
+        wrapping_convert_to_usize(range.count)
+    ), { current => {
+        let field = Vec::index(
+            &parsed.nominal.fields.values,
+            wrapping_convert_to_usize(range.start) + current
+        );
+        if(field.private) { ByteBuf::push(&mut *output, 0) } else { ByteBuf::push(&mut *output, 1) };
+        write_name(&mut *output, &parsed.source, field.name);
+        write_type(&mut *output, parsed, &field.ty)
+    }})
 }
 
 write_struct(
@@ -2248,21 +2234,18 @@ write_variants(
     range: &HeaderRange,
     index: u32
 ) {
-    if(index < range.count) {
-            let variant = Vec::index(
-                &parsed.nominal.variants.values,
-                wrapping_convert_to_usize(range.start + index)
-            );
-            write_name(&mut *output, &parsed.source, variant.name);
-            ByteBuf::write_u32_le(&mut *output, variant.fields.count);
-            write_type_edges(&mut *output, parsed, &variant.fields, 0);
-            write_variants(
-                 output,
-                parsed,
-                range,
-                index + wrapping_convert_to_u32(1)
-            )
-    } else { () }
+    for_range(Range::new(
+        wrapping_convert_to_usize(index),
+        wrapping_convert_to_usize(range.count)
+    ), { current => {
+        let variant = Vec::index(
+            &parsed.nominal.variants.values,
+            wrapping_convert_to_usize(range.start) + current
+        );
+        write_name(&mut *output, &parsed.source, variant.name);
+        ByteBuf::write_u32_le(&mut *output, variant.fields.count);
+        write_type_edges(&mut *output, parsed, &variant.fields, 0)
+    }})
 }
 
 write_enum(
@@ -2319,48 +2302,42 @@ write_interfaces(
     parsed: &ParsedHeaders,
     index: usize
 ) {
-    if(index < header_count(&parsed.nominal)) {
-            let kind = header_kind(&parsed.nominal, index);
-            let declaration = wrapping_convert_to_usize(
-                header_index(&parsed.nominal, index)
-            );
-            ByteBuf::push(&mut *output, kind);
-            handle kind {
-                3 => write_alias(
-                    &mut *output,
-                    parsed,
-                    Vec::index(&parsed.nominal.aliases.values, declaration)
-                ),
-                6 => write_fixity(
-                    &mut *output,
-                    original,
-                    parsed,
-                    Vec::index(&parsed.nominal.fixities.values, declaration)
-                ),
-                8 => write_struct(
-                    &mut *output,
-                    parsed,
-                    Vec::index(&parsed.nominal.structs.values, declaration)
-                ),
-                9 => write_enum(
-                    &mut *output,
-                    parsed,
-                    Vec::index(&parsed.nominal.enums.values, declaration)
-                ),
-                12 => write_callable(
-                    &mut *output,
-                    parsed,
-                    Vec::index(&parsed.index.callables, declaration)
-                ),
-                _ => unreachable()
-            };
-            write_interfaces(
-                output,
+    for_range(Range::new(index, header_count(&parsed.nominal)), { current => {
+        let kind = header_kind(&parsed.nominal, current);
+        let declaration = wrapping_convert_to_usize(
+            header_index(&parsed.nominal, current)
+        );
+        ByteBuf::push(&mut *output, kind);
+        handle kind {
+            3 => write_alias(
+                &mut *output,
+                parsed,
+                Vec::index(&parsed.nominal.aliases.values, declaration)
+            ),
+            6 => write_fixity(
+                &mut *output,
                 original,
                 parsed,
-                index + 1
-            )
-    } else { () }
+                Vec::index(&parsed.nominal.fixities.values, declaration)
+            ),
+            8 => write_struct(
+                &mut *output,
+                parsed,
+                Vec::index(&parsed.nominal.structs.values, declaration)
+            ),
+            9 => write_enum(
+                &mut *output,
+                parsed,
+                Vec::index(&parsed.nominal.enums.values, declaration)
+            ),
+            12 => write_callable(
+                &mut *output,
+                parsed,
+                Vec::index(&parsed.index.callables, declaration)
+            ),
+            _ => unreachable()
+        }
+    }})
 }
 
 encode_source(output: &mut ByteBuf, source: String) {
@@ -2418,19 +2395,14 @@ process_inputs(
     index: usize,
     output: &mut ByteBuf
 ) / FileRead {
-    if(index < Vec::len(arguments)) {
-            let path = *Vec::index(arguments, index);
-            let bytes = read_file(path);
-            handle String::from_utf8(bytes) {
-                Result::Err(_) => ByteBuf::push(&mut *output, 1),
-                Result::Ok(source) => encode_source(&mut *output,  source)
-            };
-            process_inputs(
-                arguments,
-                index + 1,
-                 output
-            )
-    } else { () }
+    for_range(Range::new(index, Vec::len(arguments)), { current => {
+        let path = *Vec::index(arguments, current);
+        let bytes = read_file(path);
+        handle String::from_utf8(bytes) {
+            Result::Err(_) => ByteBuf::push(&mut *output, 1),
+            Result::Ok(source) => encode_source(&mut *output, source)
+        }
+    }})
 }
 
 process_interface_inputs(
@@ -2438,22 +2410,17 @@ process_interface_inputs(
     index: usize,
     output: &mut ByteBuf
 ) / FileRead {
-    if(index < Vec::len(arguments)) {
-            let path = *Vec::index(arguments, index);
-            let bytes = read_file(path);
-            handle String::from_utf8(bytes) {
-                Result::Err(_) => ByteBuf::push(&mut *output, 1),
-                Result::Ok(source) => encode_interface_source(
-                    &mut *output,
-                     source
-                )
-            };
-            process_interface_inputs(
-                arguments,
-                index + 1,
-                 output
+    for_range(Range::new(index, Vec::len(arguments)), { current => {
+        let path = *Vec::index(arguments, current);
+        let bytes = read_file(path);
+        handle String::from_utf8(bytes) {
+            Result::Err(_) => ByteBuf::push(&mut *output, 1),
+            Result::Ok(source) => encode_interface_source(
+                &mut *output,
+                source
             )
-    } else { () }
+        }
+    }})
 }
 
 pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {

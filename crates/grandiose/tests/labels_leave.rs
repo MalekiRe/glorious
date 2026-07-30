@@ -520,6 +520,38 @@ fn a_label_captured_by_an_inlined_closure_stays_a_direct_transfer() {
 }
 
 #[test]
+fn active_static_label_in_inlined_result_handler_has_valid_cleanup_anchors() {
+    let source = r#"
+        enum Failure { Rejected }
+
+        checked() -> Result<(), ()> { Result::Err(()) }
+        invoke<F>(body: F) -> Result<(), Failure>
+        where F: Fn<(), Output=Result<(), Failure>> {
+            body()
+        }
+
+        outer() -> Result<(), Failure> {
+            invoke({ => {
+                handle checked() {
+                    Result::Err(_) =>
+                        @outer(Result::Err(Failure::Rejected)),
+                    Result::Ok(_) => ()
+                };
+                Result::Ok(())
+            } })
+        }
+
+        main() -> { () }
+    "#;
+    let artifact =
+        compile_source_to_bytecode("handler-clause-static-label.glorious", source).unwrap();
+    assert!(
+        has_direct_bytecode_leave(&artifact),
+        "the inlined Result handler did not preserve its static label transfer"
+    );
+}
+
+#[test]
 fn active_labels_cannot_cross_multishot_capture() {
     let source = r#"
         effect Replay { [2,2] replay() -> i64 }
