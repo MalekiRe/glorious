@@ -140,7 +140,25 @@ pub struct ParsedHeaders {
     nominal: NominalIndex
 }
 
-pub struct HeaderError { code: u8, token: usize, related: usize }
+pub enum HeaderError {
+    ExpectedIdentifier(usize, usize),
+    ExpectedLeftParenthesis(usize, usize),
+    ExpectedRightParenthesis(usize, usize),
+    ExpectedRightAngle(usize, usize),
+    EmptyTypeArguments(usize, usize),
+    EmptyGenericParameters(usize, usize),
+    UnsupportedGenericParameterKind(usize, usize),
+    ExpectedColon(usize, usize),
+    ExpectedRightBrace(usize, usize),
+    ExpectedSemicolon(usize, usize),
+    UnexpectedTrailingHeaderToken(usize, usize),
+    ExpectedEquals(usize, usize),
+    ExpectedIntegerPrecedence(usize, usize),
+    PrecedenceOutOfRange(usize, usize),
+    ExpectedOperator(usize, usize),
+    InvalidFixityForm(usize, usize),
+    TypeArenaExhausted(usize, usize)
+}
 
 struct HeaderBounds { start: usize, end: usize }
 
@@ -438,11 +456,71 @@ pub variant_name_token(value: &VariantHeader) -> usize { value.name_token }
 
 pub variant_fields(value: &VariantHeader) -> &HeaderRange { &value.fields }
 
-pub error_code(value: &HeaderError) -> u8 { value.code }
+pub error_code(value: &HeaderError) -> u8 {
+    handle *value {
+        HeaderError::ExpectedIdentifier(_, _) => 1,
+        HeaderError::ExpectedLeftParenthesis(_, _) => 2,
+        HeaderError::ExpectedRightParenthesis(_, _) => 3,
+        HeaderError::ExpectedRightAngle(_, _) => 4,
+        HeaderError::EmptyTypeArguments(_, _) => 5,
+        HeaderError::EmptyGenericParameters(_, _) => 5,
+        HeaderError::UnsupportedGenericParameterKind(_, _) => 6,
+        HeaderError::ExpectedColon(_, _) => 7,
+        HeaderError::ExpectedRightBrace(_, _) => 8,
+        HeaderError::ExpectedSemicolon(_, _) => 8,
+        HeaderError::UnexpectedTrailingHeaderToken(_, _) => 9,
+        HeaderError::ExpectedEquals(_, _) => 10,
+        HeaderError::ExpectedIntegerPrecedence(_, _) => 11,
+        HeaderError::PrecedenceOutOfRange(_, _) => 11,
+        HeaderError::ExpectedOperator(_, _) => 12,
+        HeaderError::InvalidFixityForm(_, _) => 13,
+        HeaderError::TypeArenaExhausted(_, _) => 14
+    }
+}
 
-pub error_token(value: &HeaderError) -> usize { value.token }
+pub error_token(value: &HeaderError) -> usize {
+    handle *value {
+        HeaderError::ExpectedIdentifier(token, _) => token,
+        HeaderError::ExpectedLeftParenthesis(token, _) => token,
+        HeaderError::ExpectedRightParenthesis(token, _) => token,
+        HeaderError::ExpectedRightAngle(token, _) => token,
+        HeaderError::EmptyTypeArguments(token, _) => token,
+        HeaderError::EmptyGenericParameters(token, _) => token,
+        HeaderError::UnsupportedGenericParameterKind(token, _) => token,
+        HeaderError::ExpectedColon(token, _) => token,
+        HeaderError::ExpectedRightBrace(token, _) => token,
+        HeaderError::ExpectedSemicolon(token, _) => token,
+        HeaderError::UnexpectedTrailingHeaderToken(token, _) => token,
+        HeaderError::ExpectedEquals(token, _) => token,
+        HeaderError::ExpectedIntegerPrecedence(token, _) => token,
+        HeaderError::PrecedenceOutOfRange(token, _) => token,
+        HeaderError::ExpectedOperator(token, _) => token,
+        HeaderError::InvalidFixityForm(token, _) => token,
+        HeaderError::TypeArenaExhausted(token, _) => token
+    }
+}
 
-pub error_related(value: &HeaderError) -> usize { value.related }
+pub error_related(value: &HeaderError) -> usize {
+    handle *value {
+        HeaderError::ExpectedIdentifier(_, related) => related,
+        HeaderError::ExpectedLeftParenthesis(_, related) => related,
+        HeaderError::ExpectedRightParenthesis(_, related) => related,
+        HeaderError::ExpectedRightAngle(_, related) => related,
+        HeaderError::EmptyTypeArguments(_, related) => related,
+        HeaderError::EmptyGenericParameters(_, related) => related,
+        HeaderError::UnsupportedGenericParameterKind(_, related) => related,
+        HeaderError::ExpectedColon(_, related) => related,
+        HeaderError::ExpectedRightBrace(_, related) => related,
+        HeaderError::ExpectedSemicolon(_, related) => related,
+        HeaderError::UnexpectedTrailingHeaderToken(_, related) => related,
+        HeaderError::ExpectedEquals(_, related) => related,
+        HeaderError::ExpectedIntegerPrecedence(_, related) => related,
+        HeaderError::PrecedenceOutOfRange(_, related) => related,
+        HeaderError::ExpectedOperator(_, related) => related,
+        HeaderError::InvalidFixityForm(_, related) => related,
+        HeaderError::TypeArenaExhausted(_, related) => related
+    }
+}
 
 header_range(start: usize, end: usize) -> HeaderRange {
     HeaderRange {
@@ -458,10 +536,6 @@ empty_range(value: &Vec<TypeEdge>) -> HeaderRange {
 
 token_range(start: usize, end: usize) -> HeaderTokenRange {
     HeaderTokenRange { start:  start, end:  end }
-}
-
-header_error(code: u8, token: usize, related: usize) -> HeaderError {
-    HeaderError { code: code, token:  token, related: related }
 }
 
 next_index(value: usize) -> usize { value + 1 }
@@ -524,16 +598,88 @@ eat_code(value: &mut Parser, code: u16) -> Bool {
     } else { false }
 }
 
-expect_code(
+expect_left_parenthesis(
     value: &mut Parser,
-    code: u16,
-    error_code: u8,
     related: usize
 ) -> Result<(), HeaderError> {
     let token = value.cursor;
-    if(eat_code(value, code)) { Result::Ok(()) } else { Result::Err(
-            header_error(error_code, token, related)
-        ) }
+    if(eat_code(value, 11)) {
+        Result::Ok(())
+    } else {
+        Result::Err(HeaderError::ExpectedLeftParenthesis(token, related))
+    }
+}
+
+expect_right_parenthesis(
+    value: &mut Parser,
+    related: usize
+) -> Result<(), HeaderError> {
+    let token = value.cursor;
+    if(eat_code(value, 12)) {
+        Result::Ok(())
+    } else {
+        Result::Err(HeaderError::ExpectedRightParenthesis(token, related))
+    }
+}
+
+expect_right_angle(
+    value: &mut Parser,
+    related: usize
+) -> Result<(), HeaderError> {
+    let token = value.cursor;
+    if(eat_code(value, 36)) {
+        Result::Ok(())
+    } else {
+        Result::Err(HeaderError::ExpectedRightAngle(token, related))
+    }
+}
+
+expect_colon(
+    value: &mut Parser,
+    related: usize
+) -> Result<(), HeaderError> {
+    let token = value.cursor;
+    if(eat_code(value, 18)) {
+        Result::Ok(())
+    } else {
+        Result::Err(HeaderError::ExpectedColon(token, related))
+    }
+}
+
+expect_right_brace(
+    value: &mut Parser,
+    related: usize
+) -> Result<(), HeaderError> {
+    let token = value.cursor;
+    if(eat_code(value, 14)) {
+        Result::Ok(())
+    } else {
+        Result::Err(HeaderError::ExpectedRightBrace(token, related))
+    }
+}
+
+expect_semicolon(
+    value: &mut Parser,
+    related: usize
+) -> Result<(), HeaderError> {
+    let token = value.cursor;
+    if(eat_code(value, 22)) {
+        Result::Ok(())
+    } else {
+        Result::Err(HeaderError::ExpectedSemicolon(token, related))
+    }
+}
+
+expect_equals(
+    value: &mut Parser,
+    related: usize
+) -> Result<(), HeaderError> {
+    let token = value.cursor;
+    if(eat_code(value, 31)) {
+        Result::Ok(())
+    } else {
+        Result::Err(HeaderError::ExpectedEquals(token, related))
+    }
 }
 
 ident(value: &mut Parser, related: usize) -> Result<NameUse, HeaderError> {
@@ -543,8 +689,10 @@ ident(value: &mut Parser, related: usize) -> Result<NameUse, HeaderError> {
                 value.cursor = token + 1;
                 Result::Ok(NameUse { name: move name, token: token })
             },
-            _ => Result::Err(header_error(1, token, related))
-        } } else { Result::Err(header_error(1, token, related)) }
+            _ => Result::Err(HeaderError::ExpectedIdentifier(token, related))
+        } } else {
+            Result::Err(HeaderError::ExpectedIdentifier(token, related))
+        }
 }
 
 at_ident(value: &Parser, expected: &String) -> Bool {
@@ -592,7 +740,9 @@ push_type(
             lifetime: move lifetime
         }
     ) {
-        Result::Err(_) => Result::Err(header_error(14, start, related)),
+        Result::Err(_) => Result::Err(
+            HeaderError::TypeArenaExhausted(start, related)
+        ),
         Result::Ok(id) => Result::Ok(id)
     }
 }
@@ -685,14 +835,14 @@ parse_application(
     constructor: TypeId
 ) -> Result<TypeId, HeaderError> {
     if(eat_code(value, 34)) { if(at_code(&*value, 36)) { Result::Err(
-                header_error(5, value.cursor, related)
+                HeaderError::EmptyTypeArguments(value.cursor, related)
             ) } else {
         let arguments = Vec::new();
         try(
             parse_type_values(value, 36, related, &mut arguments),
             @parse_application
         );
-        try(expect_code(value, 36, 4, related), @parse_application);
+        try(expect_right_angle(value, related), @parse_application);
         let edge_start = Vec::len(&value.output.type_edges);
         append_edges(
             &mut value.output.type_edges,
@@ -806,10 +956,10 @@ parse_tuple(
                 parse_type_values(value, 12, related, &mut elements),
                 @parse_tuple
             );
-            try(expect_code(value, 12, 3, related), @parse_tuple);
+            try(expect_right_parenthesis(value, related), @parse_tuple);
             finish_tuple(value, start, related, elements)
         } else {
-            try(expect_code(value, 12, 3, related), @parse_tuple);
+            try(expect_right_parenthesis(value, related), @parse_tuple);
             Result::Ok(move first)
         }
     }
@@ -860,7 +1010,11 @@ parse_generic_items(
     related: usize,
     start: usize
 ) -> Result<HeaderRange, HeaderError> {
-    if(at_code(&*value, 36)) { Result::Err(header_error(5, value.cursor, related)) } else {
+    if(at_code(&*value, 36)) {
+        Result::Err(
+            HeaderError::EmptyGenericParameters(value.cursor, related)
+        )
+    } else {
         let found = try(parse_one_generic(value, related), @parse_generic_items);
         Vec::push(&mut value.output.generic_params, move found);
         if(eat_code(value, 17)) { if(at_code(&*value, 36)) { finish_generics(value, related, start) } else { parse_generic_items(
@@ -892,7 +1046,10 @@ parse_one_generic(
                         3
                 } else { 0 } } else { 1 };
             if(kind == 0) { Result::Err(
-                    header_error(6, value.cursor, related)
+                    HeaderError::UnsupportedGenericParameterKind(
+                        value.cursor,
+                        related
+                    )
                 ) } else { Result::Ok(GenericParam {
                     name: name.name,
                     kind_code: kind,
@@ -907,7 +1064,7 @@ finish_generics(
     related: usize,
     start: usize
 ) -> Result<HeaderRange, HeaderError> {
-    try(expect_code(value, 36, 4, related), @finish_generics);
+    try(expect_right_angle(value, related), @finish_generics);
     Result::Ok(
         header_range(start, Vec::len(&value.output.generic_params))
     )
@@ -927,10 +1084,7 @@ parse_parameter_items(
     start: usize
 ) -> Result<HeaderRange, HeaderError> {
     let name = try(ident(value, related), @parse_parameter_items);
-    try(
-        expect_code(value, 18, 7, related),
-        @parse_parameter_items
-    );
+    try(expect_colon(value, related), @parse_parameter_items);
     let ty = try(parse_type(value, related), @parse_parameter_items);
     Vec::push(
         &mut value.output.parameters,
@@ -976,7 +1130,7 @@ parse_effect_items(
 ) -> Result<EffectRow, HeaderError> {
     if(eat_code(value, 30)) {
         let row_tail = try(ident(value, related), @parse_effect_items);
-        try(expect_code(value, 14, 8, related), @parse_effect_items);
+        try(expect_right_brace(value, related), @parse_effect_items);
         finish_effects(
             value,
             start,
@@ -1041,9 +1195,9 @@ parse_callable(
     } else { () };
     let name = try(ident(value, start), @parse_callable);
     let generics = try(parse_generics(value, start), @parse_callable);
-    try(expect_code(value, 11, 2, start), @parse_callable);
+    try(expect_left_parenthesis(value, start), @parse_callable);
     let parameters = try(parse_parameters(value, start), @parse_callable);
-    try(expect_code(value, 12, 3, start), @parse_callable);
+    try(expect_right_parenthesis(value, start), @parse_callable);
     parse_callable_suffix(
         value,
         shell,
@@ -1167,7 +1321,7 @@ finish_callable(
         );
         Result::Ok(())
     } else { Result::Err(
-            header_error(9, value.cursor, start)
+            HeaderError::UnexpectedTrailingHeaderToken(value.cursor, start)
         ) }
 }
 
@@ -1203,17 +1357,23 @@ parse_precedence(
             );
             handle parse_u64(&text) {
                 Result::Err(_) => Result::Err(
-                    header_error(11, token, related)
+                    HeaderError::PrecedenceOutOfRange(token, related)
                 ),
                 Result::Ok(found) => if(found <= 255) {
                     value.cursor = token + 1;
                     Result::Ok(wrapping_convert_to_u8(found))
                 } else { Result::Err(
-                        header_error(11, token, related)
+                        HeaderError::PrecedenceOutOfRange(token, related)
                     ) }
             }
-        } else { Result::Err(header_error(11, token, related)) },
-        _ => Result::Err(header_error(11, token, related))
+        } else {
+            Result::Err(
+                HeaderError::ExpectedIntegerPrecedence(token, related)
+            )
+        },
+        _ => Result::Err(
+            HeaderError::ExpectedIntegerPrecedence(token, related)
+        )
     }
 }
 
@@ -1247,7 +1407,11 @@ take_operator(
                 );
                 value.cursor = end;
                 Result::Ok(token_range(start, end))
-            } else { Result::Err(header_error(12, start, related)) } } } else { Result::Err(header_error(12, start, related)) }
+            } else {
+                Result::Err(HeaderError::ExpectedOperator(start, related))
+            } } } else {
+                Result::Err(HeaderError::ExpectedOperator(start, related))
+            }
 }
 
 parse_fixity(
@@ -1267,14 +1431,16 @@ parse_fixity(
         value.cursor = value.cursor + 1;
     } else { () };
     let form = fixity_form(&*value);
-    if(form == 0) { Result::Err(header_error(13, value.cursor, start)) } else {
+    if(form == 0) { Result::Err(
+        HeaderError::InvalidFixityForm(value.cursor, start)
+    ) } else {
         value.cursor = value.cursor + 1;
         let precedence = try(
             parse_precedence(original, value, start),
             @parse_fixity
         );
         let operator = try(take_operator(value, start), @parse_fixity);
-        try(expect_code(value, 22, 8, start), @parse_fixity);
+        try(expect_semicolon(value, start), @parse_fixity);
         if(value.cursor == value.limit) {
             Vec::push(
                 &mut fixities.values,
@@ -1297,7 +1463,7 @@ parse_fixity(
             );
             Result::Ok(())
         } else { Result::Err(
-                header_error(9, value.cursor, start)
+                HeaderError::UnexpectedTrailingHeaderToken(value.cursor, start)
             ) }
     }
 }
@@ -1341,7 +1507,7 @@ parse_alias_name(
     value.cursor = value.cursor + 1;
     let name = try(ident(value, start), @parse_alias_name);
     let generics = try(parse_generics(value, start), @parse_alias_name);
-    try(expect_code(value, 31, 10, start), @parse_alias_name);
+    try(expect_equals(value, start), @parse_alias_name);
     value.limit = whole_end - 1;
     let target = try(parse_type(value, start), @parse_alias_name);
     if(value.cursor == value.limit) { finish_alias(
@@ -1356,7 +1522,7 @@ parse_alias_name(
             generics,
             target
         ) } else { Result::Err(
-            header_error(9, value.cursor, start)
+            HeaderError::UnexpectedTrailingHeaderToken(value.cursor, start)
         ) }
 }
 
@@ -1426,7 +1592,7 @@ parse_struct(
             field_start
         )
     } else { Result::Err(
-            header_error(9, value.cursor, start)
+            HeaderError::UnexpectedTrailingHeaderToken(value.cursor, start)
         ) }
 }
 
@@ -1442,7 +1608,7 @@ parse_fields(
                 value.cursor = value.cursor + 1;
             } else { () };
             let name = try(ident(value, related), @parse_fields);
-            try(expect_code(value, 18, 7, related), @parse_fields);
+            try(expect_colon(value, related), @parse_fields);
             let ty = try(parse_type(value, related), @parse_fields);
             Vec::push(
                 &mut fields.values,
@@ -1522,7 +1688,7 @@ parse_sum_header(
             name,
             generics
         ) } else { Result::Err(
-            header_error(9, value.cursor, start)
+            HeaderError::UnexpectedTrailingHeaderToken(value.cursor, start)
         ) }
 }
 
@@ -1579,12 +1745,7 @@ parse_variants(
                     @parse_variants
                 );
                 try(
-                    expect_code(
-                        value,
-                        12,
-                        3,
-                        related
-                    ),
+                    expect_right_parenthesis(value, related),
                     @parse_variants
                 );
                 finish_variant(
