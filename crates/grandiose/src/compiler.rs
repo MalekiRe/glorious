@@ -4937,6 +4937,13 @@ fn compile_program_with_phases(
             &trait_db,
             runtime_bindings.array_name(),
         )?;
+        // The fixed-point pass can only add specializations reached from
+        // grounded Drop bodies. Most programs, including the self-hosted
+        // compiler, have no Drop declarations, so rediscovering the entire
+        // normalized program cannot change `discovery`.
+        if program.drops.is_empty() {
+            break normalized;
+        }
         let drop_discovery = specialization::discover_with_traits_and_budgets_from(
             &normalized,
             &trait_db,
