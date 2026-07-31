@@ -19,15 +19,15 @@ use crate::{
     span::Span,
 };
 
-static DISTRIBUTED_STANDARD_TOKENS: OnceLock<Vec<Token>> = OnceLock::new();
+static DISTRIBUTED_STANDARD_TOKENS: OnceLock<Result<Vec<Token>, Diagnostic>> = OnceLock::new();
 
-fn distributed_standard_tokens() -> &'static [Token] {
-    DISTRIBUTED_STANDARD_TOKENS
-        .get_or_init(|| match crate::lexer::lex(DISTRIBUTED_STANDARD_LIBRARY_SOURCE) {
-            Ok(tokens) => tokens,
-            Err(_) => panic!("embedded distributed standard library failed to lex"),
-        })
-        .as_slice()
+fn distributed_standard_tokens() -> Result<&'static [Token], Diagnostic> {
+    match DISTRIBUTED_STANDARD_TOKENS
+        .get_or_init(|| crate::lexer::lex(DISTRIBUTED_STANDARD_LIBRARY_SOURCE))
+    {
+        Ok(tokens) => Ok(tokens.as_slice()),
+        Err(error) => Err(error.clone()),
+    }
 }
 
 fn append_rebased_tokens(output: &mut Vec<Token>, tokens: &[Token], offset: usize) {
@@ -102,8 +102,9 @@ impl IncrementalFrontendCache {
                         tokens: Vec::new(),
                     });
                 }
+                let tokens = distributed_standard_tokens()?;
                 self.stats.reused_segments += 1;
-                append_rebased_tokens(&mut combined, distributed_standard_tokens(), offset);
+                append_rebased_tokens(&mut combined, tokens, offset);
                 continue;
             }
 
