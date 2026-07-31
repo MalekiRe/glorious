@@ -6,6 +6,7 @@ mod backend_errors;
 
 use super::compiler;
 use super::compiler::CompileError;
+use super::compiler::InterfaceNameKind;
 use model::CompilerDiagnostic;
 use model::DiagnosticClass;
 use model::DiagnosticPhase;
@@ -51,13 +52,16 @@ pub compile_error_diagnostic(value: &CompileError) -> CompilerDiagnostic {
         ),
         CompileError::Lowering(shell, error) =>
             backend_errors::lowering_diagnostic(shell, &error),
-        CompileError::InterfaceName(detail) => model::make_diagnostic(
+        CompileError::InterfaceName(kind, detail) => model::make_argument_diagnostic(
             DiagnosticPhase::InterfaceExport,
             DiagnosticClass::Internal,
             1,
             "self-host compiler: interface name lookup failed",
             model::site(
-                DiagnosticSpace::Interface,
+                handle kind {
+                    InterfaceNameKind::Field => DiagnosticSpace::Field,
+                    InterfaceNameKind::Variant => DiagnosticSpace::Variant
+                },
                 wrapping_convert_to_usize(detail)
             ),
             None,
@@ -65,7 +69,7 @@ pub compile_error_diagnostic(value: &CompileError) -> CompilerDiagnostic {
             0,
             detail
         ),
-        CompileError::UnsupportedInterfaceType(index) => model::make_diagnostic(
+        CompileError::UnsupportedInterfaceType(index) => model::make_argument_diagnostic(
             DiagnosticPhase::InterfaceExport,
             DiagnosticClass::Emission,
             2,
@@ -138,6 +142,10 @@ pub diagnostic_expected(value: &CompilerDiagnostic) -> u32 {
 
 pub diagnostic_found(value: &CompilerDiagnostic) -> u32 {
     model::diagnostic_found(value)
+}
+
+pub diagnostic_has_arguments(value: &CompilerDiagnostic) -> Bool {
+    model::diagnostic_has_arguments(value)
 }
 
 pub render_diagnostic(value: &CompilerDiagnostic) -> String {

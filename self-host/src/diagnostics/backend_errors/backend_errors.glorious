@@ -19,7 +19,7 @@ pub lowering_diagnostic(
     handle *error {
         LoweringError::UnsupportedScalar(ty) => model::make_diagnostic(
             DiagnosticPhase::Lowering,
-            DiagnosticClass::Ownership,
+            DiagnosticClass::Internal,
             1,
             "self-host compiler: unsupported scalar reached ownership lowering",
             model::site(DiagnosticSpace::Type, Id::to_usize(ty)),
@@ -74,7 +74,7 @@ pub lowering_diagnostic(
         ),
         LoweringError::InvalidConstructionType(ty) => model::make_diagnostic(
             DiagnosticPhase::Lowering,
-            DiagnosticClass::Ownership,
+            DiagnosticClass::Internal,
             6,
             "self-host compiler: invalid construction type reached lowering",
             model::site(DiagnosticSpace::Type, Id::to_usize(ty)),
@@ -83,9 +83,9 @@ pub lowering_diagnostic(
             0,
             0
         ),
-        LoweringError::ConstructionFieldCount(ty, expected, found) => model::make_diagnostic(
+        LoweringError::ConstructionFieldCount(ty, expected, found) => model::make_argument_diagnostic(
             DiagnosticPhase::Lowering,
-            DiagnosticClass::Ownership,
+            DiagnosticClass::Internal,
             7,
             "self-host compiler: construction field count changed before lowering",
             model::site(DiagnosticSpace::Type, Id::to_usize(ty)),
@@ -94,9 +94,9 @@ pub lowering_diagnostic(
             expected,
             found
         ),
-        LoweringError::UnexpectedVariant(ty, variant) => model::make_diagnostic(
+        LoweringError::UnexpectedVariant(ty, variant) => model::make_argument_diagnostic(
             DiagnosticPhase::Lowering,
-            DiagnosticClass::Ownership,
+            DiagnosticClass::Internal,
             8,
             "self-host compiler: an unexpected enum variant reached lowering",
             model::site(DiagnosticSpace::Type, Id::to_usize(ty)),
@@ -110,7 +110,7 @@ pub lowering_diagnostic(
         ),
         LoweringError::MissingVariant(ty) => model::make_diagnostic(
             DiagnosticPhase::Lowering,
-            DiagnosticClass::Ownership,
+            DiagnosticClass::Internal,
             9,
             "self-host compiler: enum construction is missing a variant",
             model::site(DiagnosticSpace::Type, Id::to_usize(ty)),
@@ -119,9 +119,9 @@ pub lowering_diagnostic(
             0,
             0
         ),
-        LoweringError::VariantOutOfRange(ty, variant) => model::make_diagnostic(
+        LoweringError::VariantOutOfRange(ty, variant) => model::make_argument_diagnostic(
             DiagnosticPhase::Lowering,
-            DiagnosticClass::Ownership,
+            DiagnosticClass::Internal,
             10,
             "self-host compiler: enum variant is out of range",
             model::site(DiagnosticSpace::Type, Id::to_usize(ty)),
@@ -133,9 +133,9 @@ pub lowering_diagnostic(
             0,
             variant
         ),
-        LoweringError::ConstructionFieldOrder(expected, found) => model::make_diagnostic(
+        LoweringError::ConstructionFieldOrder(expected, found) => model::make_argument_diagnostic(
             DiagnosticPhase::Lowering,
-            DiagnosticClass::Ownership,
+            DiagnosticClass::Internal,
             11,
             "self-host compiler: construction fields are not in canonical order",
             model::site(
@@ -188,7 +188,7 @@ pub lowering_diagnostic(
         ),
         LoweringError::InvalidMatchType(ty) => model::make_diagnostic(
             DiagnosticPhase::Lowering,
-            DiagnosticClass::Ownership,
+            DiagnosticClass::Internal,
             15,
             "self-host compiler: invalid match type reached lowering",
             model::site(DiagnosticSpace::Type, Id::to_usize(ty)),
@@ -197,9 +197,9 @@ pub lowering_diagnostic(
             0,
             0
         ),
-        LoweringError::MatchBindingCount(ty, expected, found) => model::make_diagnostic(
+        LoweringError::MatchBindingCount(ty, expected, found) => model::make_argument_diagnostic(
             DiagnosticPhase::Lowering,
-            DiagnosticClass::Ownership,
+            DiagnosticClass::Internal,
             16,
             "self-host compiler: match binding count changed before lowering",
             model::site(DiagnosticSpace::Type, Id::to_usize(ty)),
@@ -238,7 +238,7 @@ emission_name_diagnostic(name: emission::EmissionName) -> CompilerDiagnostic {
         emission::EmissionName::StructField(ty, field) => model::make_diagnostic(
             DiagnosticPhase::Emission,
             DiagnosticClass::Emission,
-            4,
+            11,
             "self-host compiler: emitted struct field name is missing from the canonical pool",
             model::site(DiagnosticSpace::StageType, Id::to_usize(ty)),
             Option::Some(model::site(DiagnosticSpace::Field, field)),
@@ -249,7 +249,7 @@ emission_name_diagnostic(name: emission::EmissionName) -> CompilerDiagnostic {
         emission::EmissionName::Variant(ty, variant) => model::make_diagnostic(
             DiagnosticPhase::Emission,
             DiagnosticClass::Emission,
-            4,
+            12,
             "self-host compiler: emitted variant name is missing from the canonical pool",
             model::site(DiagnosticSpace::StageType, Id::to_usize(ty)),
             Option::Some(model::site(DiagnosticSpace::Variant, variant)),
@@ -260,7 +260,7 @@ emission_name_diagnostic(name: emission::EmissionName) -> CompilerDiagnostic {
         emission::EmissionName::VariantField(ty, variant, field) => model::make_diagnostic(
             DiagnosticPhase::Emission,
             DiagnosticClass::Emission,
-            4,
+            13,
             "self-host compiler: emitted variant field name is missing from the canonical pool",
             model::site(DiagnosticSpace::StageType, Id::to_usize(ty)),
             Option::Some(model::site(DiagnosticSpace::Field, field)),
@@ -271,7 +271,7 @@ emission_name_diagnostic(name: emission::EmissionName) -> CompilerDiagnostic {
         emission::EmissionName::Function(function) => model::make_diagnostic(
             DiagnosticPhase::Emission,
             DiagnosticClass::Emission,
-            4,
+            14,
             "self-host compiler: emitted function name is missing from the canonical pool",
             model::site(DiagnosticSpace::Function, Id::to_usize(function)),
             None,
@@ -301,7 +301,7 @@ pub emission_diagnostic(error: &EmissionError) -> CompilerDiagnostic {
             2,
             "self-host compiler: emitted switch constant is missing from the canonical pool",
             model::site(DiagnosticSpace::SwitchPack, Id::to_usize(pack)),
-            Option::Some(model::site(DiagnosticSpace::Variant, variant)),
+            Option::Some(model::site(DiagnosticSpace::SwitchCase, variant)),
             None,
             0,
             0
@@ -329,7 +329,7 @@ pub emission_diagnostic(error: &EmissionError) -> CompilerDiagnostic {
             0,
             0
         ),
-        EmissionError::StructFieldNameCount(ty, expected, found) => model::make_diagnostic(
+        EmissionError::StructFieldNameCount(ty, expected, found) => model::make_argument_diagnostic(
             DiagnosticPhase::Emission,
             DiagnosticClass::Emission,
             6,
@@ -340,7 +340,7 @@ pub emission_diagnostic(error: &EmissionError) -> CompilerDiagnostic {
             wrapping_convert_to_u32(expected),
             wrapping_convert_to_u32(found)
         ),
-        EmissionError::VariantFieldNameCount(ty, variant, expected, found) => model::make_diagnostic(
+        EmissionError::VariantFieldNameCount(ty, variant, expected, found) => model::make_argument_diagnostic(
             DiagnosticPhase::Emission,
             DiagnosticClass::Emission,
             7,
@@ -351,7 +351,7 @@ pub emission_diagnostic(error: &EmissionError) -> CompilerDiagnostic {
             wrapping_convert_to_u32(expected),
             wrapping_convert_to_u32(found)
         ),
-        EmissionError::UnsupportedType(ty, tag) => model::make_diagnostic(
+        EmissionError::UnsupportedType(ty, tag) => model::make_argument_diagnostic(
             DiagnosticPhase::Emission,
             DiagnosticClass::Emission,
             8,
@@ -363,7 +363,7 @@ pub emission_diagnostic(error: &EmissionError) -> CompilerDiagnostic {
             wrapping_convert_to_u32(tag)
         ),
         EmissionError::ArtifactWrite(error) => handle error {
-            artifact::ArtifactWriteError::InvalidSectionCount => model::make_diagnostic(
+            artifact::ArtifactWriteError::InvalidSectionCount => model::make_argument_diagnostic(
                 DiagnosticPhase::Emission,
                 DiagnosticClass::Emission,
                 9,

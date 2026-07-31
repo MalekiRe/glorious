@@ -68,11 +68,12 @@ Phase numbers are:
 | Interface export | 11 |
 | Emission/artifact writing | 12 |
 
-Frontend local codes are the codes already owned by their phase error enums.
-Lowering and emission receive exhaustive local codes in the normalization layer.
-Every current body, resolution, elaboration, lowering, emission-name, emission,
-and artifact-writer variant is matched explicitly. Adding a variant therefore
-requires adding its mapping; there is no catch-all code path.
+The normalization layer owns one unique local code for every error variant.
+Where a phase-local code was already unique, that value is retained; historical
+collisions receive new values without renumbering existing unique codes. Every
+current body, resolution, elaboration, lowering, emission-name, emission, and
+artifact-writer variant is matched explicitly. Adding a variant therefore
+requires adding its mapping and a new code; there is no catch-all code path.
 
 Rendered codes use the `G` prefix, for example `G2007` for declaration-ID
 exhaustion during structural scanning.
@@ -128,6 +129,7 @@ StageType
 Variant
 Field
 Artifact
+SwitchCase
 ```
 
 This prevents a token ordinal, type ID, expression ID, register ID, and switch
@@ -157,11 +159,12 @@ real location spaces begin at `1`.
 
 `expected` and `found` are compact typed arguments retained separately from the
 message. They currently carry type IDs, counts, variant ordinals, field ordinals,
-local limits, and other phase-defined words. A zero pair means that the
-diagnostic does not supply this argument pair.
+local limits, and other phase-defined words. Argument presence is represented
+explicitly, so a meaningful `(0, 0)` pair is distinct from a diagnostic that
+does not supply arguments.
 
-The renderer includes the pair when either value is nonzero. Tooling should use
-the structured accessors rather than parsing the rendered sentence.
+The renderer includes the pair when `diagnostic_has_arguments` is true. Tooling
+should use the structured accessors rather than parsing the rendered sentence.
 
 ## Rendering
 

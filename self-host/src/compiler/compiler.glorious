@@ -25,6 +25,13 @@ use super::frontend::resolution::ResolutionError;
 use super::frontend::scanner::ScanError;
 use super::frontend::scanner::ShellId;
 
+pub enum InterfaceNameKind {
+    Field,
+    Variant
+}
+
+impl Use<[0, *]> for InterfaceNameKind {}
+
 pub enum CompileError {
     Lex(LexError),
     Scan(ScanError),
@@ -36,7 +43,7 @@ pub enum CompileError {
     BodyResolution(ShellId, ResolutionError),
     BodyElaboration(ShellId, ElaborationError),
     Lowering(ShellId, LoweringError),
-    InterfaceName(u32),
+    InterfaceName(InterfaceNameKind, u32),
     UnsupportedInterfaceType(usize),
     Emission(EmissionError)
 }
@@ -102,7 +109,7 @@ compile_error_message(value: &CompileError) -> String {
             "self-host compiler: body elaboration failed",
         CompileError::Lowering(_, _) =>
             "self-host compiler: ownership lowering failed",
-        CompileError::InterfaceName(_) =>
+        CompileError::InterfaceName(_, _) =>
             "self-host compiler: interface name lookup failed",
         CompileError::UnsupportedInterfaceType(_) =>
             "self-host compiler: interface contains an unsupported type",
@@ -283,6 +290,7 @@ find_entry(
 interface_name<'a>(
     session: &CompilerSession<'a>,
     raw: u32,
+    kind: InterfaceNameKind,
     detail: u32
 ) -> Result<String, CompileError> {
     handle lexer::lexeme(
@@ -290,7 +298,7 @@ interface_name<'a>(
         Id::from_u32(raw)
     ) {
         Result::Err(_) =>
-            Result::Err(CompileError::InterfaceName(detail)),
+            Result::Err(CompileError::InterfaceName(kind, detail)),
         Result::Ok(found) => Result::Ok(*found)
     }
 }
@@ -316,6 +324,7 @@ collect_struct_fields<'a>(
         let name = try(interface_name(
             session,
             elaboration::interface_field_view_name(&field),
+            InterfaceNameKind::Field,
             start + current_ordinal
         ), @collect_struct_fields);
         Vec::push(
@@ -387,6 +396,7 @@ collect_enum_variants<'a>(
                 &session.interfaces,
                 variant
             ),
+            InterfaceNameKind::Variant,
             start + current_ordinal
         ), @collect_enum_variants);
         let name_index = checked_u32(Vec::len(&*type_names));

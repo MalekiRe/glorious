@@ -50,7 +50,8 @@ pub enum DiagnosticSpace {
     StageType,
     Variant,
     Field,
-    Artifact
+    Artifact,
+    SwitchCase
 }
 
 impl Use<[0, *]> for DiagnosticSpace {}
@@ -71,6 +72,7 @@ pub struct CompilerDiagnostic {
     primary: DiagnosticSite,
     related: Option<DiagnosticSite>,
     owner: Option<DiagnosticSite>,
+    has_arguments: Bool,
     expected: u32,
     found: u32
 }
@@ -124,7 +126,8 @@ pub space_code(value: DiagnosticSpace) -> u32 {
         DiagnosticSpace::StageType => 16,
         DiagnosticSpace::Variant => 17,
         DiagnosticSpace::Field => 18,
-        DiagnosticSpace::Artifact => 19
+        DiagnosticSpace::Artifact => 19,
+        DiagnosticSpace::SwitchCase => 20
     }
 }
 
@@ -163,6 +166,57 @@ pub make_diagnostic(
     expected: u32,
     found: u32
 ) -> CompilerDiagnostic {
+    make_diagnostic_with_arguments(
+        phase,
+        class,
+        local_code,
+        message,
+        primary,
+        related,
+        owner,
+        false,
+        expected,
+        found
+    )
+}
+
+pub make_argument_diagnostic(
+    phase: DiagnosticPhase,
+    class: DiagnosticClass,
+    local_code: u32,
+    message: String,
+    primary: DiagnosticSite,
+    related: Option<DiagnosticSite>,
+    owner: Option<DiagnosticSite>,
+    expected: u32,
+    found: u32
+) -> CompilerDiagnostic {
+    make_diagnostic_with_arguments(
+        phase,
+        class,
+        local_code,
+        message,
+        primary,
+        related,
+        owner,
+        true,
+        expected,
+        found
+    )
+}
+
+make_diagnostic_with_arguments(
+    phase: DiagnosticPhase,
+    class: DiagnosticClass,
+    local_code: u32,
+    message: String,
+    primary: DiagnosticSite,
+    related: Option<DiagnosticSite>,
+    owner: Option<DiagnosticSite>,
+    has_arguments: Bool,
+    expected: u32,
+    found: u32
+) -> CompilerDiagnostic {
     CompilerDiagnostic {
         phase: phase,
         class: class,
@@ -171,6 +225,7 @@ pub make_diagnostic(
         primary: primary,
         related: related,
         owner: owner,
+        has_arguments: has_arguments,
         expected: expected,
         found: found
     }
@@ -252,6 +307,10 @@ pub diagnostic_expected(value: &CompilerDiagnostic) -> u32 { value.expected }
 
 pub diagnostic_found(value: &CompilerDiagnostic) -> u32 { value.found }
 
+pub diagnostic_has_arguments(value: &CompilerDiagnostic) -> Bool {
+    value.has_arguments
+}
+
 space_name(value: DiagnosticSpace) -> String {
     handle value {
         DiagnosticSpace::SourceByte => "source byte",
@@ -272,7 +331,8 @@ space_name(value: DiagnosticSpace) -> String {
         DiagnosticSpace::StageType => "Stage-A type",
         DiagnosticSpace::Variant => "variant",
         DiagnosticSpace::Field => "field",
-        DiagnosticSpace::Artifact => "artifact"
+        DiagnosticSpace::Artifact => "artifact",
+        DiagnosticSpace::SwitchCase => "switch case"
     }
 }
 
@@ -319,7 +379,7 @@ pub render_diagnostic(value: &CompilerDiagnostic) -> String {
             append_site(&mut output, found)
         }
     };
-    if(value.expected != 0 or { value.found != 0 }) {
+    if(value.has_arguments) {
         Formatter::literal(&mut output, &"; expected ");
         Formatter::append_u64(
             &mut output,

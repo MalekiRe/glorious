@@ -5476,6 +5476,19 @@ fn infer_primitive_types(
         ArrayGetBorrowShared | ArrayGetBorrowUnique => {
             set_arg(1, USIZE, inferred)?;
             let unique = op == ArrayGetBorrowUnique;
+            if let Some(reference_ty) = args.first().and_then(|register| known(*register, inferred))
+                && let Some(referent) =
+                    match types.get(reference_ty as usize).map(Type::representation) {
+                        Some(Type::RefShared { referent }) if !unique => Some(*referent),
+                        Some(Type::RefUnique { referent }) if unique => Some(*referent),
+                        _ => None,
+                    }
+                && let Some(Type::Array { element }) =
+                    types.get(referent as usize).map(Type::representation)
+                && let Some(result) = reference(*element, unique)
+            {
+                set(inferred, dst, result)?;
+            }
             if let Some(result) = known(dst, inferred)
                 && let Some(element) = match types.get(result as usize).map(Type::representation) {
                     Some(Type::RefShared { referent }) if !unique => Some(*referent),
@@ -6400,6 +6413,68 @@ mod tests {
         };
         let bytes = a.encode();
         assert_eq!(Artifact::decode(&bytes).unwrap(), canonical(a));
+    }
+
+    #[test]
+    fn array_borrow_result_types_infer_from_known_array_references() {
+        let mut types = Type::predefined();
+        let array = types.len() as TypeId;
+        types.push(Type::Array { element: U32 });
+        let shared_array = types.len() as TypeId;
+        types.push(Type::RefShared { referent: array });
+        let unique_array = types.len() as TypeId;
+        types.push(Type::RefUnique { referent: array });
+        let shared_element = types.len() as TypeId;
+        types.push(Type::RefShared { referent: U32 });
+        let unique_element = types.len() as TypeId;
+        types.push(Type::RefUnique { referent: U32 });
+        let artifact = Artifact {
+            required_features: CORE_G1 | REFERENCES_G1,
+            types,
+            functions: vec![
+                Function {
+                    flags: 0,
+                    name: "shared".into(),
+                    params: vec![shared_array, USIZE],
+                    return_type: shared_element,
+                    outward_protocols: vec![],
+                    receiver_mode: None,
+                    register_types: vec![UNIT, shared_array, USIZE, shared_element],
+                    code_start: 0,
+                    code_len: 2,
+                    label_slot_count: 0,
+                },
+                Function {
+                    flags: 0,
+                    name: "unique".into(),
+                    params: vec![unique_array, USIZE],
+                    return_type: unique_element,
+                    outward_protocols: vec![],
+                    receiver_mode: None,
+                    register_types: vec![UNIT, unique_array, USIZE, unique_element],
+                    code_start: 2,
+                    code_len: 2,
+                    label_slot_count: 0,
+                },
+            ],
+            code: vec![
+                Instruction::Primitive {
+                    dst: 3,
+                    op: Primitive::ArrayGetBorrowShared,
+                    args: vec![1, 2],
+                },
+                Instruction::Return { src: Some(3) },
+                Instruction::Primitive {
+                    dst: 3,
+                    op: Primitive::ArrayGetBorrowUnique,
+                    args: vec![1, 2],
+                },
+                Instruction::Return { src: Some(3) },
+            ],
+            ..Artifact::default()
+        };
+        let bytes = artifact.encode();
+        assert_eq!(Artifact::decode(&bytes).unwrap(), canonical(artifact));
     }
 
     #[test]

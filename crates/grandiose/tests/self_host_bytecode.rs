@@ -98,7 +98,7 @@ fn self_host_bundle() -> SourceBundle {
                         CompileError::BodyResolution(_, _) => 8,
                         CompileError::BodyElaboration(_, _) => 9,
                         CompileError::Lowering(_, _) => 10,
-                        CompileError::InterfaceName(_) => 11,
+                        CompileError::InterfaceName(_, _) => 11,
                         CompileError::UnsupportedInterfaceType(_) => 12,
                         CompileError::Emission(_) => 13
                     }

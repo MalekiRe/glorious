@@ -29,7 +29,9 @@ fn diagnostic_bundle() -> SourceBundle {
             mod diagnostics;
 
             use compiler::CompileError;
+            use compiler::InterfaceNameKind;
             use frontend::bodies::BodyError;
+            use frontend::headers::HeaderError;
             use frontend::scanner::ScanError;
             use frontend::resolution::ResolutionError;
             use frontend::elaboration::ElaborationError;
@@ -172,6 +174,156 @@ fn diagnostic_bundle() -> SourceBundle {
                 ))
             }
 
+            typed_space_contract() -> u32 {
+                let field_name = diagnostics::compile_error_diagnostic(
+                    &CompileError::InterfaceName(
+                        InterfaceNameKind::Field,
+                        4
+                    )
+                );
+                let variant_name = diagnostics::compile_error_diagnostic(
+                    &CompileError::InterfaceName(
+                        InterfaceNameKind::Variant,
+                        5
+                    )
+                );
+                let alias_header = diagnostics::compile_error_diagnostic(
+                    &CompileError::BodyElaboration(
+                        Id::from_u32(2),
+                        ElaborationError::MissingAliasHeader(6)
+                    )
+                );
+                let field_header = diagnostics::compile_error_diagnostic(
+                    &CompileError::BodyElaboration(
+                        Id::from_u32(2),
+                        ElaborationError::MissingFieldHeader(7)
+                    )
+                );
+                let variant_header = diagnostics::compile_error_diagnostic(
+                    &CompileError::ResolutionIndex(
+                        ResolutionError::MissingVariantHeader(8, 9)
+                    )
+                );
+                let switch_case = diagnostics::compile_error_diagnostic(
+                    &CompileError::Emission(
+                        EmissionError::MissingSwitchConstant(
+                            Id::from_u32(10),
+                            11
+                        )
+                    )
+                );
+                if(
+                    diagnostics::diagnostic_primary_space_code(&field_name) == 18
+                    and {
+                        diagnostics::diagnostic_primary_space_code(&variant_name) == 17
+                    }
+                    and {
+                        diagnostics::diagnostic_primary_space_code(&alias_header) == 2
+                    }
+                    and {
+                        diagnostics::diagnostic_primary_space_code(&field_header) == 18
+                    }
+                    and {
+                        diagnostics::diagnostic_related_space_code(&variant_header) == 17
+                    }
+                    and {
+                        diagnostics::diagnostic_related_space_code(&switch_case) == 20
+                    }
+                ) { 1 } else { 0 }
+            }
+
+            diagnostic_codes_preserve_variant_identity() -> u32 {
+                let header_a = diagnostics::compile_error_diagnostic(
+                    &CompileError::Headers(
+                        HeaderError::ExpectedRightBrace(1, 2)
+                    )
+                );
+                let header_b = diagnostics::compile_error_diagnostic(
+                    &CompileError::Headers(
+                        HeaderError::ExpectedSemicolon(1, 2)
+                    )
+                );
+                let body_a = diagnostics::compile_error_diagnostic(
+                    &CompileError::BodyParse(
+                        Id::from_u32(0),
+                        BodyError::ExpectedGroupingClose(1, 2)
+                    )
+                );
+                let body_b = diagnostics::compile_error_diagnostic(
+                    &CompileError::BodyParse(
+                        Id::from_u32(0),
+                        BodyError::DuplicatePatternBinder(1, 2)
+                    )
+                );
+                let resolution_a = diagnostics::compile_error_diagnostic(
+                    &CompileError::ResolutionIndex(
+                        ResolutionError::UnknownFunction(1)
+                    )
+                );
+                let resolution_b = diagnostics::compile_error_diagnostic(
+                    &CompileError::ResolutionIndex(
+                        ResolutionError::UnknownStruct(1)
+                    )
+                );
+                let elaboration_a = diagnostics::compile_error_diagnostic(
+                    &CompileError::InterfaceCollection(
+                        ElaborationError::MissingAliasHeader(1)
+                    )
+                );
+                let elaboration_b = diagnostics::compile_error_diagnostic(
+                    &CompileError::InterfaceCollection(
+                        ElaborationError::MissingDeclarationShell(1)
+                    )
+                );
+                if(
+                    diagnostics::diagnostic_code(&header_a)
+                        != diagnostics::diagnostic_code(&header_b)
+                    and {
+                        diagnostics::diagnostic_code(&body_a)
+                            != diagnostics::diagnostic_code(&body_b)
+                    }
+                    and {
+                        diagnostics::diagnostic_code(&resolution_a)
+                            != diagnostics::diagnostic_code(&resolution_b)
+                    }
+                    and {
+                        diagnostics::diagnostic_code(&elaboration_a)
+                            != diagnostics::diagnostic_code(&elaboration_b)
+                    }
+                ) { 1 } else { 0 }
+            }
+
+            zero_argument_render() -> String {
+                let value = diagnostics::compile_error_diagnostic(
+                    &CompileError::Lowering(
+                        Id::from_u32(2),
+                        LoweringError::UnexpectedVariant(
+                            Id::from_u32(4),
+                            0
+                        )
+                    )
+                );
+                diagnostics::render_diagnostic(&value)
+            }
+
+            zero_argument_contract() -> u32 {
+                let value = diagnostics::compile_error_diagnostic(
+                    &CompileError::Lowering(
+                        Id::from_u32(2),
+                        LoweringError::UnexpectedVariant(
+                            Id::from_u32(4),
+                            0
+                        )
+                    )
+                );
+                if(
+                    diagnostics::diagnostic_has_arguments(&value)
+                    and {
+                        diagnostics::diagnostic_class_code(&value) == 7
+                    }
+                ) { 1 } else { 0 }
+            }
+
             diagnostic_matrix() -> u64 {
                 diagnostic_fingerprint("\"")
                     + diagnostic_fingerprint("}") * 17
@@ -245,7 +397,7 @@ fn self_host_diagnostics_normalize_frontend_and_backend_failures() {
 
             let frontend = [
                 (1_u64, 1_u64, 1016_u64, 1_u64, 0_u64),
-                (2, 1, 2001, 2, 0),
+                (2, 1, 2004, 2, 0),
                 (3, 1, 3007, 2, 0),
                 (7, 1, 7001, 2, 3),
                 (8, 2, 8001, 2, 3),
@@ -293,7 +445,26 @@ fn self_host_diagnostics_normalize_frontend_and_backend_failures() {
             );
             assert_eq!(
                 run(&artifact, "elaboration_internal_site", vec![]),
-                Value::U64(790_070_605_070_703_002)
+                Value::U64(790_250_605_070_703_002)
+            );
+            assert_eq!(
+                run(&artifact, "typed_space_contract", vec![]),
+                Value::U64(1)
+            );
+            assert_eq!(
+                run(&artifact, "diagnostic_codes_preserve_variant_identity", vec![]),
+                Value::U64(1)
+            );
+            assert_eq!(
+                run(&artifact, "zero_argument_contract", vec![]),
+                Value::U64(1)
+            );
+            assert_eq!(
+                run(&artifact, "zero_argument_render", vec![]),
+                Value::Text(
+                    "[G10008] self-host compiler: an unexpected enum variant reached lowering (type 4); related variant 0; owner declaration 2; expected 0, found 0"
+                        .into()
+                )
             );
         })
         .unwrap()

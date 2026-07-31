@@ -6,11 +6,9 @@ use super::model::DiagnosticClass;
 use super::model::DiagnosticPhase;
 use super::model::DiagnosticSite;
 use super::model::DiagnosticSpace;
-use super::super::frontend::bodies;
 use super::super::frontend::elaboration;
 use super::super::frontend::headers;
 use super::super::frontend::lexer;
-use super::super::frontend::resolution;
 use super::super::frontend::scanner;
 use super::super::frontend::bodies::BodyError;
 use super::super::frontend::elaboration::ElaborationError;
@@ -24,6 +22,7 @@ struct DiagnosticShape {
     class: DiagnosticClass,
     primary: DiagnosticSite,
     related: Option<DiagnosticSite>,
+    has_arguments: Bool,
     expected: u32,
     found: u32
 }
@@ -41,6 +40,24 @@ shape(
         class: class,
         primary: primary,
         related: related,
+        has_arguments: false,
+        expected: expected,
+        found: found
+    }
+}
+
+argument_shape(
+    class: DiagnosticClass,
+    primary: DiagnosticSite,
+    related: Option<DiagnosticSite>,
+    expected: u32,
+    found: u32
+) -> DiagnosticShape {
+    DiagnosticShape {
+        class: class,
+        primary: primary,
+        related: related,
+        has_arguments: true,
         expected: expected,
         found: found
     }
@@ -77,6 +94,21 @@ token_pair_shape(
     )
 }
 
+token_argument_shape(
+    class: DiagnosticClass,
+    token: usize,
+    expected: u32,
+    found: u32
+) -> DiagnosticShape {
+    argument_shape(
+        class,
+        model::site(DiagnosticSpace::Token, token),
+        None,
+        expected,
+        found
+    )
+}
+
 indexed_shape(
     class: DiagnosticClass,
     space: DiagnosticSpace,
@@ -85,6 +117,22 @@ indexed_shape(
     found: u32
 ) -> DiagnosticShape {
     shape(
+        class,
+        model::site(space, index),
+        None,
+        expected,
+        found
+    )
+}
+
+indexed_argument_shape(
+    class: DiagnosticClass,
+    space: DiagnosticSpace,
+    index: usize,
+    expected: u32,
+    found: u32
+) -> DiagnosticShape {
+    argument_shape(
         class,
         model::site(space, index),
         None,
@@ -111,20 +159,35 @@ make_frontend_diagnostic(
         class,
         primary,
         related,
+        has_arguments,
         expected,
         found
     } = value;
-    model::make_diagnostic(
-        phase,
-        class,
-        local_code,
-        message,
-        primary,
-        related,
-        owner,
-        expected,
-        found
-    )
+    if(has_arguments) {
+        model::make_argument_diagnostic(
+            phase,
+            class,
+            local_code,
+            message,
+            primary,
+            related,
+            owner,
+            expected,
+            found
+        )
+    } else {
+        model::make_diagnostic(
+            phase,
+            class,
+            local_code,
+            message,
+            primary,
+            related,
+            owner,
+            expected,
+            found
+        )
+    }
 }
 
 pub lex_diagnostic(error: &LexError) -> CompilerDiagnostic {
@@ -177,6 +240,28 @@ pub scan_diagnostic(error: &ScanError) -> CompilerDiagnostic {
     )
 }
 
+header_local_code(error: &HeaderError) -> u32 {
+    handle *error {
+        HeaderError::ExpectedIdentifier(_, _) => 1,
+        HeaderError::ExpectedLeftParenthesis(_, _) => 2,
+        HeaderError::ExpectedRightParenthesis(_, _) => 3,
+        HeaderError::ExpectedRightAngle(_, _) => 4,
+        HeaderError::EmptyTypeArguments(_, _) => 5,
+        HeaderError::EmptyGenericParameters(_, _) => 15,
+        HeaderError::UnsupportedGenericParameterKind(_, _) => 6,
+        HeaderError::ExpectedColon(_, _) => 7,
+        HeaderError::ExpectedRightBrace(_, _) => 8,
+        HeaderError::ExpectedSemicolon(_, _) => 16,
+        HeaderError::UnexpectedTrailingHeaderToken(_, _) => 9,
+        HeaderError::ExpectedEquals(_, _) => 10,
+        HeaderError::ExpectedIntegerPrecedence(_, _) => 11,
+        HeaderError::PrecedenceOutOfRange(_, _) => 17,
+        HeaderError::ExpectedOperator(_, _) => 12,
+        HeaderError::InvalidFixityForm(_, _) => 13,
+        HeaderError::TypeArenaExhausted(_, _) => 14
+    }
+}
+
 pub header_diagnostic(error: &HeaderError) -> CompilerDiagnostic {
     let primary = headers::error_token(error);
     let related = headers::error_related(error);
@@ -206,7 +291,7 @@ pub header_diagnostic(error: &HeaderError) -> CompilerDiagnostic {
     model::make_diagnostic(
         DiagnosticPhase::Headers,
         class,
-        wrapping_convert_to_u32(headers::error_code(error)),
+        header_local_code(error),
         "self-host compiler: declaration header parsing failed",
         model::site(DiagnosticSpace::Token, primary),
         model::related_site(DiagnosticSpace::Token, primary, related),
@@ -214,6 +299,29 @@ pub header_diagnostic(error: &HeaderError) -> CompilerDiagnostic {
         0,
         0
     )
+}
+
+body_local_code(error: &BodyError) -> u32 {
+    handle *error {
+        BodyError::ExpectedExpression(_, _) => 1,
+        BodyError::ExpectedGroupingClose(_, _) => 2,
+        BodyError::DuplicatePatternBinder(_, _) => 8,
+        BodyError::IncompatibleAssociativity(_, _) => 3,
+        BodyError::NonAssociativeChain(_, _) => 4,
+        BodyError::ConflictingFixity(_, _) => 5,
+        BodyError::ExpressionDepthLimit(_, _) => 6,
+        BodyError::MissingBodyShell(_) => 7,
+        BodyError::InvalidEncodedExpression(_, _) => 9,
+        BodyError::ExpectedCallClose(_, _) => 10,
+        BodyError::InvalidLetSyntax(_, _) => 11,
+        BodyError::MissingEncodedName(_, _) => 17,
+        BodyError::ExpectedBlockClose(_, _) => 12,
+        BodyError::ExpectedIdentifier(_, _) => 13,
+        BodyError::ExpectedTupleDelimiter(_, _) => 14,
+        BodyError::InvalidHandleArm(_, _) => 15,
+        BodyError::InvalidStructField(_, _) => 18,
+        BodyError::ExpectedProjectionName(_, _) => 16
+    }
 }
 
 body_shape(error: &BodyError) -> DiagnosticShape {
@@ -353,11 +461,41 @@ pub body_diagnostic(
 ) -> CompilerDiagnostic {
     make_frontend_diagnostic(
         DiagnosticPhase::BodyParse,
-        wrapping_convert_to_u32(bodies::error_code(error)),
+        body_local_code(error),
         "self-host compiler: body parsing failed",
         model::owner_site(shell),
         body_shape(error)
     )
+}
+
+resolution_local_code(error: &ResolutionError) -> u32 {
+    handle *error {
+        ResolutionError::UnknownFunction(_) => 1,
+        ResolutionError::UnknownStruct(_) => 5,
+        ResolutionError::UnknownEnum(_) => 6,
+        ResolutionError::UnknownVariant(_) => 4,
+        ResolutionError::InvalidNamePath(_) => 7,
+        ResolutionError::AmbiguousFunction(_, _) => 2,
+        ResolutionError::AmbiguousStruct(_, _) => 8,
+        ResolutionError::AmbiguousEnum(_, _) => 9,
+        ResolutionError::DuplicateParameter(_, _) => 10,
+        ResolutionError::MissingCallableHeader(_) => 3,
+        ResolutionError::MissingDeclarationShell(_, _) => 11,
+        ResolutionError::MissingStructHeader(_, _) => 12,
+        ResolutionError::MissingEnumHeader(_, _) => 13,
+        ResolutionError::MissingVariantHeader(_, _) => 14,
+        ResolutionError::CorruptFunctionSearch(_) => 15,
+        ResolutionError::CorruptStructSearch(_) => 16,
+        ResolutionError::CorruptEnumSearch(_) => 17,
+        ResolutionError::LocalIdExhausted(_, _) => 18,
+        ResolutionError::ExpectedBindingIdentifier(_) => 19,
+        ResolutionError::UnexpectedHandleTarget(_, _) => 20,
+        ResolutionError::MissingParameterHeader(_) => 21,
+        ResolutionError::MissingBodyShell(_) => 22,
+        ResolutionError::MissingBodyCallable(_) => 23,
+        ResolutionError::MissingParameterRange(_) => 24,
+        ResolutionError::BodyParseFailure(_) => 25
+    }
 }
 
 resolution_shape(error: &ResolutionError) -> DiagnosticShape {
@@ -457,7 +595,7 @@ resolution_shape(error: &ResolutionError) -> DiagnosticShape {
         ResolutionError::MissingVariantHeader(token, interface) => shape(
             DiagnosticClass::Internal,
             model::site(DiagnosticSpace::Token, token),
-            Option::Some(model::site(DiagnosticSpace::Interface, interface)),
+            Option::Some(model::site(DiagnosticSpace::Variant, interface)),
             0,
             0
         ),
@@ -479,7 +617,7 @@ resolution_shape(error: &ResolutionError) -> DiagnosticShape {
             0,
             0
         ),
-        ResolutionError::LocalIdExhausted(token, count) => token_shape(
+        ResolutionError::LocalIdExhausted(token, count) => token_argument_shape(
             DiagnosticClass::ResourceLimit,
             token,
             0,
@@ -551,11 +689,65 @@ pub resolution_diagnostic(
 ) -> CompilerDiagnostic {
     make_frontend_diagnostic(
         phase,
-        wrapping_convert_to_u32(resolution::resolution_error_code(error)),
+        resolution_local_code(error),
         resolution_message(phase),
         owner_from_shell(shell),
         resolution_shape(error)
     )
+}
+
+elaboration_local_code(error: &ElaborationError) -> u32 {
+    handle *error {
+        ElaborationError::CyclicTypeAlias(_) => 1,
+        ElaborationError::MissingAliasHeader(_) => 7,
+        ElaborationError::MissingDeclarationShell(_) => 8,
+        ElaborationError::GenericTypeAliasUnsupported(_) => 9,
+        ElaborationError::MissingNominalType(_) => 10,
+        ElaborationError::UnknownTypeName(_) => 11,
+        ElaborationError::UnknownTypeModule(_) => 12,
+        ElaborationError::NamedReferenceLifetimeUnsupported(_) => 13,
+        ElaborationError::InvalidSignatureType(_) => 14,
+        ElaborationError::MissingParameterHeader(_) => 15,
+        ElaborationError::MissingCallableHeader(_) => 16,
+        ElaborationError::UnsupportedCallableSignature(_) => 17,
+        ElaborationError::MissingCallableType(_) => 18,
+        ElaborationError::MissingNominalDeclaration(_) => 19,
+        ElaborationError::MissingFieldHeader(_) => 20,
+        ElaborationError::MissingVariantHeader(_) => 21,
+        ElaborationError::MissingStructHeader(_) => 22,
+        ElaborationError::MissingEnumHeader(_) => 23,
+        ElaborationError::CyclicNominalType(_, _) => 24,
+        ElaborationError::InvalidResolvedExpression(_, _) => 25,
+        ElaborationError::TypeMismatch(_, _, _) => 3,
+        ElaborationError::FloatLiteralUnsupported(_) => 2,
+        ElaborationError::IntegerLiteralOutOfRange(_, _) => 5,
+        ElaborationError::UnexpectedExpressionToken(_) => 26,
+        ElaborationError::FunctionUsedAsValue(_) => 27,
+        ElaborationError::MissingLocalType(_) => 28,
+        ElaborationError::MissingCallableInterface(_, _) => 29,
+        ElaborationError::ArgumentCountMismatch(_, _, _) => 4,
+        ElaborationError::InvalidCallTarget(_, _) => 6,
+        ElaborationError::InvalidTupleElement(_, _) => 30,
+        ElaborationError::MissingTupleElement(_, _) => 31,
+        ElaborationError::ExpectedTupleType(_, _) => 32,
+        ElaborationError::UnknownStructField(_, _) => 33,
+        ElaborationError::DuplicateOrInaccessibleField(_, _) => 34,
+        ElaborationError::StructFieldCountMismatch(_, _, _) => 35,
+        ElaborationError::InvalidStructTarget(_, _) => 36,
+        ElaborationError::VariantPayloadCountMismatch(_, _, _) => 37,
+        ElaborationError::MissingVariant(_, _) => 38,
+        ElaborationError::UnknownProjectionField(_, _, _) => 39,
+        ElaborationError::DuplicateMatchVariant(_, _, _) => 40,
+        ElaborationError::VariantOwnerMismatch(_, _, _) => 41,
+        ElaborationError::MissingMatchVariants(_, _, _) => 42,
+        ElaborationError::ExpectedEnumType(_, _) => 43,
+        ElaborationError::UnsupportedExpression(_) => 44,
+        ElaborationError::MissingBodyCallable(_) => 45,
+        ElaborationError::IntegerEncodingOverflow(_, _) => 46,
+        ElaborationError::InvalidLocalReference(_, _, _) => 47,
+        ElaborationError::EmbeddedValueSerializationUnsupported(_) => 48,
+        ElaborationError::MatchSerializationUnsupported(_) => 49
+    }
 }
 
 elaboration_shape(error: &ElaborationError) -> DiagnosticShape {
@@ -570,14 +762,14 @@ elaboration_shape(error: &ElaborationError) -> DiagnosticShape {
         ),
         ElaborationError::MissingAliasHeader(index) => indexed_shape(
             DiagnosticClass::Internal,
-            DiagnosticSpace::Interface,
+            DiagnosticSpace::Token,
             index,
             expected,
             found
         ),
         ElaborationError::MissingDeclarationShell(index) => indexed_shape(
             DiagnosticClass::Internal,
-            DiagnosticSpace::Declaration,
+            DiagnosticSpace::Token,
             index,
             expected,
             found
@@ -655,14 +847,14 @@ elaboration_shape(error: &ElaborationError) -> DiagnosticShape {
         ),
         ElaborationError::MissingFieldHeader(index) => indexed_shape(
             DiagnosticClass::Internal,
-            DiagnosticSpace::Interface,
+            DiagnosticSpace::Field,
             index,
             expected,
             found
         ),
         ElaborationError::MissingVariantHeader(index) => indexed_shape(
             DiagnosticClass::Internal,
-            DiagnosticSpace::Interface,
+            DiagnosticSpace::Variant,
             index,
             expected,
             found
@@ -681,7 +873,7 @@ elaboration_shape(error: &ElaborationError) -> DiagnosticShape {
             expected,
             found
         ),
-        ElaborationError::CyclicNominalType(token, nominal) => shape(
+        ElaborationError::CyclicNominalType(token, nominal) => argument_shape(
             DiagnosticClass::Type,
             model::site(DiagnosticSpace::Token, token),
             Option::Some(model::site(
@@ -701,7 +893,7 @@ elaboration_shape(error: &ElaborationError) -> DiagnosticShape {
             expected,
             found
         ),
-        ElaborationError::TypeMismatch(token, _, _) => token_shape(
+        ElaborationError::TypeMismatch(token, _, _) => token_argument_shape(
             DiagnosticClass::Type,
             token,
             expected,
@@ -713,7 +905,7 @@ elaboration_shape(error: &ElaborationError) -> DiagnosticShape {
             expected,
             found
         ),
-        ElaborationError::IntegerLiteralOutOfRange(token, _) => token_shape(
+        ElaborationError::IntegerLiteralOutOfRange(token, _) => token_argument_shape(
             DiagnosticClass::Type,
             token,
             expected,
@@ -737,7 +929,7 @@ elaboration_shape(error: &ElaborationError) -> DiagnosticShape {
             expected,
             found
         ),
-        ElaborationError::MissingCallableInterface(token, shell) => shape(
+        ElaborationError::MissingCallableInterface(token, shell) => argument_shape(
             DiagnosticClass::Internal,
             model::site(DiagnosticSpace::Token, token),
             Option::Some(model::site(
@@ -747,13 +939,13 @@ elaboration_shape(error: &ElaborationError) -> DiagnosticShape {
             expected,
             found
         ),
-        ElaborationError::ArgumentCountMismatch(token, _, _) => token_shape(
+        ElaborationError::ArgumentCountMismatch(token, _, _) => token_argument_shape(
             DiagnosticClass::Type,
             token,
             expected,
             found
         ),
-        ElaborationError::InvalidCallTarget(token, _) => token_shape(
+        ElaborationError::InvalidCallTarget(token, _) => token_argument_shape(
             DiagnosticClass::Type,
             token,
             expected,
@@ -766,79 +958,85 @@ elaboration_shape(error: &ElaborationError) -> DiagnosticShape {
             expected,
             found
         ),
-        ElaborationError::MissingTupleElement(token, _) => token_shape(
+        ElaborationError::MissingTupleElement(token, _) => token_argument_shape(
             DiagnosticClass::Type,
             token,
             expected,
             found
         ),
-        ElaborationError::ExpectedTupleType(token, _) => token_shape(
+        ElaborationError::ExpectedTupleType(token, _) => token_argument_shape(
             DiagnosticClass::Type,
             token,
             expected,
             found
         ),
-        ElaborationError::UnknownStructField(token, _) => token_shape(
+        ElaborationError::UnknownStructField(token, _) => token_argument_shape(
             DiagnosticClass::Type,
             token,
             expected,
             found
         ),
-        ElaborationError::DuplicateOrInaccessibleField(token, _) => token_shape(
+        ElaborationError::DuplicateOrInaccessibleField(token, _) => token_argument_shape(
             DiagnosticClass::Type,
             token,
             expected,
             found
         ),
-        ElaborationError::StructFieldCountMismatch(token, _, _) => token_shape(
+        ElaborationError::StructFieldCountMismatch(token, _, _) =>
+            token_argument_shape(
             DiagnosticClass::Type,
             token,
             expected,
             found
         ),
-        ElaborationError::InvalidStructTarget(token, _) => token_shape(
+        ElaborationError::InvalidStructTarget(token, _) => token_argument_shape(
             DiagnosticClass::Type,
             token,
             expected,
             found
         ),
-        ElaborationError::VariantPayloadCountMismatch(token, _, _) => token_shape(
+        ElaborationError::VariantPayloadCountMismatch(token, _, _) =>
+            token_argument_shape(
             DiagnosticClass::Type,
             token,
             expected,
             found
         ),
-        ElaborationError::MissingVariant(token, _) => token_shape(
+        ElaborationError::MissingVariant(token, _) => token_argument_shape(
             DiagnosticClass::Type,
             token,
             expected,
             found
         ),
-        ElaborationError::UnknownProjectionField(token, _, _) => token_shape(
+        ElaborationError::UnknownProjectionField(token, _, _) =>
+            token_argument_shape(
             DiagnosticClass::Type,
             token,
             expected,
             found
         ),
-        ElaborationError::DuplicateMatchVariant(token, _, _) => token_shape(
+        ElaborationError::DuplicateMatchVariant(token, _, _) =>
+            token_argument_shape(
             DiagnosticClass::Type,
             token,
             expected,
             found
         ),
-        ElaborationError::VariantOwnerMismatch(token, _, _) => token_shape(
+        ElaborationError::VariantOwnerMismatch(token, _, _) =>
+            token_argument_shape(
             DiagnosticClass::Type,
             token,
             expected,
             found
         ),
-        ElaborationError::MissingMatchVariants(token, _, _) => token_shape(
+        ElaborationError::MissingMatchVariants(token, _, _) =>
+            token_argument_shape(
             DiagnosticClass::Type,
             token,
             expected,
             found
         ),
-        ElaborationError::ExpectedEnumType(token, _) => token_shape(
+        ElaborationError::ExpectedEnumType(token, _) => token_argument_shape(
             DiagnosticClass::Type,
             token,
             expected,
@@ -850,35 +1048,39 @@ elaboration_shape(error: &ElaborationError) -> DiagnosticShape {
             expected,
             found
         ),
-        ElaborationError::MissingBodyCallable(shell) => indexed_shape(
+        ElaborationError::MissingBodyCallable(shell) => indexed_argument_shape(
             DiagnosticClass::Internal,
             DiagnosticSpace::Declaration,
             Id::to_usize(shell),
             expected,
             found
         ),
-        ElaborationError::IntegerEncodingOverflow(index, _) => indexed_shape(
+        ElaborationError::IntegerEncodingOverflow(index, _) =>
+            indexed_argument_shape(
             DiagnosticClass::ResourceLimit,
             DiagnosticSpace::Artifact,
             index,
             expected,
             found
         ),
-        ElaborationError::InvalidLocalReference(local, _, _) => indexed_shape(
+        ElaborationError::InvalidLocalReference(local, _, _) =>
+            indexed_argument_shape(
             DiagnosticClass::Internal,
             DiagnosticSpace::Local,
             local,
             expected,
             found
         ),
-        ElaborationError::EmbeddedValueSerializationUnsupported(value) => indexed_shape(
+        ElaborationError::EmbeddedValueSerializationUnsupported(value) =>
+            indexed_argument_shape(
             DiagnosticClass::Internal,
             DiagnosticSpace::CoreValue,
             value,
             expected,
             found
         ),
-        ElaborationError::MatchSerializationUnsupported(computation) => indexed_shape(
+        ElaborationError::MatchSerializationUnsupported(computation) =>
+            indexed_argument_shape(
             DiagnosticClass::Internal,
             DiagnosticSpace::CoreComputation,
             computation,
@@ -903,7 +1105,7 @@ pub elaboration_diagnostic(
 ) -> CompilerDiagnostic {
     make_frontend_diagnostic(
         phase,
-        wrapping_convert_to_u32(elaboration::elaboration_error_code(error)),
+        elaboration_local_code(error),
         elaboration_message(phase),
         owner_from_shell(shell),
         elaboration_shape(error)
