@@ -12,7 +12,7 @@ use std::{
 };
 
 use crate::{
-    CompileOptions, CompiledPhases,
+    compiler::{CompileOptions, CompiledPhases},
     diagnostic::Diagnostic,
     source_bundle::SourceBundle,
 };
