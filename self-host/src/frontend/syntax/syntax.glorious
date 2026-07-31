@@ -37,10 +37,7 @@ pub id_range<Tag>(start: usize, end: usize) -> IdRange<Tag> {
     }
 }
 
-pub empty_id_range<Tag>(at: usize) -> IdRange<Tag> {
-    id_range(at, at)
-}
-
+pub empty_id_range<Tag>(at: usize) -> IdRange<Tag> { id_range(at, at) }
 pub id_range_start<Tag>(value: &IdRange<Tag>) -> u32 { value.start }
 pub id_range_count<Tag>(value: &IdRange<Tag>) -> u32 { value.count }
 pub id_range_end<Tag>(value: &IdRange<Tag>) -> u32 {
@@ -113,6 +110,14 @@ same_delimiter(left: DelimiterKind, right: DelimiterKind) -> Bool {
     }
 }
 
+replace_entry(
+    entries: &mut Vec<DelimiterEntry>,
+    index: usize,
+    entry: DelimiterEntry
+) {
+    *Vec::index_mut(entries, index) = entry
+}
+
 build_walk(
     source: &super::lexer::LexedSource,
     index: usize,
@@ -121,18 +126,17 @@ build_walk(
 ) -> Result<(), DelimiterError> {
     let count = super::lexer::token_count(source);
     if(index < count) {
-        let kind = super::lexer::token_kind_at(source, index);
-        handle kind_at(kind) {
+        handle kind_at(super::lexer::token_kind_at(source, index)) {
             None => build_walk(source, index + 1, stack, entries),
             Some((delimiter, opening)) => if(opening) {
                 Vec::push(stack, OpenDelimiter {
                     kind: delimiter,
                     token: index
                 });
-                entries[index] = DelimiterEntry {
+                replace_entry(entries, index, DelimiterEntry {
                     partner: None,
                     opening: true
-                };
+                });
                 build_walk(source, index + 1, stack, entries)
             } else {
                 handle Vec::pop(stack) {
@@ -140,14 +144,14 @@ build_walk(
                         DelimiterError::UnexpectedClose(index, count)
                     ),
                     Result::Ok(open) => if(same_delimiter(open.kind, delimiter)) {
-                        entries[open.token] = DelimiterEntry {
+                        replace_entry(entries, open.token, DelimiterEntry {
                             partner: Some(index),
                             opening: true
-                        };
-                        entries[index] = DelimiterEntry {
+                        });
+                        replace_entry(entries, index, DelimiterEntry {
                             partner: Some(open.token),
                             opening: false
-                        };
+                        });
                         build_walk(source, index + 1, stack, entries)
                     } else {
                         Result::Err(
@@ -205,6 +209,7 @@ pub cursor(start: usize, limit: usize) -> TokenCursor {
 pub cursor_position(value: &TokenCursor) -> usize { value.position }
 pub cursor_limit(value: &TokenCursor) -> usize { value.limit }
 pub cursor_at_end(value: &TokenCursor) -> Bool { value.position >= value.limit }
+
 pub cursor_reset(value: &mut TokenCursor, start: usize, limit: usize) {
     value.position = start;
     value.limit = limit
