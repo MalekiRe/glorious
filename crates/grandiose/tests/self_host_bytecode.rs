@@ -64,6 +64,304 @@ const FIXTURE: &str = r#"
     main() { () }
 "#;
 
+const DIAGNOSTIC_PROBES: &str = r#"
+    diagnostic_fingerprint(source: String) -> u64 {
+        handle diagnostics::compile_source(&source) {
+            Result::Ok(_) => 0,
+            Result::Err(value) =>
+                wrapping_convert_to_u64(
+                    diagnostics::diagnostic_phase_code(&value)
+                ) * 1000000000
+                + wrapping_convert_to_u64(
+                    diagnostics::diagnostic_class_code(&value)
+                ) * 100000000
+                + wrapping_convert_to_u64(
+                    diagnostics::diagnostic_code(&value)
+                ) * 1000
+                + wrapping_convert_to_u64(
+                    diagnostics::diagnostic_primary_space_code(&value)
+                ) * 10
+                + wrapping_convert_to_u64(
+                    diagnostics::diagnostic_owner_space_code(&value)
+                )
+        }
+    }
+
+    resource_limit_fingerprint() -> u64 {
+        let error = CompileError::Scan(
+            ScanError::DeclarationIdExhausted(3, 4)
+        );
+        let value = diagnostics::compile_error_diagnostic(&error);
+        wrapping_convert_to_u64(
+            diagnostics::diagnostic_class_code(&value)
+        ) * 10000
+            + wrapping_convert_to_u64(
+                diagnostics::diagnostic_code(&value)
+            )
+    }
+
+    resource_limit_render() -> String {
+        let error = CompileError::Scan(
+            ScanError::DeclarationIdExhausted(3, 4)
+        );
+        let value = diagnostics::compile_error_diagnostic(&error);
+        diagnostics::render_diagnostic(&value)
+    }
+
+    lowering_fingerprint() -> u64 {
+        let error = CompileError::Lowering(
+            Id::from_u32(2),
+            LoweringError::ConstructionFieldCount(
+                Id::from_u32(4),
+                2,
+                3
+            )
+        );
+        let value = diagnostics::compile_error_diagnostic(&error);
+        wrapping_convert_to_u64(
+            diagnostics::diagnostic_code(&value)
+        ) * 100000000
+            + wrapping_convert_to_u64(
+                diagnostics::diagnostic_primary_space_code(&value)
+            ) * 1000000
+            + wrapping_convert_to_u64(
+                diagnostics::diagnostic_owner_space_code(&value)
+            ) * 10000
+            + wrapping_convert_to_u64(
+                diagnostics::diagnostic_expected(&value)
+            ) * 100
+            + wrapping_convert_to_u64(
+                diagnostics::diagnostic_found(&value)
+            )
+    }
+
+    emission_code() -> u32 {
+        let error = CompileError::Emission(
+            EmissionError::StructFieldNameCount(
+                Id::from_u32(1),
+                2,
+                3
+            )
+        );
+        let value = diagnostics::compile_error_diagnostic(&error);
+        diagnostics::diagnostic_code(&value)
+    }
+
+    site_fingerprint(error: CompileError) -> u64 {
+        let value = diagnostics::compile_error_diagnostic(&error);
+        wrapping_convert_to_u64(
+            diagnostics::diagnostic_class_code(&value)
+        ) * 100000000000000000
+            + wrapping_convert_to_u64(
+                diagnostics::diagnostic_code(&value)
+            ) * 10000000000000
+            + wrapping_convert_to_u64(
+                diagnostics::diagnostic_primary_space_code(&value)
+            ) * 100000000000
+            + wrapping_convert_to_u64(
+                diagnostics::diagnostic_primary_start(&value)
+            ) * 1000000000
+            + wrapping_convert_to_u64(
+                diagnostics::diagnostic_related_space_code(&value)
+            ) * 10000000
+            + wrapping_convert_to_u64(
+                diagnostics::diagnostic_related_start(&value)
+            ) * 100000
+            + wrapping_convert_to_u64(
+                diagnostics::diagnostic_owner_space_code(&value)
+            ) * 1000
+            + wrapping_convert_to_u64(
+                diagnostics::diagnostic_owner_start(&value)
+            )
+    }
+
+    body_internal_site() -> u64 {
+        site_fingerprint(CompileError::BodyParse(
+            Id::from_u32(2),
+            BodyError::MissingBodyShell(Id::from_u32(8))
+        ))
+    }
+
+    resolution_ambiguous_site() -> u64 {
+        site_fingerprint(CompileError::BodyResolution(
+            Id::from_u32(2),
+            ResolutionError::AmbiguousFunction(
+                9,
+                Id::from_u32(4)
+            )
+        ))
+    }
+
+    elaboration_internal_site() -> u64 {
+        site_fingerprint(CompileError::BodyElaboration(
+            Id::from_u32(2),
+            ElaborationError::InvalidResolvedExpression(5, 7)
+        ))
+    }
+
+    typed_space_contract() -> u32 {
+        let field_name = diagnostics::compile_error_diagnostic(
+            &CompileError::InterfaceName(
+                InterfaceNameKind::Field,
+                4
+            )
+        );
+        let variant_name = diagnostics::compile_error_diagnostic(
+            &CompileError::InterfaceName(
+                InterfaceNameKind::Variant,
+                5
+            )
+        );
+        let alias_header = diagnostics::compile_error_diagnostic(
+            &CompileError::BodyElaboration(
+                Id::from_u32(2),
+                ElaborationError::MissingAliasHeader(6)
+            )
+        );
+        let field_header = diagnostics::compile_error_diagnostic(
+            &CompileError::BodyElaboration(
+                Id::from_u32(2),
+                ElaborationError::MissingFieldHeader(7)
+            )
+        );
+        let variant_header = diagnostics::compile_error_diagnostic(
+            &CompileError::ResolutionIndex(
+                ResolutionError::MissingVariantHeader(8, 9)
+            )
+        );
+        let switch_case = diagnostics::compile_error_diagnostic(
+            &CompileError::Emission(
+                EmissionError::MissingSwitchConstant(
+                    Id::from_u32(10),
+                    11
+                )
+            )
+        );
+        if(
+            diagnostics::diagnostic_primary_space_code(&field_name) == 18
+            and {
+                diagnostics::diagnostic_primary_space_code(&variant_name) == 17
+            }
+            and {
+                diagnostics::diagnostic_primary_space_code(&alias_header) == 2
+            }
+            and {
+                diagnostics::diagnostic_primary_space_code(&field_header) == 18
+            }
+            and {
+                diagnostics::diagnostic_related_space_code(&variant_header) == 17
+            }
+            and {
+                diagnostics::diagnostic_related_space_code(&switch_case) == 20
+            }
+        ) { 1 } else { 0 }
+    }
+
+    diagnostic_codes_preserve_variant_identity() -> u32 {
+        let header_a = diagnostics::compile_error_diagnostic(
+            &CompileError::Headers(
+                HeaderError::ExpectedRightBrace(1, 2)
+            )
+        );
+        let header_b = diagnostics::compile_error_diagnostic(
+            &CompileError::Headers(
+                HeaderError::ExpectedSemicolon(1, 2)
+            )
+        );
+        let body_a = diagnostics::compile_error_diagnostic(
+            &CompileError::BodyParse(
+                Id::from_u32(0),
+                BodyError::ExpectedGroupingClose(1, 2)
+            )
+        );
+        let body_b = diagnostics::compile_error_diagnostic(
+            &CompileError::BodyParse(
+                Id::from_u32(0),
+                BodyError::DuplicatePatternBinder(1, 2)
+            )
+        );
+        let resolution_a = diagnostics::compile_error_diagnostic(
+            &CompileError::ResolutionIndex(
+                ResolutionError::UnknownFunction(1)
+            )
+        );
+        let resolution_b = diagnostics::compile_error_diagnostic(
+            &CompileError::ResolutionIndex(
+                ResolutionError::UnknownStruct(1)
+            )
+        );
+        let elaboration_a = diagnostics::compile_error_diagnostic(
+            &CompileError::InterfaceCollection(
+                ElaborationError::MissingAliasHeader(1)
+            )
+        );
+        let elaboration_b = diagnostics::compile_error_diagnostic(
+            &CompileError::InterfaceCollection(
+                ElaborationError::MissingDeclarationShell(1)
+            )
+        );
+        if(
+            diagnostics::diagnostic_code(&header_a)
+                != diagnostics::diagnostic_code(&header_b)
+            and {
+                diagnostics::diagnostic_code(&body_a)
+                    != diagnostics::diagnostic_code(&body_b)
+            }
+            and {
+                diagnostics::diagnostic_code(&resolution_a)
+                    != diagnostics::diagnostic_code(&resolution_b)
+            }
+            and {
+                diagnostics::diagnostic_code(&elaboration_a)
+                    != diagnostics::diagnostic_code(&elaboration_b)
+            }
+        ) { 1 } else { 0 }
+    }
+
+    zero_argument_render() -> String {
+        let value = diagnostics::compile_error_diagnostic(
+            &CompileError::Lowering(
+                Id::from_u32(2),
+                LoweringError::UnexpectedVariant(
+                    Id::from_u32(4),
+                    0
+                )
+            )
+        );
+        diagnostics::render_diagnostic(&value)
+    }
+
+    zero_argument_contract() -> u32 {
+        let value = diagnostics::compile_error_diagnostic(
+            &CompileError::Lowering(
+                Id::from_u32(2),
+                LoweringError::UnexpectedVariant(
+                    Id::from_u32(4),
+                    0
+                )
+            )
+        );
+        if(
+            diagnostics::diagnostic_has_arguments(&value)
+            and {
+                diagnostics::diagnostic_class_code(&value) == 7
+            }
+        ) { 1 } else { 0 }
+    }
+
+    diagnostic_matrix() -> u64 {
+        diagnostic_fingerprint("\"")
+            + diagnostic_fingerprint("}") * 17
+            + diagnostic_fingerprint("struct Broken { field }") * 289
+            + diagnostic_fingerprint("main() { let value = ; }") * 4913
+            + diagnostic_fingerprint("main() { missing() }") * 83521
+            + diagnostic_fingerprint("main() -> i64 { () }") * 1419857
+            + resource_limit_fingerprint() * 1771561
+            + lowering_fingerprint()
+            + wrapping_convert_to_u64(emission_code()) * 19487171
+    }
+"#;
+
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -75,14 +373,22 @@ fn repository_root() -> PathBuf {
 
 fn self_host_bundle() -> SourceBundle {
     let root = repository_root().join("self-host/src");
-    let primary = Segment::new(
-        root.join("main.glorious").to_string_lossy(),
+    let primary_source = [
         r#"
             mod frontend;
             mod backend;
             mod compiler;
             mod diagnostics;
+
             use compiler::CompileError;
+            use compiler::InterfaceNameKind;
+            use frontend::bodies::BodyError;
+            use frontend::headers::HeaderError;
+            use frontend::scanner::ScanError;
+            use frontend::resolution::ResolutionError;
+            use frontend::elaboration::ElaborationError;
+            use backend::lowering::LoweringError;
+            use backend::emission::EmissionError;
 
             classify_compile_error(source: String) -> u8 {
                 handle compiler::compile_source(&source) {
@@ -104,9 +410,16 @@ fn self_host_bundle() -> SourceBundle {
                     }
                 }
             }
-
+        "#,
+        DIAGNOSTIC_PROBES,
+        r#"
             main() { run_compiler_host(diagnostics::application) }
         "#,
+    ]
+    .concat();
+    let primary = Segment::new(
+        root.join("main.glorious").to_string_lossy(),
+        primary_source,
     );
     let paths = [
         root.join("frontend/frontend.glorious"),
@@ -141,6 +454,67 @@ fn function_id(artifact: &Artifact, name: &str) -> u32 {
         .iter()
         .position(|function| function.name == name)
         .unwrap_or_else(|| panic!("self-hosted artifact is missing `{name}`")) as u32
+}
+
+fn assert_diagnostic_contracts(mut run: impl FnMut(&str, Vec<Value>) -> Value) {
+    let frontend = [
+        (1_u64, 1_u64, 1016_u64, 1_u64, 0_u64),
+        (2, 1, 2004, 2, 0),
+        (3, 1, 3007, 2, 0),
+        (7, 1, 7001, 2, 3),
+        (8, 2, 8001, 2, 3),
+        (9, 3, 9003, 2, 3),
+    ];
+    let fingerprint = |(phase, class, code, space, owner)| {
+        phase * 1_000_000_000
+            + class * 100_000_000
+            + code * 1_000
+            + space * 10
+            + owner
+    };
+    let weights = [1_u64, 17, 289, 4_913, 83_521, 1_419_857];
+    let mut expected = frontend
+        .into_iter()
+        .zip(weights)
+        .map(|(value, weight)| fingerprint(value) * weight)
+        .sum::<u64>();
+    expected += (5_u64 * 10_000 + 2_007) * 1_771_561;
+    expected += 10_007_u64 * 100_000_000 + 5 * 1_000_000 + 3 * 10_000 + 2 * 100 + 3;
+    expected += 12_006_u64 * 19_487_171;
+
+    assert_eq!(run("diagnostic_matrix", vec![]), Value::U64(expected));
+    assert_eq!(
+        run("resource_limit_render", vec![]),
+        Value::Text(
+            "[G2007] self-host compiler: declaration scanning failed (token 3); related token 4"
+                .into()
+        )
+    );
+    assert_eq!(
+        run("body_internal_site", vec![]),
+        Value::U64(770_070_308_000_003_002)
+    );
+    assert_eq!(
+        run("resolution_ambiguous_site", vec![]),
+        Value::U64(280_020_209_030_403_002)
+    );
+    assert_eq!(
+        run("elaboration_internal_site", vec![]),
+        Value::U64(790_250_605_070_703_002)
+    );
+    assert_eq!(run("typed_space_contract", vec![]), Value::U64(1));
+    assert_eq!(
+        run("diagnostic_codes_preserve_variant_identity", vec![]),
+        Value::U64(1)
+    );
+    assert_eq!(run("zero_argument_contract", vec![]), Value::U64(1));
+    assert_eq!(
+        run("zero_argument_render", vec![]),
+        Value::Text(
+            "[G10008] self-host compiler: an unexpected enum variant reached lowering (type 4); related variant 0; owner declaration 2; expected 0, found 0"
+                .into()
+        )
+    );
 }
 
 fn assert_compiled_artifact(bytes: &[u8]) {
@@ -298,6 +672,13 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
             .unwrap();
             let compiler_entry = phases.artifact.entry_function.unwrap();
             let compiler = grandiose_vm::verify(phases.artifact.clone()).unwrap();
+
+            assert_diagnostic_contracts(|name, args| {
+                Vm::new(compiler.clone())
+                    .run(function_id(&phases.artifact, name), args)
+                    .unwrap()
+            });
+
             let classify = function_id(&phases.artifact, "classify_compile_error");
             for (source, expected) in [("\"", 1), ("}", 2), ("struct Broken { field }", 3)] {
                 assert_eq!(
