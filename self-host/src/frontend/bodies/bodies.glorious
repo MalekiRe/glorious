@@ -1,33 +1,36 @@
 // One-body-at-a-time expression parsing and source-fixity grouping.
-// This slice supports eager blocks, simple local bindings, explicit calls,
-// identifiers, integer/float number tokens, unit, tuples, nominal
-// construction, projection, grouping, and declared prefix/infix operators.
+// Every node stores one semantic ExprKind; child roles are represented by
+// typed side ranges rather than numeric node and edge tags.
 
 use super::lexer::{Keyword, TokenKind};
 use super::scanner::ShellId;
+use super::syntax::{IdRange, TokenCursor, TokenSpan};
 
 pub struct ExprTag {}
-
 pub type ExprId = Id<ExprTag>;
 
 pub struct HandleArmTag {}
-
 pub type HandleArmId = Id<HandleArmTag>;
 
-pub struct ExprRange { start: u32, count: u32 }
+pub struct NameUseTag {}
+pub struct ExprUseTag {}
+pub struct BlockStatementTag {}
+pub struct StructFieldTag {}
+pub struct PatternBinderTag {}
 
-pub struct ExprEdge { value: ExprId, position: u8, metadata: u32 }
+pub type NameUseRange = IdRange<NameUseTag>;
+pub type ExprUseRange = IdRange<ExprUseTag>;
+pub type BlockStatementRange = IdRange<BlockStatementTag>;
+pub type StructFieldRange = IdRange<StructFieldTag>;
+pub type HandleArmRange = IdRange<HandleArmTag>;
+pub type PatternBinderRange = IdRange<PatternBinderTag>;
 
-pub enum BlockStatementView {
-    Let(ExprId, usize),
-    Expression(ExprId)
+pub enum ExpressionName {
+    Identifier(Id<String>, usize),
+    TupleField(u32, usize)
 }
 
-impl Use<[0, *]> for BlockStatementView {}
-
-pub struct BodyTokenRange { start: usize, end: usize }
-
-impl Use<[0, *]> for BodyTokenRange {}
+impl Use<[0, *]> for ExpressionName {}
 
 pub enum PatternBinder {
     Wildcard(usize),
@@ -36,40 +39,82 @@ pub enum PatternBinder {
 
 impl Use<[0, *]> for PatternBinder {}
 
+pub enum BlockStatement {
+    Let(ExprId, usize),
+    Expression(ExprId)
+}
+
+impl Use<[0, *]> for BlockStatement {}
+
+pub struct StructField {
+    name: Id<String>,
+    name_token: usize,
+    expression: ExprId
+}
+
+impl Use<[0, *]> for StructField {}
+
 pub struct HandleArm {
     enum_name: Id<String>,
     enum_token: usize,
     variant_name: Id<String>,
     variant_token: usize,
-    binders: ExprRange,
+    binders: PatternBinderRange,
     body: ExprId
 }
 
-enum ExpressionName {
-    Identifier(Id<String>, usize),
-    TupleField(u32, usize)
+impl Use<[0, *]> for HandleArm {}
+
+pub enum ExprKind {
+    Identifier(NameUseRange),
+    Number,
+    Unit,
+    Group(ExprId),
+    Prefix(TokenSpan, ExprId),
+    Infix(TokenSpan, ExprId, ExprId),
+    Call(ExprId, ExprUseRange),
+    Block(BlockStatementRange),
+    Tuple(ExprUseRange),
+    Struct(ExpressionName, StructFieldRange),
+    Projection(ExprId, ExpressionName),
+    Handle(ExprId, HandleArmRange)
 }
 
-impl Use<[0, *]> for ExpressionName {}
+impl Use<[0, *]> for ExprKind {}
 
 pub struct ExprNode {
-    kind_code: u8,
-    tokens: BodyTokenRange,
-    operator: BodyTokenRange,
-    names: ExprRange,
-    children: ExprRange,
-    handle_arms: ExprRange
+    tokens: TokenSpan,
+    kind: ExprKind
 }
 
 pub struct ParsedBody {
     shell: ShellId,
     root: ExprId,
     nodes: Arena<ExprTag, ExprNode>,
-    edges: Vec<ExprEdge>,
     names: Vec<ExpressionName>,
+    expression_uses: Vec<ExprId>,
+    block_statements: Vec<BlockStatement>,
+    struct_fields: Vec<StructField>,
     handle_arms: Vec<HandleArm>,
     pattern_binders: Vec<PatternBinder>
 }
+
+pub enum ExprView<'a> {
+    Identifier(TokenSpan, Slice<'a, ExpressionName>),
+    Number(TokenSpan),
+    Unit(TokenSpan),
+    Group(TokenSpan, ExprId),
+    Prefix(TokenSpan, TokenSpan, ExprId),
+    Infix(TokenSpan, TokenSpan, ExprId, ExprId),
+    Call(TokenSpan, ExprId, Slice<'a, ExprId>),
+    Block(TokenSpan, Slice<'a, BlockStatement>),
+    Tuple(TokenSpan, Slice<'a, ExprId>),
+    Struct(TokenSpan, ExpressionName, Slice<'a, StructField>),
+    Projection(TokenSpan, ExprId, ExpressionName),
+    Handle(TokenSpan, ExprId, Slice<'a, HandleArm>)
+}
+
+impl<'a> Use<[0, *]> for ExprView<'a> {}
 
 pub enum BodyError {
     ExpectedExpression(usize, usize),
@@ -93,46 +138,24 @@ pub enum BodyError {
 }
 
 struct BodyParser {
-    cursor: usize,
-    limit: usize,
+    cursor: TokenCursor,
     nodes: Arena<ExprTag, ExprNode>,
-    edges: Vec<ExprEdge>,
     names: Vec<ExpressionName>,
+    expression_uses: Vec<ExprId>,
+    block_statements: Vec<BlockStatement>,
+    struct_fields: Vec<StructField>,
     handle_arms: Vec<HandleArm>,
     pattern_binders: Vec<PatternBinder>
 }
 
 struct OperatorUse {
-    fixity: u32,
     start: usize,
     end: usize,
     form: u8,
     precedence: u8
 }
 
-struct PendingField {
-    name: Id<String>,
-    name_token: usize,
-    expression: ExprId
-}
-
-enum PendingStatement {
-    Let(usize, ExprId),
-    Expression(ExprId)
-}
-
-struct PendingHandleArm {
-    enum_name: Id<String>,
-    enum_token: usize,
-    variant_name: Id<String>,
-    variant_token: usize,
-    binders: Vec<PatternBinder>,
-    body: ExprId
-}
-
 impl Use<[0, *]> for OperatorUse {}
-impl Use<[0, *]> for PendingField {}
-impl Use<[0, *]> for PendingStatement {}
 
 pub error_code(value: &BodyError) -> u8 {
     handle *value {
@@ -203,291 +226,143 @@ pub error_related(value: &BodyError) -> usize {
     }
 }
 
-arena_node_at_raw<'a>(
-    value: &'a Arena<ExprTag, ExprNode>,
-    raw: u32
-) -> &'a ExprNode {
-    Arena::index(value, Id::from_u32(raw))
-}
-
-alloc_node(
-    value: &mut Arena<ExprTag, ExprNode>,
-    node: ExprNode
-) -> ExprId {
-    handle Arena::alloc(value, node) {
+alloc_node(value: &mut BodyParser, tokens: TokenSpan, kind: ExprKind) -> ExprId {
+    handle Arena::alloc(&mut value.nodes, ExprNode {
+        tokens: tokens,
+        kind: kind
+    }) {
         Result::Err(_) => unreachable(),
         Result::Ok(id) => id
     }
 }
 
 pub expression_count(value: &ParsedBody) -> usize { Arena::len(&value.nodes) }
-
-pub expression_at<'a>(
-    value: &'a ParsedBody,
-    index: usize
-) -> Option<&'a ExprNode> {
-    handle Id::from_usize(index) {
-        Result::Err(_) => None,
-        Result::Ok(id) => Arena::get(&value.nodes, id)
-    }
-}
-
 pub body_shell(value: &ParsedBody) -> ShellId { value.shell }
-
-pub body_root_index(value: &ParsedBody) -> u32 { Id::to_u32(value.root) }
-
-pub expression_kind_at(value: &ParsedBody, index: u32) -> u8 {
-    arena_node_at_raw(&value.nodes, index).kind_code
+pub body_root(value: &ParsedBody) -> ExprId { value.root }
+pub expression_at<'a>(value: &'a ParsedBody, id: ExprId) -> &'a ExprNode {
+    Arena::index(&value.nodes, id)
+}
+pub expression_tokens(value: &ParsedBody, id: ExprId) -> TokenSpan {
+    expression_at(value, id).tokens
+}
+pub expression_token_start(value: &ParsedBody, id: ExprId) -> usize {
+    super::syntax::token_start(&expression_at(value, id).tokens)
+}
+pub expression_token_end(value: &ParsedBody, id: ExprId) -> usize {
+    super::syntax::token_end(&expression_at(value, id).tokens)
 }
 
-pub expression_token_start_at(value: &ParsedBody, index: u32) -> usize {
-    arena_node_at_raw(&value.nodes, index).tokens.start
-}
-
-pub expression_token_end_at(value: &ParsedBody, index: u32) -> usize {
-    arena_node_at_raw(&value.nodes, index).tokens.end
-}
-
-pub expression_name_count_at(value: &ParsedBody, index: u32) -> u32 {
-    arena_node_at_raw(&value.nodes, index).names.count
-}
-
-pub expression_name_kind_at(
-    value: &ParsedBody,
-    index: u32,
-    ordinal: u32
-) -> u8 {
-    let node = arena_node_at_raw(&value.nodes, index);
-    handle *Vec::index(
-        &value.names,
-        usize_from_u32(node.names.start + ordinal)
-    ) {
-        ExpressionName::Identifier(_, _) => 1,
-        ExpressionName::TupleField(_, _) => 2
+pub expression_view<'a>(value: &'a ParsedBody, id: ExprId) -> ExprView<'a> {
+    let node = expression_at(value, id);
+    handle node.kind {
+        ExprKind::Identifier(range) => ExprView::Identifier(
+            node.tokens,
+            super::syntax::id_range_slice(&value.names, &range)
+        ),
+        ExprKind::Number => ExprView::Number(node.tokens),
+        ExprKind::Unit => ExprView::Unit(node.tokens),
+        ExprKind::Group(child) => ExprView::Group(node.tokens, child),
+        ExprKind::Prefix(operator, child) =>
+            ExprView::Prefix(node.tokens, operator, child),
+        ExprKind::Infix(operator, left, right) =>
+            ExprView::Infix(node.tokens, operator, left, right),
+        ExprKind::Call(callee, arguments) => ExprView::Call(
+            node.tokens,
+            callee,
+            super::syntax::id_range_slice(&value.expression_uses, &arguments)
+        ),
+        ExprKind::Block(statements) => ExprView::Block(
+            node.tokens,
+            super::syntax::id_range_slice(&value.block_statements, &statements)
+        ),
+        ExprKind::Tuple(elements) => ExprView::Tuple(
+            node.tokens,
+            super::syntax::id_range_slice(&value.expression_uses, &elements)
+        ),
+        ExprKind::Struct(name, fields) => ExprView::Struct(
+            node.tokens,
+            name,
+            super::syntax::id_range_slice(&value.struct_fields, &fields)
+        ),
+        ExprKind::Projection(subject, name) =>
+            ExprView::Projection(node.tokens, subject, name),
+        ExprKind::Handle(subject, arms) => ExprView::Handle(
+            node.tokens,
+            subject,
+            super::syntax::id_range_slice(&value.handle_arms, &arms)
+        )
     }
 }
 
-pub expression_name_value_at(
-    value: &ParsedBody,
-    index: u32,
-    ordinal: u32
-) -> u32 {
-    let node = arena_node_at_raw(&value.nodes, index);
-    handle *Vec::index(
-        &value.names,
-        usize_from_u32(node.names.start + ordinal)
-    ) {
-        ExpressionName::Identifier(name, _) => Id::to_u32(name),
-        ExpressionName::TupleField(field, _) => field
-    }
-}
-
-pub expression_name_token_at(
-    value: &ParsedBody,
-    index: u32,
-    ordinal: u32
-) -> usize {
-    let node = arena_node_at_raw(&value.nodes, index);
-    handle *Vec::index(
-        &value.names,
-        usize_from_u32(node.names.start + ordinal)
-    ) {
-        ExpressionName::Identifier(_, token) => token,
-        ExpressionName::TupleField(_, token) => token
-    }
-}
-
-expression_edges<'a>(
-    value: &'a ParsedBody,
-    node: &ExprNode
-) -> Slice<'a, ExprEdge> {
-    handle Slice::subslice(
-        Vec::as_slice(&value.edges),
-        usize_from_u32(node.children.start),
-        usize_from_u32(node.children.count)
-    ) {
+pub handle_arm_count(value: &ParsedBody) -> usize { Vec::len(&value.handle_arms) }
+pub handle_arm_id_at(index: usize) -> HandleArmId {
+    handle Id::from_usize(index) {
         Result::Err(_) => unreachable(),
-        Result::Ok(found) => found
+        Result::Ok(id) => id
     }
 }
-
-pub expression_children<'a>(
-    value: &'a ParsedBody,
-    expression: u32
-) -> Slice<'a, ExprEdge> {
-    let node = arena_node_at_raw(&value.nodes, expression);
-    expression_edges(value, node)
+pub handle_arm_at<'a>(value: &'a ParsedBody, id: HandleArmId) -> &'a HandleArm {
+    Vec::index(&value.handle_arms, Id::to_usize(id))
 }
-
-slice_handle_arms<'a>(
-    value: &'a ParsedBody,
-    range: &ExprRange
-) -> Slice<'a, HandleArm> {
-    handle Slice::subslice(
-        Vec::as_slice(&value.handle_arms),
-        usize_from_u32(range.start),
-        usize_from_u32(range.count)
-    ) {
-        Result::Err(_) => unreachable(),
-        Result::Ok(found) => found
-    }
-}
-
-pub expression_handle_arms<'a>(
-    value: &'a ParsedBody,
-    expression: u32
-) -> Slice<'a, HandleArm> {
-    let node = arena_node_at_raw(&value.nodes, expression);
-    slice_handle_arms(value, &node.handle_arms)
-}
-
-pub handle_arm_count(value: &ParsedBody) -> usize {
-    Vec::len(&value.handle_arms)
-}
-
-pub expression_handle_arm_id(
-    value: &ParsedBody,
-    expression: u32,
-    ordinal: usize
-) -> HandleArmId {
-    let node = arena_node_at_raw(&value.nodes, expression);
-    Id::from_u32(node.handle_arms.start + u32_from_usize(ordinal))
-}
-
-pub handle_arm_enum_name(value: &HandleArm) -> Id<String> {
-    value.enum_name
-}
-
-pub handle_arm_enum_token(value: &HandleArm) -> usize {
-    value.enum_token
-}
-
-pub handle_arm_variant_name(value: &HandleArm) -> Id<String> {
-    value.variant_name
-}
-
-pub handle_arm_variant_token(value: &HandleArm) -> usize {
-    value.variant_token
-}
-
+pub handle_arm_enum_name(value: &HandleArm) -> Id<String> { value.enum_name }
+pub handle_arm_enum_token(value: &HandleArm) -> usize { value.enum_token }
+pub handle_arm_variant_name(value: &HandleArm) -> Id<String> { value.variant_name }
+pub handle_arm_variant_token(value: &HandleArm) -> usize { value.variant_token }
 pub handle_arm_body(value: &HandleArm) -> ExprId { value.body }
-
 pub handle_arm_binders<'a>(
     body: &'a ParsedBody,
     value: &HandleArm
 ) -> Slice<'a, PatternBinder> {
-    handle Slice::subslice(
-        Vec::as_slice(&body.pattern_binders),
-        usize_from_u32(value.binders.start),
-        usize_from_u32(value.binders.count)
-    ) {
-        Result::Err(_) => unreachable(),
-        Result::Ok(found) => found
+    super::syntax::id_range_slice(&body.pattern_binders, &value.binders)
+}
+
+pub expression_name_id(value: ExpressionName) -> Option<Id<String>> {
+    handle value {
+        ExpressionName::Identifier(name, _) => Some(name),
+        ExpressionName::TupleField(_, _) => None
     }
 }
-
-pub expression_edge_value(value: &ExprEdge) -> ExprId {
-    value.value
-}
-
-expression_edge_metadata(value: &ExprEdge) -> u32 {
-    value.metadata
-}
-
-pub block_statement_view(value: &ExprEdge) -> BlockStatementView {
-    handle value.position {
-        1 => BlockStatementView::Let(
-            value.value,
-            usize_from_u32(value.metadata)
-        ),
-        2 => BlockStatementView::Expression(value.value),
-        _ => unreachable()
+pub expression_name_value(value: ExpressionName) -> u32 {
+    handle value {
+        ExpressionName::Identifier(name, _) => Id::to_u32(name),
+        ExpressionName::TupleField(field, _) => field
     }
 }
-
-// Transitional scalar accessors remain for elaboration's ordinal-sensitive
-// walks. Serialization and resolution consume the borrowed view directly.
-pub expression_child_count_at(
-    value: &ParsedBody,
-    expression: u32
-) -> u32 {
-    u32_from_usize(Slice::len(expression_children(value, expression)))
-}
-
-pub expression_child_at(
-    value: &ParsedBody,
-    expression: u32,
-    child: u32
-) -> u32 {
-    Id::to_u32(expression_edge_value(edge_in_slice(
-        expression_children(value, expression),
-        usize_from_u32(child)
-    )))
-}
-
-edge_in_slice<'a>(
-    value: Slice<'a, ExprEdge>,
-    index: usize
-) -> &'a ExprEdge {
-    handle Slice::get(value, index) {
-        Result::Err(_) => unreachable(),
-        Result::Ok(found) => found
+pub expression_name_token(value: ExpressionName) -> usize {
+    handle value {
+        ExpressionName::Identifier(_, token) => token,
+        ExpressionName::TupleField(_, token) => token
     }
 }
+pub struct_field_name(value: &StructField) -> Id<String> { value.name }
+pub struct_field_name_token(value: &StructField) -> usize { value.name_token }
+pub struct_field_expression(value: &StructField) -> ExprId { value.expression }
 
-edge_suffix<'a>(
-    value: Slice<'a, ExprEdge>,
-    start: usize
-) -> Slice<'a, ExprEdge> {
-    handle Slice::subslice(
-        value,
-        start,
-        Slice::len(value) - start
-    ) {
-        Result::Err(_) => unreachable(),
-        Result::Ok(found) => found
-    }
+position(value: &BodyParser) -> usize {
+    super::syntax::cursor_position(&value.cursor)
 }
-
-token_range(start: usize, end: usize) -> BodyTokenRange {
-    BodyTokenRange { start:  start, end:  end }
+limit(value: &BodyParser) -> usize {
+    super::syntax::cursor_limit(&value.cursor)
 }
-
-empty_tokens(at: usize) -> BodyTokenRange { token_range(at, at) }
-
-expression_range(start: usize, end: usize) -> ExprRange {
-    ExprRange {
-        start: u32_from_usize(start),
-        count: u32_from_usize(end - start)
-    }
-}
-
-name_count(value: &Vec<ExpressionName>) -> usize {
-    Vec::len(value)
-}
-
-push_name(value: &mut Vec<ExpressionName>, name: ExpressionName) {
-    Vec::push(&mut *value, name)
+set_position(value: &mut BodyParser, at: usize) {
+    super::syntax::cursor_set(&mut value.cursor, at)
 }
 
 pop_operator(value: &mut Vec<OperatorUse>) -> OperatorUse {
-    handle Vec::pop(&mut *value) {
+    handle Vec::pop(value) {
         Result::Err(_) => unreachable(),
         Result::Ok(found) => found
     }
 }
-
 pop_expr(value: &mut Vec<ExprId>) -> ExprId {
-    handle Vec::pop(&mut *value) {
+    handle Vec::pop(value) {
         Result::Err(_) => unreachable(),
         Result::Ok(found) => found
     }
 }
-
 last_operator(value: &Vec<OperatorUse>) -> OperatorUse {
     *Vec::index(value, Vec::len(value) - 1)
 }
-
 last_expr(value: &Vec<ExprId>) -> ExprId {
     *Vec::index(value, Vec::len(value) - 1)
 }
@@ -495,14 +370,11 @@ last_expr(value: &Vec<ExprId>) -> ExprId {
 source_text(value: &String, start: usize, end: usize) -> String {
     handle String::slice(value, Range { start: start, end: end }) {
         Result::Err(_) => unreachable(),
-        Result::Ok(found) =>  found
+        Result::Ok(found) => found
     }
 }
 
-token_span(
-    source: &super::lexer::LexedSource,
-    index: usize
-) -> super::lexer::Span {
+token_span(source: &super::lexer::LexedSource, index: usize) -> super::lexer::Span {
     handle super::lexer::token_at(source, index) {
         Result::Err(_) => unreachable(),
         Result::Ok(token) => super::lexer::token_span(token)
@@ -512,9 +384,10 @@ token_span(
 range_text(
     original: &String,
     source: &super::lexer::LexedSource,
-    start: usize,
-    end: usize
+    span: &TokenSpan
 ) -> String {
+    let start = super::syntax::token_start(span);
+    let end = super::syntax::token_end(span);
     let first = token_span(source, start);
     let last = token_span(source, end - 1);
     source_text(
@@ -524,159 +397,137 @@ range_text(
     )
 }
 
-node_tokens(value: &BodyParser, id: ExprId) -> BodyTokenRange {
-    let node = Arena::index(&value.nodes, id);
-    node.tokens
+node_tokens(value: &BodyParser, id: ExprId) -> TokenSpan {
+    Arena::index(&value.nodes, id).tokens
 }
 
-node_kind(value: &BodyParser, id: ExprId) -> u8 {
-    Arena::index(&value.nodes, id).kind_code
+node_is_single_identifier(value: &BodyParser, id: ExprId) -> Bool {
+    handle Arena::index(&value.nodes, id).kind {
+        ExprKind::Identifier(range) => super::syntax::id_range_count(&range) == 1,
+        _ => false
+    }
 }
 
-push_node(
+single_identifier_name(value: &BodyParser, id: ExprId) -> ExpressionName {
+    handle Arena::index(&value.nodes, id).kind {
+        ExprKind::Identifier(range) => *Slice::index(
+            super::syntax::id_range_slice(&value.names, &range),
+            0
+        ),
+        _ => unreachable()
+    }
+}
+
+append_exprs(output: &mut Vec<ExprId>, values: &Vec<ExprId>) -> ExprUseRange {
+    let start = Vec::len(output);
+    for_range(Range::new(0, Vec::len(values)), { index =>
+        Vec::push(output, *Vec::index(values, index))
+    });
+    super::syntax::id_range(start, Vec::len(output))
+}
+
+push_identifier(
+    source: &super::lexer::LexedSource,
     value: &mut BodyParser,
-    kind_code: u8,
-    tokens: BodyTokenRange,
-    operator: BodyTokenRange,
-    name_start: usize,
-    edge_start: usize
-) -> ExprId {
-    let name_end = name_count(&value.names);
-    let edge_end = Vec::len(&value.edges);
-    alloc_node(
-        &mut value.nodes,
-        ExprNode {
-            kind_code: kind_code,
-            tokens: tokens,
-            operator: operator,
-            names: expression_range(name_start, name_end),
-            children: expression_range(edge_start, edge_end),
-            handle_arms: ExprRange { start: 0, count: 0 }
-        }
-    )
+    start: usize
+) -> Result<ExprId, BodyError> {
+    let name_start = Vec::len(&value.names);
+    let cursor = start;
+    let current = cursor;
+    handle super::lexer::token_kind_at(source, current) {
+        TokenKind::Ident(name) => Vec::push(
+            &mut value.names,
+            ExpressionName::Identifier(name, current)
+        ),
+        _ => @push_identifier(Result::Err(
+            BodyError::ExpectedIdentifier(current, start)
+        ))
+    };
+    set_position(value, current + 1);
+    while_identifier_tail(source, value, start, name_start)
 }
 
-push_leaf(
+while_identifier_tail(
+    source: &super::lexer::LexedSource,
     value: &mut BodyParser,
-    kind_code: u8,
     start: usize,
-    end: usize
-) -> ExprId {
-    let name_start = name_count(&value.names);
-    let edge_start = Vec::len(&value.edges);
-    push_node(
-        value,
-        kind_code,
-        token_range(start, end),
-        empty_tokens(start),
-        name_start,
-        edge_start
-    )
-}
-
-push_named_leaf(
-    value: &mut BodyParser,
-    kind_code: u8,
-    start: usize,
-    end: usize,
     name_start: usize
-) -> ExprId {
-    let edge_start = Vec::len(&value.edges);
-    push_node(
-        value,
-        kind_code,
-        token_range(start, end),
-        empty_tokens(start),
-        name_start,
-        edge_start
-    )
+) -> Result<ExprId, BodyError> {
+    if(position(value) < limit(value)
+        and { super::lexer::token_code_at(source, position(value)) == 19 }) {
+        let separator = position(value);
+        let token = separator + 1;
+        if(token < limit(value)) {
+            handle super::lexer::token_kind_at(source, token) {
+                TokenKind::Ident(name) => Vec::push(
+                    &mut value.names,
+                    ExpressionName::Identifier(name, token)
+                ),
+                _ => @while_identifier_tail(Result::Err(
+                    BodyError::ExpectedIdentifier(token, separator)
+                ))
+            };
+            set_position(value, token + 1);
+            while_identifier_tail(source, value, start, name_start)
+        } else {
+            Result::Err(BodyError::ExpectedIdentifier(token, separator))
+        }
+    } else {
+        Result::Ok(alloc_node(
+            value,
+            super::syntax::token_span(start, position(value)),
+            ExprKind::Identifier(super::syntax::id_range(
+                name_start,
+                Vec::len(&value.names)
+            ))
+        ))
+    }
 }
 
-node_name_at(
-    value: &BodyParser,
-    id: ExprId,
-    ordinal: u32
-) -> &ExpressionName {
-    let node = Arena::index(&value.nodes, id);
-    Vec::index(
-        &value.names,
-        usize_from_u32(node.names.start + ordinal)
-    )
+push_number(value: &mut BodyParser, start: usize, end: usize) -> ExprId {
+    alloc_node(value, super::syntax::token_span(start, end), ExprKind::Number)
 }
-
-node_name_count(value: &BodyParser, id: ExprId) -> u32 {
-    Arena::index(&value.nodes, id).names.count
+push_unit(value: &mut BodyParser, start: usize, end: usize) -> ExprId {
+    alloc_node(value, super::syntax::token_span(start, end), ExprKind::Unit)
 }
-
-push_unary(
+push_group(value: &mut BodyParser, child: ExprId, start: usize, end: usize) -> ExprId {
+    alloc_node(value, super::syntax::token_span(start, end), ExprKind::Group(child))
+}
+push_prefix(
     value: &mut BodyParser,
-    kind_code: u8,
     operator: OperatorUse,
     child: ExprId,
     start: usize,
     end: usize
 ) -> ExprId {
-    let name_start = name_count(&value.names);
-    let edge_start = Vec::len(&value.edges);
-    Vec::push(
-        &mut value.edges,
-        ExprEdge { value: child, position: 0, metadata: 0 }
-    );
-    push_node(
+    alloc_node(
         value,
-        kind_code,
-        token_range(start, end),
-        token_range(operator.start, operator.end),
-        name_start,
-        edge_start
+        super::syntax::token_span(start, end),
+        ExprKind::Prefix(
+            super::syntax::token_span(operator.start, operator.end),
+            child
+        )
     )
 }
-
-push_binary(
+push_infix(
     value: &mut BodyParser,
     operator: OperatorUse,
     left: ExprId,
     right: ExprId
 ) -> ExprId {
-    let start = node_tokens(&*value, left).start;
-    let end = node_tokens(&*value, right).end;
-    let name_start = name_count(&value.names);
-    let edge_start = Vec::len(&value.edges);
-    Vec::push(
-        &mut value.edges,
-        ExprEdge { value: left, position: 0, metadata: 0 }
-    );
-    Vec::push(
-        &mut value.edges,
-        ExprEdge { value: right, position: 1, metadata: 0 }
-    );
-    push_node(
+    alloc_node(
         value,
-        6,
-        token_range(start, end),
-        token_range(operator.start, operator.end),
-        name_start,
-        edge_start
+        super::syntax::token_span(
+            super::syntax::token_start(&node_tokens(&*value, left)),
+            super::syntax::token_end(&node_tokens(&*value, right))
+        ),
+        ExprKind::Infix(
+            super::syntax::token_span(operator.start, operator.end),
+            left,
+            right
+        )
     )
 }
-
-push_argument_edges(
-    value: &mut BodyParser,
-    arguments: &Vec<ExprId>,
-    index: usize
-) {
-    for_range(Range::new(index, Vec::len(arguments)), { current =>
-        Vec::push(
-            &mut value.edges,
-            ExprEdge {
-                value: *Vec::index(arguments, current),
-                position: 1,
-                metadata: 0
-            }
-        )
-    })
-}
-
 push_call(
     value: &mut BodyParser,
     callee: ExprId,
@@ -684,178 +535,120 @@ push_call(
     start: usize,
     end: usize
 ) -> ExprId {
-    let name_start = name_count(&value.names);
-    let edge_start = Vec::len(&value.edges);
-    Vec::push(
-        &mut value.edges,
-        ExprEdge { value: callee, position: 0, metadata: 0 }
-    );
-    push_argument_edges(value, arguments, 0);
-    push_node(
+    let range = append_exprs(&mut value.expression_uses, arguments);
+    alloc_node(
         value,
-        7,
-        token_range(start, end),
-        empty_tokens(start),
-        name_start,
-        edge_start
+        super::syntax::token_span(start, end),
+        ExprKind::Call(callee, range)
     )
 }
-
-push_expression_edges(
-    value: &mut BodyParser,
-    expressions: &Vec<ExprId>,
-    index: usize,
-    position: u8
-) {
-    for_range(Range::new(index, Vec::len(expressions)), { current =>
-        Vec::push(
-            &mut value.edges,
-            ExprEdge {
-                value: *Vec::index(expressions, current),
-                position: position,
-                metadata: u32_from_usize(current)
-            }
-        )
-    })
-}
-
 push_tuple(
     value: &mut BodyParser,
     elements: &Vec<ExprId>,
     start: usize,
     end: usize
 ) -> ExprId {
-    let name_start = name_count(&value.names);
-    let edge_start = Vec::len(&value.edges);
-    push_expression_edges(value, elements, 0, 0);
-    push_node(
+    let range = append_exprs(&mut value.expression_uses, elements);
+    alloc_node(
         value,
-        9,
-        token_range(start, end),
-        empty_tokens(start),
-        name_start,
-        edge_start
+        super::syntax::token_span(start, end),
+        ExprKind::Tuple(range)
     )
 }
-
-push_struct_fields(
-    value: &mut BodyParser,
-    fields: &Vec<PendingField>,
-    index: usize
-) {
-    for_range(Range::new(index, Vec::len(fields)), { current => {
-        let field = Vec::index(fields, current);
-        push_name(&mut value.names, ExpressionName::Identifier(
-            field.name,
-            field.name_token
-        ));
-        Vec::push(
-            &mut value.edges,
-            ExprEdge {
-                value: field.expression,
-                position: 1,
-                // Name zero is the constructed nominal.
-                metadata: u32_from_usize(current) + 1
-            }
-        )
-    } })
-}
-
 push_struct(
     value: &mut BodyParser,
     constructor: ExprId,
-    fields: &Vec<PendingField>,
+    fields: &Vec<StructField>,
     start: usize,
     end: usize
 ) -> ExprId {
-    let name_start = name_count(&value.names);
-    let constructor_name = *node_name_at(&*value, constructor, 0);
-    push_name(&mut value.names, constructor_name);
-    let edge_start = Vec::len(&value.edges);
-    push_struct_fields(value, fields, 0);
-    push_node(
+    let field_start = Vec::len(&value.struct_fields);
+    for_range(Range::new(0, Vec::len(fields)), { index =>
+        Vec::push(&mut value.struct_fields, *Vec::index(fields, index))
+    });
+    alloc_node(
         value,
-        10,
-        token_range(start, end),
-        empty_tokens(start),
-        name_start,
-        edge_start
+        super::syntax::token_span(start, end),
+        ExprKind::Struct(
+            single_identifier_name(&*value, constructor),
+            super::syntax::id_range(field_start, Vec::len(&value.struct_fields))
+        )
     )
 }
-
 push_projection(
     value: &mut BodyParser,
     subject: ExprId,
     name: ExpressionName,
     end: usize
 ) -> ExprId {
-    let start = node_tokens(&*value, subject).start;
-    let name_start = name_count(&value.names);
-    let name_token = handle name {
-        ExpressionName::Identifier(_, token) => token,
-        ExpressionName::TupleField(_, token) => token
-    };
-    push_name(&mut value.names, name);
-    let edge_start = Vec::len(&value.edges);
-    Vec::push(
-        &mut value.edges,
-        ExprEdge { value: subject, position: 0, metadata: 0 }
-    );
-    push_node(
+    let start = super::syntax::token_start(&node_tokens(&*value, subject));
+    alloc_node(
         value,
-        11,
-        token_range(start, end),
-        empty_tokens(name_token),
-        name_start,
-        edge_start
+        super::syntax::token_span(start, end),
+        ExprKind::Projection(subject, name)
     )
 }
-
-push_statement_edges(
-    value: &mut BodyParser,
-    statements: &Vec<PendingStatement>,
-    index: usize
-) {
-    for_range(Range::new(index, Vec::len(statements)), { current => {
-        let statement = Vec::index(statements, current);
-        handle *statement {
-            PendingStatement::Let(token, expression) => Vec::push(
-                &mut value.edges,
-                ExprEdge {
-                    value: expression,
-                    position: 1,
-                    metadata: u32_from_usize(token)
-                }
-            ),
-            PendingStatement::Expression(expression) => Vec::push(
-                &mut value.edges,
-                ExprEdge {
-                    value: expression,
-                    position: 2,
-                    metadata: 0
-                }
-            )
-        }
-    } })
-}
-
 push_block(
     value: &mut BodyParser,
-    statements: &Vec<PendingStatement>,
+    statements: &Vec<BlockStatement>,
     start: usize,
     end: usize
 ) -> ExprId {
-    let name_start = name_count(&value.names);
-    let edge_start = Vec::len(&value.edges);
-    push_statement_edges(value, statements, 0);
-    push_node(
+    let statement_start = Vec::len(&value.block_statements);
+    for_range(Range::new(0, Vec::len(statements)), { index =>
+        Vec::push(&mut value.block_statements, *Vec::index(statements, index))
+    });
+    alloc_node(
         value,
-        8,
-        token_range(start, end),
-        empty_tokens(start),
-        name_start,
-        edge_start
+        super::syntax::token_span(start, end),
+        ExprKind::Block(super::syntax::id_range(
+            statement_start,
+            Vec::len(&value.block_statements)
+        ))
     )
+}
+
+append_pattern_binders(
+    values: VecIntoIter<PatternBinder>,
+    output: &mut Vec<PatternBinder>
+) {
+    handle VecIntoIter::next(values) {
+        None => (),
+        Some((found, remaining)) => {
+            Vec::push(output, found);
+            append_pattern_binders(remaining, output)
+        }
+    }
+}
+
+push_handle(
+    value: &mut BodyParser,
+    subject: ExprId,
+    arms: Vec<HandleArm>,
+    start: usize,
+    end: usize
+) -> ExprId {
+    let arm_start = Vec::len(&value.handle_arms);
+    let remaining = Vec::into_iter(arms);
+    append_handle_values(remaining, &mut value.handle_arms);
+    alloc_node(
+        value,
+        super::syntax::token_span(start, end),
+        ExprKind::Handle(subject, super::syntax::id_range(
+            arm_start,
+            Vec::len(&value.handle_arms)
+        ))
+    )
+}
+
+append_handle_values(values: VecIntoIter<HandleArm>, output: &mut Vec<HandleArm>) {
+    handle VecIntoIter::next(values) {
+        None => (),
+        Some((found, remaining)) => {
+            Vec::push(output, found);
+            append_handle_values(remaining, output)
+        }
+    }
 }
 
 shell_owner(
@@ -863,8 +656,8 @@ shell_owner(
     shell: ShellId
 ) -> Option<ShellId> {
     handle super::scanner::shell_at(declarations, shell) {
-        Result::Err(_) => Result::Err(()),
-        Result::Ok(found) => *super::scanner::shell_parent(found)
+        None => None,
+        Some(found) => *super::scanner::shell_parent(found)
     }
 }
 
@@ -875,65 +668,44 @@ fixity_owner(
     shell_owner(declarations, super::headers::fixity_shell(value))
 }
 
-same_owner(left: Option<ShellId>, right: Option<ShellId>) -> Bool {
-    left == right
-}
-
 operator_range(
     source: &super::lexer::LexedSource,
     cursor: usize,
     limit: usize
-) -> Option<BodyTokenRange> {
+) -> Option<TokenSpan> {
     if(cursor < limit) {
         if(super::lexer::token_code_at(source, cursor) == 1) {
-            Result::Ok(
-                token_range(cursor, cursor + 1)
-            )
-        } else {
-            if(super::lexer::operator_symbol_at(
+            Some(super::syntax::token_span(cursor, cursor + 1))
+        } else if(super::lexer::operator_symbol_at(source, cursor)) {
+            let first = token_span(source, cursor);
+            let end = super::lexer::operator_end(
                 source,
-                cursor
-            )) {
-                let first = token_span(source, cursor);
-                let end = super::lexer::operator_end(
-                    source,
-                    cursor + 1,
-                    limit,
-                    super::lexer::span_end(&first)
-                );
-                Result::Ok(token_range(cursor, end))
-            } else {
-                Result::Err(())
-            }
-        }
-    } else {
-        Result::Err(())
-    }
+                cursor + 1,
+                limit,
+                super::lexer::span_end(&first)
+            );
+            Some(super::syntax::token_span(cursor, end))
+        } else { None }
+    } else { None }
 }
 
 same_operator(
     original: &String,
     source: &super::lexer::LexedSource,
-    found: &BodyTokenRange,
+    found: &TokenSpan,
     declared_start: usize,
     declared_end: usize
 ) -> Bool {
-    let left = range_text(original, source, found.start, found.end);
-    let right = range_text(
-        original,
-        source,
-        declared_start,
-        declared_end
-    );
-    String::eq(&left, &right)
+    range_text(original, source, found)
+        == range_text(
+            original,
+            source,
+            &super::syntax::token_span(declared_start, declared_end)
+        )
 }
 
 form_matches(form: u8, prefix: Bool) -> Bool {
-    if(prefix) {
-        form == 1
-    } else {
-        form != 1
-    }
+    if(prefix) { form == 1 } else { form != 1 }
 }
 
 lookup_scope(
@@ -941,7 +713,7 @@ lookup_scope(
     source: &super::lexer::LexedSource,
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
-    operator: &BodyTokenRange,
+    operator: &TokenSpan,
     prefix: Bool,
     owner: Option<ShellId>,
     index: usize,
@@ -949,24 +721,21 @@ lookup_scope(
 ) -> Result<Option<u32>, BodyError> {
     if(index < super::headers::fixity_count(nominal)) {
         handle super::headers::fixity_at(nominal, index) {
-            Result::Err(_) => Result::Ok(selected),
-            Result::Ok(fixity) => {
+            None => Result::Ok(selected),
+            Some(fixity) => {
                 let form = super::headers::fixity_form_code(fixity);
-                let fixity_scope = fixity_owner(declarations, fixity);
-                let matches = same_owner(fixity_scope, owner)
+                let matches = fixity_owner(declarations, fixity) == owner
                     and { form_matches(form, prefix) }
-                    and {
-                        same_operator(
-                            original,
-                            source,
-                            operator,
-                            super::headers::fixity_operator_start(fixity),
-                            super::headers::fixity_operator_end(fixity)
-                        )
-                    };
+                    and { same_operator(
+                        original,
+                        source,
+                        operator,
+                        super::headers::fixity_operator_start(fixity),
+                        super::headers::fixity_operator_end(fixity)
+                    ) };
                 if(matches) {
                     handle selected {
-                        Result::Err(_) => lookup_scope(
+                        None => lookup_scope(
                             original,
                             source,
                             declarations,
@@ -975,45 +744,30 @@ lookup_scope(
                             prefix,
                             owner,
                             index + 1,
-                            Result::Ok(u32_from_usize(index))
+                            Some(wrapping_convert_to_u32(index))
                         ),
-                        Result::Ok(previous) => {
-                            let old_index = usize_from_u32(previous);
-                            if(super::headers::fixity_form_at(
-                                nominal,
-                                old_index
-                            ) == form) {
-                                if(super::headers::fixity_precedence_at(
+                        Some(previous) => {
+                            let old = wrapping_convert_to_usize(previous);
+                            if(super::headers::fixity_form_at(nominal, old) == form
+                                and {
+                                    super::headers::fixity_precedence_at(nominal, old)
+                                        == super::headers::fixity_precedence(fixity)
+                                }) {
+                                lookup_scope(
+                                    original,
+                                    source,
+                                    declarations,
                                     nominal,
-                                    old_index
-                                ) == super::headers::fixity_precedence(fixity)) {
-                                    lookup_scope(
-                                        original,
-                                        source,
-                                        declarations,
-                                        nominal,
-                                        operator,
-                                        prefix,
-                                        owner,
-                                        index + 1,
-                                        Result::Ok(previous)
-                                    )
-                                } else {
-                                    Result::Err(BodyError::ConflictingFixity(
-                                        operator.start,
-                                        super::headers::fixity_operator_start_at(
-                                            nominal,
-                                            old_index
-                                        )
-                                    ))
-                                }
+                                    operator,
+                                    prefix,
+                                    owner,
+                                    index + 1,
+                                    Some(previous)
+                                )
                             } else {
                                 Result::Err(BodyError::ConflictingFixity(
-                                    operator.start,
-                                    super::headers::fixity_operator_start_at(
-                                        nominal,
-                                        old_index
-                                    )
+                                    super::syntax::token_start(operator),
+                                    super::headers::fixity_operator_start_at(nominal, old)
                                 ))
                             }
                         }
@@ -1033,9 +787,7 @@ lookup_scope(
                 }
             }
         }
-    } else {
-        Result::Ok(selected)
-    }
+    } else { Result::Ok(selected) }
 }
 
 lookup_fixity(
@@ -1043,28 +795,25 @@ lookup_fixity(
     source: &super::lexer::LexedSource,
     declarations: &super::scanner::DeclarationIndex,
     nominal: &super::headers::NominalIndex,
-    operator: &BodyTokenRange,
+    operator: &TokenSpan,
     prefix: Bool,
     owner: Option<ShellId>
 ) -> Result<Option<u32>, BodyError> {
-    let found = try(
-        lookup_scope(
-            original,
-            source,
-            declarations,
-            nominal,
-            operator,
-            prefix,
-            owner,
-            0,
-            Result::Err(())
-        ),
-        @lookup_fixity
-    );
-    handle found {
-        Result::Ok(index) => Result::Ok(Result::Ok(index)),
-        Result::Err(_) => if(Option::is_none(&owner)) {
-            Result::Ok(Result::Err(()))
+    let local = try(lookup_scope(
+        original,
+        source,
+        declarations,
+        nominal,
+        operator,
+        prefix,
+        owner,
+        0,
+        None
+    ), @lookup_fixity);
+    handle local {
+        Some(_) => Result::Ok(local),
+        None => if(Option::is_none(&owner)) {
+            Result::Ok(None)
         } else {
             lookup_scope(
                 original,
@@ -1073,9 +822,9 @@ lookup_fixity(
                 nominal,
                 operator,
                 prefix,
-                Result::Err(()),
+                None,
                 0,
-                Result::Err(())
+                None
             )
         }
     }
@@ -1090,39 +839,26 @@ peek_operator(
     prefix: Bool,
     owner: Option<ShellId>
 ) -> Result<Option<OperatorUse>, BodyError> {
-    handle operator_range(source, value.cursor, value.limit) {
-        Result::Err(_) => Result::Ok(Result::Err(())),
-        Result::Ok(range) => {
-            let found = try(
-                lookup_fixity(
-                    original,
-                    source,
-                    declarations,
-                    nominal,
-                    &range,
-                    prefix,
-                    owner
-                ),
-                @peek_operator
-            );
-            handle found {
-                Result::Err(_) => Result::Ok(Result::Err(())),
-                Result::Ok(index) => {
-                    let header_index = usize_from_u32(index);
-                    Result::Ok(Result::Ok(OperatorUse {
-                        fixity: index,
-                        start: range.start,
-                        end: range.end,
-                        form: super::headers::fixity_form_at(
-                            nominal,
-                            header_index
-                        ),
-                        precedence: super::headers::fixity_precedence_at(
-                            nominal,
-                            header_index
-                        )
-                    }))
-                }
+    handle operator_range(source, position(value), limit(value)) {
+        None => Result::Ok(None),
+        Some(range) => handle try(lookup_fixity(
+            original,
+            source,
+            declarations,
+            nominal,
+            &range,
+            prefix,
+            owner
+        ), @peek_operator) {
+            None => Result::Ok(None),
+            Some(index) => {
+                let ordinal = wrapping_convert_to_usize(index);
+                Result::Ok(Some(OperatorUse {
+                    start: super::syntax::token_start(&range),
+                    end: super::syntax::token_end(&range),
+                    form: super::headers::fixity_form_at(nominal, ordinal),
+                    precedence: super::headers::fixity_precedence_at(nominal, ordinal)
+                }))
             }
         }
     }
@@ -1137,161 +873,61 @@ parse_primary(
     owner: Option<ShellId>,
     depth: u16
 ) -> Result<ExprId, BodyError> {
-    if(depth < 128) {
-            let prefix = try(
-                peek_operator(
+    if(depth >= 128) {
+        Result::Err(BodyError::ExpressionDepthLimit(position(value), position(value)))
+    } else {
+        handle try(peek_operator(
+            original,
+            source,
+            declarations,
+            nominal,
+            &*value,
+            true,
+            owner
+        ), @parse_primary) {
+            Some(operator) => {
+                set_position(value, operator.end);
+                let child = try(parse_expression(
                     original,
                     source,
                     declarations,
                     nominal,
-                    &*value,
-                    true,
-                    owner
-                ),
-                @parse_primary
-            );
-            handle prefix {
-                Result::Ok(operator) => {
-                    value.cursor = operator.end;
-                    let child = try(
-                        parse_expression(
-                            original,
-                            source,
-                            declarations,
-                            nominal,
-                            value,
-                            owner,
-                            operator.precedence,
-                            depth + 1
-                        ),
-                        @parse_primary
-                    );
-                    let end = node_tokens(&*value, child).end;
-                    Result::Ok(push_unary(
-                        value,
-                        5,
-                        operator,
-                        child,
-                        operator.start,
-                        end
-                    ))
-                },
-                Result::Err(_) => {
-                    let atom = try(
-                        parse_atom(
-                            original,
-                            source,
-                            declarations,
-                            nominal,
-                            value,
-                            owner,
-                            depth
-                        ),
-                        @parse_primary
-                    );
-                    parse_postfix(
-                        original,
-                        source,
-                        declarations,
-                        nominal,
-                        value,
-                        owner,
-                        depth,
-                        atom
-                    )
-                }
+                    value,
+                    owner,
+                    operator.precedence,
+                    depth + 1
+                ), @parse_primary);
+                Result::Ok(push_prefix(
+                    value,
+                    operator,
+                    child,
+                    operator.start,
+                    super::syntax::token_end(&node_tokens(&*value, child))
+                ))
+            },
+            None => {
+                let atom = try(parse_atom(
+                    original,
+                    source,
+                    declarations,
+                    nominal,
+                    value,
+                    owner,
+                    depth
+                ), @parse_primary);
+                parse_postfix(
+                    original,
+                    source,
+                    declarations,
+                    nominal,
+                    value,
+                    owner,
+                    depth,
+                    atom
+                )
             }
-    } else {
-        Result::Err(BodyError::ExpressionDepthLimit(
-            value.cursor,
-            value.cursor
-        ))
-    }
-}
-
-push_identifier_name(
-    source: &super::lexer::LexedSource,
-    value: &mut BodyParser,
-    token: usize,
-    related: usize
-) -> Result<(), BodyError> {
-    handle super::lexer::token_kind_at(source, token) {
-        TokenKind::Ident(name) => {
-            push_name(
-                &mut value.names,
-                ExpressionName::Identifier(name, token)
-            );
-            Result::Ok(())
-        },
-        _ => Result::Err(BodyError::ExpectedIdentifier(token, related))
-    }
-}
-
-parse_identifier_tail(
-    source: &super::lexer::LexedSource,
-    value: &mut BodyParser,
-    start: usize,
-    name_start: usize
-) -> Result<ExprId, BodyError> {
-    if(value.cursor < value.limit) {
-        if(super::lexer::token_code_at(source, value.cursor)
-                == 19) {
-            let separator = value.cursor;
-                let token = separator + 1;
-                if(token < value.limit) {
-                    try(
-                            push_identifier_name(
-                                source,
-                                value,
-                                token,
-                                separator
-                            ),
-                            @parse_identifier_tail
-                        );
-                        value.cursor = token + 1;
-                        parse_identifier_tail(
-                            source,
-                            value,
-                            start,
-                            name_start
-                        )
-                } else {
-                    Result::Err(
-                        BodyError::ExpectedIdentifier(token, separator)
-                    )
-                }
-        } else {
-            Result::Ok(push_named_leaf(
-                value,
-                1,
-                start,
-                value.cursor,
-                name_start
-            ))
         }
-    } else {
-        Result::Ok(push_named_leaf(
-            value,
-            1,
-            start,
-            value.cursor,
-            name_start
-        ))
     }
-}
-
-parse_identifier(
-    source: &super::lexer::LexedSource,
-    value: &mut BodyParser,
-    start: usize
-) -> Result<ExprId, BodyError> {
-    let name_start = name_count(&value.names);
-    try(
-        push_identifier_name(source, value, start, start),
-        @parse_identifier
-    );
-    value.cursor = start + 1;
-    parse_identifier_tail(source, value, start, name_start)
 }
 
 parse_tuple_tail(
@@ -1305,72 +941,49 @@ parse_tuple_tail(
     start: usize,
     elements: &mut Vec<ExprId>
 ) -> Result<ExprId, BodyError> {
-    if(value.cursor < value.limit) {
-        if(super::lexer::token_code_at(source, value.cursor)
-                == 12) {
-            value.cursor = value.cursor + 1;
-                Result::Ok(push_tuple(
-                    value,
-                    &*elements,
-                    start,
-                    value.cursor
-                ))
-        } else {
-            let element = try(
-                    parse_expression(
+    if(position(value) >= limit(value)) {
+        Result::Err(BodyError::ExpectedTupleDelimiter(position(value), start))
+    } else if(super::lexer::token_code_at(source, position(value)) == 12) {
+        set_position(value, position(value) + 1);
+        Result::Ok(push_tuple(value, elements, start, position(value)))
+    } else {
+        Vec::push(elements, try(parse_expression(
+            original,
+            source,
+            declarations,
+            nominal,
+            value,
+            owner,
+            0,
+            depth
+        ), @parse_tuple_tail));
+        if(position(value) < limit(value)) {
+            handle super::lexer::token_code_at(source, position(value)) {
+                12 => {
+                    set_position(value, position(value) + 1);
+                    Result::Ok(push_tuple(value, elements, start, position(value)))
+                },
+                17 => {
+                    set_position(value, position(value) + 1);
+                    parse_tuple_tail(
                         original,
                         source,
                         declarations,
                         nominal,
                         value,
                         owner,
-                        0,
-                        depth
-                    ),
-                    @parse_tuple_tail
-                );
-                Vec::push(&mut *elements, element);
-                if(value.cursor < value.limit) {
-                    handle
-                        super::lexer::token_code_at(source, value.cursor) {
-                        12 => {
-                            value.cursor = value.cursor + 1;
-                            Result::Ok(push_tuple(
-                                value,
-                                &*elements,
-                                start,
-                                value.cursor
-                            ))
-                        },
-                        17 => {
-                            value.cursor = value.cursor + 1;
-                            parse_tuple_tail(
-                                original,
-                                source,
-                                declarations,
-                                nominal,
-                                value,
-                                owner,
-                                depth,
-                                start,
-                                elements
-                            )
-                        },
-                        _ => Result::Err(
-                            BodyError::ExpectedTupleDelimiter(
-                                value.cursor,
-                                start
-                            )
-                        )
-                    }
-                } else {
-                    Result::Err(
-                        BodyError::ExpectedTupleDelimiter(value.cursor, start)
+                        depth,
+                        start,
+                        elements
                     )
-                }
+                },
+                _ => Result::Err(
+                    BodyError::ExpectedTupleDelimiter(position(value), start)
+                )
+            }
+        } else {
+            Result::Err(BodyError::ExpectedTupleDelimiter(position(value), start))
         }
-    } else {
-        Result::Err(BodyError::ExpectedTupleDelimiter(value.cursor, start))
     }
 }
 
@@ -1381,14 +994,10 @@ pattern_binder_named(
 ) -> Bool {
     if(index < Vec::len(value)) {
         handle *Vec::index(value, index) {
-            PatternBinder::Wildcard(_) =>
-                pattern_binder_named(value, name, index + 1),
-            PatternBinder::Binding(found, _) =>
-                if(found == name) {
-                    true
-                } else {
-                    pattern_binder_named(value, name, index + 1)
-                }
+            PatternBinder::Wildcard(_) => pattern_binder_named(value, name, index + 1),
+            PatternBinder::Binding(found, _) => if(found == name) {
+                true
+            } else { pattern_binder_named(value, name, index + 1) }
         }
     } else { false }
 }
@@ -1399,33 +1008,20 @@ parse_pattern_binder(
     binders: &mut Vec<PatternBinder>,
     related: usize
 ) -> Result<(), BodyError> {
-    let token = value.cursor;
+    let token = position(value);
     handle super::lexer::token_kind_at(source, token) {
         TokenKind::Ident(name) => handle super::lexer::lexeme(source, name) {
-            Result::Err(_) =>
-                Result::Err(BodyError::ExpectedIdentifier(token, related)),
-            Result::Ok(text) => {
-                if(String::eq(text, &"_")) {
-                    Vec::push(
-                        &mut *binders,
-                        PatternBinder::Wildcard(token)
-                    );
-                    value.cursor = token + 1;
-                    Result::Ok(())
-                } else {
-                    if(pattern_binder_named(&*binders, name, 0)) {
-                        Result::Err(
-                            BodyError::DuplicatePatternBinder(token, related)
-                        )
-                    } else {
-                        Vec::push(
-                            &mut *binders,
-                            PatternBinder::Binding(name, token)
-                        );
-                        value.cursor = token + 1;
-                        Result::Ok(())
-                    }
-                }
+            Result::Err(_) => Result::Err(BodyError::ExpectedIdentifier(token, related)),
+            Result::Ok(text) => if(*text == "_") {
+                Vec::push(binders, PatternBinder::Wildcard(token));
+                set_position(value, token + 1);
+                Result::Ok(())
+            } else if(pattern_binder_named(&*binders, name, 0)) {
+                Result::Err(BodyError::DuplicatePatternBinder(token, related))
+            } else {
+                Vec::push(binders, PatternBinder::Binding(name, token));
+                set_position(value, token + 1);
+                Result::Ok(())
             }
         },
         _ => Result::Err(BodyError::ExpectedIdentifier(token, related))
@@ -1438,46 +1034,28 @@ parse_pattern_binders(
     binders: &mut Vec<PatternBinder>,
     open: usize
 ) -> Result<(), BodyError> {
-    if(value.cursor < value.limit) {
-        if(super::lexer::token_code_at(source, value.cursor) == 12) {
-            value.cursor = value.cursor + 1;
-            Result::Ok(())
-        } else {
-            try(parse_pattern_binder(
-                source,
-                value,
-                binders,
-                open
-            ), @parse_pattern_binders);
-            if(value.cursor < value.limit) {
-                handle super::lexer::token_code_at(
-                    source,
-                    value.cursor
-                ) {
-                    12 => {
-                        value.cursor = value.cursor + 1;
-                        Result::Ok(())
-                    },
-                    17 => {
-                        value.cursor = value.cursor + 1;
-                        parse_pattern_binders(
-                            source,
-                            value,
-                            binders,
-                            open
-                        )
-                    },
-                    _ => Result::Err(BodyError::ExpectedCallClose(
-                        value.cursor,
-                        open
-                    ))
-                }
-            } else {
-                Result::Err(BodyError::ExpectedCallClose(value.cursor, open))
-            }
-        }
+    if(position(value) >= limit(value)) {
+        Result::Err(BodyError::ExpectedCallClose(position(value), open))
+    } else if(super::lexer::token_code_at(source, position(value)) == 12) {
+        set_position(value, position(value) + 1);
+        Result::Ok(())
     } else {
-        Result::Err(BodyError::ExpectedCallClose(value.cursor, open))
+        try(parse_pattern_binder(source, value, binders, open), @parse_pattern_binders);
+        if(position(value) < limit(value)) {
+            handle super::lexer::token_code_at(source, position(value)) {
+                12 => {
+                    set_position(value, position(value) + 1);
+                    Result::Ok(())
+                },
+                17 => {
+                    set_position(value, position(value) + 1);
+                    parse_pattern_binders(source, value, binders, open)
+                },
+                _ => Result::Err(BodyError::ExpectedCallClose(position(value), open))
+            }
+        } else {
+            Result::Err(BodyError::ExpectedCallClose(position(value), open))
+        }
     }
 }
 
@@ -1500,83 +1078,58 @@ parse_handle_arm(
     value: &mut BodyParser,
     owner: Option<ShellId>,
     depth: u16
-) -> Result<PendingHandleArm, BodyError> {
-    let enum_token = value.cursor;
-    let enum_name = try(identifier_name(
-        source,
-        enum_token,
-        enum_token
-    ), @parse_handle_arm);
+) -> Result<HandleArm, BodyError> {
+    let enum_token = position(value);
+    let enum_name = try(identifier_name(source, enum_token, enum_token), @parse_handle_arm);
     let separator = enum_token + 1;
-    if(separator < value.limit
-        and {
-            super::lexer::token_code_at(source, separator) == 19
-        }) {
-        let variant_token = separator + 1;
-        if(variant_token < value.limit) {
-            let variant_name = try(identifier_name(
-                source,
-                variant_token,
-                separator
-            ), @parse_handle_arm);
-            value.cursor = variant_token + 1;
-            let binders = Vec::new();
-            if(value.cursor < value.limit
-                and {
-                    super::lexer::token_code_at(
-                        source,
-                        value.cursor
-                    ) == 11
-                }) {
-                let open = value.cursor;
-                value.cursor = open + 1;
-                try(parse_pattern_binders(
-                    source,
-                    value,
-                    &mut binders,
-                    open
-                ), @parse_handle_arm)
-            } else { () };
-            if(value.cursor < value.limit
-                and {
-                    super::lexer::token_code_at(
-                        source,
-                        value.cursor
-                    ) == 24
-                }) {
-                value.cursor = value.cursor + 1;
-                let body = try(parse_expression(
-                    original,
-                    source,
-                    declarations,
-                    nominal,
-                    value,
-                    owner,
-                    0,
-                    depth + 1
-                ), @parse_handle_arm);
-                Result::Ok(PendingHandleArm {
-                    enum_name: enum_name,
-                    enum_token: enum_token,
-                    variant_name: variant_name,
-                    variant_token: variant_token,
-                    binders: binders,
-                    body: body
-                })
-            } else {
-                Result::Err(BodyError::InvalidHandleArm(
-                    value.cursor,
-                    variant_token
-                ))
-            }
-        } else {
-            Result::Err(BodyError::ExpectedIdentifier(
-                variant_token,
-                separator
-            ))
-        }
-    } else {
+    if(separator >= limit(value)
+        or { super::lexer::token_code_at(source, separator) != 19 }) {
         Result::Err(BodyError::ExpectedIdentifier(separator, enum_token))
+    } else {
+        let variant_token = separator + 1;
+        let variant_name = try(identifier_name(
+            source,
+            variant_token,
+            separator
+        ), @parse_handle_arm);
+        set_position(value, variant_token + 1);
+        let binders = Vec::new();
+        if(position(value) < limit(value)
+            and { super::lexer::token_code_at(source, position(value)) == 11 }) {
+            let open = position(value);
+            set_position(value, open + 1);
+            try(parse_pattern_binders(source, value, &mut binders, open), @parse_handle_arm)
+        } else { () };
+        if(position(value) >= limit(value)
+            or { super::lexer::token_code_at(source, position(value)) != 24 }) {
+            Result::Err(BodyError::InvalidHandleArm(position(value), variant_token))
+        } else {
+            set_position(value, position(value) + 1);
+            let body = try(parse_expression(
+                original,
+                source,
+                declarations,
+                nominal,
+                value,
+                owner,
+                0,
+                depth + 1
+            ), @parse_handle_arm);
+            let binder_start = Vec::len(&value.pattern_binders);
+            let binder_count = Vec::len(&binders);
+            append_pattern_binders(Vec::into_iter(binders), &mut value.pattern_binders);
+            Result::Ok(HandleArm {
+                enum_name: enum_name,
+                enum_token: enum_token,
+                variant_name: variant_name,
+                variant_token: variant_token,
+                binders: super::syntax::id_range(
+                    binder_start,
+                    binder_start + binder_count
+                ),
+                body: body
+            })
+        }
     }
 }
 
@@ -1589,132 +1142,43 @@ parse_handle_arms(
     owner: Option<ShellId>,
     depth: u16,
     open: usize,
-    output: &mut Vec<PendingHandleArm>
+    output: &mut Vec<HandleArm>
 ) -> Result<(), BodyError> {
-    if(value.cursor < value.limit) {
-        if(super::lexer::token_code_at(source, value.cursor) == 14) {
-            value.cursor = value.cursor + 1;
-            Result::Ok(())
-        } else {
-            let arm = try(parse_handle_arm(
+    if(position(value) >= limit(value)) {
+        Result::Err(BodyError::ExpectedBlockClose(position(value), open))
+    } else if(super::lexer::token_code_at(source, position(value)) == 14) {
+        set_position(value, position(value) + 1);
+        Result::Ok(())
+    } else {
+        Vec::push(output, try(parse_handle_arm(
+            original,
+            source,
+            declarations,
+            nominal,
+            value,
+            owner,
+            depth
+        ), @parse_handle_arms));
+        if(position(value) < limit(value)) {
+            let separator = super::lexer::token_code_at(source, position(value));
+            if(separator == 17 or { separator == 22 }) {
+                set_position(value, position(value) + 1)
+            } else { () };
+            parse_handle_arms(
                 original,
                 source,
                 declarations,
                 nominal,
                 value,
                 owner,
-                depth
-            ), @parse_handle_arms);
-            Vec::push(&mut *output, arm);
-            if(value.cursor < value.limit) {
-                let separator =
-                    super::lexer::token_code_at(source, value.cursor);
-                if(separator == 17 or { separator == 22 }) {
-                    value.cursor = value.cursor + 1;
-                    ()
-                } else { () };
-                parse_handle_arms(
-                    original,
-                    source,
-                    declarations,
-                    nominal,
-                    value,
-                    owner,
-                    depth,
-                    open,
-                    output
-                )
-            } else {
-                Result::Err(BodyError::ExpectedBlockClose(value.cursor, open))
-            }
-        }
-    } else {
-        Result::Err(BodyError::ExpectedBlockClose(value.cursor, open))
-    }
-}
-
-append_pattern_binders(
-    values: VecIntoIter<PatternBinder>,
-    output: &mut Vec<PatternBinder>
-) {
-    handle VecIntoIter::next(values) {
-        None => (),
-        Option::Some((value, remaining)) => {
-            Vec::push(&mut *output, value);
-            append_pattern_binders(remaining, output)
+                depth,
+                open,
+                output
+            )
+        } else {
+            Result::Err(BodyError::ExpectedBlockClose(position(value), open))
         }
     }
-}
-
-append_handle_arms(
-    values: VecIntoIter<PendingHandleArm>,
-    value: &mut BodyParser
-) {
-    handle VecIntoIter::next(values) {
-        None => (),
-        Option::Some((arm, remaining)) => {
-            let PendingHandleArm {
-                enum_name,
-                enum_token,
-                variant_name,
-                variant_token,
-                binders,
-                body
-            } = arm;
-            let binder_start = Vec::len(&value.pattern_binders);
-            let binder_count = Vec::len(&binders);
-            append_pattern_binders(
-                Vec::into_iter(binders),
-                &mut value.pattern_binders
-            );
-            let arm_ordinal = Vec::len(&value.handle_arms);
-            Vec::push(&mut value.handle_arms, HandleArm {
-                enum_name: enum_name,
-                enum_token: enum_token,
-                variant_name: variant_name,
-                variant_token: variant_token,
-                binders: expression_range(
-                    binder_start,
-                    binder_start + binder_count
-                ),
-                body: body
-            });
-            Vec::push(&mut value.edges, ExprEdge {
-                value: body,
-                position: 1,
-                metadata: u32_from_usize(arm_ordinal)
-            });
-            append_handle_arms(remaining, value)
-        }
-    }
-}
-
-push_handle(
-    value: &mut BodyParser,
-    subject: ExprId,
-    arms: Vec<PendingHandleArm>,
-    start: usize,
-    end: usize
-) -> ExprId {
-    let name_start = name_count(&value.names);
-    let edge_start = Vec::len(&value.edges);
-    let arm_start = Vec::len(&value.handle_arms);
-    Vec::push(&mut value.edges, ExprEdge {
-        value: subject,
-        position: 0,
-        metadata: 0
-    });
-    append_handle_arms(Vec::into_iter(arms), value);
-    let edge_end = Vec::len(&value.edges);
-    let arm_end = Vec::len(&value.handle_arms);
-    alloc_node(&mut value.nodes, ExprNode {
-        kind_code: 12,
-        tokens: token_range(start, end),
-        operator: empty_tokens(start),
-        names: expression_range(name_start, name_start),
-        children: expression_range(edge_start, edge_end),
-        handle_arms: expression_range(arm_start, arm_end)
-    })
 }
 
 parse_handle(
@@ -1727,7 +1191,7 @@ parse_handle(
     depth: u16,
     start: usize
 ) -> Result<ExprId, BodyError> {
-    value.cursor = start + 1;
+    set_position(value, start + 1);
     let subject = try(parse_expression(
         original,
         source,
@@ -1738,10 +1202,10 @@ parse_handle(
         0,
         depth + 1
     ), @parse_handle);
-    let open = value.cursor;
-    if(open < value.limit
+    let open = position(value);
+    if(open < limit(value)
         and { super::lexer::token_code_at(source, open) == 13 }) {
-        value.cursor = open + 1;
+        set_position(value, open + 1);
         let arms = Vec::new();
         try(parse_handle_arms(
             original,
@@ -1754,13 +1218,7 @@ parse_handle(
             open,
             &mut arms
         ), @parse_handle);
-        Result::Ok(push_handle(
-            value,
-            subject,
-            arms,
-            start,
-            value.cursor
-        ))
+        Result::Ok(push_handle(value, subject, arms, start, position(value)))
     } else {
         Result::Err(BodyError::ExpectedBlockClose(open, start))
     }
@@ -1775,8 +1233,10 @@ parse_atom(
     owner: Option<ShellId>,
     depth: u16
 ) -> Result<ExprId, BodyError> {
-    let start = value.cursor;
-    if(start < value.limit) {
+    let start = position(value);
+    if(start >= limit(value)) {
+        Result::Err(BodyError::ExpectedExpression(start, start))
+    } else {
         handle super::lexer::token_kind_at(source, start) {
             TokenKind::Keyword(Keyword::Handle) => parse_handle(
                 original,
@@ -1789,114 +1249,76 @@ parse_atom(
                 start
             ),
             _ => handle super::lexer::token_code_at(source, start) {
-            1 => parse_identifier(source, value, start),
-            4 => {
-                value.cursor = start + 1;
-                Result::Ok(push_leaf(value, 2, start, value.cursor))
-            },
-            11 => if(start + 1 < value.limit) {
-                if(super::lexer::token_code_at(
-                    source,
-                    start + 1
-                ) == 12) {
-                    value.cursor = start + 2;
-                        Result::Ok(push_leaf(value, 3, start, value.cursor))
+                1 => push_identifier(source, value, start),
+                4 => {
+                    set_position(value, start + 1);
+                    Result::Ok(push_number(value, start, position(value)))
+                },
+                11 => if(start + 1 < limit(value)
+                    and { super::lexer::token_code_at(source, start + 1) == 12 }) {
+                    set_position(value, start + 2);
+                    Result::Ok(push_unit(value, start, position(value)))
                 } else {
-                    value.cursor = start + 1;
-                        let child = try(
-                            parse_expression(
-                                original,
-                                source,
-                                declarations,
-                                nominal,
-                                value,
-                                owner,
-                                0,
-                                depth + 1
-                            ),
-                            @parse_atom
-                        );
-                        if(value.cursor < value.limit) {
-                            handle
-                                    super::lexer::token_code_at(
-                                        source,
-                                        value.cursor
-                                    ) {
-                                    12 => {
-                                        value.cursor = value.cursor
-                                            + 1;
-                                        Result::Ok(push_unary(
-                                            value,
-                                            4,
-                                            OperatorUse {
-                                                fixity: 0,
-                                                start: start,
-                                                end: start,
-                                                form: 0,
-                                                precedence: 0
-                                            },
-                                            child,
-                                            start,
-                                            value.cursor
-                                        ))
-                                    },
-                                    17 => {
-                                        let elements = Vec::new();
-                                        Vec::push(&mut elements, child);
-                                        value.cursor = value.cursor
-                                            + 1;
-                                        parse_tuple_tail(
-                                            original,
-                                            source,
-                                            declarations,
-                                            nominal,
-                                            value,
-                                            owner,
-                                            depth + 1,
-                                            start,
-                                            &mut elements
-                                        )
-                                    },
-                                    _ => Result::Err(
-                                        BodyError::ExpectedGroupingClose(
-                                            value.cursor,
-                                            start
-                                        )
-                                    )
-                                }
-                        } else {
-                            Result::Err(
-                                    BodyError::ExpectedGroupingClose(
-                                        value.cursor,
-                                        start
-                                    )
+                    set_position(value, start + 1);
+                    let child = try(parse_expression(
+                        original,
+                        source,
+                        declarations,
+                        nominal,
+                        value,
+                        owner,
+                        0,
+                        depth + 1
+                    ), @parse_atom);
+                    if(position(value) < limit(value)) {
+                        handle super::lexer::token_code_at(source, position(value)) {
+                            12 => {
+                                set_position(value, position(value) + 1);
+                                Result::Ok(push_group(value, child, start, position(value)))
+                            },
+                            17 => {
+                                let elements = Vec::new();
+                                Vec::push(&mut elements, child);
+                                set_position(value, position(value) + 1);
+                                parse_tuple_tail(
+                                    original,
+                                    source,
+                                    declarations,
+                                    nominal,
+                                    value,
+                                    owner,
+                                    depth + 1,
+                                    start,
+                                    &mut elements
                                 )
+                            },
+                            _ => Result::Err(
+                                BodyError::ExpectedGroupingClose(position(value), start)
+                            )
                         }
-                }
-            } else {
-                Result::Err(BodyError::ExpectedGroupingClose(start, start))
-            },
-            13 => {
-                value.cursor = start + 1;
-                let statements = Vec::new();
-                parse_block_contents(
-                    original,
-                    source,
-                    declarations,
-                    nominal,
-                    value,
-                    owner,
-                    depth + 1,
-                    start,
-                    14,
-                    &mut statements
-                )
-            },
-            _ => Result::Err(BodyError::ExpectedExpression(start, start))
+                    } else {
+                        Result::Err(BodyError::ExpectedGroupingClose(position(value), start))
+                    }
+                },
+                13 => {
+                    set_position(value, start + 1);
+                    let statements = Vec::new();
+                    parse_block_contents(
+                        original,
+                        source,
+                        declarations,
+                        nominal,
+                        value,
+                        owner,
+                        depth + 1,
+                        start,
+                        14,
+                        &mut statements
+                    )
+                },
+                _ => Result::Err(BodyError::ExpectedExpression(start, start))
             }
         }
-    } else {
-        Result::Err(BodyError::ExpectedExpression(start, start))
     }
 }
 
@@ -1911,61 +1333,47 @@ parse_call_arguments(
     arguments: &mut Vec<ExprId>,
     open: usize
 ) -> Result<(), BodyError> {
-    if(value.cursor < value.limit) {
-        if(super::lexer::token_code_at(
+    if(position(value) >= limit(value)) {
+        Result::Err(BodyError::ExpectedCallClose(position(value), open))
+    } else if(super::lexer::token_code_at(source, position(value)) == 12) {
+        set_position(value, position(value) + 1);
+        Result::Ok(())
+    } else {
+        Vec::push(arguments, try(parse_expression(
+            original,
             source,
-            value.cursor
-        ) == 12) {
-            value.cursor = value.cursor + 1;
-                Result::Ok(())
-        } else {
-            let argument = try(
-                    parse_expression(
+            declarations,
+            nominal,
+            value,
+            owner,
+            0,
+            depth
+        ), @parse_call_arguments));
+        if(position(value) < limit(value)) {
+            handle super::lexer::token_code_at(source, position(value)) {
+                12 => {
+                    set_position(value, position(value) + 1);
+                    Result::Ok(())
+                },
+                17 => {
+                    set_position(value, position(value) + 1);
+                    parse_call_arguments(
                         original,
                         source,
                         declarations,
                         nominal,
                         value,
                         owner,
-                        0,
-                        depth
-                    ),
-                    @parse_call_arguments
-                );
-                Vec::push(&mut *arguments, argument);
-                if(value.cursor < value.limit) {
-                    handle
-                        super::lexer::token_code_at(source, value.cursor) {
-                        12 => {
-                            value.cursor = value.cursor + 1;
-                            Result::Ok(())
-                        },
-                        17 => {
-                            value.cursor = value.cursor + 1;
-                            parse_call_arguments(
-                                original,
-                                source,
-                                declarations,
-                                nominal,
-                                value,
-                                owner,
-                                depth,
-                                arguments,
-                                open
-                            )
-                        },
-                        _ => Result::Err(
-                            BodyError::ExpectedCallClose(value.cursor, open)
-                        )
-                    }
-                } else {
-                    Result::Err(
-                        BodyError::ExpectedCallClose(value.cursor, open)
+                        depth,
+                        arguments,
+                        open
                     )
-                }
+                },
+                _ => Result::Err(BodyError::ExpectedCallClose(position(value), open))
+            }
+        } else {
+            Result::Err(BodyError::ExpectedCallClose(position(value), open))
         }
-    } else {
-        Result::Err(BodyError::ExpectedCallClose(value.cursor, open))
     }
 }
 
@@ -1980,122 +1388,77 @@ parse_struct_fields(
     constructor: ExprId,
     start: usize,
     open: usize,
-    fields: &mut Vec<PendingField>
+    fields: &mut Vec<StructField>
 ) -> Result<ExprId, BodyError> {
-    if(value.cursor < value.limit) {
-        if(super::lexer::token_code_at(source, value.cursor)
-                == 14) {
-            value.cursor = value.cursor + 1;
-                Result::Ok(push_struct(
-                    value,
-                    constructor,
-                    &*fields,
-                    start,
-                    value.cursor
-                ))
-        } else {
-            let name_token = value.cursor;
-                handle super::lexer::token_kind_at(source, name_token) {
-                    TokenKind::Ident(name) => {
-                        let colon = name_token + 1;
-                        if(colon < value.limit) {
-                            if(super::lexer::token_code_at(source, colon)
-                                    == 18) {
-                                value.cursor = colon + 1;
-                                    let field = try(
-                                        parse_expression(
-                                            original,
-                                            source,
-                                            declarations,
-                                            nominal,
-                                            value,
-                                            owner,
-                                            0,
-                                            depth
-                                        ),
-                                        @parse_struct_fields
-                                    );
-                                    Vec::push(
-                                        &mut *fields,
-                                        PendingField {
-                                            name: name,
-                                            name_token: name_token,
-                                            expression: field
-                                        }
-                                    );
-                                    if(value.cursor < value.limit) {
-                                        handle
-                                            super::lexer::token_code_at(
-                                                source,
-                                                value.cursor
-                                            ) {
-                                            14 => {
-                                                value.cursor =
-                                                    value.cursor
-                                                    + 1;
-                                                Result::Ok(push_struct(
-                                                    value,
-                                                    constructor,
-                                                    &*fields,
-                                                    start,
-                                                    value.cursor
-                                                ))
-                                            },
-                                            17 => {
-                                                value.cursor =
-                                                    value.cursor
-                                                    + 1;
-                                                parse_struct_fields(
-                                                    original,
-                                                    source,
-                                                    declarations,
-                                                    nominal,
-                                                    value,
-                                                    owner,
-                                                    depth,
-                                                    constructor,
-                                                    start,
-                                                    open,
-                                                    fields
-                                                )
-                                            },
-                                            _ => Result::Err(
-                                                BodyError::InvalidStructField(
-                                                    value.cursor,
-                                                    open
-                                                )
-                                            )
-                                        }
-                                    } else {
-                                        Result::Err(
-                                            BodyError::InvalidStructField(
-                                                value.cursor,
-                                                open
-                                            )
-                                        )
-                                    }
-                            } else {
-                                Result::Err(
-                                    BodyError::InvalidStructField(
-                                        colon,
-                                        name_token
-                                    )
+    if(position(value) >= limit(value)) {
+        Result::Err(BodyError::InvalidStructField(position(value), open))
+    } else if(super::lexer::token_code_at(source, position(value)) == 14) {
+        set_position(value, position(value) + 1);
+        Result::Ok(push_struct(value, constructor, fields, start, position(value)))
+    } else {
+        let name_token = position(value);
+        handle super::lexer::token_kind_at(source, name_token) {
+            TokenKind::Ident(name) => {
+                let colon = name_token + 1;
+                if(colon < limit(value)
+                    and { super::lexer::token_code_at(source, colon) == 18 }) {
+                    set_position(value, colon + 1);
+                    let expression = try(parse_expression(
+                        original,
+                        source,
+                        declarations,
+                        nominal,
+                        value,
+                        owner,
+                        0,
+                        depth
+                    ), @parse_struct_fields);
+                    Vec::push(fields, StructField {
+                        name: name,
+                        name_token: name_token,
+                        expression: expression
+                    });
+                    if(position(value) < limit(value)) {
+                        handle super::lexer::token_code_at(source, position(value)) {
+                            14 => {
+                                set_position(value, position(value) + 1);
+                                Result::Ok(push_struct(
+                                    value,
+                                    constructor,
+                                    fields,
+                                    start,
+                                    position(value)
+                                ))
+                            },
+                            17 => {
+                                set_position(value, position(value) + 1);
+                                parse_struct_fields(
+                                    original,
+                                    source,
+                                    declarations,
+                                    nominal,
+                                    value,
+                                    owner,
+                                    depth,
+                                    constructor,
+                                    start,
+                                    open,
+                                    fields
                                 )
-                            }
-                        } else {
-                            Result::Err(
-                                BodyError::InvalidStructField(colon, open)
+                            },
+                            _ => Result::Err(
+                                BodyError::InvalidStructField(position(value), open)
                             )
                         }
-                    },
-                    _ => Result::Err(BodyError::InvalidStructField(
-                        name_token,
-                        open
-                    ))
+                    } else {
+                        Result::Err(BodyError::InvalidStructField(position(value), open))
+                    }
+                } else {
+                    Result::Err(BodyError::InvalidStructField(colon, name_token))
                 }
+            },
+            _ => Result::Err(BodyError::InvalidStructField(name_token, open))
         }
-    } else {
-        Result::Err(BodyError::InvalidStructField(value.cursor, open))
     }
 }
 
@@ -2107,89 +1470,80 @@ parse_projection_name(
     dot: usize
 ) -> Result<ExprId, BodyError> {
     let token = dot + 1;
-    if(token < value.limit) {
+    if(token >= limit(value)) {
+        Result::Err(BodyError::ExpectedProjectionName(token, dot))
+    } else {
         handle super::lexer::token_kind_at(source, token) {
             TokenKind::Ident(name) => {
-                value.cursor = token + 1;
+                set_position(value, token + 1);
                 Result::Ok(push_projection(
                     value,
                     subject,
                     ExpressionName::Identifier(name, token),
-                    value.cursor
+                    position(value)
                 ))
             },
             TokenKind::Number(number) => if(super::lexer::number_is_float(&number)) {
                 Result::Err(BodyError::ExpectedProjectionName(token, dot))
             } else {
                 let text = range_text(
-                        original,
-                        source,
-                        token,
-                        token + 1
-                    );
-                    handle parse_u64(&text) {
-                        Result::Err(_) =>
-                            Result::Err(BodyError::ExpectedProjectionName(
-                                token,
-                                dot
-                            )),
-                        Result::Ok(field) => if(field <= 4294967295) {
-                            value.cursor = token + 1;
-                                Result::Ok(push_projection(
-                                    value,
-                                    subject,
-                                    ExpressionName::TupleField(
-                                        wrapping_convert_to_u32(field),
-                                        token
-                                    ),
-                                    value.cursor
-                                ))
-                        } else {
-                            Result::Err(BodyError::ExpectedProjectionName(
-                                token,
-                                dot
-                            ))
-                        }
+                    original,
+                    source,
+                    &super::syntax::token_span(token, token + 1)
+                );
+                handle parse_u64(&text) {
+                    Result::Err(_) => Result::Err(
+                        BodyError::ExpectedProjectionName(token, dot)
+                    ),
+                    Result::Ok(field) => if(field <= 4294967295) {
+                        set_position(value, token + 1);
+                        Result::Ok(push_projection(
+                            value,
+                            subject,
+                            ExpressionName::TupleField(
+                                wrapping_convert_to_u32(field),
+                                token
+                            ),
+                            position(value)
+                        ))
+                    } else {
+                        Result::Err(BodyError::ExpectedProjectionName(token, dot))
                     }
+                }
             },
             _ => Result::Err(BodyError::ExpectedProjectionName(token, dot))
         }
-    } else {
-        Result::Err(BodyError::ExpectedProjectionName(token, dot))
     }
 }
 
 handler_clause_brace(
     source: &super::lexer::LexedSource,
+    delimiters: &super::syntax::DelimiterMap,
     cursor: usize,
-    limit: usize,
-    depth: u16
+    limit: usize
 ) -> Bool {
-    if(cursor < limit) {
+    if(cursor >= limit) {
+        false
+    } else {
         let code = super::lexer::token_code_at(source, cursor);
-        if(code == 24 and { depth == 0 }) {
+        if(code == 24) {
             true
-        } else {
-            if(code == 14 and { depth == 0 }) {
-                false
-            } else {
-                let next_depth =
-                    if(code == 11 or { code == 13 or { code == 15 } }) {
-                        depth + 1
-                    } else {
-                        if(code == 12 or { code == 14 or { code == 16 } }) {
-                            if(depth == 0) { 0 } else { depth - 1 }
-                        } else { depth }
-                    };
-                handler_clause_brace(
+        } else if(code == 14) {
+            false
+        } else if(super::syntax::delimiter_is_open(delimiters, cursor)) {
+            handle super::syntax::delimiter_partner(delimiters, cursor) {
+                None => false,
+                Some(close) => handler_clause_brace(
                     source,
-                    cursor + 1,
-                    limit,
-                    next_depth
+                    delimiters,
+                    close + 1,
+                    limit
                 )
             }
+        } else {
+            handler_clause_brace(source, delimiters, cursor + 1, limit)
         }
-    } else { false }
+    }
 }
 
 parse_postfix(
@@ -2202,129 +1556,100 @@ parse_postfix(
     depth: u16,
     callee: ExprId
 ) -> Result<ExprId, BodyError> {
-    if(value.cursor < value.limit) {
-        if(depth < 128) {
-            handle
-                super::lexer::token_code_at(source, value.cursor) {
-                11 => {
-                    let start = node_tokens(&*value, callee).start;
-                    let open = value.cursor;
-                    let arguments = Vec::new();
-                    value.cursor = open + 1;
-                    try(
-                        parse_call_arguments(
-                            original,
-                            source,
-                            declarations,
-                            nominal,
-                            value,
-                            owner,
-                            depth + 1,
-                            &mut arguments,
-                            open
-                        ),
-                        @parse_postfix
-                    );
-                    let end = value.cursor;
-                    let call = push_call(
-                        value,
-                        callee,
-                        &arguments,
-                        start,
-                        end
-                    );
-                    parse_postfix(
-                        original,
-                        source,
-                        declarations,
-                        nominal,
-                        value,
-                        owner,
-                        depth + 1,
-                        call
-                    )
-                },
-                13 => if(handler_clause_brace(
-                    source,
-                    value.cursor + 1,
-                    value.limit,
-                    0
-                )) {
-                    Result::Ok(callee)
-                } else {
-                    let found_kind = node_kind(&*value, callee);
-                    let start = node_tokens(&*value, callee).start;
-                    if(found_kind == 1) {
-                        if(node_name_count(&*value, callee)
-                                == 1) {
-                            let open = value.cursor;
-                            let fields = Vec::new();
-                            value.cursor = open + 1;
-                            let found = try(
-                                parse_struct_fields(
-                                    original,
-                                    source,
-                                    declarations,
-                                    nominal,
-                                    value,
-                                    owner,
-                                    depth + 1,
-                                    callee,
-                                    start,
-                                    open,
-                                    &mut fields
-                                ),
-                                @parse_postfix
-                            );
-                            parse_postfix(
-                                original,
-                                source,
-                                declarations,
-                                nominal,
-                                value,
-                                owner,
-                                depth + 1,
-                                found
-                            )
-                        } else {
-                            Result::Ok(callee)
-                        }
-                    } else {
-                        Result::Ok(callee)
-                    }
-                },
-                21 => {
-                    let dot = value.cursor;
-                    let found = try(
-                        parse_projection_name(
-                            original,
-                            source,
-                            value,
-                            callee,
-                            dot
-                        ),
-                        @parse_postfix
-                    );
-                    parse_postfix(
-                        original,
-                        source,
-                        declarations,
-                        nominal,
-                        value,
-                        owner,
-                        depth + 1,
-                        found
-                    )
-                },
-                _ => Result::Ok(callee)
-            }
-        } else {
-            Result::Err(
-                BodyError::ExpressionDepthLimit(value.cursor, value.cursor)
-            )
-        }
-    } else {
+    if(position(value) >= limit(value)) {
         Result::Ok(callee)
+    } else if(depth >= 128) {
+        Result::Err(BodyError::ExpressionDepthLimit(position(value), position(value)))
+    } else {
+        handle super::lexer::token_code_at(source, position(value)) {
+            11 => {
+                let start = super::syntax::token_start(&node_tokens(&*value, callee));
+                let open = position(value);
+                set_position(value, open + 1);
+                let arguments = Vec::new();
+                try(parse_call_arguments(
+                    original,
+                    source,
+                    declarations,
+                    nominal,
+                    value,
+                    owner,
+                    depth + 1,
+                    &mut arguments,
+                    open
+                ), @parse_postfix);
+                let call = push_call(value, callee, &arguments, start, position(value));
+                parse_postfix(
+                    original,
+                    source,
+                    declarations,
+                    nominal,
+                    value,
+                    owner,
+                    depth + 1,
+                    call
+                )
+            },
+            13 => if(handler_clause_brace(
+                source,
+                super::scanner::delimiter_map(declarations),
+                position(value) + 1,
+                limit(value)
+            )) {
+                Result::Ok(callee)
+            } else if(node_is_single_identifier(&*value, callee)) {
+                let start = super::syntax::token_start(&node_tokens(&*value, callee));
+                let open = position(value);
+                set_position(value, open + 1);
+                let fields = Vec::new();
+                let found = try(parse_struct_fields(
+                    original,
+                    source,
+                    declarations,
+                    nominal,
+                    value,
+                    owner,
+                    depth + 1,
+                    callee,
+                    start,
+                    open,
+                    &mut fields
+                ), @parse_postfix);
+                parse_postfix(
+                    original,
+                    source,
+                    declarations,
+                    nominal,
+                    value,
+                    owner,
+                    depth + 1,
+                    found
+                )
+            } else {
+                Result::Ok(callee)
+            },
+            21 => {
+                let dot = position(value);
+                let found = try(parse_projection_name(
+                    original,
+                    source,
+                    value,
+                    callee,
+                    dot
+                ), @parse_postfix);
+                parse_postfix(
+                    original,
+                    source,
+                    declarations,
+                    nominal,
+                    value,
+                    owner,
+                    depth + 1,
+                    found
+                )
+            },
+            _ => Result::Ok(callee)
+        }
     }
 }
 
@@ -2336,22 +1661,79 @@ infix_separated(
 ) -> Bool {
     super::lexer::token_code_at(source, operator.start) == 1
         or {
-            let left_end = node_tokens(value, left).end;
+            let left_end = super::syntax::token_end(&node_tokens(value, left));
             let left_span = token_span(source, left_end - 1);
             let operator_span = token_span(source, operator.start);
             super::lexer::span_end(&left_span)
                 != super::lexer::span_start(&operator_span)
-                and { operator.end < value.limit }
+                and { operator.end < limit(value) }
                 and {
-                        let last = token_span(
-                            source,
-                            operator.end - 1
-                        );
-                        let next = token_span(source, operator.end);
-                        super::lexer::span_end(&last)
-                            != super::lexer::span_start(&next)
+                    let last = token_span(source, operator.end - 1);
+                    let next = token_span(source, operator.end);
+                    super::lexer::span_end(&last)
+                        != super::lexer::span_start(&next)
                 }
         }
+}
+
+reduce_once(
+    value: &mut BodyParser,
+    output: &mut Vec<ExprId>,
+    pending: &mut Vec<OperatorUse>
+) {
+    let operator = pop_operator(pending);
+    let right = pop_expr(output);
+    let left = pop_expr(output);
+    Vec::push(output, push_infix(value, operator, left, right))
+}
+
+prepare_operator(
+    value: &mut BodyParser,
+    output: &mut Vec<ExprId>,
+    pending: &mut Vec<OperatorUse>,
+    incoming: OperatorUse
+) -> Result<(), BodyError> {
+    if(Vec::is_empty(pending)) {
+        Result::Ok(())
+    } else {
+        let top = last_operator(pending);
+        if(top.precedence > incoming.precedence) {
+            reduce_once(value, output, pending);
+            prepare_operator(value, output, pending, incoming)
+        } else if(top.precedence == incoming.precedence) {
+            if(top.form == incoming.form) {
+                handle incoming.form {
+                    2 => {
+                        reduce_once(value, output, pending);
+                        prepare_operator(value, output, pending, incoming)
+                    },
+                    3 => Result::Ok(()),
+                    _ => Result::Err(BodyError::NonAssociativeChain(
+                        incoming.start,
+                        top.start
+                    ))
+                }
+            } else {
+                Result::Err(BodyError::IncompatibleAssociativity(
+                    incoming.start,
+                    top.start
+                ))
+            }
+        } else { Result::Ok(()) }
+    }
+}
+
+finish_chain(
+    value: &mut BodyParser,
+    output: &mut Vec<ExprId>,
+    pending: &mut Vec<OperatorUse>
+) -> Result<ExprId, BodyError> {
+    if(Vec::is_empty(pending)) {
+        Result::Ok(pop_expr(output))
+    } else {
+        reduce_once(value, output, pending);
+        finish_chain(value, output, pending)
+    }
 }
 
 parse_chain(
@@ -2366,143 +1748,46 @@ parse_chain(
     output: &mut Vec<ExprId>,
     pending: &mut Vec<OperatorUse>
 ) -> Result<ExprId, BodyError> {
-    let found = try(
-        peek_operator(
-            original,
-            source,
-            declarations,
-            nominal,
-            &*value,
-            false,
-            owner
-        ),
-        @parse_chain
-    );
-    handle found {
-            Result::Err(_) => finish_chain(value, output, pending),
-            Result::Ok(operator) => if(operator.precedence < minimum) {
-                finish_chain(value, output, pending)
-            } else {
-                let left = last_expr(output);
-                    if(infix_separated(source, &*value, left, operator)) {
-                        value.cursor = operator.end;
-                            let operand = try(
-                                parse_primary(
-                                    original,
-                                    source,
-                                    declarations,
-                                    nominal,
-                                    value,
-                                    owner,
-                                    depth
-                                ),
-                                @parse_chain
-                            );
-                            try(
-                                prepare_operator(
-                                    &mut *value,
-                                    &mut *output,
-                                    &mut *pending,
-                                    operator
-                                ),
-                                @parse_chain
-                            );
-                            Vec::push(&mut *pending, operator);
-                            Vec::push(&mut *output, operand);
-                            parse_chain(
-                                original,
-                                source,
-                                declarations,
-                                nominal,
-                                value,
-                                owner,
-                                minimum,
-                                depth,
-                                output,
-                                pending
-                            )
-                    } else {
-                        finish_chain(value, output, pending)
-                    }
-            }
-    }
-}
-
-reduce_once(
-    value: &mut BodyParser,
-    output: &mut Vec<ExprId>,
-    pending: &mut Vec<OperatorUse>
-) {
-    let operator = pop_operator(&mut *pending);
-    let right = pop_expr(&mut *output);
-    let left = pop_expr(&mut *output);
-    let grouped = push_binary(value, operator, left, right);
-    Vec::push(&mut *output, grouped)
-}
-
-prepare_operator(
-    value: &mut BodyParser,
-    output: &mut Vec<ExprId>,
-    pending: &mut Vec<OperatorUse>,
-    incoming: OperatorUse
-) -> Result<(), BodyError> {
-    if(Vec::len(&*pending) == 0) {
-        Result::Ok(())
-    } else {
-        let top = last_operator(&*pending);
-            if(top.precedence > incoming.precedence) {
-                reduce_once(&mut *value, &mut *output, &mut *pending);
-                    prepare_operator(value, output, pending, incoming)
-            } else {
-                if(top.precedence == incoming.precedence) {
-                    if(top.form == incoming.form) {
-                        handle incoming.form {
-                            2 => {
-                                reduce_once(
-                                    &mut *value,
-                                    &mut *output,
-                                    &mut *pending
-                                );
-                                prepare_operator(
-                                    value,
-                                    output,
-                                    pending,
-                                    incoming
-                                )
-                            },
-                            3 => Result::Ok(()),
-                            _ => Result::Err(
-                                BodyError::NonAssociativeChain(
-                                    incoming.start,
-                                    top.start
-                                )
-                            )
-                        }
-                    } else {
-                        Result::Err(
-                            BodyError::IncompatibleAssociativity(
-                                incoming.start,
-                                top.start
-                            )
-                        )
-                    }
-                } else {
-                    Result::Ok(())
-                }
-            }
-    }
-}
-
-finish_chain(
-    value: &mut BodyParser,
-    output: &mut Vec<ExprId>,
-    pending: &mut Vec<OperatorUse>
-) -> Result<ExprId, BodyError> {
-    if(Vec::len(&*pending) == 0) {
-        Result::Ok(pop_expr(&mut *output))
-    } else {
-        reduce_once(&mut *value, &mut *output, &mut *pending);
+    handle try(peek_operator(
+        original,
+        source,
+        declarations,
+        nominal,
+        &*value,
+        false,
+        owner
+    ), @parse_chain) {
+        None => finish_chain(value, output, pending),
+        Some(operator) => if(operator.precedence < minimum
+            or { not(infix_separated(source, &*value, last_expr(output), operator)) }) {
             finish_chain(value, output, pending)
+        } else {
+            set_position(value, operator.end);
+            let operand = try(parse_primary(
+                original,
+                source,
+                declarations,
+                nominal,
+                value,
+                owner,
+                depth
+            ), @parse_chain);
+            try(prepare_operator(value, output, pending, operator), @parse_chain);
+            Vec::push(pending, operator);
+            Vec::push(output, operand);
+            parse_chain(
+                original,
+                source,
+                declarations,
+                nominal,
+                value,
+                owner,
+                minimum,
+                depth,
+                output,
+                pending
+            )
+        }
     }
 }
 
@@ -2516,18 +1801,15 @@ parse_expression(
     minimum: u8,
     depth: u16
 ) -> Result<ExprId, BodyError> {
-    let first = try(
-        parse_primary(
-            original,
-            source,
-            declarations,
-            nominal,
-            value,
-            owner,
-            depth
-        ),
-        @parse_expression
-    );
+    let first = try(parse_primary(
+        original,
+        source,
+        declarations,
+        nominal,
+        value,
+        owner,
+        depth
+    ), @parse_expression);
     let output = Vec::new();
     let pending = Vec::new();
     Vec::push(&mut output, first);
@@ -2553,65 +1835,18 @@ parse_block_statement(
     value: &mut BodyParser,
     owner: Option<ShellId>,
     depth: u16,
-    statements: &mut Vec<PendingStatement>
+    statements: &mut Vec<BlockStatement>
 ) -> Result<(), BodyError> {
-    let start = value.cursor;
+    let start = position(value);
     handle super::lexer::token_kind_at(source, start) {
         TokenKind::Keyword(Keyword::Let) => {
             let name_token = start + 1;
-            if(name_token < value.limit) {
-                if(super::lexer::token_code_at(
-                    source,
-                    name_token
-                ) == 1) {
-                    let equals = name_token + 1;
-                        if(equals < value.limit) {
-                            if(super::lexer::token_code_at(source, equals)
-                                    == 31) {
-                                value.cursor = equals + 1;
-                                    let initializer = try(
-                                        parse_expression(
-                                            original,
-                                            source,
-                                            declarations,
-                                            nominal,
-                                            value,
-                                            owner,
-                                            0,
-                                            depth
-                                        ),
-                                        @parse_block_statement
-                                    );
-                                    Vec::push(
-                                        &mut *statements,
-                                        PendingStatement::Let(
-                                            name_token,
-                                            initializer
-                                        )
-                                    );
-                                    Result::Ok(())
-                            } else {
-                                Result::Err(
-                                    BodyError::InvalidLetSyntax(equals, start)
-                                )
-                            }
-                        } else {
-                            Result::Err(
-                                BodyError::InvalidLetSyntax(equals, start)
-                            )
-                        }
-                } else {
-                    Result::Err(
-                        BodyError::InvalidLetSyntax(name_token, start)
-                    )
-                }
-            } else {
-                Result::Err(BodyError::InvalidLetSyntax(name_token, start))
-            }
-        },
-        _ => {
-            let expression = try(
-                parse_expression(
+            let equals = name_token + 1;
+            if(equals < limit(value)
+                and { super::lexer::token_code_at(source, name_token) == 1 }
+                and { super::lexer::token_code_at(source, equals) == 31 }) {
+                set_position(value, equals + 1);
+                let initializer = try(parse_expression(
                     original,
                     source,
                     declarations,
@@ -2620,13 +1855,24 @@ parse_block_statement(
                     owner,
                     0,
                     depth
-                ),
-                @parse_block_statement
-            );
-            Vec::push(
-                &mut *statements,
-                PendingStatement::Expression(expression)
-            );
+                ), @parse_block_statement);
+                Vec::push(statements, BlockStatement::Let(initializer, name_token));
+                Result::Ok(())
+            } else {
+                Result::Err(BodyError::InvalidLetSyntax(equals, start))
+            }
+        },
+        _ => {
+            Vec::push(statements, BlockStatement::Expression(try(parse_expression(
+                original,
+                source,
+                declarations,
+                nominal,
+                value,
+                owner,
+                0,
+                depth
+            ), @parse_block_statement)));
             Result::Ok(())
         }
     }
@@ -2642,50 +1888,39 @@ parse_block_after_statement(
     depth: u16,
     start: usize,
     close_code: u16,
-    statements: &mut Vec<PendingStatement>
+    statements: &mut Vec<BlockStatement>
 ) -> Result<ExprId, BodyError> {
-    if(value.cursor < value.limit) {
-        handle super::lexer::token_code_at(
-            source,
-            value.cursor
-        ) {
-            22 => {
-                value.cursor = value.cursor + 1;
-                parse_block_contents(
-                    original,
-                    source,
-                    declarations,
-                    nominal,
-                    value,
-                    owner,
-                    depth,
-                    start,
-                    close_code,
-                    statements
-                )
-            },
-            14 => if(close_code == 14) {
-                parse_block_contents(
-                    original,
-                    source,
-                    declarations,
-                    nominal,
-                    value,
-                    owner,
-                    depth,
-                    start,
-                    close_code,
-                    statements
-                )
-            } else {
-                Result::Err(
-                    BodyError::ExpectedBlockClose(value.cursor, start)
-                )
-            },
-            _ => Result::Err(BodyError::ExpectedBlockClose(
-                value.cursor,
-                start
-            ))
+    if(position(value) < limit(value)) {
+        let code = super::lexer::token_code_at(source, position(value));
+        if(code == 22) {
+            set_position(value, position(value) + 1);
+            parse_block_contents(
+                original,
+                source,
+                declarations,
+                nominal,
+                value,
+                owner,
+                depth,
+                start,
+                close_code,
+                statements
+            )
+        } else if(code == 14 and { close_code == 14 }) {
+            parse_block_contents(
+                original,
+                source,
+                declarations,
+                nominal,
+                value,
+                owner,
+                depth,
+                start,
+                close_code,
+                statements
+            )
+        } else {
+            Result::Err(BodyError::ExpectedBlockClose(position(value), start))
         }
     } else {
         parse_block_contents(
@@ -2713,85 +1948,41 @@ parse_block_contents(
     depth: u16,
     start: usize,
     close_code: u16,
-    statements: &mut Vec<PendingStatement>
+    statements: &mut Vec<BlockStatement>
 ) -> Result<ExprId, BodyError> {
-    if(value.cursor < value.limit) {
-        if(close_code == 14) {
-            if(super::lexer::token_code_at(
+    if(position(value) < limit(value)) {
+        if(close_code == 14
+            and { super::lexer::token_code_at(source, position(value)) == 14 }) {
+            set_position(value, position(value) + 1);
+            Result::Ok(push_block(value, statements, start, position(value)))
+        } else {
+            try(parse_block_statement(
+                original,
                 source,
-                value.cursor
-            ) == 14) {
-                value.cursor = value.cursor + 1;
-                    Result::Ok(push_block(
-                        value,
-                        statements,
-                        start,
-                        value.cursor
-                    ))
-            } else {
-                try(
-                        parse_block_statement(
-                            original,
-                            source,
-                            declarations,
-                            nominal,
-                            value,
-                            owner,
-                            depth,
-                            statements
-                        ),
-                        @parse_block_contents
-                    );
-                    parse_block_after_statement(
-                        original,
-                        source,
-                        declarations,
-                        nominal,
-                        value,
-                        owner,
-                        depth,
-                        start,
-                        close_code,
-                        statements
-                    )
-            }
-        } else {
-            try(
-                    parse_block_statement(
-                        original,
-                        source,
-                        declarations,
-                        nominal,
-                        value,
-                        owner,
-                        depth,
-                        statements
-                    ),
-                    @parse_block_contents
-                );
-                parse_block_after_statement(
-                    original,
-                    source,
-                    declarations,
-                    nominal,
-                    value,
-                    owner,
-                    depth,
-                    start,
-                    close_code,
-                    statements
-                )
+                declarations,
+                nominal,
+                value,
+                owner,
+                depth,
+                statements
+            ), @parse_block_contents);
+            parse_block_after_statement(
+                original,
+                source,
+                declarations,
+                nominal,
+                value,
+                owner,
+                depth,
+                start,
+                close_code,
+                statements
+            )
         }
+    } else if(close_code == 0) {
+        Result::Ok(push_block(value, statements, start, position(value)))
     } else {
-        if(close_code == 0) {
-            Result::Ok(
-                push_block(value, statements, start, value.cursor)
-            )
-        } else {
-            Result::Err(
-                BodyError::ExpectedBlockClose(value.cursor, start)
-            )
-        }
+        Result::Err(BodyError::ExpectedBlockClose(position(value), start))
     }
 }
 
@@ -2802,49 +1993,43 @@ pub parse_function_body(
     shell: ShellId
 ) -> Result<ParsedBody, BodyError> {
     handle super::scanner::shell_at(declarations, shell) {
-        Result::Err(_) =>
-            Result::Err(BodyError::MissingBodyShell(shell)),
-        Result::Ok(declaration) => if(super::scanner::shell_kind_code(declaration) == 12) {
-            handle
-                super::scanner::shell_body_range(declaration) {
-                Result::Err(_) =>
-                    Result::Err(BodyError::MissingBodyShell(shell)),
-                Result::Ok(body) => {
-                    let start = super::scanner::range_start(&body);
-                    let end = super::scanner::range_end(&body);
+        None => Result::Err(BodyError::MissingBodyShell(shell)),
+        Some(declaration) => if(super::scanner::shell_is_function(declaration)) {
+            handle super::scanner::shell_body_span(declaration) {
+                None => Result::Err(BodyError::MissingBodyShell(shell)),
+                Some(body) => {
+                    let start = super::syntax::token_start(&body);
+                    let end = super::syntax::token_end(&body);
                     let parser = BodyParser {
-                        cursor: start,
-                        limit: end,
+                        cursor: super::syntax::cursor(start, end),
                         nodes: Arena::new(),
-                        edges: Vec::new(),
                         names: Vec::new(),
+                        expression_uses: Vec::new(),
+                        block_statements: Vec::new(),
+                        struct_fields: Vec::new(),
                         handle_arms: Vec::new(),
                         pattern_binders: Vec::new()
                     };
-                    let source = super::headers::parsed_source(headers);
-                    let nominal = super::headers::nominal_index(headers);
                     let statements = Vec::new();
-                    let root = try(
-                        parse_block_contents(
-                            original,
-                            source,
-                            declarations,
-                            nominal,
-                            &mut parser,
-                            shell_owner(declarations, shell),
-                            0,
-                            start,
-                            0,
-                            &mut statements
-                        ),
-                        @parse_function_body
-                    );
+                    let root = try(parse_block_contents(
+                        original,
+                        super::headers::parsed_source(headers),
+                        declarations,
+                        super::headers::nominal_index(headers),
+                        &mut parser,
+                        shell_owner(declarations, shell),
+                        0,
+                        start,
+                        0,
+                        &mut statements
+                    ), @parse_function_body);
                     let BodyParser {
                         cursor: _,
-                        limit: _,
                         nodes,
-                        edges,
                         names,
+                        expression_uses,
+                        block_statements,
+                        struct_fields,
                         handle_arms,
                         pattern_binders
                     } = parser;
@@ -2852,8 +2037,10 @@ pub parse_function_body(
                         shell: shell,
                         root: root,
                         nodes: nodes,
-                        edges: edges,
                         names: names,
+                        expression_uses: expression_uses,
+                        block_statements: block_statements,
+                        struct_fields: struct_fields,
                         handle_arms: handle_arms,
                         pattern_binders: pattern_binders
                     })
@@ -2864,578 +2051,3 @@ pub parse_function_body(
         }
     }
 }
-
-write_string(output: &mut ByteBuf, value: &String) {
-    let bytes = String::as_bytes(value);
-    ByteBuf::write_u32_le(
-        &mut *output,
-        u32_from_usize(Bytes::len(&bytes))
-    );
-    ByteBuf::append_bytes( output, &bytes)
-}
-
-write_name_token(
-    output: &mut ByteBuf,
-    source: &super::lexer::LexedSource,
-    token: usize
-) -> Result<(), BodyError> {
-    handle super::lexer::token_kind_at(source, token) {
-        TokenKind::Ident(name) => handle super::lexer::lexeme(source, name) {
-            Result::Err(_) =>
-                Result::Err(BodyError::MissingEncodedName(token, token)),
-            Result::Ok(text) => {
-                write_string( output, text);
-                Result::Ok(())
-            }
-        },
-        _ => Result::Err(BodyError::MissingEncodedName(token, token))
-    }
-}
-
-write_node_name(
-    output: &mut ByteBuf,
-    original: &String,
-    source: &super::lexer::LexedSource,
-    value: &ParsedBody,
-    node: &ExprNode,
-    ordinal: u32
-) -> Result<(), BodyError> {
-    let at = node.names.start + ordinal;
-    handle *Vec::index(&value.names, usize_from_u32(at)) {
-        ExpressionName::Identifier(name, token) =>
-            handle super::lexer::lexeme(source, name) {
-            Result::Err(_) =>
-                Result::Err(BodyError::MissingEncodedName(token, token)),
-            Result::Ok(text) => {
-                write_string( output, text);
-                Result::Ok(())
-            }
-        },
-        ExpressionName::TupleField(_, token) => {
-            let text = range_text(
-                original,
-                source,
-                token,
-                token + 1
-            );
-            write_string( output, &text);
-            Result::Ok(())
-        }
-    }
-}
-
-write_children<'a>(
-    output: &mut ByteBuf,
-    original: &String,
-    source: &super::lexer::LexedSource,
-    value: &ParsedBody,
-    children: Slice<'a, ExprEdge>
-) -> Result<(), BodyError> {
-    Slice::try_for_each(children, { edge =>
-        write_expression(
-            &mut *output,
-            original,
-            source,
-            value,
-            expression_edge_value(edge)
-        )
-    })
-}
-
-write_struct_fields<'a>(
-    output: &mut ByteBuf,
-    original: &String,
-    source: &super::lexer::LexedSource,
-    value: &ParsedBody,
-    node: &ExprNode,
-    fields: Slice<'a, ExprEdge>
-) -> Result<(), BodyError> {
-    Slice::try_for_each(fields, { edge =>
-        write_node_name(
-            &mut *output,
-            original,
-            source,
-            value,
-            node,
-            expression_edge_metadata(edge)
-        ) and {
-            write_expression(
-                &mut *output,
-                original,
-                source,
-                value,
-                expression_edge_value(edge)
-            )
-        }
-    })
-}
-
-write_pattern_binders<'a>(
-    output: &mut ByteBuf,
-    source: &super::lexer::LexedSource,
-    binders: Slice<'a, PatternBinder>
-) -> Result<(), BodyError> {
-    Slice::try_for_each(binders, { binder =>
-        handle *binder {
-            PatternBinder::Wildcard(_) => {
-                ByteBuf::push(&mut *output, 0);
-                Result::Ok(())
-            },
-            PatternBinder::Binding(name, token) => {
-                ByteBuf::push(&mut *output, 1);
-                handle super::lexer::lexeme(source, name) {
-                    Result::Err(_) =>
-                        Result::Err(BodyError::MissingEncodedName(
-                            token,
-                            token
-                        )),
-                    Result::Ok(text) => {
-                        write_string(&mut *output, text);
-                        Result::Ok(())
-                    }
-                }
-            }
-        }
-    })
-}
-
-write_handle_arms<'a>(
-    output: &mut ByteBuf,
-    original: &String,
-    source: &super::lexer::LexedSource,
-    value: &ParsedBody,
-    arms: Slice<'a, HandleArm>
-) -> Result<(), BodyError> {
-    Slice::try_for_each(arms, { arm =>
-        handle super::lexer::lexeme(source, arm.enum_name) {
-            Result::Err(_) => Result::Err(BodyError::MissingEncodedName(
-                arm.enum_token,
-                arm.enum_token
-            )),
-            Result::Ok(enum_name) => {
-                write_string(&mut *output, enum_name);
-                handle super::lexer::lexeme(source, arm.variant_name) {
-                    Result::Err(_) => Result::Err(BodyError::MissingEncodedName(
-                        arm.variant_token,
-                        arm.variant_token
-                    )),
-                    Result::Ok(variant_name) => {
-                        write_string(&mut *output, variant_name);
-                        let binders = handle_arm_binders(value, arm);
-                        ByteBuf::write_u32_le(
-                            &mut *output,
-                            u32_from_usize(Slice::len(binders))
-                        );
-                        try(write_pattern_binders(
-                            &mut *output,
-                            source,
-                            binders
-                        ), @write_handle_arms);
-                        try(write_expression(
-                            &mut *output,
-                            original,
-                            source,
-                            value,
-                            arm.body
-                        ), @write_handle_arms);
-                        Result::Ok(())
-                    }
-                }
-            }
-        }
-    })
-}
-
-write_block_statements<'a>(
-    output: &mut ByteBuf,
-    original: &String,
-    source: &super::lexer::LexedSource,
-    value: &ParsedBody,
-    statements: Slice<'a, ExprEdge>
-) -> Result<(), BodyError> {
-    Slice::try_for_each(statements, { statement =>
-        handle block_statement_view(statement) {
-            BlockStatementView::Let(expression, token) => {
-                ByteBuf::push(&mut *output, 1);
-                write_name_token(
-                    &mut *output,
-                    source,
-                    token
-                ) and {
-                    write_expression(
-                        &mut *output,
-                        original,
-                        source,
-                        value,
-                        expression
-                    )
-                }
-            },
-            BlockStatementView::Expression(expression) => {
-                ByteBuf::push(&mut *output, 2);
-                write_expression(
-                    &mut *output,
-                    original,
-                    source,
-                    value,
-                    expression
-                )
-            }
-        }
-    })
-}
-
-write_expression(
-    output: &mut ByteBuf,
-    original: &String,
-    source: &super::lexer::LexedSource,
-    value: &ParsedBody,
-    id: ExprId
-) -> Result<(), BodyError> {
-    let node = Arena::index(&value.nodes, id);
-    let children = expression_edges(value, node);
-    handle node.kind_code {
-        1 => {
-            ByteBuf::push(&mut *output, 1);
-            let spelling = range_text(
-                original,
-                source,
-                node.tokens.start,
-                node.tokens.end
-            );
-            write_string( output, &spelling);
-            Result::Ok(())
-        },
-        2 => {
-            let text = range_text(
-                original,
-                source,
-                node.tokens.start,
-                node.tokens.end
-            );
-            handle parse_u64(&text) {
-                Result::Err(_) => Result::Err(
-                    BodyError::InvalidEncodedExpression(
-                        node.tokens.start,
-                        node.tokens.start
-                    )
-                ),
-                Result::Ok(number) => {
-                    ByteBuf::push(&mut *output, 2);
-                    ByteBuf::write_u64_le( output, number);
-                    Result::Ok(())
-                }
-            }
-        },
-        3 => {
-            ByteBuf::push( output, 3);
-            Result::Ok(())
-        },
-        4 => write_expression(
-            output,
-            original,
-            source,
-            value,
-            expression_edge_value(edge_in_slice(children, 0))
-        ),
-        5 => {
-            ByteBuf::push(&mut *output, 5);
-            let spelling = range_text(
-                original,
-                source,
-                node.operator.start,
-                node.operator.end
-            );
-            write_string(&mut *output, &spelling);
-            write_expression(
-                 output,
-                original,
-                source,
-                value,
-                expression_edge_value(edge_in_slice(children, 0))
-            )
-        },
-        6 => {
-            ByteBuf::push(&mut *output, 6);
-            let spelling = range_text(
-                original,
-                source,
-                node.operator.start,
-                node.operator.end
-            );
-            write_string(&mut *output, &spelling);
-            try(
-                write_expression(
-                    &mut *output,
-                    original,
-                    source,
-                    value,
-                    expression_edge_value(edge_in_slice(children, 0))
-                ),
-                @write_expression
-            );
-            write_expression(
-                 output,
-                original,
-                source,
-                value,
-                expression_edge_value(edge_in_slice(children, 1))
-            )
-        },
-        7 => {
-            ByteBuf::push(&mut *output, 7);
-            try(
-                write_expression(
-                    &mut *output,
-                    original,
-                    source,
-                    value,
-                    expression_edge_value(edge_in_slice(children, 0))
-                ),
-                @write_expression
-            );
-            ByteBuf::write_u32_le(
-                &mut *output,
-                node.children.count - 1
-            );
-            write_children(
-                 output,
-                original,
-                source,
-                value,
-                edge_suffix(children, 1)
-            )
-        },
-        8 => {
-            ByteBuf::push(&mut *output, 8);
-            ByteBuf::write_u32_le(&mut *output, node.children.count);
-            write_block_statements(
-                 output,
-                original,
-                source,
-                value,
-                children
-            )
-        },
-        9 => {
-            ByteBuf::push(&mut *output, 9);
-            ByteBuf::write_u32_le(&mut *output, node.children.count);
-            write_children(output, original, source, value, children)
-        },
-        10 => {
-            ByteBuf::push(&mut *output, 10);
-            try(
-                write_node_name(
-                    &mut *output,
-                    original,
-                    source,
-                    value,
-                    node,
-                    0
-                ),
-                @write_expression
-            );
-            ByteBuf::write_u32_le(
-                &mut *output,
-                node.children.count
-            );
-            write_struct_fields(
-                 output,
-                original,
-                source,
-                value,
-                node,
-                children
-            )
-        },
-        11 => {
-            ByteBuf::push(&mut *output, 11);
-            try(
-                write_expression(
-                    &mut *output,
-                    original,
-                    source,
-                    value,
-                    expression_edge_value(edge_in_slice(children, 0))
-                ),
-                @write_expression
-            );
-            write_node_name(
-                 output,
-                original,
-                source,
-                value,
-                node,
-                0
-            )
-        },
-        12 => {
-            ByteBuf::push(&mut *output, 12);
-            try(write_expression(
-                &mut *output,
-                original,
-                source,
-                value,
-                expression_edge_value(edge_in_slice(children, 0))
-            ), @write_expression);
-            let arms = slice_handle_arms(value, &node.handle_arms);
-            ByteBuf::write_u32_le(
-                &mut *output,
-                u32_from_usize(Slice::len(arms))
-            );
-            write_handle_arms(
-                output,
-                original,
-                source,
-                value,
-                arms
-            )
-        },
-        _ => Result::Err(BodyError::InvalidEncodedExpression(
-            node.tokens.start,
-            node.tokens.start
-        ))
-    }
-}
-
-function_count(
-    declarations: &super::scanner::DeclarationIndex
-) -> usize {
-    super::scanner::fold_shells(declarations, 0, { count, _, shell =>
-        if(super::scanner::shell_kind_code(shell) == 12) {
-            count + 1
-        } else {
-            count
-        }
-    })
-}
-
-write_function_name(
-    output: &mut ByteBuf,
-    source: &super::lexer::LexedSource,
-    shell: &super::scanner::DeclarationShell
-) {
-    handle Option::as_ref(super::scanner::shell_name(shell)) {
-        Result::Err(_) => unreachable(),
-        Result::Ok(name) => handle super::lexer::lexeme(source, *name) {
-            Result::Err(_) => unreachable(),
-            Result::Ok(text) => write_string( output, text)
-        }
-    }
-}
-
-write_functions(
-    output: &mut ByteBuf,
-    original: &String,
-    headers: &super::headers::ParsedHeaders,
-    declarations: &super::scanner::DeclarationIndex
-) -> Result<(), BodyError> {
-    super::scanner::try_for_each_shell(declarations, { id, shell => {
-        if(super::scanner::shell_kind_code(shell) == 12) {
-            let body = try(
-                parse_function_body(
-                    original,
-                    headers,
-                    declarations,
-                    id
-                ),
-                @write_functions
-            );
-            let source = super::headers::parsed_source(headers);
-            write_function_name(&mut *output, source, shell);
-            try(
-                write_expression(
-                    &mut *output,
-                    original,
-                    source,
-                    &body,
-                    body.root
-                ),
-                @write_functions
-            );
-        } else {
-            ()
-        };
-        Result::Ok(())
-    }})
-}
-
-encode_source(output: &mut ByteBuf, source_text_value: String) {
-    handle super::lexer::lex(&source_text_value) {
-        Result::Err(_) => ByteBuf::push( output, 1),
-        Result::Ok(lexed) => handle super::scanner::scan(&lexed) {
-            Result::Err(_) => ByteBuf::push( output, 2),
-            Result::Ok(declarations) => handle super::headers::parse(
-                &source_text_value,
-                 lexed,
-                &declarations
-            ) {
-                Result::Err(_) => ByteBuf::push( output, 3),
-                Result::Ok(headers) => {
-                    let encoded = ByteBuf::new();
-                    ByteBuf::write_u32_le(
-                        &mut encoded,
-                        u32_from_usize(function_count(&declarations))
-                    );
-                    handle write_functions(
-                        &mut encoded,
-                        &source_text_value,
-                        &headers,
-                        &declarations
-                    ) {
-                        Result::Err(_) => ByteBuf::push( output, 3),
-                        Result::Ok(_) => {
-                            ByteBuf::push(&mut *output, 0);
-                            ByteBuf::append_bytes(
-                                 output,
-                                &ByteBuf::finish( encoded)
-                            )
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-process_inputs(
-    arguments: &Vec<String>,
-    index: usize,
-    output: &mut ByteBuf
-) / FileRead {
-    for_range(Range::new(index, Vec::len(arguments)), { current => {
-        let path = *Vec::index(arguments, current);
-        let bytes = read_file(path);
-        handle String::from_utf8(bytes) {
-            Result::Err(_) => ByteBuf::push(&mut *output, 1),
-            Result::Ok(source) => encode_source(&mut *output, source)
-        }
-    }})
-}
-
-pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
-    let arguments = process_args();
-    let count = Vec::len(&arguments);
-    if(count < 2) {
-        write_diagnostic(
-            "usage: grandiose-self-host-bodies <output> <input>..."
-        )
-    } else {
-        let output_path = *Vec::index(&arguments, 0);
-            let encoded = ByteBuf::new();
-            ByteBuf::write_u32_le(
-                &mut encoded,
-                u32_from_usize(count - 1)
-            );
-            process_inputs(&arguments, 1, &mut encoded);
-            write_file(output_path, ByteBuf::finish( encoded))
-    }
-}
-
-u32_from_usize(value: usize) -> u32 { wrapping_convert_to_u32( value) }
-
-usize_from_u32(value: u32) -> usize { wrapping_convert_to_usize( value) }
-
-u32_from_u8(value: u8) -> u32 { wrapping_convert_to_u32( value) }
-
-u8_from_u32(value: u32) -> u8 { wrapping_convert_to_u8( value) }
