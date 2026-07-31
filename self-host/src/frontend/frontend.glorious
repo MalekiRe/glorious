@@ -118,7 +118,7 @@ pub mod syntax {
 
     fill_entries(value: &mut Vec<DelimiterEntry>, count: usize) {
         for_range(Range::new(0, count), { _ =>
-            Vec::push(value, DelimiterEntry {
+            Vec::push(&mut *value, DelimiterEntry {
                 partner: None,
                 opening: false
             })
@@ -131,7 +131,7 @@ pub mod syntax {
         partner: Option<usize>,
         opening: Bool
     ) {
-        *Vec::index_mut(value, token) = DelimiterEntry {
+        *Vec::index_mut(&mut *value, token) = DelimiterEntry {
             partner: partner,
             opening: opening
         }
@@ -159,27 +159,27 @@ pub mod syntax {
         handle delimiter_kind(super::lexer::token_kind_at(source, index)) {
             None => Result::Ok(()),
             Option::Some((kind, opening)) => if(opening) {
-                Vec::push(stack, OpenDelimiter {
+                Vec::push(&mut *stack, OpenDelimiter {
                     kind: kind,
                     token: index
                 });
-                set_entry(entries, index, None, true);
+                set_entry(&mut *entries, index, None, true);
                 Result::Ok(())
             } else {
-                handle Vec::pop(stack) {
+                handle Vec::pop(&mut *stack) {
                     Result::Err(_) => Result::Err(
                         DelimiterError::UnexpectedClose(index, sentinel)
                     ),
                     Result::Ok(open) =>
                         if(same_delimiter(open.kind, kind)) {
                             set_entry(
-                                entries,
+                                &mut *entries,
                                 open.token,
                                 Option::Some(index),
                                 true
                             );
                             set_entry(
-                                entries,
+                                &mut *entries,
                                 index,
                                 Option::Some(open.token),
                                 false
