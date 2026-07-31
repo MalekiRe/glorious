@@ -1,0 +1,157 @@
+// Test-only structured-diagnostic probes shared by the self-host integration
+// fixture. Keeping these in one module lets the expensive self-host artifact be
+// compiled once while VM, diagnostic, and optional native-parity checks reuse it.
+
+use super::compiler::CompileError;
+use super::frontend::bodies::BodyError;
+use super::frontend::scanner::ScanError;
+use super::frontend::resolution::ResolutionError;
+use super::frontend::elaboration::ElaborationError;
+use super::backend::lowering::LoweringError;
+use super::backend::emission::EmissionError;
+
+pub diagnostic_fingerprint(source: String) -> u64 {
+    handle super::diagnostics::compile_source(&source) {
+        Result::Ok(_) => 0,
+        Result::Err(value) =>
+            wrapping_convert_to_u64(
+                super::diagnostics::diagnostic_phase_code(&value)
+            ) * 1000000000
+            + wrapping_convert_to_u64(
+                super::diagnostics::diagnostic_class_code(&value)
+            ) * 100000000
+            + wrapping_convert_to_u64(
+                super::diagnostics::diagnostic_code(&value)
+            ) * 1000
+            + wrapping_convert_to_u64(
+                super::diagnostics::diagnostic_primary_space_code(&value)
+            ) * 10
+            + wrapping_convert_to_u64(
+                super::diagnostics::diagnostic_owner_space_code(&value)
+            )
+    }
+}
+
+pub resource_limit_fingerprint() -> u64 {
+    let error = CompileError::Scan(
+        ScanError::DeclarationIdExhausted(3, 4)
+    );
+    let value = super::diagnostics::compile_error_diagnostic(&error);
+    wrapping_convert_to_u64(
+        super::diagnostics::diagnostic_class_code(&value)
+    ) * 10000
+        + wrapping_convert_to_u64(
+            super::diagnostics::diagnostic_code(&value)
+        )
+}
+
+pub resource_limit_render() -> String {
+    let error = CompileError::Scan(
+        ScanError::DeclarationIdExhausted(3, 4)
+    );
+    let value = super::diagnostics::compile_error_diagnostic(&error);
+    super::diagnostics::render_diagnostic(&value)
+}
+
+pub lowering_fingerprint() -> u64 {
+    let error = CompileError::Lowering(
+        Id::from_u32(2),
+        LoweringError::ConstructionFieldCount(
+            Id::from_u32(4),
+            2,
+            3
+        )
+    );
+    let value = super::diagnostics::compile_error_diagnostic(&error);
+    wrapping_convert_to_u64(
+        super::diagnostics::diagnostic_code(&value)
+    ) * 100000000
+        + wrapping_convert_to_u64(
+            super::diagnostics::diagnostic_primary_space_code(&value)
+        ) * 1000000
+        + wrapping_convert_to_u64(
+            super::diagnostics::diagnostic_owner_space_code(&value)
+        ) * 10000
+        + wrapping_convert_to_u64(
+            super::diagnostics::diagnostic_expected(&value)
+        ) * 100
+        + wrapping_convert_to_u64(
+            super::diagnostics::diagnostic_found(&value)
+        )
+}
+
+pub emission_code() -> u32 {
+    let error = CompileError::Emission(
+        EmissionError::StructFieldNameCount(
+            Id::from_u32(1),
+            2,
+            3
+        )
+    );
+    let value = super::diagnostics::compile_error_diagnostic(&error);
+    super::diagnostics::diagnostic_code(&value)
+}
+
+site_fingerprint(error: CompileError) -> u64 {
+    let value = super::diagnostics::compile_error_diagnostic(&error);
+    wrapping_convert_to_u64(
+        super::diagnostics::diagnostic_class_code(&value)
+    ) * 100000000000000000
+        + wrapping_convert_to_u64(
+            super::diagnostics::diagnostic_code(&value)
+        ) * 10000000000000
+        + wrapping_convert_to_u64(
+            super::diagnostics::diagnostic_primary_space_code(&value)
+        ) * 100000000000
+        + wrapping_convert_to_u64(
+            super::diagnostics::diagnostic_primary_start(&value)
+        ) * 1000000000
+        + wrapping_convert_to_u64(
+            super::diagnostics::diagnostic_related_space_code(&value)
+        ) * 10000000
+        + wrapping_convert_to_u64(
+            super::diagnostics::diagnostic_related_start(&value)
+        ) * 100000
+        + wrapping_convert_to_u64(
+            super::diagnostics::diagnostic_owner_space_code(&value)
+        ) * 1000
+        + wrapping_convert_to_u64(
+            super::diagnostics::diagnostic_owner_start(&value)
+        )
+}
+
+pub body_internal_site() -> u64 {
+    site_fingerprint(CompileError::BodyParse(
+        Id::from_u32(2),
+        BodyError::MissingBodyShell(Id::from_u32(8))
+    ))
+}
+
+pub resolution_ambiguous_site() -> u64 {
+    site_fingerprint(CompileError::BodyResolution(
+        Id::from_u32(2),
+        ResolutionError::AmbiguousFunction(
+            9,
+            Id::from_u32(4)
+        )
+    ))
+}
+
+pub elaboration_internal_site() -> u64 {
+    site_fingerprint(CompileError::BodyElaboration(
+        Id::from_u32(2),
+        ElaborationError::InvalidResolvedExpression(5, 7)
+    ))
+}
+
+pub diagnostic_matrix() -> u64 {
+    diagnostic_fingerprint("\"")
+        + diagnostic_fingerprint("}") * 17
+        + diagnostic_fingerprint("struct Broken { field }") * 289
+        + diagnostic_fingerprint("main() { let value = ; }") * 4913
+        + diagnostic_fingerprint("main() { missing() }") * 83521
+        + diagnostic_fingerprint("main() -> i64 { () }") * 1419857
+        + resource_limit_fingerprint() * 1771561
+        + lowering_fingerprint()
+        + wrapping_convert_to_u64(emission_code()) * 19487171
+}
