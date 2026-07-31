@@ -2,6 +2,7 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::OnceLock,
 };
 
 use grandiose::{
@@ -64,6 +65,8 @@ const FIXTURE: &str = r#"
     main() { () }
 "#;
 
+static SELF_HOST_ARTIFACT: OnceLock<Artifact> = OnceLock::new();
+
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -82,6 +85,7 @@ fn self_host_bundle() -> SourceBundle {
             mod backend;
             mod compiler;
             mod diagnostics;
+            mod diagnostic_probe;
             use compiler::CompileError;
 
             classify_compile_error(source: String) -> u8 {
@@ -105,6 +109,26 @@ fn self_host_bundle() -> SourceBundle {
                 }
             }
 
+            diagnostic_matrix() -> u64 {
+                diagnostic_probe::diagnostic_matrix()
+            }
+
+            resource_limit_render() -> String {
+                diagnostic_probe::resource_limit_render()
+            }
+
+            body_internal_site() -> u64 {
+                diagnostic_probe::body_internal_site()
+            }
+
+            resolution_ambiguous_site() -> u64 {
+                diagnostic_probe::resolution_ambiguous_site()
+            }
+
+            elaboration_internal_site() -> u64 {
+                diagnostic_probe::elaboration_internal_site()
+            }
+
             main() { run_compiler_host(diagnostics::application) }
         "#,
     );
@@ -125,6 +149,7 @@ fn self_host_bundle() -> SourceBundle {
         root.join("diagnostics/model/model.glorious"),
         root.join("diagnostics/source_errors/source_errors.glorious"),
         root.join("diagnostics/backend_errors/backend_errors.glorious"),
+        root.join("diagnostic_probe/diagnostic_probe.glorious"),
     ];
     SourceBundle::distributed(
         primary,
@@ -135,12 +160,78 @@ fn self_host_bundle() -> SourceBundle {
     )
 }
 
+fn self_host_artifact() -> &'static Artifact {
+    SELF_HOST_ARTIFACT.get_or_init(|| {
+        grandiose::compile_bundle_to_phases_with_options(
+            &self_host_bundle(),
+            CompileOptions {
+                optimization_level: OptimizationLevel::O2,
+            },
+        )
+        .unwrap()
+        .artifact
+    })
+}
+
 fn function_id(artifact: &Artifact, name: &str) -> u32 {
     artifact
         .functions
         .iter()
         .position(|function| function.name == name)
         .unwrap_or_else(|| panic!("self-hosted artifact is missing `{name}`")) as u32
+}
+
+fn run_verified(verified: &grandiose_vm::VerifiedArtifact, artifact: &Artifact, name: &str) -> Value {
+    Vm::new(verified.clone())
+        .run(function_id(artifact, name), vec![])
+        .unwrap()
+}
+
+fn assert_diagnostics(artifact: &Artifact, verified: &grandiose_vm::VerifiedArtifact) {
+    let frontend = [
+        (1_u64, 1_u64, 1016_u64, 1_u64, 0_u64),
+        (2, 1, 2001, 2, 0),
+        (3, 1, 3007, 2, 0),
+        (7, 1, 7001, 2, 3),
+        (8, 2, 8001, 2, 3),
+        (9, 3, 9003, 2, 3),
+    ];
+    let fingerprint = |(phase, class, code, space, owner)| {
+        phase * 1_000_000_000 + class * 100_000_000 + code * 1_000 + space * 10 + owner
+    };
+    let weights = [1_u64, 17, 289, 4_913, 83_521, 1_419_857];
+    let mut expected = frontend
+        .into_iter()
+        .zip(weights)
+        .map(|(value, weight)| fingerprint(value) * weight)
+        .sum::<u64>();
+    expected += (5_u64 * 10_000 + 2_007) * 1_771_561;
+    expected += 10_007_u64 * 100_000_000 + 5 * 1_000_000 + 3 * 10_000 + 2 * 100 + 3;
+    expected += 12_006_u64 * 19_487_171;
+
+    assert_eq!(
+        run_verified(verified, artifact, "diagnostic_matrix"),
+        Value::U64(expected)
+    );
+    assert_eq!(
+        run_verified(verified, artifact, "resource_limit_render"),
+        Value::Text(
+            "[G2007] self-host compiler: declaration scanning failed (token 3); related token 4"
+                .into()
+        )
+    );
+    assert_eq!(
+        run_verified(verified, artifact, "body_internal_site"),
+        Value::U64(770_070_308_000_003_002)
+    );
+    assert_eq!(
+        run_verified(verified, artifact, "resolution_ambiguous_site"),
+        Value::U64(280_020_209_030_403_002)
+    );
+    assert_eq!(
+        run_verified(verified, artifact, "elaboration_internal_site"),
+        Value::U64(790_070_605_070_703_002)
+    );
 }
 
 fn assert_compiled_artifact(bytes: &[u8]) {
@@ -280,15 +371,77 @@ fn assert_compiled_artifact(bytes: &[u8]) {
     assert_eq!(Vm::new(verified).run(main, vec![]).unwrap(), Value::Unit);
 }
 
+fn write_fixture(directory: &Path) -> PathBuf {
+    let input = directory.join("input.glorious");
+    fs::write(&input, FIXTURE).unwrap();
+    input
+}
+
+fn compile_fixture_with_vm(
+    compiler: &grandiose_vm::VerifiedArtifact,
+    compiler_entry: u32,
+    directory: &Path,
+    input: &Path,
+    output_name: &str,
+) -> Vec<u8> {
+    let output = directory.join(output_name);
+    let vm = Vm::with_host(
+        compiler.clone(),
+        ["process.args", "fs.read", "fs.write", "diagnostic"],
+        SystemHost::new(vec![
+            output.clone().into_os_string(),
+            input.to_path_buf().into_os_string(),
+        ]),
+    )
+    .unwrap();
+    assert_eq!(vm.run(compiler_entry, vec![]).unwrap(), Value::Unit);
+    fs::read(output).unwrap()
+}
+
 #[test]
-fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
+fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm() {
+    std::thread::Builder::new()
+        .stack_size(64 * 1024 * 1024)
+        .spawn(|| {
+            let artifact = self_host_artifact();
+            let verified = grandiose_vm::verify(artifact.clone()).unwrap();
+
+            let classify = function_id(artifact, "classify_compile_error");
+            for (source, expected) in [("\"", 1), ("}", 2), ("struct Broken { field }", 3)] {
+                assert_eq!(
+                    Vm::new(verified.clone())
+                        .run(classify, vec![Value::Text(source.into())])
+                        .unwrap(),
+                    Value::U64(expected),
+                    "{source:?}"
+                );
+            }
+            assert_diagnostics(artifact, &verified);
+
+            let directory = tempfile::tempdir().unwrap();
+            let input = write_fixture(directory.path());
+            let vm_bytes = compile_fixture_with_vm(
+                &verified,
+                artifact.entry_function.unwrap(),
+                directory.path(),
+                &input,
+                "vm.grbc",
+            );
+            assert_compiled_artifact(&vm_bytes);
+        })
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+#[test]
+#[ignore = "expensive LLVM/clang self-host parity; run explicitly or in the slow test tier"]
+fn self_hosted_frontend_matches_native_llvm() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
             let directory = tempfile::tempdir().unwrap();
-            let input = directory.path().join("input.glorious");
-            fs::write(&input, FIXTURE).unwrap();
-
+            let input = write_fixture(directory.path());
             let phases = grandiose::compile_bundle_to_phases_with_options(
                 &self_host_bundle(),
                 CompileOptions {
@@ -296,37 +449,14 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
                 },
             )
             .unwrap();
-            let compiler_entry = phases.artifact.entry_function.unwrap();
-            let compiler = grandiose_vm::verify(phases.artifact.clone()).unwrap();
-            let classify = function_id(&phases.artifact, "classify_compile_error");
-            for (source, expected) in [("\"", 1), ("}", 2), ("struct Broken { field }", 3)] {
-                assert_eq!(
-                    Vm::with_host(
-                        compiler.clone(),
-                        ["process.args", "fs.read", "fs.write", "diagnostic"],
-                        SystemHost::new(vec![]),
-                    )
-                    .unwrap()
-                    .run(classify, vec![Value::Text(source.into())])
-                    .unwrap(),
-                    Value::U64(expected),
-                    "{source:?}"
-                );
-            }
-
-            let vm_output = directory.path().join("vm.grbc");
-            let vm = Vm::with_host(
-                compiler,
-                ["process.args", "fs.read", "fs.write", "diagnostic"],
-                SystemHost::new(vec![
-                    vm_output.clone().into_os_string(),
-                    input.clone().into_os_string(),
-                ]),
-            )
-            .unwrap();
-            assert_eq!(vm.run(compiler_entry, vec![]).unwrap(), Value::Unit);
-            let vm_bytes = fs::read(&vm_output).unwrap();
-            assert_compiled_artifact(&vm_bytes);
+            let verified = grandiose_vm::verify(phases.artifact.clone()).unwrap();
+            let vm_bytes = compile_fixture_with_vm(
+                &verified,
+                phases.artifact.entry_function.unwrap(),
+                directory.path(),
+                &input,
+                "vm.grbc",
+            );
 
             let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
             let llvm = directory.path().join("self-host-bytecode.ll");
