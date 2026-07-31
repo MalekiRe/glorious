@@ -1,11 +1,8 @@
-// A compact structural pass between lexing and semantic header parsing.
-// Bodies remain exact half-open token ranges and are not parsed here.
+// Structural declaration scanning over one precomputed delimiter map.
+// Bodies remain exact half-open token spans and are not parsed here.
 
 use super::lexer::{Keyword, TokenKind};
-
-pub struct TokenRange { start: usize, end: usize }
-
-impl Use<[0, *]> for TokenRange {}
+use super::syntax::{DelimiterError, DelimiterMap, TokenSpan};
 
 pub enum DeclarationKind {
     Module,
@@ -25,22 +22,21 @@ pub enum DeclarationKind {
 impl Use<[0, *]> for DeclarationKind {}
 
 pub struct ShellTag {}
-
 pub type ShellId = Id<ShellTag>;
 
 pub struct DeclarationShell {
     kind: DeclarationKind,
-    kind_code: u8,
     public: Bool,
     name: Option<Id<String>>,
-    header: TokenRange,
-    body: Option<TokenRange>,
-    whole: TokenRange,
+    header: TokenSpan,
+    body: Option<TokenSpan>,
+    whole: TokenSpan,
     parent: Option<ShellId>
 }
 
 pub struct DeclarationIndex {
-    shells: IndexVec<ShellTag, DeclarationShell>
+    shells: IndexVec<ShellTag, DeclarationShell>,
+    delimiters: DelimiterMap
 }
 
 pub enum ScanError {
@@ -53,19 +49,24 @@ pub enum ScanError {
     DeclarationIdExhausted(usize, usize)
 }
 
-struct OpenDelimiter { kind: u8, token: usize }
+pub enum DeclarationStyle {
+    Semicolon,
+    Braced,
+    FunctionBody,
+    Module
+}
+
+impl Use<[0, *]> for DeclarationStyle {}
 
 struct Classification {
     kind: DeclarationKind,
-    kind_code: u8,
     name: Option<Id<String>>,
-    style: u8
+    style: DeclarationStyle
 }
 
 struct ScanStep {
     next: usize,
-    nested_start: Option<usize>,
-    nested_end: usize,
+    nested: Option<TokenSpan>,
     declaration: DeclarationShell
 }
 
@@ -80,12 +81,9 @@ struct ScanState {
     limit: usize,
     parent: Option<ShellId>,
     scopes: Vec<ScanScope>,
-    output: IndexVec<ShellTag, DeclarationShell>
+    output: IndexVec<ShellTag, DeclarationShell>,
+    delimiters: DelimiterMap
 }
-
-pub range_start(value: &TokenRange) -> usize { value.start }
-
-pub range_end(value: &TokenRange) -> usize { value.end }
 
 pub shell_count(value: &DeclarationIndex) -> usize {
     IndexVec::len(&value.shells)
@@ -98,7 +96,7 @@ pub shell_id_at_ordinal(
     let id = try(Id::from_usize(index), @shell_id_at_ordinal);
     handle IndexVec::get(&value.shells, id) {
         Result::Err(_) => None,
-        Result::Ok(_) => Option::Some(id)
+        Result::Ok(_) => Some(id)
     }
 }
 
@@ -107,6 +105,10 @@ pub shell_at<'a>(
     id: ShellId
 ) -> Option<&'a DeclarationShell> {
     IndexVec::get(&value.shells, id)
+}
+
+pub delimiter_map(value: &DeclarationIndex) -> &DelimiterMap {
+    &value.delimiters
 }
 
 pub for_each_shell<'a, F, e: EffectRow>(
@@ -145,28 +147,17 @@ F: Use<[0, 0]> {
     IndexVec::fold(&value.shells, initial, body)
 }
 
-pub shell_kind(value: &DeclarationShell) -> &DeclarationKind { &value.kind }
-
-pub shell_kind_code(value: &DeclarationShell) -> u8 { value.kind_code }
-
+pub shell_kind(value: &DeclarationShell) -> DeclarationKind { value.kind }
+pub shell_is_function(value: &DeclarationShell) -> Bool {
+    value.kind is DeclarationKind::Function
+}
 pub shell_is_public(value: &DeclarationShell) -> Bool { value.public }
-
 pub shell_name(value: &DeclarationShell) -> &Option<Id<String>> { &value.name }
-
-pub shell_header(value: &DeclarationShell) -> &TokenRange { &value.header }
-
-pub shell_body(value: &DeclarationShell) -> &Option<TokenRange> { &value.body }
-
-pub shell_body_range(value: &DeclarationShell) -> Option<TokenRange> {
-    let found = try(Option::as_ref(&value.body), @shell_body_range);
-    Result::Ok(*found)
-}
-
-pub shell_whole(value: &DeclarationShell) -> &TokenRange { &value.whole }
-
-pub shell_parent(value: &DeclarationShell) -> &Option<ShellId> {
-    &value.parent
-}
+pub shell_header(value: &DeclarationShell) -> &TokenSpan { &value.header }
+pub shell_body(value: &DeclarationShell) -> &Option<TokenSpan> { &value.body }
+pub shell_body_span(value: &DeclarationShell) -> Option<TokenSpan> { value.body }
+pub shell_whole(value: &DeclarationShell) -> &TokenSpan { &value.whole }
+pub shell_parent(value: &DeclarationShell) -> &Option<ShellId> { &value.parent }
 
 pub scan_error_code(value: &ScanError) -> u8 {
     handle *value {
@@ -204,30 +195,7 @@ pub scan_error_related(value: &ScanError) -> usize {
     }
 }
 
-u8_equal(left: u8, right: u8) -> Bool {  left ==  right }
-
-delimiter_open(value: TokenKind) -> u8 {
-    handle value {
-        TokenKind::LParen => 1,
-        TokenKind::LBrace => 2,
-        TokenKind::LBracket => 3,
-        _ => 0
-    }
-}
-
-delimiter_close(value: TokenKind) -> u8 {
-    handle value {
-        TokenKind::RParen => 1,
-        TokenKind::RBrace => 2,
-        TokenKind::RBracket => 3,
-        _ => 0
-    }
-}
-
-token_kind_at(
-    value: &super::lexer::LexedSource,
-    index: usize
-) -> TokenKind {
+token_kind_at(value: &super::lexer::LexedSource, index: usize) -> TokenKind {
     super::lexer::token_kind_at(value, index)
 }
 
@@ -236,8 +204,8 @@ token_ident(
     index: usize
 ) -> Option<Id<String>> {
     handle token_kind_at(value, index) {
-        TokenKind::Ident(name) => Result::Ok( name),
-        _ => Result::Err(())
+        TokenKind::Ident(name) => Some(name),
+        _ => None
     }
 }
 
@@ -246,23 +214,17 @@ ident_is(
     index: usize,
     expected: &String
 ) -> Bool {
-    if(token_ident(value, index) is Result::Ok(name)) {
-        if(super::lexer::lexeme(value, name) is Result::Ok(found)) {
-            *found == *expected
-        } else { false }
-    } else { false }
+    handle token_ident(value, index) {
+        None => false,
+        Some(name) => handle super::lexer::lexeme(value, name) {
+            Result::Err(_) => false,
+            Result::Ok(found) => *found == *expected
+        }
+    }
 }
 
 token_is_number(value: &super::lexer::LexedSource, index: usize) -> Bool {
     token_kind_at(value, index) is TokenKind::Number(_)
-}
-
-token_is_slash(value: &super::lexer::LexedSource, index: usize) -> Bool {
-    token_kind_at(value, index) is TokenKind::Slash
-}
-
-token_is_eq(value: &super::lexer::LexedSource, index: usize) -> Bool {
-    token_kind_at(value, index) is TokenKind::Eq
 }
 
 token_is_semicolon(value: &super::lexer::LexedSource, index: usize) -> Bool {
@@ -273,233 +235,128 @@ token_is_eof(value: &super::lexer::LexedSource, index: usize) -> Bool {
     token_kind_at(value, index) is TokenKind::Eof
 }
 
-matching_close_walk(
-    value: &super::lexer::LexedSource,
-    index: usize,
-    stack: Vec<OpenDelimiter>
-) -> Result<usize, ScanError> {
-    let count = super::lexer::token_count(value);
-    if(index < count) { if(token_is_eof(value, index)) {
-            handle Vec::last(&stack) {
-                Result::Ok(open) => Result::Err(
-                    ScanError::UnclosedDelimiter(index, open.token)
-                ),
-                Result::Err(_) => Result::Err(
-                    ScanError::IncompleteDeclaration(index, count)
-                )
-            }
-        } else {
-                let kind = token_kind_at(value, index);
-                let opening = delimiter_open(kind);
-                let closing = delimiter_close(kind);
-                if(u8_equal(opening, 0)) { if(u8_equal(closing, 0)) { matching_close_walk(
-                            value,
-                            index + 1,
-                             stack
-                        ) } else {
-                        let next =  stack;
-                        handle Vec::pop(&mut next) {
-                            Result::Err(_) => Result::Err(
-                                ScanError::UnexpectedClosingDelimiter(
-                                    index,
-                                    count
-                                )
-                            ),
-                            Result::Ok(open) => if(u8_equal(open.kind, closing)) { if(Vec::is_empty(&next)) { Result::Ok(index) } else { matching_close_walk(
-                                        value,
-                                        index + 1,
-                                        next
-                                    ) } } else { Result::Err(
-                                    ScanError::MismatchedClosingDelimiter(
-                                        index,
-                                        open.token
-                                    )
-                                ) }
-                        }
-                    } } else {
-                    let next =  stack;
-                    Vec::push(
-                        &mut next,
-                        OpenDelimiter { kind: opening, token: index }
-                    );
-                    matching_close_walk(value, index + 1, next)
-                }
-        } } else { handle Vec::last(&stack) {
-            Result::Ok(open) => Result::Err(
-                ScanError::UnclosedDelimiter(count, open.token)
-            ),
-            Result::Err(_) => Result::Err(
-                ScanError::IncompleteDeclaration(count, count)
-            )
-        } }
+token_is_close(value: &super::lexer::LexedSource, index: usize) -> Bool {
+    handle token_kind_at(value, index) {
+        TokenKind::RParen => true,
+        TokenKind::RBrace => true,
+        TokenKind::RBracket => true,
+        _ => false
+    }
+}
+
+token_is_brace_open(value: &super::lexer::LexedSource, index: usize) -> Bool {
+    token_kind_at(value, index) is TokenKind::LBrace
 }
 
 matching_close(
-    value: &super::lexer::LexedSource,
+    delimiters: &DelimiterMap,
     open: usize
 ) -> Result<usize, ScanError> {
-    let kind = delimiter_open(token_kind_at(value, open));
-    if(u8_equal(kind, 0)) {
-        Result::Err(ScanError::IncompleteDeclaration(open, open))
-    } else {
-        let stack = Vec::new();
-        Vec::push(
-            &mut stack,
-            OpenDelimiter { kind: kind, token: open }
-        );
-        matching_close_walk(value, open + 1,  stack)
+    handle super::syntax::delimiter_partner(delimiters, open) {
+        None => Result::Err(ScanError::IncompleteDeclaration(open, open)),
+        Some(close) => Result::Ok(close)
     }
 }
 
 find_semicolon(
     value: &super::lexer::LexedSource,
+    delimiters: &DelimiterMap,
     index: usize,
     limit: usize,
     start: usize
 ) -> Result<usize, ScanError> {
-    if(index < limit) { if(token_is_eof(value, index)) { Result::Err(
-        ScanError::IncompleteDeclaration(index, start)
-    ) } else {
-            let kind = token_kind_at(value, index);
-            let opening = delimiter_open(kind);
-            let closing = delimiter_close(kind);
-            if(token_is_semicolon(value, index)) { Result::Ok(index) } else { if(u8_equal(opening, 0)) { if(u8_equal(closing, 0)) { find_semicolon(
-                            value,
-                            index + 1,
-                            limit,
-                            start
-                        ) } else { Result::Err(
-                            ScanError::UnexpectedClosingDelimiter(
-                                index,
-                                super::lexer::token_count(value)
-                            )
-                        ) } } else {
-                    let close = try(
-                        matching_close(value, index),
-                        @find_semicolon
-                    );
-                    find_semicolon(
-                        value,
-                        close + 1,
-                        limit,
-                        start
-                    )
-                } }
-        } } else { Result::Err(
-            ScanError::IncompleteDeclaration(limit, start)
-        ) }
+    if(index < limit) {
+        if(token_is_eof(value, index)) {
+            Result::Err(ScanError::IncompleteDeclaration(index, start))
+        } else if(token_is_semicolon(value, index)) {
+            Result::Ok(index)
+        } else if(super::syntax::delimiter_is_open(delimiters, index)) {
+            let close = try(matching_close(delimiters, index), @find_semicolon);
+            find_semicolon(value, delimiters, close + 1, limit, start)
+        } else if(token_is_close(value, index)) {
+            Result::Err(ScanError::UnexpectedClosingDelimiter(
+                index,
+                super::lexer::token_count(value)
+            ))
+        } else {
+            find_semicolon(value, delimiters, index + 1, limit, start)
+        }
+    } else {
+        Result::Err(ScanError::IncompleteDeclaration(limit, start))
+    }
+}
+
+body_span(
+    delimiters: &DelimiterMap,
+    open: usize,
+    limit: usize,
+    start: usize
+) -> Result<TokenSpan, ScanError> {
+    let close = try(matching_close(delimiters, open), @body_span);
+    if(close < limit) {
+        Result::Ok(super::syntax::token_span(open, close))
+    } else {
+        Result::Err(ScanError::IncompleteDeclaration(limit, start))
+    }
 }
 
 find_body(
     value: &super::lexer::LexedSource,
+    delimiters: &DelimiterMap,
     index: usize,
     limit: usize,
     start: usize,
     function: Bool
-) -> Result<TokenRange, ScanError> {
-    if(index < limit) { if(token_is_eof(value, index)) { Result::Err(
-        ScanError::IncompleteDeclaration(index, start)
-    ) } else {
-            let kind = token_kind_at(value, index);
-            let opening = delimiter_open(kind);
-            let closing = delimiter_close(kind);
-            if(u8_equal(opening, 0)) { if(u8_equal(closing, 0)) { find_body(
-                        value,
-                        index + 1,
-                        limit,
-                        start,
-                        function
-                    ) } else { Result::Err(
-                        ScanError::UnexpectedClosingDelimiter(
-                            index,
-                            super::lexer::token_count(value)
-                        )
-                    ) } } else { if(opening != 2) {
-                    let close = try(
-                        matching_close(value, index),
-                        @find_body
-                    );
-                    find_body(
-                        value,
-                        close + 1,
-                        limit,
-                        start,
-                        function
-                    )
+) -> Result<TokenSpan, ScanError> {
+    if(index < limit) {
+        if(token_is_eof(value, index)) {
+            Result::Err(ScanError::IncompleteDeclaration(index, start))
+        } else if(super::syntax::delimiter_is_open(delimiters, index)) {
+            if(token_is_brace_open(value, index)) {
+                let skip_handler_body = function
+                    and { index > start }
+                    and { token_kind_at(value, index - 1) is TokenKind::Slash };
+                if(skip_handler_body) {
+                    let close = try(matching_close(delimiters, index), @find_body);
+                    find_body(value, delimiters, close + 1, limit, start, function)
                 } else {
-                    if(function) { if(index > start) { if(token_is_slash(
-                                value,
-                                index - 1
-                            )) {
-                                let close = try(
-                                    matching_close(value, index),
-                                    @find_body
-                                );
-                                find_body(
-                                    value,
-                                    close + 1,
-                                    limit,
-                                    start,
-                                    function
-                                )
-                            } else { body_range(
-                                    value,
-                                    index,
-                                    limit,
-                                    start
-                                ) } } else { body_range(
-                                value,
-                                index,
-                                limit,
-                                start
-                            ) } } else { body_range(
-                            value,
-                            index,
-                            limit,
-                            start
-                        ) }
-                } }
-        } } else { Result::Err(
-            ScanError::IncompleteDeclaration(limit, start)
-        ) }
-}
-
-body_range(
-    value: &super::lexer::LexedSource,
-    open: usize,
-    limit: usize,
-    start: usize
-) -> Result<TokenRange, ScanError> {
-    let close = try(matching_close(value, open), @body_range);
-    if(close < limit) { Result::Ok(
-            TokenRange { start: open, end: close }
-        ) } else { Result::Err(
-            ScanError::IncompleteDeclaration(limit, start)
-        ) }
+                    body_span(delimiters, index, limit, start)
+                }
+            } else {
+                let close = try(matching_close(delimiters, index), @find_body);
+                find_body(value, delimiters, close + 1, limit, start, function)
+            }
+        } else if(token_is_close(value, index)) {
+            Result::Err(ScanError::UnexpectedClosingDelimiter(
+                index,
+                super::lexer::token_count(value)
+            ))
+        } else {
+            find_body(value, delimiters, index + 1, limit, start, function)
+        }
+    } else {
+        Result::Err(ScanError::IncompleteDeclaration(limit, start))
+    }
 }
 
 find_top_level_eq(
     value: &super::lexer::LexedSource,
+    delimiters: &DelimiterMap,
     index: usize,
     end: usize
 ) -> Option<usize> {
-    if(index < end) { if(token_is_eq(value, index)) {
-            Result::Ok(index)
+    if(index < end) {
+        if(token_kind_at(value, index) is TokenKind::Eq) {
+            Some(index)
+        } else if(super::syntax::delimiter_is_open(delimiters, index)) {
+            handle super::syntax::delimiter_partner(delimiters, index) {
+                None => None,
+                Some(close) => find_top_level_eq(value, delimiters, close + 1, end)
+            }
         } else {
-                let opening = delimiter_open(token_kind_at(value, index));
-                if(u8_equal(opening, 0)) { find_top_level_eq(
-                        value,
-                        index + 1,
-                        end
-                    ) } else { handle matching_close(value, index) {
-                        Result::Err(_) => Result::Err(()),
-                        Result::Ok(close) => find_top_level_eq(
-                            value,
-                            close + 1,
-                            end
-                        )
-                    } }
-        } } else { Result::Err(()) }
+            find_top_level_eq(value, delimiters, index + 1, end)
+        }
+    } else { None }
 }
 
 name_at(
@@ -508,168 +365,32 @@ name_at(
     start: usize
 ) -> Result<Id<String>, ScanError> {
     handle token_ident(value, index) {
-        Result::Ok(name) => Result::Ok( name),
-        Result::Err(_) => Result::Err(
-            ScanError::ExpectedDeclarationName(index, start)
-        )
+        Some(name) => Result::Ok(name),
+        None => Result::Err(ScanError::ExpectedDeclarationName(index, start))
     }
 }
 
-classify(
-    value: &super::lexer::LexedSource,
-    cursor: usize,
-    start: usize
-) -> Result<Classification, ScanError> {
-    handle token_kind_at(value, cursor) {
-        TokenKind::Keyword(Keyword::Type) => {
-            let name = try(
-                name_at(value, cursor + 1, start),
-                @classify
-            );
-            Result::Ok(Classification {
-                kind: DeclarationKind::TypeAlias,
-                kind_code: 3,
-                name: Result::Ok(name),
-                style: 1
-            })
-        },
-        TokenKind::Keyword(Keyword::Let) => {
-            let name = try(
-                name_at(value, cursor + 1, start),
-                @classify
-            );
-            Result::Ok(Classification {
-                kind: DeclarationKind::Global,
-                kind_code: 5,
-                name: Result::Ok(name),
-                style: 1
-            })
-        },
-        TokenKind::Keyword(Keyword::Effect) => {
-            named_braced(
-                value,
-                cursor + 1,
-                start,
-                DeclarationKind::Effect,
-                7
-            )
-        },
-        TokenKind::Keyword(Keyword::Struct) => {
-            named_braced(
-                value,
-                cursor + 1,
-                start,
-                DeclarationKind::Struct,
-                8
-            )
-        },
-        TokenKind::Keyword(Keyword::Enum) => {
-            named_braced(
-                value,
-                cursor + 1,
-                start,
-                DeclarationKind::Enum,
-                9
-            )
-        },
-        TokenKind::Keyword(Keyword::Trait) => {
-            named_braced(
-                value,
-                cursor + 1,
-                start,
-                DeclarationKind::Trait,
-                10
-            )
-        },
-        TokenKind::Keyword(Keyword::Impl) => {
-            Result::Ok(Classification {
-                kind: DeclarationKind::Impl,
-                kind_code: 11,
-                name: Result::Err(()),
-                style: 2
-            })
-        },
-        TokenKind::Ident(name) => classify_ident(
-            value,
-            cursor,
-            start,
-             name
-        ),
-        _ => Result::Err(ScanError::InvalidDeclarationStart(
-            cursor,
-            super::lexer::token_count(value)
-        ))
-    }
-}
-
-named_braced(
+named(
     value: &super::lexer::LexedSource,
     name_index: usize,
     start: usize,
     kind: DeclarationKind,
-    kind_code: u8
+    style: DeclarationStyle
 ) -> Result<Classification, ScanError> {
-    let name = try(name_at(value, name_index, start), @named_braced);
+    let name = try(name_at(value, name_index, start), @named);
     Result::Ok(Classification {
         kind: kind,
-        kind_code: kind_code,
-        name: Result::Ok( name),
-        style: 2
+        name: Some(name),
+        style: style
     })
 }
 
-classify_ident(
-    value: &super::lexer::LexedSource,
-    cursor: usize,
-    start: usize,
-    name: Id<String>
-) -> Result<Classification, ScanError> {
-    if(ident_is(value, cursor, &"mod")) {
-        let found = try(
-            name_at(value, cursor + 1, start),
-            @classify_ident
-        );
-        Result::Ok(Classification {
-            kind: DeclarationKind::Module,
-            kind_code: 1,
-            name: Result::Ok(found),
-            style: 4
-        })
-    } else { if(ident_is(value, cursor, &"use")) { if(import_declaration(value, cursor)) {
-                Result::Ok(Classification {
-                    kind: DeclarationKind::Import,
-                    kind_code: 2,
-                    name: token_ident(value, cursor + 1),
-                    style: 1
-                })
-            } else { function_classification(name) } } else { if(ident_is(value, cursor, &"cases")) {
-                let found = try(
-                    name_at(value, cursor + 1, start),
-                    @classify_ident
-                );
-                Result::Ok(Classification {
-                    kind: DeclarationKind::EffectRowAlias,
-                    kind_code: 4,
-                    name: Result::Ok(found),
-                    style: 1
-                })
-            } else { if(fixity_declaration(value, cursor)) {
-                    Result::Ok(Classification {
-                        kind: DeclarationKind::Fixity,
-                        kind_code: 6,
-                        name: token_ident(value, cursor + 2),
-                        style: 1
-                    })
-                } else { function_classification(name) } } } }
-}
-
-function_classification(name: Id<String>) -> Result<Classification, ScanError> {
-    Result::Ok(Classification {
+function_classification(name: Id<String>) -> Classification {
+    Classification {
         kind: DeclarationKind::Function,
-        kind_code: 12,
-        name: Result::Ok( name),
-        style: 3
-    })
+        name: Some(name),
+        style: DeclarationStyle::FunctionBody
+    }
 }
 
 import_declaration(value: &super::lexer::LexedSource, cursor: usize) -> Bool {
@@ -689,16 +410,134 @@ fixity_declaration(value: &super::lexer::LexedSource, cursor: usize) -> Bool {
     ) and { token_is_number(value, cursor + 1) }
 }
 
-scan_state_error(
-    kind: DeclarationKind,
-    name: Option<Id<String>>,
-    error: ScanError
-) -> Result<ScanStep, ScanError> {
-    Result::Err( error)
+classify_ident(
+    value: &super::lexer::LexedSource,
+    cursor: usize,
+    start: usize,
+    name: Id<String>
+) -> Result<Classification, ScanError> {
+    if(ident_is(value, cursor, &"mod")) {
+        named(
+            value,
+            cursor + 1,
+            start,
+            DeclarationKind::Module,
+            DeclarationStyle::Module
+        )
+    } else if(ident_is(value, cursor, &"use")
+        and { import_declaration(value, cursor) }) {
+        Result::Ok(Classification {
+            kind: DeclarationKind::Import,
+            name: token_ident(value, cursor + 1),
+            style: DeclarationStyle::Semicolon
+        })
+    } else if(ident_is(value, cursor, &"cases")) {
+        named(
+            value,
+            cursor + 1,
+            start,
+            DeclarationKind::EffectRowAlias,
+            DeclarationStyle::Semicolon
+        )
+    } else if(fixity_declaration(value, cursor)) {
+        Result::Ok(Classification {
+            kind: DeclarationKind::Fixity,
+            name: token_ident(value, cursor + 2),
+            style: DeclarationStyle::Semicolon
+        })
+    } else {
+        Result::Ok(function_classification(name))
+    }
+}
+
+classify(
+    value: &super::lexer::LexedSource,
+    cursor: usize,
+    start: usize
+) -> Result<Classification, ScanError> {
+    handle token_kind_at(value, cursor) {
+        TokenKind::Keyword(Keyword::Type) => named(
+            value,
+            cursor + 1,
+            start,
+            DeclarationKind::TypeAlias,
+            DeclarationStyle::Semicolon
+        ),
+        TokenKind::Keyword(Keyword::Let) => named(
+            value,
+            cursor + 1,
+            start,
+            DeclarationKind::Global,
+            DeclarationStyle::Semicolon
+        ),
+        TokenKind::Keyword(Keyword::Effect) => named(
+            value,
+            cursor + 1,
+            start,
+            DeclarationKind::Effect,
+            DeclarationStyle::Braced
+        ),
+        TokenKind::Keyword(Keyword::Struct) => named(
+            value,
+            cursor + 1,
+            start,
+            DeclarationKind::Struct,
+            DeclarationStyle::Braced
+        ),
+        TokenKind::Keyword(Keyword::Enum) => named(
+            value,
+            cursor + 1,
+            start,
+            DeclarationKind::Enum,
+            DeclarationStyle::Braced
+        ),
+        TokenKind::Keyword(Keyword::Trait) => named(
+            value,
+            cursor + 1,
+            start,
+            DeclarationKind::Trait,
+            DeclarationStyle::Braced
+        ),
+        TokenKind::Keyword(Keyword::Impl) => Result::Ok(Classification {
+            kind: DeclarationKind::Impl,
+            name: None,
+            style: DeclarationStyle::Braced
+        }),
+        TokenKind::Ident(name) => classify_ident(value, cursor, start, name),
+        _ => Result::Err(ScanError::InvalidDeclarationStart(
+            cursor,
+            super::lexer::token_count(value)
+        ))
+    }
+}
+
+find_module_style(
+    value: &super::lexer::LexedSource,
+    index: usize,
+    limit: usize,
+    start: usize
+) -> Result<DeclarationStyle, ScanError> {
+    if(index < limit) {
+        if(token_is_semicolon(value, index)) {
+            Result::Ok(DeclarationStyle::Semicolon)
+        } else if(token_is_brace_open(value, index)) {
+            Result::Ok(DeclarationStyle::Braced)
+        } else if(token_is_close(value, index)) {
+            Result::Err(ScanError::UnexpectedClosingDelimiter(
+                index,
+                super::lexer::token_count(value)
+            ))
+        } else {
+            find_module_style(value, index + 1, limit, start)
+        }
+    } else {
+        Result::Err(ScanError::IncompleteDeclaration(limit, start))
+    }
 }
 
 scan_semicolon_shell(
     value: &super::lexer::LexedSource,
+    delimiters: &DelimiterMap,
     start: usize,
     cursor: usize,
     limit: usize,
@@ -706,83 +545,49 @@ scan_semicolon_shell(
     classification: Classification,
     parent: Option<ShellId>
 ) -> Result<ScanStep, ScanError> {
-    let Classification {
-        kind,
-        kind_code,
-        name,
-        style: _
-    } = classification;
-    handle find_semicolon(value, cursor, limit, start) {
-        Result::Err(error) => scan_state_error(
-            kind,
-            name,
-             error
-        ),
-        Result::Ok(end) => {
-            if(u8_equal(kind_code, 5)) { handle find_top_level_eq(
-                    value,
-                    cursor,
-                    end
-                ) {
-                    Result::Err(_) => scan_state_error(
-                        kind,
-                        name,
-                        ScanError::IncompleteDeclaration(end, start)
-                    ),
-                    Result::Ok(equal) => {
-                        let whole = TokenRange {
-                            start: start,
-                            end: end + 1
-                        };
-                        Result::Ok(ScanStep {
-                            next: end + 1,
-                            nested_start: Result::Err(()),
-                            nested_end: 0,
-                            declaration: DeclarationShell {
-                                kind: kind,
-                                kind_code: kind_code,
-                                public: public,
-                                name: name,
-                                header: TokenRange {
-                                    start: start,
-                                    end: equal + 1
-                                },
-                                body: Result::Ok(TokenRange {
-                                    start: equal + 1,
-                                    end: end
-                                }),
-                                whole: whole,
-                                parent: parent
-                            }
-                        })
-                    }
-                } } else {
-                let whole = TokenRange { start: start, end: end + 1 };
-                Result::Ok(ScanStep {
-                    next: end + 1,
-                    nested_start: Result::Err(()),
-                    nested_end: 0,
-                    declaration: DeclarationShell {
-                        kind: kind,
-                        kind_code: kind_code,
-                        public: public,
-                        name: name,
-                        header: TokenRange {
-                            start: whole.start,
-                            end: whole.end
-                        },
-                        body: Result::Err(()),
-                        whole: whole,
-                        parent: parent
-                    }
-                })
-            }
+    let Classification { kind, name, style: _ } = classification;
+    let end = try(
+        find_semicolon(value, delimiters, cursor, limit, start),
+        @scan_semicolon_shell
+    );
+    let whole = super::syntax::token_span(start, end + 1);
+    if(kind is DeclarationKind::Global) {
+        handle find_top_level_eq(value, delimiters, cursor, end) {
+            None => Result::Err(ScanError::IncompleteDeclaration(end, start)),
+            Some(equal) => Result::Ok(ScanStep {
+                next: end + 1,
+                nested: None,
+                declaration: DeclarationShell {
+                    kind: kind,
+                    public: public,
+                    name: name,
+                    header: super::syntax::token_span(start, equal + 1),
+                    body: Some(super::syntax::token_span(equal + 1, end)),
+                    whole: whole,
+                    parent: parent
+                }
+            })
         }
+    } else {
+        Result::Ok(ScanStep {
+            next: end + 1,
+            nested: None,
+            declaration: DeclarationShell {
+                kind: kind,
+                public: public,
+                name: name,
+                header: whole,
+                body: None,
+                whole: whole,
+                parent: parent
+            }
+        })
     }
 }
 
 scan_braced_shell(
     value: &super::lexer::LexedSource,
+    delimiters: &DelimiterMap,
     start: usize,
     cursor: usize,
     limit: usize,
@@ -791,155 +596,105 @@ scan_braced_shell(
     parent: Option<ShellId>,
     function: Bool
 ) -> Result<ScanStep, ScanError> {
-    let Classification {
-        kind,
-        kind_code,
-        name,
-        style: _
-    } = classification;
-    handle find_body(value, cursor, limit, start, function) {
-        Result::Err(error) => scan_state_error(
-            kind,
-            name,
-             error
-        ),
-        Result::Ok(bounds) => {
-            let open = bounds.start;
-            let close = bounds.end;
-            Result::Ok(ScanStep {
-                next: close + 1,
-                nested_start: if(u8_equal(kind_code, 1)) {
-                    Result::Ok(open + 1)
-                } else { Result::Err(()) },
-                nested_end: close,
-                declaration: DeclarationShell {
-                    kind: kind,
-                    kind_code: kind_code,
-                    public: public,
-                    name: name,
-                    header: TokenRange { start: start, end: open },
-                    body: Result::Ok(TokenRange {
-                        start: open + 1,
-                        end: close
-                    }),
-                    whole: TokenRange {
-                        start: start,
-                        end: close + 1
-                    },
-                    parent: parent
-                }
-            })
+    let Classification { kind, name, style: _ } = classification;
+    let bounds = try(
+        find_body(value, delimiters, cursor, limit, start, function),
+        @scan_braced_shell
+    );
+    let open = super::syntax::token_start(&bounds);
+    let close = super::syntax::token_end(&bounds);
+    let body = super::syntax::token_span(open + 1, close);
+    Result::Ok(ScanStep {
+        next: close + 1,
+        nested: if(kind is DeclarationKind::Module) {
+            Some(body)
+        } else { None },
+        declaration: DeclarationShell {
+            kind: kind,
+            public: public,
+            name: name,
+            header: super::syntax::token_span(start, open),
+            body: Some(body),
+            whole: super::syntax::token_span(start, close + 1),
+            parent: parent
         }
-    }
+    })
 }
 
 scan_one(
     value: &super::lexer::LexedSource,
+    delimiters: &DelimiterMap,
     start: usize,
     limit: usize,
     parent: Option<ShellId>
 ) -> Result<ScanStep, ScanError> {
     let public = ident_is(value, start, &"pub");
-    let cursor = if(public) {
-        start + 1
-    } else { start };
+    let cursor = if(public) { start + 1 } else { start };
     let classification = try(classify(value, cursor, start), @scan_one);
-    let style = classification.style;
-    if(u8_equal(style, 1)) { scan_semicolon_shell(
+    let style = handle classification.style {
+        DeclarationStyle::Module => try(
+            find_module_style(value, cursor + 1, limit, start),
+            @scan_one
+        ),
+        found => found
+    };
+    handle style {
+        DeclarationStyle::Semicolon => scan_semicolon_shell(
             value,
+            delimiters,
             start,
             cursor + 1,
             limit,
             public,
             classification,
             parent
-        ) } else { if(u8_equal(style, 4)) {
-            let style = try(
-                find_module_style(value, cursor, limit, start),
-                @scan_one
-            );
-            if(u8_equal(style, 1)) { scan_semicolon_shell(
-                    value,
-                    start,
-                    cursor + 1,
-                    limit,
-                    public,
-                    classification,
-                    parent
-                ) } else { scan_braced_shell(
-                    value,
-                    start,
-                    cursor + 1,
-                    limit,
-                    public,
-                    classification,
-                    parent,
-                    false
-                ) }
-        } else { scan_braced_shell(
-                value,
-                start,
-                cursor + 1,
-                limit,
-                public,
-                classification,
-                parent,
-                u8_equal(style, 3)
-            ) } }
-}
-
-find_module_style(
-    value: &super::lexer::LexedSource,
-    index: usize,
-    limit: usize,
-    start: usize
-) -> Result<u8, ScanError> {
-    if(index < limit) { if(token_is_semicolon(value, index)) { Result::Ok(1) } else { if(u8_equal(
-                delimiter_open(token_kind_at(value, index)),
-                2
-            )) { Result::Ok(2) } else { if(u8_equal(
-                    delimiter_close(token_kind_at(value, index)),
-                    0
-                )) { find_module_style(
-                        value,
-                        index + 1,
-                        limit,
-                        start
-                    ) } else { Result::Err(
-                        ScanError::UnexpectedClosingDelimiter(
-                        index,
-                        super::lexer::token_count(value)
-                    )) } } } } else { Result::Err(
-                        ScanError::IncompleteDeclaration(limit, start)
-                    ) }
-}
-
-scan_loop_error(
-    scopes: Vec<ScanScope>,
-    output: IndexVec<ShellTag, DeclarationShell>,
-    error: ScanError
-) -> Result<DeclarationIndex, ScanError> {
-    Result::Err( error)
+        ),
+        DeclarationStyle::Braced => scan_braced_shell(
+            value,
+            delimiters,
+            start,
+            cursor + 1,
+            limit,
+            public,
+            classification,
+            parent,
+            false
+        ),
+        DeclarationStyle::FunctionBody => scan_braced_shell(
+            value,
+            delimiters,
+            start,
+            cursor + 1,
+            limit,
+            public,
+            classification,
+            parent,
+            true
+        ),
+        DeclarationStyle::Module => unreachable()
+    }
 }
 
 scan_complete(
     value: &super::lexer::LexedSource,
     scopes: Vec<ScanScope>,
-    output: IndexVec<ShellTag, DeclarationShell>
+    output: IndexVec<ShellTag, DeclarationShell>,
+    delimiters: DelimiterMap
 ) -> Result<DeclarationIndex, ScanError> {
-    let remaining =  scopes;
+    let remaining = scopes;
     handle Vec::pop(&mut remaining) {
-        Result::Err(_) => Result::Ok(DeclarationIndex { shells:  output }),
-        Result::Ok(scope) => {
-            let ScanScope { cursor, limit, parent } = scope;
-            scan_loop(value, ScanState {
-                cursor: cursor,
-                limit: limit,
-                parent: parent,
-                scopes: remaining,
-                output: output
-            })
-        }
+        Result::Err(_) => Result::Ok(DeclarationIndex {
+            shells: output,
+            delimiters: delimiters
+        }),
+        Result::Ok(scope) => scan_loop(value, ScanState {
+            cursor: scope.cursor,
+            limit: scope.limit,
+            parent: scope.parent,
+            scopes: remaining,
+            output: output,
+            delimiters: delimiters
+        })
     }
 }
 
@@ -952,215 +707,75 @@ scan_loop(
         limit,
         parent,
         scopes,
-        output
+        output,
+        delimiters
     } = state;
-    if(cursor < limit) { if(token_is_eof(value, cursor)) { scan_complete(value,  scopes,  output) } else { handle scan_one(
-                value,
-                cursor,
-                limit,
-                parent
-            ) {
-                Result::Err(error) => scan_loop_error(
-                     scopes,
-                     output,
-                     error
-                ),
-                Result::Ok(step) => {
-                    let ScanStep {
-                        next,
-                        nested_start,
-                        nested_end,
-                        declaration
-                    } = step;
-                    handle IndexVec::push(&mut output, declaration) {
-                        Result::Err(rejected) => {
-                            let token = rejected.whole.start;
-                            scan_loop_error(
-                                scopes,
-                                output,
-                                ScanError::DeclarationIdExhausted(token, token)
-                            )
-                        },
-                        Result::Ok(shell) => handle nested_start {
-                            Result::Err(_) => scan_loop(value, ScanState {
-                                cursor: next,
-                                limit: limit,
-                                parent: parent,
-                                scopes:  scopes,
-                                output:  output
-                            }),
-                            Result::Ok(nested) => {
-                                Vec::push(&mut scopes, ScanScope {
-                                    cursor: next,
-                                    limit: limit,
-                                    parent: parent
-                                });
-                                scan_loop(
-                                    value,
-                                    ScanState {
-                                        cursor: nested,
-                                        limit: nested_end,
-                                        parent: Option::Some(shell),
-                                        scopes:  scopes,
-                                        output:  output
-                                    }
-                                )
-                            }
-                        }
-                    }
+    if(cursor >= limit or { token_is_eof(value, cursor) }) {
+        scan_complete(value, scopes, output, delimiters)
+    } else {
+        let step = try(
+            scan_one(value, &delimiters, cursor, limit, parent),
+            @scan_loop
+        );
+        let ScanStep { next, nested, declaration } = step;
+        handle IndexVec::push(&mut output, declaration) {
+            Result::Err(rejected) => {
+                let token = super::syntax::token_start(&rejected.whole);
+                Result::Err(ScanError::DeclarationIdExhausted(token, token))
+            },
+            Result::Ok(shell) => handle nested {
+                None => scan_loop(value, ScanState {
+                    cursor: next,
+                    limit: limit,
+                    parent: parent,
+                    scopes: scopes,
+                    output: output,
+                    delimiters: delimiters
+                }),
+                Some(span) => {
+                    Vec::push(&mut scopes, ScanScope {
+                        cursor: next,
+                        limit: limit,
+                        parent: parent
+                    });
+                    scan_loop(value, ScanState {
+                        cursor: super::syntax::token_start(&span),
+                        limit: super::syntax::token_end(&span),
+                        parent: Some(shell),
+                        scopes: scopes,
+                        output: output,
+                        delimiters: delimiters
+                    })
                 }
-            } } } else { scan_complete(value,  scopes,  output) }
+            }
+        }
+    }
+}
+
+map_delimiter_error(value: DelimiterError) -> ScanError {
+    handle value {
+        DelimiterError::UnexpectedClose(token, related) =>
+            ScanError::UnexpectedClosingDelimiter(token, related),
+        DelimiterError::MismatchedClose(token, related) =>
+            ScanError::MismatchedClosingDelimiter(token, related),
+        DelimiterError::Unclosed(token, related) =>
+            ScanError::UnclosedDelimiter(token, related)
+    }
 }
 
 pub scan(
     value: &super::lexer::LexedSource
 ) -> Result<DeclarationIndex, ScanError> {
+    let delimiters = handle super::syntax::build_delimiter_map(value) {
+        Result::Err(error) => @scan(Result::Err(map_delimiter_error(error))),
+        Result::Ok(found) => found
+    };
     scan_loop(value, ScanState {
         cursor: 0,
         limit: super::lexer::token_count(value),
-        parent: Result::Err(()),
+        parent: None,
         scopes: Vec::new(),
-        output: IndexVec::new()
+        output: IndexVec::new(),
+        delimiters: delimiters
     })
-}
-
-bool_code(value: Bool) -> u8 {
-    if(value) { 1 } else { 0 }
-}
-
-write_string(output: &mut ByteBuf, value: &String) {
-    let bytes = String::as_bytes(value);
-    ByteBuf::write_u32_le(
-        &mut *output,
-        wrapping_convert_to_u32(Bytes::len(&bytes))
-    );
-    ByteBuf::append_bytes( output, &bytes)
-}
-
-write_optional_name(
-    output: &mut ByteBuf,
-    lexed: &super::lexer::LexedSource,
-    value: &Option<Id<String>>
-) {
-    handle Option::as_ref(value) {
-        Result::Err(_) => ByteBuf::push( output, 0),
-        Result::Ok(name) => {
-            ByteBuf::push(&mut *output, 1);
-            handle super::lexer::lexeme(lexed, *name) {
-                Result::Err(_) => unreachable(),
-                Result::Ok(text) => write_string( output,  text)
-            }
-        }
-    }
-}
-
-write_range(output: &mut ByteBuf, value: &TokenRange) {
-    ByteBuf::write_u32_le(
-        &mut *output,
-        wrapping_convert_to_u32(value.start)
-    );
-    ByteBuf::write_u32_le(
-         output,
-        wrapping_convert_to_u32(value.end)
-    )
-}
-
-write_optional_range(output: &mut ByteBuf, value: &Option<TokenRange>) {
-    handle Option::as_ref(value) {
-        Result::Err(_) => ByteBuf::push( output, 0),
-        Result::Ok(range) => {
-            ByteBuf::push(&mut *output, 1);
-            write_range( output, range)
-        }
-    }
-}
-
-write_optional_parent(output: &mut ByteBuf, value: &Option<ShellId>) {
-    handle Option::as_ref(value) {
-        Result::Err(_) => ByteBuf::push( output, 0),
-        Result::Ok(parent) => {
-            ByteBuf::push(&mut *output, 1);
-            ByteBuf::write_u32_le(
-                 output,
-                Id::to_u32(*parent)
-            )
-        }
-    }
-}
-
-write_shells(
-    output: &mut ByteBuf,
-    lexed: &super::lexer::LexedSource,
-    value: &DeclarationIndex
-) {
-    for_each_shell(value, { _, shell => {
-        ByteBuf::push(&mut *output, shell.kind_code);
-        ByteBuf::push(&mut *output, bool_code(shell.public));
-        write_optional_name(&mut *output, lexed, &shell.name);
-        write_range(&mut *output, &shell.header);
-        write_optional_range(&mut *output, &shell.body);
-        write_range(&mut *output, &shell.whole);
-        write_optional_parent(&mut *output, &shell.parent)
-    }})
-}
-
-encode_scan(
-    output: &mut ByteBuf,
-    lexed: super::lexer::LexedSource
-) {
-    handle scan(&lexed) {
-        Result::Err(error) => {
-            ByteBuf::push(&mut *output, 2);
-            ByteBuf::push(&mut *output, scan_error_code(&error));
-            ByteBuf::write_u32_le(
-                &mut *output,
-                wrapping_convert_to_u32(scan_error_token(&error))
-            );
-            ByteBuf::write_u32_le(
-                 output,
-                wrapping_convert_to_u32(scan_error_related(&error))
-            )
-        },
-        Result::Ok(index) => {
-            ByteBuf::push(&mut *output, 0);
-            ByteBuf::write_u32_le(
-                &mut *output,
-                wrapping_convert_to_u32(shell_count(&index))
-            );
-            write_shells(output, &lexed, &index)
-        }
-    }
-}
-
-process_inputs(arguments: &Vec<String>, index: usize, output: &mut ByteBuf) / FileRead {
-    for_range(Range::new(index, Vec::len(arguments)), { current => {
-        let path = *Vec::index(arguments, current);
-        let bytes = read_file(path);
-        handle String::from_utf8(bytes) {
-            Result::Err(_) => ByteBuf::push(&mut *output, 1),
-            Result::Ok(source) => handle super::lexer::lex(&source) {
-                Result::Err(_) => ByteBuf::push(&mut *output, 1),
-                Result::Ok(lexed) => encode_scan(&mut *output, lexed)
-            }
-        }
-    }})
-}
-
-pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
-    let arguments = process_args();
-    let argument_count = Vec::len(&arguments);
-    if(argument_count < 2) {
-        write_diagnostic(
-            "usage: grandiose-self-host-scanner <output> <input>..."
-        )
-    } else {
-        let output_path = *Vec::index(&arguments, 0);
-        let encoded = ByteBuf::new();
-        ByteBuf::write_u32_le(
-            &mut encoded,
-            wrapping_convert_to_u32(argument_count - 1)
-        );
-        process_inputs(&arguments, 1, &mut encoded);
-        write_file(output_path, ByteBuf::finish( encoded))
-    }
 }
