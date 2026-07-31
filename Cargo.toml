@@ -1,3 +1,11 @@
 [workspace]
 members = ["crates/grandiose", "crates/grandiose-vm"]
 resolver = "2"
+
+# The test suite executes the compiler, verifier, VM, and optimizer as workload,
+# not merely as code under assertion. Running those engines in completely
+# unoptimized test binaries dominates large integration tests. Keep debug
+# assertions and line-table backtraces, but give the workload basic optimization.
+[profile.test]
+opt-level = 1
+debug = "line-tables-only"
