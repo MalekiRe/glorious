@@ -1,5 +1,282 @@
 pub mod lexer;
-pub mod syntax;
+
+// Shared source, range, delimiter, and cursor substrate. Keeping this module
+// inline means every existing self-host phase bundle receives it with the
+// already-required frontend root; individual tests do not need another source
+// segment merely to compile scanner, header, or body code.
+pub mod syntax {
+    use super::lexer::TokenKind;
+
+    pub struct SourceSpan { start: usize, end: usize }
+    pub struct TokenSpan { start: usize, end: usize }
+    pub struct IdRange<Tag> { start: u32, count: u32 }
+
+    impl Use<[0, *]> for SourceSpan {}
+    impl Use<[0, *]> for TokenSpan {}
+    impl<Tag> Use<[0, *]> for IdRange<Tag> {}
+
+    pub source_span(start: usize, end: usize) -> SourceSpan {
+        SourceSpan { start: start, end: end }
+    }
+
+    pub token_span(start: usize, end: usize) -> TokenSpan {
+        TokenSpan { start: start, end: end }
+    }
+
+    pub source_start(value: &SourceSpan) -> usize { value.start }
+    pub source_end(value: &SourceSpan) -> usize { value.end }
+    pub token_start(value: &TokenSpan) -> usize { value.start }
+    pub token_end(value: &TokenSpan) -> usize { value.end }
+    pub token_len(value: &TokenSpan) -> usize { value.end - value.start }
+    pub token_is_empty(value: &TokenSpan) -> Bool { value.start == value.end }
+
+    pub id_range<Tag>(start: usize, end: usize) -> IdRange<Tag> {
+        IdRange {
+            start: wrapping_convert_to_u32(start),
+            count: wrapping_convert_to_u32(end - start)
+        }
+    }
+
+    pub empty_id_range<Tag>(at: usize) -> IdRange<Tag> {
+        id_range(at, at)
+    }
+
+    pub id_range_start<Tag>(value: &IdRange<Tag>) -> u32 { value.start }
+    pub id_range_count<Tag>(value: &IdRange<Tag>) -> u32 { value.count }
+    pub id_range_end<Tag>(value: &IdRange<Tag>) -> u32 {
+        value.start + value.count
+    }
+
+    pub id_range_slice<'a, Tag, T>(
+        values: &'a Vec<T>,
+        value: &IdRange<Tag>
+    ) -> Slice<'a, T> {
+        handle Slice::subslice(
+            Vec::as_slice(values),
+            wrapping_convert_to_usize(value.start),
+            wrapping_convert_to_usize(value.count)
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        }
+    }
+
+    pub enum DelimiterKind {
+        Parenthesis,
+        Brace,
+        Bracket
+    }
+
+    impl Use<[0, *]> for DelimiterKind {}
+
+    pub enum DelimiterError {
+        UnexpectedClose(usize, usize),
+        MismatchedClose(usize, usize),
+        Unclosed(usize, usize)
+    }
+
+    struct OpenDelimiter {
+        kind: DelimiterKind,
+        token: usize
+    }
+
+    pub struct DelimiterEntry {
+        partner: Option<usize>,
+        opening: Bool
+    }
+
+    pub struct DelimiterMap {
+        entries: Vec<DelimiterEntry>
+    }
+
+    delimiter_kind(value: TokenKind) -> Option<(DelimiterKind, Bool)> {
+        handle value {
+            TokenKind::LParen => Option::Some((DelimiterKind::Parenthesis, true)),
+            TokenKind::RParen => Option::Some((DelimiterKind::Parenthesis, false)),
+            TokenKind::LBrace => Option::Some((DelimiterKind::Brace, true)),
+            TokenKind::RBrace => Option::Some((DelimiterKind::Brace, false)),
+            TokenKind::LBracket => Option::Some((DelimiterKind::Bracket, true)),
+            TokenKind::RBracket => Option::Some((DelimiterKind::Bracket, false)),
+            _ => None
+        }
+    }
+
+    same_delimiter(left: DelimiterKind, right: DelimiterKind) -> Bool {
+        handle left {
+            DelimiterKind::Parenthesis => right is DelimiterKind::Parenthesis,
+            DelimiterKind::Brace => right is DelimiterKind::Brace,
+            DelimiterKind::Bracket => right is DelimiterKind::Bracket
+        }
+    }
+
+    fill_entries(value: &mut Vec<DelimiterEntry>, count: usize) {
+        for_range(Range::new(0, count), { _ =>
+            Vec::push(value, DelimiterEntry {
+                partner: None,
+                opening: false
+            })
+        })
+    }
+
+    set_entry(
+        value: &mut Vec<DelimiterEntry>,
+        token: usize,
+        partner: Option<usize>,
+        opening: Bool
+    ) {
+        *Vec::index_mut(value, token) = DelimiterEntry {
+            partner: partner,
+            opening: opening
+        }
+    }
+
+    build_delimiters(
+        source: &super::lexer::LexedSource,
+        index: usize,
+        stack: &mut Vec<OpenDelimiter>,
+        entries: &mut Vec<DelimiterEntry>
+    ) -> Result<(), DelimiterError> {
+        let count = super::lexer::token_count(source);
+        if(index < count) {
+            handle delimiter_kind(super::lexer::token_kind_at(source, index)) {
+                None => build_delimiters(source, index + 1, stack, entries),
+                Option::Some((kind, opening)) => if(opening) {
+                    Vec::push(stack, OpenDelimiter {
+                        kind: kind,
+                        token: index
+                    });
+                    set_entry(entries, index, None, true);
+                    build_delimiters(source, index + 1, stack, entries)
+                } else {
+                    handle Vec::pop(stack) {
+                        Result::Err(_) => Result::Err(
+                            DelimiterError::UnexpectedClose(index, count)
+                        ),
+                        Result::Ok(open) => if(same_delimiter(open.kind, kind)) {
+                            set_entry(entries, open.token, Option::Some(index), true);
+                            set_entry(entries, index, Option::Some(open.token), false);
+                            build_delimiters(source, index + 1, stack, entries)
+                        } else {
+                            Result::Err(
+                                DelimiterError::MismatchedClose(index, open.token)
+                            )
+                        }
+                    }
+                }
+            }
+        } else {
+            handle Vec::last(stack) {
+                Result::Err(_) => Result::Ok(()),
+                Result::Ok(open) => Result::Err(
+                    DelimiterError::Unclosed(count, open.token)
+                )
+            }
+        }
+    }
+
+    pub build_delimiter_map(
+        source: &super::lexer::LexedSource
+    ) -> Result<DelimiterMap, DelimiterError> {
+        let entries = Vec::new();
+        fill_entries(&mut entries, super::lexer::token_count(source));
+        let stack = Vec::new();
+        try(
+            build_delimiters(source, 0, &mut stack, &mut entries),
+            @build_delimiter_map
+        );
+        Result::Ok(DelimiterMap { entries: entries })
+    }
+
+    pub delimiter_partner(value: &DelimiterMap, token: usize) -> Option<usize> {
+        handle Vec::get(&value.entries, token) {
+            Result::Err(_) => None,
+            Result::Ok(entry) => entry.partner
+        }
+    }
+
+    pub delimiter_is_open(value: &DelimiterMap, token: usize) -> Bool {
+        handle Vec::get(&value.entries, token) {
+            Result::Err(_) => false,
+            Result::Ok(entry) => entry.opening
+        }
+    }
+
+    pub struct TokenCursor {
+        position: usize,
+        limit: usize
+    }
+
+    impl Use<[0, *]> for TokenCursor {}
+
+    pub cursor(start: usize, limit: usize) -> TokenCursor {
+        TokenCursor { position: start, limit: limit }
+    }
+
+    pub cursor_position(value: &TokenCursor) -> usize { value.position }
+    pub cursor_limit(value: &TokenCursor) -> usize { value.limit }
+    pub cursor_at_end(value: &TokenCursor) -> Bool {
+        value.position >= value.limit
+    }
+
+    pub cursor_reset(value: &mut TokenCursor, start: usize, limit: usize) {
+        value.position = start;
+        value.limit = limit
+    }
+
+    pub cursor_set(value: &mut TokenCursor, position: usize) {
+        value.position = position
+    }
+
+    pub cursor_advance(value: &mut TokenCursor) {
+        value.position = value.position + 1
+    }
+
+    pub cursor_at_code(
+        value: &TokenCursor,
+        source: &super::lexer::LexedSource,
+        code: u16
+    ) -> Bool {
+        value.position < value.limit
+            and { super::lexer::token_code_at(source, value.position) == code }
+    }
+
+    pub cursor_eat_code(
+        value: &mut TokenCursor,
+        source: &super::lexer::LexedSource,
+        code: u16
+    ) -> Bool {
+        if(cursor_at_code(&*value, source, code)) {
+            cursor_advance(value);
+            true
+        } else { false }
+    }
+
+    pub cursor_kind(
+        value: &TokenCursor,
+        source: &super::lexer::LexedSource
+    ) -> TokenKind {
+        if(value.position < value.limit) {
+            super::lexer::token_kind_at(source, value.position)
+        } else { TokenKind::Eof }
+    }
+
+    pub cursor_skip_tree(
+        value: &mut TokenCursor,
+        delimiters: &DelimiterMap
+    ) -> Bool {
+        let token = value.position;
+        if(delimiter_is_open(delimiters, token)) {
+            handle delimiter_partner(delimiters, token) {
+                None => false,
+                Option::Some(close) => {
+                    value.position = close + 1;
+                    true
+                }
+            }
+        } else { false }
+    }
+}
+
 pub mod scanner;
 pub mod headers;
 pub mod bodies;
