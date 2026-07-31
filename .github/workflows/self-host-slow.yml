@@ -1,0 +1,21 @@
+name: Slow self-host parity
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 5 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  native-parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run ignored self-host LLVM parity test
+        run: >-
+          cargo test -p grandiose --test self_host_bytecode
+          self_hosted_frontend_matches_native_llvm -- --ignored --exact
