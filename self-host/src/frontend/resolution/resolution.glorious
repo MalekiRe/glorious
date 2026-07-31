@@ -1,12 +1,9 @@
-// Direct name-resolution model. Global declaration lookup and one-body lexical
-// traversal live in focused submodules; resolved expression targets remain
-// indexed by ExprId and are consumed directly by elaboration.
+// Compact ordinary value-name resolution for one parsed function body.
+// Bindings and results retain interned identities, never source strings.
 
-pub mod index;
-mod body;
-
+use super::lexer::TokenKind;
+use super::bodies::PatternBinder;
 use super::scanner::{ShellId, ShellTag};
-use super::syntax::IdRange;
 
 pub struct ParameterTag {}
 pub type ParameterId = Id<ParameterTag>;
@@ -24,12 +21,15 @@ pub enum ResolvedTarget {
 
 impl Use<[0, *]> for ResolvedTarget {}
 
+pub struct Resolution {
+    expression: super::bodies::ExprId,
+    target: ResolvedTarget
+}
+
 pub struct LocalBinding {
     name_token: usize,
     block_expression: super::bodies::ExprId
 }
-
-impl Use<[0, *]> for LocalBinding {}
 
 pub enum ResolvedPatternBinder {
     Wildcard,
@@ -38,25 +38,21 @@ pub enum ResolvedPatternBinder {
 
 impl Use<[0, *]> for ResolvedPatternBinder {}
 
-pub struct ResolvedPatternBinderTag {}
-pub struct ResolvedHandleArmTag {}
-
-pub type ResolvedBinderRange = IdRange<ResolvedPatternBinderTag>;
-pub type ResolvedHandleRange = IdRange<ResolvedHandleArmTag>;
+pub struct ResolvedBinderRange { start: u32, count: u32 }
 
 pub struct ResolvedHandleArm {
     variant: u32,
     binders: ResolvedBinderRange
 }
 
+impl Use<[0, *]> for ResolvedBinderRange {}
 impl Use<[0, *]> for ResolvedHandleArm {}
 
 pub struct ResolvedBody {
-    targets: IndexVec<super::bodies::ExprTag, Option<ResolvedTarget>>,
+    names: Vec<Resolution>,
     locals: Vec<LocalBinding>,
-    handle_ranges:
-        IndexVec<super::bodies::ExprTag, Option<ResolvedHandleRange>>,
-    handle_arms: Vec<ResolvedHandleArm>,
+    handle_arms:
+        IndexVec<super::bodies::HandleArmTag, Option<ResolvedHandleArm>>,
     pattern_binders: Vec<ResolvedPatternBinder>
 }
 
@@ -88,33 +84,24 @@ pub enum ResolutionError {
     BodyParseFailure(ShellId)
 }
 
-pub struct FunctionSearch {
+struct FunctionSearch {
     first: Option<ShellId>,
     count: u32
 }
-
-pub struct NominalSearch {
-    first: Option<u32>,
-    count: u32
-}
-
-impl Use<[0, *]> for FunctionSearch {}
-impl Use<[0, *]> for NominalSearch {}
-
+struct NominalSearch { first: Option<u32>, count: u32 }
+struct Binding { name: Id<String>, target: ResolvedTarget }
 pub struct ResolutionIndex {
-    functions: HashMap<(Option<ShellId>, u32), FunctionSearch>,
-    callable_by_shell: IndexVec<ShellTag, Option<u32>>
+    functions:
+        HashMap<
+            (Option<ShellId>, u32),
+            FunctionSearch
+        >,
+    callable_by_shell:
+        IndexVec<ShellTag, Option<u32>>
 }
 
-pub struct ScopeJournalEntry {
-    name: u32,
-    previous: Option<ResolvedTarget>
-}
-
-pub struct ScopeMap {
-    current: HashMap<u32, ResolvedTarget>,
-    journal: Vec<ScopeJournalEntry>
-}
+impl Use<[0, *]> for Binding {}
+impl Use<[0, *]> for FunctionSearch {}
 
 pub resolution_error_code(value: &ResolutionError) -> u8 {
     handle *value {
@@ -168,12 +155,14 @@ pub resolution_error_related(value: &ResolutionError) -> usize {
         ResolutionError::UnknownEnum(token) => token,
         ResolutionError::UnknownVariant(token) => token,
         ResolutionError::InvalidNamePath(token) => token,
-        ResolutionError::AmbiguousFunction(_, related) => Id::to_usize(related),
+        ResolutionError::AmbiguousFunction(_, related) =>
+            Id::to_usize(related),
         ResolutionError::AmbiguousStruct(_, related) => related,
         ResolutionError::AmbiguousEnum(_, related) => related,
         ResolutionError::DuplicateParameter(_, related) => related,
         ResolutionError::MissingCallableHeader(index) => index,
-        ResolutionError::MissingDeclarationShell(_, shell) => Id::to_usize(shell),
+        ResolutionError::MissingDeclarationShell(_, shell) =>
+            Id::to_usize(shell),
         ResolutionError::MissingStructHeader(_, index) => index,
         ResolutionError::MissingEnumHeader(_, index) => index,
         ResolutionError::MissingVariantHeader(_, index) => index,
@@ -191,66 +180,1828 @@ pub resolution_error_related(value: &ResolutionError) -> usize {
     }
 }
 
-pub resolved_target(
-    value: &ResolvedBody,
-    expression: super::bodies::ExprId
-) -> Option<ResolvedTarget> {
-    *IndexVec::index(&value.targets, expression)
+pub resolved_name_count(value: &ResolvedBody) -> usize {
+    Vec::len(&value.names)
 }
 
-pub local_count(value: &ResolvedBody) -> usize { Vec::len(&value.locals) }
-pub local_name_token_at(value: &ResolvedBody, index: usize) -> usize {
-    Vec::index(&value.locals, index).name_token
-}
-pub local_block_expression_at(
+pub resolved_name_expression_id_at(
     value: &ResolvedBody,
     index: usize
 ) -> super::bodies::ExprId {
-    Vec::index(&value.locals, index).block_expression
+    Vec::index(&value.names, index).expression
 }
 
-pub resolved_handle_arms<'a>(
+pub resolved_name_target_at(
+    value: &ResolvedBody,
+    index: usize
+) -> ResolvedTarget {
+    Vec::index(&value.names, index).target
+}
+
+pub local_count(value: &ResolvedBody) -> usize {
+    Vec::len(&value.locals)
+}
+
+pub local_name_token_at(value: &ResolvedBody, index: usize) -> usize {
+    Vec::index(&value.locals, index).name_token
+}
+
+pub local_block_expression_at(value: &ResolvedBody, index: usize) -> u32 {
+    Id::to_u32(Vec::index(&value.locals, index).block_expression)
+}
+
+pub resolved_handle_arm<'a>(
     value: &'a ResolvedBody,
-    expression: super::bodies::ExprId
-) -> Slice<'a, ResolvedHandleArm> {
-    handle *IndexVec::index(&value.handle_ranges, expression) {
-        None => handle Slice::subslice(Vec::as_slice(&value.handle_arms), 0, 0) {
-            Result::Err(_) => unreachable(),
-            Result::Ok(found) => found
-        },
-        Some(range) => super::syntax::id_range_slice(&value.handle_arms, &range)
+    id: super::bodies::HandleArmId
+) -> &'a ResolvedHandleArm {
+    handle Option::as_ref(IndexVec::index(&value.handle_arms, id)) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
     }
 }
 
-pub resolved_handle_variant(value: &ResolvedHandleArm) -> u32 { value.variant }
+pub resolved_handle_variant(value: &ResolvedHandleArm) -> u32 {
+    value.variant
+}
+
 pub resolved_handle_binders<'a>(
     value: &'a ResolvedBody,
     arm: &ResolvedHandleArm
 ) -> Slice<'a, ResolvedPatternBinder> {
-    super::syntax::id_range_slice(&value.pattern_binders, &arm.binders)
+    handle Slice::subslice(
+        Vec::as_slice(&value.pattern_binders),
+        usize_from_u32(arm.binders.start),
+        usize_from_u32(arm.binders.count)
+    ) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+shell_parent_module(
+    shell: &super::scanner::DeclarationShell
+) -> Option<ShellId> {
+    *super::scanner::shell_parent(shell)
+}
+
+same_module(
+    left: Option<ShellId>,
+    right: Option<ShellId>
+) -> Bool {
+    left == right
+}
+
+local_id_from_usize(value: usize) -> Option<LocalId> {
+    Id::from_usize(value)
+}
+
+push_binding(
+    bindings: &mut Vec<Binding>,
+    name: Id<String>,
+    target: ResolvedTarget
+) {
+    Vec::push(&mut *bindings, Binding { name: name, target: target })
+}
+
+push_resolution(
+    output: &mut ResolvedBody,
+    expression: super::bodies::ExprId,
+    target: ResolvedTarget
+) {
+    Vec::push(&mut output.names, Resolution {
+        expression: expression,
+        target: target
+    })
+}
+
+binding_lookup(
+    bindings: &Vec<Binding>,
+    name: Id<String>,
+    count: usize
+) -> Option<ResolvedTarget> {
+    if(count == 0) {
+        Result::Err(())
+    } else {
+            let binding = Vec::index(bindings, count - 1);
+            if(binding.name == name) {
+                Result::Ok(binding.target)
+            } else {
+                binding_lookup(
+                    bindings,
+                    name,
+                    count - 1
+                )
+            }
+    }
+}
+
+index_callable(
+    index: &mut ResolutionIndex,
+    headers: &super::headers::HeaderIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    ordinal: usize
+) -> Result<(), ResolutionError> {
+    let callable = handle super::headers::callable_at(headers, ordinal) {
+        Result::Err(_) =>
+            @index_callable(Result::Err(
+                ResolutionError::MissingCallableHeader(ordinal)
+            )),
+        Result::Ok(callable) => callable
+    };
+    let shell_index = super::headers::callable_shell(callable);
+    let shell = handle super::scanner::shell_at(
+        declarations,
+        shell_index
+    ) {
+        Result::Err(_) =>
+            @index_callable(Result::Err(
+                ResolutionError::MissingDeclarationShell(
+                    Id::to_usize(shell_index),
+                    shell_index
+                )
+            )),
+        Result::Ok(shell) => shell
+    };
+    let key = (
+        shell_parent_module(shell),
+        super::headers::callable_name_raw(callable)
+    );
+    let found = handle HashMap::remove(&mut index.functions, &key) {
+        Result::Err(_) =>
+            FunctionSearch { first: Result::Err(()), count: 0 },
+        Result::Ok(found) => found
+    };
+    let updated = FunctionSearch {
+        first: if(found.count == 0) {
+            Result::Ok(shell_index)
+        } else {
+            found.first
+        },
+        count: found.count + 1
+    };
+    let previous = HashMap::insert(
+        &mut index.functions,
+        key,
+        updated
+    );
+    handle previous {
+        Result::Err(_) => (),
+        Result::Ok(previous) => {
+            previous;
+            ()
+        }
+    };
+    let slot = IndexVec::index_mut(
+        &mut index.callable_by_shell,
+        shell_index
+    );
+    if(*slot is Result::Err(_)) {
+        *slot = Result::Ok(u32_from_usize(ordinal));
+        ()
+    } else {
+        ()
+    };
+    Result::Ok(())
+}
+
+fill_callable_slots(index: &mut ResolutionIndex, count: usize) {
+    for_range(Range::new(0, count), { _ => handle
+        IndexVec::push(&mut index.callable_by_shell, Result::Err(())) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(_) => ()
+    } })
+}
+
+index_callables(
+    index: &mut ResolutionIndex,
+    headers: &super::headers::HeaderIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    ordinal: usize
+) -> Result<(), ResolutionError> {
+    try_for_range(Range::new(
+        ordinal,
+        super::headers::callable_count(headers)
+    ), { current =>
+        index_callable(index, headers, declarations, current)
+    })
 }
 
 pub build_resolution_index(
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex
 ) -> Result<ResolutionIndex, ResolutionError> {
-    index::build(headers, declarations)
+    let index = ResolutionIndex {
+        functions: HashMap::new(),
+        callable_by_shell: IndexVec::new()
+    };
+    fill_callable_slots(
+        &mut index,
+        super::scanner::shell_count(declarations)
+    );
+    try(
+        index_callables(
+            &mut index,
+            super::headers::parsed_index(headers),
+            declarations,
+            0
+        ),
+        @build_resolution_index
+    );
+    Result::Ok(index)
+}
+
+resolve_function_name_in(
+    index: &ResolutionIndex,
+    name: u32,
+    module: Option<ShellId>
+) -> FunctionSearch {
+    handle HashMap::get(&index.functions, &(module, name)) {
+        Result::Err(_) =>
+            FunctionSearch { first: Result::Err(()), count: 0 },
+        Result::Ok(found) => FunctionSearch {
+            first: found.first,
+            count: found.count
+        }
+    }
+}
+
+finish_function_name(
+    declarations: &super::scanner::DeclarationIndex,
+    found: FunctionSearch,
+    token: usize
+) -> Result<ResolvedTarget, ResolutionError> {
+    handle found.count {
+        0 => Result::Err(ResolutionError::UnknownFunction(token)),
+        1 => handle found.first {
+            Result::Err(_) =>
+                Result::Err(ResolutionError::CorruptFunctionSearch(token)),
+            Result::Ok(shell_index) => {
+                handle super::scanner::shell_at(
+                    declarations,
+                    shell_index
+                ) {
+                    Result::Err(_) => Result::Err(
+                        ResolutionError::MissingDeclarationShell(
+                            token,
+                            shell_index
+                        )
+                    ),
+                    Result::Ok(shell) =>
+                        Result::Ok(ResolvedTarget::Function(shell_index))
+                }
+            }
+        },
+        _ => handle found.first {
+            Result::Err(_) =>
+                Result::Err(ResolutionError::CorruptFunctionSearch(token)),
+            Result::Ok(shell_index) => Result::Err(
+                ResolutionError::AmbiguousFunction(
+                    token,
+                    shell_index
+                )
+            )
+        }
+    }
+}
+
+resolve_function_name(
+    index: &ResolutionIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    name: u32,
+    module: Option<ShellId>,
+    token: usize
+) -> Result<ResolvedTarget, ResolutionError> {
+    let found = resolve_function_name_in(index, name, module);
+    if(found.count == 0
+        and { Option::is_some(&module) }) {
+        let root = resolve_function_name_in(index, name, Result::Err(()));
+        finish_function_name(
+            declarations,
+            root,
+            token
+        )
+    } else {
+        finish_function_name(
+            declarations,
+            found,
+            token
+        )
+    }
+}
+
+search_structs(
+    nominal: &super::headers::NominalIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    name: u32,
+    module: Option<ShellId>,
+    token: usize,
+    index: usize,
+    found: NominalSearch
+) -> Result<NominalSearch, ResolutionError> {
+    try_fold_range(
+        Range::new(index, super::headers::struct_count(nominal)),
+        found,
+        { found, current => handle
+            super::headers::struct_at(nominal, current) {
+            Result::Err(_) => Result::Err(
+                ResolutionError::MissingStructHeader(token, current)
+            ),
+            Result::Ok(header) => {
+                let shell_index = super::headers::struct_shell(header);
+                handle super::scanner::shell_at(
+                    declarations,
+                    shell_index
+                ) {
+                    Result::Err(_) => Result::Err(
+                        ResolutionError::MissingDeclarationShell(
+                            token,
+                            shell_index
+                        )
+                    ),
+                    Result::Ok(shell) =>
+                        if(super::headers::struct_name_raw(header) == name
+                            and {
+                                same_module(shell_parent_module(shell), module)
+                            }) {
+                        Result::Ok(
+                            NominalSearch {
+                                first: if(found.count == 0) {
+                                        Result::Ok(u32_from_usize(current))
+                                    } else {
+                                        found.first
+                                    },
+                                count: found.count + 1
+                            }
+                        )
+                    } else {
+                        Result::Ok(found)
+                    }
+                }
+            }
+        } }
+    )
+}
+
+finish_struct_name(
+    nominal: &super::headers::NominalIndex,
+    found: NominalSearch,
+    token: usize
+) -> Result<ResolvedTarget, ResolutionError> {
+    handle found.count {
+        0 => Result::Err(ResolutionError::UnknownStruct(token)),
+        1 => handle found.first {
+            Result::Err(_) =>
+                Result::Err(ResolutionError::CorruptStructSearch(token)),
+            Result::Ok(index) => {
+                handle super::headers::struct_at(
+                    nominal,
+                    usize_from_u32(index)
+                ) {
+                    Result::Err(_) => Result::Err(
+                        ResolutionError::MissingStructHeader(
+                            token,
+                            usize_from_u32(index)
+                        )
+                    ),
+                    Result::Ok(_) => Result::Ok(
+                        ResolvedTarget::Struct(index)
+                    )
+                }
+            }
+        },
+        _ => handle found.first {
+            Result::Err(_) =>
+                Result::Err(ResolutionError::CorruptStructSearch(token)),
+            Result::Ok(index) => Result::Err(
+                ResolutionError::AmbiguousStruct(
+                    token,
+                    usize_from_u32(index)
+                )
+            )
+        }
+    }
+}
+
+resolve_struct_name_in(
+    nominal: &super::headers::NominalIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    name: u32,
+    module: Option<ShellId>,
+    token: usize
+) -> Result<NominalSearch, ResolutionError> {
+    search_structs(
+        nominal,
+        declarations,
+        name,
+        module,
+        token,
+        0,
+        NominalSearch { first: Result::Err(()), count: 0 }
+    )
+}
+
+resolve_struct_name(
+    nominal: &super::headers::NominalIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    name: u32,
+    module: Option<ShellId>,
+    token: usize
+) -> Result<ResolvedTarget, ResolutionError> {
+    let found = try(resolve_struct_name_in(
+        nominal,
+        declarations,
+        name,
+        module,
+        token
+    ), @resolve_struct_name);
+    if(found.count == 0
+        and { Option::is_some(&module) }) {
+        let root = try(resolve_struct_name_in(
+            nominal,
+            declarations,
+            name,
+            Result::Err(()),
+            token
+        ), @resolve_struct_name);
+        finish_struct_name(nominal, root, token)
+    } else {
+        finish_struct_name(nominal, found, token)
+    }
+}
+
+search_enums(
+    nominal: &super::headers::NominalIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    name: u32,
+    module: Option<ShellId>,
+    token: usize,
+    index: usize,
+    found: NominalSearch
+) -> Result<NominalSearch, ResolutionError> {
+    try_fold_range(
+        Range::new(index, super::headers::enum_count(nominal)),
+        found,
+        { found, current => handle
+            super::headers::enum_at(nominal, current) {
+            Result::Err(_) => Result::Err(
+                ResolutionError::MissingEnumHeader(token, current)
+            ),
+            Result::Ok(header) => {
+                let shell_index = super::headers::enum_shell(header);
+                handle super::scanner::shell_at(
+                    declarations,
+                    shell_index
+                ) {
+                    Result::Err(_) => Result::Err(
+                        ResolutionError::MissingDeclarationShell(
+                            token,
+                            shell_index
+                        )
+                    ),
+                    Result::Ok(shell) =>
+                        if(super::headers::enum_name_raw(header) == name
+                            and {
+                                same_module(shell_parent_module(shell), module)
+                            }) {
+                        Result::Ok(
+                            NominalSearch {
+                                first: if(found.count == 0) {
+                                    Result::Ok(u32_from_usize(current))
+                                } else {
+                                    found.first
+                                },
+                                count: found.count + 1
+                            }
+                        )
+                    } else {
+                        Result::Ok(found)
+                    }
+                }
+            }
+        } }
+    )
+}
+
+find_variant(
+    nominal: &super::headers::NominalIndex,
+    start: u32,
+    count: u32,
+    name: u32,
+    token: usize,
+    ordinal: u32
+) -> Result<u32, ResolutionError> {
+    if(ordinal < count) {
+        let index = start + ordinal;
+        handle super::headers::variant_at(
+            nominal,
+            usize_from_u32(index)
+        ) {
+            Result::Err(_) => Result::Err(
+                ResolutionError::MissingVariantHeader(
+                    token,
+                    usize_from_u32(index)
+                )
+            ),
+            Result::Ok(variant) => if(super::headers::variant_name_raw(variant) == name) {
+                Result::Ok(index)
+            } else {
+                find_variant(
+                    nominal,
+                    start,
+                    count,
+                    name,
+                    token,
+                    ordinal + 1
+                )
+            }
+        }
+    } else {
+        // The enum namespace resolved, but its value member did not. Keep
+        // this distinct from an unknown namespace so the full compiler can
+        // classify the failure at its typed-construction boundary.
+        Result::Err(ResolutionError::UnknownVariant(token))
+    }
+}
+
+finish_variant_name(
+    nominal: &super::headers::NominalIndex,
+    found: NominalSearch,
+    variant_name: u32,
+    enum_token: usize,
+    variant_token: usize
+) -> Result<ResolvedTarget, ResolutionError> {
+    handle found.count {
+        0 => Result::Err(ResolutionError::UnknownEnum(enum_token)),
+        1 => handle found.first {
+            Result::Err(_) =>
+                Result::Err(ResolutionError::CorruptEnumSearch(enum_token)),
+            Result::Ok(enum_index) => {
+                handle super::headers::enum_at(
+                    nominal,
+                    usize_from_u32(enum_index)
+                ) {
+                    Result::Err(_) => Result::Err(
+                        ResolutionError::MissingEnumHeader(
+                            enum_token,
+                            usize_from_u32(enum_index)
+                        )
+                    ),
+                    Result::Ok(header) => {
+                        let variants = super::headers::enum_variants(header);
+                        let variant = try(
+                            find_variant(
+                                nominal,
+                                super::headers::range_start(variants),
+                                super::headers::range_count(variants),
+                                variant_name,
+                                variant_token,
+                                0
+                            ),
+                            @finish_variant_name
+                        );
+                        Result::Ok(ResolvedTarget::Variant(variant))
+                    }
+                }
+            }
+        },
+        _ => handle found.first {
+            Result::Err(_) =>
+                Result::Err(ResolutionError::CorruptEnumSearch(enum_token)),
+            Result::Ok(enum_index) => Result::Err(
+                ResolutionError::AmbiguousEnum(
+                    enum_token,
+                    usize_from_u32(enum_index)
+                )
+            )
+        }
+    }
+}
+
+resolve_variant_name(
+    nominal: &super::headers::NominalIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    enum_name: u32,
+    variant_name: u32,
+    module: Option<ShellId>,
+    enum_token: usize,
+    variant_token: usize
+) -> Result<ResolvedTarget, ResolutionError> {
+    let found = try(search_enums(
+        nominal,
+        declarations,
+        enum_name,
+        module,
+        enum_token,
+        0,
+        NominalSearch { first: Result::Err(()), count: 0 }
+    ), @resolve_variant_name);
+    if(found.count == 0
+        and { Option::is_some(&module) }) {
+        let root = try(search_enums(
+            nominal,
+            declarations,
+            enum_name,
+            Result::Err(()),
+            enum_token,
+            0,
+            NominalSearch { first: Result::Err(()), count: 0 }
+        ), @resolve_variant_name);
+        finish_variant_name(
+            nominal,
+            root,
+            variant_name,
+            enum_token,
+            variant_token
+        )
+    } else {
+        finish_variant_name(
+            nominal,
+            found,
+            variant_name,
+            enum_token,
+            variant_token
+        )
+    }
+}
+
+resolve_identifier(
+    headers: &super::headers::ParsedHeaders,
+    index: &ResolutionIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    body: &super::bodies::ParsedBody,
+    bindings: &Vec<Binding>,
+    output: &mut ResolvedBody,
+    expression: u32,
+    module: Option<ShellId>
+) -> Result<(), ResolutionError> {
+    let count = super::bodies::expression_name_count_at(body, expression);
+    let token = super::bodies::expression_name_token_at(body, expression, 0);
+    handle count {
+        1 => {
+            let raw =
+                super::bodies::expression_name_value_at(body, expression, 0);
+            handle binding_lookup(
+                bindings,
+                Id::from_u32(raw),
+                Vec::len(bindings)
+            ) {
+                Result::Ok(found) => {
+                    push_resolution(
+                        output,
+                        Id::from_u32(expression),
+                        found
+                    );
+                    Result::Ok(())
+                },
+                Result::Err(_) => {
+                    let found = try(resolve_function_name(
+                        index,
+                        declarations,
+                        raw,
+                        module,
+                        token
+                    ), @resolve_identifier);
+                        push_resolution(
+                            output,
+                            Id::from_u32(expression),
+                            found
+                        );
+                        Result::Ok(())
+                }
+            }
+        },
+        2 => {
+            let variant_token =
+                super::bodies::expression_name_token_at(body, expression, 1);
+            let found = try(resolve_variant_name(
+                super::headers::nominal_index(headers),
+                declarations,
+                super::bodies::expression_name_value_at(body, expression, 0),
+                super::bodies::expression_name_value_at(body, expression, 1),
+                module,
+                token,
+                variant_token
+            ), @resolve_identifier);
+            push_resolution(
+                output,
+                Id::from_u32(expression),
+                found
+            );
+            Result::Ok(())
+        },
+        _ => Result::Err(ResolutionError::InvalidNamePath(token))
+    }
+}
+
+resolve_struct_constructor(
+    headers: &super::headers::ParsedHeaders,
+    index: &ResolutionIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    body: &super::bodies::ParsedBody,
+    bindings: &mut Vec<Binding>,
+    output: &mut ResolvedBody,
+    expression: u32,
+    module: Option<ShellId>
+) -> Result<(), ResolutionError> {
+    let token = super::bodies::expression_name_token_at(body, expression, 0);
+    let found = try(resolve_struct_name(
+        super::headers::nominal_index(headers),
+        declarations,
+        super::bodies::expression_name_value_at(body, expression, 0),
+        module,
+        token
+    ), @resolve_struct_constructor);
+    push_resolution(
+        output,
+        Id::from_u32(expression),
+        found
+    );
+    resolve_children(
+        headers,
+        index,
+        declarations,
+        body,
+        bindings,
+        output,
+        expression,
+        module
+    )
+}
+
+resolve_children(
+    headers: &super::headers::ParsedHeaders,
+    index: &ResolutionIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    body: &super::bodies::ParsedBody,
+    bindings: &mut Vec<Binding>,
+    output: &mut ResolvedBody,
+    expression: u32,
+    module: Option<ShellId>
+) -> Result<(), ResolutionError> {
+    Slice::try_for_each(
+        super::bodies::expression_children(body, expression),
+        { edge =>
+            resolve_expression(
+                headers,
+                index,
+                declarations,
+                body,
+                bindings,
+                output,
+                Id::to_u32(
+                    super::bodies::expression_edge_value(edge)
+                ),
+                module
+            )
+        }
+    )
+}
+
+resolve_block_children(
+    headers: &super::headers::ParsedHeaders,
+    index: &ResolutionIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    body: &super::bodies::ParsedBody,
+    bindings: &mut Vec<Binding>,
+    output: &mut ResolvedBody,
+    expression: u32,
+    module: Option<ShellId>
+) -> Result<(), ResolutionError> {
+    Slice::try_for_each(
+        super::bodies::expression_children(body, expression),
+        { edge => {
+            handle super::bodies::block_statement_view(edge) {
+                super::bodies::BlockStatementView::Let(id, token) => {
+                    let value = Id::to_u32(id);
+                        handle super::lexer::token_kind_at(
+                            super::headers::parsed_source(headers),
+                            token
+                        ) {
+                            TokenKind::Ident(name) => {
+                                // Allocate the source binder identity when its
+                                // declaration is encountered, but do not add it
+                                // to lexical lookup until its initializer has
+                                // resolved. Nested initializer lets therefore
+                                // cannot steal an earlier local ID.
+                                handle local_id_from_usize(
+                                    Vec::len(&output.locals)
+                                ) {
+                                    Result::Err(_) => Result::Err(
+                                        ResolutionError::LocalIdExhausted(
+                                            token,
+                                            Vec::len(&output.locals)
+                                        )
+                                    ),
+                                    Result::Ok(local) => {
+                                        Vec::push(
+                                            &mut output.locals,
+                                            LocalBinding {
+                                                name_token: token,
+                                                block_expression:
+                                                    Id::from_u32(expression)
+                                            }
+                                        );
+                                        resolve_expression(
+                                            headers,
+                                            index,
+                                            declarations,
+                                            body,
+                                            bindings,
+                                            output,
+                                            value,
+                                            module
+                                        ) and {
+                                            push_binding(
+                                                bindings,
+                                                name,
+                                                ResolvedTarget::Local(local)
+                                            );
+                                            Result::Ok(())
+                                        }
+                                    }
+                                }
+                            },
+                            _ => Result::Err(
+                                ResolutionError::ExpectedBindingIdentifier(
+                                    token
+                                )
+                            )
+                        }
+                },
+                super::bodies::BlockStatementView::Expression(id) => {
+                    resolve_expression(
+                        headers,
+                        index,
+                        declarations,
+                        body,
+                        bindings,
+                        output,
+                        Id::to_u32(id),
+                        module
+                    )
+                }
+            }
+        } }
+    )
+}
+
+resolve_block(
+    headers: &super::headers::ParsedHeaders,
+    index: &ResolutionIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    body: &super::bodies::ParsedBody,
+    bindings: &mut Vec<Binding>,
+    output: &mut ResolvedBody,
+    expression: u32,
+    module: Option<ShellId>
+) -> Result<(), ResolutionError> {
+    let mark = Vec::len(&*bindings);
+    handle resolve_block_children(
+        headers,
+        index,
+        declarations,
+        body,
+        bindings,
+        output,
+        expression,
+        module
+    ) {
+        Result::Err(error) => {
+            Vec::truncate(bindings, mark);
+            Result::Err(error)
+        },
+        Result::Ok(_) => {
+            Vec::truncate(bindings, mark);
+            Result::Ok(())
+        }
+    }
+}
+
+resolve_pattern_binders<'a>(
+    bindings: &mut Vec<Binding>,
+    output: &mut ResolvedBody,
+    scope: super::bodies::ExprId,
+    values: Slice<'a, super::bodies::PatternBinder>,
+    index: usize
+) -> Result<(), ResolutionError> {
+    try_for_range(Range::new(index, Slice::len(values)), { current => {
+        let value = handle Slice::get(values, current) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        handle *value {
+            PatternBinder::Wildcard(_) =>
+                Vec::push(
+                    &mut output.pattern_binders,
+                    ResolvedPatternBinder::Wildcard
+                ),
+            PatternBinder::Binding(name, token) => {
+                let local = try(
+                    Result::map_err(
+                        local_id_from_usize(Vec::len(&output.locals)),
+                        { _ => ResolutionError::LocalIdExhausted(
+                                token,
+                                Vec::len(&output.locals)
+                        ) }
+                    ),
+                    @resolve_pattern_binders
+                );
+                Vec::push(&mut output.locals, LocalBinding {
+                    name_token: token,
+                    block_expression: scope
+                });
+                push_binding(
+                    bindings,
+                    name,
+                    ResolvedTarget::Local(local)
+                );
+                Vec::push(
+                    &mut output.pattern_binders,
+                    ResolvedPatternBinder::Local(local)
+                )
+            }
+        };
+        Result::Ok(())
+    }})
+}
+
+resolve_handle_arm(
+    headers: &super::headers::ParsedHeaders,
+    index: &ResolutionIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    body: &super::bodies::ParsedBody,
+    bindings: &mut Vec<Binding>,
+    output: &mut ResolvedBody,
+    expression: u32,
+    arm_id: super::bodies::HandleArmId,
+    arm: &super::bodies::HandleArm,
+    module: Option<ShellId>
+) -> Result<(), ResolutionError> {
+    let target = try(resolve_variant_name(
+        super::headers::nominal_index(headers),
+        declarations,
+        Id::to_u32(super::bodies::handle_arm_enum_name(arm)),
+        Id::to_u32(super::bodies::handle_arm_variant_name(arm)),
+        module,
+        super::bodies::handle_arm_enum_token(arm),
+        super::bodies::handle_arm_variant_token(arm)
+    ), @resolve_handle_arm);
+    let variant = handle target {
+        ResolvedTarget::Variant(found) => found,
+        _ => @resolve_handle_arm(Result::Err(
+            ResolutionError::UnexpectedHandleTarget(
+                super::bodies::handle_arm_variant_token(arm),
+                super::bodies::handle_arm_enum_token(arm)
+            )
+        ))
+    };
+    let mark = Vec::len(&*bindings);
+    let binder_start = Vec::len(&output.pattern_binders);
+    let source_binders = super::bodies::handle_arm_binders(body, arm);
+    try(resolve_pattern_binders(
+        bindings,
+        output,
+        Id::from_u32(expression),
+        source_binders,
+        0
+    ), @resolve_handle_arm);
+    handle resolve_expression(
+        headers,
+        index,
+        declarations,
+        body,
+        bindings,
+        output,
+        Id::to_u32(super::bodies::handle_arm_body(arm)),
+        module
+    ) {
+        Result::Err(error) => {
+            Vec::truncate(bindings, mark);
+            Result::Err(error)
+        },
+        Result::Ok(_) => {
+            Vec::truncate(bindings, mark);
+            let binder_count =
+                Vec::len(&output.pattern_binders) - binder_start;
+            *IndexVec::index_mut(&mut output.handle_arms, arm_id) =
+                Option::Some(ResolvedHandleArm {
+                    variant: variant,
+                    binders: ResolvedBinderRange {
+                        start: u32_from_usize(binder_start),
+                        count: u32_from_usize(binder_count)
+                    }
+                });
+            Result::Ok(())
+        }
+    }
+}
+
+resolve_handle_arms<'a>(
+    headers: &super::headers::ParsedHeaders,
+    index: &ResolutionIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    body: &super::bodies::ParsedBody,
+    bindings: &mut Vec<Binding>,
+    output: &mut ResolvedBody,
+    expression: u32,
+    arms: Slice<'a, super::bodies::HandleArm>,
+    ordinal: usize,
+    module: Option<ShellId>
+) -> Result<(), ResolutionError> {
+    if(ordinal < Slice::len(arms)) {
+        let arm = handle Slice::get(arms, ordinal) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        try(resolve_handle_arm(
+            headers,
+            index,
+            declarations,
+            body,
+            bindings,
+            output,
+            expression,
+            super::bodies::expression_handle_arm_id(
+                body,
+                expression,
+                ordinal
+            ),
+            arm,
+            module
+        ), @resolve_handle_arms);
+        resolve_handle_arms(
+            headers,
+            index,
+            declarations,
+            body,
+            bindings,
+            output,
+            expression,
+            arms,
+            ordinal + 1,
+            module
+        )
+    } else { Result::Ok(()) }
+}
+
+resolve_handle(
+    headers: &super::headers::ParsedHeaders,
+    index: &ResolutionIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    body: &super::bodies::ParsedBody,
+    bindings: &mut Vec<Binding>,
+    output: &mut ResolvedBody,
+    expression: u32,
+    module: Option<ShellId>
+) -> Result<(), ResolutionError> {
+    try(resolve_expression(
+        headers,
+        index,
+        declarations,
+        body,
+        bindings,
+        output,
+        super::bodies::expression_child_at(body, expression, 0),
+        module
+    ), @resolve_handle);
+    resolve_handle_arms(
+        headers,
+        index,
+        declarations,
+        body,
+        bindings,
+        output,
+        expression,
+        super::bodies::expression_handle_arms(body, expression),
+        0,
+        module
+    )
+}
+
+resolve_expression(
+    headers: &super::headers::ParsedHeaders,
+    index: &ResolutionIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    body: &super::bodies::ParsedBody,
+    bindings: &mut Vec<Binding>,
+    output: &mut ResolvedBody,
+    expression: u32,
+    module: Option<ShellId>
+) -> Result<(), ResolutionError> {
+    handle super::bodies::expression_kind_at(body, expression) {
+        1 => resolve_identifier(
+            headers,
+            index,
+            declarations,
+            body,
+            &*bindings,
+            output,
+            expression,
+            module
+        ),
+        8 => resolve_block(
+            headers,
+            index,
+            declarations,
+            body,
+            bindings,
+            output,
+            expression,
+            module
+        ),
+        10 => resolve_struct_constructor(
+            headers,
+            index,
+            declarations,
+            body,
+            bindings,
+            output,
+            expression,
+            module
+        ),
+        12 => resolve_handle(
+            headers,
+            index,
+            declarations,
+            body,
+            bindings,
+            output,
+            expression,
+            module
+        ),
+        _ => resolve_children(
+            headers,
+            index,
+            declarations,
+            body,
+            bindings,
+            output,
+            expression,
+            module
+        )
+    }
+}
+
+add_parameters(
+    headers: &super::headers::HeaderIndex,
+    callable: &super::headers::CallableHeader,
+    bindings: &mut Vec<Binding>,
+    ordinal: u32
+) -> Result<(), ResolutionError> {
+    let parameters = super::headers::callable_parameters(callable);
+    if(ordinal < super::headers::range_count(parameters)) {
+        let index = super::headers::range_start(parameters) + ordinal;
+            handle super::headers::parameter_at(headers, usize_from_u32(index)) {
+                Result::Err(_) => Result::Err(
+                    ResolutionError::MissingParameterHeader(
+                        usize_from_u32(index)
+                    )
+                ),
+                Result::Ok(parameter) => handle duplicate_parameter_token(
+                    headers,
+                    super::headers::range_start(parameters),
+                    super::headers::parameter_name_raw(parameter),
+                    ordinal
+                ) {
+                    Result::Ok(earlier) => Result::Err(
+                        ResolutionError::DuplicateParameter(
+                            super::headers::parameter_name_token(parameter),
+                            earlier
+                        )
+                    ),
+                    Result::Err(_) => {
+                        push_binding(
+                            bindings,
+                            Id::from_u32(
+                                super::headers::parameter_name_raw(parameter)
+                            ),
+                            ResolvedTarget::Parameter(Id::from_u32(ordinal))
+                        );
+                        add_parameters(
+                            headers,
+                            callable,
+                            bindings,
+                            ordinal + 1
+                        )
+                    }
+                }
+            }
+    } else {
+        Result::Ok(())
+    }
+}
+
+duplicate_parameter_token(
+    headers: &super::headers::HeaderIndex,
+    start: u32,
+    name: u32,
+    count: u32
+) -> Option<usize> {
+    if(count == 0) {
+        Result::Err(())
+    } else {
+        let index = start + count - 1;
+        let parameter = try(
+            super::headers::parameter_at(headers, usize_from_u32(index)),
+            @duplicate_parameter_token
+        );
+        if(super::headers::parameter_name_raw(parameter) == name) {
+            Result::Ok(
+                super::headers::parameter_name_token(parameter)
+            )
+        } else {
+            duplicate_parameter_token(
+                headers,
+                start,
+                name,
+                count - 1
+            )
+        }
+    }
+}
+
+body_callable<'a>(
+    index: &ResolutionIndex,
+    headers: &'a super::headers::HeaderIndex,
+    shell: ShellId
+) -> Option<&'a super::headers::CallableHeader> {
+    handle *IndexVec::index(&index.callable_by_shell, shell) {
+        Result::Err(_) => Result::Err(()),
+        Result::Ok(ordinal) => super::headers::callable_at(
+            headers,
+            usize_from_u32(ordinal)
+        )
+    }
+}
+
+push_missing_resolved_handle_arms(
+    output:
+        &mut IndexVec<
+            super::bodies::HandleArmTag,
+            Option<ResolvedHandleArm>
+        >,
+    remaining: usize
+) {
+    if(remaining == 0) {
+        ()
+    } else {
+        IndexVec::push(&mut *output, None);
+        push_missing_resolved_handle_arms(output, remaining - 1)
+    }
 }
 
 pub resolve_function_body_indexed(
     index: &ResolutionIndex,
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex,
-    parsed: &super::bodies::ParsedBody
+    body: &super::bodies::ParsedBody
 ) -> Result<ResolvedBody, ResolutionError> {
-    body::resolve(index, headers, declarations, parsed)
+    let shell_index = super::bodies::body_shell(body);
+    let headers_index = super::headers::parsed_index(headers);
+    handle super::scanner::shell_at(
+        declarations,
+        shell_index
+    ) {
+        Result::Err(_) => Result::Err(
+            ResolutionError::MissingBodyShell(
+                shell_index
+            )
+        ),
+        Result::Ok(shell) => handle body_callable(
+            index,
+            headers_index,
+            shell_index
+        ) {
+            Result::Err(_) => Result::Err(
+                ResolutionError::MissingBodyCallable(
+                    shell_index
+                )
+            ),
+            Result::Ok(callable) => {
+                let bindings = Vec::new();
+                let output = ResolvedBody {
+                    names: Vec::new(),
+                    locals: Vec::new(),
+                    handle_arms: IndexVec::new(),
+                    pattern_binders: Vec::new()
+                };
+                push_missing_resolved_handle_arms(
+                    &mut output.handle_arms,
+                    super::bodies::handle_arm_count(body)
+                );
+                try(
+                    add_parameters(
+                        headers_index,
+                        callable,
+                        &mut bindings,
+                        0
+                    ),
+                    @resolve_function_body_indexed
+                );
+                try(
+                    resolve_expression(
+                        headers,
+                        index,
+                        declarations,
+                        body,
+                        &mut bindings,
+                        &mut output,
+                        super::bodies::body_root_index(body),
+                        shell_parent_module(shell)
+                    ),
+                    @resolve_function_body_indexed
+                );
+                Result::Ok( output)
+            }
+        }
+    }
 }
 
 pub resolve_function_body(
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex,
-    parsed: &super::bodies::ParsedBody
+    body: &super::bodies::ParsedBody
 ) -> Result<ResolvedBody, ResolutionError> {
-    let index = try(build_resolution_index(headers, declarations), @resolve_function_body);
-    resolve_function_body_indexed(&index, headers, declarations, parsed)
+    let index = try(
+        build_resolution_index(headers, declarations),
+        @resolve_function_body
+    );
+    resolve_function_body_indexed(&index, headers, declarations, body)
 }
+
+write_string(output: &mut ByteBuf, value: &String) {
+    let bytes = String::as_bytes(value);
+    ByteBuf::write_u32_le(&mut *output, u32_from_usize(Bytes::len(&bytes)));
+    ByteBuf::append_bytes( output, &bytes)
+}
+
+write_name_id(
+    output: &mut ByteBuf,
+    source: &super::lexer::LexedSource,
+    name: Id<String>
+) {
+    handle super::lexer::lexeme(source, name) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(text) => write_string( output, text)
+    }
+}
+
+write_name_token(
+    output: &mut ByteBuf,
+    source: &super::lexer::LexedSource,
+    token: usize
+) {
+    handle super::lexer::token_kind_at(source, token) {
+        TokenKind::Ident(name) => write_name_id( output, source, name),
+        _ => unreachable()
+    }
+}
+
+shell_name_id(shell: &super::scanner::DeclarationShell) -> Id<String> {
+    handle Option::as_ref(super::scanner::shell_name(shell)) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(name) => *name
+    }
+}
+
+module_depth(
+    declarations: &super::scanner::DeclarationIndex,
+    module: Option<ShellId>
+) -> usize {
+    handle module {
+        Result::Err(_) => 0,
+        Result::Ok(index) => handle super::scanner::shell_at(
+            declarations,
+            index
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(shell) => 1 + module_depth(
+                declarations,
+                shell_parent_module(shell)
+            )
+        }
+    }
+}
+
+write_module_components(
+    output: &mut ByteBuf,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    module: Option<ShellId>
+) {
+    handle module {
+        Result::Err(_) => (),
+        Result::Ok(index) => handle super::scanner::shell_at(
+            declarations,
+            index
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(shell) => {
+                let parent = shell_parent_module(shell);
+                let name = shell_name_id(shell);
+                write_module_components(
+                    &mut *output,
+                    source,
+                    declarations,
+                    parent
+                );
+                write_name_id( output, source, name)
+            }
+        }
+    }
+}
+
+write_module_path(
+    output: &mut ByteBuf,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    module: Option<ShellId>
+) {
+    ByteBuf::write_u32_le(
+        &mut *output,
+        u32_from_usize(module_depth(declarations, module))
+    );
+    write_module_components(
+         output,
+        source,
+        declarations,
+        module
+    )
+}
+
+write_function_identity(
+    output: &mut ByteBuf,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    shell_index: ShellId
+) {
+    handle super::scanner::shell_at(declarations, shell_index) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(shell) => {
+            let parent = shell_parent_module(shell);
+            let name = shell_name_id(shell);
+            write_module_path(
+                &mut *output,
+                source,
+                declarations,
+                parent
+            );
+            write_name_id( output, source, name)
+        }
+    }
+}
+
+struct ParameterSearch { start: u32, count: u32 }
+
+find_parameter_range(
+    index: &super::headers::HeaderIndex,
+    shell: ShellId,
+    at: usize
+) -> Option<ParameterSearch> {
+    if(at < super::headers::callable_count(index)) {
+        let callable = try(
+            super::headers::callable_at(index, at),
+            @find_parameter_range
+        );
+        if(super::headers::callable_shell(callable) == shell) {
+            let parameters =
+                super::headers::callable_parameters(callable);
+            Result::Ok(ParameterSearch {
+                start: super::headers::range_start(parameters),
+                count: super::headers::range_count(parameters)
+            })
+        } else {
+            find_parameter_range(
+                index,
+                shell,
+                at + 1
+            )
+        }
+    } else {
+        Result::Err(())
+    }
+}
+
+write_parameters(
+    output: &mut ByteBuf,
+    source: &super::lexer::LexedSource,
+    index: &super::headers::HeaderIndex,
+    start: u32,
+    count: u32,
+    ordinal: u32
+) {
+    for_range(Range::new(
+        usize_from_u32(ordinal),
+        usize_from_u32(count)
+    ), { current => {
+        let current = u32_from_usize(current);
+        let at = start + current;
+            handle super::headers::parameter_at(index, usize_from_u32(at)) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(parameter) => {
+                    ByteBuf::push(&mut *output, 1);
+                    write_name_token(
+                        &mut *output,
+                        source,
+                        super::headers::parameter_name_token(parameter)
+                    )
+                }
+            }
+    }})
+}
+
+write_locals(
+    output: &mut ByteBuf,
+    source: &super::lexer::LexedSource,
+    resolved: &ResolvedBody,
+    index: usize
+) {
+    for_range(Range::new(index, local_count(resolved)), { current => {
+        ByteBuf::push(&mut *output, 2);
+        write_name_token(
+            &mut *output,
+            source,
+            local_name_token_at(resolved, current)
+        )
+    } })
+}
+
+write_target(
+    output: &mut ByteBuf,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    target: ResolvedTarget,
+    parameter_count: u32
+) {
+    handle target {
+        ResolvedTarget::Parameter(id) => {
+            ByteBuf::push(&mut *output, 1);
+            ByteBuf::write_u32_le(
+                output,
+                Id::to_u32(id)
+            )
+        },
+        ResolvedTarget::Local(id) => {
+            ByteBuf::push(&mut *output, 1);
+            ByteBuf::write_u32_le(
+                output,
+                parameter_count + Id::to_u32(id)
+            )
+        },
+        ResolvedTarget::Function(shell) => {
+            ByteBuf::push(&mut *output, 2);
+            write_function_identity(
+                output,
+                source,
+                declarations,
+                shell
+            )
+        },
+        ResolvedTarget::Struct(header) => {
+            ByteBuf::push(&mut *output, 3);
+            ByteBuf::write_u32_le(output, header)
+        },
+        ResolvedTarget::Variant(variant) => {
+            ByteBuf::push(&mut *output, 4);
+            ByteBuf::write_u32_le(output, variant)
+        }
+    }
+}
+
+write_occurrences(
+    output: &mut ByteBuf,
+    source: &super::lexer::LexedSource,
+    declarations: &super::scanner::DeclarationIndex,
+    body: &super::bodies::ParsedBody,
+    resolved: &ResolvedBody,
+    parameter_count: u32,
+    occurrence: usize
+) {
+    for_range(
+        Range::new(occurrence, resolved_name_count(resolved)),
+        { current => {
+        let expression = resolved_name_expression_id_at(resolved, current);
+        write_name_token(
+            &mut *output,
+            source,
+            super::bodies::expression_token_start_at(
+                body,
+                Id::to_u32(expression)
+            )
+        );
+        write_target(
+            &mut *output,
+            source,
+            declarations,
+            resolved_name_target_at(resolved, current),
+            parameter_count
+        )
+    } })
+}
+
+write_resolved_function(
+    output: &mut ByteBuf,
+    original: &String,
+    headers: &super::headers::ParsedHeaders,
+    resolution_index: &ResolutionIndex,
+    declarations: &super::scanner::DeclarationIndex,
+    shell_index: ShellId
+) -> Result<(), ResolutionError> {
+    let index = super::headers::parsed_index(headers);
+    let source = super::headers::parsed_source(headers);
+    handle find_parameter_range(index, shell_index, 0) {
+        Result::Err(_) => Result::Err(
+            ResolutionError::MissingParameterRange(shell_index)
+        ),
+        Result::Ok(parameters) => {
+            let parameter_count = parameters.count;
+            handle super::bodies::parse_function_body(
+                original,
+                headers,
+                declarations,
+                shell_index
+            ) {
+            Result::Err(_) => Result::Err(
+                ResolutionError::BodyParseFailure(shell_index)
+            ),
+            Result::Ok(body) => {
+                let resolved = try(
+                    resolve_function_body_indexed(
+                        resolution_index,
+                        headers,
+                        declarations,
+                        &body
+                    ),
+                    @write_resolved_function
+                );
+                write_function_identity(
+                    &mut *output,
+                    source,
+                    declarations,
+                    shell_index
+                );
+                ByteBuf::write_u32_le(
+                    &mut *output,
+                    parameter_count + u32_from_usize(local_count(&resolved))
+                );
+                write_parameters(
+                    &mut *output,
+                    source,
+                    index,
+                    parameters.start,
+                    parameters.count,
+                    0
+                );
+                write_locals(&mut *output, source, &resolved, 0);
+                ByteBuf::write_u32_le(
+                    &mut *output,
+                    u32_from_usize(resolved_name_count(&resolved))
+                );
+                write_occurrences(
+                     output,
+                    source,
+                    declarations,
+                    &body,
+                    &resolved,
+                    parameter_count,
+                    0
+                );
+                Result::Ok(())
+            }
+        }
+        }
+    }
+}
+
+function_count(
+    declarations: &super::scanner::DeclarationIndex
+) -> usize {
+    super::scanner::fold_shells(declarations, 0, { count, _, shell =>
+        if(super::scanner::shell_kind_code(shell) == 12) {
+            count + 1
+        } else {
+            count
+        }
+    })
+}
+
+write_functions(
+    output: &mut ByteBuf,
+    original: &String,
+    headers: &super::headers::ParsedHeaders,
+    resolution_index: &ResolutionIndex,
+    declarations: &super::scanner::DeclarationIndex
+) -> Result<(), ResolutionError> {
+    super::scanner::try_for_each_shell(declarations, { shell_id, shell => {
+        if(super::scanner::shell_kind_code(shell) == 12) {
+            try(
+                write_resolved_function(
+                    &mut *output,
+                    original,
+                    headers,
+                    resolution_index,
+                    declarations,
+                    shell_id
+                ),
+                @write_functions
+            );
+        } else {
+            ()
+        };
+        Result::Ok(())
+    }})
+}
+
+encode_source(output: &mut ByteBuf, original: String) {
+    handle super::lexer::lex(&original) {
+        Result::Err(_) => ByteBuf::push( output, 1),
+        Result::Ok(source) => handle super::scanner::scan(&source) {
+            Result::Err(_) => ByteBuf::push( output, 2),
+            Result::Ok(declarations) => handle super::headers::parse(
+                &original,
+                 source,
+                &declarations
+            ) {
+                Result::Err(_) => ByteBuf::push( output, 3),
+                Result::Ok(headers) => handle build_resolution_index(
+                        &headers,
+                        &declarations
+                    ) {
+                    Result::Err(_) => ByteBuf::push(output, 3),
+                    Result::Ok(resolution_index) => {
+                    let encoded = ByteBuf::new();
+                    ByteBuf::write_u32_le(
+                        &mut encoded,
+                        u32_from_usize(function_count(&declarations))
+                    );
+                    handle write_functions(
+                        &mut encoded,
+                        &original,
+                        &headers,
+                        &resolution_index,
+                        &declarations
+                    ) {
+                        Result::Err(_) => ByteBuf::push( output, 3),
+                        Result::Ok(_) => {
+                            ByteBuf::push(&mut *output, 0);
+                            ByteBuf::append_bytes(
+                                 output,
+                                &ByteBuf::finish( encoded)
+                            )
+                        }
+                    }
+                    }
+                }
+            }
+        }
+    }
+}
+
+process_inputs(
+    arguments: &Vec<String>,
+    index: usize,
+    output: &mut ByteBuf
+) / FileRead {
+    if(index < Vec::len(arguments)) {
+        let path = *Vec::index(arguments, index);
+            let bytes = read_file(path);
+            handle String::from_utf8(bytes) {
+                Result::Err(_) => ByteBuf::push(&mut *output, 1),
+                Result::Ok(source) => encode_source(&mut *output, source)
+            };
+            process_inputs(
+                arguments,
+                index + 1,
+                 output
+            )
+    } else {
+        ()
+    }
+}
+
+pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
+    let arguments = process_args();
+    let count = Vec::len(&arguments);
+    if(count < 2) {
+        write_diagnostic(
+            "usage: grandiose-self-host-resolution <output> <input>..."
+        )
+    } else {
+        let output_path = *Vec::index(&arguments, 0);
+            let encoded = ByteBuf::new();
+            ByteBuf::write_u32_le(
+                &mut encoded,
+                u32_from_usize(count - 1)
+            );
+            process_inputs(&arguments, 1, &mut encoded);
+            write_file(output_path, ByteBuf::finish( encoded))
+    }
+}
+
+u32_from_usize(value: usize) -> u32 { wrapping_convert_to_u32( value) }
+
+usize_from_u32(value: u32) -> usize { wrapping_convert_to_usize( value) }
+
+u32_from_u8(value: u8) -> u32 { wrapping_convert_to_u32( value) }
+
+u8_from_u32(value: u32) -> u8 { wrapping_convert_to_u8( value) }
