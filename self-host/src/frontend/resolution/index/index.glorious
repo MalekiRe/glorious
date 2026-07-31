@@ -1,0 +1,394 @@
+// Global declaration lookup for body resolution.
+
+use super::{
+    FunctionSearch,
+    NominalSearch,
+    ResolutionError,
+    ResolutionIndex,
+    ResolvedTarget
+};
+use super::super::scanner::ShellId;
+
+usize_from_u32(value: u32) -> usize { wrapping_convert_to_usize(value) }
+u32_from_usize(value: usize) -> u32 { wrapping_convert_to_u32(value) }
+
+ignore_previous<T>(value: Option<T>) {
+    handle value {
+        None => (),
+        Some(found) => { found; () }
+    }
+}
+
+shell_parent(
+    value: &super::super::scanner::DeclarationShell
+) -> Option<ShellId> {
+    *super::super::scanner::shell_parent(value)
+}
+
+index_callable(
+    output: &mut ResolutionIndex,
+    headers: &super::super::headers::HeaderIndex,
+    declarations: &super::super::scanner::DeclarationIndex,
+    ordinal: usize
+) -> Result<(), ResolutionError> {
+    let callable = handle super::super::headers::callable_at(headers, ordinal) {
+        None => @index_callable(Result::Err(
+            ResolutionError::MissingCallableHeader(ordinal)
+        )),
+        Some(found) => found
+    };
+    let shell_id = super::super::headers::callable_shell(callable);
+    let shell = handle super::super::scanner::shell_at(declarations, shell_id) {
+        None => @index_callable(Result::Err(
+            ResolutionError::MissingDeclarationShell(
+                Id::to_usize(shell_id),
+                shell_id
+            )
+        )),
+        Some(found) => found
+    };
+    let key = (
+        shell_parent(shell),
+        super::super::headers::callable_name_raw(callable)
+    );
+    let previous = handle HashMap::remove(&mut output.functions, &key) {
+        Result::Err(_) => FunctionSearch { first: None, count: 0 },
+        Result::Ok(found) => found
+    };
+    ignore_previous(HashMap::insert(
+        &mut output.functions,
+        key,
+        FunctionSearch {
+            first: if(previous.count == 0) {
+                Some(shell_id)
+            } else { previous.first },
+            count: previous.count + 1
+        }
+    ));
+    let slot = IndexVec::index_mut(&mut output.callable_by_shell, shell_id);
+    if(Option::is_none(slot)) {
+        *slot = Some(u32_from_usize(ordinal))
+    } else { () };
+    Result::Ok(())
+}
+
+pub build(
+    headers: &super::super::headers::ParsedHeaders,
+    declarations: &super::super::scanner::DeclarationIndex
+) -> Result<ResolutionIndex, ResolutionError> {
+    let output = ResolutionIndex {
+        functions: HashMap::new(),
+        callable_by_shell: IndexVec::new()
+    };
+    for_range(Range::new(0, super::super::scanner::shell_count(declarations)), {
+        _ => handle IndexVec::push(&mut output.callable_by_shell, None) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(_) => ()
+        }
+    });
+    try(try_for_range(Range::new(
+        0,
+        super::super::headers::callable_count(
+            super::super::headers::parsed_index(headers)
+        )
+    ), { ordinal => index_callable(
+        &mut output,
+        super::super::headers::parsed_index(headers),
+        declarations,
+        ordinal
+    ) }), @build);
+    Result::Ok(output)
+}
+
+function_search(
+    value: &ResolutionIndex,
+    name: u32,
+    module: Option<ShellId>
+) -> FunctionSearch {
+    handle HashMap::get(&value.functions, &(module, name)) {
+        Result::Err(_) => FunctionSearch { first: None, count: 0 },
+        Result::Ok(found) => *found
+    }
+}
+
+finish_function(
+    declarations: &super::super::scanner::DeclarationIndex,
+    found: FunctionSearch,
+    token: usize
+) -> Result<ResolvedTarget, ResolutionError> {
+    handle found.count {
+        0 => Result::Err(ResolutionError::UnknownFunction(token)),
+        1 => handle found.first {
+            None => Result::Err(ResolutionError::CorruptFunctionSearch(token)),
+            Some(shell) => handle super::super::scanner::shell_at(
+                declarations,
+                shell
+            ) {
+                None => Result::Err(
+                    ResolutionError::MissingDeclarationShell(token, shell)
+                ),
+                Some(_) => Result::Ok(ResolvedTarget::Function(shell))
+            }
+        },
+        _ => handle found.first {
+            None => Result::Err(ResolutionError::CorruptFunctionSearch(token)),
+            Some(shell) => Result::Err(
+                ResolutionError::AmbiguousFunction(token, shell)
+            )
+        }
+    }
+}
+
+pub resolve_function(
+    value: &ResolutionIndex,
+    declarations: &super::super::scanner::DeclarationIndex,
+    name: u32,
+    module: Option<ShellId>,
+    token: usize
+) -> Result<ResolvedTarget, ResolutionError> {
+    let local = function_search(value, name, module);
+    if(local.count == 0 and { Option::is_some(&module) }) {
+        finish_function(declarations, function_search(value, name, None), token)
+    } else { finish_function(declarations, local, token) }
+}
+
+search_structs(
+    headers: &super::super::headers::NominalIndex,
+    declarations: &super::super::scanner::DeclarationIndex,
+    name: u32,
+    module: Option<ShellId>,
+    token: usize
+) -> Result<NominalSearch, ResolutionError> {
+    try_fold_range(
+        Range::new(0, super::super::headers::struct_count(headers)),
+        NominalSearch { first: None, count: 0 },
+        { found, current => handle super::super::headers::struct_at(
+            headers,
+            current
+        ) {
+            None => Result::Err(
+                ResolutionError::MissingStructHeader(token, current)
+            ),
+            Some(header) => {
+                let shell_id = super::super::headers::struct_shell(header);
+                handle super::super::scanner::shell_at(declarations, shell_id) {
+                    None => Result::Err(
+                        ResolutionError::MissingDeclarationShell(token, shell_id)
+                    ),
+                    Some(shell) => if(
+                        super::super::headers::struct_name_raw(header) == name
+                        and { shell_parent(shell) == module }
+                    ) {
+                        Result::Ok(NominalSearch {
+                            first: if(found.count == 0) {
+                                Some(u32_from_usize(current))
+                            } else { found.first },
+                            count: found.count + 1
+                        })
+                    } else { Result::Ok(found) }
+                }
+            }
+        } }
+    )
+}
+
+finish_struct(
+    headers: &super::super::headers::NominalIndex,
+    found: NominalSearch,
+    token: usize
+) -> Result<ResolvedTarget, ResolutionError> {
+    handle found.count {
+        0 => Result::Err(ResolutionError::UnknownStruct(token)),
+        1 => handle found.first {
+            None => Result::Err(ResolutionError::CorruptStructSearch(token)),
+            Some(index) => handle super::super::headers::struct_at(
+                headers,
+                usize_from_u32(index)
+            ) {
+                None => Result::Err(ResolutionError::MissingStructHeader(
+                    token,
+                    usize_from_u32(index)
+                )),
+                Some(_) => Result::Ok(ResolvedTarget::Struct(index))
+            }
+        },
+        _ => handle found.first {
+            None => Result::Err(ResolutionError::CorruptStructSearch(token)),
+            Some(index) => Result::Err(ResolutionError::AmbiguousStruct(
+                token,
+                usize_from_u32(index)
+            ))
+        }
+    }
+}
+
+pub resolve_struct(
+    headers: &super::super::headers::NominalIndex,
+    declarations: &super::super::scanner::DeclarationIndex,
+    name: u32,
+    module: Option<ShellId>,
+    token: usize
+) -> Result<ResolvedTarget, ResolutionError> {
+    let local = try(search_structs(
+        headers,
+        declarations,
+        name,
+        module,
+        token
+    ), @resolve_struct);
+    if(local.count == 0 and { Option::is_some(&module) }) {
+        finish_struct(
+            headers,
+            try(search_structs(
+                headers,
+                declarations,
+                name,
+                None,
+                token
+            ), @resolve_struct),
+            token
+        )
+    } else { finish_struct(headers, local, token) }
+}
+
+search_enums(
+    headers: &super::super::headers::NominalIndex,
+    declarations: &super::super::scanner::DeclarationIndex,
+    name: u32,
+    module: Option<ShellId>,
+    token: usize
+) -> Result<NominalSearch, ResolutionError> {
+    try_fold_range(
+        Range::new(0, super::super::headers::enum_count(headers)),
+        NominalSearch { first: None, count: 0 },
+        { found, current => handle super::super::headers::enum_at(
+            headers,
+            current
+        ) {
+            None => Result::Err(
+                ResolutionError::MissingEnumHeader(token, current)
+            ),
+            Some(header) => {
+                let shell_id = super::super::headers::enum_shell(header);
+                handle super::super::scanner::shell_at(declarations, shell_id) {
+                    None => Result::Err(
+                        ResolutionError::MissingDeclarationShell(token, shell_id)
+                    ),
+                    Some(shell) => if(
+                        super::super::headers::enum_name_raw(header) == name
+                        and { shell_parent(shell) == module }
+                    ) {
+                        Result::Ok(NominalSearch {
+                            first: if(found.count == 0) {
+                                Some(u32_from_usize(current))
+                            } else { found.first },
+                            count: found.count + 1
+                        })
+                    } else { Result::Ok(found) }
+                }
+            }
+        } }
+    )
+}
+
+find_variant(
+    headers: &super::super::headers::NominalIndex,
+    range: &super::super::headers::VariantRange,
+    name: u32,
+    token: usize,
+    ordinal: u32
+) -> Result<u32, ResolutionError> {
+    if(ordinal < super::super::headers::range_count(range)) {
+        let index = super::super::headers::range_start(range) + ordinal;
+        handle super::super::headers::variant_at(
+            headers,
+            usize_from_u32(index)
+        ) {
+            None => Result::Err(ResolutionError::MissingVariantHeader(
+                token,
+                usize_from_u32(index)
+            )),
+            Some(variant) => if(
+                super::super::headers::variant_name_raw(variant) == name
+            ) {
+                Result::Ok(index)
+            } else {
+                find_variant(headers, range, name, token, ordinal + 1)
+            }
+        }
+    } else { Result::Err(ResolutionError::UnknownVariant(token)) }
+}
+
+finish_variant(
+    headers: &super::super::headers::NominalIndex,
+    found: NominalSearch,
+    variant_name: u32,
+    enum_token: usize,
+    variant_token: usize
+) -> Result<ResolvedTarget, ResolutionError> {
+    handle found.count {
+        0 => Result::Err(ResolutionError::UnknownEnum(enum_token)),
+        1 => handle found.first {
+            None => Result::Err(ResolutionError::CorruptEnumSearch(enum_token)),
+            Some(index) => handle super::super::headers::enum_at(
+                headers,
+                usize_from_u32(index)
+            ) {
+                None => Result::Err(ResolutionError::MissingEnumHeader(
+                    enum_token,
+                    usize_from_u32(index)
+                )),
+                Some(header) => Result::Ok(ResolvedTarget::Variant(
+                    try(find_variant(
+                        headers,
+                        super::super::headers::enum_variants(header),
+                        variant_name,
+                        variant_token,
+                        0
+                    ), @finish_variant)
+                ))
+            }
+        },
+        _ => handle found.first {
+            None => Result::Err(ResolutionError::CorruptEnumSearch(enum_token)),
+            Some(index) => Result::Err(ResolutionError::AmbiguousEnum(
+                enum_token,
+                usize_from_u32(index)
+            ))
+        }
+    }
+}
+
+pub resolve_variant(
+    headers: &super::super::headers::NominalIndex,
+    declarations: &super::super::scanner::DeclarationIndex,
+    enum_name: u32,
+    variant_name: u32,
+    module: Option<ShellId>,
+    enum_token: usize,
+    variant_token: usize
+) -> Result<ResolvedTarget, ResolutionError> {
+    let local = try(search_enums(
+        headers,
+        declarations,
+        enum_name,
+        module,
+        enum_token
+    ), @resolve_variant);
+    let found = if(local.count == 0 and { Option::is_some(&module) }) {
+        try(search_enums(
+            headers,
+            declarations,
+            enum_name,
+            None,
+            enum_token
+        ), @resolve_variant)
+    } else { local };
+    finish_variant(
+        headers,
+        found,
+        variant_name,
+        enum_token,
+        variant_token
+    )
+}
