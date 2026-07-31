@@ -1,0 +1,1947 @@
+// Expected-type-directed elaboration from the transient semantic body AST to
+// Typed Core. Resolution is consumed directly through ExprId-indexed tables;
+// no HIR or resolution adapter is materialized.
+
+use super::super::bodies::{
+    BlockStatement,
+    ExprView,
+    ExpressionName
+};
+use super::super::resolution::{
+    ResolvedPatternBinder,
+    ResolvedTarget
+};
+use super::model;
+use super::model::{
+    ConstructionField,
+    ConstructionFlavor,
+    CoreComputation,
+    CoreComputationId,
+    CoreComputationKind,
+    CoreLocalAccess,
+    CoreLocalId,
+    CoreMatchArm,
+    CoreMatchBinding,
+    CoreValue,
+    CoreValueId,
+    CoreValueKind,
+    ElaborationError,
+    IntegerConstant,
+    InterfaceCallableId,
+    InterfaceNominalId,
+    InterfaceNominalKind,
+    InterfaceVariant,
+    TypeId,
+    TypeKind,
+    TypeNode,
+    TypedBody,
+    TypedInterfaces
+};
+
+pub enum ElaboratedForm {
+    Value(CoreValueId),
+    Computation(CoreComputationId)
+}
+
+impl Use<[0, *]> for ElaboratedForm {}
+
+pub struct Elaborated {
+    ty: TypeId,
+    form: ElaboratedForm
+}
+
+impl Use<[0, *]> for Elaborated {}
+
+pub struct BodyBuilder {
+    parameter_count: u32,
+    final_transfers: IndexVec<super::super::bodies::ExprTag, Bool>,
+    local_types: IndexVec<model::CoreLocalTag, Option<TypeId>>,
+    values: Arena<model::CoreValueTag, CoreValue>,
+    computations: Arena<model::CoreComputationTag, CoreComputation>,
+    operands: Vec<CoreValueId>,
+    construction_fields: Vec<ConstructionField>,
+    match_arms: Vec<CoreMatchArm>,
+    match_bindings: Vec<CoreMatchBinding>,
+    integer_constants: Arena<model::IntegerConstantTag, IntegerConstant>
+}
+
+usize_from_u32(value: u32) -> usize { wrapping_convert_to_usize(value) }
+u32_from_usize(value: usize) -> u32 {
+    handle checked_usize_to_u32(value) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+core_local(value: u32) -> CoreLocalId { Id::from_u32(value) }
+
+push_local_slot(
+    value: &mut IndexVec<model::CoreLocalTag, Option<TypeId>>,
+    ty: Option<TypeId>
+) -> CoreLocalId {
+    handle IndexVec::push(value, ty) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+push_value(value: &mut BodyBuilder, ty: TypeId, kind: CoreValueKind) -> CoreValueId {
+    handle Arena::alloc(&mut value.values, CoreValue {
+        ty: ty,
+        kind: kind
+    }) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+push_computation(
+    value: &mut BodyBuilder,
+    ty: TypeId,
+    kind: CoreComputationKind
+) -> CoreComputationId {
+    handle Arena::alloc(&mut value.computations, CoreComputation {
+        ty: ty,
+        kind: kind
+    }) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+pure(value: &mut BodyBuilder, found: Elaborated) -> CoreComputationId {
+    handle found.form {
+        ElaboratedForm::Value(id) => push_computation(
+            value,
+            found.ty,
+            CoreComputationKind::Pure(id)
+        ),
+        ElaboratedForm::Computation(id) => id
+    }
+}
+
+embedded(value: &mut BodyBuilder, found: Elaborated) -> CoreValueId {
+    handle found.form {
+        ElaboratedForm::Value(id) => id,
+        ElaboratedForm::Computation(id) => push_value(
+            value,
+            found.ty,
+            CoreValueKind::Embedded(id)
+        )
+    }
+}
+
+check_expected_type(
+    found: TypeId,
+    expected: Option<TypeId>,
+    token: usize
+) -> Result<(), ElaborationError> {
+    handle expected {
+        None => Result::Ok(()),
+        Some(ty) => if(found == ty) {
+            Result::Ok(())
+        } else {
+            Result::Err(ElaborationError::TypeMismatch(
+                token,
+                Id::to_u32(ty),
+                Id::to_u32(found)
+            ))
+        }
+    }
+}
+
+check_expected(
+    found: Elaborated,
+    expected: Option<TypeId>,
+    token: usize
+) -> Result<Elaborated, ElaborationError> {
+    try(check_expected_type(found.ty, expected, token), @check_expected);
+    Result::Ok(found)
+}
+
+unit(value: &mut BodyBuilder) -> Elaborated {
+    let ty = Id::from_u32(0);
+    Elaborated {
+        ty: ty,
+        form: ElaboratedForm::Value(push_value(
+            value,
+            ty,
+            CoreValueKind::Unit
+        ))
+    }
+}
+
+fill_bool_slots(
+    value: &mut IndexVec<super::super::bodies::ExprTag, Bool>,
+    count: usize
+) {
+    for_range(Range::new(0, count), { _ => handle IndexVec::push(value, false) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(_) => ()
+    } })
+}
+
+fill_last_uses(
+    value: &mut Vec<Option<super::super::bodies::ExprId>>,
+    count: usize
+) {
+    for_range(Range::new(0, count), { _ => Vec::push(value, None) })
+}
+
+local_ordinal(
+    parameter_count: u32,
+    target: ResolvedTarget
+) -> Option<usize> {
+    handle target {
+        ResolvedTarget::Parameter(id) => Some(Id::to_usize(id)),
+        ResolvedTarget::Local(id) => Some(
+            usize_from_u32(parameter_count) + Id::to_usize(id)
+        ),
+        _ => None
+    }
+}
+
+record_last_use(
+    resolved: &super::super::resolution::ResolvedBody,
+    expression: super::super::bodies::ExprId,
+    parameter_count: u32,
+    output: &mut Vec<Option<super::super::bodies::ExprId>>
+) {
+    handle super::super::resolution::resolved_target(resolved, expression) {
+        None => (),
+        Some(target) => handle local_ordinal(parameter_count, target) {
+            None => (),
+            Some(index) => if(index < Vec::len(output)) {
+                *Vec::index_mut(output, index) = Some(expression)
+            } else { () }
+        }
+    }
+}
+
+collect_last_uses<'a>(
+    body: &super::super::bodies::ParsedBody,
+    resolved: &super::super::resolution::ResolvedBody,
+    expression: super::super::bodies::ExprId,
+    parameter_count: u32,
+    output: &mut Vec<Option<super::super::bodies::ExprId>>
+) {
+    handle super::super::bodies::expression_view(body, expression) {
+        ExprView::Identifier(_, _) => record_last_use(
+            resolved, expression, parameter_count, output
+        ),
+        ExprView::Number(_) => (),
+        ExprView::Unit(_) => (),
+        ExprView::Group(_, child) => collect_last_uses(
+            body, resolved, child, parameter_count, output
+        ),
+        ExprView::Prefix(_, _, child) => collect_last_uses(
+            body, resolved, child, parameter_count, output
+        ),
+        ExprView::Infix(_, _, left, right) => {
+            collect_last_uses(body, resolved, left, parameter_count, output);
+            collect_last_uses(body, resolved, right, parameter_count, output)
+        },
+        ExprView::Call(_, callee, arguments) => {
+            collect_last_uses(body, resolved, callee, parameter_count, output);
+            Slice::for_each(arguments, { argument => collect_last_uses(
+                body, resolved, *argument, parameter_count, output
+            ) })
+        },
+        ExprView::Block(_, statements) => Slice::for_each(statements, { statement =>
+            handle *statement {
+                BlockStatement::Let(initializer, _) => collect_last_uses(
+                    body, resolved, initializer, parameter_count, output
+                ),
+                BlockStatement::Expression(found) => collect_last_uses(
+                    body, resolved, found, parameter_count, output
+                )
+            }
+        }),
+        ExprView::Tuple(_, elements) => Slice::for_each(elements, { element =>
+            collect_last_uses(body, resolved, *element, parameter_count, output)
+        }),
+        ExprView::Struct(_, _, fields) => Slice::for_each(fields, { field =>
+            collect_last_uses(
+                body,
+                resolved,
+                super::super::bodies::struct_field_expression(field),
+                parameter_count,
+                output
+            )
+        }),
+        ExprView::Projection(_, subject, _) => collect_last_uses(
+            body, resolved, subject, parameter_count, output
+        ),
+        ExprView::Handle(_, subject, arms) => {
+            collect_last_uses(body, resolved, subject, parameter_count, output);
+            Slice::for_each(arms, { arm => collect_last_uses(
+                body,
+                resolved,
+                super::super::bodies::handle_arm_body(arm),
+                parameter_count,
+                output
+            ) })
+        }
+    }
+}
+
+mark_last_uses(
+    output: &mut IndexVec<super::super::bodies::ExprTag, Bool>,
+    values: &Vec<Option<super::super::bodies::ExprId>>,
+    index: usize
+) {
+    if(index < Vec::len(values)) {
+        handle *Vec::index(values, index) {
+            None => (),
+            Some(expression) => *IndexVec::index_mut(output, expression) = true
+        };
+        mark_last_uses(output, values, index + 1)
+    } else { () }
+}
+
+final_transfers(
+    body: &super::super::bodies::ParsedBody,
+    resolved: &super::super::resolution::ResolvedBody,
+    parameter_count: u32
+) -> IndexVec<super::super::bodies::ExprTag, Bool> {
+    let last = Vec::new();
+    fill_last_uses(
+        &mut last,
+        usize_from_u32(parameter_count)
+            + super::super::resolution::local_count(resolved)
+    );
+    collect_last_uses(
+        body,
+        resolved,
+        super::super::bodies::body_root(body),
+        parameter_count,
+        &mut last
+    );
+    let output = IndexVec::new();
+    fill_bool_slots(&mut output, super::super::bodies::expression_count(body));
+    mark_last_uses(&mut output, &last, 0);
+    output
+}
+
+fill_local_types(
+    value: &mut BodyBuilder,
+    interfaces: &TypedInterfaces,
+    callable: InterfaceCallableId,
+    local_count: usize
+) {
+    for_range(Range::new(
+        0,
+        usize_from_u32(model::interface_callable_parameter_count(
+            interfaces,
+            callable
+        ))
+    ), { index => {
+        push_local_slot(
+            &mut value.local_types,
+            Some(model::interface_callable_parameter_at(
+                interfaces,
+                callable,
+                index
+            ))
+        );
+        ()
+    }});
+    for_range(Range::new(0, local_count), { _ => {
+        push_local_slot(&mut value.local_types, None);
+        ()
+    }})
+}
+
+resolved_target(
+    resolved: &super::super::resolution::ResolvedBody,
+    expression: super::super::bodies::ExprId,
+    token: usize
+) -> Result<ResolvedTarget, ElaborationError> {
+    handle super::super::resolution::resolved_target(resolved, expression) {
+        None => Result::Err(ElaborationError::InvalidResolvedExpression(
+            Id::to_usize(expression),
+            token
+        )),
+        Some(found) => Result::Ok(found)
+    }
+}
+
+local_type(
+    value: &BodyBuilder,
+    local: CoreLocalId,
+    token: usize
+) -> Result<TypeId, ElaborationError> {
+    if(Id::to_usize(local) < IndexVec::len(&value.local_types)) {
+        handle *IndexVec::index(&value.local_types, local) {
+            None => Result::Err(ElaborationError::MissingLocalType(token)),
+            Some(found) => Result::Ok(found)
+        }
+    } else { Result::Err(ElaborationError::MissingLocalType(token)) }
+}
+
+elaborate_local(
+    interfaces: &TypedInterfaces,
+    value: &mut BodyBuilder,
+    expression: super::super::bodies::ExprId,
+    local: CoreLocalId,
+    token: usize,
+    expected: Option<TypeId>
+) -> Result<Elaborated, ElaborationError> {
+    let ty = try(local_type(&*value, local, token), @elaborate_local);
+    let final_transfer = *IndexVec::index(&value.final_transfers, expression);
+    let access = if(final_transfer and { model::type_is_copyable(interfaces, ty) }) {
+        CoreLocalAccess::Move
+    } else { CoreLocalAccess::Copy };
+    check_expected(Elaborated {
+        ty: ty,
+        form: ElaboratedForm::Value(push_value(
+            value,
+            ty,
+            CoreValueKind::Local(local, access)
+        ))
+    }, expected, token)
+}
+
+elaborate_identifier(
+    interfaces: &TypedInterfaces,
+    body: &super::super::bodies::ParsedBody,
+    resolved: &super::super::resolution::ResolvedBody,
+    value: &mut BodyBuilder,
+    expression: super::super::bodies::ExprId,
+    expected: Option<TypeId>
+) -> Result<Elaborated, ElaborationError> {
+    let token = super::super::bodies::expression_token_start(body, expression);
+    handle try(resolved_target(resolved, expression, token), @elaborate_identifier) {
+        ResolvedTarget::Parameter(id) => elaborate_local(
+            interfaces,
+            value,
+            expression,
+            core_local(Id::to_u32(id)),
+            token,
+            expected
+        ),
+        ResolvedTarget::Local(id) => elaborate_local(
+            interfaces,
+            value,
+            expression,
+            core_local(value.parameter_count + Id::to_u32(id)),
+            token,
+            expected
+        ),
+        ResolvedTarget::Function(_) =>
+            Result::Err(ElaborationError::FunctionUsedAsValue(token)),
+        ResolvedTarget::Variant(variant) => elaborate_variant(
+            interfaces,
+            value,
+            variant,
+            token,
+            Slice::empty(),
+            expected
+        ),
+        _ => Result::Err(ElaborationError::UnexpectedExpressionToken(token))
+    }
+}
+
+scalar_bits(kind: u8) -> u32 {
+    handle kind {
+        1 => 8,
+        2 => 16,
+        3 => 32,
+        4 => 64,
+        5 => 128,
+        6 => 64,
+        7 => 8,
+        8 => 16,
+        9 => 32,
+        10 => 64,
+        11 => 128,
+        _ => 64
+    }
+}
+
+scalar_signed(kind: u8) -> Bool { kind >= 7 }
+
+unsigned_max(bits: u32) -> u128 {
+    if(bits == 128) {
+        bit_not(wrapping_convert_to_u128(0))
+    } else {
+        shift_left(wrapping_convert_to_u128(1), bits)
+            - wrapping_convert_to_u128(1)
+    }
+}
+
+scalar_max(kind: u8) -> u128 {
+    let bits = scalar_bits(kind);
+    if(scalar_signed(kind)) { unsigned_max(bits - 1) } else { unsigned_max(bits) }
+}
+
+digit_value(byte: u8) -> Option<u32> {
+    if(48 <= byte and { byte <= 57 }) {
+        Some(wrapping_convert_to_u32(byte - 48))
+    } else if(65 <= byte and { byte <= 70 }) {
+        Some(wrapping_convert_to_u32(byte - 65) + 10)
+    } else if(97 <= byte and { byte <= 102 }) {
+        Some(wrapping_convert_to_u32(byte - 97) + 10)
+    } else { None }
+}
+
+parse_digits(
+    bytes: Bytes,
+    cursor: usize,
+    end: usize,
+    base: u32,
+    accumulator: u128
+) -> Option<u128> {
+    if(cursor < end) {
+        handle Bytes::get(&bytes, cursor) {
+            Result::Err(_) => None,
+            Result::Ok(byte) => if(byte == 95) {
+                parse_digits(bytes, cursor + 1, end, base, accumulator)
+            } else {
+                let digit = try(digit_value(byte), @parse_digits);
+                let wide_base = wrapping_convert_to_u128(base);
+                let wide_digit = wrapping_convert_to_u128(digit);
+                let maximum = bit_not(wrapping_convert_to_u128(0));
+                if(accumulator <= (maximum - wide_digit) / wide_base) {
+                    parse_digits(
+                        bytes,
+                        cursor + 1,
+                        end,
+                        base,
+                        accumulator * wide_base + wide_digit
+                    )
+                } else { None }
+            }
+        }
+    } else { Some(accumulator) }
+}
+
+number_radix(value: &super::super::lexer::NumberToken) -> u32 {
+    handle super::super::lexer::number_base_code(value) {
+        1 => 2,
+        2 => 8,
+        3 => 10,
+        _ => 16
+    }
+}
+
+push_integer_constant(value: &mut BodyBuilder, magnitude: u128) -> model::IntegerConstantId {
+    handle Arena::alloc(&mut value.integer_constants, IntegerConstant {
+        low0: wrapping_convert_to_u32(magnitude),
+        low1: wrapping_convert_to_u32(shift_right(magnitude, 32)),
+        high0: wrapping_convert_to_u32(shift_right(magnitude, 64)),
+        high1: wrapping_convert_to_u32(shift_right(magnitude, 96))
+    }) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+elaborate_number(
+    original: &String,
+    headers: &super::super::headers::ParsedHeaders,
+    body: &super::super::bodies::ParsedBody,
+    value: &mut BodyBuilder,
+    expression: super::super::bodies::ExprId,
+    expected: Option<TypeId>
+) -> Result<Elaborated, ElaborationError> {
+    let token = super::super::bodies::expression_token_start(body, expression);
+    handle super::super::lexer::token_kind_at(
+        super::super::headers::parsed_source(headers),
+        token
+    ) {
+        super::super::lexer::TokenKind::Number(number) =>
+            if(super::super::lexer::number_is_float(&number)) {
+                Result::Err(ElaborationError::FloatLiteralUnsupported(token))
+            } else {
+                let ty = expected else { Id::from_u32(10) };
+                let raw = Id::to_u32(ty);
+                if(raw >= 2 and { raw <= 13 }) {
+                    let kind = handle model::type_kind_at(
+                        &TypedInterfaces {
+                            types: Arena::new(),
+                            type_elements: Vec::new(),
+                            nominals: Arena::new(),
+                            fields: Arena::new(),
+                            variants: Arena::new(),
+                            variant_payloads: Vec::new(),
+                            callables: Arena::new(),
+                            callable_parameters: Vec::new(),
+                            shell_to_callable: IndexVec::new(),
+                            shell_to_nominal: IndexVec::new(),
+                            shell_to_type: IndexVec::new(),
+                            alias_states: Vec::new()
+                        },
+                        ty
+                    ) {
+                        TypeKind::Scalar(found) => found,
+                        _ => handle raw {
+                            2 => 1, 3 => 2, 4 => 3, 5 => 4, 6 => 5,
+                            12 => 6, 7 => 7, 8 => 8, 9 => 9, 10 => 10,
+                            11 => 11, _ => 12
+                        }
+                    };
+                    let digits = super::super::lexer::number_digits(&number);
+                    handle parse_digits(
+                        String::as_bytes(original),
+                        super::super::lexer::span_start(&digits),
+                        super::super::lexer::span_end(&digits),
+                        number_radix(&number),
+                        wrapping_convert_to_u128(0)
+                    ) {
+                        None => Result::Err(
+                            ElaborationError::IntegerLiteralOutOfRange(token, raw)
+                        ),
+                        Some(magnitude) => if(magnitude <= scalar_max(kind)) {
+                            Result::Ok(Elaborated {
+                                ty: ty,
+                                form: ElaboratedForm::Value(push_value(
+                                    value,
+                                    ty,
+                                    CoreValueKind::Integer(
+                                        push_integer_constant(value, magnitude)
+                                    )
+                                ))
+                            })
+                        } else {
+                            Result::Err(
+                                ElaborationError::IntegerLiteralOutOfRange(token, raw)
+                            )
+                        }
+                    }
+                } else {
+                    Result::Err(ElaborationError::TypeMismatch(token, raw, 10))
+                }
+            },
+        _ => Result::Err(ElaborationError::UnexpectedExpressionToken(token))
+    }
+}
+
+// The predefined scalar table is stable; this helper avoids querying mutable
+// interface state while an integer constant is being appended.
+scalar_kind_for_type(raw: u32) -> u8 {
+    handle raw {
+        2 => 1,
+        3 => 2,
+        4 => 3,
+        5 => 4,
+        6 => 5,
+        12 => 6,
+        7 => 7,
+        8 => 8,
+        9 => 9,
+        10 => 10,
+        11 => 11,
+        _ => 12
+    }
+}
+
+find_tuple_type(
+    interfaces: &TypedInterfaces,
+    elements: &Vec<TypeId>,
+    index: usize
+) -> Option<TypeId> {
+    if(index < model::interface_type_count(interfaces)) {
+        handle model::type_kind_at(interfaces, model::type_id_from_usize(index)) {
+            TypeKind::Tuple(range) => {
+                let found = super::super::syntax::id_range_slice(
+                    &interfaces.type_elements,
+                    &range
+                );
+                if(Slice::len(found) == Vec::len(elements)
+                    and { Slice::fold(found, (true, 0), { state, item => {
+                        let equal = state.0
+                            and { *item == *Vec::index(elements, state.1) };
+                        (equal, state.1 + 1)
+                    } }).0 }) {
+                    Some(model::type_id_from_usize(index))
+                } else { find_tuple_type(interfaces, elements, index + 1) }
+            },
+            _ => find_tuple_type(interfaces, elements, index + 1)
+        }
+    } else { None }
+}
+
+intern_tuple_type(
+    interfaces: &mut TypedInterfaces,
+    elements: &Vec<TypeId>
+) -> TypeId {
+    handle find_tuple_type(&*interfaces, elements, 0) {
+        Some(found) => found,
+        None => {
+            let start = Vec::len(&interfaces.type_elements);
+            for_range(Range::new(0, Vec::len(elements)), { index =>
+                Vec::push(&mut interfaces.type_elements, *Vec::index(elements, index))
+            });
+            let copyable = fold_range(Range::new(0, Vec::len(elements)), true, {
+                flag, index => flag and {
+                    model::type_is_copyable(
+                        &*interfaces,
+                        *Vec::index(elements, index)
+                    )
+                }
+            });
+            handle Arena::alloc(&mut interfaces.types, TypeNode {
+                kind: TypeKind::Tuple(super::super::syntax::id_range(
+                    start,
+                    Vec::len(&interfaces.type_elements)
+                )),
+                copyable: copyable
+            }) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            }
+        }
+    }
+}
+
+elaborate_expression_slice<'a>(
+    original: &String,
+    headers: &super::super::headers::ParsedHeaders,
+    declarations: &super::super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::super::bodies::ParsedBody,
+    resolved: &super::super::resolution::ResolvedBody,
+    value: &mut BodyBuilder,
+    expressions: Slice<'a, super::super::bodies::ExprId>,
+    expected: Option<Slice<'a, TypeId>>,
+    output_values: &mut Vec<CoreValueId>,
+    output_types: &mut Vec<TypeId>
+) -> Result<(), ElaborationError> {
+    try_for_range(Range::new(0, Slice::len(expressions)), { index => {
+        let expression = *handle Slice::get(expressions, index) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let expected_type = handle expected {
+            None => None,
+            Some(types) => handle Slice::get(types, index) {
+                Result::Err(_) => None,
+                Result::Ok(found) => Some(*found)
+            }
+        };
+        let found = try(elaborate_expression(
+            original,
+            headers,
+            declarations,
+            interfaces,
+            body,
+            resolved,
+            value,
+            expression,
+            expected_type
+        ), @elaborate_expression_slice);
+        Vec::push(output_values, embedded(value, found));
+        Vec::push(output_types, found.ty);
+        Result::Ok(())
+    } })
+}
+
+append_construction_values(
+    value: &mut BodyBuilder,
+    fields: &Vec<CoreValueId>
+) -> model::ConstructionFieldRange {
+    let start = Vec::len(&value.construction_fields);
+    for_range(Range::new(0, Vec::len(fields)), { index =>
+        Vec::push(&mut value.construction_fields, ConstructionField {
+            field: u32_from_usize(index),
+            value: *Vec::index(fields, index)
+        })
+    });
+    super::super::syntax::id_range(start, Vec::len(&value.construction_fields))
+}
+
+elaborate_tuple<'a>(
+    original: &String,
+    headers: &super::super::headers::ParsedHeaders,
+    declarations: &super::super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::super::bodies::ParsedBody,
+    resolved: &super::super::resolution::ResolvedBody,
+    value: &mut BodyBuilder,
+    expression: super::super::bodies::ExprId,
+    elements: Slice<'a, super::super::bodies::ExprId>,
+    expected: Option<TypeId>
+) -> Result<Elaborated, ElaborationError> {
+    let token = super::super::bodies::expression_token_start(body, expression);
+    if(Slice::is_empty(elements)) {
+        check_expected(unit(value), expected, token)
+    } else {
+        let expected_elements = handle expected {
+            None => None,
+            Some(ty) => handle model::type_kind_at(&*interfaces, ty) {
+                TypeKind::Tuple(range) => Some(
+                    super::super::syntax::id_range_slice(
+                        &interfaces.type_elements,
+                        &range
+                    )
+                ),
+                _ => @elaborate_tuple(Result::Err(
+                    ElaborationError::ExpectedTupleType(token, Id::to_u32(ty))
+                ))
+            }
+        };
+        handle expected_elements {
+            Some(found) => if(Slice::len(found) != Slice::len(elements)) {
+                @elaborate_tuple(Result::Err(
+                    ElaborationError::ArgumentCountMismatch(
+                        token,
+                        u32_from_usize(Slice::len(found)),
+                        u32_from_usize(Slice::len(elements))
+                    )
+                ))
+            } else { () },
+            None => ()
+        };
+        let values = Vec::new();
+        let types = Vec::new();
+        try(elaborate_expression_slice(
+            original,
+            headers,
+            declarations,
+            interfaces,
+            body,
+            resolved,
+            value,
+            elements,
+            expected_elements,
+            &mut values,
+            &mut types
+        ), @elaborate_tuple);
+        let ty = expected else { intern_tuple_type(interfaces, &types) };
+        Result::Ok(Elaborated {
+            ty: ty,
+            form: ElaboratedForm::Computation(push_computation(
+                value,
+                ty,
+                CoreComputationKind::Construct(
+                    ConstructionFlavor::Product,
+                    append_construction_values(value, &values)
+                )
+            ))
+        })
+    }
+}
+
+variant_at(
+    interfaces: &TypedInterfaces,
+    raw: u32,
+    token: usize
+) -> Result<InterfaceVariant, ElaborationError> {
+    if(usize_from_u32(raw) < model::interface_variant_count(interfaces)) {
+        Result::Ok(*model::interface_variant_at(
+            interfaces,
+            model::interface_variant_id_from_usize(usize_from_u32(raw))
+        ))
+    } else { Result::Err(ElaborationError::MissingVariant(token, raw)) }
+}
+
+variant_owner_type(
+    interfaces: &TypedInterfaces,
+    variant: InterfaceVariant,
+    token: usize
+) -> Result<TypeId, ElaborationError> {
+    let nominal = model::interface_nominal_at(interfaces, variant.owner);
+    handle *IndexVec::index(&interfaces.shell_to_type, nominal.shell) {
+        None => Result::Err(ElaborationError::MissingNominalType(token)),
+        Some(found) => Result::Ok(found)
+    }
+}
+
+elaborate_variant<'a>(
+    interfaces: &mut TypedInterfaces,
+    value: &mut BodyBuilder,
+    raw: u32,
+    token: usize,
+    arguments: Slice<'a, super::super::bodies::ExprId>,
+    expected: Option<TypeId>
+) -> Result<Elaborated, ElaborationError> {
+    let variant = try(variant_at(&*interfaces, raw, token), @elaborate_variant);
+    let ty = try(variant_owner_type(&*interfaces, variant, token), @elaborate_variant);
+    try(check_expected_type(ty, expected, token), @elaborate_variant);
+    let payloads = super::super::syntax::id_range_slice(
+        &interfaces.variant_payloads,
+        &variant.payloads
+    );
+    if(Slice::len(payloads) != Slice::len(arguments)) {
+        Result::Err(ElaborationError::VariantPayloadCountMismatch(
+            token,
+            u32_from_usize(Slice::len(payloads)),
+            u32_from_usize(Slice::len(arguments))
+        ))
+    } else if(Slice::is_empty(arguments)) {
+        let ordinal = Id::to_u32(model::interface_variant_id_from_usize(
+            usize_from_u32(raw)
+        )) - super::super::syntax::id_range_start(
+            handle model::interface_nominal_at(
+                &*interfaces,
+                variant.owner
+            ).kind {
+                InterfaceNominalKind::Enum(range) => &range,
+                _ => unreachable()
+            }
+        );
+        Result::Ok(Elaborated {
+            ty: ty,
+            form: ElaboratedForm::Computation(push_computation(
+                value,
+                ty,
+                CoreComputationKind::Construct(
+                    ConstructionFlavor::Variant(ordinal),
+                    super::super::syntax::id_range(
+                        Vec::len(&value.construction_fields),
+                        Vec::len(&value.construction_fields)
+                    )
+                )
+            ))
+        })
+    } else {
+        @elaborate_variant(Result::Err(ElaborationError::UnsupportedExpression(token)))
+    }
+}
+
+// Full variant argument elaboration needs the common expression context.
+elaborate_variant_arguments<'a>(
+    original: &String,
+    headers: &super::super::headers::ParsedHeaders,
+    declarations: &super::super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::super::bodies::ParsedBody,
+    resolved: &super::super::resolution::ResolvedBody,
+    value: &mut BodyBuilder,
+    raw: u32,
+    token: usize,
+    arguments: Slice<'a, super::super::bodies::ExprId>,
+    expected: Option<TypeId>
+) -> Result<Elaborated, ElaborationError> {
+    let variant = try(variant_at(&*interfaces, raw, token), @elaborate_variant_arguments);
+    let ty = try(variant_owner_type(&*interfaces, variant, token), @elaborate_variant_arguments);
+    try(check_expected_type(ty, expected, token), @elaborate_variant_arguments);
+    let payloads = super::super::syntax::id_range_slice(
+        &interfaces.variant_payloads,
+        &variant.payloads
+    );
+    if(Slice::len(payloads) != Slice::len(arguments)) {
+        Result::Err(ElaborationError::VariantPayloadCountMismatch(
+            token,
+            u32_from_usize(Slice::len(payloads)),
+            u32_from_usize(Slice::len(arguments))
+        ))
+    } else {
+        let values = Vec::new();
+        let types = Vec::new();
+        try(elaborate_expression_slice(
+            original,
+            headers,
+            declarations,
+            interfaces,
+            body,
+            resolved,
+            value,
+            arguments,
+            Some(payloads),
+            &mut values,
+            &mut types
+        ), @elaborate_variant_arguments);
+        let nominal = model::interface_nominal_at(&*interfaces, variant.owner);
+        let variants = handle nominal.kind {
+            InterfaceNominalKind::Enum(range) => range,
+            _ => unreachable()
+        };
+        let ordinal = raw - super::super::syntax::id_range_start(&variants);
+        Result::Ok(Elaborated {
+            ty: ty,
+            form: ElaboratedForm::Computation(push_computation(
+                value,
+                ty,
+                CoreComputationKind::Construct(
+                    ConstructionFlavor::Variant(ordinal),
+                    append_construction_values(value, &values)
+                )
+            ))
+        })
+    }
+}
+
+elaborate_call<'a>(
+    original: &String,
+    headers: &super::super::headers::ParsedHeaders,
+    declarations: &super::super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::super::bodies::ParsedBody,
+    resolved: &super::super::resolution::ResolvedBody,
+    value: &mut BodyBuilder,
+    expression: super::super::bodies::ExprId,
+    callee: super::super::bodies::ExprId,
+    arguments: Slice<'a, super::super::bodies::ExprId>,
+    expected: Option<TypeId>
+) -> Result<Elaborated, ElaborationError> {
+    let token = super::super::bodies::expression_token_start(body, expression);
+    handle try(resolved_target(resolved, callee, token), @elaborate_call) {
+        ResolvedTarget::Variant(raw) => elaborate_variant_arguments(
+            original,
+            headers,
+            declarations,
+            interfaces,
+            body,
+            resolved,
+            value,
+            raw,
+            token,
+            arguments,
+            expected
+        ),
+        ResolvedTarget::Function(shell) => handle model::interface_callable_for_shell(
+            &*interfaces,
+            shell
+        ) {
+            None => Result::Err(
+                ElaborationError::MissingCallableInterface(token, shell)
+            ),
+            Some(callable) => {
+                let count = model::interface_callable_parameter_count(
+                    &*interfaces,
+                    callable
+                );
+                if(usize_from_u32(count) != Slice::len(arguments)) {
+                    Result::Err(ElaborationError::ArgumentCountMismatch(
+                        token,
+                        count,
+                        u32_from_usize(Slice::len(arguments))
+                    ))
+                } else {
+                    let parameters = Vec::new();
+                    for_range(Range::new(0, usize_from_u32(count)), { index =>
+                        Vec::push(&mut parameters, model::interface_callable_parameter_at(
+                            &*interfaces,
+                            callable,
+                            index
+                        ))
+                    });
+                    let values = Vec::new();
+                    let types = Vec::new();
+                    try(elaborate_expression_slice(
+                        original,
+                        headers,
+                        declarations,
+                        interfaces,
+                        body,
+                        resolved,
+                        value,
+                        arguments,
+                        Some(Vec::as_slice(&parameters)),
+                        &mut values,
+                        &mut types
+                    ), @elaborate_call);
+                    let result = model::interface_callable_result(&*interfaces, callable);
+                    try(check_expected_type(result, expected, token), @elaborate_call);
+                    let start = Vec::len(&value.operands);
+                    for_range(Range::new(0, Vec::len(&values)), { index =>
+                        Vec::push(&mut value.operands, *Vec::index(&values, index))
+                    });
+                    Result::Ok(Elaborated {
+                        ty: result,
+                        form: ElaboratedForm::Computation(push_computation(
+                            value,
+                            result,
+                            CoreComputationKind::Call(
+                                shell,
+                                super::super::syntax::id_range(
+                                    start,
+                                    Vec::len(&value.operands)
+                                )
+                            )
+                        ))
+                    })
+                }
+            }
+        },
+        found => Result::Err(ElaborationError::InvalidCallTarget(
+            token,
+            handle found {
+                ResolvedTarget::Parameter(id) => Id::to_u32(id),
+                ResolvedTarget::Local(id) => Id::to_u32(id),
+                ResolvedTarget::Struct(raw) => raw,
+                _ => 0
+            }
+        ))
+    }
+}
+
+field_range_for_type(
+    interfaces: &TypedInterfaces,
+    ty: TypeId,
+    token: usize
+) -> Result<model::InterfaceFieldRange, ElaborationError> {
+    handle model::type_kind_at(interfaces, ty) {
+        TypeKind::Nominal(id) => handle model::interface_nominal_at(
+            interfaces,
+            id
+        ).kind {
+            InterfaceNominalKind::Struct(range) => Result::Ok(range),
+            _ => Result::Err(ElaborationError::InvalidStructTarget(
+                token,
+                Id::to_u32(ty)
+            ))
+        },
+        _ => Result::Err(ElaborationError::InvalidStructTarget(
+            token,
+            Id::to_u32(ty)
+        ))
+    }
+}
+
+field_name(value: ExpressionName) -> Option<(u32, usize)> {
+    handle value {
+        ExpressionName::Identifier(name, token) => Some((Id::to_u32(name), token)),
+        _ => None
+    }
+}
+
+find_interface_field(
+    interfaces: &TypedInterfaces,
+    range: model::InterfaceFieldRange,
+    name: u32,
+    ordinal: u32
+) -> Option<u32> {
+    let count = super::super::syntax::id_range_count(&range);
+    if(ordinal < count) {
+        let raw = super::super::syntax::id_range_start(&range) + ordinal;
+        let field = model::interface_field_at(
+            interfaces,
+            model::interface_field_id_from_usize(usize_from_u32(raw))
+        );
+        if(field.name == name) { Some(ordinal) }
+        else { find_interface_field(interfaces, range, name, ordinal + 1) }
+    } else { None }
+}
+
+elaborate_struct_fields<'a>(
+    original: &String,
+    headers: &super::super::headers::ParsedHeaders,
+    declarations: &super::super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::super::bodies::ParsedBody,
+    resolved: &super::super::resolution::ResolvedBody,
+    value: &mut BodyBuilder,
+    fields: Slice<'a, super::super::bodies::StructField>,
+    range: model::InterfaceFieldRange,
+    slots: &mut Vec<Option<CoreValueId>>
+) -> Result<(), ElaborationError> {
+    Slice::try_for_each(fields, { source => {
+        let name = Id::to_u32(super::super::bodies::struct_field_name(source));
+        let token = super::super::bodies::struct_field_name_token(source);
+        handle find_interface_field(&*interfaces, range, name, 0) {
+            None => Result::Err(ElaborationError::UnknownStructField(token, name)),
+            Some(ordinal) => if(Option::is_some(Vec::index(slots, usize_from_u32(ordinal)))) {
+                Result::Err(ElaborationError::DuplicateOrInaccessibleField(
+                    token,
+                    ordinal
+                ))
+            } else {
+                let raw = super::super::syntax::id_range_start(&range) + ordinal;
+                let field = model::interface_field_at(
+                    &*interfaces,
+                    model::interface_field_id_from_usize(usize_from_u32(raw))
+                );
+                let found = try(elaborate_expression(
+                    original,
+                    headers,
+                    declarations,
+                    interfaces,
+                    body,
+                    resolved,
+                    value,
+                    super::super::bodies::struct_field_expression(source),
+                    Some(field.ty)
+                ), @elaborate_struct_fields);
+                *Vec::index_mut(slots, usize_from_u32(ordinal)) = Some(
+                    embedded(value, found)
+                );
+                Result::Ok(())
+            }
+        }
+    } })
+}
+
+append_struct_fields(
+    value: &mut BodyBuilder,
+    slots: &Vec<Option<CoreValueId>>,
+    token: usize
+) -> Result<model::ConstructionFieldRange, ElaborationError> {
+    let start = Vec::len(&value.construction_fields);
+    try(try_for_range(Range::new(0, Vec::len(slots)), { index => handle
+        *Vec::index(slots, index) {
+            None => Result::Err(ElaborationError::StructFieldCountMismatch(
+                token,
+                u32_from_usize(Vec::len(slots)),
+                u32_from_usize(index)
+            )),
+            Some(found) => {
+                Vec::push(&mut value.construction_fields, ConstructionField {
+                    field: u32_from_usize(index),
+                    value: found
+                });
+                Result::Ok(())
+            }
+        }
+    }), @append_struct_fields);
+    Result::Ok(super::super::syntax::id_range(
+        start,
+        Vec::len(&value.construction_fields)
+    ))
+}
+
+elaborate_struct<'a>(
+    original: &String,
+    headers: &super::super::headers::ParsedHeaders,
+    declarations: &super::super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::super::bodies::ParsedBody,
+    resolved: &super::super::resolution::ResolvedBody,
+    value: &mut BodyBuilder,
+    expression: super::super::bodies::ExprId,
+    fields: Slice<'a, super::super::bodies::StructField>,
+    expected: Option<TypeId>
+) -> Result<Elaborated, ElaborationError> {
+    let token = super::super::bodies::expression_token_start(body, expression);
+    let header = handle try(resolved_target(
+        resolved,
+        expression,
+        token
+    ), @elaborate_struct) {
+        ResolvedTarget::Struct(found) => found,
+        found => @elaborate_struct(Result::Err(
+            ElaborationError::InvalidStructTarget(token, handle found {
+                ResolvedTarget::Parameter(id) => Id::to_u32(id),
+                ResolvedTarget::Local(id) => Id::to_u32(id),
+                ResolvedTarget::Function(id) => Id::to_u32(id),
+                ResolvedTarget::Variant(raw) => raw,
+                _ => 0
+            })
+        ))
+    };
+    let source = handle super::super::headers::struct_at(
+        super::super::headers::nominal_index(headers),
+        usize_from_u32(header)
+    ) {
+        None => @elaborate_struct(Result::Err(
+            ElaborationError::MissingStructHeader(Id::from_u32(header))
+        )),
+        Some(found) => found
+    };
+    let shell = super::super::headers::struct_shell(source);
+    let ty = handle *IndexVec::index(&interfaces.shell_to_type, shell) {
+        None => @elaborate_struct(Result::Err(
+            ElaborationError::MissingNominalType(token)
+        )),
+        Some(found) => found
+    };
+    try(check_expected_type(ty, expected, token), @elaborate_struct);
+    let range = try(field_range_for_type(&*interfaces, ty, token), @elaborate_struct);
+    let slots = Vec::new();
+    for_range(Range::new(
+        0,
+        usize_from_u32(super::super::syntax::id_range_count(&range))
+    ), { _ => Vec::push(&mut slots, None) });
+    try(elaborate_struct_fields(
+        original,
+        headers,
+        declarations,
+        interfaces,
+        body,
+        resolved,
+        value,
+        fields,
+        range,
+        &mut slots
+    ), @elaborate_struct);
+    if(Slice::len(fields) != Vec::len(&slots)) {
+        Result::Err(ElaborationError::StructFieldCountMismatch(
+            token,
+            u32_from_usize(Vec::len(&slots)),
+            u32_from_usize(Slice::len(fields))
+        ))
+    } else {
+        Result::Ok(Elaborated {
+            ty: ty,
+            form: ElaboratedForm::Computation(push_computation(
+                value,
+                ty,
+                CoreComputationKind::Construct(
+                    ConstructionFlavor::Product,
+                    try(append_struct_fields(value, &slots, token), @elaborate_struct)
+                )
+            ))
+        })
+    }
+}
+
+elaborate_projection(
+    original: &String,
+    headers: &super::super::headers::ParsedHeaders,
+    declarations: &super::super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::super::bodies::ParsedBody,
+    resolved: &super::super::resolution::ResolvedBody,
+    value: &mut BodyBuilder,
+    expression: super::super::bodies::ExprId,
+    subject: super::super::bodies::ExprId,
+    name: ExpressionName,
+    expected: Option<TypeId>
+) -> Result<Elaborated, ElaborationError> {
+    let token = super::super::bodies::expression_name_token(name);
+    let found = try(elaborate_expression(
+        original,
+        headers,
+        declarations,
+        interfaces,
+        body,
+        resolved,
+        value,
+        subject,
+        None
+    ), @elaborate_projection);
+    let field = super::super::bodies::expression_name_value(name);
+    let result = handle model::type_kind_at(&*interfaces, found.ty) {
+        TypeKind::Tuple(range) => {
+            let elements = super::super::syntax::id_range_slice(
+                &interfaces.type_elements,
+                &range
+            );
+            if(usize_from_u32(field) < Slice::len(elements)) {
+                Result::Ok(*handle Slice::get(elements, usize_from_u32(field)) {
+                    Result::Err(_) => unreachable(),
+                    Result::Ok(found) => found
+                })
+            } else { Result::Err(()) }
+        },
+        TypeKind::Nominal(nominal) => handle model::interface_nominal_at(
+            &*interfaces,
+            nominal
+        ).kind {
+            InterfaceNominalKind::Struct(range) => handle find_interface_field(
+                &*interfaces,
+                range,
+                field,
+                0
+            ) {
+                None => Result::Err(()),
+                Some(ordinal) => {
+                    let raw = super::super::syntax::id_range_start(&range) + ordinal;
+                    Result::Ok(model::interface_field_at(
+                        &*interfaces,
+                        model::interface_field_id_from_usize(usize_from_u32(raw))
+                    ).ty)
+                }
+            },
+            _ => Result::Err(())
+        },
+        _ => Result::Err(())
+    };
+    handle result {
+        Result::Err(_) => Result::Err(ElaborationError::UnknownProjectionField(
+            token,
+            Id::to_u32(found.ty),
+            field
+        )),
+        Result::Ok(ty) => {
+            try(check_expected_type(ty, expected, token), @elaborate_projection);
+            Result::Ok(Elaborated {
+                ty: ty,
+                form: ElaboratedForm::Value(push_value(
+                    value,
+                    ty,
+                    CoreValueKind::Projection(embedded(value, found), field)
+                ))
+            })
+        }
+    }
+}
+
+source_local_for_let(
+    resolved: &super::super::resolution::ResolvedBody,
+    token: usize,
+    block: super::super::bodies::ExprId,
+    index: usize
+) -> Option<super::super::resolution::LocalId> {
+    if(index < super::super::resolution::local_count(resolved)) {
+        if(super::super::resolution::local_name_token_at(resolved, index) == token
+            and {
+                super::super::resolution::local_block_expression_at(resolved, index)
+                    == block
+            }) {
+            handle Id::from_usize(index) {
+                Result::Err(_) => None,
+                Result::Ok(found) => Some(found)
+            }
+        } else {
+            source_local_for_let(resolved, token, block, index + 1)
+        }
+    } else { None }
+}
+
+elaborate_block<'a>(
+    original: &String,
+    headers: &super::super::headers::ParsedHeaders,
+    declarations: &super::super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::super::bodies::ParsedBody,
+    resolved: &super::super::resolution::ResolvedBody,
+    value: &mut BodyBuilder,
+    block: super::super::bodies::ExprId,
+    statements: Slice<'a, BlockStatement>,
+    ordinal: usize,
+    expected: Option<TypeId>
+) -> Result<Elaborated, ElaborationError> {
+    if(ordinal >= Slice::len(statements)) {
+        check_expected(unit(value), expected, super::super::bodies::expression_token_end(
+            body,
+            block
+        ))
+    } else {
+        let statement = *handle Slice::get(statements, ordinal) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let last = ordinal + 1 == Slice::len(statements);
+        handle statement {
+            BlockStatement::Expression(expression) => if(last) {
+                elaborate_expression(
+                    original,
+                    headers,
+                    declarations,
+                    interfaces,
+                    body,
+                    resolved,
+                    value,
+                    expression,
+                    expected
+                )
+            } else {
+                let initializer = try(elaborate_expression(
+                    original,
+                    headers,
+                    declarations,
+                    interfaces,
+                    body,
+                    resolved,
+                    value,
+                    expression,
+                    None
+                ), @elaborate_block);
+                let temporary = push_local_slot(
+                    &mut value.local_types,
+                    Some(initializer.ty)
+                );
+                let remainder = try(elaborate_block(
+                    original,
+                    headers,
+                    declarations,
+                    interfaces,
+                    body,
+                    resolved,
+                    value,
+                    block,
+                    statements,
+                    ordinal + 1,
+                    expected
+                ), @elaborate_block);
+                Result::Ok(Elaborated {
+                    ty: remainder.ty,
+                    form: ElaboratedForm::Computation(push_computation(
+                        value,
+                        remainder.ty,
+                        CoreComputationKind::Let(
+                            temporary,
+                            pure(value, initializer),
+                            pure(value, remainder)
+                        )
+                    ))
+                })
+            },
+            BlockStatement::Let(initializer_id, token) => {
+                let initializer = try(elaborate_expression(
+                    original,
+                    headers,
+                    declarations,
+                    interfaces,
+                    body,
+                    resolved,
+                    value,
+                    initializer_id,
+                    None
+                ), @elaborate_block);
+                let source = handle source_local_for_let(
+                    resolved,
+                    token,
+                    block,
+                    0
+                ) {
+                    None => @elaborate_block(Result::Err(
+                        ElaborationError::InvalidLocalReference(
+                            token,
+                            u32_from_usize(super::super::resolution::local_count(resolved)),
+                            0
+                        )
+                    )),
+                    Some(found) => found
+                };
+                let local = core_local(value.parameter_count + Id::to_u32(source));
+                *IndexVec::index_mut(&mut value.local_types, local) = Some(initializer.ty);
+                let remainder = try(elaborate_block(
+                    original,
+                    headers,
+                    declarations,
+                    interfaces,
+                    body,
+                    resolved,
+                    value,
+                    block,
+                    statements,
+                    ordinal + 1,
+                    expected
+                ), @elaborate_block);
+                Result::Ok(Elaborated {
+                    ty: remainder.ty,
+                    form: ElaboratedForm::Computation(push_computation(
+                        value,
+                        remainder.ty,
+                        CoreComputationKind::Let(
+                            local,
+                            pure(value, initializer),
+                            pure(value, remainder)
+                        )
+                    ))
+                })
+            }
+        }
+    }
+}
+
+mark_seen(value: &mut Vec<Bool>, ordinal: usize) -> Bool {
+    if(*Vec::index(value, ordinal)) {
+        false
+    } else {
+        *Vec::index_mut(value, ordinal) = true;
+        true
+    }
+}
+
+all_seen(value: &Vec<Bool>, index: usize) -> Bool {
+    if(index < Vec::len(value)) {
+        *Vec::index(value, index) and { all_seen(value, index + 1) }
+    } else { true }
+}
+
+elaborate_handle<'a>(
+    original: &String,
+    headers: &super::super::headers::ParsedHeaders,
+    declarations: &super::super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::super::bodies::ParsedBody,
+    resolved: &super::super::resolution::ResolvedBody,
+    value: &mut BodyBuilder,
+    expression: super::super::bodies::ExprId,
+    subject_id: super::super::bodies::ExprId,
+    source_arms: Slice<'a, super::super::bodies::HandleArm>,
+    expected: Option<TypeId>
+) -> Result<Elaborated, ElaborationError> {
+    let token = super::super::bodies::expression_token_start(body, expression);
+    let subject = try(elaborate_expression(
+        original,
+        headers,
+        declarations,
+        interfaces,
+        body,
+        resolved,
+        value,
+        subject_id,
+        None
+    ), @elaborate_handle);
+    let nominal = handle model::type_kind_at(&*interfaces, subject.ty) {
+        TypeKind::Nominal(found) => found,
+        _ => @elaborate_handle(Result::Err(
+            ElaborationError::ExpectedEnumType(token, Id::to_u32(subject.ty))
+        ))
+    };
+    let variants = handle model::interface_nominal_at(
+        &*interfaces,
+        nominal
+    ).kind {
+        InterfaceNominalKind::Enum(found) => found,
+        _ => @elaborate_handle(Result::Err(
+            ElaborationError::ExpectedEnumType(token, Id::to_u32(subject.ty))
+        ))
+    };
+    let resolved_arms = super::super::resolution::resolved_handle_arms(
+        resolved,
+        expression
+    );
+    let variant_count = usize_from_u32(
+        super::super::syntax::id_range_count(&variants)
+    );
+    if(Slice::len(source_arms) != variant_count
+        or { Slice::len(resolved_arms) != Slice::len(source_arms) }) {
+        Result::Err(ElaborationError::MissingMatchVariants(
+            token,
+            u32_from_usize(variant_count),
+            u32_from_usize(Slice::len(source_arms))
+        ))
+    } else {
+        let seen = Vec::new();
+        for_range(Range::new(0, variant_count), { _ => Vec::push(&mut seen, false) });
+        let arms = Vec::new();
+        let result_type = expected;
+        try(try_for_range(Range::new(0, Slice::len(source_arms)), { index => {
+            let source = *handle Slice::get(source_arms, index) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            };
+            let resolved_arm = *handle Slice::get(resolved_arms, index) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            };
+            let raw = super::super::resolution::resolved_handle_variant(&resolved_arm);
+            let start = super::super::syntax::id_range_start(&variants);
+            if(raw < start or { raw >= start + u32_from_usize(variant_count) }) {
+                Result::Err(ElaborationError::VariantOwnerMismatch(
+                    super::super::bodies::handle_arm_variant_token(&source),
+                    Id::to_u32(nominal),
+                    raw
+                ))
+            } else {
+                let ordinal = raw - start;
+                if(not(mark_seen(&mut seen, usize_from_u32(ordinal)))) {
+                    Result::Err(ElaborationError::DuplicateMatchVariant(
+                        super::super::bodies::handle_arm_variant_token(&source),
+                        u32_from_usize(variant_count),
+                        u32_from_usize(Slice::len(source_arms))
+                    ))
+                } else {
+                    let variant = *model::interface_variant_at(
+                        &*interfaces,
+                        model::interface_variant_id_from_usize(usize_from_u32(raw))
+                    );
+                    let payloads = super::super::syntax::id_range_slice(
+                        &interfaces.variant_payloads,
+                        &variant.payloads
+                    );
+                    let binders = super::super::resolution::resolved_handle_binders(
+                        resolved,
+                        &resolved_arm
+                    );
+                    if(Slice::len(payloads) != Slice::len(binders)) {
+                        Result::Err(ElaborationError::VariantPayloadCountMismatch(
+                            super::super::bodies::handle_arm_variant_token(&source),
+                            u32_from_usize(Slice::len(payloads)),
+                            u32_from_usize(Slice::len(binders))
+                        ))
+                    } else {
+                        let binding_start = Vec::len(&value.match_bindings);
+                        for_range(Range::new(0, Slice::len(payloads)), { binder_index => {
+                            let ty = *handle Slice::get(payloads, binder_index) {
+                                Result::Err(_) => unreachable(),
+                                Result::Ok(found) => found
+                            };
+                            let binder = *handle Slice::get(binders, binder_index) {
+                                Result::Err(_) => unreachable(),
+                                Result::Ok(found) => found
+                            };
+                            let local = handle binder {
+                                ResolvedPatternBinder::Wildcard => None,
+                                ResolvedPatternBinder::Local(source_local) => {
+                                    let core = core_local(
+                                        value.parameter_count + Id::to_u32(source_local)
+                                    );
+                                    *IndexVec::index_mut(
+                                        &mut value.local_types,
+                                        core
+                                    ) = Some(ty);
+                                    Some(core)
+                                }
+                            };
+                            Vec::push(&mut value.match_bindings, CoreMatchBinding {
+                                field: u32_from_usize(binder_index),
+                                local: local,
+                                ty: ty
+                            })
+                        }});
+                        let arm = try(elaborate_expression(
+                            original,
+                            headers,
+                            declarations,
+                            interfaces,
+                            body,
+                            resolved,
+                            value,
+                            super::super::bodies::handle_arm_body(&source),
+                            result_type
+                        ), @elaborate_handle);
+                        handle result_type {
+                            None => result_type = Some(arm.ty),
+                            Some(_) => ()
+                        };
+                        Vec::push(&mut arms, CoreMatchArm {
+                            variant: ordinal,
+                            bindings: super::super::syntax::id_range(
+                                binding_start,
+                                Vec::len(&value.match_bindings)
+                            ),
+                            body: pure(value, arm)
+                        });
+                        Result::Ok(())
+                    }
+                }
+            }
+        } }), @elaborate_handle);
+        if(not(all_seen(&seen, 0))) {
+            Result::Err(ElaborationError::MissingMatchVariants(
+                token,
+                u32_from_usize(variant_count),
+                u32_from_usize(Slice::len(source_arms))
+            ))
+        } else {
+            let ty = result_type else { Id::from_u32(0) };
+            let start = Vec::len(&value.match_arms);
+            for_range(Range::new(0, Vec::len(&arms)), { index =>
+                Vec::push(&mut value.match_arms, *Vec::index(&arms, index))
+            });
+            Result::Ok(Elaborated {
+                ty: ty,
+                form: ElaboratedForm::Computation(push_computation(
+                    value,
+                    ty,
+                    CoreComputationKind::Match(
+                        embedded(value, subject),
+                        super::super::syntax::id_range(
+                            start,
+                            Vec::len(&value.match_arms)
+                        )
+                    )
+                ))
+            })
+        }
+    }
+}
+
+pub elaborate_expression(
+    original: &String,
+    headers: &super::super::headers::ParsedHeaders,
+    declarations: &super::super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::super::bodies::ParsedBody,
+    resolved: &super::super::resolution::ResolvedBody,
+    value: &mut BodyBuilder,
+    expression: super::super::bodies::ExprId,
+    expected: Option<TypeId>
+) -> Result<Elaborated, ElaborationError> {
+    handle super::super::bodies::expression_view(body, expression) {
+        ExprView::Identifier(_, _) => elaborate_identifier(
+            &*interfaces,
+            body,
+            resolved,
+            value,
+            expression,
+            expected
+        ),
+        ExprView::Number(_) => elaborate_number(
+            original,
+            headers,
+            body,
+            value,
+            expression,
+            expected
+        ),
+        ExprView::Unit(_) => check_expected(
+            unit(value),
+            expected,
+            super::super::bodies::expression_token_start(body, expression)
+        ),
+        ExprView::Group(_, child) => elaborate_expression(
+            original,
+            headers,
+            declarations,
+            interfaces,
+            body,
+            resolved,
+            value,
+            child,
+            expected
+        ),
+        ExprView::Prefix(tokens, _, _) => Result::Err(
+            ElaborationError::UnsupportedExpression(
+                super::super::syntax::token_start(&tokens)
+            )
+        ),
+        ExprView::Infix(tokens, _, _, _) => Result::Err(
+            ElaborationError::UnsupportedExpression(
+                super::super::syntax::token_start(&tokens)
+            )
+        ),
+        ExprView::Call(_, callee, arguments) => elaborate_call(
+            original,
+            headers,
+            declarations,
+            interfaces,
+            body,
+            resolved,
+            value,
+            expression,
+            callee,
+            arguments,
+            expected
+        ),
+        ExprView::Block(_, statements) => elaborate_block(
+            original,
+            headers,
+            declarations,
+            interfaces,
+            body,
+            resolved,
+            value,
+            expression,
+            statements,
+            0,
+            expected
+        ),
+        ExprView::Tuple(_, elements) => elaborate_tuple(
+            original,
+            headers,
+            declarations,
+            interfaces,
+            body,
+            resolved,
+            value,
+            expression,
+            elements,
+            expected
+        ),
+        ExprView::Struct(_, _, fields) => elaborate_struct(
+            original,
+            headers,
+            declarations,
+            interfaces,
+            body,
+            resolved,
+            value,
+            expression,
+            fields,
+            expected
+        ),
+        ExprView::Projection(_, subject, name) => elaborate_projection(
+            original,
+            headers,
+            declarations,
+            interfaces,
+            body,
+            resolved,
+            value,
+            expression,
+            subject,
+            name,
+            expected
+        ),
+        ExprView::Handle(_, subject, arms) => elaborate_handle(
+            original,
+            headers,
+            declarations,
+            interfaces,
+            body,
+            resolved,
+            value,
+            expression,
+            subject,
+            arms,
+            expected
+        )
+    }
+}
+
+pub elaborate_function_body(
+    original: &String,
+    headers: &super::super::headers::ParsedHeaders,
+    declarations: &super::super::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    body: &super::super::bodies::ParsedBody,
+    resolved: &super::super::resolution::ResolvedBody
+) -> Result<TypedBody, ElaborationError> {
+    let shell = super::super::bodies::body_shell(body);
+    let callable = handle model::interface_callable_for_shell(
+        &*interfaces,
+        shell
+    ) {
+        None => @elaborate_function_body(Result::Err(
+            ElaborationError::MissingBodyCallable(shell)
+        )),
+        Some(found) => found
+    };
+    let parameter_count = model::interface_callable_parameter_count(
+        &*interfaces,
+        callable
+    );
+    let builder = BodyBuilder {
+        parameter_count: parameter_count,
+        final_transfers: final_transfers(body, resolved, parameter_count),
+        local_types: IndexVec::new(),
+        values: Arena::new(),
+        computations: Arena::new(),
+        operands: Vec::new(),
+        construction_fields: Vec::new(),
+        match_arms: Vec::new(),
+        match_bindings: Vec::new(),
+        integer_constants: Arena::new()
+    };
+    fill_local_types(
+        &mut builder,
+        &*interfaces,
+        callable,
+        super::super::resolution::local_count(resolved)
+    );
+    let result = model::interface_callable_result(&*interfaces, callable);
+    let elaborated = try(elaborate_expression(
+        original,
+        headers,
+        declarations,
+        interfaces,
+        body,
+        resolved,
+        &mut builder,
+        super::super::bodies::body_root(body),
+        Some(result)
+    ), @elaborate_function_body);
+    let root = pure(&mut builder, elaborated);
+    let BodyBuilder {
+        parameter_count: _,
+        final_transfers: _,
+        local_types,
+        values,
+        computations,
+        operands,
+        construction_fields,
+        match_arms,
+        match_bindings,
+        integer_constants
+    } = builder;
+    let finalized_locals = IndexVec::new();
+    IndexVec::for_each(&local_types, { _, ty => handle *ty {
+        None => (),
+        Some(found) => handle IndexVec::push(&mut finalized_locals, found) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(_) => ()
+        }
+    }});
+    Result::Ok(TypedBody {
+        shell: shell,
+        result_type: result,
+        root: root,
+        local_types: finalized_locals,
+        values: values,
+        computations: computations,
+        operands: operands,
+        construction_fields: construction_fields,
+        match_arms: match_arms,
+        match_bindings: match_bindings,
+        integer_constants: integer_constants
+    })
+}
