@@ -417,10 +417,7 @@ fn self_host_bundle() -> SourceBundle {
         "#,
     ]
     .concat();
-    let primary = Segment::new(
-        root.join("main.glorious").to_string_lossy(),
-        primary_source,
-    );
+    let primary = Segment::new(root.join("main.glorious").to_string_lossy(), primary_source);
     let paths = [
         root.join("frontend/frontend.glorious"),
         root.join("frontend/lexer/lexer.glorious"),
@@ -466,11 +463,7 @@ fn assert_diagnostic_contracts(mut run: impl FnMut(&str, Vec<Value>) -> Value) {
         (9, 3, 9003, 2, 3),
     ];
     let fingerprint = |(phase, class, code, space, owner)| {
-        phase * 1_000_000_000
-            + class * 100_000_000
-            + code * 1_000
-            + space * 10
-            + owner
+        phase * 1_000_000_000 + class * 100_000_000 + code * 1_000 + space * 10 + owner
     };
     let weights = [1_u64, 17, 289, 4_913, 83_521, 1_419_857];
     let mut expected = frontend
@@ -671,12 +664,17 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
             )
             .unwrap();
             let compiler_entry = phases.artifact.entry_function.unwrap();
-            let compiler = grandiose_vm::verify(phases.artifact.clone()).unwrap();
+            let compiler = load_verified(&phases.artifact.encode()).unwrap();
 
             assert_diagnostic_contracts(|name, args| {
-                Vm::new(compiler.clone())
-                    .run(function_id(&phases.artifact, name), args)
-                    .unwrap()
+                Vm::with_host(
+                    compiler.clone(),
+                    ["process.args", "fs.read", "fs.write", "diagnostic"],
+                    SystemHost::new(vec![]),
+                )
+                .unwrap()
+                .run(function_id(&phases.artifact, name), args)
+                .unwrap()
             });
 
             let classify = function_id(&phases.artifact, "classify_compile_error");
@@ -717,7 +715,7 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
                 .arg(&llvm)
                 .arg(repository_root().join("crates/grandiose/src/native_runtime.c"))
                 .arg(repository_root().join("crates/grandiose/src/native_host_runtime.c"))
-                .arg("-O0")
+                .arg("-O2")
                 .arg("-o")
                 .arg(&executable)
                 .output()

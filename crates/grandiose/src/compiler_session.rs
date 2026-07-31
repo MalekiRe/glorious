@@ -50,6 +50,7 @@ pub struct CompilationDriver {
     pub(crate) mir_cache: IncrementalMirCache,
     phase_cache: VecDeque<CachedPhases>,
     diagnostic_cache: VecDeque<CachedDiagnostics>,
+    request_revision: u64,
     stats: IncrementalCompilationStats,
     diagnostic_stats: DiagnosticCacheStats,
 }
@@ -62,6 +63,7 @@ struct CachedPhases {
     interfaces: Option<crate::interface::InterfaceBundleSnapshot>,
     reusable_bodies: usize,
     reusable_mir_bodies: usize,
+    last_used_revision: u64,
 }
 
 #[derive(Clone)]
@@ -70,6 +72,7 @@ struct CachedDiagnostics {
     options: CompileOptions,
     include_interfaces: bool,
     diagnostics: Vec<Diagnostic>,
+    last_used_revision: u64,
 }
 
 /// Retaining a few complete revisions makes undo/redo effectively free while
@@ -130,16 +133,20 @@ impl CompilationDriver {
         ),
         Vec<Diagnostic>,
     > {
+        self.request_revision = self.request_revision.wrapping_add(1);
+        let request_revision = self.request_revision;
         if let Some(index) = self.phase_cache.iter().position(|cached| {
             cached.options == options
                 && cached.bundle == *bundle
                 && (!include_interfaces || cached.interfaces.is_some())
         }) {
-            let historical = index != 0;
             let cached = self
                 .phase_cache
                 .remove(index)
                 .expect("phase cache index disappeared");
+            let historical = cached.last_used_revision != request_revision.wrapping_sub(1);
+            let mut cached = cached;
+            cached.last_used_revision = request_revision;
             self.stats = IncrementalCompilationStats {
                 elaborated_bodies: 0,
                 reused_bodies: cached.reusable_bodies,
@@ -159,11 +166,13 @@ impl CompilationDriver {
                 && cached.include_interfaces == include_interfaces
                 && cached.bundle == *bundle
         }) {
-            let historical = index != 0;
             let cached = self
                 .diagnostic_cache
                 .remove(index)
                 .expect("diagnostic cache index disappeared");
+            let historical = cached.last_used_revision != request_revision.wrapping_sub(1);
+            let mut cached = cached;
+            cached.last_used_revision = request_revision;
             self.stats = IncrementalCompilationStats::default();
             self.diagnostic_stats = DiagnosticCacheStats {
                 reused_results: 1,
@@ -203,6 +212,7 @@ impl CompilationDriver {
                     reusable_bodies: self.stats.elaborated_bodies + self.stats.reused_bodies,
                     reusable_mir_bodies: self.stats.lowered_mir_bodies
                         + self.stats.reused_mir_bodies,
+                    last_used_revision: request_revision,
                 });
                 self.phase_cache.truncate(PHASE_CACHE_CAPACITY);
                 // A successful revision supersedes any terminal-diagnostic
@@ -224,6 +234,7 @@ impl CompilationDriver {
                     options,
                     include_interfaces,
                     diagnostics: diagnostics.clone(),
+                    last_used_revision: request_revision,
                 });
                 self.diagnostic_cache.truncate(DIAGNOSTIC_CACHE_CAPACITY);
             }
@@ -374,26 +385,60 @@ mod tests {
         let second = invalid_bundle("main() { missing( } ");
         let mut driver = CompilationDriver::new();
 
-        assert!(driver.compile_bundle(&first, options).is_err());
+        let first_diagnostics = driver.compile_bundle(&first, options).unwrap_err();
         assert_eq!(driver.diagnostic_cache_stats().reused_results, 0);
 
-        assert!(driver.compile_bundle(&first, options).is_err());
-        assert_eq!(driver.diagnostic_cache_stats().reused_results, 1);
         assert_eq!(
-            driver
-                .diagnostic_cache_stats()
-                .reused_historical_results,
-            0
+            format!("{:?}", driver.compile_bundle(&first, options).unwrap_err()),
+            format!("{first_diagnostics:?}")
         );
+        assert_eq!(driver.diagnostic_cache_stats().reused_results, 1);
+        assert_eq!(driver.diagnostic_cache_stats().reused_historical_results, 0);
 
         assert!(driver.compile_bundle(&second, options).is_err());
         assert!(driver.compile_bundle(&first, options).is_err());
         assert_eq!(driver.diagnostic_cache_stats().reused_results, 1);
-        assert_eq!(
-            driver
-                .diagnostic_cache_stats()
-                .reused_historical_results,
-            1
-        );
+        assert_eq!(driver.diagnostic_cache_stats().reused_historical_results, 1);
+    }
+
+    #[test]
+    fn diagnostic_cache_keys_modes_options_and_evicts_old_entries() {
+        let o0 = CompileOptions {
+            optimization_level: OptimizationLevel::O0,
+        };
+        let o1 = CompileOptions {
+            optimization_level: OptimizationLevel::O1,
+        };
+        let first = invalid_bundle("main() { missing_a( }");
+        let mut driver = CompilationDriver::new();
+
+        assert!(driver.compile_bundle(&first, o0).is_err());
+        assert!(driver.compile_bundle(&first, o1).is_err());
+        assert_eq!(driver.diagnostic_cache_stats().reused_results, 0);
+        assert!(driver.compile_bundle_with_interfaces(&first, o0).is_err());
+        assert_eq!(driver.diagnostic_cache_stats().reused_results, 0);
+
+        for suffix in ["b", "c", "d", "e"] {
+            let bundle = invalid_bundle(&format!("main() {{ missing_{suffix}( }}"));
+            assert!(driver.compile_bundle(&bundle, o0).is_err());
+        }
+        assert!(driver.compile_bundle(&first, o0).is_err());
+        assert_eq!(driver.diagnostic_cache_stats().reused_results, 0);
+    }
+
+    #[test]
+    fn diagnostic_reuse_is_historical_after_a_successful_revision() {
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O0,
+        };
+        let invalid = invalid_bundle("main() { missing( }");
+        let valid = invalid_bundle("main() -> () { () }");
+        let mut driver = CompilationDriver::new();
+
+        assert!(driver.compile_bundle(&invalid, options).is_err());
+        assert!(driver.compile_bundle(&valid, options).is_ok());
+        assert!(driver.compile_bundle(&invalid, options).is_err());
+        assert_eq!(driver.diagnostic_cache_stats().reused_results, 1);
+        assert_eq!(driver.diagnostic_cache_stats().reused_historical_results, 1);
     }
 }

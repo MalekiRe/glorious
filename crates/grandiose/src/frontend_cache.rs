@@ -186,10 +186,8 @@ mod tests {
 
     #[test]
     fn fresh_compiler_sessions_share_the_embedded_standard_tokens() {
-        let bundle = SourceBundle::distributed(
-            Segment::new("main.glorious", "main() -> () { () }"),
-            [],
-        );
+        let bundle =
+            SourceBundle::distributed(Segment::new("main.glorious", "main() -> () { () }"), []);
         let mut first = IncrementalFrontendCache::new();
         let mut second = IncrementalFrontendCache::new();
 
