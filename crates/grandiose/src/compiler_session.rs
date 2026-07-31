@@ -2,11 +2,11 @@
 //!
 //! Module/import/name context is rebuilt on body-changing requests. Provisional
 //! per-body inference evidence is retained while the compiler's context
-//! fingerprint (all source outside callable bodies) remains identical. The
-//! A bounded set of successful, fully verified phase outputs is additionally
-//! retained for exact-input retries, avoiding all downstream work for duplicate
-//! checks and editor undo/redo without reusing artifacts across a semantic
-//! input change.
+//! fingerprint (all source outside callable bodies) remains identical. A
+//! bounded set of successful, fully verified phase outputs and terminal
+//! diagnostics is additionally retained for exact-input retries, avoiding all
+//! downstream work for duplicate checks and editor undo/redo without reusing
+//! results across a semantic input change.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -22,13 +22,17 @@ use crate::{compiler_core as core, compiler_mir as mir};
 pub struct IncrementalCompilationStats {
     pub elaborated_bodies: usize,
     pub reused_bodies: usize,
-    /// Exact-input checks satisfied by cloning the last successful verified
-    /// Core, MIR, and bytecode phase output.
+    /// Exact-input checks satisfied by cloning a successful verified Core, MIR,
+    /// and bytecode phase output.
     pub reused_phase_artifacts: usize,
-    /// Exact-input checks restored from an older successful revision rather
-    /// than the immediately preceding revision. This is the common editor
-    /// undo/redo and branch-switch case.
+    /// Successful exact-input checks restored from an older revision rather
+    /// than the immediately preceding revision.
     pub reused_historical_phase_artifacts: usize,
+    /// Exact invalid-input checks satisfied by cloning terminal diagnostics.
+    pub reused_diagnostics: usize,
+    /// Invalid-input checks restored from an older revision. This is common for
+    /// editor undo/redo across two independently invalid states.
+    pub reused_historical_diagnostics: usize,
     pub lowered_mir_bodies: usize,
     pub reused_mir_bodies: usize,
     pub frontend: crate::frontend_cache::FrontendCacheStats,
@@ -40,6 +44,7 @@ pub struct CompilationDriver {
     pub(crate) type_cache: IncrementalTypeCache,
     pub(crate) mir_cache: IncrementalMirCache,
     phase_cache: VecDeque<CachedPhases>,
+    diagnostic_cache: VecDeque<CachedDiagnostics>,
     stats: IncrementalCompilationStats,
 }
 
@@ -53,9 +58,21 @@ struct CachedPhases {
     reusable_mir_bodies: usize,
 }
 
+#[derive(Clone)]
+struct CachedDiagnostics {
+    bundle: SourceBundle,
+    options: CompileOptions,
+    include_interfaces: bool,
+    diagnostics: Vec<Diagnostic>,
+}
+
 /// Retaining a few complete revisions makes undo/redo effectively free while
 /// keeping the potentially large verified bytecode artifacts strictly bounded.
 const PHASE_CACHE_CAPACITY: usize = 4;
+
+/// Invalid revisions are also bounded because each key retains its exact source
+/// bundle to make cache hits collision-free.
+const DIAGNOSTIC_CACHE_CAPACITY: usize = 4;
 
 /// Compatibility name for callers that only need phase compilation.
 pub type IncrementalCompilerSession = CompilationDriver;
@@ -122,6 +139,8 @@ impl CompilationDriver {
                 reused_bodies: cached.reusable_bodies,
                 reused_phase_artifacts: 1,
                 reused_historical_phase_artifacts: usize::from(historical),
+                reused_diagnostics: 0,
+                reused_historical_diagnostics: 0,
                 lowered_mir_bodies: 0,
                 reused_mir_bodies: cached.reusable_mir_bodies,
                 frontend: crate::frontend_cache::FrontendCacheStats::default(),
@@ -130,6 +149,26 @@ impl CompilationDriver {
             self.phase_cache.push_front(cached);
             return Ok(result);
         }
+        if let Some(index) = self.diagnostic_cache.iter().position(|cached| {
+            cached.options == options
+                && cached.include_interfaces == include_interfaces
+                && cached.bundle == *bundle
+        }) {
+            let historical = index != 0;
+            let cached = self
+                .diagnostic_cache
+                .remove(index)
+                .expect("diagnostic cache index disappeared");
+            self.stats = IncrementalCompilationStats {
+                reused_diagnostics: 1,
+                reused_historical_diagnostics: usize::from(historical),
+                ..IncrementalCompilationStats::default()
+            };
+            let diagnostics = cached.diagnostics.clone();
+            self.diagnostic_cache.push_front(cached);
+            return Err(diagnostics);
+        }
+
         let checkpoint = self.type_cache.clone();
         let mir_checkpoint = self.mir_cache.clone();
         self.mir_cache.begin_revision();
@@ -160,11 +199,27 @@ impl CompilationDriver {
                         + self.stats.reused_mir_bodies,
                 });
                 self.phase_cache.truncate(PHASE_CACHE_CAPACITY);
+                // A successful revision supersedes any terminal-diagnostic
+                // entry for the same exact semantic input.
+                self.diagnostic_cache
+                    .retain(|cached| cached.options != options || cached.bundle != *bundle);
             }
-            Err(_) => {
+            Err(diagnostics) => {
                 self.type_cache = checkpoint;
                 self.mir_cache = mir_checkpoint;
                 self.stats = IncrementalCompilationStats::default();
+                self.diagnostic_cache.retain(|cached| {
+                    cached.options != options
+                        || cached.include_interfaces != include_interfaces
+                        || cached.bundle != *bundle
+                });
+                self.diagnostic_cache.push_front(CachedDiagnostics {
+                    bundle: bundle.clone(),
+                    options,
+                    include_interfaces,
+                    diagnostics: diagnostics.clone(),
+                });
+                self.diagnostic_cache.truncate(DIAGNOSTIC_CACHE_CAPACITY);
             }
         }
         result
@@ -180,6 +235,8 @@ impl CompilationDriver {
             reused_bodies: self.type_cache.stats.reused_bodies,
             reused_phase_artifacts: 0,
             reused_historical_phase_artifacts: 0,
+            reused_diagnostics: 0,
+            reused_historical_diagnostics: 0,
             lowered_mir_bodies: self.mir_cache.lowered_bodies,
             reused_mir_bodies: self.mir_cache.reused_bodies,
             frontend: self.frontend_cache.stats(),
@@ -284,5 +341,44 @@ impl Fnv1a {
 
     fn finish(self) -> u64 {
         self.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        compiler_mir::OptimizationLevel,
+        source_bundle::Segment,
+    };
+
+    fn invalid_bundle(source: &str) -> SourceBundle {
+        SourceBundle::raw_for_conformance(
+            Segment::new("std.glorious", ""),
+            Segment::new("main.glorious", source),
+            [],
+        )
+    }
+
+    #[test]
+    fn terminal_diagnostics_are_reused_for_exact_inputs_and_undo() {
+        let options = CompileOptions {
+            optimization_level: OptimizationLevel::O0,
+        };
+        let first = invalid_bundle("main() { let value = ; }");
+        let second = invalid_bundle("main() { missing( } ");
+        let mut driver = CompilationDriver::new();
+
+        assert!(driver.compile_bundle(&first, options).is_err());
+        assert_eq!(driver.stats().reused_diagnostics, 0);
+
+        assert!(driver.compile_bundle(&first, options).is_err());
+        assert_eq!(driver.stats().reused_diagnostics, 1);
+        assert_eq!(driver.stats().reused_historical_diagnostics, 0);
+
+        assert!(driver.compile_bundle(&second, options).is_err());
+        assert!(driver.compile_bundle(&first, options).is_err());
+        assert_eq!(driver.stats().reused_diagnostics, 1);
+        assert_eq!(driver.stats().reused_historical_diagnostics, 1);
     }
 }
