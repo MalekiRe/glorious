@@ -26,11 +26,13 @@ pub mod source_bundle;
 pub mod span;
 pub mod validate;
 
-use std::path::Path;
+use std::{path::Path, sync::OnceLock};
 
 use diagnostic::Diagnostic;
 use eval::{Host, Value};
 use source_bundle::{Segment, SourceBundle};
+
+static DISTRIBUTED_RUNTIME_LEAF_AUTHORITY: OnceLock<eval::RuntimeLeafAuthority> = OnceLock::new();
 
 pub use ast::ConstKind;
 pub use compiler::{
@@ -128,6 +130,14 @@ pub fn run_source(
     })
 }
 
+fn distributed_runtime_leaf_authority(bundle: &SourceBundle) -> eval::RuntimeLeafAuthority {
+    DISTRIBUTED_RUNTIME_LEAF_AUTHORITY
+        .get_or_init(|| {
+            runtime_leaf_authority(bundle, TrustedRuntimeManifest::distributed_generation_1())
+        })
+        .clone()
+}
+
 /// Runs a generation-1 bundle as one source stream. Diagnostics retain global
 /// spans and can be localized with [`SourceBundle::map_diagnostic`] or rendered
 /// with [`SourceBundle::write_diagnostic`].
@@ -137,7 +147,7 @@ pub fn run_bundle(
     host: &mut dyn Host,
 ) -> Result<Value, Vec<Diagnostic>> {
     let runtime_leaves = if bundle.is_canonical_distribution() {
-        runtime_leaf_authority(bundle, TrustedRuntimeManifest::distributed_generation_1())
+        distributed_runtime_leaf_authority(bundle)
     } else {
         eval::RuntimeLeafAuthority::default()
     };
