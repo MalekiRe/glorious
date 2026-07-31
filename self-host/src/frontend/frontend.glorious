@@ -91,19 +91,26 @@ pub mod syntax {
 
     delimiter_kind(value: TokenKind) -> Option<(DelimiterKind, Bool)> {
         handle value {
-            TokenKind::LParen => Option::Some((DelimiterKind::Parenthesis, true)),
-            TokenKind::RParen => Option::Some((DelimiterKind::Parenthesis, false)),
-            TokenKind::LBrace => Option::Some((DelimiterKind::Brace, true)),
-            TokenKind::RBrace => Option::Some((DelimiterKind::Brace, false)),
-            TokenKind::LBracket => Option::Some((DelimiterKind::Bracket, true)),
-            TokenKind::RBracket => Option::Some((DelimiterKind::Bracket, false)),
+            TokenKind::LParen =>
+                Option::Some((DelimiterKind::Parenthesis, true)),
+            TokenKind::RParen =>
+                Option::Some((DelimiterKind::Parenthesis, false)),
+            TokenKind::LBrace =>
+                Option::Some((DelimiterKind::Brace, true)),
+            TokenKind::RBrace =>
+                Option::Some((DelimiterKind::Brace, false)),
+            TokenKind::LBracket =>
+                Option::Some((DelimiterKind::Bracket, true)),
+            TokenKind::RBracket =>
+                Option::Some((DelimiterKind::Bracket, false)),
             _ => None
         }
     }
 
     same_delimiter(left: DelimiterKind, right: DelimiterKind) -> Bool {
         handle left {
-            DelimiterKind::Parenthesis => right is DelimiterKind::Parenthesis,
+            DelimiterKind::Parenthesis =>
+                right is DelimiterKind::Parenthesis,
             DelimiterKind::Brace => right is DelimiterKind::Brace,
             DelimiterKind::Bracket => right is DelimiterKind::Bracket
         }
@@ -130,6 +137,18 @@ pub mod syntax {
         }
     }
 
+    finish_delimiters(
+        token: usize,
+        stack: &Vec<OpenDelimiter>
+    ) -> Result<(), DelimiterError> {
+        handle Vec::last(stack) {
+            Result::Err(_) => Result::Ok(()),
+            Result::Ok(open) => Result::Err(
+                DelimiterError::Unclosed(token, open.token)
+            )
+        }
+    }
+
     build_delimiters(
         source: &super::lexer::LexedSource,
         index: usize,
@@ -138,39 +157,59 @@ pub mod syntax {
     ) -> Result<(), DelimiterError> {
         let count = super::lexer::token_count(source);
         if(index < count) {
-            handle delimiter_kind(super::lexer::token_kind_at(source, index)) {
-                None => build_delimiters(source, index + 1, stack, entries),
-                Option::Some((kind, opening)) => if(opening) {
-                    Vec::push(stack, OpenDelimiter {
-                        kind: kind,
-                        token: index
-                    });
-                    set_entry(entries, index, None, true);
-                    build_delimiters(source, index + 1, stack, entries)
-                } else {
-                    handle Vec::pop(stack) {
-                        Result::Err(_) => Result::Err(
-                            DelimiterError::UnexpectedClose(index, count)
-                        ),
-                        Result::Ok(open) => if(same_delimiter(open.kind, kind)) {
-                            set_entry(entries, open.token, Option::Some(index), true);
-                            set_entry(entries, index, Option::Some(open.token), false);
-                            build_delimiters(source, index + 1, stack, entries)
-                        } else {
-                            Result::Err(
-                                DelimiterError::MismatchedClose(index, open.token)
-                            )
+            let token = super::lexer::token_kind_at(source, index);
+            if(token is TokenKind::Eof) {
+                finish_delimiters(index, &*stack)
+            } else {
+                handle delimiter_kind(token) {
+                    None =>
+                        build_delimiters(source, index + 1, stack, entries),
+                    Option::Some((kind, opening)) => if(opening) {
+                        Vec::push(stack, OpenDelimiter {
+                            kind: kind,
+                            token: index
+                        });
+                        set_entry(entries, index, None, true);
+                        build_delimiters(source, index + 1, stack, entries)
+                    } else {
+                        handle Vec::pop(stack) {
+                            Result::Err(_) => Result::Err(
+                                DelimiterError::UnexpectedClose(index, count)
+                            ),
+                            Result::Ok(open) =>
+                                if(same_delimiter(open.kind, kind)) {
+                                    set_entry(
+                                        entries,
+                                        open.token,
+                                        Option::Some(index),
+                                        true
+                                    );
+                                    set_entry(
+                                        entries,
+                                        index,
+                                        Option::Some(open.token),
+                                        false
+                                    );
+                                    build_delimiters(
+                                        source,
+                                        index + 1,
+                                        stack,
+                                        entries
+                                    )
+                                } else {
+                                    Result::Err(
+                                        DelimiterError::MismatchedClose(
+                                            index,
+                                            open.token
+                                        )
+                                    )
+                                }
                         }
                     }
                 }
             }
         } else {
-            handle Vec::last(stack) {
-                Result::Err(_) => Result::Ok(()),
-                Result::Ok(open) => Result::Err(
-                    DelimiterError::Unclosed(count, open.token)
-                )
-            }
+            finish_delimiters(count, &*stack)
         }
     }
 
