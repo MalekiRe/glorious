@@ -93,6 +93,15 @@ impl IncrementalFrontendCache {
             // token spans are immutable, so sharing this stream cannot leak
             // authority to a caller-controlled segment.
             if bundle.is_canonical_distribution() && index == 0 {
+                // Keep later entries aligned with their bundle segment index.
+                // The empty sentinel is also a valid token cache for an empty
+                // raw segment if this driver later changes bundle kind.
+                if self.entries.is_empty() {
+                    self.entries.push(CachedLexSegment {
+                        source: String::new(),
+                        tokens: Vec::new(),
+                    });
+                }
                 self.stats.reused_segments += 1;
                 append_rebased_tokens(&mut combined, distributed_standard_tokens(), offset);
                 continue;
