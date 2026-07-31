@@ -1,4 +1,5 @@
 pub mod lexer;
+pub mod syntax;
 pub mod scanner;
 pub mod headers;
 pub mod bodies;
