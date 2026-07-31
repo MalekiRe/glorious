@@ -4,6 +4,8 @@
 use super::lexer::{Keyword, TokenKind};
 use super::syntax::{DelimiterError, DelimiterMap, TokenSpan};
 
+pub type TokenRange = TokenSpan;
+
 pub enum DeclarationKind {
     Module,
     Import,
@@ -85,6 +87,14 @@ struct ScanState {
     delimiters: DelimiterMap
 }
 
+pub range_start(value: &TokenRange) -> usize {
+    super::syntax::token_start(value)
+}
+
+pub range_end(value: &TokenRange) -> usize {
+    super::syntax::token_end(value)
+}
+
 pub shell_count(value: &DeclarationIndex) -> usize {
     IndexVec::len(&value.shells)
 }
@@ -96,7 +106,7 @@ pub shell_id_at_ordinal(
     let id = try(Id::from_usize(index), @shell_id_at_ordinal);
     handle IndexVec::get(&value.shells, id) {
         Result::Err(_) => None,
-        Result::Ok(_) => Some(id)
+        Result::Ok(_) => Option::Some(id)
     }
 }
 
@@ -148,14 +158,34 @@ F: Use<[0, 0]> {
 }
 
 pub shell_kind(value: &DeclarationShell) -> DeclarationKind { value.kind }
+
+pub shell_kind_code(value: &DeclarationShell) -> u8 {
+    handle value.kind {
+        DeclarationKind::Module => 1,
+        DeclarationKind::Import => 2,
+        DeclarationKind::TypeAlias => 3,
+        DeclarationKind::EffectRowAlias => 4,
+        DeclarationKind::Global => 5,
+        DeclarationKind::Fixity => 6,
+        DeclarationKind::Effect => 7,
+        DeclarationKind::Struct => 8,
+        DeclarationKind::Enum => 9,
+        DeclarationKind::Trait => 10,
+        DeclarationKind::Impl => 11,
+        DeclarationKind::Function => 12
+    }
+}
+
 pub shell_is_function(value: &DeclarationShell) -> Bool {
     value.kind is DeclarationKind::Function
 }
+
 pub shell_is_public(value: &DeclarationShell) -> Bool { value.public }
 pub shell_name(value: &DeclarationShell) -> &Option<Id<String>> { &value.name }
 pub shell_header(value: &DeclarationShell) -> &TokenSpan { &value.header }
 pub shell_body(value: &DeclarationShell) -> &Option<TokenSpan> { &value.body }
 pub shell_body_span(value: &DeclarationShell) -> Option<TokenSpan> { value.body }
+pub shell_body_range(value: &DeclarationShell) -> Option<TokenRange> { value.body }
 pub shell_whole(value: &DeclarationShell) -> &TokenSpan { &value.whole }
 pub shell_parent(value: &DeclarationShell) -> &Option<ShellId> { &value.parent }
 
@@ -204,7 +234,7 @@ token_ident(
     index: usize
 ) -> Option<Id<String>> {
     handle token_kind_at(value, index) {
-        TokenKind::Ident(name) => Some(name),
+        TokenKind::Ident(name) => Option::Some(name),
         _ => None
     }
 }
@@ -216,7 +246,7 @@ ident_is(
 ) -> Bool {
     handle token_ident(value, index) {
         None => false,
-        Some(name) => handle super::lexer::lexeme(value, name) {
+        Option::Some(name) => handle super::lexer::lexeme(value, name) {
             Result::Err(_) => false,
             Result::Ok(found) => *found == *expected
         }
@@ -254,7 +284,7 @@ matching_close(
 ) -> Result<usize, ScanError> {
     handle super::syntax::delimiter_partner(delimiters, open) {
         None => Result::Err(ScanError::IncompleteDeclaration(open, open)),
-        Some(close) => Result::Ok(close)
+        Option::Some(close) => Result::Ok(close)
     }
 }
 
@@ -347,11 +377,12 @@ find_top_level_eq(
 ) -> Option<usize> {
     if(index < end) {
         if(token_kind_at(value, index) is TokenKind::Eq) {
-            Some(index)
+            Option::Some(index)
         } else if(super::syntax::delimiter_is_open(delimiters, index)) {
             handle super::syntax::delimiter_partner(delimiters, index) {
                 None => None,
-                Some(close) => find_top_level_eq(value, delimiters, close + 1, end)
+                Option::Some(close) =>
+                    find_top_level_eq(value, delimiters, close + 1, end)
             }
         } else {
             find_top_level_eq(value, delimiters, index + 1, end)
@@ -365,7 +396,7 @@ name_at(
     start: usize
 ) -> Result<Id<String>, ScanError> {
     handle token_ident(value, index) {
-        Some(name) => Result::Ok(name),
+        Option::Some(name) => Result::Ok(name),
         None => Result::Err(ScanError::ExpectedDeclarationName(index, start))
     }
 }
@@ -380,7 +411,7 @@ named(
     let name = try(name_at(value, name_index, start), @named);
     Result::Ok(Classification {
         kind: kind,
-        name: Some(name),
+        name: Option::Some(name),
         style: style
     })
 }
@@ -388,7 +419,7 @@ named(
 function_classification(name: Id<String>) -> Classification {
     Classification {
         kind: DeclarationKind::Function,
-        name: Some(name),
+        name: Option::Some(name),
         style: DeclarationStyle::FunctionBody
     }
 }
@@ -554,7 +585,7 @@ scan_semicolon_shell(
     if(kind is DeclarationKind::Global) {
         handle find_top_level_eq(value, delimiters, cursor, end) {
             None => Result::Err(ScanError::IncompleteDeclaration(end, start)),
-            Some(equal) => Result::Ok(ScanStep {
+            Option::Some(equal) => Result::Ok(ScanStep {
                 next: end + 1,
                 nested: None,
                 declaration: DeclarationShell {
@@ -562,7 +593,7 @@ scan_semicolon_shell(
                     public: public,
                     name: name,
                     header: super::syntax::token_span(start, equal + 1),
-                    body: Some(super::syntax::token_span(equal + 1, end)),
+                    body: Option::Some(super::syntax::token_span(equal + 1, end)),
                     whole: whole,
                     parent: parent
                 }
@@ -607,14 +638,14 @@ scan_braced_shell(
     Result::Ok(ScanStep {
         next: close + 1,
         nested: if(kind is DeclarationKind::Module) {
-            Some(body)
+            Option::Some(body)
         } else { None },
         declaration: DeclarationShell {
             kind: kind,
             public: public,
             name: name,
             header: super::syntax::token_span(start, open),
-            body: Some(body),
+            body: Option::Some(body),
             whole: super::syntax::token_span(start, close + 1),
             parent: parent
         }
@@ -732,7 +763,7 @@ scan_loop(
                     output: output,
                     delimiters: delimiters
                 }),
-                Some(span) => {
+                Option::Some(span) => {
                     Vec::push(&mut scopes, ScanScope {
                         cursor: next,
                         limit: limit,
@@ -741,7 +772,7 @@ scan_loop(
                     scan_loop(value, ScanState {
                         cursor: super::syntax::token_start(&span),
                         limit: super::syntax::token_end(&span),
-                        parent: Some(shell),
+                        parent: Option::Some(shell),
                         scopes: scopes,
                         output: output,
                         delimiters: delimiters
@@ -778,4 +809,137 @@ pub scan(
         output: IndexVec::new(),
         delimiters: delimiters
     })
+}
+
+bool_code(value: Bool) -> u8 {
+    if(value) { 1 } else { 0 }
+}
+
+write_string(output: &mut ByteBuf, value: &String) {
+    let bytes = String::as_bytes(value);
+    ByteBuf::write_u32_le(
+        output,
+        wrapping_convert_to_u32(Bytes::len(&bytes))
+    );
+    ByteBuf::append_bytes(output, &bytes)
+}
+
+write_optional_name(
+    output: &mut ByteBuf,
+    lexed: &super::lexer::LexedSource,
+    value: &Option<Id<String>>
+) {
+    handle *value {
+        None => ByteBuf::push(output, 0),
+        Option::Some(name) => {
+            ByteBuf::push(output, 1);
+            handle super::lexer::lexeme(lexed, name) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(text) => write_string(output, text)
+            }
+        }
+    }
+}
+
+write_range(output: &mut ByteBuf, value: &TokenRange) {
+    ByteBuf::write_u32_le(output, wrapping_convert_to_u32(range_start(value)));
+    ByteBuf::write_u32_le(output, wrapping_convert_to_u32(range_end(value)))
+}
+
+write_optional_range(output: &mut ByteBuf, value: &Option<TokenRange>) {
+    handle *value {
+        None => ByteBuf::push(output, 0),
+        Option::Some(range) => {
+            ByteBuf::push(output, 1);
+            write_range(output, &range)
+        }
+    }
+}
+
+write_optional_parent(output: &mut ByteBuf, value: &Option<ShellId>) {
+    handle *value {
+        None => ByteBuf::push(output, 0),
+        Option::Some(parent) => {
+            ByteBuf::push(output, 1);
+            ByteBuf::write_u32_le(output, Id::to_u32(parent))
+        }
+    }
+}
+
+write_shells(
+    output: &mut ByteBuf,
+    lexed: &super::lexer::LexedSource,
+    value: &DeclarationIndex
+) {
+    for_each_shell(value, { _, shell => {
+        ByteBuf::push(output, shell_kind_code(shell));
+        ByteBuf::push(output, bool_code(shell.public));
+        write_optional_name(output, lexed, &shell.name);
+        write_range(output, &shell.header);
+        write_optional_range(output, &shell.body);
+        write_range(output, &shell.whole);
+        write_optional_parent(output, &shell.parent)
+    } })
+}
+
+encode_scan(output: &mut ByteBuf, lexed: super::lexer::LexedSource) {
+    handle scan(&lexed) {
+        Result::Err(error) => {
+            ByteBuf::push(output, 2);
+            ByteBuf::push(output, scan_error_code(&error));
+            ByteBuf::write_u32_le(
+                output,
+                wrapping_convert_to_u32(scan_error_token(&error))
+            );
+            ByteBuf::write_u32_le(
+                output,
+                wrapping_convert_to_u32(scan_error_related(&error))
+            )
+        },
+        Result::Ok(index) => {
+            ByteBuf::push(output, 0);
+            ByteBuf::write_u32_le(
+                output,
+                wrapping_convert_to_u32(shell_count(&index))
+            );
+            write_shells(output, &lexed, &index)
+        }
+    }
+}
+
+process_inputs(
+    arguments: &Vec<String>,
+    index: usize,
+    output: &mut ByteBuf
+) / FileRead {
+    for_range(Range::new(index, Vec::len(arguments)), { current => {
+        let path = *Vec::index(arguments, current);
+        let bytes = read_file(path);
+        handle String::from_utf8(bytes) {
+            Result::Err(_) => ByteBuf::push(output, 1),
+            Result::Ok(source) => handle super::lexer::lex(&source) {
+                Result::Err(_) => ByteBuf::push(output, 1),
+                Result::Ok(lexed) => encode_scan(output, lexed)
+            }
+        }
+    } })
+}
+
+pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
+    let arguments = process_args();
+    let count = Vec::len(&arguments);
+    if(count < 2) {
+        write_diagnostic(
+            "usage: grandiose-self-host-scanner <output> <input>..."
+        )
+    } else {
+        let output_path = *Vec::index(&arguments, 0);
+        let encoded = ByteBuf::new();
+        ByteBuf::write_u32_le(
+            &mut encoded,
+            wrapping_convert_to_u32(count - 1)
+        );
+        process_inputs(&arguments, 1, &mut encoded);
+        write_file(output_path, ByteBuf::finish(encoded))
+    }
 }
