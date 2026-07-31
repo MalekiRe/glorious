@@ -1,0 +1,733 @@
+// Shared semantic model for interface collection, body elaboration, lowering,
+// emission, and diagnostic normalization. All contiguous side arenas use the
+// frontend's branded IdRange substrate.
+
+use super::super::scanner::{ShellId, ShellTag};
+use super::super::syntax::IdRange;
+
+pub struct TypeTag {}
+pub type TypeId = Id<TypeTag>;
+
+pub struct TypeElementTag {}
+pub type TypeElementRange = IdRange<TypeElementTag>;
+
+pub enum TypeKind {
+    Unit,
+    Never,
+    Scalar(u8),
+    Tuple(TypeElementRange),
+    Nominal(InterfaceNominalId),
+    SharedReference(TypeId),
+    UniqueReference(TypeId)
+}
+
+impl Use<[0, *]> for TypeKind {}
+
+pub struct TypeNode {
+    kind: TypeKind,
+    copyable: Bool
+}
+
+impl Use<[0, *]> for TypeNode {}
+
+pub struct InterfaceNominalTag {}
+pub type InterfaceNominalId = Id<InterfaceNominalTag>;
+
+pub struct InterfaceFieldTag {}
+pub type InterfaceFieldId = Id<InterfaceFieldTag>;
+
+pub struct InterfaceVariantTag {}
+pub type InterfaceVariantId = Id<InterfaceVariantTag>;
+
+pub struct InterfaceCallableTag {}
+pub type InterfaceCallableId = Id<InterfaceCallableTag>;
+
+pub struct InterfaceFieldRangeTag {}
+pub struct InterfaceVariantRangeTag {}
+pub struct VariantPayloadRangeTag {}
+pub struct CallableParameterRangeTag {}
+
+pub type InterfaceFieldRange = IdRange<InterfaceFieldRangeTag>;
+pub type InterfaceVariantRange = IdRange<InterfaceVariantRangeTag>;
+pub type VariantPayloadRange = IdRange<VariantPayloadRangeTag>;
+pub type CallableParameterRange = IdRange<CallableParameterRangeTag>;
+
+pub enum InterfaceNominalKind {
+    Struct(InterfaceFieldRange),
+    Enum(InterfaceVariantRange)
+}
+
+impl Use<[0, *]> for InterfaceNominalKind {}
+
+pub enum NominalCopyState {
+    Unresolved,
+    Resolving,
+    Resolved
+}
+
+impl Use<[0, *]> for NominalCopyState {}
+
+pub enum AliasResolutionState {
+    Unresolved,
+    Resolving,
+    Resolved(TypeId)
+}
+
+impl Use<[0, *]> for AliasResolutionState {}
+
+pub struct InterfaceNominal {
+    shell: ShellId,
+    kind: InterfaceNominalKind,
+    copy_state: NominalCopyState
+}
+
+impl Use<[0, *]> for InterfaceNominal {}
+
+pub struct InterfaceField {
+    owner: InterfaceNominalId,
+    name: u32,
+    ty: TypeId,
+    private: Bool,
+    name_token: usize
+}
+
+impl Use<[0, *]> for InterfaceField {}
+
+pub struct InterfaceVariant {
+    owner: InterfaceNominalId,
+    name: u32,
+    payloads: VariantPayloadRange,
+    name_token: usize
+}
+
+impl Use<[0, *]> for InterfaceVariant {}
+
+pub struct InterfaceCallable {
+    shell: ShellId,
+    result: TypeId,
+    parameters: CallableParameterRange
+}
+
+impl Use<[0, *]> for InterfaceCallable {}
+
+pub struct TypedInterfaces {
+    types: Arena<TypeTag, TypeNode>,
+    type_elements: Vec<TypeId>,
+    nominals: Arena<InterfaceNominalTag, InterfaceNominal>,
+    fields: Arena<InterfaceFieldTag, InterfaceField>,
+    variants: Arena<InterfaceVariantTag, InterfaceVariant>,
+    variant_payloads: Vec<TypeId>,
+    callables: Arena<InterfaceCallableTag, InterfaceCallable>,
+    callable_parameters: Vec<TypeId>,
+    shell_to_callable: IndexVec<ShellTag, Option<InterfaceCallableId>>,
+    shell_to_nominal: IndexVec<ShellTag, Option<InterfaceNominalId>>,
+    shell_to_type: IndexVec<ShellTag, Option<TypeId>>,
+    alias_states: Vec<AliasResolutionState>
+}
+
+pub struct CoreValueTag {}
+pub type CoreValueId = Id<CoreValueTag>;
+
+pub struct CoreComputationTag {}
+pub type CoreComputationId = Id<CoreComputationTag>;
+
+pub struct CoreLocalTag {}
+pub type CoreLocalId = Id<CoreLocalTag>;
+
+pub struct IntegerConstantTag {}
+pub type IntegerConstantId = Id<IntegerConstantTag>;
+
+pub enum CoreLocalAccess {
+    Move,
+    Copy
+}
+
+impl Use<[0, *]> for CoreLocalAccess {}
+
+pub enum CoreValueKind {
+    Unit,
+    Integer(IntegerConstantId),
+    Local(CoreLocalId, CoreLocalAccess),
+    Projection(CoreValueId, u32),
+    Embedded(CoreComputationId)
+}
+
+impl Use<[0, *]> for CoreValueKind {}
+
+pub struct CoreValue {
+    ty: TypeId,
+    kind: CoreValueKind
+}
+
+impl Use<[0, *]> for CoreValue {}
+
+pub struct OperandTag {}
+pub struct ConstructionFieldTag {}
+pub struct MatchArmTag {}
+pub struct MatchBindingTag {}
+
+pub type OperandRange = IdRange<OperandTag>;
+pub type ConstructionFieldRange = IdRange<ConstructionFieldTag>;
+pub type MatchArmRange = IdRange<MatchArmTag>;
+pub type MatchBindingRange = IdRange<MatchBindingTag>;
+
+pub enum ConstructionFlavor {
+    Product,
+    Variant(u32)
+}
+
+impl Use<[0, *]> for ConstructionFlavor {}
+
+pub enum CoreComputationKind {
+    Pure(CoreValueId),
+    Let(CoreLocalId, CoreComputationId, CoreComputationId),
+    Call(ShellId, OperandRange),
+    Construct(ConstructionFlavor, ConstructionFieldRange),
+    Match(CoreValueId, MatchArmRange)
+}
+
+impl Use<[0, *]> for CoreComputationKind {}
+
+pub struct CoreComputation {
+    ty: TypeId,
+    kind: CoreComputationKind
+}
+
+impl Use<[0, *]> for CoreComputation {}
+
+pub struct ConstructionField {
+    field: u32,
+    value: CoreValueId
+}
+
+impl Use<[0, *]> for ConstructionField {}
+
+pub struct CoreMatchArm {
+    variant: u32,
+    bindings: MatchBindingRange,
+    body: CoreComputationId
+}
+
+impl Use<[0, *]> for CoreMatchArm {}
+
+pub struct CoreMatchBinding {
+    field: u32,
+    local: Option<CoreLocalId>,
+    ty: TypeId
+}
+
+impl Use<[0, *]> for CoreMatchBinding {}
+
+pub struct IntegerConstant {
+    low0: u32,
+    low1: u32,
+    high0: u32,
+    high1: u32
+}
+
+impl Use<[0, *]> for IntegerConstant {}
+
+pub struct TypedBody {
+    shell: ShellId,
+    result_type: TypeId,
+    root: CoreComputationId,
+    local_types: IndexVec<CoreLocalTag, TypeId>,
+    values: Arena<CoreValueTag, CoreValue>,
+    computations: Arena<CoreComputationTag, CoreComputation>,
+    operands: Vec<CoreValueId>,
+    construction_fields: Vec<ConstructionField>,
+    match_arms: Vec<CoreMatchArm>,
+    match_bindings: Vec<CoreMatchBinding>,
+    integer_constants: Arena<IntegerConstantTag, IntegerConstant>
+}
+
+pub enum ElaborationError {
+    CyclicTypeAlias(usize),
+    MissingAliasHeader(usize),
+    MissingDeclarationShell(usize),
+    GenericTypeAliasUnsupported(usize),
+    MissingNominalType(usize),
+    UnknownTypeName(usize),
+    UnknownTypeModule(usize),
+    NamedReferenceLifetimeUnsupported(usize),
+    InvalidSignatureType(usize),
+    MissingParameterHeader(usize),
+    MissingCallableHeader(usize),
+    UnsupportedCallableSignature(ShellId),
+    MissingCallableType(ShellId),
+    MissingNominalDeclaration(usize),
+    MissingFieldHeader(usize),
+    MissingVariantHeader(usize),
+    MissingStructHeader(ShellId),
+    MissingEnumHeader(ShellId),
+    CyclicNominalType(usize, u32),
+    InvalidResolvedExpression(usize, usize),
+    TypeMismatch(usize, u32, u32),
+    FloatLiteralUnsupported(usize),
+    IntegerLiteralOutOfRange(usize, u32),
+    UnexpectedExpressionToken(usize),
+    FunctionUsedAsValue(usize),
+    MissingLocalType(usize),
+    MissingCallableInterface(usize, ShellId),
+    ArgumentCountMismatch(usize, u32, u32),
+    InvalidCallTarget(usize, u32),
+    InvalidTupleElement(usize, usize),
+    MissingTupleElement(usize, u32),
+    ExpectedTupleType(usize, u32),
+    UnknownStructField(usize, u32),
+    DuplicateOrInaccessibleField(usize, u32),
+    StructFieldCountMismatch(usize, u32, u32),
+    InvalidStructTarget(usize, u32),
+    VariantPayloadCountMismatch(usize, u32, u32),
+    MissingVariant(usize, u32),
+    UnknownProjectionField(usize, u32, u32),
+    DuplicateMatchVariant(usize, u32, u32),
+    VariantOwnerMismatch(usize, u32, u32),
+    MissingMatchVariants(usize, u32, u32),
+    ExpectedEnumType(usize, u32),
+    UnsupportedExpression(usize),
+    MissingBodyCallable(ShellId),
+    IntegerEncodingOverflow(usize, u32),
+    InvalidLocalReference(usize, u32, u32),
+    EmbeddedValueSerializationUnsupported(usize),
+    MatchSerializationUnsupported(usize)
+}
+
+pub enum InterfaceTypeView<'a> {
+    Unit,
+    Never,
+    Scalar(u8),
+    Tuple(Slice<'a, TypeId>),
+    Nominal(u32),
+    SharedReference(u32),
+    UniqueReference(u32)
+}
+
+impl<'a> Use<[0, *]> for InterfaceTypeView<'a> {}
+
+pub enum InterfaceNominalView {
+    Struct(ShellId, u32, u32),
+    Enum(ShellId, u32, u32)
+}
+
+impl Use<[0, *]> for InterfaceNominalView {}
+
+pub struct InterfaceFieldView {
+    name: u32,
+    ty: u32
+}
+
+impl Use<[0, *]> for InterfaceFieldView {}
+
+pub enum CoreValueView {
+    Unit(TypeId),
+    Integer(TypeId, IntegerConstantId),
+    Local(TypeId, CoreLocalId, Bool),
+    Projection(TypeId, CoreValueId, u32),
+    Embedded(TypeId, CoreComputationId)
+}
+
+impl Use<[0, *]> for CoreValueView {}
+
+pub enum CoreComputationView<'a> {
+    Pure(TypeId, CoreValueId),
+    Let(TypeId, CoreLocalId, CoreComputationId, CoreComputationId),
+    Call(TypeId, ShellId, Slice<'a, CoreValueId>),
+    Construct(TypeId, ConstructionFlavor, Slice<'a, ConstructionField>),
+    Match(TypeId, CoreValueId, Slice<'a, CoreMatchArm>)
+}
+
+impl<'a> Use<[0, *]> for CoreComputationView<'a> {}
+
+pub struct IntegerConstantView {
+    low0: u32,
+    low1: u32,
+    high0: u32,
+    high1: u32
+}
+
+impl Use<[0, *]> for IntegerConstantView {}
+
+pub type_id_from_usize(value: usize) -> TypeId {
+    handle Id::from_usize(value) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+pub interface_nominal_id_from_usize(value: usize) -> InterfaceNominalId {
+    handle Id::from_usize(value) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+pub interface_field_id_from_usize(value: usize) -> InterfaceFieldId {
+    handle Id::from_usize(value) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+pub interface_variant_id_from_usize(value: usize) -> InterfaceVariantId {
+    handle Id::from_usize(value) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+pub core_value_at<'a>(value: &'a TypedBody, id: CoreValueId) -> &'a CoreValue {
+    Arena::index(&value.values, id)
+}
+
+pub core_computation_at<'a>(
+    value: &'a TypedBody,
+    id: CoreComputationId
+) -> &'a CoreComputation {
+    Arena::index(&value.computations, id)
+}
+
+pub interface_nominal_at<'a>(
+    value: &'a TypedInterfaces,
+    id: InterfaceNominalId
+) -> &'a InterfaceNominal {
+    Arena::index(&value.nominals, id)
+}
+
+pub interface_field_at<'a>(
+    value: &'a TypedInterfaces,
+    id: InterfaceFieldId
+) -> &'a InterfaceField {
+    Arena::index(&value.fields, id)
+}
+
+pub interface_variant_at<'a>(
+    value: &'a TypedInterfaces,
+    id: InterfaceVariantId
+) -> &'a InterfaceVariant {
+    Arena::index(&value.variants, id)
+}
+
+pub interface_callable_at<'a>(
+    value: &'a TypedInterfaces,
+    id: InterfaceCallableId
+) -> &'a InterfaceCallable {
+    Arena::index(&value.callables, id)
+}
+
+pub type_kind_at(value: &TypedInterfaces, id: TypeId) -> TypeKind {
+    Arena::index(&value.types, id).kind
+}
+
+pub type_is_copyable(value: &TypedInterfaces, id: TypeId) -> Bool {
+    Arena::index(&value.types, id).copyable
+}
+
+pub interface_callable_id_at(
+    value: &TypedInterfaces,
+    index: usize
+) -> Option<InterfaceCallableId> {
+    let id = try(Id::from_usize(index), @interface_callable_id_at);
+    handle Arena::get(&value.callables, id) {
+        Result::Err(_) => None,
+        Result::Ok(_) => Some(id)
+    }
+}
+
+pub interface_callable_result(
+    value: &TypedInterfaces,
+    id: InterfaceCallableId
+) -> TypeId {
+    interface_callable_at(value, id).result
+}
+
+pub interface_callable_for_shell(
+    value: &TypedInterfaces,
+    shell: ShellId
+) -> Option<InterfaceCallableId> {
+    *IndexVec::index(&value.shell_to_callable, shell)
+}
+
+pub interface_callable_count(value: &TypedInterfaces) -> usize {
+    Arena::len(&value.callables)
+}
+
+pub interface_callable_shell(
+    value: &TypedInterfaces,
+    id: InterfaceCallableId
+) -> ShellId {
+    interface_callable_at(value, id).shell
+}
+
+pub interface_callable_parameter_count(
+    value: &TypedInterfaces,
+    id: InterfaceCallableId
+) -> u32 {
+    super::super::syntax::id_range_count(&interface_callable_at(value, id).parameters)
+}
+
+pub interface_callable_parameter_at(
+    value: &TypedInterfaces,
+    id: InterfaceCallableId,
+    index: usize
+) -> TypeId {
+    let range = interface_callable_at(value, id).parameters;
+    *Vec::index(
+        &value.callable_parameters,
+        wrapping_convert_to_usize(super::super::syntax::id_range_start(&range)) + index
+    )
+}
+
+pub interface_type_count(value: &TypedInterfaces) -> usize {
+    Arena::len(&value.types)
+}
+
+pub interface_type_at<'a>(
+    value: &'a TypedInterfaces,
+    index: usize
+) -> InterfaceTypeView<'a> {
+    handle type_kind_at(value, type_id_from_usize(index)) {
+        TypeKind::Unit => InterfaceTypeView::Unit,
+        TypeKind::Never => InterfaceTypeView::Never,
+        TypeKind::Scalar(kind) => InterfaceTypeView::Scalar(kind),
+        TypeKind::Tuple(range) => InterfaceTypeView::Tuple(
+            super::super::syntax::id_range_slice(&value.type_elements, &range)
+        ),
+        TypeKind::Nominal(id) => InterfaceTypeView::Nominal(Id::to_u32(id)),
+        TypeKind::SharedReference(id) =>
+            InterfaceTypeView::SharedReference(Id::to_u32(id)),
+        TypeKind::UniqueReference(id) =>
+            InterfaceTypeView::UniqueReference(Id::to_u32(id))
+    }
+}
+
+pub interface_type_tag_at(value: &TypedInterfaces, index: usize) -> u8 {
+    handle type_kind_at(value, type_id_from_usize(index)) {
+        TypeKind::Unit => 1,
+        TypeKind::Never => 2,
+        TypeKind::Scalar(_) => 3,
+        TypeKind::Tuple(_) => 4,
+        TypeKind::Nominal(_) => 5,
+        TypeKind::SharedReference(_) => 6,
+        TypeKind::UniqueReference(_) => 7
+    }
+}
+
+pub interface_type_a_at(value: &TypedInterfaces, index: usize) -> u32 {
+    handle type_kind_at(value, type_id_from_usize(index)) {
+        TypeKind::Scalar(kind) => wrapping_convert_to_u32(kind),
+        TypeKind::Tuple(range) => super::super::syntax::id_range_start(&range),
+        TypeKind::Nominal(id) => Id::to_u32(id),
+        TypeKind::SharedReference(id) => Id::to_u32(id),
+        TypeKind::UniqueReference(id) => Id::to_u32(id),
+        _ => 0
+    }
+}
+
+pub interface_type_b_at(value: &TypedInterfaces, index: usize) -> u32 {
+    handle type_kind_at(value, type_id_from_usize(index)) {
+        TypeKind::Tuple(range) => super::super::syntax::id_range_count(&range),
+        _ => 0
+    }
+}
+
+pub interface_type_c_at(value: &TypedInterfaces, index: usize) -> u32 {
+    value;
+    index;
+    0
+}
+
+pub interface_type_flags_at(value: &TypedInterfaces, index: usize) -> u32 {
+    if(type_is_copyable(value, type_id_from_usize(index))) { 1 } else { 0 }
+}
+
+pub interface_type_element_count(value: &TypedInterfaces) -> usize {
+    Vec::len(&value.type_elements)
+}
+
+pub interface_nominal_count(value: &TypedInterfaces) -> usize {
+    Arena::len(&value.nominals)
+}
+
+pub interface_nominal_at_view(
+    value: &TypedInterfaces,
+    index: usize
+) -> InterfaceNominalView {
+    let nominal = interface_nominal_at(value, interface_nominal_id_from_usize(index));
+    handle nominal.kind {
+        InterfaceNominalKind::Struct(range) => InterfaceNominalView::Struct(
+            nominal.shell,
+            super::super::syntax::id_range_start(&range),
+            super::super::syntax::id_range_count(&range)
+        ),
+        InterfaceNominalKind::Enum(range) => InterfaceNominalView::Enum(
+            nominal.shell,
+            super::super::syntax::id_range_start(&range),
+            super::super::syntax::id_range_count(&range)
+        )
+    }
+}
+
+pub interface_field_count(value: &TypedInterfaces) -> usize {
+    Arena::len(&value.fields)
+}
+
+pub interface_field_at_view(
+    value: &TypedInterfaces,
+    index: usize
+) -> InterfaceFieldView {
+    let field = interface_field_at(value, interface_field_id_from_usize(index));
+    InterfaceFieldView {
+        name: field.name,
+        ty: Id::to_u32(field.ty)
+    }
+}
+
+pub interface_field_view_name(value: &InterfaceFieldView) -> u32 { value.name }
+pub interface_field_view_type(value: &InterfaceFieldView) -> u32 { value.ty }
+
+pub interface_field_word_at(
+    value: &TypedInterfaces,
+    index: usize,
+    word: usize
+) -> u32 {
+    let field = interface_field_at(value, interface_field_id_from_usize(index));
+    handle word {
+        0 => Id::to_u32(field.owner),
+        1 => field.name,
+        2 => Id::to_u32(field.ty),
+        3 => if(field.private) { 1 } else { 0 },
+        _ => wrapping_convert_to_u32(field.name_token)
+    }
+}
+
+pub interface_variant_count(value: &TypedInterfaces) -> usize {
+    Arena::len(&value.variants)
+}
+
+pub interface_variant_name_at(value: &TypedInterfaces, index: usize) -> u32 {
+    interface_variant_at(value, interface_variant_id_from_usize(index)).name
+}
+
+pub interface_variant_payloads_at<'a>(
+    value: &'a TypedInterfaces,
+    index: usize
+) -> Slice<'a, TypeId> {
+    let variant = interface_variant_at(value, interface_variant_id_from_usize(index));
+    super::super::syntax::id_range_slice(&value.variant_payloads, &variant.payloads)
+}
+
+pub typed_body_shell(value: &TypedBody) -> ShellId { value.shell }
+pub typed_body_result_type(value: &TypedBody) -> TypeId { value.result_type }
+pub typed_body_root(value: &TypedBody) -> CoreComputationId { value.root }
+pub typed_body_local_count(value: &TypedBody) -> usize {
+    IndexVec::len(&value.local_types)
+}
+
+pub typed_body_value_at(value: &TypedBody, id: CoreValueId) -> CoreValueView {
+    let node = core_value_at(value, id);
+    handle node.kind {
+        CoreValueKind::Unit => CoreValueView::Unit(node.ty),
+        CoreValueKind::Integer(constant) =>
+            CoreValueView::Integer(node.ty, constant),
+        CoreValueKind::Local(local, access) => CoreValueView::Local(
+            node.ty,
+            local,
+            access is CoreLocalAccess::Move
+        ),
+        CoreValueKind::Projection(subject, field) =>
+            CoreValueView::Projection(node.ty, subject, field),
+        CoreValueKind::Embedded(computation) =>
+            CoreValueView::Embedded(node.ty, computation)
+    }
+}
+
+pub typed_body_computation_at<'a>(
+    value: &'a TypedBody,
+    id: CoreComputationId
+) -> CoreComputationView<'a> {
+    let node = core_computation_at(value, id);
+    handle node.kind {
+        CoreComputationKind::Pure(found) =>
+            CoreComputationView::Pure(node.ty, found),
+        CoreComputationKind::Let(local, initializer, body) =>
+            CoreComputationView::Let(node.ty, local, initializer, body),
+        CoreComputationKind::Call(shell, range) => CoreComputationView::Call(
+            node.ty,
+            shell,
+            super::super::syntax::id_range_slice(&value.operands, &range)
+        ),
+        CoreComputationKind::Construct(flavor, range) =>
+            CoreComputationView::Construct(
+                node.ty,
+                flavor,
+                super::super::syntax::id_range_slice(
+                    &value.construction_fields,
+                    &range
+                )
+            ),
+        CoreComputationKind::Match(subject, range) => CoreComputationView::Match(
+            node.ty,
+            subject,
+            super::super::syntax::id_range_slice(&value.match_arms, &range)
+        )
+    }
+}
+
+pub core_match_arm_variant(value: &CoreMatchArm) -> u32 { value.variant }
+pub core_match_arm_body(value: &CoreMatchArm) -> CoreComputationId { value.body }
+pub core_match_arm_bindings<'a>(
+    body: &'a TypedBody,
+    value: &CoreMatchArm
+) -> Slice<'a, CoreMatchBinding> {
+    super::super::syntax::id_range_slice(&body.match_bindings, &value.bindings)
+}
+pub core_match_binding_field(value: &CoreMatchBinding) -> u32 { value.field }
+pub core_match_binding_local(value: &CoreMatchBinding) -> Option<CoreLocalId> {
+    value.local
+}
+pub core_match_binding_type(value: &CoreMatchBinding) -> TypeId { value.ty }
+pub construction_field_ordinal(value: &ConstructionField) -> u32 { value.field }
+pub construction_field_value(value: &ConstructionField) -> CoreValueId {
+    value.value
+}
+
+pub typed_body_integer_constant_at(
+    value: &TypedBody,
+    id: IntegerConstantId
+) -> IntegerConstantView {
+    let found = Arena::index(&value.integer_constants, id);
+    IntegerConstantView {
+        low0: found.low0,
+        low1: found.low1,
+        high0: found.high0,
+        high1: found.high1
+    }
+}
+
+pub integer_constant_view_word(value: &IntegerConstantView, word: usize) -> u32 {
+    handle word {
+        0 => value.low0,
+        1 => value.low1,
+        2 => value.high0,
+        3 => value.high1,
+        _ => unreachable()
+    }
+}
+
+pub typed_body_integer_constant_word_at(
+    value: &TypedBody,
+    index: usize,
+    word: usize
+) -> u32 {
+    integer_constant_view_word(
+        &typed_body_integer_constant_at(
+            value,
+            handle Id::from_usize(index) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            }
+        ),
+        word
+    )
+}
