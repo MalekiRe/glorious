@@ -37,12 +37,12 @@ pub use ast::ConstKind;
 pub use compiler::{
     CompileOptions, CompiledPhases, compile_bundle_to_bytecode,
     compile_bundle_to_bytecode_with_manifest, compile_bundle_to_bytecode_with_manifest_and_options,
-    compile_bundle_to_bytecode_with_options, compile_bundle_to_phases,
-    compile_bundle_to_phases_with_manifest, compile_bundle_to_phases_with_manifest_and_options,
-    compile_source_to_bytecode, compile_source_to_bytecode_with_manifest,
-    compile_source_to_bytecode_with_manifest_and_options, compile_source_to_bytecode_with_options,
-    compile_source_to_phases, compile_source_to_phases_with_manifest,
-    compile_source_to_phases_with_manifest_and_options, compile_source_to_phases_with_options,
+    compile_bundle_to_bytecode_with_options, compile_bundle_to_phases_with_manifest,
+    compile_bundle_to_phases_with_manifest_and_options, compile_source_to_bytecode,
+    compile_source_to_bytecode_with_manifest, compile_source_to_bytecode_with_manifest_and_options,
+    compile_source_to_bytecode_with_options, compile_source_to_phases,
+    compile_source_to_phases_with_manifest, compile_source_to_phases_with_manifest_and_options,
+    compile_source_to_phases_with_options,
 };
 pub use compiler_mir::{
     OptimizationLevel, OptimizationPass, OptimizationPassOutcome, OptimizationPassReport,
@@ -52,9 +52,17 @@ pub use llvm_backend::{
     LlvmModule, LlvmOptions, default_target_data_layout, default_target_triple, emit_llvm_ir,
 };
 
-/// Compile a canonical batch bundle while reusing a bounded exact-input result
-/// from another caller in the same process. Incremental tools should continue
-/// to own a [`compiler_session::CompilationDriver`] for body-level reuse.
+/// Compile a canonical batch bundle with the default options while reusing the
+/// calling thread's persistent frontend, type, MIR, and exact-result caches.
+pub fn compile_bundle_to_phases(
+    bundle: &SourceBundle,
+) -> Result<CompiledPhases, Vec<Diagnostic>> {
+    compile_bundle_to_phases_with_options(bundle, CompileOptions::default())
+}
+
+/// Compile a canonical batch bundle while reusing one incremental compiler
+/// driver per calling thread. Tools that need explicit statistics or revision
+/// control should continue to own a [`compiler_session::CompilationDriver`].
 pub fn compile_bundle_to_phases_with_options(
     bundle: &SourceBundle,
     options: CompileOptions,
