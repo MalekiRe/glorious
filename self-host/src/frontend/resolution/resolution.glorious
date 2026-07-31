@@ -1,9 +1,10 @@
-// Name resolution for one parsed function body.
-// Targets are indexed directly by ExprId. Lexical lookup uses a journaled map,
-// and handler resolution is stored per handle expression in source-arm order.
+// Direct name-resolution model. Global declaration lookup and one-body lexical
+// traversal live in focused submodules; resolved expression targets remain
+// indexed by ExprId and are consumed directly by elaboration.
 
-use super::bodies::{BlockStatement, ExprView, ExpressionName, PatternBinder};
-use super::lexer::TokenKind;
+pub mod index;
+mod body;
+
 use super::scanner::{ShellId, ShellTag};
 use super::syntax::IdRange;
 
@@ -28,6 +29,8 @@ pub struct LocalBinding {
     block_expression: super::bodies::ExprId
 }
 
+impl Use<[0, *]> for LocalBinding {}
+
 pub enum ResolvedPatternBinder {
     Wildcard,
     Local(LocalId)
@@ -49,8 +52,7 @@ pub struct ResolvedHandleArm {
 impl Use<[0, *]> for ResolvedHandleArm {}
 
 pub struct ResolvedBody {
-    targets:
-        IndexVec<super::bodies::ExprTag, Option<ResolvedTarget>>,
+    targets: IndexVec<super::bodies::ExprTag, Option<ResolvedTarget>>,
     locals: Vec<LocalBinding>,
     handle_ranges:
         IndexVec<super::bodies::ExprTag, Option<ResolvedHandleRange>>,
@@ -86,33 +88,33 @@ pub enum ResolutionError {
     BodyParseFailure(ShellId)
 }
 
-struct FunctionSearch {
+pub struct FunctionSearch {
     first: Option<ShellId>,
     count: u32
 }
 
-struct NominalSearch {
+pub struct NominalSearch {
     first: Option<u32>,
     count: u32
 }
 
-struct ScopeJournalEntry {
-    name: u32,
-    previous: Option<ResolvedTarget>
-}
-
-struct ScopeMap {
-    current: HashMap<u32, ResolvedTarget>,
-    journal: Vec<ScopeJournalEntry>
-}
+impl Use<[0, *]> for FunctionSearch {}
+impl Use<[0, *]> for NominalSearch {}
 
 pub struct ResolutionIndex {
     functions: HashMap<(Option<ShellId>, u32), FunctionSearch>,
     callable_by_shell: IndexVec<ShellTag, Option<u32>>
 }
 
-impl Use<[0, *]> for FunctionSearch {}
-impl Use<[0, *]> for NominalSearch {}
+pub struct ScopeJournalEntry {
+    name: u32,
+    previous: Option<ResolvedTarget>
+}
+
+pub struct ScopeMap {
+    current: HashMap<u32, ResolvedTarget>,
+    journal: Vec<ScopeJournalEntry>
+}
 
 pub resolution_error_code(value: &ResolutionError) -> u8 {
     handle *value {
@@ -200,7 +202,10 @@ pub local_count(value: &ResolvedBody) -> usize { Vec::len(&value.locals) }
 pub local_name_token_at(value: &ResolvedBody, index: usize) -> usize {
     Vec::index(&value.locals, index).name_token
 }
-pub local_block_expression_at(value: &ResolvedBody, index: usize) -> super::bodies::ExprId {
+pub local_block_expression_at(
+    value: &ResolvedBody,
+    index: usize
+) -> super::bodies::ExprId {
     Vec::index(&value.locals, index).block_expression
 }
 
@@ -225,903 +230,27 @@ pub resolved_handle_binders<'a>(
     super::syntax::id_range_slice(&value.pattern_binders, &arm.binders)
 }
 
-shell_parent_module(shell: &super::scanner::DeclarationShell) -> Option<ShellId> {
-    *super::scanner::shell_parent(shell)
-}
-
-scope_new() -> ScopeMap {
-    ScopeMap {
-        current: HashMap::new(),
-        journal: Vec::new()
-    }
-}
-
-scope_mark(value: &ScopeMap) -> usize { Vec::len(&value.journal) }
-
-scope_lookup(value: &ScopeMap, name: Id<String>) -> Option<ResolvedTarget> {
-    handle HashMap::get(&value.current, &Id::to_u32(name)) {
-        Result::Err(_) => None,
-        Result::Ok(found) => Some(*found)
-    }
-}
-
-ignore_previous<T>(value: Option<T>) {
-    handle value {
-        None => (),
-        Some(previous) => { previous; () }
-    }
-}
-
-scope_insert(
-    value: &mut ScopeMap,
-    name: Id<String>,
-    target: ResolvedTarget
-) {
-    let raw = Id::to_u32(name);
-    let previous = handle HashMap::remove(&mut value.current, &raw) {
-        Result::Err(_) => None,
-        Result::Ok(found) => Some(found)
-    };
-    Vec::push(&mut value.journal, ScopeJournalEntry {
-        name: raw,
-        previous: previous
-    });
-    ignore_previous(HashMap::insert(&mut value.current, raw, target))
-}
-
-scope_restore(value: &mut ScopeMap, mark: usize) {
-    if(Vec::len(&value.journal) > mark) {
-        let entry = handle Vec::pop(&mut value.journal) {
-            Result::Err(_) => unreachable(),
-            Result::Ok(found) => found
-        };
-        handle HashMap::remove(&mut value.current, &entry.name) {
-            Result::Err(_) => (),
-            Result::Ok(discarded) => { discarded; () }
-        };
-        handle entry.previous {
-            None => (),
-            Some(previous) => ignore_previous(HashMap::insert(
-                &mut value.current,
-                entry.name,
-                previous
-            ))
-        };
-        scope_restore(value, mark)
-    } else { () }
-}
-
-set_target(
-    output: &mut ResolvedBody,
-    expression: super::bodies::ExprId,
-    target: ResolvedTarget
-) {
-    *IndexVec::index_mut(&mut output.targets, expression) = Some(target)
-}
-
-local_id(value: &ResolvedBody, token: usize) -> Result<LocalId, ResolutionError> {
-    handle Id::from_usize(Vec::len(&value.locals)) {
-        Result::Err(_) => Result::Err(ResolutionError::LocalIdExhausted(
-            token,
-            Vec::len(&value.locals)
-        )),
-        Result::Ok(found) => Result::Ok(found)
-    }
-}
-
-index_callable(
-    index: &mut ResolutionIndex,
-    headers: &super::headers::HeaderIndex,
-    declarations: &super::scanner::DeclarationIndex,
-    ordinal: usize
-) -> Result<(), ResolutionError> {
-    let callable = handle super::headers::callable_at(headers, ordinal) {
-        None => @index_callable(Result::Err(
-            ResolutionError::MissingCallableHeader(ordinal)
-        )),
-        Some(found) => found
-    };
-    let shell_id = super::headers::callable_shell(callable);
-    let shell = handle super::scanner::shell_at(declarations, shell_id) {
-        None => @index_callable(Result::Err(
-            ResolutionError::MissingDeclarationShell(Id::to_usize(shell_id), shell_id)
-        )),
-        Some(found) => found
-    };
-    let key = (
-        shell_parent_module(shell),
-        super::headers::callable_name_raw(callable)
-    );
-    let found = handle HashMap::remove(&mut index.functions, &key) {
-        Result::Err(_) => FunctionSearch { first: None, count: 0 },
-        Result::Ok(found) => found
-    };
-    let updated = FunctionSearch {
-        first: if(found.count == 0) { Some(shell_id) } else { found.first },
-        count: found.count + 1
-    };
-    ignore_previous(HashMap::insert(&mut index.functions, key, updated));
-    let slot = IndexVec::index_mut(&mut index.callable_by_shell, shell_id);
-    if(Option::is_none(slot)) {
-        *slot = Some(wrapping_convert_to_u32(ordinal))
-    } else { () };
-    Result::Ok(())
-}
-
-fill_callable_slots(index: &mut ResolutionIndex, count: usize) {
-    for_range(Range::new(0, count), { _ =>
-        handle IndexVec::push(&mut index.callable_by_shell, None) {
-            Result::Err(_) => unreachable(),
-            Result::Ok(_) => ()
-        }
-    })
-}
-
 pub build_resolution_index(
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex
 ) -> Result<ResolutionIndex, ResolutionError> {
-    let index = ResolutionIndex {
-        functions: HashMap::new(),
-        callable_by_shell: IndexVec::new()
-    };
-    fill_callable_slots(&mut index, super::scanner::shell_count(declarations));
-    try_for_range(
-        Range::new(0, super::headers::callable_count(super::headers::parsed_index(headers))),
-        { ordinal => index_callable(
-            &mut index,
-            super::headers::parsed_index(headers),
-            declarations,
-            ordinal
-        ) }
-    ) and { Result::Ok(index) }
-}
-
-resolve_function_name_in(
-    index: &ResolutionIndex,
-    name: u32,
-    module: Option<ShellId>
-) -> FunctionSearch {
-    handle HashMap::get(&index.functions, &(module, name)) {
-        Result::Err(_) => FunctionSearch { first: None, count: 0 },
-        Result::Ok(found) => *found
-    }
-}
-
-finish_function_name(
-    declarations: &super::scanner::DeclarationIndex,
-    found: FunctionSearch,
-    token: usize
-) -> Result<ResolvedTarget, ResolutionError> {
-    handle found.count {
-        0 => Result::Err(ResolutionError::UnknownFunction(token)),
-        1 => handle found.first {
-            None => Result::Err(ResolutionError::CorruptFunctionSearch(token)),
-            Some(shell) => handle super::scanner::shell_at(declarations, shell) {
-                None => Result::Err(
-                    ResolutionError::MissingDeclarationShell(token, shell)
-                ),
-                Some(_) => Result::Ok(ResolvedTarget::Function(shell))
-            }
-        },
-        _ => handle found.first {
-            None => Result::Err(ResolutionError::CorruptFunctionSearch(token)),
-            Some(shell) => Result::Err(
-                ResolutionError::AmbiguousFunction(token, shell)
-            )
-        }
-    }
-}
-
-resolve_function_name(
-    index: &ResolutionIndex,
-    declarations: &super::scanner::DeclarationIndex,
-    name: u32,
-    module: Option<ShellId>,
-    token: usize
-) -> Result<ResolvedTarget, ResolutionError> {
-    let local = resolve_function_name_in(index, name, module);
-    if(local.count == 0 and { Option::is_some(&module) }) {
-        finish_function_name(
-            declarations,
-            resolve_function_name_in(index, name, None),
-            token
-        )
-    } else { finish_function_name(declarations, local, token) }
-}
-
-search_structs(
-    nominal: &super::headers::NominalIndex,
-    declarations: &super::scanner::DeclarationIndex,
-    name: u32,
-    module: Option<ShellId>,
-    token: usize
-) -> Result<NominalSearch, ResolutionError> {
-    try_fold_range(
-        Range::new(0, super::headers::struct_count(nominal)),
-        NominalSearch { first: None, count: 0 },
-        { found, current => handle super::headers::struct_at(nominal, current) {
-            None => Result::Err(ResolutionError::MissingStructHeader(token, current)),
-            Some(header) => {
-                let shell_id = super::headers::struct_shell(header);
-                handle super::scanner::shell_at(declarations, shell_id) {
-                    None => Result::Err(
-                        ResolutionError::MissingDeclarationShell(token, shell_id)
-                    ),
-                    Some(shell) => if(super::headers::struct_name_raw(header) == name
-                        and { shell_parent_module(shell) == module }) {
-                        Result::Ok(NominalSearch {
-                            first: if(found.count == 0) {
-                                Some(wrapping_convert_to_u32(current))
-                            } else { found.first },
-                            count: found.count + 1
-                        })
-                    } else { Result::Ok(found) }
-                }
-            }
-        } }
-    )
-}
-
-finish_struct_name(
-    nominal: &super::headers::NominalIndex,
-    found: NominalSearch,
-    token: usize
-) -> Result<ResolvedTarget, ResolutionError> {
-    handle found.count {
-        0 => Result::Err(ResolutionError::UnknownStruct(token)),
-        1 => handle found.first {
-            None => Result::Err(ResolutionError::CorruptStructSearch(token)),
-            Some(index) => handle super::headers::struct_at(
-                nominal,
-                wrapping_convert_to_usize(index)
-            ) {
-                None => Result::Err(ResolutionError::MissingStructHeader(
-                    token,
-                    wrapping_convert_to_usize(index)
-                )),
-                Some(_) => Result::Ok(ResolvedTarget::Struct(index))
-            }
-        },
-        _ => handle found.first {
-            None => Result::Err(ResolutionError::CorruptStructSearch(token)),
-            Some(index) => Result::Err(ResolutionError::AmbiguousStruct(
-                token,
-                wrapping_convert_to_usize(index)
-            ))
-        }
-    }
-}
-
-resolve_struct_name(
-    nominal: &super::headers::NominalIndex,
-    declarations: &super::scanner::DeclarationIndex,
-    name: u32,
-    module: Option<ShellId>,
-    token: usize
-) -> Result<ResolvedTarget, ResolutionError> {
-    let local = try(search_structs(
-        nominal,
-        declarations,
-        name,
-        module,
-        token
-    ), @resolve_struct_name);
-    if(local.count == 0 and { Option::is_some(&module) }) {
-        finish_struct_name(
-            nominal,
-            try(search_structs(nominal, declarations, name, None, token), @resolve_struct_name),
-            token
-        )
-    } else { finish_struct_name(nominal, local, token) }
-}
-
-search_enums(
-    nominal: &super::headers::NominalIndex,
-    declarations: &super::scanner::DeclarationIndex,
-    name: u32,
-    module: Option<ShellId>,
-    token: usize
-) -> Result<NominalSearch, ResolutionError> {
-    try_fold_range(
-        Range::new(0, super::headers::enum_count(nominal)),
-        NominalSearch { first: None, count: 0 },
-        { found, current => handle super::headers::enum_at(nominal, current) {
-            None => Result::Err(ResolutionError::MissingEnumHeader(token, current)),
-            Some(header) => {
-                let shell_id = super::headers::enum_shell(header);
-                handle super::scanner::shell_at(declarations, shell_id) {
-                    None => Result::Err(
-                        ResolutionError::MissingDeclarationShell(token, shell_id)
-                    ),
-                    Some(shell) => if(super::headers::enum_name_raw(header) == name
-                        and { shell_parent_module(shell) == module }) {
-                        Result::Ok(NominalSearch {
-                            first: if(found.count == 0) {
-                                Some(wrapping_convert_to_u32(current))
-                            } else { found.first },
-                            count: found.count + 1
-                        })
-                    } else { Result::Ok(found) }
-                }
-            }
-        } }
-    )
-}
-
-find_variant(
-    nominal: &super::headers::NominalIndex,
-    start: u32,
-    count: u32,
-    name: u32,
-    token: usize,
-    ordinal: u32
-) -> Result<u32, ResolutionError> {
-    if(ordinal < count) {
-        let index = start + ordinal;
-        handle super::headers::variant_at(nominal, wrapping_convert_to_usize(index)) {
-            None => Result::Err(ResolutionError::MissingVariantHeader(
-                token,
-                wrapping_convert_to_usize(index)
-            )),
-            Some(variant) => if(super::headers::variant_name_raw(variant) == name) {
-                Result::Ok(index)
-            } else {
-                find_variant(nominal, start, count, name, token, ordinal + 1)
-            }
-        }
-    } else { Result::Err(ResolutionError::UnknownVariant(token)) }
-}
-
-finish_variant_name(
-    nominal: &super::headers::NominalIndex,
-    found: NominalSearch,
-    variant_name: u32,
-    enum_token: usize,
-    variant_token: usize
-) -> Result<ResolvedTarget, ResolutionError> {
-    handle found.count {
-        0 => Result::Err(ResolutionError::UnknownEnum(enum_token)),
-        1 => handle found.first {
-            None => Result::Err(ResolutionError::CorruptEnumSearch(enum_token)),
-            Some(enum_index) => handle super::headers::enum_at(
-                nominal,
-                wrapping_convert_to_usize(enum_index)
-            ) {
-                None => Result::Err(ResolutionError::MissingEnumHeader(
-                    enum_token,
-                    wrapping_convert_to_usize(enum_index)
-                )),
-                Some(header) => {
-                    let variants = super::headers::enum_variants(header);
-                    Result::Ok(ResolvedTarget::Variant(try(find_variant(
-                        nominal,
-                        super::headers::range_start(variants),
-                        super::headers::range_count(variants),
-                        variant_name,
-                        variant_token,
-                        0
-                    ), @finish_variant_name)))
-                }
-            }
-        },
-        _ => handle found.first {
-            None => Result::Err(ResolutionError::CorruptEnumSearch(enum_token)),
-            Some(index) => Result::Err(ResolutionError::AmbiguousEnum(
-                enum_token,
-                wrapping_convert_to_usize(index)
-            ))
-        }
-    }
-}
-
-resolve_variant_name(
-    nominal: &super::headers::NominalIndex,
-    declarations: &super::scanner::DeclarationIndex,
-    enum_name: u32,
-    variant_name: u32,
-    module: Option<ShellId>,
-    enum_token: usize,
-    variant_token: usize
-) -> Result<ResolvedTarget, ResolutionError> {
-    let local = try(search_enums(
-        nominal,
-        declarations,
-        enum_name,
-        module,
-        enum_token
-    ), @resolve_variant_name);
-    let found = if(local.count == 0 and { Option::is_some(&module) }) {
-        try(search_enums(
-            nominal,
-            declarations,
-            enum_name,
-            None,
-            enum_token
-        ), @resolve_variant_name)
-    } else { local };
-    finish_variant_name(
-        nominal,
-        found,
-        variant_name,
-        enum_token,
-        variant_token
-    )
-}
-
-name_at<'a>(
-    names: Slice<'a, ExpressionName>,
-    index: usize,
-    related: usize
-) -> Result<ExpressionName, ResolutionError> {
-    handle Slice::get(names, index) {
-        Result::Err(_) => Result::Err(ResolutionError::InvalidNamePath(related)),
-        Result::Ok(found) => Result::Ok(*found)
-    }
-}
-
-identifier_parts(value: ExpressionName, related: usize) -> Result<(u32, usize), ResolutionError> {
-    handle value {
-        ExpressionName::Identifier(name, token) => Result::Ok((Id::to_u32(name), token)),
-        ExpressionName::TupleField(_, token) =>
-            Result::Err(ResolutionError::InvalidNamePath(token))
-    }
-}
-
-resolve_identifier<'a>(
-    headers: &super::headers::ParsedHeaders,
-    index: &ResolutionIndex,
-    declarations: &super::scanner::DeclarationIndex,
-    scopes: &ScopeMap,
-    output: &mut ResolvedBody,
-    expression: super::bodies::ExprId,
-    names: Slice<'a, ExpressionName>,
-    module: Option<ShellId>
-) -> Result<(), ResolutionError> {
-    let count = Slice::len(names);
-    let first_name = try(name_at(names, 0, super::bodies::expression_token_start(
-        // `expression_token_start` does not inspect the name representation.
-        // The body value itself is not available here, so use the first token
-        // after validating the name below.
-        @resolve_identifier(unreachable()),
-        expression
-    )), @resolve_identifier);
-    let (first, token) = try(identifier_parts(first_name, 0), @resolve_identifier);
-    handle count {
-        1 => {
-            let target = handle scope_lookup(scopes, Id::from_u32(first)) {
-                Some(found) => found,
-                None => try(resolve_function_name(
-                    index,
-                    declarations,
-                    first,
-                    module,
-                    token
-                ), @resolve_identifier)
-            };
-            set_target(output, expression, target);
-            Result::Ok(())
-        },
-        2 => {
-            let (second, second_token) = try(identifier_parts(
-                try(name_at(names, 1, token), @resolve_identifier),
-                token
-            ), @resolve_identifier);
-            set_target(output, expression, try(resolve_variant_name(
-                super::headers::nominal_index(headers),
-                declarations,
-                first,
-                second,
-                module,
-                token,
-                second_token
-            ), @resolve_identifier));
-            Result::Ok(())
-        },
-        _ => Result::Err(ResolutionError::InvalidNamePath(token))
-    }
-}
-
-resolve_expr_slice<'a>(
-    headers: &super::headers::ParsedHeaders,
-    index: &ResolutionIndex,
-    declarations: &super::scanner::DeclarationIndex,
-    body: &super::bodies::ParsedBody,
-    scopes: &mut ScopeMap,
-    output: &mut ResolvedBody,
-    expressions: Slice<'a, super::bodies::ExprId>,
-    module: Option<ShellId>
-) -> Result<(), ResolutionError> {
-    Slice::try_for_each(expressions, { expression => resolve_expression(
-        headers,
-        index,
-        declarations,
-        body,
-        scopes,
-        output,
-        *expression,
-        module
-    ) })
-}
-
-resolve_block<'a>(
-    headers: &super::headers::ParsedHeaders,
-    index: &ResolutionIndex,
-    declarations: &super::scanner::DeclarationIndex,
-    body: &super::bodies::ParsedBody,
-    scopes: &mut ScopeMap,
-    output: &mut ResolvedBody,
-    expression: super::bodies::ExprId,
-    statements: Slice<'a, BlockStatement>,
-    module: Option<ShellId>
-) -> Result<(), ResolutionError> {
-    let mark = scope_mark(&*scopes);
-    let result = Slice::try_for_each(statements, { statement => handle *statement {
-        BlockStatement::Expression(value) => resolve_expression(
-            headers,
-            index,
-            declarations,
-            body,
-            scopes,
-            output,
-            value,
-            module
-        ),
-        BlockStatement::Let(initializer, token) => {
-            let local = try(local_id(&*output, token), @resolve_block);
-            Vec::push(&mut output.locals, LocalBinding {
-                name_token: token,
-                block_expression: expression
-            });
-            try(resolve_expression(
-                headers,
-                index,
-                declarations,
-                body,
-                scopes,
-                output,
-                initializer,
-                module
-            ), @resolve_block);
-            handle super::lexer::token_kind_at(super::headers::parsed_source(headers), token) {
-                TokenKind::Ident(name) => {
-                    scope_insert(scopes, name, ResolvedTarget::Local(local));
-                    Result::Ok(())
-                },
-                _ => Result::Err(ResolutionError::ExpectedBindingIdentifier(token))
-            }
-        }
-    } });
-    scope_restore(scopes, mark);
-    result
-}
-
-resolve_pattern_binders<'a>(
-    scopes: &mut ScopeMap,
-    output: &mut ResolvedBody,
-    scope: super::bodies::ExprId,
-    values: Slice<'a, PatternBinder>
-) -> Result<ResolvedBinderRange, ResolutionError> {
-    let start = Vec::len(&output.pattern_binders);
-    try(Slice::try_for_each(values, { value => {
-        handle *value {
-            PatternBinder::Wildcard(_) => Vec::push(
-                &mut output.pattern_binders,
-                ResolvedPatternBinder::Wildcard
-            ),
-            PatternBinder::Binding(name, token) => {
-                let local = try(local_id(&*output, token), @resolve_pattern_binders);
-                Vec::push(&mut output.locals, LocalBinding {
-                    name_token: token,
-                    block_expression: scope
-                });
-                scope_insert(scopes, name, ResolvedTarget::Local(local));
-                Vec::push(
-                    &mut output.pattern_binders,
-                    ResolvedPatternBinder::Local(local)
-                )
-            }
-        };
-        Result::Ok(())
-    } }), @resolve_pattern_binders);
-    Result::Ok(super::syntax::id_range(start, Vec::len(&output.pattern_binders)))
-}
-
-resolve_handle<'a>(
-    headers: &super::headers::ParsedHeaders,
-    index: &ResolutionIndex,
-    declarations: &super::scanner::DeclarationIndex,
-    body: &super::bodies::ParsedBody,
-    scopes: &mut ScopeMap,
-    output: &mut ResolvedBody,
-    expression: super::bodies::ExprId,
-    subject: super::bodies::ExprId,
-    arms: Slice<'a, super::bodies::HandleArm>,
-    module: Option<ShellId>
-) -> Result<(), ResolutionError> {
-    try(resolve_expression(
-        headers,
-        index,
-        declarations,
-        body,
-        scopes,
-        output,
-        subject,
-        module
-    ), @resolve_handle);
-    let start = Vec::len(&output.handle_arms);
-    try(Slice::try_for_each(arms, { arm => {
-        let target = try(resolve_variant_name(
-            super::headers::nominal_index(headers),
-            declarations,
-            Id::to_u32(super::bodies::handle_arm_enum_name(arm)),
-            Id::to_u32(super::bodies::handle_arm_variant_name(arm)),
-            module,
-            super::bodies::handle_arm_enum_token(arm),
-            super::bodies::handle_arm_variant_token(arm)
-        ), @resolve_handle);
-        let variant = handle target {
-            ResolvedTarget::Variant(found) => found,
-            _ => @resolve_handle(Result::Err(
-                ResolutionError::UnexpectedHandleTarget(
-                    super::bodies::handle_arm_variant_token(arm),
-                    super::bodies::handle_arm_enum_token(arm)
-                )
-            ))
-        };
-        let mark = scope_mark(&*scopes);
-        let binders = try(resolve_pattern_binders(
-            scopes,
-            output,
-            expression,
-            super::bodies::handle_arm_binders(body, arm)
-        ), @resolve_handle);
-        let result = resolve_expression(
-            headers,
-            index,
-            declarations,
-            body,
-            scopes,
-            output,
-            super::bodies::handle_arm_body(arm),
-            module
-        );
-        scope_restore(scopes, mark);
-        try(result, @resolve_handle);
-        Vec::push(&mut output.handle_arms, ResolvedHandleArm {
-            variant: variant,
-            binders: binders
-        });
-        Result::Ok(())
-    } }), @resolve_handle);
-    *IndexVec::index_mut(&mut output.handle_ranges, expression) = Some(
-        super::syntax::id_range(start, Vec::len(&output.handle_arms))
-    );
-    Result::Ok(())
-}
-
-resolve_expression(
-    headers: &super::headers::ParsedHeaders,
-    index: &ResolutionIndex,
-    declarations: &super::scanner::DeclarationIndex,
-    body: &super::bodies::ParsedBody,
-    scopes: &mut ScopeMap,
-    output: &mut ResolvedBody,
-    expression: super::bodies::ExprId,
-    module: Option<ShellId>
-) -> Result<(), ResolutionError> {
-    handle super::bodies::expression_view(body, expression) {
-        ExprView::Identifier(_, names) => resolve_identifier(
-            headers,
-            index,
-            declarations,
-            &*scopes,
-            output,
-            expression,
-            names,
-            module
-        ),
-        ExprView::Number(_) => Result::Ok(()),
-        ExprView::Unit(_) => Result::Ok(()),
-        ExprView::Group(_, child) => resolve_expression(
-            headers, index, declarations, body, scopes, output, child, module
-        ),
-        ExprView::Prefix(_, _, child) => resolve_expression(
-            headers, index, declarations, body, scopes, output, child, module
-        ),
-        ExprView::Infix(_, _, left, right) => {
-            try(resolve_expression(
-                headers, index, declarations, body, scopes, output, left, module
-            ), @resolve_expression);
-            resolve_expression(
-                headers, index, declarations, body, scopes, output, right, module
-            )
-        },
-        ExprView::Call(_, callee, arguments) => {
-            try(resolve_expression(
-                headers, index, declarations, body, scopes, output, callee, module
-            ), @resolve_expression);
-            resolve_expr_slice(
-                headers, index, declarations, body, scopes, output, arguments, module
-            )
-        },
-        ExprView::Block(_, statements) => resolve_block(
-            headers, index, declarations, body, scopes, output,
-            expression, statements, module
-        ),
-        ExprView::Tuple(_, elements) => resolve_expr_slice(
-            headers, index, declarations, body, scopes, output, elements, module
-        ),
-        ExprView::Struct(_, name, fields) => {
-            let (raw, token) = try(identifier_parts(name, 0), @resolve_expression);
-            set_target(output, expression, try(resolve_struct_name(
-                super::headers::nominal_index(headers),
-                declarations,
-                raw,
-                module,
-                token
-            ), @resolve_expression));
-            Slice::try_for_each(fields, { field => resolve_expression(
-                headers,
-                index,
-                declarations,
-                body,
-                scopes,
-                output,
-                super::bodies::struct_field_expression(field),
-                module
-            ) })
-        },
-        ExprView::Projection(_, subject, _) => resolve_expression(
-            headers, index, declarations, body, scopes, output, subject, module
-        ),
-        ExprView::Handle(_, subject, arms) => resolve_handle(
-            headers, index, declarations, body, scopes, output,
-            expression, subject, arms, module
-        )
-    }
-}
-
-duplicate_parameter_token(
-    headers: &super::headers::HeaderIndex,
-    start: u32,
-    name: u32,
-    count: u32
-) -> Option<usize> {
-    if(count == 0) {
-        None
-    } else {
-        let index = start + count - 1;
-        handle super::headers::parameter_at(headers, wrapping_convert_to_usize(index)) {
-            None => None,
-            Some(parameter) => if(super::headers::parameter_name_raw(parameter) == name) {
-                Some(super::headers::parameter_name_token(parameter))
-            } else {
-                duplicate_parameter_token(headers, start, name, count - 1)
-            }
-        }
-    }
-}
-
-add_parameters(
-    headers: &super::headers::HeaderIndex,
-    callable: &super::headers::CallableHeader,
-    scopes: &mut ScopeMap,
-    ordinal: u32
-) -> Result<(), ResolutionError> {
-    let parameters = super::headers::callable_parameters(callable);
-    if(ordinal < super::headers::range_count(parameters)) {
-        let index = super::headers::range_start(parameters) + ordinal;
-        handle super::headers::parameter_at(headers, wrapping_convert_to_usize(index)) {
-            None => Result::Err(ResolutionError::MissingParameterHeader(
-                wrapping_convert_to_usize(index)
-            )),
-            Some(parameter) => handle duplicate_parameter_token(
-                headers,
-                super::headers::range_start(parameters),
-                super::headers::parameter_name_raw(parameter),
-                ordinal
-            ) {
-                Some(earlier) => Result::Err(ResolutionError::DuplicateParameter(
-                    super::headers::parameter_name_token(parameter),
-                    earlier
-                )),
-                None => {
-                    scope_insert(
-                        scopes,
-                        Id::from_u32(super::headers::parameter_name_raw(parameter)),
-                        ResolvedTarget::Parameter(Id::from_u32(ordinal))
-                    );
-                    add_parameters(headers, callable, scopes, ordinal + 1)
-                }
-            }
-        }
-    } else { Result::Ok(()) }
-}
-
-body_callable<'a>(
-    index: &ResolutionIndex,
-    headers: &'a super::headers::HeaderIndex,
-    shell: ShellId
-) -> Option<&'a super::headers::CallableHeader> {
-    handle *IndexVec::index(&index.callable_by_shell, shell) {
-        None => None,
-        Some(ordinal) => super::headers::callable_at(
-            headers,
-            wrapping_convert_to_usize(ordinal)
-        )
-    }
-}
-
-fill_expression_slots<T>(
-    output: &mut IndexVec<super::bodies::ExprTag, Option<T>>,
-    count: usize
-) {
-    for_range(Range::new(0, count), { _ =>
-        handle IndexVec::push(output, None) {
-            Result::Err(_) => unreachable(),
-            Result::Ok(_) => ()
-        }
-    })
+    index::build(headers, declarations)
 }
 
 pub resolve_function_body_indexed(
     index: &ResolutionIndex,
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex,
-    body: &super::bodies::ParsedBody
+    parsed: &super::bodies::ParsedBody
 ) -> Result<ResolvedBody, ResolutionError> {
-    let shell_id = super::bodies::body_shell(body);
-    let shell = handle super::scanner::shell_at(declarations, shell_id) {
-        None => @resolve_function_body_indexed(Result::Err(
-            ResolutionError::MissingBodyShell(shell_id)
-        )),
-        Some(found) => found
-    };
-    let callable = handle body_callable(
-        index,
-        super::headers::parsed_index(headers),
-        shell_id
-    ) {
-        None => @resolve_function_body_indexed(Result::Err(
-            ResolutionError::MissingBodyCallable(shell_id)
-        )),
-        Some(found) => found
-    };
-    let output = ResolvedBody {
-        targets: IndexVec::new(),
-        locals: Vec::new(),
-        handle_ranges: IndexVec::new(),
-        handle_arms: Vec::new(),
-        pattern_binders: Vec::new()
-    };
-    fill_expression_slots(&mut output.targets, super::bodies::expression_count(body));
-    fill_expression_slots(&mut output.handle_ranges, super::bodies::expression_count(body));
-    let scopes = scope_new();
-    try(add_parameters(
-        super::headers::parsed_index(headers),
-        callable,
-        &mut scopes,
-        0
-    ), @resolve_function_body_indexed);
-    try(resolve_expression(
-        headers,
-        index,
-        declarations,
-        body,
-        &mut scopes,
-        &mut output,
-        super::bodies::body_root(body),
-        shell_parent_module(shell)
-    ), @resolve_function_body_indexed);
-    Result::Ok(output)
+    body::resolve(index, headers, declarations, parsed)
 }
 
 pub resolve_function_body(
     headers: &super::headers::ParsedHeaders,
     declarations: &super::scanner::DeclarationIndex,
-    body: &super::bodies::ParsedBody
+    parsed: &super::bodies::ParsedBody
 ) -> Result<ResolvedBody, ResolutionError> {
     let index = try(build_resolution_index(headers, declarations), @resolve_function_body);
-    resolve_function_body_indexed(&index, headers, declarations, body)
+    resolve_function_body_indexed(&index, headers, declarations, parsed)
 }
