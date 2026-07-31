@@ -22,20 +22,25 @@ use crate::{compiler_core as core, compiler_mir as mir};
 pub struct IncrementalCompilationStats {
     pub elaborated_bodies: usize,
     pub reused_bodies: usize,
-    /// Exact-input checks satisfied by cloning a successful verified Core, MIR,
-    /// and bytecode phase output.
+    /// Exact-input checks satisfied by cloning the last successful verified
+    /// Core, MIR, and bytecode phase output.
     pub reused_phase_artifacts: usize,
-    /// Successful exact-input checks restored from an older revision rather
-    /// than the immediately preceding revision.
+    /// Exact-input checks restored from an older successful revision rather
+    /// than the immediately preceding revision. This is the common editor
+    /// undo/redo and branch-switch case.
     pub reused_historical_phase_artifacts: usize,
-    /// Exact invalid-input checks satisfied by cloning terminal diagnostics.
-    pub reused_diagnostics: usize,
-    /// Invalid-input checks restored from an older revision. This is common for
-    /// editor undo/redo across two independently invalid states.
-    pub reused_historical_diagnostics: usize,
     pub lowered_mir_bodies: usize,
     pub reused_mir_bodies: usize,
     pub frontend: crate::frontend_cache::FrontendCacheStats,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct DiagnosticCacheStats {
+    /// Exact invalid-input checks satisfied by cloning terminal diagnostics.
+    pub reused_results: usize,
+    /// Invalid-input checks restored from an older revision. This is common for
+    /// editor undo/redo across two independently invalid states.
+    pub reused_historical_results: usize,
 }
 
 #[derive(Default)]
@@ -46,6 +51,7 @@ pub struct CompilationDriver {
     phase_cache: VecDeque<CachedPhases>,
     diagnostic_cache: VecDeque<CachedDiagnostics>,
     stats: IncrementalCompilationStats,
+    diagnostic_stats: DiagnosticCacheStats,
 }
 
 #[derive(Clone)]
@@ -139,12 +145,11 @@ impl CompilationDriver {
                 reused_bodies: cached.reusable_bodies,
                 reused_phase_artifacts: 1,
                 reused_historical_phase_artifacts: usize::from(historical),
-                reused_diagnostics: 0,
-                reused_historical_diagnostics: 0,
                 lowered_mir_bodies: 0,
                 reused_mir_bodies: cached.reusable_mir_bodies,
                 frontend: crate::frontend_cache::FrontendCacheStats::default(),
             };
+            self.diagnostic_stats = DiagnosticCacheStats::default();
             let result = (cached.phases.clone(), cached.interfaces.clone());
             self.phase_cache.push_front(cached);
             return Ok(result);
@@ -159,10 +164,10 @@ impl CompilationDriver {
                 .diagnostic_cache
                 .remove(index)
                 .expect("diagnostic cache index disappeared");
-            self.stats = IncrementalCompilationStats {
-                reused_diagnostics: 1,
-                reused_historical_diagnostics: usize::from(historical),
-                ..IncrementalCompilationStats::default()
+            self.stats = IncrementalCompilationStats::default();
+            self.diagnostic_stats = DiagnosticCacheStats {
+                reused_results: 1,
+                reused_historical_results: usize::from(historical),
             };
             let diagnostics = cached.diagnostics.clone();
             self.diagnostic_cache.push_front(cached);
@@ -173,6 +178,7 @@ impl CompilationDriver {
         let mir_checkpoint = self.mir_cache.clone();
         self.mir_cache.begin_revision();
         self.stats = IncrementalCompilationStats::default();
+        self.diagnostic_stats = DiagnosticCacheStats::default();
         let result = if include_interfaces {
             crate::compiler::compile_bundle_to_phases_incremental_with_interfaces(
                 bundle, options, self,
@@ -229,14 +235,16 @@ impl CompilationDriver {
         self.stats
     }
 
+    pub fn diagnostic_cache_stats(&self) -> DiagnosticCacheStats {
+        self.diagnostic_stats
+    }
+
     pub(crate) fn publish_stats(&mut self) {
         self.stats = IncrementalCompilationStats {
             elaborated_bodies: self.type_cache.stats.elaborated_bodies,
             reused_bodies: self.type_cache.stats.reused_bodies,
             reused_phase_artifacts: 0,
             reused_historical_phase_artifacts: 0,
-            reused_diagnostics: 0,
-            reused_historical_diagnostics: 0,
             lowered_mir_bodies: self.mir_cache.lowered_bodies,
             reused_mir_bodies: self.mir_cache.reused_bodies,
             frontend: self.frontend_cache.stats(),
@@ -367,15 +375,25 @@ mod tests {
         let mut driver = CompilationDriver::new();
 
         assert!(driver.compile_bundle(&first, options).is_err());
-        assert_eq!(driver.stats().reused_diagnostics, 0);
+        assert_eq!(driver.diagnostic_cache_stats().reused_results, 0);
 
         assert!(driver.compile_bundle(&first, options).is_err());
-        assert_eq!(driver.stats().reused_diagnostics, 1);
-        assert_eq!(driver.stats().reused_historical_diagnostics, 0);
+        assert_eq!(driver.diagnostic_cache_stats().reused_results, 1);
+        assert_eq!(
+            driver
+                .diagnostic_cache_stats()
+                .reused_historical_results,
+            0
+        );
 
         assert!(driver.compile_bundle(&second, options).is_err());
         assert!(driver.compile_bundle(&first, options).is_err());
-        assert_eq!(driver.stats().reused_diagnostics, 1);
-        assert_eq!(driver.stats().reused_historical_diagnostics, 1);
+        assert_eq!(driver.diagnostic_cache_stats().reused_results, 1);
+        assert_eq!(
+            driver
+                .diagnostic_cache_stats()
+                .reused_historical_results,
+            1
+        );
     }
 }
