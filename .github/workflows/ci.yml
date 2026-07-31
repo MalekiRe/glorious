@@ -7,31 +7,68 @@ on:
 permissions:
   contents: read
 
+# Do not spend runner time validating commits that a newer push has replaced.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
-  rust:
+  formatting:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
-      - name: Formatting
+      - name: Workspace formatting
         run: cargo fmt --all -- --check
       - name: Tooling formatting
         run: |
           cargo fmt --manifest-path tooling/fmt/Cargo.toml -- --check
           cargo fmt --manifest-path tooling/grand/Cargo.toml -- --check
           cargo fmt --manifest-path tooling/lsp/Cargo.toml -- --check
+
+  compiler-and-vm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
       - name: Compiler and VM
         run: cargo test --workspace --all-targets
-      - name: Formatter
-        run: cargo test --manifest-path tooling/fmt/Cargo.toml --all-targets
-      - name: Build tool
-        run: cargo test --manifest-path tooling/grand/Cargo.toml --all-targets
-      - name: Real grc-grand-grvm contract
+
+  tooling:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Formatter
+            manifest: tooling/fmt/Cargo.toml
+          - name: Build tool
+            manifest: tooling/grand/Cargo.toml
+          - name: Language server
+            manifest: tooling/lsp/Cargo.toml
+    name: tooling / ${{ matrix.name }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: ${{ matrix.name }}
+        run: cargo test --manifest-path ${{ matrix.manifest }} --all-targets
+
+  real-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build compiler, VM, and project tool
         run: |
           cargo build --release --workspace --bins
           cargo build --release --manifest-path tooling/grand/Cargo.toml --bin grand
+      - name: Real grc-grand-grvm contract
+        run: |
           integration_root="$(mktemp -d)"
           cd "$integration_root"
           "$GITHUB_WORKSPACE/tooling/grand/target/release/grand" new app
@@ -42,8 +79,6 @@ jobs:
           "$GITHUB_WORKSPACE/tooling/grand/target/release/grand" build
           "$GITHUB_WORKSPACE/tooling/grand/target/release/grand" run
           test -f target/grand/app.grbc
-      - name: Language server
-        run: cargo test --manifest-path tooling/lsp/Cargo.toml --all-targets
 
   editor-metadata:
     runs-on: ubuntu-latest
