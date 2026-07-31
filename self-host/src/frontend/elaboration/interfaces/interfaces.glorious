@@ -1,0 +1,1227 @@
+// Declaration-interface collection and semantic type interning.
+// Nominals are predeclared before their fields are resolved, aliases are
+// memoized with explicit cycle state, and copyability is computed once over the
+// resulting shared type graph.
+
+use super::super::headers::{HeaderTypeView, NominalHeader};
+use super::super::scanner::{DeclarationKind, ShellId};
+use super::model;
+use super::model::{
+    AliasResolutionState,
+    CallableParameterRange,
+    ElaborationError,
+    InterfaceCallable,
+    InterfaceCallableId,
+    InterfaceField,
+    InterfaceFieldId,
+    InterfaceFieldRange,
+    InterfaceNominal,
+    InterfaceNominalId,
+    InterfaceNominalKind,
+    InterfaceVariant,
+    InterfaceVariantId,
+    InterfaceVariantRange,
+    NominalCopyState,
+    TypeId,
+    TypeKind,
+    TypeNode,
+    TypedInterfaces,
+    VariantPayloadRange
+};
+
+pub enum TypeNameTarget {
+    Alias(u32),
+    Struct(u32),
+    Enum(u32)
+}
+
+impl Use<[0, *]> for TypeNameTarget {}
+
+usize_from_u32(value: u32) -> usize { wrapping_convert_to_usize(value) }
+u32_from_usize(value: usize) -> u32 {
+    handle checked_usize_to_u32(value) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+alloc_type(value: &mut TypedInterfaces, node: TypeNode) -> TypeId {
+    handle Arena::alloc(&mut value.types, node) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+alloc_nominal(
+    value: &mut TypedInterfaces,
+    node: InterfaceNominal
+) -> InterfaceNominalId {
+    handle Arena::alloc(&mut value.nominals, node) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+alloc_field(value: &mut TypedInterfaces, node: InterfaceField) -> InterfaceFieldId {
+    handle Arena::alloc(&mut value.fields, node) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+alloc_variant(
+    value: &mut TypedInterfaces,
+    node: InterfaceVariant
+) -> InterfaceVariantId {
+    handle Arena::alloc(&mut value.variants, node) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+alloc_callable(
+    value: &mut TypedInterfaces,
+    node: InterfaceCallable
+) -> InterfaceCallableId {
+    handle Arena::alloc(&mut value.callables, node) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(found) => found
+    }
+}
+
+fill_shell_slots<T>(value: &mut IndexVec<super::super::scanner::ShellTag, Option<T>>, count: usize) {
+    for_range(Range::new(0, count), { _ => handle IndexVec::push(value, None) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(_) => ()
+    } })
+}
+
+fill_alias_states(value: &mut Vec<AliasResolutionState>, count: usize) {
+    for_range(Range::new(0, count), { _ =>
+        Vec::push(value, AliasResolutionState::Unresolved)
+    })
+}
+
+seed_types(value: &mut TypedInterfaces) {
+    alloc_type(value, TypeNode {
+        kind: TypeKind::Unit,
+        copyable: true
+    });
+    alloc_type(value, TypeNode {
+        kind: TypeKind::Never,
+        copyable: true
+    });
+    for_range(Range::new(1, 13), { kind => {
+        alloc_type(value, TypeNode {
+            kind: TypeKind::Scalar(wrapping_convert_to_u8(kind)),
+            copyable: true
+        });
+        ()
+    }})
+}
+
+scalar_kind(value: &String) -> Option<u8> {
+    if(String::eq(value, &"u8")) { Some(1) }
+    else if(String::eq(value, &"u16")) { Some(2) }
+    else if(String::eq(value, &"u32")) { Some(3) }
+    else if(String::eq(value, &"u64")) { Some(4) }
+    else if(String::eq(value, &"u128")) { Some(5) }
+    else if(String::eq(value, &"usize")) { Some(6) }
+    else if(String::eq(value, &"i8")) { Some(7) }
+    else if(String::eq(value, &"i16")) { Some(8) }
+    else if(String::eq(value, &"i32")) { Some(9) }
+    else if(String::eq(value, &"i64")) { Some(10) }
+    else if(String::eq(value, &"i128")) { Some(11) }
+    else if(String::eq(value, &"isize")) { Some(12) }
+    else { None }
+}
+
+scalar_kind_to_type(kind: u8) -> u32 {
+    handle kind {
+        1 => 2,
+        2 => 3,
+        3 => 4,
+        4 => 5,
+        5 => 6,
+        6 => 12,
+        7 => 7,
+        8 => 8,
+        9 => 9,
+        10 => 10,
+        11 => 11,
+        _ => 13
+    }
+}
+
+shell_parent_module(
+    shell: &super::super::scanner::DeclarationShell
+) -> Option<ShellId> {
+    *super::super::scanner::shell_parent(shell)
+}
+
+interface_type_for_shell(
+    value: &TypedInterfaces,
+    shell: ShellId
+) -> Option<TypeId> {
+    *IndexVec::index(&value.shell_to_type, shell)
+}
+
+set_type_copyable(value: &mut TypedInterfaces, id: TypeId, copyable: Bool) {
+    Arena::index_mut(&mut value.types, id).copyable = copyable
+}
+
+set_nominal_kind(
+    value: &mut TypedInterfaces,
+    id: InterfaceNominalId,
+    kind: InterfaceNominalKind
+) {
+    Arena::index_mut(&mut value.nominals, id).kind = kind
+}
+
+set_nominal_state(
+    value: &mut TypedInterfaces,
+    id: InterfaceNominalId,
+    state: NominalCopyState
+) {
+    Arena::index_mut(&mut value.nominals, id).copy_state = state
+}
+
+predeclare_nominal(
+    value: &mut TypedInterfaces,
+    shell: ShellId,
+    kind: InterfaceNominalKind
+) {
+    let nominal = alloc_nominal(value, InterfaceNominal {
+        shell: shell,
+        kind: kind,
+        copy_state: NominalCopyState::Unresolved
+    });
+    let ty = alloc_type(value, TypeNode {
+        kind: TypeKind::Nominal(nominal),
+        copyable: false
+    });
+    *IndexVec::index_mut(&mut value.shell_to_nominal, shell) = Some(nominal);
+    *IndexVec::index_mut(&mut value.shell_to_type, shell) = Some(ty)
+}
+
+predeclare_nominals(
+    headers: &super::super::headers::ParsedHeaders,
+    output: &mut TypedInterfaces,
+    ordinal: usize
+) -> Result<(), ElaborationError> {
+    let nominal = super::super::headers::nominal_index(headers);
+    if(ordinal < super::super::headers::header_count(nominal)) {
+        handle super::super::headers::nominal_header_at(nominal, ordinal) {
+            NominalHeader::Struct(index) => handle super::super::headers::struct_at(
+                nominal,
+                usize_from_u32(index)
+            ) {
+                None => Result::Err(
+                    ElaborationError::MissingNominalDeclaration(ordinal)
+                ),
+                Some(found) => if(super::super::headers::range_count(
+                    super::super::headers::struct_generics(found)
+                ) == 0) {
+                    predeclare_nominal(
+                        output,
+                        super::super::headers::struct_shell(found),
+                        InterfaceNominalKind::Struct(
+                            super::super::syntax::id_range(0, 0)
+                        )
+                    );
+                    predeclare_nominals(headers, output, ordinal + 1)
+                } else {
+                    Result::Err(ElaborationError::MissingNominalDeclaration(ordinal))
+                }
+            },
+            NominalHeader::Enum(index) => handle super::super::headers::enum_at(
+                nominal,
+                usize_from_u32(index)
+            ) {
+                None => Result::Err(
+                    ElaborationError::MissingNominalDeclaration(ordinal)
+                ),
+                Some(found) => if(super::super::headers::range_count(
+                    super::super::headers::enum_generics(found)
+                ) == 0) {
+                    predeclare_nominal(
+                        output,
+                        super::super::headers::enum_shell(found),
+                        InterfaceNominalKind::Enum(
+                            super::super::syntax::id_range(0, 0)
+                        )
+                    );
+                    predeclare_nominals(headers, output, ordinal + 1)
+                } else {
+                    Result::Err(ElaborationError::MissingNominalDeclaration(ordinal))
+                }
+            },
+            _ => predeclare_nominals(headers, output, ordinal + 1)
+        }
+    } else { Result::Ok(()) }
+}
+
+type_name_target_in(
+    headers: &super::super::headers::ParsedHeaders,
+    declarations: &super::super::scanner::DeclarationIndex,
+    name: u32,
+    module: Option<ShellId>,
+    kind: u8,
+    index: usize
+) -> Option<TypeNameTarget> {
+    let nominal = super::super::headers::nominal_index(headers);
+    let count = handle kind {
+        1 => super::super::headers::alias_count(nominal),
+        2 => super::super::headers::struct_count(nominal),
+        _ => super::super::headers::enum_count(nominal)
+    };
+    if(index < count) {
+        let found = handle kind {
+            1 => handle super::super::headers::alias_at(nominal, index) {
+                None => None,
+                Some(header) => Some((
+                    super::super::headers::alias_shell(header),
+                    super::super::headers::alias_name_raw(header)
+                ))
+            },
+            2 => handle super::super::headers::struct_at(nominal, index) {
+                None => None,
+                Some(header) => Some((
+                    super::super::headers::struct_shell(header),
+                    super::super::headers::struct_name_raw(header)
+                ))
+            },
+            _ => handle super::super::headers::enum_at(nominal, index) {
+                None => None,
+                Some(header) => Some((
+                    super::super::headers::enum_shell(header),
+                    super::super::headers::enum_name_raw(header)
+                ))
+            }
+        };
+        handle found {
+            None => type_name_target_in(
+                headers, declarations, name, module, kind, index + 1
+            ),
+            Some((shell_id, found_name)) => handle super::super::scanner::shell_at(
+                declarations,
+                shell_id
+            ) {
+                None => type_name_target_in(
+                    headers, declarations, name, module, kind, index + 1
+                ),
+                Some(shell) => if(found_name == name
+                    and { shell_parent_module(shell) == module }) {
+                    Some(handle kind {
+                        1 => TypeNameTarget::Alias(u32_from_usize(index)),
+                        2 => TypeNameTarget::Struct(u32_from_usize(index)),
+                        _ => TypeNameTarget::Enum(u32_from_usize(index))
+                    })
+                } else {
+                    type_name_target_in(
+                        headers, declarations, name, module, kind, index + 1
+                    )
+                }
+            }
+        }
+    } else { None }
+}
+
+type_name_target(
+    headers: &super::super::headers::ParsedHeaders,
+    declarations: &super::super::scanner::DeclarationIndex,
+    name: u32,
+    module: Option<ShellId>
+) -> Option<TypeNameTarget> {
+    handle type_name_target_in(headers, declarations, name, module, 1, 0) {
+        Some(found) => Some(found),
+        None => handle type_name_target_in(
+            headers, declarations, name, module, 2, 0
+        ) {
+            Some(found) => Some(found),
+            None => handle type_name_target_in(
+                headers, declarations, name, module, 3, 0
+            ) {
+                Some(found) => Some(found),
+                None => handle module {
+                    None => None,
+                    Some(_) => type_name_target(headers, declarations, name, None)
+                }
+            }
+        }
+    }
+}
+
+module_named_in(
+    declarations: &super::super::scanner::DeclarationIndex,
+    name: u32,
+    parent: Option<ShellId>,
+    index: usize
+) -> Option<ShellId> {
+    if(index < super::super::scanner::shell_count(declarations)) {
+        handle super::super::scanner::shell_id_at_ordinal(declarations, index) {
+            None => None,
+            Some(shell_id) => handle super::super::scanner::shell_at(
+                declarations,
+                shell_id
+            ) {
+                None => module_named_in(declarations, name, parent, index + 1),
+                Some(shell) => if(super::super::scanner::shell_kind(shell)
+                    is DeclarationKind::Module
+                    and { shell_parent_module(shell) == parent }) {
+                    handle *super::super::scanner::shell_name(shell) {
+                        None => module_named_in(
+                            declarations, name, parent, index + 1
+                        ),
+                        Some(found) => if(Id::to_u32(found) == name) {
+                            Some(shell_id)
+                        } else {
+                            module_named_in(declarations, name, parent, index + 1)
+                        }
+                    }
+                } else {
+                    module_named_in(declarations, name, parent, index + 1)
+                }
+            }
+        }
+    } else { None }
+}
+
+module_named(
+    declarations: &super::super::scanner::DeclarationIndex,
+    name: u32,
+    parent: Option<ShellId>
+) -> Option<ShellId> {
+    handle module_named_in(declarations, name, parent, 0) {
+        Some(found) => Some(found),
+        None => handle parent {
+            None => None,
+            Some(_) => module_named_in(declarations, name, None, 0)
+        }
+    }
+}
+
+type_kinds_equal(left: TypeKind, right: TypeKind) -> Bool {
+    handle left {
+        TypeKind::Unit => right is TypeKind::Unit,
+        TypeKind::Never => right is TypeKind::Never,
+        TypeKind::Scalar(kind) => handle right {
+            TypeKind::Scalar(found) => kind == found,
+            _ => false
+        },
+        TypeKind::Tuple(left_range) => handle right {
+            TypeKind::Tuple(right_range) =>
+                super::super::syntax::id_range_start(&left_range)
+                    == super::super::syntax::id_range_start(&right_range)
+                and {
+                    super::super::syntax::id_range_count(&left_range)
+                        == super::super::syntax::id_range_count(&right_range)
+                },
+            _ => false
+        },
+        TypeKind::Nominal(id) => handle right {
+            TypeKind::Nominal(found) => id == found,
+            _ => false
+        },
+        TypeKind::SharedReference(id) => handle right {
+            TypeKind::SharedReference(found) => id == found,
+            _ => false
+        },
+        TypeKind::UniqueReference(id) => handle right {
+            TypeKind::UniqueReference(found) => id == found,
+            _ => false
+        }
+    }
+}
+
+find_record_type(
+    output: &TypedInterfaces,
+    kind: TypeKind,
+    index: usize
+) -> Option<u32> {
+    if(index < model::interface_type_count(output)) {
+        if(type_kinds_equal(
+            model::type_kind_at(output, model::type_id_from_usize(index)),
+            kind
+        )) {
+            Some(u32_from_usize(index))
+        } else { find_record_type(output, kind, index + 1) }
+    } else { None }
+}
+
+intern_record_type(
+    output: &mut TypedInterfaces,
+    kind: TypeKind,
+    copyable: Bool
+) -> u32 {
+    handle find_record_type(&*output, kind, 0) {
+        Some(found) => found,
+        None => Id::to_u32(alloc_type(output, TypeNode {
+            kind: kind,
+            copyable: copyable
+        }))
+    }
+}
+
+tuple_elements_equal(
+    output: &TypedInterfaces,
+    range: model::TypeElementRange,
+    elements: &Vec<u32>,
+    ordinal: usize
+) -> Bool {
+    if(ordinal < Vec::len(elements)) {
+        let start = super::super::syntax::id_range_start(&range);
+        if(Id::to_u32(*Vec::index(
+            &output.type_elements,
+            usize_from_u32(start) + ordinal
+        )) == *Vec::index(elements, ordinal)) {
+            tuple_elements_equal(output, range, elements, ordinal + 1)
+        } else { false }
+    } else { true }
+}
+
+find_tuple_type(
+    output: &TypedInterfaces,
+    elements: &Vec<u32>,
+    index: usize
+) -> Option<u32> {
+    if(index < model::interface_type_count(output)) {
+        let matches = handle model::type_kind_at(
+            output,
+            model::type_id_from_usize(index)
+        ) {
+            TypeKind::Tuple(range) =>
+                super::super::syntax::id_range_count(&range)
+                    == u32_from_usize(Vec::len(elements))
+                and { tuple_elements_equal(output, range, elements, 0) },
+            _ => false
+        };
+        if(matches) { Some(u32_from_usize(index)) }
+        else { find_tuple_type(output, elements, index + 1) }
+    } else { None }
+}
+
+intern_tuple_type(output: &mut TypedInterfaces, elements: &Vec<u32>) -> u32 {
+    handle find_tuple_type(&*output, elements, 0) {
+        Some(found) => found,
+        None => {
+            let start = Vec::len(&output.type_elements);
+            for_range(Range::new(0, Vec::len(elements)), { index =>
+                Vec::push(
+                    &mut output.type_elements,
+                    Id::from_u32(*Vec::index(elements, index))
+                )
+            });
+            Id::to_u32(alloc_type(output, TypeNode {
+                kind: TypeKind::Tuple(super::super::syntax::id_range(
+                    start,
+                    Vec::len(&output.type_elements)
+                )),
+                copyable: false
+            }))
+        }
+    }
+}
+
+resolve_alias_type(
+    headers: &super::super::headers::ParsedHeaders,
+    declarations: &super::super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    alias_index: usize,
+    token: usize
+) -> Result<u32, ElaborationError> {
+    handle *Vec::index(&output.alias_states, alias_index) {
+        AliasResolutionState::Resolving =>
+            Result::Err(ElaborationError::CyclicTypeAlias(token)),
+        AliasResolutionState::Resolved(ty) => Result::Ok(Id::to_u32(ty)),
+        AliasResolutionState::Unresolved => {
+            *Vec::index_mut(&mut output.alias_states, alias_index) =
+                AliasResolutionState::Resolving;
+            handle super::super::headers::alias_at(
+                super::super::headers::nominal_index(headers),
+                alias_index
+            ) {
+                None => Result::Err(ElaborationError::MissingAliasHeader(token)),
+                Some(alias) => if(super::super::headers::range_count(
+                    super::super::headers::alias_generics(alias)
+                ) == 0) {
+                    handle super::super::scanner::shell_at(
+                        declarations,
+                        super::super::headers::alias_shell(alias)
+                    ) {
+                        None => Result::Err(
+                            ElaborationError::MissingDeclarationShell(token)
+                        ),
+                        Some(owner) => {
+                            let ty = try(resolve_signature_type(
+                                headers,
+                                declarations,
+                                output,
+                                *super::super::headers::alias_target(alias),
+                                shell_parent_module(owner)
+                            ), @resolve_alias_type);
+                            *Vec::index_mut(&mut output.alias_states, alias_index) =
+                                AliasResolutionState::Resolved(Id::from_u32(ty));
+                            Result::Ok(ty)
+                        }
+                    }
+                } else {
+                    Result::Err(
+                        ElaborationError::GenericTypeAliasUnsupported(token)
+                    )
+                }
+            }
+        }
+    }
+}
+
+resolve_type_name_target(
+    headers: &super::super::headers::ParsedHeaders,
+    declarations: &super::super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    found: TypeNameTarget,
+    token: usize
+) -> Result<u32, ElaborationError> {
+    handle found {
+        TypeNameTarget::Alias(index) => resolve_alias_type(
+            headers, declarations, output, usize_from_u32(index), token
+        ),
+        TypeNameTarget::Struct(index) => handle super::super::headers::struct_at(
+            super::super::headers::nominal_index(headers),
+            usize_from_u32(index)
+        ) {
+            None => Result::Err(ElaborationError::MissingNominalType(token)),
+            Some(header) => handle interface_type_for_shell(
+                &*output,
+                super::super::headers::struct_shell(header)
+            ) {
+                None => Result::Err(ElaborationError::MissingNominalType(token)),
+                Some(ty) => Result::Ok(Id::to_u32(ty))
+            }
+        },
+        TypeNameTarget::Enum(index) => handle super::super::headers::enum_at(
+            super::super::headers::nominal_index(headers),
+            usize_from_u32(index)
+        ) {
+            None => Result::Err(ElaborationError::MissingNominalType(token)),
+            Some(header) => handle interface_type_for_shell(
+                &*output,
+                super::super::headers::enum_shell(header)
+            ) {
+                None => Result::Err(ElaborationError::MissingNominalType(token)),
+                Some(ty) => Result::Ok(Id::to_u32(ty))
+            }
+        }
+    }
+}
+
+pub resolve_signature_type(
+    headers: &super::super::headers::ParsedHeaders,
+    declarations: &super::super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    type_id: super::super::headers::TypeId,
+    module: Option<ShellId>
+) -> Result<u32, ElaborationError> {
+    handle super::super::headers::header_type_view(
+        super::super::headers::parsed_index(headers),
+        type_id
+    ) {
+        HeaderTypeView::Path(token, names) => if(Slice::len(names) == 1) {
+            let name = handle Slice::first(names) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            };
+            let raw = Id::to_u32(super::super::headers::name_use_name(name));
+            handle super::super::lexer::lexeme(
+                super::super::headers::parsed_source(headers),
+                super::super::headers::name_use_name(name)
+            ) {
+                Result::Err(_) =>
+                    Result::Err(ElaborationError::UnknownTypeName(token)),
+                Result::Ok(text) => if(String::eq(text, &"Unit")) {
+                    Result::Ok(0)
+                } else if(String::eq(text, &"Never")) {
+                    Result::Ok(1)
+                } else {
+                    handle scalar_kind(text) {
+                        Some(kind) => Result::Ok(scalar_kind_to_type(kind)),
+                        None => handle type_name_target(
+                            headers,
+                            declarations,
+                            raw,
+                            module
+                        ) {
+                            None => Result::Err(
+                                ElaborationError::UnknownTypeName(token)
+                            ),
+                            Some(found) => resolve_type_name_target(
+                                headers, declarations, output, found, token
+                            )
+                        }
+                    }
+                }
+            }
+        } else if(Slice::len(names) == 2) {
+            let module_name = handle Slice::get(names, 0) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            };
+            let type_name = handle Slice::get(names, 1) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            };
+            let token = super::super::headers::name_use_token(type_name);
+            handle module_named(
+                declarations,
+                Id::to_u32(super::super::headers::name_use_name(module_name)),
+                module
+            ) {
+                None => Result::Err(ElaborationError::UnknownTypeModule(
+                    super::super::headers::name_use_token(module_name)
+                )),
+                Some(owner) => handle type_name_target(
+                    headers,
+                    declarations,
+                    Id::to_u32(super::super::headers::name_use_name(type_name)),
+                    Some(owner)
+                ) {
+                    None => Result::Err(ElaborationError::UnknownTypeName(token)),
+                    Some(found) => resolve_type_name_target(
+                        headers, declarations, output, found, token
+                    )
+                }
+            }
+        } else {
+            Result::Err(ElaborationError::InvalidSignatureType(token))
+        },
+        HeaderTypeView::SharedReference(_, lifetime, referent) => handle lifetime {
+            Some(token) => Result::Err(
+                ElaborationError::NamedReferenceLifetimeUnsupported(token)
+            ),
+            None => {
+                let referent = try(resolve_signature_type(
+                    headers, declarations, output, referent, module
+                ), @resolve_signature_type);
+                Result::Ok(intern_record_type(
+                    output,
+                    TypeKind::SharedReference(Id::from_u32(referent)),
+                    true
+                ))
+            }
+        },
+        HeaderTypeView::UniqueReference(_, lifetime, referent) => handle lifetime {
+            Some(token) => Result::Err(
+                ElaborationError::NamedReferenceLifetimeUnsupported(token)
+            ),
+            None => {
+                let referent = try(resolve_signature_type(
+                    headers, declarations, output, referent, module
+                ), @resolve_signature_type);
+                Result::Ok(intern_record_type(
+                    output,
+                    TypeKind::UniqueReference(Id::from_u32(referent)),
+                    false
+                ))
+            }
+        },
+        HeaderTypeView::Tuple(_, children) => if(Slice::is_empty(children)) {
+            Result::Ok(0)
+        } else {
+            let elements = Vec::new();
+            try(Slice::try_for_each(children, { edge => {
+                Vec::push(&mut elements, try(resolve_signature_type(
+                    headers,
+                    declarations,
+                    output,
+                    super::super::headers::type_edge_type(edge),
+                    module
+                ), @resolve_signature_type));
+                Result::Ok(())
+            } }), @resolve_signature_type);
+            Result::Ok(intern_tuple_type(output, &elements))
+        },
+        HeaderTypeView::Application(token, _, _) =>
+            Result::Err(ElaborationError::InvalidSignatureType(token)),
+        HeaderTypeView::Never(_) => Result::Ok(1)
+    }
+}
+
+collect_parameter_types(
+    headers: &super::super::headers::ParsedHeaders,
+    declarations: &super::super::scanner::DeclarationIndex,
+    callable: &super::super::headers::CallableHeader,
+    output: &mut TypedInterfaces,
+    module: Option<ShellId>,
+    ordinal: u32
+) -> Result<(), ElaborationError> {
+    let range = super::super::headers::callable_parameters(callable);
+    if(ordinal < super::super::headers::range_count(range)) {
+        let at = super::super::headers::range_start(range) + ordinal;
+        handle super::super::headers::parameter_at(
+            super::super::headers::parsed_index(headers),
+            usize_from_u32(at)
+        ) {
+            None => Result::Err(ElaborationError::MissingParameterHeader(
+                usize_from_u32(at)
+            )),
+            Some(parameter) => {
+                Vec::push(&mut output.callable_parameters, Id::from_u32(
+                    try(resolve_signature_type(
+                        headers,
+                        declarations,
+                        output,
+                        super::super::headers::parameter_type(parameter),
+                        module
+                    ), @collect_parameter_types)
+                ));
+                collect_parameter_types(
+                    headers, declarations, callable, output, module, ordinal + 1
+                )
+            }
+        }
+    } else { Result::Ok(()) }
+}
+
+collect_callable(
+    headers: &super::super::headers::ParsedHeaders,
+    declarations: &super::super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    callable: &super::super::headers::CallableHeader,
+    result: TypeId
+) -> Result<(), ElaborationError> {
+    let shell = super::super::headers::callable_shell(callable);
+    let parameters = super::super::headers::callable_parameters(callable);
+    let start = Vec::len(&output.callable_parameters);
+    let module = handle super::super::scanner::shell_at(declarations, shell) {
+        None => None,
+        Some(owner) => shell_parent_module(owner)
+    };
+    try(collect_parameter_types(
+        headers, declarations, callable, output, module, 0
+    ), @collect_callable);
+    let id = alloc_callable(output, InterfaceCallable {
+        shell: shell,
+        result: result,
+        parameters: super::super::syntax::id_range(
+            start,
+            Vec::len(&output.callable_parameters)
+        )
+    });
+    *IndexVec::index_mut(&mut output.shell_to_callable, shell) = Some(id);
+    Result::Ok(())
+}
+
+collect_callables(
+    headers: &super::super::headers::ParsedHeaders,
+    declarations: &super::super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    index: usize
+) -> Result<(), ElaborationError> {
+    let header_index = super::super::headers::parsed_index(headers);
+    if(index < super::super::headers::callable_count(header_index)) {
+        handle super::super::headers::callable_at(header_index, index) {
+            None => Result::Err(ElaborationError::MissingCallableHeader(index)),
+            Some(callable) => if(super::super::headers::callable_generic_count(callable) > 0
+                or { super::super::headers::callable_has_effects(callable) }) {
+                Result::Err(ElaborationError::UnsupportedCallableSignature(
+                    super::super::headers::callable_shell(callable)
+                ))
+            } else {
+                let result = handle super::super::headers::callable_result(callable) {
+                    None => Id::from_u32(0),
+                    Some(ty) => Id::from_u32(try(resolve_signature_type(
+                        headers,
+                        declarations,
+                        output,
+                        ty,
+                        handle super::super::scanner::shell_at(
+                            declarations,
+                            super::super::headers::callable_shell(callable)
+                        ) {
+                            None => None,
+                            Some(owner) => shell_parent_module(owner)
+                        }
+                    ), @collect_callables))
+                };
+                try(collect_callable(
+                    headers, declarations, output, callable, result
+                ), @collect_callables);
+                collect_callables(headers, declarations, output, index + 1)
+            }
+        }
+    } else { Result::Ok(()) }
+}
+
+find_struct_shell<'a>(
+    nominal: &'a super::super::headers::NominalIndex,
+    shell: ShellId,
+    index: usize
+) -> Option<&'a super::super::headers::StructHeader> {
+    if(index < super::super::headers::struct_count(nominal)) {
+        handle super::super::headers::struct_at(nominal, index) {
+            None => None,
+            Some(found) => if(super::super::headers::struct_shell(found) == shell) {
+                Some(found)
+            } else { find_struct_shell(nominal, shell, index + 1) }
+        }
+    } else { None }
+}
+
+find_enum_shell<'a>(
+    nominal: &'a super::super::headers::NominalIndex,
+    shell: ShellId,
+    index: usize
+) -> Option<&'a super::super::headers::EnumHeader> {
+    if(index < super::super::headers::enum_count(nominal)) {
+        handle super::super::headers::enum_at(nominal, index) {
+            None => None,
+            Some(found) => if(super::super::headers::enum_shell(found) == shell) {
+                Some(found)
+            } else { find_enum_shell(nominal, shell, index + 1) }
+        }
+    } else { None }
+}
+
+collect_struct_fields(
+    headers: &super::super::headers::ParsedHeaders,
+    declarations: &super::super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    owner: InterfaceNominalId,
+    fields: &super::super::headers::FieldRange,
+    module: Option<ShellId>,
+    ordinal: u32
+) -> Result<(), ElaborationError> {
+    if(ordinal < super::super::headers::range_count(fields)) {
+        let index = super::super::headers::range_start(fields) + ordinal;
+        handle super::super::headers::field_at(
+            super::super::headers::nominal_index(headers),
+            usize_from_u32(index)
+        ) {
+            None => Result::Err(ElaborationError::MissingFieldHeader(
+                usize_from_u32(index)
+            )),
+            Some(field) => {
+                alloc_field(output, InterfaceField {
+                    owner: owner,
+                    name: super::super::headers::field_name_raw(field),
+                    ty: Id::from_u32(try(resolve_signature_type(
+                        headers,
+                        declarations,
+                        output,
+                        *super::super::headers::field_type(field),
+                        module
+                    ), @collect_struct_fields)),
+                    private: super::super::headers::field_is_private(field),
+                    name_token: super::super::headers::field_name_token(field)
+                });
+                collect_struct_fields(
+                    headers,
+                    declarations,
+                    output,
+                    owner,
+                    fields,
+                    module,
+                    ordinal + 1
+                )
+            }
+        }
+    } else { Result::Ok(()) }
+}
+
+collect_variant_payloads<'a>(
+    headers: &super::super::headers::ParsedHeaders,
+    declarations: &super::super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    fields: Slice<'a, super::super::headers::TypeEdge>,
+    module: Option<ShellId>
+) -> Result<(), ElaborationError> {
+    Slice::try_for_each(fields, { field => {
+        Vec::push(&mut output.variant_payloads, Id::from_u32(
+            try(resolve_signature_type(
+                headers,
+                declarations,
+                output,
+                super::super::headers::type_edge_type(field),
+                module
+            ), @collect_variant_payloads)
+        ));
+        Result::Ok(())
+    } })
+}
+
+collect_enum_variants(
+    headers: &super::super::headers::ParsedHeaders,
+    declarations: &super::super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    owner: InterfaceNominalId,
+    variants: &super::super::headers::VariantRange,
+    module: Option<ShellId>,
+    ordinal: u32
+) -> Result<(), ElaborationError> {
+    if(ordinal < super::super::headers::range_count(variants)) {
+        let index = super::super::headers::range_start(variants) + ordinal;
+        handle super::super::headers::variant_at(
+            super::super::headers::nominal_index(headers),
+            usize_from_u32(index)
+        ) {
+            None => Result::Err(ElaborationError::MissingVariantHeader(
+                usize_from_u32(index)
+            )),
+            Some(variant) => {
+                let payloads = super::super::headers::variant_payloads(
+                    super::super::headers::parsed_index(headers),
+                    variant
+                );
+                let start = Vec::len(&output.variant_payloads);
+                try(collect_variant_payloads(
+                    headers, declarations, output, payloads, module
+                ), @collect_enum_variants);
+                alloc_variant(output, InterfaceVariant {
+                    owner: owner,
+                    name: super::super::headers::variant_name_raw(variant),
+                    payloads: super::super::syntax::id_range(
+                        start,
+                        Vec::len(&output.variant_payloads)
+                    ),
+                    name_token: super::super::headers::variant_name_token(variant)
+                });
+                collect_enum_variants(
+                    headers,
+                    declarations,
+                    output,
+                    owner,
+                    variants,
+                    module,
+                    ordinal + 1
+                )
+            }
+        }
+    } else { Result::Ok(()) }
+}
+
+collect_nominal_definitions(
+    headers: &super::super::headers::ParsedHeaders,
+    declarations: &super::super::scanner::DeclarationIndex,
+    output: &mut TypedInterfaces,
+    index: usize
+) -> Result<(), ElaborationError> {
+    if(index < model::interface_nominal_count(&*output)) {
+        let id = model::interface_nominal_id_from_usize(index);
+        let nominal = *model::interface_nominal_at(&*output, id);
+        let module = handle super::super::scanner::shell_at(
+            declarations,
+            nominal.shell
+        ) {
+            None => None,
+            Some(owner) => shell_parent_module(owner)
+        };
+        handle nominal.kind {
+            InterfaceNominalKind::Struct(_) => handle find_struct_shell(
+                super::super::headers::nominal_index(headers),
+                nominal.shell,
+                0
+            ) {
+                None => Result::Err(
+                    ElaborationError::MissingStructHeader(nominal.shell)
+                ),
+                Some(header) => {
+                    let fields = super::super::headers::struct_fields(header);
+                    let start = model::interface_field_count(&*output);
+                    try(collect_struct_fields(
+                        headers,
+                        declarations,
+                        output,
+                        id,
+                        fields,
+                        module,
+                        0
+                    ), @collect_nominal_definitions);
+                    set_nominal_kind(output, id, InterfaceNominalKind::Struct(
+                        super::super::syntax::id_range(
+                            start,
+                            model::interface_field_count(&*output)
+                        )
+                    ));
+                    collect_nominal_definitions(
+                        headers, declarations, output, index + 1
+                    )
+                }
+            },
+            InterfaceNominalKind::Enum(_) => handle find_enum_shell(
+                super::super::headers::nominal_index(headers),
+                nominal.shell,
+                0
+            ) {
+                None => Result::Err(
+                    ElaborationError::MissingEnumHeader(nominal.shell)
+                ),
+                Some(header) => {
+                    let variants = super::super::headers::enum_variants(header);
+                    let start = model::interface_variant_count(&*output);
+                    try(collect_enum_variants(
+                        headers,
+                        declarations,
+                        output,
+                        id,
+                        variants,
+                        module,
+                        0
+                    ), @collect_nominal_definitions);
+                    set_nominal_kind(output, id, InterfaceNominalKind::Enum(
+                        super::super::syntax::id_range(
+                            start,
+                            model::interface_variant_count(&*output)
+                        )
+                    ));
+                    collect_nominal_definitions(
+                        headers, declarations, output, index + 1
+                    )
+                }
+            }
+        }
+    } else { Result::Ok(()) }
+}
+
+type_copyable(
+    output: &mut TypedInterfaces,
+    ty: TypeId,
+    token: usize
+) -> Result<Bool, ElaborationError> {
+    handle model::type_kind_at(&*output, ty) {
+        TypeKind::Unit => Result::Ok(true),
+        TypeKind::Never => Result::Ok(true),
+        TypeKind::Scalar(_) => Result::Ok(true),
+        TypeKind::Tuple(range) => {
+            let elements = super::super::syntax::id_range_slice(
+                &output.type_elements,
+                &range
+            );
+            let copyable = try(Slice::try_fold(elements, true, { result, item =>
+                if(result) {
+                    type_copyable(output, *item, token)
+                } else { Result::Ok(false) }
+            }), @type_copyable);
+            set_type_copyable(output, ty, copyable);
+            Result::Ok(copyable)
+        },
+        TypeKind::Nominal(nominal) => nominal_copyable(output, nominal, token),
+        TypeKind::SharedReference(_) => Result::Ok(true),
+        TypeKind::UniqueReference(_) => Result::Ok(false)
+    }
+}
+
+nominal_copyable(
+    output: &mut TypedInterfaces,
+    id: InterfaceNominalId,
+    token: usize
+) -> Result<Bool, ElaborationError> {
+    let nominal = *model::interface_nominal_at(&*output, id);
+    handle nominal.copy_state {
+        NominalCopyState::Resolving => Result::Err(
+            ElaborationError::CyclicNominalType(token, Id::to_u32(id))
+        ),
+        NominalCopyState::Resolved => handle interface_type_for_shell(
+            &*output,
+            nominal.shell
+        ) {
+            None => Result::Err(ElaborationError::MissingNominalType(token)),
+            Some(ty) => Result::Ok(model::type_is_copyable(&*output, ty))
+        },
+        NominalCopyState::Unresolved => {
+            set_nominal_state(output, id, NominalCopyState::Resolving);
+            let copyable = handle nominal.kind {
+                InterfaceNominalKind::Struct(range) => {
+                    let fields = super::super::syntax::id_range_slice(
+                        &output.fields,
+                        &range
+                    );
+                    Slice::try_fold(fields, true, { result, field =>
+                        if(result) {
+                            type_copyable(output, field.ty, token)
+                        } else { Result::Ok(false) }
+                    })
+                },
+                InterfaceNominalKind::Enum(range) => {
+                    let variants = super::super::syntax::id_range_slice(
+                        &output.variants,
+                        &range
+                    );
+                    Slice::try_fold(variants, true, { result, variant =>
+                        if(result) {
+                            let payloads = super::super::syntax::id_range_slice(
+                                &output.variant_payloads,
+                                &variant.payloads
+                            );
+                            Slice::try_fold(payloads, true, { payload_result, ty =>
+                                if(payload_result) {
+                                    type_copyable(output, *ty, token)
+                                } else { Result::Ok(false) }
+                            })
+                        } else { Result::Ok(false) }
+                    })
+                }
+            };
+            let flag = try(copyable, @nominal_copyable);
+            handle interface_type_for_shell(&*output, nominal.shell) {
+                None => Result::Err(ElaborationError::MissingNominalType(token)),
+                Some(ty) => {
+                    set_type_copyable(output, ty, flag);
+                    set_nominal_state(output, id, NominalCopyState::Resolved);
+                    Result::Ok(flag)
+                }
+            }
+        }
+    }
+}
+
+compute_type_flags(
+    output: &mut TypedInterfaces,
+    index: usize
+) -> Result<(), ElaborationError> {
+    if(index < model::interface_type_count(&*output)) {
+        try(type_copyable(
+            output,
+            model::type_id_from_usize(index),
+            index
+        ), @compute_type_flags);
+        compute_type_flags(output, index + 1)
+    } else { Result::Ok(()) }
+}
+
+pub collect_interfaces(
+    headers: &super::super::headers::ParsedHeaders,
+    declarations: &super::super::scanner::DeclarationIndex
+) -> Result<TypedInterfaces, ElaborationError> {
+    let output = TypedInterfaces {
+        types: Arena::new(),
+        type_elements: Vec::new(),
+        nominals: Arena::new(),
+        fields: Arena::new(),
+        variants: Arena::new(),
+        variant_payloads: Vec::new(),
+        callables: Arena::new(),
+        callable_parameters: Vec::new(),
+        shell_to_callable: IndexVec::new(),
+        shell_to_nominal: IndexVec::new(),
+        shell_to_type: IndexVec::new(),
+        alias_states: Vec::new()
+    };
+    seed_types(&mut output);
+    let shell_count = super::super::scanner::shell_count(declarations);
+    fill_shell_slots(&mut output.shell_to_callable, shell_count);
+    fill_shell_slots(&mut output.shell_to_nominal, shell_count);
+    fill_shell_slots(&mut output.shell_to_type, shell_count);
+    fill_alias_states(
+        &mut output.alias_states,
+        super::super::headers::alias_count(
+            super::super::headers::nominal_index(headers)
+        )
+    );
+    try(predeclare_nominals(headers, &mut output, 0), @collect_interfaces);
+    try(collect_nominal_definitions(
+        headers, declarations, &mut output, 0
+    ), @collect_interfaces);
+    try(collect_callables(headers, declarations, &mut output, 0), @collect_interfaces);
+    try(compute_type_flags(&mut output, 0), @collect_interfaces);
+    Result::Ok(output)
+}
