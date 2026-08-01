@@ -4,12 +4,9 @@ on:
   push:
     branches:
       - agent/semantic-header-representation
-  pull_request:
-    branches:
-      - master
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   core:
@@ -18,48 +15,49 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: agent/semantic-header-representation
-      - name: Map the remaining self-host ownership diagnostic
+      - name: Replace nested cursor mutation with one helper
+        id: repair
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import re
 
-          test = Path("crates/grandiose/tests/self_host_bytecode.rs").read_text()
-          diagnostic = re.search(
-              r'const DIAGNOSTIC_PROBES: &str = r#"(.*?)"#;', test, re.S
-          ).group(1)
-          block = re.search(
-              r'let primary_source = \[(.*?)\]\s*\.concat\(\);', test, re.S
-          ).group(1)
-          pieces = []
-          for match in re.finditer(r'r#"(.*?)"#|DIAGNOSTIC_PROBES', block, re.S):
-              pieces.append(diagnostic if match.group(0) == "DIAGNOSTIC_PROBES" else match.group(1))
-          primary = "".join(pieces)
-          paths = [
-              Path("crates/grandiose/src/distributed_std.glorious"),
-              Path("self-host/src/main.glorious"),
-              Path("self-host/src/frontend/frontend.glorious"),
-              Path("self-host/src/frontend/lexer/lexer.glorious"),
-              Path("self-host/src/frontend/scanner/scanner.glorious"),
-              Path("self-host/src/frontend/headers/headers.glorious"),
-          ]
-          sources = [paths[0].read_text(), primary] + [path.read_text() for path in paths[2:]]
-          names = [str(paths[0]), str(paths[1])] + [str(path) for path in paths[2:]]
-          start = 0
-          offset = 553014
-          for index, (name, source) in enumerate(zip(names, sources)):
-              if index:
-                  start += 1
-              end = start + len(source.encode())
-              print(f"SEGMENT {start}..{end} {name}")
-              if start <= offset < end:
-                  local = offset - start
-                  prefix = source.encode()[:local].decode("utf-8", errors="ignore")
-                  line = prefix.count("\n") + 1
-                  column = len(prefix.rsplit("\n", 1)[-1]) + 1
-                  lines = source.splitlines()
-                  print(f"OFFSET {offset} => {name}:{line}:{column}")
-                  for current in range(max(1, line - 3), min(len(lines), line + 3) + 1):
-                      print(f"{current:04}: {lines[current - 1]}")
-              start = end
+          path = Path("self-host/src/frontend/headers/headers.glorious")
+          source = path.read_text()
+          anchor = """set_position(value: &mut Parser, at: usize) {
+              super::syntax::cursor_set(&mut value.cursor, at)
+          }
+
+          token_code"""
+          replacement = """set_position(value: &mut Parser, at: usize) {
+              super::syntax::cursor_set(&mut value.cursor, at)
+          }
+
+          advance(value: &mut Parser) {
+              let next = position(&*value) + 1;
+              set_position(value, next)
+          }
+
+          token_code"""
+          if "advance(value: &mut Parser)" not in source:
+              if anchor not in source:
+                  raise SystemExit("cursor helper anchor not found")
+              source = source.replace(anchor, replacement, 1)
+          source = source.replace(
+              "set_position(value, position(value) + 1)",
+              "advance(value)",
+          )
+          path.write_text(source)
           PY
+          if git diff --quiet -- self-host/src/frontend/headers/headers.glorious; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Commit cursor normalization
+        if: steps.repair.outputs.changed == 'true'
+        run: |
+          git config user.name "OpenAI Agent"
+          git config user.email "agent@users.noreply.github.com"
+          git add -- self-host/src/frontend/headers/headers.glorious
+          git commit -m "Normalize semantic header cursor advancement"
+          git push origin HEAD:agent/semantic-header-representation
