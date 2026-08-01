@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: agent/semantic-header-representation
-      - name: Apply verified ownership-safe rewrites
+      - name: Separate arena bookkeeping from mutation
         id: repair
         run: |
           python3 - <<'PY'
@@ -33,126 +33,109 @@ jobs:
               source = source.replace(before, after, 1)
 
           replace_once(
-              "path tail name",
+              "fixity ordinal",
               "\n".join([
-                  "        Vec::push(",
-                  "            &mut value.output.names,",
-                  "            try(ident(value, related), @parse_path_tail)",
-                  "        );",
+                  "            record_header(nominal, NominalHeader::Fixity(",
+                  "                wrapping_convert_to_u32(Vec::len(&nominal.fixities.values) - 1)",
+                  "            ));",
               ]),
               "\n".join([
-                  "        let name = try(ident(value, related), @parse_path_tail);",
-                  "        Vec::push(&mut value.output.names, name);",
+                  "            let ordinal = wrapping_convert_to_u32(",
+                  "                Vec::len(&nominal.fixities.values) - 1",
+                  "            );",
+                  "            record_header(nominal, NominalHeader::Fixity(ordinal));",
+              ]),
+          )
+          for kind, arena in [
+              ("Alias", "aliases"),
+              ("Struct", "structs"),
+              ("Enum", "enums"),
+          ]:
+              replace_once(
+                  f"{kind.lower()} ordinal",
+                  "\n".join([
+                      f"        record_header(nominal, NominalHeader::{kind}(",
+                      f"            wrapping_convert_to_u32(Vec::len(&nominal.{arena}.values) - 1)",
+                      "        ));",
+                  ]),
+                  "\n".join([
+                      "        let ordinal = wrapping_convert_to_u32(",
+                      f"            Vec::len(&nominal.{arena}.values) - 1",
+                      "        );",
+                      f"        record_header(nominal, NominalHeader::{kind}(ordinal));",
+                  ]),
+              )
+
+          replace_once(
+              "struct range precompute",
+              "\n".join([
+                  "        try(parse_fields(value, &mut nominal.fields, start), @parse_struct);",
+                  "        Vec::push(&mut nominal.structs.values, StructHeader {",
+              ]),
+              "\n".join([
+                  "        try(parse_fields(value, &mut nominal.fields, start), @parse_struct);",
+                  "        let field_end = Vec::len(&nominal.fields.values);",
+                  "        let field_range = super::syntax::id_range(field_start, field_end);",
+                  "        Vec::push(&mut nominal.structs.values, StructHeader {",
               ]),
           )
           replace_once(
-              "path range",
+              "struct range field",
               "\n".join([
-                  "        let path = try(push_type(",
-                  "            value,",
-                  "            HeaderTypeKind::Path(super::syntax::id_range(",
-                  "                name_start,",
-                  "                Vec::len(&value.output.names)",
-                  "            )),",
-                  "            start,",
-                  "            related",
-                  "        ), @parse_path_tail);",
+                  "            fields: super::syntax::id_range(",
+                  "                field_start,",
+                  "                Vec::len(&nominal.fields.values)",
+                  "            ),",
+              ]),
+              "            fields: field_range,",
+          )
+
+          replace_once(
+              "variant range precompute",
+              "\n".join([
+                  "        append_edges(&mut value.output.type_edges, &fields, 0, 0);",
+                  "        Vec::push(&mut variants.values, VariantHeader {",
               ]),
               "\n".join([
-                  "        let name_end = Vec::len(&value.output.names);",
-                  "        let names = super::syntax::id_range(name_start, name_end);",
-                  "        let path = try(push_type(",
-                  "            value,",
-                  "            HeaderTypeKind::Path(names),",
-                  "            start,",
-                  "            related",
-                  "        ), @parse_path_tail);",
+                  "        append_edges(&mut value.output.type_edges, &fields, 0, 0);",
+                  "        let edge_end = Vec::len(&value.output.type_edges);",
+                  "        let field_range = super::syntax::id_range(edge_start, edge_end);",
+                  "        Vec::push(&mut variants.values, VariantHeader {",
               ]),
           )
           replace_once(
-              "application range",
+              "variant range field",
               "\n".join([
-                  "            push_type(",
-                  "                value,",
-                  "                HeaderTypeKind::Application(",
-                  "                    constructor,",
-                  "                    super::syntax::id_range(",
-                  "                        edge_start,",
-                  "                        Vec::len(&value.output.type_edges)",
-                  "                    )",
-                  "                ),",
-                  "                start,",
-                  "                related",
+                  "            fields: super::syntax::id_range(",
+                  "                edge_start,",
+                  "                Vec::len(&value.output.type_edges)",
                   "            )",
               ]),
+              "            fields: field_range",
+          )
+
+          replace_once(
+              "enum range precompute",
               "\n".join([
-                  "            let edge_end = Vec::len(&value.output.type_edges);",
-                  "            let argument_range = super::syntax::id_range(edge_start, edge_end);",
-                  "            push_type(",
-                  "                value,",
-                  "                HeaderTypeKind::Application(constructor, argument_range),",
-                  "                start,",
-                  "                related",
-                  "            )",
+                  "        try(parse_variants(&mut *value, &mut nominal.variants, start), @parse_enum);",
+                  "        Vec::push(&mut nominal.enums.values, EnumHeader {",
+              ]),
+              "\n".join([
+                  "        try(parse_variants(&mut *value, &mut nominal.variants, start), @parse_enum);",
+                  "        let variant_end = Vec::len(&nominal.variants.values);",
+                  "        let variant_range = super::syntax::id_range(variant_start, variant_end);",
+                  "        Vec::push(&mut nominal.enums.values, EnumHeader {",
               ]),
           )
           replace_once(
-              "tuple range",
+              "enum range field",
               "\n".join([
-                  "    push_type(",
-                  "        value,",
-                  "        HeaderTypeKind::Tuple(super::syntax::id_range(",
-                  "            edge_start,",
-                  "            Vec::len(&value.output.type_edges)",
-                  "        )),",
-                  "        start,",
-                  "        related",
-                  "    )",
+                  "            variants: super::syntax::id_range(",
+                  "                variant_start,",
+                  "                Vec::len(&nominal.variants.values)",
+                  "            ),",
               ]),
-              "\n".join([
-                  "    let edge_end = Vec::len(&value.output.type_edges);",
-                  "    let element_range = super::syntax::id_range(edge_start, edge_end);",
-                  "    push_type(",
-                  "        value,",
-                  "        HeaderTypeKind::Tuple(element_range),",
-                  "        start,",
-                  "        related",
-                  "    )",
-              ]),
-          )
-          replace_once(
-              "generic item",
-              "\n".join([
-                  "        Vec::push(",
-                  "            &mut value.output.generic_params,",
-                  "            try(parse_one_generic(value, related), @parse_generic_items)",
-                  "        );",
-              ]),
-              "\n".join([
-                  "        let parameter = try(",
-                  "            parse_one_generic(value, related),",
-                  "            @parse_generic_items",
-                  "        );",
-                  "        Vec::push(&mut value.output.generic_params, parameter);",
-              ]),
-          )
-          replace_once(
-              "callable tokens",
-              "\n".join([
-                  "    if(position(value) == limit(value)) {",
-                  "        Vec::push(&mut value.output.callables, CallableHeader {",
-              ]),
-              "\n".join([
-                  "    if(position(value) == limit(value)) {",
-                  "        let token_end = limit(&*value);",
-                  "        let tokens = super::syntax::token_span(start, token_end);",
-                  "        Vec::push(&mut value.output.callables, CallableHeader {",
-              ]),
-          )
-          replace_once(
-              "callable token field",
-              "            tokens: super::syntax::token_span(start, limit(value))",
-              "            tokens: tokens",
+              "            variants: variant_range,",
           )
 
           path.write_text(source)
@@ -162,11 +145,11 @@ jobs:
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
-      - name: Commit verified ownership-safe rewrites
+      - name: Commit separated arena bookkeeping
         if: steps.repair.outputs.changed == 'true'
         run: |
           git config user.name "OpenAI Agent"
           git config user.email "agent@users.noreply.github.com"
           git add -- self-host/src/frontend/headers/headers.glorious
-          git commit -m "Finish semantic header parser borrow flattening"
+          git commit -m "Separate semantic header arena bookkeeping"
           git push origin HEAD:agent/semantic-header-representation
