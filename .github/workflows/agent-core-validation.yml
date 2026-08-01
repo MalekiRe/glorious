@@ -4,9 +4,12 @@ on:
   push:
     branches:
       - agent/semantic-header-representation
+  pull_request:
+    branches:
+      - master
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   core:
@@ -17,37 +20,8 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: agent/semantic-header-representation
-      - name: Apply the exact semantic-header repair
-        id: repair
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path("self-host/src/frontend/headers/headers.glorious")
-          source = path.read_text()
-          before = "try(parse_variants(value, &mut nominal.variants, start), @parse_enum);"
-          after = "try(parse_variants(&mut *value, &mut nominal.variants, start), @parse_enum);"
-          source = source.replace(before, after)
-          path.write_text(source)
-          PY
-          if git diff --quiet -- self-host/src/frontend/headers/headers.glorious; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Commit the exact repair
-        if: steps.repair.outputs.changed == 'true'
-        run: |
-          git config user.name "OpenAI Agent"
-          git config user.email "agent@users.noreply.github.com"
-          git add -- self-host/src/frontend/headers/headers.glorious
-          git commit -m "Reborrow the semantic header parser"
-          git push origin HEAD:agent/semantic-header-representation
       - uses: dtolnay/rust-toolchain@stable
-        if: steps.repair.outputs.changed == 'false'
       - name: Compile the complete self-host test target
-        if: steps.repair.outputs.changed == 'false'
         run: cargo test -p grandiose --test self_host_bytecode --no-run
       - name: Exercise the complete self-host compiler
-        if: steps.repair.outputs.changed == 'false'
         run: cargo test -p grandiose --test self_host_bytecode -- --nocapture
