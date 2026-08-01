@@ -6,10 +6,7 @@ use super::model::DiagnosticClass;
 use super::model::DiagnosticPhase;
 use super::model::DiagnosticSite;
 use super::model::DiagnosticSpace;
-use super::super::frontend::elaboration;
-use super::super::frontend::headers;
 use super::super::frontend::lexer;
-use super::super::frontend::scanner;
 use super::super::frontend::bodies::BodyError;
 use super::super::frontend::elaboration::ElaborationError;
 use super::super::frontend::headers::HeaderError;
@@ -190,6 +187,37 @@ make_frontend_diagnostic(
     }
 }
 
+lex_local_code(error: &LexError) -> u32 {
+    handle *lexer::error_kind(error) {
+        lexer::LexErrorKind::UnexpectedCharacter => 1,
+        lexer::LexErrorKind::UnfinishedComment => 2,
+        lexer::LexErrorKind::InvalidLabel => 3,
+        lexer::LexErrorKind::InvalidDigit => 4,
+        lexer::LexErrorKind::MisplacedDigitSeparator => 5,
+        lexer::LexErrorKind::ExpectedDigits => 6,
+        lexer::LexErrorKind::MalformedFloatExponent => 7,
+        lexer::LexErrorKind::UnfinishedEscape => 8,
+        lexer::LexErrorKind::InvalidCharacterEscape => 9,
+        lexer::LexErrorKind::UnknownEscape => 10,
+        lexer::LexErrorKind::MalformedHexEscape => 11,
+        lexer::LexErrorKind::MalformedUnicodeEscape => 12,
+        lexer::LexErrorKind::UnfinishedUnicodeEscape => 13,
+        lexer::LexErrorKind::InvalidUnicodeScalar => 14,
+        lexer::LexErrorKind::InvalidByteEscape => 15,
+        lexer::LexErrorKind::UnfinishedString => 16,
+        lexer::LexErrorKind::InvalidByteStringCharacter => 17,
+        lexer::LexErrorKind::UnfinishedByteString => 18,
+        lexer::LexErrorKind::EmptyByteLiteral => 19,
+        lexer::LexErrorKind::InvalidByteLiteral => 20,
+        lexer::LexErrorKind::UnfinishedByteLiteral => 21,
+        lexer::LexErrorKind::UnfinishedCharacterLiteral => 22,
+        lexer::LexErrorKind::EmptyCharacterLiteral => 23,
+        lexer::LexErrorKind::InvalidLifetimeIdentifier => 24,
+        lexer::LexErrorKind::InvalidCharacterLiteral => 25,
+        lexer::LexErrorKind::ResourceLimit => 26
+    }
+}
+
 pub lex_diagnostic(error: &LexError) -> CompilerDiagnostic {
     let span = lexer::error_span(error);
     let class = if(*lexer::error_kind(error) is lexer::LexErrorKind::ResourceLimit) {
@@ -200,7 +228,7 @@ pub lex_diagnostic(error: &LexError) -> CompilerDiagnostic {
     model::make_diagnostic(
         DiagnosticPhase::Lex,
         class,
-        wrapping_convert_to_u32(lexer::error_code(error)),
+        lex_local_code(error),
         "self-host compiler: lexical analysis failed",
         model::span_site(
             DiagnosticSpace::SourceByte,
@@ -214,29 +242,49 @@ pub lex_diagnostic(error: &LexError) -> CompilerDiagnostic {
     )
 }
 
-pub scan_diagnostic(error: &ScanError) -> CompilerDiagnostic {
-    let primary = scanner::scan_error_token(error);
-    let related = scanner::scan_error_related(error);
-    let class = handle *error {
-        ScanError::DeclarationIdExhausted(_, _) =>
+scan_shape(error: &ScanError) -> DiagnosticShape {
+    handle *error {
+        ScanError::UnexpectedClosingDelimiter(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        ScanError::MismatchedClosingDelimiter(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        ScanError::UnclosedDelimiter(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        ScanError::InvalidDeclarationStart(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        ScanError::IncompleteDeclaration(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        ScanError::ExpectedDeclarationName(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        ScanError::DeclarationIdExhausted(token, related) => token_pair_shape(
             DiagnosticClass::ResourceLimit,
-        ScanError::UnexpectedClosingDelimiter(_, _) => DiagnosticClass::Syntax,
-        ScanError::MismatchedClosingDelimiter(_, _) => DiagnosticClass::Syntax,
-        ScanError::UnclosedDelimiter(_, _) => DiagnosticClass::Syntax,
-        ScanError::InvalidDeclarationStart(_, _) => DiagnosticClass::Syntax,
-        ScanError::IncompleteDeclaration(_, _) => DiagnosticClass::Syntax,
-        ScanError::ExpectedDeclarationName(_, _) => DiagnosticClass::Syntax
-    };
-    model::make_diagnostic(
+            token,
+            related,
+            0,
+            0
+        )
+    }
+}
+
+scan_local_code(error: &ScanError) -> u32 {
+    handle *error {
+        ScanError::UnexpectedClosingDelimiter(_, _) => 1,
+        ScanError::MismatchedClosingDelimiter(_, _) => 2,
+        ScanError::UnclosedDelimiter(_, _) => 3,
+        ScanError::InvalidDeclarationStart(_, _) => 4,
+        ScanError::IncompleteDeclaration(_, _) => 5,
+        ScanError::ExpectedDeclarationName(_, _) => 6,
+        ScanError::DeclarationIdExhausted(_, _) => 7
+    }
+}
+
+pub scan_diagnostic(error: &ScanError) -> CompilerDiagnostic {
+    make_frontend_diagnostic(
         DiagnosticPhase::Scan,
-        class,
-        wrapping_convert_to_u32(scanner::scan_error_code(error)),
+        scan_local_code(error),
         "self-host compiler: declaration scanning failed",
-        model::site(DiagnosticSpace::Token, primary),
-        model::related_site(DiagnosticSpace::Token, primary, related),
         None,
-        0,
-        0
+        scan_shape(error)
     )
 }
 
@@ -262,42 +310,57 @@ header_local_code(error: &HeaderError) -> u32 {
     }
 }
 
-pub header_diagnostic(error: &HeaderError) -> CompilerDiagnostic {
-    let primary = headers::error_token(error);
-    let related = headers::error_related(error);
-    let class = handle *error {
-        HeaderError::TypeArenaExhausted(_, _) =>
+header_shape(error: &HeaderError) -> DiagnosticShape {
+    handle *error {
+        HeaderError::ExpectedIdentifier(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        HeaderError::ExpectedLeftParenthesis(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        HeaderError::ExpectedRightParenthesis(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        HeaderError::ExpectedRightAngle(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        HeaderError::EmptyTypeArguments(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        HeaderError::EmptyGenericParameters(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        HeaderError::UnsupportedGenericParameterKind(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        HeaderError::ExpectedColon(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        HeaderError::ExpectedRightBrace(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        HeaderError::ExpectedSemicolon(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        HeaderError::UnexpectedTrailingHeaderToken(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        HeaderError::ExpectedEquals(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        HeaderError::ExpectedIntegerPrecedence(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        HeaderError::PrecedenceOutOfRange(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        HeaderError::ExpectedOperator(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        HeaderError::InvalidFixityForm(token, related) =>
+            token_pair_shape(DiagnosticClass::Syntax, token, related, 0, 0),
+        HeaderError::TypeArenaExhausted(token, related) => token_pair_shape(
             DiagnosticClass::ResourceLimit,
-        HeaderError::ExpectedIdentifier(_, _) => DiagnosticClass::Syntax,
-        HeaderError::ExpectedLeftParenthesis(_, _) => DiagnosticClass::Syntax,
-        HeaderError::ExpectedRightParenthesis(_, _) => DiagnosticClass::Syntax,
-        HeaderError::ExpectedRightAngle(_, _) => DiagnosticClass::Syntax,
-        HeaderError::EmptyTypeArguments(_, _) => DiagnosticClass::Syntax,
-        HeaderError::EmptyGenericParameters(_, _) => DiagnosticClass::Syntax,
-        HeaderError::UnsupportedGenericParameterKind(_, _) =>
-            DiagnosticClass::Syntax,
-        HeaderError::ExpectedColon(_, _) => DiagnosticClass::Syntax,
-        HeaderError::ExpectedRightBrace(_, _) => DiagnosticClass::Syntax,
-        HeaderError::ExpectedSemicolon(_, _) => DiagnosticClass::Syntax,
-        HeaderError::UnexpectedTrailingHeaderToken(_, _) =>
-            DiagnosticClass::Syntax,
-        HeaderError::ExpectedEquals(_, _) => DiagnosticClass::Syntax,
-        HeaderError::ExpectedIntegerPrecedence(_, _) =>
-            DiagnosticClass::Syntax,
-        HeaderError::PrecedenceOutOfRange(_, _) => DiagnosticClass::Syntax,
-        HeaderError::ExpectedOperator(_, _) => DiagnosticClass::Syntax,
-        HeaderError::InvalidFixityForm(_, _) => DiagnosticClass::Syntax
-    };
-    model::make_diagnostic(
+            token,
+            related,
+            0,
+            0
+        )
+    }
+}
+
+pub header_diagnostic(error: &HeaderError) -> CompilerDiagnostic {
+    make_frontend_diagnostic(
         DiagnosticPhase::Headers,
-        class,
         header_local_code(error),
         "self-host compiler: declaration header parsing failed",
-        model::site(DiagnosticSpace::Token, primary),
-        model::related_site(DiagnosticSpace::Token, primary, related),
         None,
-        0,
-        0
+        header_shape(error)
     )
 }
 
@@ -746,13 +809,55 @@ elaboration_local_code(error: &ElaborationError) -> u32 {
         ElaborationError::IntegerEncodingOverflow(_, _) => 46,
         ElaborationError::InvalidLocalReference(_, _, _) => 47,
         ElaborationError::EmbeddedValueSerializationUnsupported(_) => 48,
-        ElaborationError::MatchSerializationUnsupported(_) => 49
+        ElaborationError::VariantDispatchSerializationUnsupported(_) => 49
+    }
+}
+
+elaboration_arguments(error: &ElaborationError) -> (u32, u32) {
+    handle *error {
+        ElaborationError::CyclicNominalType(_, nominal) => (nominal, nominal),
+        ElaborationError::TypeMismatch(_, expected, found) =>
+            (expected, found),
+        ElaborationError::IntegerLiteralOutOfRange(_, ty) => (ty, ty),
+        ElaborationError::MissingCallableInterface(_, shell) =>
+            (0, Id::to_u32(shell)),
+        ElaborationError::ArgumentCountMismatch(_, expected, found) =>
+            (expected, found),
+        ElaborationError::InvalidCallTarget(_, found) => (0, found),
+        ElaborationError::MissingTupleElement(_, expected) => (expected, 0),
+        ElaborationError::ExpectedTupleType(_, ty) => (ty, ty),
+        ElaborationError::UnknownStructField(_, name) => (0, name),
+        ElaborationError::DuplicateOrInaccessibleField(_, field) =>
+            (field, field),
+        ElaborationError::StructFieldCountMismatch(_, expected, found) =>
+            (expected, found),
+        ElaborationError::InvalidStructTarget(_, found) => (4, found),
+        ElaborationError::VariantPayloadCountMismatch(_, expected, found) =>
+            (expected, found),
+        ElaborationError::MissingVariant(_, variant) => (0, variant),
+        ElaborationError::UnknownProjectionField(_, subject, name) =>
+            (subject, name),
+        ElaborationError::DuplicateMatchVariant(_, expected, found) =>
+            (expected, found),
+        ElaborationError::VariantOwnerMismatch(_, expected, found) =>
+            (expected, found),
+        ElaborationError::MissingMatchVariants(_, expected, found) =>
+            (expected, found),
+        ElaborationError::ExpectedEnumType(_, found) => (0, found),
+        ElaborationError::MissingBodyCallable(shell) =>
+            (0, Id::to_u32(shell)),
+        ElaborationError::IntegerEncodingOverflow(_, ty) => (0, ty),
+        ElaborationError::InvalidLocalReference(_, limit, local) =>
+            (limit, local),
+        ElaborationError::EmbeddedValueSerializationUnsupported(_) => (0, 5),
+        ElaborationError::VariantDispatchSerializationUnsupported(_) =>
+            (0, 12),
+        _ => (0, 0)
     }
 }
 
 elaboration_shape(error: &ElaborationError) -> DiagnosticShape {
-    let expected = elaboration::elaboration_error_expected(error);
-    let found = elaboration::elaboration_error_found(error);
+    let (expected, found) = elaboration_arguments(error);
     handle *error {
         ElaborationError::CyclicTypeAlias(token) => token_shape(
             DiagnosticClass::Type,
@@ -1079,7 +1184,7 @@ elaboration_shape(error: &ElaborationError) -> DiagnosticShape {
             expected,
             found
         ),
-        ElaborationError::MatchSerializationUnsupported(computation) =>
+        ElaborationError::VariantDispatchSerializationUnsupported(computation) =>
             indexed_argument_shape(
             DiagnosticClass::Internal,
             DiagnosticSpace::CoreComputation,

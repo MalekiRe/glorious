@@ -29,22 +29,29 @@ fn self_host_bundle() -> SourceBundle {
     let root = repository_root().join("self-host/src");
     let primary = Segment::new(
         root.join("main.glorious").to_string_lossy(),
-        "mod frontend;\n\nmain() { run_compiler_host(frontend::headers::interface_application) }\n",
+        "mod frontend;\nmod probe;\n\nmain() { run_compiler_host(probe::headers::interface_application) }\n",
     );
     let paths = [
         root.join("frontend/frontend.glorious"),
         root.join("frontend/lexer/lexer.glorious"),
         root.join("frontend/scanner/scanner.glorious"),
         root.join("frontend/headers/headers.glorious"),
+        root.join("probe/probe.glorious"),
+        root.join("probe/headers/headers.glorious"),
     ];
     SourceBundle::distributed(
         primary,
         paths.into_iter().map(|path| {
-            let source = fs::read_to_string(&path)
+            let mut source = fs::read_to_string(&path)
                 .unwrap()
                 .replace("pub mod bodies;\n", "")
                 .replace("pub mod resolution;\n", "")
                 .replace("pub mod elaboration;\n", "");
+            if path.ends_with("probe/probe.glorious") {
+                source = source
+                    .replace("pub mod lexer;\n", "")
+                    .replace("pub mod scanner;\n", "");
+            }
             Segment::new(path.to_string_lossy(), source)
         }),
     )

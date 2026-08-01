@@ -57,10 +57,21 @@ const FIXTURE: &str = r#"
             Choice::Pair(_, second) => second
         }
     }
+    branch_final(choice: Choice) -> i64 {
+        let value = 17;
+        handle choice {
+            Choice::Empty => identity(value),
+            Choice::Number(_) => identity(value),
+            Choice::Pair(_, _) => identity(value)
+        }
+    }
     matched_empty() -> i64 { inspect_choice(Choice::Empty) }
     matched_number() -> i64 { inspect_choice(Choice::Number(13)) }
     matched_pair() -> i64 { inspect_choice(Choice::Pair(7, 9)) }
     matched_pair_tail() -> u64 { inspect_choice_tail(Choice::Pair(7, 9)) }
+    branch_final_empty() -> i64 { branch_final(Choice::Empty) }
+    branch_final_number() -> i64 { branch_final(Choice::Number(1)) }
+    branch_final_pair() -> i64 { branch_final(Choice::Pair(1, 2)) }
     main() { () }
 "#;
 
@@ -456,7 +467,7 @@ fn function_id(artifact: &Artifact, name: &str) -> u32 {
 fn assert_diagnostic_contracts(mut run: impl FnMut(&str, Vec<Value>) -> Value) {
     let frontend = [
         (1_u64, 1_u64, 1016_u64, 1_u64, 0_u64),
-        (2, 1, 2004, 2, 0),
+        (2, 1, 2001, 2, 0),
         (3, 1, 3007, 2, 0),
         (7, 1, 7001, 2, 3),
         (8, 2, 8001, 2, 3),
@@ -527,6 +538,10 @@ fn assert_compiled_artifact(bytes: &[u8]) {
     let matched_number = function_id(&decoded, "matched_number");
     let matched_pair = function_id(&decoded, "matched_pair");
     let matched_pair_tail = function_id(&decoded, "matched_pair_tail");
+    let branch_final = function_id(&decoded, "branch_final");
+    let branch_final_empty = function_id(&decoded, "branch_final_empty");
+    let branch_final_number = function_id(&decoded, "branch_final_number");
+    let branch_final_pair = function_id(&decoded, "branch_final_pair");
     let main = function_id(&decoded, "main");
     assert!(decoded.types.iter().any(|ty| matches!(
         ty.representation(),
@@ -622,6 +637,17 @@ fn assert_compiled_artifact(bytes: &[u8]) {
             .any(|instruction| matches!(instruction, Instruction::Deconstruct { .. })),
         "enum handles must consume the matched aggregate shell"
     );
+    let branch = &decoded.functions[branch_final as usize];
+    let branch_code = &decoded.code
+        [branch.code_start as usize..(branch.code_start + branch.code_len) as usize];
+    assert!(
+        branch_code
+            .iter()
+            .filter(|instruction| matches!(instruction, Instruction::Move { .. }))
+            .count()
+            >= 7,
+        "CFG-final uses in the subject and every arm must lower as moves"
+    );
     assert_eq!(
         Vm::new(verified.clone())
             .run(matched_empty, vec![])
@@ -644,6 +670,18 @@ fn assert_compiled_artifact(bytes: &[u8]) {
             .unwrap(),
         Value::U64(9)
     );
+    assert_eq!(
+        Vm::new(verified.clone()).run(branch_final_empty, vec![]).unwrap(),
+        Value::I64(17)
+    );
+    assert_eq!(
+        Vm::new(verified.clone()).run(branch_final_number, vec![]).unwrap(),
+        Value::I64(17)
+    );
+    assert_eq!(
+        Vm::new(verified.clone()).run(branch_final_pair, vec![]).unwrap(),
+        Value::I64(17)
+    );
     assert_eq!(Vm::new(verified).run(main, vec![]).unwrap(), Value::Unit);
 }
 
@@ -652,6 +690,34 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
     std::thread::Builder::new()
         .stack_size(64 * 1024 * 1024)
         .spawn(|| {
+            if std::env::var_os("G1_SELF_HOST_BYTECODE_CHECK_ONLY").is_some() {
+                let bundle = self_host_bundle();
+                let phases = grandiose::compile_bundle_to_phases_with_options(
+                    &bundle,
+                    CompileOptions {
+                        optimization_level: OptimizationLevel::O2,
+                    },
+                )
+                .unwrap_or_else(|errors| {
+                    for error in &errors {
+                        if let Some(span) = error.span
+                            && let Some(segment) = bundle.segment_at(span.start)
+                        {
+                            let base = segment.global_range().start;
+                            eprintln!(
+                                "{}:{}..{}: {}",
+                                segment.name(),
+                                span.start - base,
+                                span.end - base,
+                                error.message
+                            );
+                        }
+                    }
+                    panic!("{errors:#?}")
+                });
+                load_verified(&phases.artifact.encode()).unwrap();
+                return;
+            }
             let directory = tempfile::tempdir().unwrap();
             let input = directory.path().join("input.glorious");
             fs::write(&input, FIXTURE).unwrap();
@@ -706,6 +772,10 @@ fn self_hosted_frontend_emits_canonical_executable_bytecode_in_vm_and_native() {
             assert_eq!(vm.run(compiler_entry, vec![]).unwrap(), Value::Unit);
             let vm_bytes = fs::read(&vm_output).unwrap();
             assert_compiled_artifact(&vm_bytes);
+
+            if std::env::var_os("G1_SELF_HOST_BYTECODE_VM_ONLY").is_some() {
+                return;
+            }
 
             let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();
             let llvm = directory.path().join("self-host-bytecode.ll");

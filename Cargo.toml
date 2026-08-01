@@ -1,3 +1,12 @@
 [workspace]
 members = ["crates/grandiose", "crates/grandiose-vm"]
 resolver = "2"
+
+# Bootstrap and self-host conformance tests execute the Rust compiler and its
+# bytecode verifier. Optimizing those two Rust packages cuts repeated bootstrap
+# runtime without changing the self-hosted compiler or generated semantics.
+[profile.test.package.grandiose]
+opt-level = 2
+
+[profile.test.package.grandiose-vm]
+opt-level = 2

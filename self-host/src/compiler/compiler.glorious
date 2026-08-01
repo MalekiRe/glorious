@@ -48,15 +48,12 @@ pub enum CompileError {
     Emission(EmissionError)
 }
 
-type StageFunctionArena = Arena<
-    lowering::StageFunctionTag,
-    lowering::StageFunction
+type MirFunctionArena = Arena<
+    lowering::MirFunctionTag,
+    lowering::MirFunction
 >;
 
-type StageTypeArena = Arena<
-    lowering::StageTypeTag,
-    lowering::StageType
->;
+type MirTypeArena = lowering::MirTypes;
 
 // One session owns all cross-body semantic state. Body syntax and resolution
 // are deliberately absent: those live only in BodyCompilation and are released
@@ -191,7 +188,7 @@ prepare_body<'a>(
 lower_body<'a>(
     session: &mut CompilerSession<'a>,
     body: BodyCompilation
-) -> Result<lowering::StageFunction, CompileError> {
+) -> Result<lowering::MirFunction, CompileError> {
     let BodyCompilation {
         callable,
         name,
@@ -230,7 +227,7 @@ lower_body<'a>(
 lower_functions<'a>(
     session: &mut CompilerSession<'a>,
     index: usize,
-    output: &mut StageFunctionArena
+    output: &mut MirFunctionArena
 ) -> Result<(), CompileError> {
     let end = elaboration::interface_callable_count(&session.interfaces);
     try_for_range(Range::new(index, end), { current => {
@@ -260,28 +257,28 @@ lower_functions<'a>(
 }
 
 find_entry(
-    program: &lowering::StageProgram,
+    program: &lowering::MirProgram,
     index: usize
-) -> Option<lowering::StageFunctionId> {
-    let count = lowering::stage_program_function_count(program);
+) -> Option<lowering::MirFunctionId> {
+    let count = lowering::mir_program_function_count(program);
     handle find_range(Range::new(index, count), { current => {
-        let function = lowering::stage_program_function_at(
+        let function = lowering::mir_program_function_at(
             program,
-            lowering::stage_function_id_from_usize(current)
+            lowering::mir_function_id_from_usize(current)
         );
         String::eq(
-            lowering::stage_function_name(function),
+            lowering::mir_function_name(function),
             &"main"
         ) and {
-            lowering::stage_function_parameter_count(function) == 0
+            lowering::mir_function_parameter_count(function) == 0
         } and {
             lowering::artifact_type_raw(
-                lowering::stage_function_result(function)
+                lowering::mir_function_result(function)
             ) == 0
         }
     } }) {
         Option::Some(found) => Option::Some(
-            lowering::stage_function_id_from_usize(found)
+            lowering::mir_function_id_from_usize(found)
         ),
         None => None
     }
@@ -382,7 +379,7 @@ collect_enum_variants<'a>(
     count: u32,
     ordinal: u32,
     type_names: &mut Vec<String>,
-    output: &mut Vec<lowering::StageVariant>
+    output: &mut Vec<lowering::MirVariant>
 ) -> Result<(), CompileError> {
     try_for_range(Range::new(
         usize_from_u32(ordinal),
@@ -427,7 +424,7 @@ collect_enum_variants<'a>(
 collect_types<'a>(
     session: &CompilerSession<'a>,
     index: usize,
-    output: &mut StageTypeArena,
+    output: &mut MirTypeArena,
     type_names: &mut Vec<String>
 ) -> Result<(), CompileError> {
     let end = elaboration::interface_type_count(&session.interfaces);
@@ -444,21 +441,16 @@ collect_types<'a>(
                         lowering::artifact_type_id(Id::to_u32(*element))
                     )
                 });
-                handle Arena::alloc(
+                lowering::push_tuple_type(
                     &mut *output,
-                    lowering::tuple_type(
-                        fields,
-                        if(
-                            elaboration::interface_type_flags_at(
-                                &session.interfaces,
-                                current
-                            ) % 2 == 1
-                        ) { 1 } else { 0 }
-                    )
-                ) {
-                    Result::Err(_) => unreachable(),
-                    Result::Ok(_) => ()
-                };
+                    fields,
+                    if(
+                        elaboration::interface_type_flags_at(
+                            &session.interfaces,
+                            current
+                        ) % 2 == 1
+                    ) { 1 } else { 0 }
+                );
                 Result::Ok(())
             },
             InterfaceTypeView::Nominal(nominal) => handle
@@ -484,23 +476,18 @@ collect_types<'a>(
                         &mut field_names,
                         &mut field_types
                     ), @collect_types);
-                    handle Arena::alloc(
+                    lowering::push_struct_type(
                         &mut *output,
-                        lowering::struct_type(
-                            name_index,
-                            field_names,
-                            field_types,
-                            if(
-                                elaboration::interface_type_flags_at(
-                                    &session.interfaces,
-                                    current
-                                ) % 2 == 1
-                            ) { 1 } else { 0 }
-                        )
-                    ) {
-                        Result::Err(_) => unreachable(),
-                        Result::Ok(_) => ()
-                    };
+                        name_index,
+                        field_names,
+                        field_types,
+                        if(
+                            elaboration::interface_type_flags_at(
+                                &session.interfaces,
+                                current
+                            ) % 2 == 1
+                        ) { 1 } else { 0 }
+                    );
                     Result::Ok(())
                 },
                 InterfaceNominalView::Enum(shell, start, count) => {
@@ -519,22 +506,17 @@ collect_types<'a>(
                         type_names,
                         &mut variants
                     ), @collect_types);
-                    handle Arena::alloc(
+                    lowering::push_enum_type(
                         &mut *output,
-                        lowering::enum_type(
-                            name_index,
-                            variants,
-                            if(
-                                elaboration::interface_type_flags_at(
-                                    &session.interfaces,
-                                    current
-                                ) % 2 == 1
-                            ) { 1 } else { 0 }
-                        )
-                    ) {
-                        Result::Err(_) => unreachable(),
-                        Result::Ok(_) => ()
-                    };
+                        name_index,
+                        variants,
+                        if(
+                            elaboration::interface_type_flags_at(
+                                &session.interfaces,
+                                current
+                            ) % 2 == 1
+                        ) { 1 } else { 0 }
+                    );
                     Result::Ok(())
                 }
             },
@@ -602,7 +584,7 @@ compile_session<'a>(
     session: CompilerSession<'a>
 ) -> Result<Bytes, CompileError> {
     let functions = Arena::new();
-    let types = Arena::new();
+    let types = lowering::mir_types();
     let type_names = Vec::new();
     try(lower_functions(
         &mut session,

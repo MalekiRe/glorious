@@ -1,0 +1,494 @@
+use super::super::frontend::lexer::TokenKind;
+use super::super::frontend::resolution::{
+    ResolvedBody,
+    ResolvedTarget,
+    ResolutionError,
+    ResolutionIndex,
+    build_resolution_index,
+    local_block_expression_at,
+    local_count,
+    local_name_token_at,
+    resolve_function_body_indexed,
+    resolved_name_count,
+    resolved_name_expression_id_at,
+    resolved_name_target_at
+};
+use super::super::frontend::scanner::ShellId;
+
+u32_from_usize(value: usize) -> u32 { wrapping_convert_to_u32(value) }
+usize_from_u32(value: u32) -> usize { wrapping_convert_to_usize(value) }
+
+shell_parent_module(
+    shell: &super::super::frontend::scanner::DeclarationShell
+) -> Option<ShellId> {
+    *super::super::frontend::scanner::shell_parent(shell)
+}
+
+write_string(output: &mut ByteBuf, value: &String) {
+    let bytes = String::as_bytes(value);
+    ByteBuf::write_u32_le(&mut *output, u32_from_usize(Bytes::len(&bytes)));
+    ByteBuf::append_bytes( output, &bytes)
+}
+
+write_name_id(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    name: Id<String>
+) {
+    handle super::super::frontend::lexer::lexeme(source, name) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(text) => write_string( output, text)
+    }
+}
+
+write_name_token(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    token: usize
+) {
+    handle super::super::frontend::lexer::token_kind_at(source, token) {
+        TokenKind::Ident(name) => write_name_id( output, source, name),
+        _ => unreachable()
+    }
+}
+
+shell_name_id(shell: &super::super::frontend::scanner::DeclarationShell) -> Id<String> {
+    handle Option::as_ref(super::super::frontend::scanner::shell_name(shell)) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(name) => *name
+    }
+}
+
+module_depth(
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    module: Option<ShellId>
+) -> usize {
+    handle module {
+        Result::Err(_) => 0,
+        Result::Ok(index) => handle super::super::frontend::scanner::shell_at(
+            declarations,
+            index
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(shell) => 1 + module_depth(
+                declarations,
+                shell_parent_module(shell)
+            )
+        }
+    }
+}
+
+write_module_components(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    module: Option<ShellId>
+) {
+    handle module {
+        Result::Err(_) => (),
+        Result::Ok(index) => handle super::super::frontend::scanner::shell_at(
+            declarations,
+            index
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(shell) => {
+                let parent = shell_parent_module(shell);
+                let name = shell_name_id(shell);
+                write_module_components(
+                    &mut *output,
+                    source,
+                    declarations,
+                    parent
+                );
+                write_name_id( output, source, name)
+            }
+        }
+    }
+}
+
+write_module_path(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    module: Option<ShellId>
+) {
+    ByteBuf::write_u32_le(
+        &mut *output,
+        u32_from_usize(module_depth(declarations, module))
+    );
+    write_module_components(
+         output,
+        source,
+        declarations,
+        module
+    )
+}
+
+write_function_identity(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    shell_index: ShellId
+) {
+    handle super::super::frontend::scanner::shell_at(declarations, shell_index) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(shell) => {
+            let parent = shell_parent_module(shell);
+            let name = shell_name_id(shell);
+            write_module_path(
+                &mut *output,
+                source,
+                declarations,
+                parent
+            );
+            write_name_id( output, source, name)
+        }
+    }
+}
+
+struct ParameterSearch { start: u32, count: u32 }
+
+find_parameter_range(
+    index: &super::super::frontend::headers::HeaderIndex,
+    shell: ShellId,
+    at: usize
+) -> Option<ParameterSearch> {
+    if(at < super::super::frontend::headers::callable_count(index)) {
+        let callable = try(
+            super::super::frontend::headers::callable_at(index, at),
+            @find_parameter_range
+        );
+        if(super::super::frontend::headers::callable_shell(callable) == shell) {
+            let parameters =
+                super::super::frontend::headers::callable_parameters(callable);
+            Result::Ok(ParameterSearch {
+                start: super::super::frontend::headers::range_start(parameters),
+                count: super::super::frontend::headers::range_count(parameters)
+            })
+        } else {
+            find_parameter_range(
+                index,
+                shell,
+                at + 1
+            )
+        }
+    } else {
+        Result::Err(())
+    }
+}
+
+write_parameters(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    index: &super::super::frontend::headers::HeaderIndex,
+    start: u32,
+    count: u32,
+    ordinal: u32
+) {
+    for_range(Range::new(
+        usize_from_u32(ordinal),
+        usize_from_u32(count)
+    ), { current => {
+        let current = u32_from_usize(current);
+        let at = start + current;
+            handle super::super::frontend::headers::parameter_at(index, usize_from_u32(at)) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(parameter) => {
+                    ByteBuf::push(&mut *output, 1);
+                    write_name_token(
+                        &mut *output,
+                        source,
+                        super::super::frontend::headers::parameter_name_token(parameter)
+                    )
+                }
+            }
+    }})
+}
+
+write_locals(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    resolved: &ResolvedBody,
+    index: usize
+) {
+    for_range(Range::new(index, local_count(resolved)), { current => {
+        ByteBuf::push(&mut *output, 2);
+        write_name_token(
+            &mut *output,
+            source,
+            local_name_token_at(resolved, current)
+        )
+    } })
+}
+
+write_target(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    target: ResolvedTarget,
+    parameter_count: u32
+) {
+    handle target {
+        ResolvedTarget::Parameter(id) => {
+            ByteBuf::push(&mut *output, 1);
+            ByteBuf::write_u32_le(
+                output,
+                Id::to_u32(id)
+            )
+        },
+        ResolvedTarget::Local(id) => {
+            ByteBuf::push(&mut *output, 1);
+            ByteBuf::write_u32_le(
+                output,
+                parameter_count + Id::to_u32(id)
+            )
+        },
+        ResolvedTarget::Function(shell) => {
+            ByteBuf::push(&mut *output, 2);
+            write_function_identity(
+                output,
+                source,
+                declarations,
+                shell
+            )
+        },
+        ResolvedTarget::Struct(header) => {
+            ByteBuf::push(&mut *output, 3);
+            ByteBuf::write_u32_le(output, Id::to_u32(header))
+        },
+        ResolvedTarget::Variant(variant) => {
+            ByteBuf::push(&mut *output, 4);
+            ByteBuf::write_u32_le(output, Id::to_u32(variant))
+        }
+    }
+}
+
+write_occurrences(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    body: &super::super::frontend::bodies::ParsedBody,
+    resolved: &ResolvedBody,
+    parameter_count: u32,
+    occurrence: usize
+) {
+    for_range(
+        Range::new(occurrence, resolved_name_count(resolved)),
+        { current => {
+        let expression = resolved_name_expression_id_at(resolved, current);
+        write_name_token(
+            &mut *output,
+            source,
+            super::super::frontend::bodies::expression_token_start_at(
+                body,
+                Id::to_u32(expression)
+            )
+        );
+        write_target(
+            &mut *output,
+            source,
+            declarations,
+            resolved_name_target_at(resolved, current),
+            parameter_count
+        )
+    } })
+}
+
+write_resolved_function(
+    output: &mut ByteBuf,
+    original: &String,
+    headers: &super::super::frontend::headers::ParsedHeaders,
+    resolution_index: &ResolutionIndex,
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    shell_index: ShellId
+) -> Result<(), ResolutionError> {
+    let index = super::super::frontend::headers::parsed_index(headers);
+    let source = super::super::frontend::headers::parsed_source(headers);
+    handle find_parameter_range(index, shell_index, 0) {
+        Result::Err(_) => Result::Err(
+            ResolutionError::MissingParameterRange(shell_index)
+        ),
+        Result::Ok(parameters) => {
+            let parameter_count = parameters.count;
+            handle super::super::frontend::bodies::parse_function_body(
+                original,
+                headers,
+                declarations,
+                shell_index
+            ) {
+            Result::Err(_) => Result::Err(
+                ResolutionError::BodyParseFailure(shell_index)
+            ),
+            Result::Ok(body) => {
+                let resolved = try(
+                    resolve_function_body_indexed(
+                        resolution_index,
+                        headers,
+                        declarations,
+                        &body
+                    ),
+                    @write_resolved_function
+                );
+                write_function_identity(
+                    &mut *output,
+                    source,
+                    declarations,
+                    shell_index
+                );
+                ByteBuf::write_u32_le(
+                    &mut *output,
+                    parameter_count + u32_from_usize(local_count(&resolved))
+                );
+                write_parameters(
+                    &mut *output,
+                    source,
+                    index,
+                    parameters.start,
+                    parameters.count,
+                    0
+                );
+                write_locals(&mut *output, source, &resolved, 0);
+                ByteBuf::write_u32_le(
+                    &mut *output,
+                    u32_from_usize(resolved_name_count(&resolved))
+                );
+                write_occurrences(
+                     output,
+                    source,
+                    declarations,
+                    &body,
+                    &resolved,
+                    parameter_count,
+                    0
+                );
+                Result::Ok(())
+            }
+        }
+        }
+    }
+}
+
+function_count(
+    declarations: &super::super::frontend::scanner::DeclarationIndex
+) -> usize {
+    super::super::frontend::scanner::fold_shells(declarations, 0, { count, _, shell =>
+        if(super::super::frontend::scanner::shell_kind_code(shell) == 12) {
+            count + 1
+        } else {
+            count
+        }
+    })
+}
+
+write_functions(
+    output: &mut ByteBuf,
+    original: &String,
+    headers: &super::super::frontend::headers::ParsedHeaders,
+    resolution_index: &ResolutionIndex,
+    declarations: &super::super::frontend::scanner::DeclarationIndex
+) -> Result<(), ResolutionError> {
+    super::super::frontend::scanner::try_for_each_shell(declarations, { shell_id, shell => {
+        if(super::super::frontend::scanner::shell_kind_code(shell) == 12) {
+            try(
+                write_resolved_function(
+                    &mut *output,
+                    original,
+                    headers,
+                    resolution_index,
+                    declarations,
+                    shell_id
+                ),
+                @write_functions
+            );
+        } else {
+            ()
+        };
+        Result::Ok(())
+    }})
+}
+
+encode_source(output: &mut ByteBuf, original: String) {
+    handle super::super::frontend::lexer::lex(&original) {
+        Result::Err(_) => ByteBuf::push( output, 1),
+        Result::Ok(source) => handle super::super::frontend::scanner::scan(&source) {
+            Result::Err(_) => ByteBuf::push( output, 2),
+            Result::Ok(declarations) => handle super::super::frontend::headers::parse(
+                &original,
+                 source,
+                &declarations
+            ) {
+                Result::Err(_) => ByteBuf::push( output, 3),
+                Result::Ok(headers) => handle build_resolution_index(
+                        &headers,
+                        &declarations
+                    ) {
+                    Result::Err(_) => ByteBuf::push(output, 3),
+                    Result::Ok(resolution_index) => {
+                    let encoded = ByteBuf::new();
+                    ByteBuf::write_u32_le(
+                        &mut encoded,
+                        u32_from_usize(function_count(&declarations))
+                    );
+                    handle write_functions(
+                        &mut encoded,
+                        &original,
+                        &headers,
+                        &resolution_index,
+                        &declarations
+                    ) {
+                        Result::Err(_) => ByteBuf::push( output, 3),
+                        Result::Ok(_) => {
+                            ByteBuf::push(&mut *output, 0);
+                            ByteBuf::append_bytes(
+                                 output,
+                                &ByteBuf::finish( encoded)
+                            )
+                        }
+                    }
+                    }
+                }
+            }
+        }
+    }
+}
+
+process_inputs(
+    arguments: &Vec<String>,
+    index: usize,
+    output: &mut ByteBuf
+) / FileRead {
+    if(index < Vec::len(arguments)) {
+        let path = *Vec::index(arguments, index);
+            let bytes = read_file(path);
+            handle String::from_utf8(bytes) {
+                Result::Err(_) => ByteBuf::push(&mut *output, 1),
+                Result::Ok(source) => encode_source(&mut *output, source)
+            };
+            process_inputs(
+                arguments,
+                index + 1,
+                 output
+            )
+    } else {
+        ()
+    }
+}
+
+pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
+    let arguments = process_args();
+    let count = Vec::len(&arguments);
+    if(count < 2) {
+        write_diagnostic(
+            "usage: grandiose-self-host-resolution <output> <input>..."
+        )
+    } else {
+        let output_path = *Vec::index(&arguments, 0);
+            let encoded = ByteBuf::new();
+            ByteBuf::write_u32_le(
+                &mut encoded,
+                u32_from_usize(count - 1)
+            );
+            process_inputs(&arguments, 1, &mut encoded);
+            write_file(output_path, ByteBuf::finish( encoded))
+    }
+}

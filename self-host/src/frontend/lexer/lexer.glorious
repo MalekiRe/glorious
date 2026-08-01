@@ -3,6 +3,8 @@
 
 pub struct Span { start: usize, end: usize }
 
+impl Use<[0, *]> for Span {}
+
 pub enum Keyword {
     Cancel,
     Effect,
@@ -30,7 +32,6 @@ pub struct NumberExponent {
 pub struct NumberToken {
     spelling: Span,
     base: NumberBase,
-    base_code: u8,
     digits: Span,
     fraction: Option<Span>,
     exponent: Option<NumberExponent>
@@ -82,19 +83,55 @@ pub enum TokenKind {
 
 impl Use<[0, *]> for TokenKind {}
 
-pub struct Token { kind: TokenKind, code: u16, keyword_code: u8, span: Span }
-
-struct CodedTokenKind { kind: TokenKind, code: u16 }
-
-struct RecognizedKeyword { value: Keyword, code: u8 }
-
-coded_token_kind(kind: TokenKind, code: u16) -> CodedTokenKind {
-    CodedTokenKind { kind:  kind, code:  code }
+pub enum TokenPattern {
+    Ident,
+    LParen,
+    RParen,
+    LBrace,
+    RBrace,
+    Comma,
+    Colon,
+    DoubleColon,
+    Dot,
+    Semicolon,
+    Arrow,
+    FatArrow,
+    Slash,
+    Pipe,
+    Eq,
+    Lt,
+    Gt,
+    Amp,
+    Bang
 }
 
-recognized_keyword(value: Keyword, code: u8) -> RecognizedKeyword {
-    RecognizedKeyword { value:  value, code:  code }
+impl Use<[0, *]> for TokenPattern {}
+
+token_pattern_code(pattern: TokenPattern) -> u16 {
+    handle pattern {
+        TokenPattern::Ident => 1,
+        TokenPattern::LParen => 11,
+        TokenPattern::RParen => 12,
+        TokenPattern::LBrace => 13,
+        TokenPattern::RBrace => 14,
+        TokenPattern::Comma => 17,
+        TokenPattern::Colon => 18,
+        TokenPattern::DoubleColon => 19,
+        TokenPattern::Dot => 21,
+        TokenPattern::Semicolon => 22,
+        TokenPattern::Arrow => 23,
+        TokenPattern::FatArrow => 24,
+        TokenPattern::Slash => 25,
+        TokenPattern::Pipe => 30,
+        TokenPattern::Eq => 31,
+        TokenPattern::Lt => 34,
+        TokenPattern::Gt => 36,
+        TokenPattern::Amp => 38,
+        TokenPattern::Bang => 39
+    }
 }
+
+pub struct Token { kind: TokenKind, span: Span }
 
 pub struct LexedSource {
     tokens: Vec<Token>,
@@ -145,16 +182,112 @@ pub token_kind_at(value: &LexedSource, index: usize) -> TokenKind {
     *token_kind( token)
 }
 
-pub token_code(value: &Token) -> u16 { value.code }
+pub token_matches(value: &Token, pattern: TokenPattern) -> Bool {
+    token_code(value) == token_pattern_code(pattern)
+}
 
-pub token_code_at(value: &LexedSource, index: usize) -> u16 {
-    token_code(Vec::index(&value.tokens, index))
+pub token_matches_at(
+    value: &LexedSource,
+    index: usize,
+    pattern: TokenPattern
+) -> Bool {
+    handle token_at(value, index) {
+        Result::Err(_) => false,
+        Result::Ok(found) => token_matches(found, pattern)
+    }
+}
+
+keyword_code(value: &Keyword) -> u8 {
+    handle *value {
+        Keyword::Cancel => 1,
+        Keyword::Effect => 2,
+        Keyword::Enum => 3,
+        Keyword::Handle => 4,
+        Keyword::Impl => 5,
+        Keyword::Is => 6,
+        Keyword::Let => 7,
+        Keyword::Perform => 8,
+        Keyword::Resume => 9,
+        Keyword::Struct => 10,
+        Keyword::Tail => 11,
+        Keyword::Trait => 12,
+        Keyword::Type => 13,
+        Keyword::Where => 14
+    }
+}
+
+pub token_code(value: &Token) -> u16 {
+    handle value.kind {
+        TokenKind::Ident(_) => 1,
+        TokenKind::Keyword(_) => 2,
+        TokenKind::Lifetime(_) => 3,
+        TokenKind::Number(_) => 4,
+        TokenKind::String(_) => 5,
+        TokenKind::Char(_) => 6,
+        TokenKind::Byte(_) => 7,
+        TokenKind::ByteString(_) => 8,
+        TokenKind::Label(_) => 9,
+        TokenKind::Operator(_) => 10,
+        TokenKind::LParen => 11,
+        TokenKind::RParen => 12,
+        TokenKind::LBrace => 13,
+        TokenKind::RBrace => 14,
+        TokenKind::LBracket => 15,
+        TokenKind::RBracket => 16,
+        TokenKind::Comma => 17,
+        TokenKind::Colon => 18,
+        TokenKind::DoubleColon => 19,
+        TokenKind::DotDot => 20,
+        TokenKind::Dot => 21,
+        TokenKind::Semicolon => 22,
+        TokenKind::Arrow => 23,
+        TokenKind::FatArrow => 24,
+        TokenKind::Slash => 25,
+        TokenKind::Plus => 26,
+        TokenKind::Minus => 27,
+        TokenKind::Star => 28,
+        TokenKind::Percent => 29,
+        TokenKind::Pipe => 30,
+        TokenKind::Eq => 31,
+        TokenKind::EqEq => 32,
+        TokenKind::BangEq => 33,
+        TokenKind::Lt => 34,
+        TokenKind::LtEq => 35,
+        TokenKind::Gt => 36,
+        TokenKind::GtEq => 37,
+        TokenKind::Amp => 38,
+        TokenKind::Bang => 39,
+        TokenKind::Dollar => 40,
+        TokenKind::Eof => 41
+    }
+}
+
+pub token_keyword_code(value: &Token) -> u8 {
+    handle value.kind {
+        TokenKind::Keyword(found) => keyword_code(&found),
+        _ => 0
+    }
 }
 
 pub operator_symbol_at(value: &LexedSource, index: usize) -> Bool {
-    let code = token_code_at(value, index);
-    code == 10 or {
-        25 <= code and { code <= 39 }
+    handle token_kind_at(value, index) {
+        TokenKind::Operator(_) => true,
+        TokenKind::Slash => true,
+        TokenKind::Plus => true,
+        TokenKind::Minus => true,
+        TokenKind::Star => true,
+        TokenKind::Percent => true,
+        TokenKind::Pipe => true,
+        TokenKind::Eq => true,
+        TokenKind::EqEq => true,
+        TokenKind::BangEq => true,
+        TokenKind::Lt => true,
+        TokenKind::LtEq => true,
+        TokenKind::Gt => true,
+        TokenKind::GtEq => true,
+        TokenKind::Amp => true,
+        TokenKind::Bang => true,
+        _ => false
     }
 }
 
@@ -200,7 +333,14 @@ pub number_spelling(value: &NumberToken) -> Span {
 
 pub number_base(value: &NumberToken) -> &NumberBase { &value.base }
 
-pub number_base_code(value: &NumberToken) -> u8 { value.base_code }
+pub number_base_code(value: &NumberToken) -> u8 {
+    handle value.base {
+        NumberBase::Binary => 1,
+        NumberBase::Octal => 2,
+        NumberBase::Decimal => 3,
+        NumberBase::Hex => 4
+    }
+}
 
 pub number_is_float(value: &NumberToken) -> Bool {
     (Option::as_ref(&value.fraction) is Result::Ok(_))
@@ -227,38 +367,16 @@ pub lexeme<'a>(value: &'a LexedSource, id: Id<String>) -> Option<&'a String> {
     Interner::get(&value.lexemes, id)
 }
 
-pub error_kind(value: &LexError) -> &LexErrorKind { &value.kind }
-
-pub error_code(value: &LexError) -> u16 {
-    handle *error_kind(value) {
-        LexErrorKind::UnexpectedCharacter => 1,
-        LexErrorKind::UnfinishedComment => 2,
-        LexErrorKind::InvalidLabel => 3,
-        LexErrorKind::InvalidDigit => 4,
-        LexErrorKind::MisplacedDigitSeparator => 5,
-        LexErrorKind::ExpectedDigits => 6,
-        LexErrorKind::MalformedFloatExponent => 7,
-        LexErrorKind::UnfinishedEscape => 8,
-        LexErrorKind::InvalidCharacterEscape => 9,
-        LexErrorKind::UnknownEscape => 10,
-        LexErrorKind::MalformedHexEscape => 11,
-        LexErrorKind::MalformedUnicodeEscape => 12,
-        LexErrorKind::UnfinishedUnicodeEscape => 13,
-        LexErrorKind::InvalidUnicodeScalar => 14,
-        LexErrorKind::InvalidByteEscape => 15,
-        LexErrorKind::UnfinishedString => 16,
-        LexErrorKind::InvalidByteStringCharacter => 17,
-        LexErrorKind::UnfinishedByteString => 18,
-        LexErrorKind::EmptyByteLiteral => 19,
-        LexErrorKind::InvalidByteLiteral => 20,
-        LexErrorKind::UnfinishedByteLiteral => 21,
-        LexErrorKind::UnfinishedCharacterLiteral => 22,
-        LexErrorKind::EmptyCharacterLiteral => 23,
-        LexErrorKind::InvalidLifetimeIdentifier => 24,
-        LexErrorKind::InvalidCharacterLiteral => 25,
-        LexErrorKind::ResourceLimit => 26
+pub lexeme_id(value: &LexedSource, spelling: &String) -> Option<Id<String>> {
+    let index = Interner::string_index_or_len(&value.lexemes, spelling);
+    if(index < Interner::len(&value.lexemes)) {
+        Id::from_usize(index)
+    } else {
+        None
     }
 }
+
+pub error_kind(value: &LexError) -> &LexErrorKind { &value.kind }
 
 pub error_span(value: &LexError) -> Span {
     Span { start: value.span.start, end: value.span.end }
@@ -273,7 +391,9 @@ struct Lexer {
     after_projection_dot: Bool
 }
 
-span(start: usize, end: usize) -> Span { Span { start:  start, end:  end } }
+pub span(start: usize, end: usize) -> Span {
+    Span { start: start, end: end }
+}
 
 lex_error(kind: LexErrorKind, start: usize, end: usize) -> LexError {
     LexError {
@@ -287,10 +407,6 @@ bool_value(value: Bool) -> u32 {
 }
 
 byte_value(value: u8) -> u8 {  value }
-
-u16_is(value: &u16, expected: u16) -> Bool {
-    *value == expected
-}
 
 byte_at_most(value: &u8, upper: u8) -> Bool {
     *value <= upper
@@ -395,7 +511,7 @@ present_byte(result: Option<u8>) -> u8 {
     }
 }
 
-text_slice(source: &String, start: usize, end: usize) -> String {
+pub text_slice(source: &String, start: usize, end: usize) -> String {
     text_slice_result(
         String::slice(source, Range { start:  start, end:  end })
     )
@@ -420,83 +536,64 @@ intern_text(value: &mut Lexer, text: String) -> Id<String> {
     interned_id(Interner::intern_string(&mut value.lexemes, text))
 }
 
-push_with_metadata(
-    value: &mut Lexer,
-    kind: TokenKind,
-    code: u16,
-    keyword_code: u8,
-    start: usize
-) {
-    let after_dot = u16_is(&code, 21);
+push(value: &mut Lexer, kind: TokenKind, start: usize) {
+    let after_dot = kind is TokenKind::Dot;
     let end = value.cursor;
     Vec::push(
         &mut value.tokens,
         Token {
             kind: kind,
-            code: code,
-            keyword_code: keyword_code,
             span: span(start, end)
         }
     );
     (*value).after_projection_dot =  after_dot;
 }
 
-push(value: &mut Lexer, kind: TokenKind, code: u16, start: usize) {
-    push_with_metadata( value,  kind,  code, 0,  start)
-}
-
-push_keyword(value: &mut Lexer, found: RecognizedKeyword, start: usize) {
-    push_with_metadata(
-         value,
-        TokenKind::Keyword(found.value),
-        2,
-        found.code,
-        start
-    )
+push_keyword(value: &mut Lexer, found: Keyword, start: usize) {
+    push(value, TokenKind::Keyword(found), start)
 }
 
 keyword_named(
     value: &String,
     spelling: &String,
-    found: Keyword,
-    code: u8
-) -> Option<RecognizedKeyword> {
+    found: Keyword
+) -> Option<Keyword> {
     if(String::eq(value, spelling)) {
-        Option::Some(recognized_keyword(found, code))
+        Option::Some(found)
     } else {
         None
     }
 }
 
-keyword(value: &String) -> Option<RecognizedKeyword> {
+keyword(value: &String) -> Option<Keyword> {
     let bytes = String::as_bytes(value);
     handle Bytes::get(&bytes, 0) {
-        Result::Ok(99) => keyword_named(value, &"cancel", Keyword::Cancel, 1),
+        Result::Ok(99) => keyword_named(value, &"cancel", Keyword::Cancel),
         Result::Ok(101) => if(String::eq(value, &"enum")) {
-                               Option::Some(recognized_keyword(Keyword::Enum, 3))
+                               Option::Some(Keyword::Enum)
                            } else {
-                               keyword_named(value, &"effect", Keyword::Effect, 2)
+                               keyword_named(value, &"effect", Keyword::Effect)
                            },
-        Result::Ok(104) => keyword_named(value, &"handle", Keyword::Handle, 4),
+        Result::Ok(104) => keyword_named(value, &"handle", Keyword::Handle),
         Result::Ok(105) => if(String::eq(value, &"is")) {
-                               Option::Some(recognized_keyword(Keyword::Is, 6))
+                               Option::Some(Keyword::Is)
                            } else {
-                               keyword_named(value, &"impl", Keyword::Impl, 5)
+                               keyword_named(value, &"impl", Keyword::Impl)
                            },
-        Result::Ok(108) => keyword_named(value, &"let", Keyword::Let, 7),
-        Result::Ok(112) => keyword_named(value, &"perform", Keyword::Perform, 8),
-        Result::Ok(114) => keyword_named(value, &"resume", Keyword::Resume, 9),
-        Result::Ok(115) => keyword_named(value, &"struct", Keyword::Struct, 10),
+        Result::Ok(108) => keyword_named(value, &"let", Keyword::Let),
+        Result::Ok(112) => keyword_named(value, &"perform", Keyword::Perform),
+        Result::Ok(114) => keyword_named(value, &"resume", Keyword::Resume),
+        Result::Ok(115) => keyword_named(value, &"struct", Keyword::Struct),
         Result::Ok(116) => if(String::eq(value, &"tail")) {
-                               Option::Some(recognized_keyword(Keyword::Tail, 11))
+                               Option::Some(Keyword::Tail)
                            } else {
                                if(String::eq(value, &"trait")) {
-                               Option::Some(recognized_keyword(Keyword::Trait, 12))
+                               Option::Some(Keyword::Trait)
                                } else {
-                               keyword_named(value, &"type", Keyword::Type, 13)
+                               keyword_named(value, &"type", Keyword::Type)
                                }
                            },
-        Result::Ok(119) => keyword_named(value, &"where", Keyword::Where, 14),
+        Result::Ok(119) => keyword_named(value, &"where", Keyword::Where),
         _ => None
     }
 }
@@ -512,7 +609,7 @@ scan_word(value: &mut Lexer) {
         Result::Err(_) => {
             let end = value.cursor;
             let id = intern_slice(&mut *value, start, end);
-            push( value, TokenKind::Ident(id), 1, start)
+            push(value, TokenKind::Ident(id), start)
         }
     }
 }
@@ -652,7 +749,7 @@ scan_label(value: &mut Lexer) -> Result<(), LexError> {
                     scan_label_tail(&mut *value);
                     let name_end = value.cursor;
                     let id = intern_slice(&mut *value, name_start, name_end);
-                    push( value, TokenKind::Label(id), 9, start);
+                    push(value, TokenKind::Label(id), start);
                     Result::Ok(())
 
             } else {
@@ -667,60 +764,46 @@ scan_label(value: &mut Lexer) -> Result<(), LexError> {
     }
 }
 
-structural_two(first: u8, second: u8) -> Option<CodedTokenKind> {
+structural_two(first: u8, second: u8) -> Option<TokenKind> {
     handle first {
         45 => if(second == byte_value(62)) {
-            Option::Some(
-                CodedTokenKind { kind: TokenKind::Arrow, code: 23 }
-            )
+            Option::Some(TokenKind::Arrow)
         } else { None },
         61 => handle second {
-            62 => Option::Some(
-                CodedTokenKind { kind: TokenKind::FatArrow, code: 24 }
-            ),
-            61 => Option::Some(
-                CodedTokenKind { kind: TokenKind::EqEq, code: 32 }
-            ),
+            62 => Option::Some(TokenKind::FatArrow),
+            61 => Option::Some(TokenKind::EqEq),
             _ => None
         },
         46 => if(second == byte_value(46)) {
-            Option::Some(
-                CodedTokenKind { kind: TokenKind::DotDot, code: 20 }
-            )
+            Option::Some(TokenKind::DotDot)
         } else { None },
         33 => if(second == byte_value(61)) {
-            Option::Some(
-                CodedTokenKind { kind: TokenKind::BangEq, code: 33 }
-            )
+            Option::Some(TokenKind::BangEq)
         } else { None },
         60 => if(second == byte_value(61)) {
-            Option::Some(
-                CodedTokenKind { kind: TokenKind::LtEq, code: 35 }
-            )
+            Option::Some(TokenKind::LtEq)
         } else { None },
         62 => if(second == byte_value(61)) {
-            Option::Some(
-                CodedTokenKind { kind: TokenKind::GtEq, code: 37 }
-            )
+            Option::Some(TokenKind::GtEq)
         } else { None },
         _ => None
     }
 }
 
-structural_one(value: u8) -> Option<CodedTokenKind> {
+structural_one(value: u8) -> Option<TokenKind> {
     handle value {
-        46 => Option::Some(CodedTokenKind { kind: TokenKind::Dot, code: 21 }),
-        47 => Option::Some(CodedTokenKind { kind: TokenKind::Slash, code: 25 }),
-        43 => Option::Some(CodedTokenKind { kind: TokenKind::Plus, code: 26 }),
-        45 => Option::Some(CodedTokenKind { kind: TokenKind::Minus, code: 27 }),
-        42 => Option::Some(CodedTokenKind { kind: TokenKind::Star, code: 28 }),
-        37 => Option::Some(CodedTokenKind { kind: TokenKind::Percent, code: 29 }),
-        124 => Option::Some(CodedTokenKind { kind: TokenKind::Pipe, code: 30 }),
-        61 => Option::Some(CodedTokenKind { kind: TokenKind::Eq, code: 31 }),
-        60 => Option::Some(CodedTokenKind { kind: TokenKind::Lt, code: 34 }),
-        62 => Option::Some(CodedTokenKind { kind: TokenKind::Gt, code: 36 }),
-        38 => Option::Some(CodedTokenKind { kind: TokenKind::Amp, code: 38 }),
-        33 => Option::Some(CodedTokenKind { kind: TokenKind::Bang, code: 39 }),
+        46 => Option::Some(TokenKind::Dot),
+        47 => Option::Some(TokenKind::Slash),
+        43 => Option::Some(TokenKind::Plus),
+        45 => Option::Some(TokenKind::Minus),
+        42 => Option::Some(TokenKind::Star),
+        37 => Option::Some(TokenKind::Percent),
+        124 => Option::Some(TokenKind::Pipe),
+        61 => Option::Some(TokenKind::Eq),
+        60 => Option::Some(TokenKind::Lt),
+        62 => Option::Some(TokenKind::Gt),
+        38 => Option::Some(TokenKind::Amp),
+        33 => Option::Some(TokenKind::Bang),
         _ => None
     }
 }
@@ -772,28 +855,47 @@ scan_operator_tail(value: &mut Lexer) {
     }
 }
 
+operator_run_end(value: &Lexer, offset: usize) -> usize {
+    handle peek(value, offset) {
+        Result::Ok(byte) => if(byte_is_operator(byte)) {
+            operator_run_end(value, offset + 1)
+        } else {
+            value.cursor + offset
+        },
+        Result::Err(_) => value.cursor + offset
+    }
+}
+
+intern_operator_run(value: &mut Lexer, start: usize) {
+    let end = operator_run_end(&*value, 0);
+    let id = intern_slice(&mut *value, start, end);
+    id;
+    ()
+}
+
 scan_operator(value: &mut Lexer) {
     let start = value.cursor;
+    intern_operator_run(&mut *value, start);
     let first = present_byte(peek(&*value, 0));
     let pair = handle peek(&*value, 1) {
         Result::Ok(second) => structural_two(first,  second),
         Result::Err(_) => None
     };
     handle pair {
-        Result::Ok(coded) => {
+        Result::Ok(kind) => {
             advance(&mut *value, 2);
-            push( value, coded.kind, coded.code, start)
+            push(value, kind, start)
         },
         Result::Err(_) => handle structural_one(first) {
-            Result::Ok(coded) => {
+            Result::Ok(kind) => {
                 advance(&mut *value, 1);
-                push( value, coded.kind, coded.code, start)
+                push(value, kind, start)
             },
             Result::Err(_) => {
                 scan_operator_tail(&mut *value);
                 let end = value.cursor;
                 let id = intern_slice(&mut *value, start, end);
-                push( value, TokenKind::Operator(id), 10, start)
+                push(value, TokenKind::Operator(id), start)
             }
         }
     }
@@ -963,7 +1065,6 @@ scan_number(value: &mut Lexer) -> Result<(), LexError> {
                                         value,
                                         start,
                                         base,
-                                        base_code,
                                         digit_span,
                                         fraction_span,
                                         exponent_span
@@ -975,7 +1076,6 @@ scan_number(value: &mut Lexer) -> Result<(), LexError> {
                                      value,
                                     start,
                                     base,
-                                    base_code,
                                     digit_span,
                                     fraction_span,
                                     exponent_span
@@ -1087,7 +1187,6 @@ finish_number(
     value: &mut Lexer,
     start: usize,
     base: NumberBase,
-    base_code: u8,
     digits: Span,
     fraction: Option<Span>,
     exponent: Option<NumberExponent>
@@ -1098,12 +1197,10 @@ finish_number(
         TokenKind::Number(NumberToken {
             spelling:  spelling,
             base:  base,
-            base_code: base_code,
             digits:  digits,
             fraction:  fraction,
             exponent:  exponent
         }),
-        4,
         start
     );
     Result::Ok(())
@@ -1400,7 +1497,7 @@ scan_string(value: &mut Lexer) -> Result<(), LexError> {
     handle StringBuilder::finish( decoded) {
         Result::Ok(text) => {
             let id = intern_text(&mut *value, text);
-            push( value, TokenKind::String(id), 5, start);
+            push(value, TokenKind::String(id), start);
             Result::Ok(())
         },
         Result::Err(_) => unreachable()
@@ -1473,7 +1570,6 @@ scan_byte_string(value: &mut Lexer) -> Result<(), LexError> {
     push(
          value,
         TokenKind::ByteString(Bytes::from_vec( decoded)),
-        8,
         start
     );
     Result::Ok(())
@@ -1530,7 +1626,7 @@ scan_byte_literal(value: &mut Lexer) -> Result<(), LexError> {
     let byte = try( decoded, @scan_byte_literal);
     if(peek_is(&*value, 0, 39)) {
             advance(&mut *value, 1);
-            push( value, TokenKind::Byte(byte), 7, start);
+            push(value, TokenKind::Byte(byte), start);
             Result::Ok(())
 
     } else {
@@ -1562,7 +1658,7 @@ scan_char_or_lifetime(value: &mut Lexer) -> Result<(), LexError> {
             );
             if(peek_is(&*value, 0, 39)) {
                     advance(&mut *value, 1);
-                    push( value, TokenKind::Char(character), 6, start);
+                    push(value, TokenKind::Char(character), start);
                     Result::Ok(())
 
             } else {
@@ -1595,7 +1691,7 @@ scan_char_or_lifetime(value: &mut Lexer) -> Result<(), LexError> {
             Result::Ok(character) => handle Bytes::get(&bytes, character.next) {
                 Result::Ok(39) => {
                     (*value).cursor = character.next + 1;
-                    push( value, TokenKind::Char(character.value), 6, start);
+                    push(value, TokenKind::Char(character.value), start);
                     Result::Ok(())
                 },
                 _ => scan_lifetime( value, start)
@@ -1641,7 +1737,7 @@ scan_lifetime(value: &mut Lexer, start: usize) -> Result<(), LexError> {
                 } else {
                         let end = value.cursor;
                         let id = intern_slice(&mut *value, start, end);
-                        push( value, TokenKind::Lifetime(id), 3, start);
+                        push(value, TokenKind::Lifetime(id), start);
                         Result::Ok(())
 
                 }
@@ -1699,8 +1795,6 @@ run(value: Lexer) -> Result<LexedSource, LexError> {
     } else {
             let eof = Token {
                 kind: TokenKind::Eof,
-                code: 41,
-                keyword_code: 0,
                 span: span(
                     Bytes::len(&value.bytes),
                     Bytes::len(&value.bytes)
@@ -1785,9 +1879,9 @@ run_byte_low_44(
     start: usize
 ) -> Result<LexedSource, LexError> {
     handle byte {
-        40 => run_structural( value, TokenKind::LParen, 11, start),
-        41 => run_structural( value, TokenKind::RParen, 12, start),
-        44 => run_structural( value, TokenKind::Comma, 17, start),
+        40 => run_structural(value, TokenKind::LParen, start),
+        41 => run_structural(value, TokenKind::RParen, start),
+        44 => run_structural(value, TokenKind::Comma, start),
         _ => run_general_byte( value, byte, start)
     }
 }
@@ -1817,13 +1911,13 @@ run_byte_high_93(
 ) -> Result<LexedSource, LexError> {
     handle split_byte(byte, byte_value(64)) {
         Result::Ok(byte) => handle byte {
-            59 => run_structural( value, TokenKind::Semicolon, 22, start),
+            59 => run_structural(value, TokenKind::Semicolon, start),
             64 => run_label_token( value),
             _ => run_general_byte( value, byte, start)
         },
         Result::Err(byte) => handle byte {
-            91 => run_structural( value, TokenKind::LBracket, 15, start),
-            93 => run_structural( value, TokenKind::RBracket, 16, start),
+            91 => run_structural(value, TokenKind::LBracket, start),
+            93 => run_structural(value, TokenKind::RBracket, start),
             _ => run_general_byte( value, byte, start)
         }
     }
@@ -1840,8 +1934,8 @@ run_byte_above_93(
             _ => run_general_byte( value, byte, start)
         },
         Result::Err(byte) => handle byte {
-            123 => run_structural( value, TokenKind::LBrace, 13, start),
-            125 => run_structural( value, TokenKind::RBrace, 14, start),
+            123 => run_structural(value, TokenKind::LBrace, start),
+            125 => run_structural(value, TokenKind::RBrace, start),
             _ => run_general_byte( value, byte, start)
         }
     }
@@ -1862,10 +1956,10 @@ run_slash_token(value: Lexer, start: usize) -> Result<LexedSource, LexError> {
         run( value)
 
         } else {
+        intern_operator_run(&mut value, start);
         run_structural(
         value,
         TokenKind::Slash,
-        25,
         start
         )
         }
@@ -1873,17 +1967,17 @@ run_slash_token(value: Lexer, start: usize) -> Result<LexedSource, LexError> {
 }
 
 run_dollar_token(value: Lexer, start: usize) -> Result<LexedSource, LexError> {
-    run_structural( value, TokenKind::Dollar, 40,  start)
+    run_structural(value, TokenKind::Dollar, start)
 }
 
 run_colon_token(value: Lexer, start: usize) -> Result<LexedSource, LexError> {
     advance(&mut value, 1);
     if(peek_is(&value, 0, 58)) {
             advance(&mut value, 1);
-            push(&mut value, TokenKind::DoubleColon, 19, start)
+            push(&mut value, TokenKind::DoubleColon, start)
 
     } else {
-        push(&mut value, TokenKind::Colon, 18, start)
+        push(&mut value, TokenKind::Colon, start)
     };
     run( value)
 }
@@ -1967,238 +2061,9 @@ run_general_byte(
 run_structural(
     value: Lexer,
     kind: TokenKind,
-    code: u16,
     start: usize
 ) -> Result<LexedSource, LexError> {
     advance(&mut value, 1);
-    push(&mut value,  kind,  code,  start);
+    push(&mut value, kind, start);
     run( value)
-}
-
-write_bytes(output: &mut ByteBuf, bytes: &Bytes) {
-    ByteBuf::write_u32_le(
-        &mut *output,
-        wrapping_convert_to_u32(Bytes::len(bytes))
-    );
-    ByteBuf::append_bytes( output, bytes)
-}
-
-write_string(output: &mut ByteBuf, text: &String) {
-    let bytes = String::as_bytes(text);
-    write_bytes( output, &bytes)
-}
-
-write_source_span(output: &mut ByteBuf, source: &String, value: &Span) {
-    let text = text_slice(source, value.start, value.end);
-    write_string( output, &text)
-}
-
-normalized_span_len(bytes: &Bytes, cursor: usize, end: usize, count: usize) -> usize {
-    fold_range(Range::new(cursor, end), count, { current_count, current => {
-        let byte = handle Bytes::get(bytes, current) {
-            Result::Ok(found) => byte_value(found),
-            Result::Err(_) => unreachable()
-        };
-        if(byte == byte_value(95)) {
-            current_count
-        } else {
-            current_count + 1
-        }
-    }})
-}
-
-write_normalized_span_bytes(
-    output: &mut ByteBuf,
-    bytes: &Bytes,
-    cursor: usize,
-    end: usize
-) {
-    for_range(Range::new(cursor, end), { current => {
-        let byte = handle Bytes::get(bytes, current) {
-            Result::Ok(found) => byte_value(found),
-            Result::Err(_) => unreachable()
-        };
-        if(byte == byte_value(95)) {
-            ()
-        } else {
-            ByteBuf::push(&mut *output, byte)
-        }
-    }})
-}
-
-write_normalized_span(
-    output: &mut ByteBuf,
-    source: &String,
-    value: &Span
-) {
-    let bytes = String::as_bytes(source);
-    ByteBuf::write_u32_le(
-        &mut *output,
-        wrapping_convert_to_u32(
-            normalized_span_len(&bytes, value.start, value.end, 0)
-        )
-    );
-    write_normalized_span_bytes( output, &bytes, value.start, value.end)
-}
-
-base_code(value: &NumberToken) -> u8 {
-    value.base_code
-}
-
-lexeme_text(value: &LexedSource, id: &Id<String>) -> String {
-    handle Interner::get(&value.lexemes, *id) {
-        Result::Ok(text) => *text,
-        Result::Err(_) => unreachable()
-    }
-}
-
-write_lexeme(output: &mut ByteBuf, value: &LexedSource, id: &Id<String>) {
-    let text = lexeme_text(value, id);
-    write_string( output, &text)
-}
-
-write_number(
-    output: &mut ByteBuf,
-    source: &String,
-    value: &NumberToken
-) {
-    write_source_span(&mut *output, source, &value.spelling);
-    ByteBuf::push(&mut *output, base_code(value));
-    write_normalized_span(&mut *output, source, &value.digits);
-    handle Option::as_ref(&value.fraction) {
-        Result::Ok(fraction) => {
-            ByteBuf::push(&mut *output, 1);
-            write_normalized_span(&mut *output, source, fraction)
-        },
-        Result::Err(_) => ByteBuf::push(&mut *output, 0)
-    };
-    handle Option::as_ref(&value.exponent) {
-        Result::Ok(exponent) => {
-            let negative = exponent_negative(exponent);
-            let digits = exponent_digits(exponent);
-            ByteBuf::push(&mut *output, 1);
-            ByteBuf::push(&mut *output, wrapping_convert_to_u8(
-                bool_value(negative)
-            ));
-            write_normalized_span( output, source, &digits)
-        },
-        Result::Err(_) => ByteBuf::push( output, 0)
-    }
-}
-
-write_token_payload(
-    output: &mut ByteBuf,
-    source: &String,
-    lexed: &LexedSource,
-    token: &Token
-) {
-    if(token.code <= 9) {
-        handle *token_kind(token) {
-        TokenKind::Ident(id) => write_lexeme( output, lexed, &id),
-        TokenKind::Keyword(_) => ByteBuf::push( output, token.keyword_code),
-        TokenKind::Lifetime(id) => write_lexeme( output, lexed, &id),
-        TokenKind::Number(number) => write_number( output, source, &number),
-        TokenKind::String(id) => write_lexeme( output, lexed, &id),
-        TokenKind::Char(character) => ByteBuf::write_u32_le(
-        output,
-        char_to_u32( character)
-        ),
-        TokenKind::Byte(byte) => ByteBuf::push( output,  byte),
-        TokenKind::ByteString(bytes) => write_bytes( output, &bytes),
-        TokenKind::Label(id) => write_lexeme( output, lexed, &id),
-        _ => unreachable()
-        }
-    } else {
-        if(token.code == 10) {
-        handle *token_kind(token) {
-        TokenKind::Operator(id) => write_lexeme( output, lexed, &id),
-        _ => unreachable()
-        }
-        } else {
-        ()
-        }
-    }
-}
-
-write_tokens(
-    output: &mut ByteBuf,
-    source: &String,
-    value: &LexedSource,
-    index: usize
-) {
-    for_range(Range::new(index, Vec::len(&value.tokens)), { current => {
-        let token = Vec::index(&value.tokens, current);
-        ByteBuf::write_u16_le(&mut *output, token.code);
-        ByteBuf::write_u64_le(
-            &mut *output,
-            wrapping_convert_to_u64(token.span.start)
-        );
-        ByteBuf::write_u64_le(
-            &mut *output,
-            wrapping_convert_to_u64(token.span.end)
-        );
-        write_token_payload(&mut *output, source, value, token)
-    }})
-}
-
-encode_result(
-    output: &mut ByteBuf,
-    source: &String,
-    result: Result<LexedSource, LexError>
-) {
-    handle  result {
-        Result::Err(error) => {
-            ByteBuf::push(&mut *output, 1);
-            ByteBuf::write_u16_le(&mut *output, error_code(&error));
-            ByteBuf::write_u64_le(&mut *output, wrapping_convert_to_u64(error.span.start));
-            ByteBuf::write_u64_le( output, wrapping_convert_to_u64(error.span.end))
-        },
-        Result::Ok(lexed) => {
-            ByteBuf::push(&mut *output, 0);
-            ByteBuf::write_u32_le(
-                &mut *output,
-                wrapping_convert_to_u32(Vec::len(&lexed.tokens))
-            );
-            write_tokens( output, source, &lexed, 0)
-        }
-    }
-}
-
-process_inputs(arguments: &Vec<String>, index: usize, output: &mut ByteBuf) / FileRead {
-    for_range(Range::new(index, Vec::len(arguments)), { current => {
-        let path = *Vec::index(arguments, current);
-        let bytes = read_file(path);
-        handle String::from_utf8(bytes) {
-            Result::Ok(source) => encode_result(
-                    &mut *output,
-                    &source,
-                    lex(&source)
-                ),
-                Result::Err(_) => {
-                ByteBuf::push(&mut *output, 2)
-            }
-        }
-    }})
-}
-
-pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
-    let arguments = process_args();
-    let argument_count = Vec::len(&arguments);
-    if(argument_count < 2) {
-        write_diagnostic(
-        "usage: grandiose-self-host <output> <input>..."
-        )
-    } else {
-            let output_path = *Vec::index(&arguments, 0);
-            let encoded = ByteBuf::new();
-            ByteBuf::write_u32_le(
-                &mut encoded,
-                wrapping_convert_to_u32(
-                    argument_count - 1
-                )
-            );
-            process_inputs(&arguments, 1, &mut encoded);
-            write_file(output_path, ByteBuf::finish( encoded))
-
-    }
 }

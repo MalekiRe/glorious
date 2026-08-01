@@ -1,0 +1,295 @@
+use super::super::frontend::lexer::{
+    LexError,
+    LexErrorKind,
+    LexedSource,
+    NumberToken,
+    Span,
+    Token,
+    TokenKind
+};
+
+// Numeric error codes belong to the legacy probe envelope only.
+legacy_error_code(value: &LexError) -> u16 {
+    handle *super::super::frontend::lexer::error_kind(value) {
+        LexErrorKind::UnexpectedCharacter => 1,
+        LexErrorKind::UnfinishedComment => 2,
+        LexErrorKind::InvalidLabel => 3,
+        LexErrorKind::InvalidDigit => 4,
+        LexErrorKind::MisplacedDigitSeparator => 5,
+        LexErrorKind::ExpectedDigits => 6,
+        LexErrorKind::MalformedFloatExponent => 7,
+        LexErrorKind::UnfinishedEscape => 8,
+        LexErrorKind::InvalidCharacterEscape => 9,
+        LexErrorKind::UnknownEscape => 10,
+        LexErrorKind::MalformedHexEscape => 11,
+        LexErrorKind::MalformedUnicodeEscape => 12,
+        LexErrorKind::UnfinishedUnicodeEscape => 13,
+        LexErrorKind::InvalidUnicodeScalar => 14,
+        LexErrorKind::InvalidByteEscape => 15,
+        LexErrorKind::UnfinishedString => 16,
+        LexErrorKind::InvalidByteStringCharacter => 17,
+        LexErrorKind::UnfinishedByteString => 18,
+        LexErrorKind::EmptyByteLiteral => 19,
+        LexErrorKind::InvalidByteLiteral => 20,
+        LexErrorKind::UnfinishedByteLiteral => 21,
+        LexErrorKind::UnfinishedCharacterLiteral => 22,
+        LexErrorKind::EmptyCharacterLiteral => 23,
+        LexErrorKind::InvalidLifetimeIdentifier => 24,
+        LexErrorKind::InvalidCharacterLiteral => 25,
+        LexErrorKind::ResourceLimit => 26
+    }
+}
+
+byte_value(value: u8) -> u8 { value }
+
+write_bytes(output: &mut ByteBuf, bytes: &Bytes) {
+    ByteBuf::write_u32_le(
+        output,
+        wrapping_convert_to_u32(Bytes::len(bytes))
+    );
+    ByteBuf::append_bytes(output, bytes)
+}
+
+write_string(output: &mut ByteBuf, text: &String) {
+    let bytes = String::as_bytes(text);
+    write_bytes(output, &bytes)
+}
+
+write_source_span(output: &mut ByteBuf, source: &String, value: &Span) {
+    let text = super::super::frontend::lexer::text_slice(
+        source,
+        super::super::frontend::lexer::span_start(value),
+        super::super::frontend::lexer::span_end(value)
+    );
+    write_string(output, &text)
+}
+
+normalized_span_len(
+    bytes: &Bytes,
+    cursor: usize,
+    end: usize,
+    count: usize
+) -> usize {
+    fold_range(Range::new(cursor, end), count, { current_count, current => {
+        let byte = handle Bytes::get(bytes, current) {
+            Result::Ok(found) => byte_value(found),
+            Result::Err(_) => unreachable()
+        };
+        if(byte == byte_value(95)) { current_count } else { current_count + 1 }
+    }})
+}
+
+write_normalized_span_bytes(
+    output: &mut ByteBuf,
+    bytes: &Bytes,
+    cursor: usize,
+    end: usize
+) {
+    for_range(Range::new(cursor, end), { current => {
+        let byte = handle Bytes::get(bytes, current) {
+            Result::Ok(found) => byte_value(found),
+            Result::Err(_) => unreachable()
+        };
+        if(byte == byte_value(95)) { () } else { ByteBuf::push(output, byte) }
+    }})
+}
+
+write_normalized_span(
+    output: &mut ByteBuf,
+    source: &String,
+    value: &Span
+) {
+    let bytes = String::as_bytes(source);
+    let start = super::super::frontend::lexer::span_start(value);
+    let end = super::super::frontend::lexer::span_end(value);
+    ByteBuf::write_u32_le(
+        output,
+        wrapping_convert_to_u32(normalized_span_len(&bytes, start, end, 0))
+    );
+    write_normalized_span_bytes(output, &bytes, start, end)
+}
+
+write_lexeme(output: &mut ByteBuf, value: &LexedSource, id: &Id<String>) {
+    handle super::super::frontend::lexer::lexeme(value, *id) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(text) => write_string(output, text)
+    }
+}
+
+write_number(output: &mut ByteBuf, source: &String, value: &NumberToken) {
+    let spelling = super::super::frontend::lexer::number_spelling(value);
+    write_source_span(output, source, &spelling);
+    ByteBuf::push(
+        output,
+        super::super::frontend::lexer::number_base_code(value)
+    );
+    let digits = super::super::frontend::lexer::number_digits(value);
+    write_normalized_span(output, source, &digits);
+    handle Option::as_ref(
+        super::super::frontend::lexer::number_fraction(value)
+    ) {
+        Result::Ok(fraction) => {
+            ByteBuf::push(output, 1);
+            write_normalized_span(output, source, fraction)
+        },
+        Result::Err(_) => ByteBuf::push(output, 0)
+    };
+    handle Option::as_ref(
+        super::super::frontend::lexer::number_exponent(value)
+    ) {
+        Result::Ok(exponent) => {
+            let negative =
+                super::super::frontend::lexer::exponent_negative(exponent);
+            let digits =
+                super::super::frontend::lexer::exponent_digits(exponent);
+            ByteBuf::push(output, 1);
+            ByteBuf::push(output, if(negative) { 1 } else { 0 });
+            write_normalized_span(output, source, &digits)
+        },
+        Result::Err(_) => ByteBuf::push(output, 0)
+    }
+}
+
+write_token_payload(
+    output: &mut ByteBuf,
+    source: &String,
+    lexed: &LexedSource,
+    token: &Token
+) {
+    let code = super::super::frontend::lexer::token_code(token);
+    if(code <= 9) {
+        handle *super::super::frontend::lexer::token_kind(token) {
+            TokenKind::Ident(id) => write_lexeme(output, lexed, &id),
+            TokenKind::Keyword(_) => ByteBuf::push(
+                output,
+                super::super::frontend::lexer::token_keyword_code(token)
+            ),
+            TokenKind::Lifetime(id) => write_lexeme(output, lexed, &id),
+            TokenKind::Number(number) => write_number(output, source, &number),
+            TokenKind::String(id) => write_lexeme(output, lexed, &id),
+            TokenKind::Char(character) =>
+                ByteBuf::write_u32_le(output, char_to_u32(character)),
+            TokenKind::Byte(byte) => ByteBuf::push(output, byte),
+            TokenKind::ByteString(bytes) => write_bytes(output, &bytes),
+            TokenKind::Label(id) => write_lexeme(output, lexed, &id),
+            _ => unreachable()
+        }
+    } else {
+        if(code == 10) {
+            handle *super::super::frontend::lexer::token_kind(token) {
+                TokenKind::Operator(id) => write_lexeme(output, lexed, &id),
+                _ => unreachable()
+            }
+        } else { () }
+    }
+}
+
+write_tokens(
+    output: &mut ByteBuf,
+    source: &String,
+    value: &LexedSource
+) {
+    for_range(Range::new(
+        0,
+        super::super::frontend::lexer::token_count(value)
+    ), { current => {
+        let token = handle
+            super::super::frontend::lexer::token_at(value, current) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        ByteBuf::write_u16_le(
+            output,
+            super::super::frontend::lexer::token_code(token)
+        );
+        let span = super::super::frontend::lexer::token_span(token);
+        ByteBuf::write_u64_le(
+            output,
+            wrapping_convert_to_u64(
+                super::super::frontend::lexer::span_start(&span)
+            )
+        );
+        ByteBuf::write_u64_le(
+            output,
+            wrapping_convert_to_u64(
+                super::super::frontend::lexer::span_end(&span)
+            )
+        );
+        write_token_payload(output, source, value, token)
+    }})
+}
+
+encode_result(
+    output: &mut ByteBuf,
+    source: &String,
+    result: Result<LexedSource, LexError>
+) {
+    handle result {
+        Result::Err(error) => {
+            ByteBuf::push(output, 1);
+            ByteBuf::write_u16_le(
+                output,
+                legacy_error_code(&error)
+            );
+            let span = super::super::frontend::lexer::error_span(&error);
+            ByteBuf::write_u64_le(
+                output,
+                wrapping_convert_to_u64(
+                    super::super::frontend::lexer::span_start(&span)
+                )
+            );
+            ByteBuf::write_u64_le(
+                output,
+                wrapping_convert_to_u64(
+                    super::super::frontend::lexer::span_end(&span)
+                )
+            )
+        },
+        Result::Ok(lexed) => {
+            ByteBuf::push(output, 0);
+            ByteBuf::write_u32_le(
+                output,
+                wrapping_convert_to_u32(
+                    super::super::frontend::lexer::token_count(&lexed)
+                )
+            );
+            write_tokens(output, source, &lexed)
+        }
+    }
+}
+
+process_inputs(
+    arguments: &Vec<String>,
+    index: usize,
+    output: &mut ByteBuf
+) / FileRead {
+    for_range(Range::new(index, Vec::len(arguments)), { current => {
+        let path = *Vec::index(arguments, current);
+        let bytes = read_file(path);
+        handle String::from_utf8(bytes) {
+            Result::Ok(source) => encode_result(
+                output,
+                &source,
+                super::super::frontend::lexer::lex(&source)
+            ),
+            Result::Err(_) => ByteBuf::push(output, 2)
+        }
+    }})
+}
+
+pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
+    let arguments = process_args();
+    let argument_count = Vec::len(&arguments);
+    if(argument_count < 2) {
+        write_diagnostic("usage: grandiose-self-host <output> <input>...")
+    } else {
+        let output_path = *Vec::index(&arguments, 0);
+        let encoded = ByteBuf::new();
+        ByteBuf::write_u32_le(
+            &mut encoded,
+            wrapping_convert_to_u32(argument_count - 1)
+        );
+        process_inputs(&arguments, 1, &mut encoded);
+        write_file(output_path, ByteBuf::finish(encoded))
+    }
+}

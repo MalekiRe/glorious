@@ -4,7 +4,7 @@ Status: implemented compiler-facing diagnostic contract for the self-hosted
 compiler.
 
 This document defines how failures from the existing frontend, Typed Core,
-Stage-A lowering, emission, and artifact writer are normalized before they cross
+MIR lowering, emission, and artifact writer are normalized before they cross
 the compiler API or host boundary. Phase-local error enums remain authoritative
 inside their phases. The `diagnostics` module is the single adapter from those
 enums to a stable cross-phase representation.
@@ -125,7 +125,7 @@ RegisterPack
 SwitchPack
 Block
 Function
-StageType
+MirType
 Variant
 Field
 Artifact

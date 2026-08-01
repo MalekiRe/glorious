@@ -1,0 +1,9 @@
+// Test-only phase probes. The production compiler root deliberately does not
+// declare this module, so snapshot protocols cannot acquire host capabilities
+// through frontend phase modules.
+pub mod lexer;
+pub mod scanner;
+pub mod headers;
+pub mod bodies;
+pub mod resolution;
+pub mod elaboration;

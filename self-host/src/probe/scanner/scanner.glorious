@@ -1,0 +1,197 @@
+use super::super::frontend::scanner::{
+    DeclarationIndex,
+    ScanError,
+    ShellId,
+    TokenRange
+};
+
+// The legacy probe protocol is test infrastructure, not a compiler-phase API.
+legacy_scan_error(value: &ScanError) -> (u8, usize, usize) {
+    handle *value {
+        ScanError::UnexpectedClosingDelimiter(token, related) =>
+            (1, token, related),
+        ScanError::MismatchedClosingDelimiter(token, related) =>
+            (2, token, related),
+        ScanError::UnclosedDelimiter(token, related) => (3, token, related),
+        ScanError::InvalidDeclarationStart(token, related) =>
+            (4, token, related),
+        ScanError::IncompleteDeclaration(token, related) =>
+            (5, token, related),
+        ScanError::ExpectedDeclarationName(token, related) =>
+            (6, token, related),
+        ScanError::DeclarationIdExhausted(token, related) =>
+            (7, token, related)
+    }
+}
+
+bool_code(value: Bool) -> u8 {
+    if(value) { 1 } else { 0 }
+}
+
+write_string(output: &mut ByteBuf, value: &String) {
+    let bytes = String::as_bytes(value);
+    ByteBuf::write_u32_le(
+        output,
+        wrapping_convert_to_u32(Bytes::len(&bytes))
+    );
+    ByteBuf::append_bytes(output, &bytes)
+}
+
+write_optional_name(
+    output: &mut ByteBuf,
+    lexed: &super::super::frontend::lexer::LexedSource,
+    value: &Option<Id<String>>
+) {
+    handle *value {
+        None => ByteBuf::push(output, 0),
+        Option::Some(name) => {
+            ByteBuf::push(output, 1);
+            handle super::super::frontend::lexer::lexeme(lexed, name) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(text) => write_string(output, text)
+            }
+        }
+    }
+}
+
+write_range(output: &mut ByteBuf, value: &TokenRange) {
+    ByteBuf::write_u32_le(
+        output,
+        wrapping_convert_to_u32(
+            super::super::frontend::scanner::range_start(value)
+        )
+    );
+    ByteBuf::write_u32_le(
+        output,
+        wrapping_convert_to_u32(
+            super::super::frontend::scanner::range_end(value)
+        )
+    )
+}
+
+write_optional_range(output: &mut ByteBuf, value: &Option<TokenRange>) {
+    handle *value {
+        None => ByteBuf::push(output, 0),
+        Option::Some(range) => {
+            ByteBuf::push(output, 1);
+            write_range(output, &range)
+        }
+    }
+}
+
+write_optional_parent(output: &mut ByteBuf, value: &Option<ShellId>) {
+    handle *value {
+        None => ByteBuf::push(output, 0),
+        Option::Some(parent) => {
+            ByteBuf::push(output, 1);
+            ByteBuf::write_u32_le(output, Id::to_u32(parent))
+        }
+    }
+}
+
+write_shells(
+    output: &mut ByteBuf,
+    lexed: &super::super::frontend::lexer::LexedSource,
+    value: &DeclarationIndex
+) {
+    super::super::frontend::scanner::for_each_shell(value, { _, shell => {
+        ByteBuf::push(
+            output,
+            super::super::frontend::scanner::shell_kind_code(shell)
+        );
+        ByteBuf::push(
+            output,
+            bool_code(super::super::frontend::scanner::shell_is_public(shell))
+        );
+        write_optional_name(
+            output,
+            lexed,
+            super::super::frontend::scanner::shell_name(shell)
+        );
+        write_range(
+            output,
+            super::super::frontend::scanner::shell_header(shell)
+        );
+        write_optional_range(
+            output,
+            super::super::frontend::scanner::shell_body(shell)
+        );
+        write_range(
+            output,
+            super::super::frontend::scanner::shell_whole(shell)
+        );
+        write_optional_parent(
+            output,
+            super::super::frontend::scanner::shell_parent(shell)
+        )
+    } })
+}
+
+encode_scan(
+    output: &mut ByteBuf,
+    lexed: super::super::frontend::lexer::LexedSource
+) {
+    handle super::super::frontend::scanner::scan(&lexed) {
+        Result::Err(error) => {
+            let (code, token, related) = legacy_scan_error(&error);
+            ByteBuf::push(output, 2);
+            ByteBuf::push(output, code);
+            ByteBuf::write_u32_le(
+                output,
+                wrapping_convert_to_u32(token)
+            );
+            ByteBuf::write_u32_le(
+                output,
+                wrapping_convert_to_u32(related)
+            )
+        },
+        Result::Ok(index) => {
+            ByteBuf::push(output, 0);
+            ByteBuf::write_u32_le(
+                output,
+                wrapping_convert_to_u32(
+                    super::super::frontend::scanner::shell_count(&index)
+                )
+            );
+            write_shells(output, &lexed, &index)
+        }
+    }
+}
+
+process_inputs(
+    arguments: &Vec<String>,
+    index: usize,
+    output: &mut ByteBuf
+) / FileRead {
+    for_range(Range::new(index, Vec::len(arguments)), { current => {
+        let path = *Vec::index(arguments, current);
+        let bytes = read_file(path);
+        handle String::from_utf8(bytes) {
+            Result::Err(_) => ByteBuf::push(output, 1),
+            Result::Ok(source) =>
+                handle super::super::frontend::lexer::lex(&source) {
+                    Result::Err(_) => ByteBuf::push(output, 1),
+                    Result::Ok(lexed) => encode_scan(output, lexed)
+                }
+        }
+    } })
+}
+
+pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
+    let arguments = process_args();
+    let count = Vec::len(&arguments);
+    if(count < 2) {
+        write_diagnostic(
+            "usage: grandiose-self-host-scanner <output> <input>..."
+        )
+    } else {
+        let output_path = *Vec::index(&arguments, 0);
+        let encoded = ByteBuf::new();
+        ByteBuf::write_u32_le(
+            &mut encoded,
+            wrapping_convert_to_u32(count - 1)
+        );
+        process_inputs(&arguments, 1, &mut encoded);
+        write_file(output_path, ByteBuf::finish(encoded))
+    }
+}

@@ -7,16 +7,15 @@ pub mod lexer;
 pub mod syntax {
     use super::lexer::TokenKind;
 
-    pub struct SourceSpan { start: usize, end: usize }
+    pub type SourceSpan = super::lexer::Span;
     pub struct TokenSpan { start: usize, end: usize }
     pub struct IdRange<Tag> { start: u32, count: u32 }
 
-    impl Use<[0, *]> for SourceSpan {}
     impl Use<[0, *]> for TokenSpan {}
     impl<Tag> Use<[0, *]> for IdRange<Tag> {}
 
     pub source_span(start: usize, end: usize) -> SourceSpan {
-        SourceSpan { start: start, end: end }
+        super::lexer::span(start, end)
     }
 
     pub token_span(start: usize, end: usize) -> TokenSpan {
@@ -40,6 +39,8 @@ pub mod syntax {
     pub empty_id_range<Tag>(at: usize) -> IdRange<Tag> {
         id_range(at, at)
     }
+
+    pub range_mark<T>(values: &Vec<T>) -> usize { Vec::len(values) }
 
     pub id_range_start<Tag>(value: &IdRange<Tag>) -> u32 { value.start }
     pub id_range_count<Tag>(value: &IdRange<Tag>) -> u32 { value.count }
@@ -269,21 +270,27 @@ pub mod syntax {
         value.position = value.position + 1;
     }
 
-    pub cursor_at_code(
+    pub cursor_at(
         value: &TokenCursor,
         source: &super::lexer::LexedSource,
-        code: u16
+        pattern: super::lexer::TokenPattern
     ) -> Bool {
         value.position < value.limit
-            and { super::lexer::token_code_at(source, value.position) == code }
+            and {
+                super::lexer::token_matches_at(
+                    source,
+                    value.position,
+                    pattern
+                )
+            }
     }
 
-    pub cursor_eat_code(
+    pub cursor_eat(
         value: &mut TokenCursor,
         source: &super::lexer::LexedSource,
-        code: u16
+        pattern: super::lexer::TokenPattern
     ) -> Bool {
-        if(cursor_at_code(&*value, source, code)) {
+        if(cursor_at(&*value, source, pattern)) {
             cursor_advance(value);
             true
         } else { false }

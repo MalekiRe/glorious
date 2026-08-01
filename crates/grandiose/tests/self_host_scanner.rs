@@ -25,22 +25,27 @@ fn self_host_bundle() -> SourceBundle {
     let root = repository_root().join("self-host/src");
     let primary = Segment::new(
         root.join("main.glorious").to_string_lossy(),
-        "mod frontend;\n\nmain() { run_compiler_host(frontend::scanner::application) }\n",
+        "mod frontend;\nmod probe;\n\nmain() { run_compiler_host(probe::scanner::application) }\n",
     );
     let paths = [
         root.join("frontend/frontend.glorious"),
         root.join("frontend/lexer/lexer.glorious"),
         root.join("frontend/scanner/scanner.glorious"),
+        root.join("probe/probe.glorious"),
+        root.join("probe/scanner/scanner.glorious"),
     ];
     SourceBundle::distributed(
         primary,
         paths.into_iter().map(|path| {
-            let source = fs::read_to_string(&path)
+            let mut source = fs::read_to_string(&path)
                 .unwrap()
                 .replace("pub mod headers;\n", "")
                 .replace("pub mod bodies;\n", "")
                 .replace("pub mod resolution;\n", "")
                 .replace("pub mod elaboration;\n", "");
+            if path.ends_with("probe/probe.glorious") {
+                source = source.replace("pub mod lexer;\n", "");
+            }
             Segment::new(path.to_string_lossy(), source)
         }),
     )
@@ -214,7 +219,7 @@ fn scan_range(
             return Err(ScanError {
                 code: 1,
                 token: cursor.try_into().unwrap(),
-                related: eof.try_into().unwrap(),
+                related: end.try_into().unwrap(),
             });
         }
 
@@ -449,6 +454,7 @@ fn encode_rust_scan(output: &mut Vec<u8>, source: &str) {
 fn corpus(directory: &Path) -> Vec<PathBuf> {
     let focused = [
         "",
+        "}",
         "mod empty;",
         "pub mod nested { type Word = u32; value() { () } }",
         "use std::prelude::*; cases Io = { Read, Write };",
@@ -524,7 +530,20 @@ fn self_hosted_scanner_matches_rust_in_vm_and_native_execution() {
             )
             .unwrap();
             assert_eq!(vm.run(entry, vec![]).unwrap(), Value::Unit);
-            assert_eq!(fs::read(&vm_path).unwrap(), expected, "VM scanner diverged");
+            let vm_bytes = fs::read(&vm_path).unwrap();
+            if vm_bytes != expected {
+                let mismatch = vm_bytes
+                    .iter()
+                    .zip(&expected)
+                    .position(|(actual, expected)| actual != expected)
+                    .unwrap_or_else(|| vm_bytes.len().min(expected.len()));
+                let end = (mismatch + 16).min(vm_bytes.len().min(expected.len()));
+                panic!(
+                    "VM scanner diverged at byte {mismatch}: actual {:?}, expected {:?}",
+                    &vm_bytes[mismatch..end],
+                    &expected[mismatch..end]
+                );
+            }
 
             let asan = std::env::var_os("G1_SELF_HOST_SCANNER_ASAN").is_some();
             let module = grandiose::emit_llvm_ir(&phases, &LlvmOptions::default()).unwrap();

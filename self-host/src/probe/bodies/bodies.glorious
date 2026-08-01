@@ -1,0 +1,481 @@
+use super::super::frontend::bodies::{
+    BlockStatementView,
+    BodyError,
+    BodyExpressionView,
+    BodyTokenRange,
+    ExprEdge,
+    ExpressionNameView,
+    HandleArm,
+    ParsedBody,
+    PatternBinder
+};
+use super::super::frontend::lexer::LexedSource;
+
+u32_from_usize(value: usize) -> u32 { wrapping_convert_to_u32(value) }
+
+write_string(output: &mut ByteBuf, value: &String) {
+    let bytes = String::as_bytes(value);
+    ByteBuf::write_u32_le(output, u32_from_usize(Bytes::len(&bytes)));
+    ByteBuf::append_bytes(output, &bytes)
+}
+
+write_name(
+    output: &mut ByteBuf,
+    source: &LexedSource,
+    name: Id<String>,
+    token: usize
+) -> Result<(), BodyError> {
+    handle super::super::frontend::lexer::lexeme(source, name) {
+        Result::Err(_) =>
+            Result::Err(BodyError::MissingEncodedName(token, token)),
+        Result::Ok(text) => {
+            write_string(output, text);
+            Result::Ok(())
+        }
+    }
+}
+
+write_name_token(
+    output: &mut ByteBuf,
+    source: &LexedSource,
+    token: usize
+) -> Result<(), BodyError> {
+    handle super::super::frontend::lexer::token_kind_at(source, token) {
+        super::super::frontend::lexer::TokenKind::Ident(name) =>
+            write_name(output, source, name, token),
+        _ => Result::Err(BodyError::MissingEncodedName(token, token))
+    }
+}
+
+range_text(
+    original: &String,
+    source: &LexedSource,
+    range: &BodyTokenRange
+) -> String {
+    let start = super::super::frontend::syntax::token_start(range);
+    let end = super::super::frontend::syntax::token_end(range);
+    let first = handle super::super::frontend::lexer::token_at(source, start) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(token) => super::super::frontend::lexer::token_span(token)
+    };
+    let last = handle super::super::frontend::lexer::token_at(source, end - 1) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(token) => super::super::frontend::lexer::token_span(token)
+    };
+    super::super::frontend::lexer::text_slice(
+        original,
+        super::super::frontend::lexer::span_start(&first),
+        super::super::frontend::lexer::span_end(&last)
+    )
+}
+
+write_expression_name(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &LexedSource,
+    value: ExpressionNameView
+) -> Result<(), BodyError> {
+    handle value {
+        ExpressionNameView::Identifier(name, token) =>
+            write_name(output, source, name, token),
+        ExpressionNameView::TupleField(_, token) => {
+            let range = super::super::frontend::syntax::token_span(
+                token,
+                token + 1
+            );
+            let text = range_text(original, source, &range);
+            write_string(output, &text);
+            Result::Ok(())
+        }
+    }
+}
+
+write_children<'a>(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &LexedSource,
+    value: &ParsedBody,
+    children: Slice<'a, ExprEdge>
+) -> Result<(), BodyError> {
+    Slice::try_for_each(children, { edge =>
+        write_expression(
+            output,
+            original,
+            source,
+            value,
+            Id::to_u32(
+                super::super::frontend::bodies::expression_edge_value(edge)
+            )
+        )
+    })
+}
+
+write_struct_fields<'a>(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &LexedSource,
+    value: &ParsedBody,
+    expression: u32,
+    fields: Slice<'a, ExprEdge>
+) -> Result<(), BodyError> {
+    Slice::try_for_each(fields, { edge =>
+        write_expression_name(
+            output,
+            original,
+            source,
+            super::super::frontend::bodies::expression_name_view_at(
+                value,
+                expression,
+                super::super::frontend::bodies::expression_edge_metadata(edge)
+            )
+        ) and {
+            write_expression(
+                output,
+                original,
+                source,
+                value,
+                Id::to_u32(
+                    super::super::frontend::bodies::expression_edge_value(edge)
+                )
+            )
+        }
+    })
+}
+
+write_pattern_binders<'a>(
+    output: &mut ByteBuf,
+    source: &LexedSource,
+    binders: Slice<'a, PatternBinder>
+) -> Result<(), BodyError> {
+    Slice::try_for_each(binders, { binder =>
+        handle *binder {
+            PatternBinder::Wildcard(_) => {
+                ByteBuf::push(output, 0);
+                Result::Ok(())
+            },
+            PatternBinder::Binding(name, token) => {
+                ByteBuf::push(output, 1);
+                write_name(output, source, name, token)
+            }
+        }
+    })
+}
+
+write_handle_arms<'a>(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &LexedSource,
+    value: &ParsedBody,
+    arms: Slice<'a, HandleArm>
+) -> Result<(), BodyError> {
+    Slice::try_for_each(arms, { arm => {
+        try(write_name(
+            output,
+            source,
+            super::super::frontend::bodies::handle_arm_enum_name(arm),
+            super::super::frontend::bodies::handle_arm_enum_token(arm)
+        ), @write_handle_arms);
+        try(write_name(
+            output,
+            source,
+            super::super::frontend::bodies::handle_arm_variant_name(arm),
+            super::super::frontend::bodies::handle_arm_variant_token(arm)
+        ), @write_handle_arms);
+        let binders =
+            super::super::frontend::bodies::handle_arm_binders(value, arm);
+        ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(binders)));
+        try(write_pattern_binders(output, source, binders), @write_handle_arms);
+        write_expression(
+            output,
+            original,
+            source,
+            value,
+            Id::to_u32(super::super::frontend::bodies::handle_arm_body(arm))
+        )
+    }})
+}
+
+write_block_statements<'a>(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &LexedSource,
+    value: &ParsedBody,
+    statements: Slice<'a, ExprEdge>
+) -> Result<(), BodyError> {
+    Slice::try_for_each(statements, { statement =>
+        handle super::super::frontend::bodies::block_statement_view(statement) {
+            BlockStatementView::Let(expression, token) => {
+                ByteBuf::push(output, 1);
+                write_name_token(output, source, token) and {
+                    write_expression(
+                        output,
+                        original,
+                        source,
+                        value,
+                        Id::to_u32(expression)
+                    )
+                }
+            },
+            BlockStatementView::Expression(expression) => {
+                ByteBuf::push(output, 2);
+                write_expression(
+                    output,
+                    original,
+                    source,
+                    value,
+                    Id::to_u32(expression)
+                )
+            }
+        }
+    })
+}
+
+write_expression(
+    output: &mut ByteBuf,
+    original: &String,
+    source: &LexedSource,
+    value: &ParsedBody,
+    expression: u32
+) -> Result<(), BodyError> {
+    handle super::super::frontend::bodies::expression_view(value, expression) {
+        BodyExpressionView::Identifier(tokens) => {
+            ByteBuf::push(output, 1);
+            let spelling = range_text(original, source, &tokens);
+            write_string(output, &spelling);
+            Result::Ok(())
+        },
+        BodyExpressionView::Number(tokens) => {
+            let text = range_text(original, source, &tokens);
+            handle parse_u64(&text) {
+                Result::Err(_) => Result::Err(
+                    BodyError::InvalidEncodedExpression(
+                        super::super::frontend::syntax::token_start(&tokens),
+                        super::super::frontend::syntax::token_start(&tokens)
+                    )
+                ),
+                Result::Ok(number) => {
+                    ByteBuf::push(output, 2);
+                    ByteBuf::write_u64_le(output, number);
+                    Result::Ok(())
+                }
+            }
+        },
+        BodyExpressionView::Unit(_) => {
+            ByteBuf::push(output, 3);
+            Result::Ok(())
+        },
+        BodyExpressionView::Grouping(child) =>
+            write_expression(output, original, source, value, Id::to_u32(child)),
+        BodyExpressionView::Prefix(operator, child) => {
+            ByteBuf::push(output, 5);
+            let spelling = range_text(original, source, &operator);
+            write_string(output, &spelling);
+            write_expression(output, original, source, value, Id::to_u32(child))
+        },
+        BodyExpressionView::Infix(operator, left, right) => {
+            ByteBuf::push(output, 6);
+            let spelling = range_text(original, source, &operator);
+            write_string(output, &spelling);
+            try(write_expression(
+                output,
+                original,
+                source,
+                value,
+                Id::to_u32(left)
+            ), @write_expression);
+            write_expression(output, original, source, value, Id::to_u32(right))
+        },
+        BodyExpressionView::Call(callee, arguments) => {
+            ByteBuf::push(output, 7);
+            try(write_expression(
+                output,
+                original,
+                source,
+                value,
+                Id::to_u32(callee)
+            ), @write_expression);
+            ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(arguments)));
+            write_children(output, original, source, value, arguments)
+        },
+        BodyExpressionView::Block(statements) => {
+            ByteBuf::push(output, 8);
+            ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(statements)));
+            write_block_statements(output, original, source, value, statements)
+        },
+        BodyExpressionView::Tuple(elements) => {
+            ByteBuf::push(output, 9);
+            ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(elements)));
+            write_children(output, original, source, value, elements)
+        },
+        BodyExpressionView::Construction(constructor, fields) => {
+            ByteBuf::push(output, 10);
+            try(write_expression_name(
+                output,
+                original,
+                source,
+                constructor
+            ), @write_expression);
+            ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(fields)));
+            write_struct_fields(
+                output,
+                original,
+                source,
+                value,
+                expression,
+                fields
+            )
+        },
+        BodyExpressionView::Projection(subject, field) => {
+            ByteBuf::push(output, 11);
+            try(write_expression(
+                output,
+                original,
+                source,
+                value,
+                Id::to_u32(subject)
+            ), @write_expression);
+            write_expression_name(output, original, source, field)
+        },
+        BodyExpressionView::Handle(subject, arms) => {
+            ByteBuf::push(output, 12);
+            try(write_expression(
+                output,
+                original,
+                source,
+                value,
+                Id::to_u32(subject)
+            ), @write_expression);
+            ByteBuf::write_u32_le(output, u32_from_usize(Slice::len(arms)));
+            write_handle_arms(output, original, source, value, arms)
+        }
+    }
+}
+
+function_count(
+    declarations: &super::super::frontend::scanner::DeclarationIndex
+) -> usize {
+    super::super::frontend::scanner::fold_shells(
+        declarations,
+        0,
+        { count, _, shell =>
+            if(super::super::frontend::scanner::shell_kind_code(shell) == 12) {
+                count + 1
+            } else { count }
+        }
+    )
+}
+
+write_functions(
+    output: &mut ByteBuf,
+    original: &String,
+    headers: &super::super::frontend::headers::ParsedHeaders,
+    declarations: &super::super::frontend::scanner::DeclarationIndex
+) -> Result<(), BodyError> {
+    super::super::frontend::scanner::try_for_each_shell(
+        declarations,
+        { id, shell => {
+            if(super::super::frontend::scanner::shell_kind_code(shell) == 12) {
+                let body = try(
+                    super::super::frontend::bodies::parse_function_body(
+                        original,
+                        headers,
+                        declarations,
+                        id
+                    ),
+                    @write_functions
+                );
+                let source =
+                    super::super::frontend::headers::parsed_source(headers);
+                let name = handle Option::as_ref(
+                    super::super::frontend::scanner::shell_name(shell)
+                ) {
+                    Result::Err(_) => unreachable(),
+                    Result::Ok(found) => *found
+                };
+                handle super::super::frontend::lexer::lexeme(source, name) {
+                    Result::Err(_) => unreachable(),
+                    Result::Ok(text) => write_string(output, text)
+                };
+                try(write_expression(
+                    output,
+                    original,
+                    source,
+                    &body,
+                    super::super::frontend::bodies::body_root_index(&body)
+                ), @write_functions)
+            } else { () };
+            Result::Ok(())
+        }}
+    )
+}
+
+encode_source(output: &mut ByteBuf, source_text_value: String) {
+    handle super::super::frontend::lexer::lex(&source_text_value) {
+        Result::Err(_) => ByteBuf::push(output, 1),
+        Result::Ok(lexed) =>
+            handle super::super::frontend::scanner::scan(&lexed) {
+            Result::Err(_) => ByteBuf::push(output, 2),
+            Result::Ok(declarations) =>
+                handle super::super::frontend::headers::parse(
+                    &source_text_value,
+                    lexed,
+                    &declarations
+                ) {
+                Result::Err(_) => ByteBuf::push(output, 3),
+                Result::Ok(headers) => {
+                    let encoded = ByteBuf::new();
+                    ByteBuf::write_u32_le(
+                        &mut encoded,
+                        u32_from_usize(function_count(&declarations))
+                    );
+                    handle write_functions(
+                        &mut encoded,
+                        &source_text_value,
+                        &headers,
+                        &declarations
+                    ) {
+                        Result::Err(_) => ByteBuf::push(output, 3),
+                        Result::Ok(_) => {
+                            ByteBuf::push(output, 0);
+                            ByteBuf::append_bytes(
+                                output,
+                                &ByteBuf::finish(encoded)
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+process_inputs(
+    arguments: &Vec<String>,
+    index: usize,
+    output: &mut ByteBuf
+) / FileRead {
+    for_range(Range::new(index, Vec::len(arguments)), { current => {
+        let path = *Vec::index(arguments, current);
+        let bytes = read_file(path);
+        handle String::from_utf8(bytes) {
+            Result::Err(_) => ByteBuf::push(output, 1),
+            Result::Ok(source) => encode_source(output, source)
+        }
+    }})
+}
+
+pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
+    let arguments = process_args();
+    let count = Vec::len(&arguments);
+    if(count < 2) {
+        write_diagnostic(
+            "usage: grandiose-self-host-bodies <output> <input>..."
+        )
+    } else {
+        let output_path = *Vec::index(&arguments, 0);
+        let encoded = ByteBuf::new();
+        ByteBuf::write_u32_le(&mut encoded, u32_from_usize(count - 1));
+        process_inputs(&arguments, 1, &mut encoded);
+        write_file(output_path, ByteBuf::finish(encoded))
+    }
+}

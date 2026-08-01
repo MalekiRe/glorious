@@ -9,6 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::ops::ControlFlow;
 use std::rc::Rc;
+use std::time::Instant;
 
 use grandiose_vm::bytecode::{
     CleanupPlan, EnumVariant, Field, HandlerClause as BytecodeHandlerClause, HandlerDef, Import,
@@ -65,6 +66,35 @@ const HOST_ABI_G1: u64 = 1 << 5;
 const ARRAY_RESERVE_G1: u64 = 1 << 6;
 const ARRAY_FINISH_DRAINED_G1: u64 = 1 << 7;
 const BYTES_UTF8_VALID_UP_TO_G1: u64 = 1 << 8;
+
+struct BootstrapTimings {
+    enabled: bool,
+    started: Instant,
+    checkpoint: Instant,
+}
+
+impl BootstrapTimings {
+    fn from_environment() -> Self {
+        let now = Instant::now();
+        Self {
+            enabled: std::env::var_os("G1_BOOTSTRAP_TIMINGS").is_some(),
+            started: now,
+            checkpoint: now,
+        }
+    }
+
+    fn mark(&mut self, phase: &str) {
+        if self.enabled {
+            let now = Instant::now();
+            eprintln!(
+                "g1-bootstrap {phase}: phase={:.3}s total={:.3}s",
+                now.duration_since(self.checkpoint).as_secs_f64(),
+                now.duration_since(self.started).as_secs_f64()
+            );
+            self.checkpoint = now;
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 struct PrivacyDomains {
@@ -4222,6 +4252,7 @@ fn compile_stream_phases_with_manifest_and_domains(
     ),
     Vec<Diagnostic>,
 > {
+    let mut timings = BootstrapTimings::from_environment();
     let parsed = if let Some(session) = incremental.as_mut() {
         session.frontend_cache.begin_revision();
         session.frontend_cache.parse_bundle(bundle)
@@ -4234,6 +4265,7 @@ fn compile_stream_phases_with_manifest_and_domains(
             .map(|error| error.with_code(PARSE_CODE))
             .collect::<Vec<_>>()
     })?;
+    timings.mark("parse");
     let interface_program = include_interfaces.then(|| program.clone());
     let has_modules = !program.modules.is_empty();
     let resolved = if include_interfaces {
@@ -4241,6 +4273,7 @@ fn compile_stream_phases_with_manifest_and_domains(
     } else {
         crate::modules::resolve_program(bundle, program)?
     };
+    timings.mark("resolve");
     let interfaces = interface_program.map(|program| {
         crate::interface::interface_bundle_from_resolved(bundle, program, &resolved.resolution)
     });
@@ -4256,6 +4289,7 @@ fn compile_stream_phases_with_manifest_and_domains(
         .as_ref()
         .map(|_| crate::compiler_session::fingerprints(bundle, &program));
     crate::validate::validate(&program)?;
+    timings.mark("validate");
     let compiled = match (incremental.as_mut(), incremental_fingerprints.as_ref()) {
         (Some(session), Some(fingerprints)) => compile_program_with_phases(
             &program,
@@ -4288,6 +4322,7 @@ fn compile_stream_phases_with_manifest_and_domains(
         provisional_fingerprint,
         mut diagnostics,
     ) = compiled?;
+    timings.mark("compile-program");
     diagnostics.retain(|diagnostic| {
         diagnostic.code.as_deref() != Some(REDUNDANT_MOVE_CODE)
             || !diagnostic
@@ -4818,6 +4853,7 @@ fn compile_program_with_phases(
     )>,
     mut incremental_mir: Option<&mut crate::compiler_session::IncrementalMirCache>,
 ) -> Result<CompiledProgramOutput, Vec<Diagnostic>> {
+    let mut timings = BootstrapTimings::from_environment();
     // Source lifetime binders are statically validated before this phase and
     // deliberately erased from runtime generic identity. A callable whose only
     // binders are lifetimes is therefore emitted once, rather than spuriously
@@ -4850,18 +4886,25 @@ fn compile_program_with_phases(
     // newly generated ordinary callable are solved by the same symbolic
     // function machinery. This avoids a second method-specific trait solver.
     let initial_trait_db = TraitDb::build_with_manifest(&lifetime_erased_program, manifest)?;
+    timings.mark("initial-trait-db");
     let source_projection_normalized_program =
         normalize_ground_projections(&lifetime_erased_program, &initial_trait_db)?;
+    timings.mark("normalize-ground-projections-1");
     let two_phase_normalized_program =
         normalize_two_phase_unique_call_arguments(&source_projection_normalized_program);
+    timings.mark("normalize-two-phase");
     let trait_method_normalized_program =
         normalize_ground_trait_methods(&two_phase_normalized_program, trusted_standard_range)?;
+    timings.mark("normalize-trait-methods");
     let trait_method_projection_normalized_program =
         normalize_ground_projections(&trait_method_normalized_program, &initial_trait_db)?;
+    timings.mark("normalize-ground-projections-2");
     let constructor_alias_normalized_program =
         normalize_constructor_aliases(&trait_method_projection_normalized_program)?;
+    timings.mark("normalize-constructor-aliases");
     let generalized_global_normalized_program =
         normalize_value_restricted_globals(&constructor_alias_normalized_program);
+    timings.mark("normalize-value-restricted-globals");
     let program = &generalized_global_normalized_program;
     let runtime_bindings = bind_runtime_manifest(
         program,
@@ -4870,9 +4913,12 @@ fn compile_program_with_phases(
         trusted_standard_library_domain,
     )?;
     let alias_normalized_program = normalize_generic_type_aliases(program)?;
+    timings.mark("normalize-generic-type-aliases");
     let effect_row_normalized_program = normalize_effect_rows(&alias_normalized_program)?;
+    timings.mark("normalize-effect-rows");
     let function_item_normalized_program =
         normalize_capture_free_function_items(&effect_row_normalized_program);
+    timings.mark("normalize-function-items");
     let program = &function_item_normalized_program;
     // Ground nominal normalization rewrites `Slice<'a, T>` to its runtime
     // nominal path and therefore erases the source lifetime sidecar. Capture
@@ -4890,6 +4936,7 @@ fn compile_program_with_phases(
         return Err(region_contract_errors);
     }
     let trait_db = TraitDb::build_with_manifest(program, manifest)?;
+    timings.mark("final-trait-db");
     // The distributed library is an implementation dependency, not a set of
     // eager specialization roots. Walking every trusted body is both wasted
     // work and particularly costly for surface `handle` completion arms,
@@ -4967,6 +5014,7 @@ fn compile_program_with_phases(
         &mut specialization_solver_budgets,
         Some(&discovery_roots),
     );
+    timings.mark("specialization-discovery");
     let nominal_templates = program.structs.clone();
     let enum_templates = program.enums.clone();
     let mut rounds = 0_usize;
@@ -5010,7 +5058,9 @@ fn compile_program_with_phases(
         &runtime_bindings,
         privacy_domains,
     )?;
+    timings.mark("instantiate-and-reject-subset");
     let program = &normalized_program;
+    timings.mark("normalize-discover");
     fn collect_function_dependencies(expression: &Expr, found: &mut BTreeSet<String>) {
         let mut pending = vec![expression];
         while let Some(expression) = pending.pop() {
@@ -5172,6 +5222,7 @@ fn compile_program_with_phases(
         emission_plan.ordered.len(),
         emission_plan.ids.len(),
     );
+    timings.mark("reachability-and-emission-plan");
     let nominal_ids = nominal_ids(program);
     let mut reserved_callable_types = discovery
         .graph
@@ -5393,6 +5444,7 @@ fn compile_program_with_phases(
             ))
         })
         .collect();
+    timings.mark("resolve-type-tables");
     let provisional = match incremental {
         Some((cache, fingerprints)) => typeck::type_program_incremental(
             program,
@@ -5408,8 +5460,10 @@ fn compile_program_with_phases(
             &call_shapes,
         ),
     };
+    timings.mark("type-program");
     let provisional_text = provisional.canonical_text();
     let provisional_fingerprint = provisional.fingerprint() ^ trait_db.fingerprint().rotate_left(1);
+    timings.mark("typecheck-canonicalization");
     let expression_reference_types = provisional
         .reference_requirements()
         .into_iter()
@@ -7942,6 +7996,7 @@ fn compile_program_with_phases(
     if has_multishot {
         artifact.required_features |= MULTISHOT_G1;
     }
+    timings.mark("resolve-types-and-build-core");
     let core_program = core::Program {
         functions: core_functions,
         performance_summaries: emitted_performance_evidence,
@@ -7989,6 +8044,7 @@ fn compile_program_with_phases(
                 .with_code("G1MIR999"),
             ]
         })?;
+    timings.mark("lower-mir");
     let mut optimization_report = mir::optimizer::optimize_program_with_control_tables(
         &mut mir_program,
         &artifact.types,
@@ -8004,6 +8060,7 @@ fn compile_program_with_phases(
             .with_code("G1OPT999"),
         ]
     })?;
+    timings.mark("optimize-mir");
     let lowering_work = mir_program
         .functions
         .iter()
@@ -8238,6 +8295,7 @@ fn compile_program_with_phases(
         Vec::new()
     };
     let peephole_changed = mir_layout_changed || peephole_pc_maps.iter().any(Option::is_some);
+    timings.mark("emit-bytecode-and-peephole");
     if artifact.code.iter().any(|instruction| {
         matches!(
             instruction,
@@ -8312,28 +8370,39 @@ fn compile_program_with_phases(
             .with_code("G1BC999"),
         ]
     })?;
+    timings.mark("serialize-and-crosscheck-cleanups");
     let has_leave = artifact
         .code
         .iter()
         .any(|instruction| matches!(instruction, Instruction::Leave { .. }));
     artifact = if has_leave {
-        grandiose_vm::verify::with_compiler_seeded_cleanup_plans(artifact)
+        grandiose_vm::verify::with_compiler_seeded_cleanup_plans_unverified(artifact)
     } else {
-        grandiose_vm::verify::with_generated_cleanup_plans(artifact)
+        grandiose_vm::verify::with_generated_cleanup_plans_unverified(artifact)
     }
     .map_err(|error| {
+        let function = match &error {
+            grandiose_vm::VerifyError::InvalidFunction(function) => mir_program
+                .functions
+                .get(*function as usize)
+                .map(|body| format!(" (`{}`)", body.name))
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
         vec![
             Diagnostic::plain(format!(
-                "the VM cleanup oracle rejected compiler-emitted MIR anchors: {error}"
+                "the VM cleanup oracle rejected compiler-emitted MIR anchors: {error}{function}"
             ))
             .with_code("G1BC999"),
         ]
     })?;
+    timings.mark("cleanup-oracle");
     let registers_compacted_after_peephole =
         compact_artifact_registers_after_peephole(&mut artifact);
 
     let constants_before_canonicalization = artifact.constants.clone();
     canonicalize_constants(&mut artifact);
+    timings.mark("compact-and-canonicalize-artifact");
     optimization_report
         .passes
         .push(mir::OptimizationPassReport {
@@ -8349,11 +8418,8 @@ fn compile_program_with_phases(
             work_units: peephole_work,
         });
 
-    let artifact_for_diagnostics = artifact.clone();
-    let verified_artifact = artifact.clone();
-    let artifact = grandiose_vm::verify::verify(verified_artifact)
-        .map(|_| artifact)
-        .map_err(|error| {
+    let artifact_for_diagnostics = &artifact;
+    grandiose_vm::verify::verify(artifact.clone()).map_err(|error| {
             let function = match &error {
                 grandiose_vm::VerifyError::BorrowConflict {
                     function,
@@ -8483,7 +8549,8 @@ fn compile_program_with_phases(
                 ))
                 .with_code("G1BC999"),
             ]
-        })?;
+    })?;
+    timings.mark("verify-artifact");
     optimization_report
         .passes
         .push(mir::OptimizationPassReport {
@@ -8494,6 +8561,7 @@ fn compile_program_with_phases(
                 + artifact.types.len() as u64
                 + artifact.cleanups.len() as u64,
         });
+    timings.mark("emit-and-verify");
     Ok((
         artifact,
         core_program,
@@ -44033,6 +44101,14 @@ impl MirLowerer {
                                 })
                                 .collect();
                             positive_edge_item = Some(edge_item + cleanup_len);
+                            // These locals are deliberately removed from the
+                            // positive predecessor because the negative
+                            // predecessor cannot carry them. They therefore
+                            // remain unavailable after the join even though
+                            // they were initialized when the positive state
+                            // was first snapshotted.
+                            joined_uninitialized
+                                .extend(removed_positive.iter().map(|(_, local)| *local));
                             for (index, _) in removed_positive.into_iter().rev() {
                                 join_local_ids.remove(index);
                                 join_registers.remove(index);
@@ -44185,7 +44261,11 @@ impl MirLowerer {
                         .copied()
                         .chain(retire_at_join.iter().copied())
                         .collect();
-                    debug_assert_eq!(joined_uninitialized, expected_uninitialized);
+                    debug_assert_eq!(
+                        joined_uninitialized, expected_uninitialized,
+                        "refinement unavailability mismatch at {:?}",
+                        expression.span,
+                    );
                     if positive_reaches_join {
                         for (index, source) in sources.iter().enumerate() {
                             let incoming_partial = self.partial_aggregates.get(source).cloned();

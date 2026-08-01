@@ -1,8 +1,140 @@
-// Canonical assembly of straight-line Stage-A bytecode into GRBC sections.
+// Canonical assembly of straight-line MIR bytecode into GRBC sections.
 
-use super::lowering::StageInstruction;
-use super::lowering::StageTypeView;
-use super::lowering::StageVariantView;
+use super::lowering::MirInstruction;
+use super::lowering::MirTypeKind;
+use super::lowering::MirVariantView;
+
+enum Opcode {
+    Constant,
+    Move,
+    Copy,
+    Construct,
+    ProjectMove,
+    ProjectCopy,
+    EnumTag,
+    Drop,
+    Deconstruct,
+    Jump,
+    Switch,
+    Call,
+    Return
+}
+
+struct OpcodeSpec {
+    code: u32,
+    operand_words: u32
+}
+
+opcode_spec(opcode: Opcode) -> OpcodeSpec {
+    handle opcode {
+        Opcode::Constant => OpcodeSpec { code: 1, operand_words: 2 },
+        Opcode::Move => OpcodeSpec { code: 2, operand_words: 2 },
+        Opcode::Copy => OpcodeSpec { code: 3, operand_words: 2 },
+        Opcode::Construct => OpcodeSpec { code: 9, operand_words: 5 },
+        Opcode::ProjectMove => OpcodeSpec { code: 10, operand_words: 3 },
+        Opcode::ProjectCopy => OpcodeSpec { code: 11, operand_words: 3 },
+        Opcode::EnumTag => OpcodeSpec { code: 14, operand_words: 2 },
+        Opcode::Drop => OpcodeSpec { code: 17, operand_words: 1 },
+        Opcode::Deconstruct => OpcodeSpec { code: 19, operand_words: 1 },
+        Opcode::Jump => OpcodeSpec { code: 32, operand_words: 1 },
+        Opcode::Switch => OpcodeSpec { code: 33, operand_words: 4 },
+        Opcode::Call => OpcodeSpec { code: 34, operand_words: 4 },
+        Opcode::Return => OpcodeSpec { code: 38, operand_words: 1 }
+    }
+}
+
+write_opcode(output: &mut ByteBuf, opcode: Opcode) {
+    let spec = opcode_spec(opcode);
+    ByteBuf::write_u32_le(
+        output,
+        bit_or(spec.code, shift_left(spec.operand_words, 12))
+    )
+}
+
+struct CanonicalPool<K> {
+    values: Vec<K>,
+    ids: HashMap<K, u32>
+}
+
+index_canonical_values<K>(
+    values: &Vec<K>,
+    ids: &mut HashMap<K, u32>,
+    index: usize
+) where K: Eq,
+K: Hash,
+K: Use<[0, *]> {
+    for_range(Range::new(index, Vec::len(values)), { current => {
+        let previous = HashMap::insert(
+            &mut *ids,
+            *Vec::index(values, current),
+            checked_u32(current)
+        );
+        handle previous {
+            Result::Err(_) => (),
+            Result::Ok(_) => unreachable()
+        }
+    } })
+}
+
+freeze_canonical_pool<K>(values: Vec<K>) -> CanonicalPool<K> where K: Ord,
+K: Eq,
+K: Hash,
+K: Use<[0, *]> {
+    let values = values;
+    Vec::sort(&mut values);
+    Vec::dedup(&mut values);
+    let ids = HashMap::new();
+    index_canonical_values(&values, &mut ids, 0);
+    CanonicalPool { values: values, ids: ids }
+}
+
+index_stable_values<K>(
+    values: &Vec<K>,
+    unique: &mut Vec<K>,
+    ids: &mut HashMap<K, u32>,
+    index: usize
+) where K: Eq,
+K: Hash,
+K: Use<[0, *]> {
+    for_range(Range::new(index, Vec::len(values)), { current => {
+        let key = Vec::index(values, current);
+        if(HashMap::contains_key(&*ids, key)) {
+            ()
+        } else {
+            let id = checked_u32(Vec::len(&*unique));
+            let previous = HashMap::insert(&mut *ids, *key, id);
+            handle previous {
+                Result::Err(_) => (),
+                Result::Ok(_) => unreachable()
+            };
+            Vec::push(&mut *unique, *key)
+        }
+    } })
+}
+
+freeze_stable_pool<K>(values: Vec<K>) -> CanonicalPool<K> where K: Eq,
+K: Hash,
+K: Use<[0, *]> {
+    let unique = Vec::new();
+    let ids = HashMap::new();
+    index_stable_values(&values, &mut unique, &mut ids, 0);
+    CanonicalPool { values: unique, ids: ids }
+}
+
+canonical_id<K>(value: &CanonicalPool<K>, key: &K) -> Option<u32> where K: Eq,
+K: Hash {
+    handle HashMap::get(&value.ids, key) {
+        Result::Err(_) => None,
+        Result::Ok(found) => Option::Some(*found)
+    }
+}
+
+canonical_bytes_id(
+    value: &CanonicalPool<Bytes>,
+    key: &Bytes
+) -> Option<u32> {
+    canonical_id(value, key)
+}
 
 struct FunctionSpans {
     code_start: u32,
@@ -11,47 +143,60 @@ struct FunctionSpans {
     cleanup_count: u32
 }
 
+struct EmissionContext<'a> {
+    program: &'a super::lowering::MirProgram,
+    names: CanonicalPool<String>,
+    signatures: CanonicalPool<Bytes>,
+    constants: CanonicalPool<Bytes>,
+    operands: Vec<u32>,
+    spans: Vec<FunctionSpans>,
+    writer: super::artifact::ArtifactWriter
+}
+
 pub enum EmissionError {
     MissingConstant(super::lowering::RegisterId),
     MissingSwitchConstant(
-        super::lowering::StageSwitchPackId,
+        super::lowering::MirSwitchPackId,
         usize
     ),
     UnsupportedInstruction,
     MissingName(EmissionName),
-    MissingSignature(super::lowering::StageFunctionId),
+    MissingSignature(super::lowering::MirFunctionId),
     StructFieldNameCount(
-        super::lowering::StageTypeId,
+        super::lowering::MirTypeId,
         usize,
         usize
     ),
     VariantFieldNameCount(
-        super::lowering::StageTypeId,
+        super::lowering::MirTypeId,
         usize,
         usize,
         usize
     ),
-    UnsupportedType(super::lowering::StageTypeId, u8),
+    // Retained as a diagnostic compatibility case until MIR cleanup anchors
+    // are remapped across dead-function elimination. MirType construction
+    // itself cannot produce an unsupported semantic kind.
+    UnsupportedType(super::lowering::MirTypeId, u8),
     ArtifactWrite(super::artifact::ArtifactWriteError)
 }
 
 pub enum EmissionName {
-    Type(super::lowering::StageTypeId),
-    StructField(super::lowering::StageTypeId, usize),
-    Variant(super::lowering::StageTypeId, usize),
-    VariantField(super::lowering::StageTypeId, usize, usize),
-    Function(super::lowering::StageFunctionId)
+    Type(super::lowering::MirTypeId),
+    StructField(super::lowering::MirTypeId, usize),
+    Variant(super::lowering::MirTypeId, usize),
+    VariantField(super::lowering::MirTypeId, usize, usize),
+    Function(super::lowering::MirFunctionId)
 }
 
 require_program_name(
-    program: &super::lowering::StageProgram,
-    names: &Vec<String>,
+    program: &super::lowering::MirProgram,
+    names: &CanonicalPool<String>,
     name_index: u32,
     origin: EmissionName
 ) -> Result<u32, EmissionError> {
     require_name_value(
         names,
-        *super::lowering::stage_program_type_name_at(
+        *super::lowering::mir_program_type_name_at(
             program,
             usize_from_u32(name_index)
         ),
@@ -88,24 +233,21 @@ copy_bytes_after(
 }
 
 constant_records(
-    program: &super::lowering::StageProgram,
+    constants: &CanonicalPool<Bytes>,
     index: usize,
     output: &mut Vec<super::artifact::Record>
 ) {
     for_range(Range::new(
         index,
-        super::lowering::stage_program_constant_count(program)
+        Vec::len(&constants.values)
     ), { current => {
-        let key = super::lowering::stage_program_constant_at(
-            program,
-            super::lowering::stage_constant_id_from_usize(current)
-        );
+        let key = Bytes::to_vec(*Vec::index(&constants.values, current));
         let payload = Vec::new();
-        copy_bytes_after(key, 1, &mut payload);
+        copy_bytes_after(&key, 1, &mut payload);
         Vec::push(
             &mut *output,
             super::artifact::record(
-                *Vec::index(key, 0),
+                *Vec::index(&key, 0),
                 0,
                 Bytes::from_vec(payload)
             )
@@ -113,41 +255,44 @@ constant_records(
     } })
 }
 
-find_constant(
-    program: &super::lowering::StageProgram,
-    key: &Vec<u8>,
-    index: usize
-) -> Option<super::lowering::StageConstantId> {
-    if(index < super::lowering::stage_program_constant_count(program)) {
-        if(Eq::eq(
-            super::lowering::stage_program_constant_at(
+collect_constant_values(
+    program: &super::lowering::MirProgram,
+    index: usize,
+    output: &mut Vec<Bytes>
+) {
+    for_range(Range::new(
+        index,
+        super::lowering::mir_program_constant_count(program)
+    ), { current => {
+        let key = Vec::new();
+        copy_bytes_after(
+            super::lowering::mir_program_constant_at(
                 program,
-                super::lowering::stage_constant_id_from_usize(index)
+                super::lowering::mir_constant_id_from_usize(current)
             ),
-            key
-        )) {
-            Option::Some(
-                super::lowering::stage_constant_id_from_usize(index)
-            )
-        } else {
-            find_constant(program, key, index + 1)
-        }
-    } else { None }
+            0,
+            &mut key
+        );
+        Vec::push(
+            &mut *output,
+            Bytes::from_vec(key)
+        )
+    } })
 }
 
 collect_names(
-    program: &super::lowering::StageProgram,
+    program: &super::lowering::MirProgram,
     index: usize,
     output: &mut Vec<String>
 ) {
-    let end = super::lowering::stage_program_function_count(program);
+    let end = super::lowering::mir_program_function_count(program);
     for_range(Range::new(index, end), { current =>
         Vec::push(
             &mut *output,
-            *super::lowering::stage_function_name(
-                super::lowering::stage_program_function_at(
+            *super::lowering::mir_function_name(
+                super::lowering::mir_program_function_at(
                     program,
-                    super::lowering::stage_function_id_from_usize(current)
+                    super::lowering::mir_function_id_from_usize(current)
                 )
             )
         )
@@ -155,7 +300,7 @@ collect_names(
 }
 
 collect_stage_field_names<'a>(
-    program: &super::lowering::StageProgram,
+    program: &super::lowering::MirProgram,
     field_names: Slice<'a, u32>,
     index: usize,
     output: &mut Vec<String>
@@ -164,7 +309,7 @@ collect_stage_field_names<'a>(
     for_range(Range::new(index, end), { current =>
         Vec::push(
             &mut *output,
-            *super::lowering::stage_program_type_name_at(
+            *super::lowering::mir_program_type_name_at(
                 program,
                 usize_from_u32(*slice_at(field_names, current))
             )
@@ -172,25 +317,25 @@ collect_stage_field_names<'a>(
     })
 }
 
-collect_stage_variant_names<'a>(
-    program: &super::lowering::StageProgram,
-    variants: Slice<'a, super::lowering::StageVariant>,
+collect_mir_variant_names<'a>(
+    program: &super::lowering::MirProgram,
+    variants: Slice<'a, super::lowering::MirVariant>,
     index: usize,
     output: &mut Vec<String>
 ) {
     let end = Slice::len(variants);
     for_range(Range::new(index, end), { current =>
-        handle super::lowering::stage_variant_view(
+        handle super::lowering::mir_variant_view(
             slice_at(variants, current)
         ) {
-            super::lowering::StageVariantView::Variant(
+            super::lowering::MirVariantView::Variant(
                 name_index,
                 field_names,
                 _
             ) => {
                 Vec::push(
                     &mut *output,
-                    *super::lowering::stage_program_type_name_at(
+                    *super::lowering::mir_program_type_name_at(
                         program,
                         usize_from_u32(name_index)
                     )
@@ -207,196 +352,57 @@ collect_stage_variant_names<'a>(
 }
 
 collect_type_names(
-    program: &super::lowering::StageProgram,
+    program: &super::lowering::MirProgram,
     index: usize,
     output: &mut Vec<String>
 ) {
-    let end = super::lowering::stage_program_type_count(program);
-    for_range(Range::new(index, end), { current =>
-        handle super::lowering::stage_program_type_view(
-            program,
-            super::lowering::stage_type_id_from_usize(current)
-        ) {
-            super::lowering::StageTypeView::Struct(
-                name_index,
-                field_names,
-                _,
-                _
-            ) => {
+    let end = super::lowering::mir_program_type_count(program);
+    for_range(Range::new(index, end), { current => {
+        let type_id = super::lowering::mir_type_id_from_usize(current);
+        handle super::lowering::mir_program_type_kind(program, type_id) {
+            MirTypeKind::Tuple => (),
+            MirTypeKind::Struct => {
+                let name_index =
+                    super::lowering::mir_program_struct_name(program, type_id);
                 Vec::push(
                     &mut *output,
-                    *super::lowering::stage_program_type_name_at(
+                    *super::lowering::mir_program_type_name_at(
                         program,
                         usize_from_u32(name_index)
                     )
                 );
                 collect_stage_field_names(
                     program,
-                    field_names,
+                    super::lowering::mir_program_struct_field_names(
+                        program,
+                        type_id
+                    ),
                     0,
                     output
                 )
             },
-            super::lowering::StageTypeView::Enum(
-                name_index,
-                variants,
-                _
-            ) => {
+            MirTypeKind::Enum => {
+                let name_index =
+                    super::lowering::mir_program_enum_name(program, type_id);
                 Vec::push(
                     &mut *output,
-                    *super::lowering::stage_program_type_name_at(
+                    *super::lowering::mir_program_type_name_at(
                         program,
                         usize_from_u32(name_index)
                     )
                 );
-                collect_stage_variant_names(
+                collect_mir_variant_names(
                     program,
-                    variants,
+                    super::lowering::mir_program_enum_variants(
+                        program,
+                        type_id
+                    ),
                     0,
                     output
                 )
-            },
-            _ => ()
+            }
         }
-    })
-}
-
-aggregate_zero_sized_flag<'a>(
-    program: &super::lowering::StageProgram,
-    fields: Slice<'a, super::lowering::ArtifactTypeId>,
-    index: usize
-) -> u32 {
-    if(index < Slice::len(fields)) {
-        if(type_zero_sized_flag(
-            program,
-            *slice_at(fields, index)
-        ) == 2) {
-            aggregate_zero_sized_flag(
-                program,
-                fields,
-                index + 1
-            )
-        } else { 0 }
-    } else { 2 }
-}
-
-enum_variants_zero_sized_flag<'a>(
-    program: &super::lowering::StageProgram,
-    variants: Slice<'a, super::lowering::StageVariant>,
-    index: usize
-) -> u32 {
-    if(index < Slice::len(variants)) {
-        let flag = handle super::lowering::stage_variant_view(
-            slice_at(variants, index)
-        ) {
-            super::lowering::StageVariantView::Variant(_, _, fields) =>
-                aggregate_zero_sized_flag(program, fields, 0)
-        };
-        if(flag == 2) {
-            enum_variants_zero_sized_flag(
-                program,
-                variants,
-                index + 1
-            )
-        } else { 0 }
-    } else { 2 }
-}
-
-type_zero_sized_flag(
-    program: &super::lowering::StageProgram,
-    type_id: super::lowering::ArtifactTypeId
-) -> u32 {
-    let raw = super::lowering::artifact_type_raw(type_id);
-    if(raw < 19) {
-        if(raw == 0) {
-            2
-        } else {
-            if(raw == 1) { 2 } else { 0 }
-        }
-    } else {
-        handle super::lowering::stage_program_type_view(
-            program,
-            super::lowering::stage_type_id_from_usize(
-                usize_from_u32(raw - 19)
-            )
-        ) {
-            super::lowering::StageTypeView::Tuple(fields, _) =>
-                aggregate_zero_sized_flag(program, fields, 0),
-            super::lowering::StageTypeView::Struct(_, _, fields, _) =>
-                aggregate_zero_sized_flag(program, fields, 0),
-            super::lowering::StageTypeView::Enum(_, variants, _) =>
-                if(Slice::len(variants) <= 1) {
-                    enum_variants_zero_sized_flag(program, variants, 0)
-                } else { 0 },
-            super::lowering::StageTypeView::Unsupported(_) => 0
-        }
-    }
-}
-
-aggregate_zero_use_flag<'a>(
-    program: &super::lowering::StageProgram,
-    fields: Slice<'a, super::lowering::ArtifactTypeId>,
-    index: usize
-) -> u32 {
-    if(index < Slice::len(fields)) {
-        if(type_zero_use_flag(
-            program,
-            *slice_at(fields, index)
-        ) == 16) {
-            aggregate_zero_use_flag(
-                program,
-                fields,
-                index + 1
-            )
-        } else { 0 }
-    } else { 16 }
-}
-
-enum_variants_zero_use_flag<'a>(
-    program: &super::lowering::StageProgram,
-    variants: Slice<'a, super::lowering::StageVariant>,
-    index: usize
-) -> u32 {
-    if(index < Slice::len(variants)) {
-        let flag = handle super::lowering::stage_variant_view(
-            slice_at(variants, index)
-        ) {
-            super::lowering::StageVariantView::Variant(_, _, fields) =>
-                aggregate_zero_use_flag(program, fields, 0)
-        };
-        if(flag == 16) {
-            enum_variants_zero_use_flag(
-                program,
-                variants,
-                index + 1
-            )
-        } else { 0 }
-    } else { 16 }
-}
-
-type_zero_use_flag(
-    program: &super::lowering::StageProgram,
-    type_id: super::lowering::ArtifactTypeId
-) -> u32 {
-    let raw = super::lowering::artifact_type_raw(type_id);
-    if(raw < 19) {
-        if(raw == 1) { 0 } else { 16 }
-    } else {
-        handle super::lowering::stage_program_type_view(
-            program,
-            super::lowering::stage_type_id_from_usize(
-                usize_from_u32(raw - 19)
-            )
-        ) {
-            super::lowering::StageTypeView::Tuple(fields, _) =>
-                aggregate_zero_use_flag(program, fields, 0),
-            super::lowering::StageTypeView::Struct(_, _, fields, _) =>
-                aggregate_zero_use_flag(program, fields, 0),
-            super::lowering::StageTypeView::Enum(_, variants, _) =>
-                enum_variants_zero_use_flag(program, variants, 0),
-            super::lowering::StageTypeView::Unsupported(_) => 0
-        }
-    }
+    } })
 }
 
 write_type_fields<'a>(
@@ -416,9 +422,9 @@ write_type_fields<'a>(
 }
 
 write_named_type_fields<'a>(
-    program: &super::lowering::StageProgram,
-    names: &Vec<String>,
-    type_id: super::lowering::StageTypeId,
+    program: &super::lowering::MirProgram,
+    names: &CanonicalPool<String>,
+    type_id: super::lowering::MirTypeId,
     field_names: Slice<'a, u32>,
     fields: Slice<'a, super::lowering::ArtifactTypeId>,
     field_index: usize,
@@ -444,20 +450,21 @@ write_named_type_fields<'a>(
 }
 
 custom_type_flags(
-    program: &super::lowering::StageProgram,
+    program: &super::lowering::MirProgram,
     index: usize,
     copy_flag: u32
 ) -> u32 {
-    let type_id = super::lowering::stage_type_artifact_id(
-        super::lowering::stage_type_id_from_usize(index)
-    );
+    let type_id = super::lowering::mir_type_id_from_usize(index);
     copy_flag
-        + type_zero_sized_flag(program, type_id)
-        + type_zero_use_flag(program, type_id)
+        + super::lowering::mir_program_type_zero_sized_flag(
+            program,
+            type_id
+        )
+        + super::lowering::mir_program_type_zero_use_flag(program, type_id)
 }
 
 tuple_type_record<'a>(
-    program: &super::lowering::StageProgram,
+    program: &super::lowering::MirProgram,
     index: usize,
     fields: Slice<'a, super::lowering::ArtifactTypeId>,
     copy_flag: u32
@@ -470,30 +477,26 @@ tuple_type_record<'a>(
     write_type_fields(&mut payload, fields, 0);
     super::artifact::record(
         32,
-        wrapping_convert_to_u8(custom_type_flags(
-            program,
-            index,
-            copy_flag
-        )),
+        wrapping_convert_to_u8(custom_type_flags(program, index, copy_flag)),
         ByteBuf::finish(payload)
     )
 }
 
 valid_struct_type_record<'a>(
-    program: &super::lowering::StageProgram,
-    names: &Vec<String>,
+    program: &super::lowering::MirProgram,
+    names: &CanonicalPool<String>,
     index: usize,
     name_index: u32,
     field_names: Slice<'a, u32>,
     fields: Slice<'a, super::lowering::ArtifactTypeId>,
     copy_flag: u32
 ) -> Result<super::artifact::Record, EmissionError> {
-    let stage_type_id = super::lowering::stage_type_id_from_usize(index);
+    let mir_type_id = super::lowering::mir_type_id_from_usize(index);
     let type_name = try(require_program_name(
         program,
         names,
         name_index,
-        EmissionName::Type(stage_type_id)
+        EmissionName::Type(mir_type_id)
     ), @valid_struct_type_record);
     let payload = ByteBuf::new();
     ByteBuf::write_u32_le(&mut payload, type_name);
@@ -504,7 +507,7 @@ valid_struct_type_record<'a>(
     try(write_named_type_fields(
         program,
         names,
-        stage_type_id,
+        mir_type_id,
         field_names,
         fields,
         0,
@@ -513,18 +516,14 @@ valid_struct_type_record<'a>(
     let payload_bytes = ByteBuf::finish( payload);
     Result::Ok(super::artifact::record(
         34,
-        wrapping_convert_to_u8(custom_type_flags(
-            program,
-            index,
-            copy_flag
-        )),
+        wrapping_convert_to_u8(custom_type_flags(program, index, copy_flag)),
         payload_bytes
     ))
 }
 
 struct_type_record<'a>(
-    program: &super::lowering::StageProgram,
-    names: &Vec<String>,
+    program: &super::lowering::MirProgram,
+    names: &CanonicalPool<String>,
     index: usize,
     name_index: u32,
     field_names: Slice<'a, u32>,
@@ -543,7 +542,7 @@ struct_type_record<'a>(
         )
     } else {
         Result::Err(EmissionError::StructFieldNameCount(
-            super::lowering::stage_type_id_from_usize(index),
+            super::lowering::mir_type_id_from_usize(index),
             Slice::len(fields),
             Slice::len(field_names)
         ))
@@ -551,9 +550,9 @@ struct_type_record<'a>(
 }
 
 write_enum_variant_fields<'a>(
-    program: &super::lowering::StageProgram,
-    names: &Vec<String>,
-    type_id: super::lowering::StageTypeId,
+    program: &super::lowering::MirProgram,
+    names: &CanonicalPool<String>,
+    type_id: super::lowering::MirTypeId,
     variant_index: usize,
     field_names: Slice<'a, u32>,
     fields: Slice<'a, super::lowering::ArtifactTypeId>,
@@ -584,18 +583,18 @@ write_enum_variant_fields<'a>(
 }
 
 write_enum_variants<'a>(
-    program: &super::lowering::StageProgram,
-    names: &Vec<String>,
-    type_id: super::lowering::StageTypeId,
-    variants: Slice<'a, super::lowering::StageVariant>,
+    program: &super::lowering::MirProgram,
+    names: &CanonicalPool<String>,
+    type_id: super::lowering::MirTypeId,
+    variants: Slice<'a, super::lowering::MirVariant>,
     index: usize,
     output: &mut ByteBuf
 ) -> Result<(), EmissionError> {
     try_for_range(Range::new(index, Slice::len(variants)), { current => {
-        handle super::lowering::stage_variant_view(
+        handle super::lowering::mir_variant_view(
             slice_at(variants, current)
         ) {
-            super::lowering::StageVariantView::Variant(
+            super::lowering::MirVariantView::Variant(
                 name_index,
                 field_names,
                 fields
@@ -635,19 +634,19 @@ write_enum_variants<'a>(
 }
 
 enum_type_record<'a>(
-    program: &super::lowering::StageProgram,
-    names: &Vec<String>,
+    program: &super::lowering::MirProgram,
+    names: &CanonicalPool<String>,
     index: usize,
     name_index: u32,
-    variants: Slice<'a, super::lowering::StageVariant>,
+    variants: Slice<'a, super::lowering::MirVariant>,
     copy_flag: u32
 ) -> Result<super::artifact::Record, EmissionError> {
-    let stage_type_id = super::lowering::stage_type_id_from_usize(index);
+    let mir_type_id = super::lowering::mir_type_id_from_usize(index);
     let type_name = try(require_program_name(
         program,
         names,
         name_index,
-        EmissionName::Type(stage_type_id)
+        EmissionName::Type(mir_type_id)
     ), @enum_type_record);
     let payload = ByteBuf::new();
     ByteBuf::write_u32_le(&mut payload, type_name);
@@ -658,79 +657,67 @@ enum_type_record<'a>(
     try(write_enum_variants(
         program,
         names,
-        stage_type_id,
+        mir_type_id,
         variants,
         0,
         &mut payload
     ), @enum_type_record);
     Result::Ok(super::artifact::record(
         35,
-        wrapping_convert_to_u8(custom_type_flags(
-            program,
-            index,
-            copy_flag
-        )),
+        wrapping_convert_to_u8(custom_type_flags(program, index, copy_flag)),
         ByteBuf::finish(payload)
     ))
 }
 
 custom_type_record(
-    program: &super::lowering::StageProgram,
-    names: &Vec<String>,
+    program: &super::lowering::MirProgram,
+    names: &CanonicalPool<String>,
     index: usize
 ) -> Result<super::artifact::Record, EmissionError> {
-    handle super::lowering::stage_program_type_view(
-        program,
-        super::lowering::stage_type_id_from_usize(index)
-    ) {
-        super::lowering::StageTypeView::Tuple(fields, copy_flag) =>
+    let mir_type = super::lowering::mir_type_id_from_usize(index);
+    let copy_flag =
+        super::lowering::mir_program_type_copy_flag(program, mir_type);
+    handle super::lowering::mir_program_type_kind(program, mir_type) {
+        MirTypeKind::Tuple =>
             Result::Ok(tuple_type_record(
                 program,
                 index,
-                fields,
+                super::lowering::mir_program_tuple_fields(
+                    program,
+                    mir_type
+                ),
                 copy_flag
             )),
-        super::lowering::StageTypeView::Struct(
-            name_index,
-            field_names,
-            fields,
-            copy_flag
-        ) => struct_type_record(
+        MirTypeKind::Struct => struct_type_record(
             program,
             names,
             index,
-            name_index,
-            field_names,
-            fields,
+            super::lowering::mir_program_struct_name(program, mir_type),
+            super::lowering::mir_program_struct_field_names(
+                program,
+                mir_type
+            ),
+            super::lowering::mir_program_struct_fields(program, mir_type),
             copy_flag
         ),
-        super::lowering::StageTypeView::Enum(
-            name_index,
-            variants,
-            copy_flag
-        ) => enum_type_record(
+        MirTypeKind::Enum => enum_type_record(
             program,
             names,
             index,
-            name_index,
-            variants,
+            super::lowering::mir_program_enum_name(program, mir_type),
+            super::lowering::mir_program_enum_variants(program, mir_type),
             copy_flag
-        ),
-        super::lowering::StageTypeView::Unsupported(tag) =>
-            Result::Err(EmissionError::UnsupportedType(
-            super::lowering::stage_type_id_from_usize(index),
-            tag
-        ))
+        )
     }
 }
 
 custom_type_records(
-    program: &super::lowering::StageProgram,
-    names: &Vec<String>,
+    program: &super::lowering::MirProgram,
+    names: &CanonicalPool<String>,
     index: usize,
     output: &mut Vec<super::artifact::Record>
 ) -> Result<(), EmissionError> {
-    let end = super::lowering::stage_program_type_count(program);
+    let end = super::lowering::mir_program_type_count(program);
     try_for_range(Range::new(index, end), { current => {
         let record = try(custom_type_record(
             program,
@@ -743,8 +730,8 @@ custom_type_records(
 }
 
 type_section(
-    program: &super::lowering::StageProgram,
-    names: &Vec<String>
+    program: &super::lowering::MirProgram,
+    names: &CanonicalPool<String>
 ) -> Result<super::artifact::Section, EmissionError> {
     let records = Vec::new();
     super::artifact::append_predefined_scalar_records(&mut records);
@@ -757,48 +744,24 @@ type_section(
     Result::Ok(super::artifact::variable_section(&records))
 }
 
-find_name(names: &Vec<String>, name: &String, index: usize) -> Option<u32> {
-    if(index < Vec::len(names)) {
-        if(String::eq(Vec::index(names, index), name)) {
-            Option::Some(checked_u32(index))
-        } else {
-            find_name(names, name, index + 1)
-        }
-    } else { None }
-}
-
 require_name(
-    names: &Vec<String>,
+    names: &CanonicalPool<String>,
     name: &String,
     origin: EmissionName
 ) -> Result<u32, EmissionError> {
-    handle find_name(names, name, 0) {
+    handle canonical_id(names, name) {
         Result::Err(_) =>
             Result::Err(EmissionError::MissingName(origin)),
         Result::Ok(found) => Result::Ok(found)
     }
 }
 
-find_name_value(
-    names: &Vec<String>,
-    name: String,
-    index: usize
-) -> Option<u32> {
-    if(index < Vec::len(names)) {
-        if(String::eq(Vec::index(names, index), &name)) {
-            Option::Some(checked_u32(index))
-        } else {
-            find_name_value(names, name, index + 1)
-        }
-    } else { None }
-}
-
 require_name_value(
-    names: &Vec<String>,
+    names: &CanonicalPool<String>,
     name: String,
     origin: EmissionName
 ) -> Result<u32, EmissionError> {
-    handle find_name_value(names, name, 0) {
+    handle canonical_id(names, &name) {
         Result::Err(_) =>
             Result::Err(EmissionError::MissingName(origin)),
         Result::Ok(found) => Result::Ok(found)
@@ -806,37 +769,37 @@ require_name_value(
 }
 
 signature_key(
-    function: &super::lowering::StageFunction
-) -> Vec<u32> {
-    let output = Vec::new();
-    Vec::push(
+    function: &super::lowering::MirFunction
+) -> Bytes {
+    let output = ByteBuf::new();
+    ByteBuf::write_u32_le(
         &mut output,
         checked_u32(
-            super::lowering::stage_function_parameter_count(function)
+            super::lowering::mir_function_parameter_count(function)
         )
     );
-    Vec::push(
+    ByteBuf::write_u32_le(
         &mut output,
         super::lowering::artifact_type_raw(
-            super::lowering::stage_function_result(function)
+            super::lowering::mir_function_result(function)
         )
     );
-    Vec::push(&mut output, 0);
+    ByteBuf::write_u32_le(&mut output, 0);
     append_parameter_types(function, 0, &mut output);
-    output
+    ByteBuf::finish(output)
 }
 
 append_parameter_types(
-    function: &super::lowering::StageFunction,
+    function: &super::lowering::MirFunction,
     index: usize,
-    output: &mut Vec<u32>
+    output: &mut ByteBuf
 ) {
-    let end = super::lowering::stage_function_parameter_count(function);
+    let end = super::lowering::mir_function_parameter_count(function);
     for_range(Range::new(index, end), { current =>
-        Vec::push(
+        ByteBuf::write_u32_le(
             &mut *output,
             super::lowering::artifact_type_raw(
-                super::lowering::stage_function_parameter_at(
+                super::lowering::mir_function_parameter_at(
                     function,
                     current
                 )
@@ -845,26 +808,12 @@ append_parameter_types(
     })
 }
 
-find_signature(
-    signatures: &Vec<Vec<u32>>,
-    key: &Vec<u32>,
-    index: usize
-) -> Option<u32> {
-    if(index < Vec::len(signatures)) {
-        if(Eq::eq(Vec::index(signatures, index), key)) {
-            Option::Some(checked_u32(index))
-        } else {
-            find_signature(signatures, key, index + 1)
-        }
-    } else { None }
-}
-
 require_signature(
-    signatures: &Vec<Vec<u32>>,
-    key: &Vec<u32>,
-    function: super::lowering::StageFunctionId
+    signatures: &CanonicalPool<Bytes>,
+    key: &Bytes,
+    function: super::lowering::MirFunctionId
 ) -> Result<u32, EmissionError> {
-    handle find_signature(signatures, key, 0) {
+    handle canonical_id(signatures, key) {
         Result::Err(_) =>
             Result::Err(EmissionError::MissingSignature(function)),
         Result::Ok(found) => Result::Ok(found)
@@ -872,58 +821,36 @@ require_signature(
 }
 
 collect_signatures(
-    program: &super::lowering::StageProgram,
+    program: &super::lowering::MirProgram,
     index: usize,
-    output: &mut Vec<Vec<u32>>
+    output: &mut Vec<Bytes>
 ) {
     for_range(Range::new(
         index,
-        super::lowering::stage_program_function_count(program)
+        super::lowering::mir_program_function_count(program)
     ), { current => {
         let key = signature_key(
-            super::lowering::stage_program_function_at(
+            super::lowering::mir_program_function_at(
                 program,
-                super::lowering::stage_function_id_from_usize(current)
+                super::lowering::mir_function_id_from_usize(current)
             )
         );
-        handle find_signature(output, &key, 0) {
-            Result::Err(_) => Vec::push(&mut *output, key),
-            Result::Ok(_) => {
-                key;
-                ()
-            }
-        }
+        Vec::push(&mut *output, key)
     } })
 }
 
-write_words(
-    output: &mut ByteBuf,
-    words: &Vec<u32>,
-    index: usize
-) {
-    for_range(Range::new(index, Vec::len(words)), { current =>
-        ByteBuf::write_u32_le(&mut *output, *Vec::index(words, current))
-    })
-}
-
 signature_records(
-    signatures: &Vec<Vec<u32>>,
+    signatures: &CanonicalPool<Bytes>,
     index: usize,
     output: &mut Vec<super::artifact::Record>
 ) {
-    for_range(Range::new(index, Vec::len(signatures)), { current => {
-        let payload = ByteBuf::new();
-        write_words(
-            &mut payload,
-            Vec::index(signatures, current),
-            0
-        );
+    for_range(Range::new(index, Vec::len(&signatures.values)), { current => {
         Vec::push(
             &mut *output,
             super::artifact::record(
                 0,
                 0,
-                ByteBuf::finish(payload)
+                *Vec::index(&signatures.values, current)
             )
         )
     } })
@@ -959,35 +886,35 @@ append_arguments(
 }
 
 append_switch_cases(
-    program: &super::lowering::StageProgram,
-    function: &super::lowering::StageFunction,
-    pack_id: super::lowering::StageSwitchPackId,
+    program: &super::lowering::MirProgram,
+    constants: &CanonicalPool<Bytes>,
+    function: &super::lowering::MirFunction,
+    pack_id: super::lowering::MirSwitchPackId,
     index: usize,
     output: &mut Vec<u32>
 ) -> Result<(), EmissionError> {
-    let pack = super::lowering::stage_function_switch_pack(
+    let pack = super::lowering::mir_function_switch_pack(
         function,
         pack_id
     );
-    let end = super::lowering::stage_switch_pack_count(pack);
+    let end = super::lowering::mir_switch_pack_count(pack);
     try_for_range(Range::new(index, end), { current => {
-        let case = super::lowering::stage_switch_pack_at(pack, current);
-        let key = super::lowering::stage_switch_case_key(case);
-        let words = Bytes::to_vec(*key);
-        handle find_constant(program, &words, 0) {
+        let case = super::lowering::mir_switch_pack_at(pack, current);
+        let key = super::lowering::mir_switch_case_key(case);
+        handle canonical_bytes_id(constants, key) {
             Result::Err(_) => Result::Err(
                 EmissionError::MissingSwitchConstant(pack_id, current)
             ),
             Result::Ok(constant) => {
                 Vec::push(
                     &mut *output,
-                    super::lowering::stage_constant_raw(constant)
+                    constant
                 );
                 Vec::push(
                     &mut *output,
-                    super::lowering::stage_function_block_offset(
+                    super::lowering::mir_function_block_offset(
                         function,
-                        super::lowering::stage_switch_case_target(case)
+                        super::lowering::mir_switch_case_target(case)
                     )
                 );
                 Result::Ok(())
@@ -997,30 +924,30 @@ append_switch_cases(
 }
 
 write_instruction(
-    program: &super::lowering::StageProgram,
-    stage_function: &super::lowering::StageFunction,
-    instruction: &StageInstruction,
+    program: &super::lowering::MirProgram,
+    constants: &CanonicalPool<Bytes>,
+    mir_function: &super::lowering::MirFunction,
+    instruction: &MirInstruction,
     code: &mut ByteBuf,
     operands: &mut Vec<u32>
 ) -> Result<(), EmissionError> {
-    if(*instruction is StageInstruction::Const(target, key)) {
+    if(*instruction is MirInstruction::Const(target, key)) {
         let target_raw = super::lowering::register_raw(target);
-        let words = Bytes::to_vec(key);
-        handle find_constant(program, &words, 0) {
+        handle canonical_bytes_id(constants, &key) {
             Result::Err(_) =>
                 Result::Err(EmissionError::MissingConstant(target)),
             Result::Ok(constant) => {
-                ByteBuf::write_u32_le(&mut *code, 8193);
+                write_opcode(&mut *code, Opcode::Constant);
                 ByteBuf::write_u32_le(&mut *code, target_raw);
                 ByteBuf::write_u32_le(
                     code,
-                    super::lowering::stage_constant_raw(constant)
+                    constant
                 );
                 Result::Ok(())
             }
         }
-    } else if(*instruction is StageInstruction::Move(target, source)) {
-        ByteBuf::write_u32_le(&mut *code, 8194);
+    } else if(*instruction is MirInstruction::Move(target, source)) {
+        write_opcode(&mut *code, Opcode::Move);
         ByteBuf::write_u32_le(
             &mut *code,
             super::lowering::register_raw(target)
@@ -1030,8 +957,8 @@ write_instruction(
             super::lowering::register_raw(source)
         );
         Result::Ok(())
-    } else if(*instruction is StageInstruction::Copy(target, source)) {
-        ByteBuf::write_u32_le(&mut *code, 8195);
+    } else if(*instruction is MirInstruction::Copy(target, source)) {
+        write_opcode(&mut *code, Opcode::Copy);
         ByteBuf::write_u32_le(
             &mut *code,
             super::lowering::register_raw(target)
@@ -1041,19 +968,19 @@ write_instruction(
             super::lowering::register_raw(source)
         );
         Result::Ok(())
-    } else if(*instruction is StageInstruction::Construct(
+    } else if(*instruction is MirInstruction::Construct(
         target,
         ty,
         variant,
         fields_id
     )) {
-        let fields = super::lowering::stage_function_register_pack(
-            stage_function,
+        let fields = super::lowering::mir_function_register_pack(
+            mir_function,
             fields_id
         );
         let start = checked_u32(Vec::len(&*operands));
         append_arguments(fields, 0, operands);
-        ByteBuf::write_u32_le(&mut *code, 20489);
+        write_opcode(&mut *code, Opcode::Construct);
         ByteBuf::write_u32_le(
             &mut *code,
             super::lowering::register_raw(target)
@@ -1065,7 +992,7 @@ write_instruction(
         ByteBuf::write_u32_le(
             &mut *code,
             handle variant {
-                Result::Err(_) => 4294967295,
+                Result::Err(_) => super::artifact::absent_id(),
                 Result::Ok(found) => found
             }
         );
@@ -1075,12 +1002,12 @@ write_instruction(
             super::lowering::register_pack_count(fields)
         );
         Result::Ok(())
-    } else if(*instruction is StageInstruction::ProjectMove(
+    } else if(*instruction is MirInstruction::ProjectMove(
         target,
         source,
         field
     )) {
-        ByteBuf::write_u32_le(&mut *code, 12298);
+        write_opcode(&mut *code, Opcode::ProjectMove);
         ByteBuf::write_u32_le(
             &mut *code,
             super::lowering::register_raw(target)
@@ -1091,12 +1018,12 @@ write_instruction(
         );
         ByteBuf::write_u32_le(code, field);
         Result::Ok(())
-    } else if(*instruction is StageInstruction::ProjectCopy(
+    } else if(*instruction is MirInstruction::ProjectCopy(
         target,
         source,
         field
     )) {
-        ByteBuf::write_u32_le(&mut *code, 12299);
+        write_opcode(&mut *code, Opcode::ProjectCopy);
         ByteBuf::write_u32_le(
             &mut *code,
             super::lowering::register_raw(target)
@@ -1107,11 +1034,11 @@ write_instruction(
         );
         ByteBuf::write_u32_le(code, field);
         Result::Ok(())
-    } else if(*instruction is StageInstruction::EnumTag(
+    } else if(*instruction is MirInstruction::EnumTag(
         target,
         source
     )) {
-        ByteBuf::write_u32_le(&mut *code, 8206);
+        write_opcode(&mut *code, Opcode::EnumTag);
         ByteBuf::write_u32_le(
             &mut *code,
             super::lowering::register_raw(target)
@@ -1121,48 +1048,49 @@ write_instruction(
             super::lowering::register_raw(source)
         );
         Result::Ok(())
-    } else if(*instruction is StageInstruction::Drop(register)) {
-        ByteBuf::write_u32_le(&mut *code, 4113);
+    } else if(*instruction is MirInstruction::Drop(register)) {
+        write_opcode(&mut *code, Opcode::Drop);
         ByteBuf::write_u32_le(
             code,
             super::lowering::register_raw(register)
         );
         Result::Ok(())
-    } else if(*instruction is StageInstruction::Deconstruct(register)) {
-        ByteBuf::write_u32_le(&mut *code, 4115);
+    } else if(*instruction is MirInstruction::Deconstruct(register)) {
+        write_opcode(&mut *code, Opcode::Deconstruct);
         ByteBuf::write_u32_le(
             code,
             super::lowering::register_raw(register)
         );
         Result::Ok(())
-    } else if(*instruction is StageInstruction::Jump(target)) {
-        ByteBuf::write_u32_le(&mut *code, 4128);
+    } else if(*instruction is MirInstruction::Jump(target)) {
+        write_opcode(&mut *code, Opcode::Jump);
         ByteBuf::write_u32_le(
             code,
-            super::lowering::stage_function_block_offset(
-                stage_function,
+            super::lowering::mir_function_block_offset(
+                mir_function,
                 target
             )
         );
         Result::Ok(())
-    } else if(*instruction is StageInstruction::Switch(
+    } else if(*instruction is MirInstruction::Switch(
         discriminant,
         pack_id,
         otherwise
     )) {
-        let pack = super::lowering::stage_function_switch_pack(
-            stage_function,
+        let pack = super::lowering::mir_function_switch_pack(
+            mir_function,
             pack_id
         );
         let operand_start = checked_u32(Vec::len(&*operands));
         try(append_switch_cases(
             program,
-            stage_function,
+            constants,
+            mir_function,
             pack_id,
             0,
             operands
         ), @write_instruction);
-        ByteBuf::write_u32_le(&mut *code, 16417);
+        write_opcode(&mut *code, Opcode::Switch);
         ByteBuf::write_u32_le(
             &mut *code,
             super::lowering::register_raw(discriminant)
@@ -1171,40 +1099,40 @@ write_instruction(
         ByteBuf::write_u32_le(
             &mut *code,
             checked_u32(
-                super::lowering::stage_switch_pack_count(pack)
+                super::lowering::mir_switch_pack_count(pack)
             )
         );
         ByteBuf::write_u32_le(
             code,
-            super::lowering::stage_function_block_offset(
-                stage_function,
+            super::lowering::mir_function_block_offset(
+                mir_function,
                 otherwise
             )
         );
         Result::Ok(())
-    } else if(*instruction is StageInstruction::Call(
+    } else if(*instruction is MirInstruction::Call(
         target,
         function,
         arguments_id
     )) {
-        let arguments = super::lowering::stage_function_register_pack(
-            stage_function,
+        let arguments = super::lowering::mir_function_register_pack(
+            mir_function,
             arguments_id
         );
         let start = checked_u32(Vec::len(&*operands));
         append_arguments(arguments, 0, operands);
-        ByteBuf::write_u32_le(&mut *code, 16418);
+        write_opcode(&mut *code, Opcode::Call);
         ByteBuf::write_u32_le(
             &mut *code,
             handle target {
-                Result::Err(_) => 4294967295,
+                Result::Err(_) => super::artifact::absent_id(),
                 Result::Ok(found) =>
                     super::lowering::register_raw(found)
             }
         );
         ByteBuf::write_u32_le(
             &mut *code,
-            super::lowering::stage_function_raw(function)
+            super::lowering::mir_function_raw(function)
         );
         ByteBuf::write_u32_le(&mut *code, start);
         ByteBuf::write_u32_le(
@@ -1212,12 +1140,12 @@ write_instruction(
             super::lowering::register_pack_count(arguments)
         );
         Result::Ok(())
-    } else if(*instruction is StageInstruction::Return(source)) {
-        ByteBuf::write_u32_le(&mut *code, 4134);
+    } else if(*instruction is MirInstruction::Return(source)) {
+        write_opcode(&mut *code, Opcode::Return);
         ByteBuf::write_u32_le(
             code,
             handle source {
-                Result::Err(_) => 4294967295,
+                Result::Err(_) => super::artifact::absent_id(),
                 Result::Ok(found) =>
                     super::lowering::register_raw(found)
             }
@@ -1229,18 +1157,20 @@ write_instruction(
 }
 
 write_function_code(
-    program: &super::lowering::StageProgram,
-    function: &super::lowering::StageFunction,
+    program: &super::lowering::MirProgram,
+    constants: &CanonicalPool<Bytes>,
+    function: &super::lowering::MirFunction,
     index: usize,
     code: &mut ByteBuf,
     operands: &mut Vec<u32>
 ) -> Result<(), EmissionError> {
-    let end = super::lowering::stage_function_instruction_count(function);
+    let end = super::lowering::mir_function_instruction_count(function);
     try_for_range(Range::new(index, end), { current =>
         write_instruction(
             program,
+            constants,
             function,
-            super::lowering::stage_function_instruction_at(
+            super::lowering::mir_function_instruction_at(
                 function,
                 current
             ),
@@ -1251,22 +1181,24 @@ write_function_code(
 }
 
 write_all_code(
-    program: &super::lowering::StageProgram,
+    program: &super::lowering::MirProgram,
+    constants: &CanonicalPool<Bytes>,
     index: usize,
     code: &mut ByteBuf,
     operands: &mut Vec<u32>,
     spans: &mut Vec<FunctionSpans>
 ) -> Result<(), EmissionError> {
-    let end = super::lowering::stage_program_function_count(program);
+    let end = super::lowering::mir_program_function_count(program);
     try_for_range(Range::new(index, end), { current => {
         let function =
-            super::lowering::stage_program_function_at(
+            super::lowering::mir_program_function_at(
                 program,
-                super::lowering::stage_function_id_from_usize(current)
+                super::lowering::mir_function_id_from_usize(current)
             );
         let start = checked_u32(ByteBuf::len(&*code) / 4);
         try(write_function_code(
             program,
+            constants,
             function,
             0,
             code,
@@ -1284,16 +1216,16 @@ write_all_code(
 }
 
 append_cleanup_registers(
-    cleanup: &super::lowering::StageCleanup,
+    cleanup: &super::lowering::MirCleanup,
     index: usize,
     operands: &mut Vec<u32>
 ) {
-    let end = super::lowering::stage_cleanup_register_count(cleanup);
+    let end = super::lowering::mir_cleanup_register_count(cleanup);
     for_range(Range::new(index, end), { current =>
         Vec::push(
             &mut *operands,
             super::lowering::register_raw(
-                super::lowering::stage_cleanup_register_at(
+                super::lowering::mir_cleanup_register_at(
                     cleanup,
                     current
                 )
@@ -1303,7 +1235,7 @@ append_cleanup_registers(
 }
 
 write_function_cleanups(
-    function: &super::lowering::StageFunction,
+    function: &super::lowering::MirFunction,
     function_id: u32,
     index: usize,
     output: &mut ByteBuf,
@@ -1311,26 +1243,26 @@ write_function_cleanups(
 ) {
     for_range(Range::new(
         index,
-        super::lowering::stage_function_cleanup_count(function)
+        super::lowering::mir_function_cleanup_count(function)
     ), { current => {
         let cleanup =
-            super::lowering::stage_function_cleanup_at(function, current);
+            super::lowering::mir_function_cleanup_at(function, current);
         let operand_start = checked_u32(Vec::len(&*operands));
         append_cleanup_registers(cleanup, 0, operands);
         ByteBuf::write_u32_le(&mut *output, function_id);
         ByteBuf::write_u32_le(
             &mut *output,
-            super::lowering::stage_cleanup_first(cleanup)
+            super::lowering::mir_cleanup_first(cleanup)
         );
         ByteBuf::write_u32_le(
             &mut *output,
-            super::lowering::stage_cleanup_end(cleanup)
+            super::lowering::mir_cleanup_end(cleanup)
         );
         ByteBuf::write_u32_le(&mut *output, operand_start);
         ByteBuf::write_u32_le(
             &mut *output,
             checked_u32(
-                super::lowering::stage_cleanup_register_count(cleanup)
+                super::lowering::mir_cleanup_register_count(cleanup)
             )
         );
         ByteBuf::write_u32_le(&mut *output, 0);
@@ -1338,7 +1270,7 @@ write_function_cleanups(
 }
 
 write_all_cleanups(
-    program: &super::lowering::StageProgram,
+    program: &super::lowering::MirProgram,
     index: usize,
     output: &mut ByteBuf,
     operands: &mut Vec<u32>,
@@ -1346,12 +1278,12 @@ write_all_cleanups(
 ) {
     for_range(Range::new(
         index,
-        super::lowering::stage_program_function_count(program)
+        super::lowering::mir_program_function_count(program)
     ), { current => {
         let function =
-            super::lowering::stage_program_function_at(
+            super::lowering::mir_program_function_at(
                 program,
-                super::lowering::stage_function_id_from_usize(current)
+                super::lowering::mir_function_id_from_usize(current)
             );
         let start = checked_u32(ByteBuf::len(&*output) / 24);
         write_function_cleanups(
@@ -1389,26 +1321,26 @@ write_operand_words(
 }
 
 write_functions(
-    program: &super::lowering::StageProgram,
-    names: &Vec<String>,
-    signatures: &Vec<Vec<u32>>,
+    program: &super::lowering::MirProgram,
+    names: &CanonicalPool<String>,
+    signatures: &CanonicalPool<Bytes>,
     spans: &Vec<FunctionSpans>,
     index: usize,
     output: &mut ByteBuf
 ) -> Result<(), EmissionError> {
-    let end = super::lowering::stage_program_function_count(program);
+    let end = super::lowering::mir_program_function_count(program);
     try_for_range(Range::new(index, end), { current => {
         let function =
-            super::lowering::stage_program_function_at(
+            super::lowering::mir_program_function_at(
                 program,
-                super::lowering::stage_function_id_from_usize(current)
+                super::lowering::mir_function_id_from_usize(current)
             );
         let signature = signature_key(function);
         let function_id =
-            super::lowering::stage_function_id_from_usize(current);
+            super::lowering::mir_function_id_from_usize(current);
         let name = try(require_name(
             names,
-            super::lowering::stage_function_name(function),
+            super::lowering::mir_function_name(function),
             EmissionName::Function(function_id)
         ), @write_functions);
         let signature_id = try(require_signature(
@@ -1422,115 +1354,162 @@ write_functions(
         ByteBuf::write_u32_le(&mut *output, 0);
         ByteBuf::write_u32_le(
             &mut *output,
-            super::lowering::stage_function_register_count(function)
+            super::lowering::mir_function_register_count(function)
         );
         ByteBuf::write_u32_le(&mut *output, span.code_start);
         ByteBuf::write_u32_le(&mut *output, span.code_length);
         ByteBuf::write_u32_le(
             &mut *output,
             checked_u32(
-                super::lowering::stage_function_instruction_count(function)
+                super::lowering::mir_function_instruction_count(function)
             )
         );
         ByteBuf::write_u32_le(&mut *output, span.cleanup_start);
         ByteBuf::write_u32_le(&mut *output, span.cleanup_count);
         ByteBuf::write_u32_le(&mut *output, 0);
         ByteBuf::write_u32_le(&mut *output, 0);
-        ByteBuf::write_u32_le(&mut *output, 4294967295);
+        ByteBuf::write_u32_le(
+            &mut *output,
+            super::artifact::absent_id()
+        );
         ByteBuf::write_u64_le(&mut *output, 0);
         ByteBuf::write_u64_le(&mut *output, 0);
         Result::Ok(())
     } })
 }
 
-pub encode(
-    program: &super::lowering::StageProgram,
-    entry: Option<super::lowering::StageFunctionId>
-) -> Result<Bytes, EmissionError> {
-    let names = Vec::new();
-    collect_names(program, 0, &mut names);
-    collect_type_names(program, 0, &mut names);
-    Vec::sort(&mut names);
-    Vec::dedup(&mut names);
+new_emission_context<'a>(
+    program: &'a super::lowering::MirProgram
+) -> EmissionContext<'a> {
+    let name_values = Vec::new();
+    collect_names(program, 0, &mut name_values);
+    collect_type_names(program, 0, &mut name_values);
+    let signature_values = Vec::new();
+    collect_signatures(program, 0, &mut signature_values);
+    let constant_values = Vec::new();
+    collect_constant_values(program, 0, &mut constant_values);
+    EmissionContext {
+        program: program,
+        names: freeze_canonical_pool(name_values),
+        signatures: freeze_stable_pool(signature_values),
+        constants: freeze_canonical_pool(constant_values),
+        operands: Vec::new(),
+        spans: Vec::new(),
+        writer: super::artifact::new_writer()
+    }
+}
 
-    let signatures = Vec::new();
-    collect_signatures(program, 0, &mut signatures);
+write_context_code<'a>(
+    value: &mut EmissionContext<'a>,
+    output: &mut ByteBuf
+) -> Result<(), EmissionError> {
+    write_all_code(
+        value.program,
+        &value.constants,
+        0,
+        output,
+        &mut value.operands,
+        &mut value.spans
+    )
+}
+
+write_context_cleanups<'a>(
+    value: &mut EmissionContext<'a>,
+    output: &mut ByteBuf
+) {
+    write_all_cleanups(
+        value.program,
+        0,
+        output,
+        &mut value.operands,
+        &mut value.spans
+    )
+}
+
+write_context_functions<'a>(
+    value: &EmissionContext<'a>,
+    output: &mut ByteBuf
+) -> Result<(), EmissionError> {
+    write_functions(
+        value.program,
+        &value.names,
+        &value.signatures,
+        &value.spans,
+        0,
+        output
+    )
+}
+
+pub encode(
+    program: &super::lowering::MirProgram,
+    entry: Option<super::lowering::MirFunctionId>
+) -> Result<Bytes, EmissionError> {
+    let context = new_emission_context(program);
     let signature_table_records = Vec::new();
-    signature_records(&signatures, 0, &mut signature_table_records);
+    signature_records(
+        &context.signatures,
+        0,
+        &mut signature_table_records
+    );
 
     let constant_table_records = Vec::new();
-    constant_records(program, 0, &mut constant_table_records);
+    constant_records(
+        &context.constants,
+        0,
+        &mut constant_table_records
+    );
 
     let code = ByteBuf::new();
-    let operands = Vec::new();
-    let spans = Vec::new();
-    try(write_all_code(
-        program,
-        0,
-        &mut code,
-        &mut operands,
-        &mut spans
-    ), @encode);
+    try(write_context_code(&mut context, &mut code), @encode);
 
     let cleanups = ByteBuf::new();
-    write_all_cleanups(
-        program,
-        0,
-        &mut cleanups,
-        &mut operands,
-        &mut spans
-    );
+    write_context_cleanups(&mut context, &mut cleanups);
     let operand_bytes = ByteBuf::new();
-    write_operand_words(&operands, 0, &mut operand_bytes);
+    write_operand_words(&context.operands, 0, &mut operand_bytes);
     let functions = ByteBuf::new();
-    try(write_functions(
-        program,
-        &names,
-        &signatures,
-        &spans,
-        0,
-        &mut functions
-    ), @encode);
+    try(write_context_functions(&context, &mut functions), @encode);
     let code_count = checked_u32(ByteBuf::len(&code) / 4);
     let code_bytes = ByteBuf::finish(code);
     let cleanup_count =
         checked_u32(ByteBuf::len(&cleanups) / 24);
     let cleanup_bytes = ByteBuf::finish(cleanups);
-    let types = try(type_section(program, &names), @encode);
+    let types = try(type_section(
+        context.program,
+        &context.names
+    ), @encode);
 
-    let writer = super::artifact::new_writer();
     super::artifact::set_section(
-        &mut writer,
+        &mut context.writer,
         super::artifact::SectionId::Strings,
-        super::artifact::sorted_string_section(&names)
+        super::artifact::sorted_string_section(&context.names.values)
     );
     super::artifact::set_section(
-        &mut writer,
+        &mut context.writer,
         super::artifact::SectionId::Constants,
         super::artifact::variable_section(&constant_table_records)
     );
     super::artifact::set_section(
-        &mut writer,
+        &mut context.writer,
         super::artifact::SectionId::Types,
         types
     );
     super::artifact::set_section(
-        &mut writer,
+        &mut context.writer,
         super::artifact::SectionId::Signatures,
         super::artifact::variable_section(&signature_table_records)
     );
     super::artifact::set_section(
-        &mut writer,
+        &mut context.writer,
         super::artifact::SectionId::Functions,
         super::artifact::section(
             ByteBuf::finish(functions),
             checked_u32(
-                super::lowering::stage_program_function_count(program)
+                super::lowering::mir_program_function_count(context.program)
             )
         )
     );
     super::artifact::set_section(
-        &mut writer,
+        &mut context.writer,
         super::artifact::SectionId::Code,
         super::artifact::section(
             code_bytes,
@@ -1538,15 +1517,15 @@ pub encode(
         )
     );
     super::artifact::set_section(
-        &mut writer,
+        &mut context.writer,
         super::artifact::SectionId::Operands,
         super::artifact::section(
             ByteBuf::finish(operand_bytes),
-            checked_u32(Vec::len(&operands))
+            checked_u32(Vec::len(&context.operands))
         )
     );
     super::artifact::set_section(
-        &mut writer,
+        &mut context.writer,
         super::artifact::SectionId::Cleanups,
         super::artifact::section(
             cleanup_bytes,
@@ -1554,9 +1533,9 @@ pub encode(
         )
     );
     let raw_entry = Option::map(entry, {
-        found => super::lowering::stage_function_raw(found)
+        found => super::lowering::mir_function_raw(found)
     });
-    handle super::artifact::encode_writer(&writer, raw_entry, 1) {
+    handle super::artifact::encode_writer(&context.writer, raw_entry, 1) {
         Result::Err(error) =>
             Result::Err(EmissionError::ArtifactWrite(error)),
         Result::Ok(bytes) => Result::Ok(bytes)

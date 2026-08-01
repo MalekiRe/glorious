@@ -23,6 +23,29 @@ pub enum SectionId {
 
 impl Use<[0, *]> for SectionId {}
 
+enum SectionEncoding {
+    Variable,
+    Fixed(u32)
+}
+
+impl Use<[0, *]> for SectionEncoding {}
+
+enum SectionInitial {
+    Empty,
+    EmptyStrings,
+    PredefinedScalarTypes
+}
+
+impl Use<[0, *]> for SectionInitial {}
+
+struct SectionSpec {
+    ordinal: usize,
+    encoding: SectionEncoding,
+    initial: SectionInitial
+}
+
+impl Use<[0, *]> for SectionSpec {}
+
 pub enum ArtifactWriteError {
     InvalidSectionCount,
     InvalidFixedSectionLength
@@ -44,47 +67,97 @@ pub struct Record {
 impl Use<[0, *]> for Record {}
 
 pub struct ArtifactWriter {
-    sections: Vec<Section>
+    sections: Vec<SectionSlot>
 }
 
 impl Use<[0, 1]> for ArtifactWriter {}
 
-section_ordinal(section: SectionId) -> usize {
+struct SectionSlot {
+    spec: SectionSpec,
+    payload: Section
+}
+
+impl Use<[0, *]> for SectionSlot {}
+
+section_spec(section: SectionId) -> SectionSpec {
     handle section {
-        SectionId::Strings => 0,
-        SectionId::Types => 1,
-        SectionId::Constants => 2,
-        SectionId::Signatures => 3,
-        SectionId::Imports => 4,
-        SectionId::Protocols => 5,
-        SectionId::HandlerDefinitions => 6,
-        SectionId::Functions => 7,
-        SectionId::Code => 8,
-        SectionId::Operands => 9,
-        SectionId::Cleanups => 10,
-        SectionId::Exports => 11,
-        SectionId::DropGlue => 12,
-        SectionId::ReferenceReturnContracts => 13
+        SectionId::Strings => SectionSpec {
+            ordinal: 0,
+            encoding: SectionEncoding::Variable,
+            initial: SectionInitial::EmptyStrings
+        },
+        SectionId::Types => SectionSpec {
+            ordinal: 1,
+            encoding: SectionEncoding::Variable,
+            initial: SectionInitial::PredefinedScalarTypes
+        },
+        SectionId::Constants => SectionSpec {
+            ordinal: 2,
+            encoding: SectionEncoding::Variable,
+            initial: SectionInitial::Empty
+        },
+        SectionId::Signatures => SectionSpec {
+            ordinal: 3,
+            encoding: SectionEncoding::Variable,
+            initial: SectionInitial::Empty
+        },
+        SectionId::Imports => SectionSpec {
+            ordinal: 4,
+            encoding: SectionEncoding::Fixed(24),
+            initial: SectionInitial::Empty
+        },
+        SectionId::Protocols => SectionSpec {
+            ordinal: 5,
+            encoding: SectionEncoding::Variable,
+            initial: SectionInitial::Empty
+        },
+        SectionId::HandlerDefinitions => SectionSpec {
+            ordinal: 6,
+            encoding: SectionEncoding::Variable,
+            initial: SectionInitial::Empty
+        },
+        SectionId::Functions => SectionSpec {
+            ordinal: 7,
+            encoding: SectionEncoding::Fixed(64),
+            initial: SectionInitial::Empty
+        },
+        SectionId::Code => SectionSpec {
+            ordinal: 8,
+            encoding: SectionEncoding::Fixed(4),
+            initial: SectionInitial::Empty
+        },
+        SectionId::Operands => SectionSpec {
+            ordinal: 9,
+            encoding: SectionEncoding::Fixed(4),
+            initial: SectionInitial::Empty
+        },
+        SectionId::Cleanups => SectionSpec {
+            ordinal: 10,
+            encoding: SectionEncoding::Fixed(24),
+            initial: SectionInitial::Empty
+        },
+        SectionId::Exports => SectionSpec {
+            ordinal: 11,
+            encoding: SectionEncoding::Fixed(16),
+            initial: SectionInitial::Empty
+        },
+        SectionId::DropGlue => SectionSpec {
+            ordinal: 12,
+            encoding: SectionEncoding::Fixed(16),
+            initial: SectionInitial::Empty
+        },
+        SectionId::ReferenceReturnContracts => SectionSpec {
+            ordinal: 13,
+            encoding: SectionEncoding::Variable,
+            initial: SectionInitial::Empty
+        }
     }
 }
 
-section_width(ordinal: usize) -> u32 {
-    if(ordinal == 4) {
-        24
-    } else if(ordinal == 7) {
-        64
-    } else if(ordinal == 8) {
-        4
-    } else if(ordinal == 9) {
-        4
-    } else if(ordinal == 10) {
-        24
-    } else if(ordinal == 11) {
-        16
-    } else if(ordinal == 12) {
-        16
-    } else {
-        0
+section_width(spec: &SectionSpec) -> u32 {
+    handle spec.encoding {
+        SectionEncoding::Variable => 0,
+        SectionEncoding::Fixed(width) => width
     }
 }
 
@@ -95,6 +168,8 @@ pub section(bytes: Bytes, count: u32) -> Section {
 pub section_bytes(value: &Section) -> Bytes { value.bytes }
 
 pub section_count(value: &Section) -> u32 { value.count }
+
+pub absent_id() -> u32 { 4294967295 }
 
 pub record(tag: u8, flags: u8, payload: Bytes) -> Record {
     let output = ByteBuf::with_capacity(Bytes::len(&payload) + 8);
@@ -255,22 +330,45 @@ pub predefined_scalar_types() -> Section {
     variable_section(&records)
 }
 
+default_section(spec: &SectionSpec) -> Section {
+    handle spec.initial {
+        SectionInitial::EmptyStrings => sorted_string_section(&Vec::new()),
+        SectionInitial::PredefinedScalarTypes => predefined_scalar_types(),
+        SectionInitial::Empty => handle spec.encoding {
+            SectionEncoding::Variable => empty_variable_section(),
+            SectionEncoding::Fixed(_) => empty_fixed_section()
+        }
+    }
+}
+
+append_default_section(sections: &mut Vec<SectionSlot>, section: SectionId) {
+    let spec = section_spec(section);
+    let payload = default_section(&spec);
+    Vec::push(
+        &mut *sections,
+        SectionSlot { spec: spec, payload: payload }
+    )
+}
+
 pub new_writer() -> ArtifactWriter {
     let sections = Vec::with_capacity(14);
-    Vec::push(&mut sections, sorted_string_section(&Vec::new()));
-    Vec::push(&mut sections, predefined_scalar_types());
-    Vec::push(&mut sections, empty_variable_section());
-    Vec::push(&mut sections, empty_variable_section());
-    Vec::push(&mut sections, empty_fixed_section());
-    Vec::push(&mut sections, empty_variable_section());
-    Vec::push(&mut sections, empty_variable_section());
-    Vec::push(&mut sections, empty_fixed_section());
-    Vec::push(&mut sections, empty_fixed_section());
-    Vec::push(&mut sections, empty_fixed_section());
-    Vec::push(&mut sections, empty_fixed_section());
-    Vec::push(&mut sections, empty_fixed_section());
-    Vec::push(&mut sections, empty_fixed_section());
-    Vec::push(&mut sections, empty_variable_section());
+    append_default_section(&mut sections, SectionId::Strings);
+    append_default_section(&mut sections, SectionId::Types);
+    append_default_section(&mut sections, SectionId::Constants);
+    append_default_section(&mut sections, SectionId::Signatures);
+    append_default_section(&mut sections, SectionId::Imports);
+    append_default_section(&mut sections, SectionId::Protocols);
+    append_default_section(&mut sections, SectionId::HandlerDefinitions);
+    append_default_section(&mut sections, SectionId::Functions);
+    append_default_section(&mut sections, SectionId::Code);
+    append_default_section(&mut sections, SectionId::Operands);
+    append_default_section(&mut sections, SectionId::Cleanups);
+    append_default_section(&mut sections, SectionId::Exports);
+    append_default_section(&mut sections, SectionId::DropGlue);
+    append_default_section(
+        &mut sections,
+        SectionId::ReferenceReturnContracts
+    );
     ArtifactWriter { sections: sections }
 }
 
@@ -279,11 +377,10 @@ pub set_section(
     section: SectionId,
     payload: Section
 ) {
+    let spec = section_spec(section);
+    let slot = Vec::index_mut(&mut writer.sections, spec.ordinal);
     let previous = replace(
-        Vec::index_mut(
-            &mut writer.sections,
-            section_ordinal(section)
-        ),
+        &mut slot.payload,
         payload
     );
     previous;
@@ -296,26 +393,28 @@ align8(value: usize) -> usize {
 }
 
 collect_offsets(
-    sections: &Vec<Section>,
+    sections: &Vec<SectionSlot>,
     offsets: &mut Vec<usize>,
     index: usize,
     cursor: usize
 ) -> usize {
     fold_range(Range::new(index, Vec::len(sections)), cursor, {
         current_offset, current_index => {
-        let section = Vec::index(sections, current_index);
+        let slot = Vec::index(sections, current_index);
+        let section = &slot.payload;
         Vec::push(&mut *offsets, current_offset);
         align8(current_offset + Bytes::len(&section.bytes))
     }})
 }
 
-fixed_sections_valid(sections: &Vec<Section>, index: usize) -> Bool {
+fixed_sections_valid(sections: &Vec<SectionSlot>, index: usize) -> Bool {
     find_range(Range::new(index, Vec::len(sections)), { current => {
-        let width = section_width(current);
+        let slot = Vec::index(sections, current);
+        let width = section_width(&slot.spec);
         if(width == 0) {
             false
         } else {
-            let section = Vec::index(sections, current);
+            let section = &slot.payload;
             Bytes::len(&section.bytes)
                 != wrapping_convert_to_usize(section.count)
                     * wrapping_convert_to_usize(width)
@@ -336,15 +435,16 @@ write_magic(output: &mut ByteBuf) {
 
 write_directory(
     output: &mut ByteBuf,
-    sections: &Vec<Section>,
+    sections: &Vec<SectionSlot>,
     offsets: &Vec<usize>,
     index: usize
 ) {
     for_range(Range::new(index, Vec::len(sections)), { current => {
-        let section = Vec::index(sections, current);
+        let slot = Vec::index(sections, current);
+        let section = &slot.payload;
         ByteBuf::write_u32_le(
             &mut *output,
-            wrapping_convert_to_u32(current + 1)
+            wrapping_convert_to_u32(slot.spec.ordinal + 1)
         );
         ByteBuf::write_u32_le(&mut *output, 1);
         ByteBuf::write_u64_le(
@@ -356,18 +456,19 @@ write_directory(
             wrapping_convert_to_u64(Bytes::len(&section.bytes))
         );
         ByteBuf::write_u32_le(&mut *output, section.count);
-        ByteBuf::write_u32_le(&mut *output, section_width(current))
+        ByteBuf::write_u32_le(&mut *output, section_width(&slot.spec))
     }})
 }
 
 write_sections(
     output: &mut ByteBuf,
-    sections: &Vec<Section>,
+    sections: &Vec<SectionSlot>,
     offsets: &Vec<usize>,
     index: usize
 ) {
     for_range(Range::new(index, Vec::len(sections)), { current => {
-        let section = Vec::index(sections, current);
+        let slot = Vec::index(sections, current);
+        let section = &slot.payload;
         ByteBuf::resize_zeroed(
             &mut *output,
             *Vec::index(offsets, current)
@@ -382,12 +483,18 @@ write_sections(
 }
 
 encode_valid(
-    sections: &Vec<Section>,
+    sections: &Vec<SectionSlot>,
     entry_function: Option<u32>,
     required_features: u64
 ) -> Bytes {
     let offsets = Vec::with_capacity(14);
-    let file_length = collect_offsets(sections, &mut offsets, 0, 512);
+    let directory_end = 64 + Vec::len(sections) * 32;
+    let file_length = collect_offsets(
+        sections,
+        &mut offsets,
+        0,
+        directory_end
+    );
     let output = ByteBuf::with_capacity(file_length);
     write_magic(&mut output);
     ByteBuf::write_u16_le(&mut output, 1);
@@ -397,11 +504,14 @@ encode_valid(
         Result::Ok(_) => ByteBuf::write_u32_le(&mut output, 1),
         Result::Err(_) => ByteBuf::write_u32_le(&mut output, 0)
     };
-    ByteBuf::write_u32_le(&mut output, 14);
+    ByteBuf::write_u32_le(
+        &mut output,
+        wrapping_convert_to_u32(Vec::len(sections))
+    );
     ByteBuf::write_u32_le(&mut output, 32);
     handle entry_function {
         Result::Ok(entry) => ByteBuf::write_u32_le(&mut output, entry),
-        Result::Err(_) => ByteBuf::write_u32_le(&mut output, 4294967295)
+        Result::Err(_) => ByteBuf::write_u32_le(&mut output, absent_id())
     };
     ByteBuf::write_u64_le(&mut output, bit_or(required_features, 1));
     ByteBuf::write_u64_le(&mut output, 0);
@@ -416,8 +526,8 @@ encode_valid(
     ByteBuf::finish(output)
 }
 
-pub encode(
-    sections: &Vec<Section>,
+encode(
+    sections: &Vec<SectionSlot>,
     entry_function: Option<u32>,
     required_features: u64
 ) -> Result<Bytes, ArtifactWriteError> {

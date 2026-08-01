@@ -23,24 +23,29 @@ fn repository_root() -> PathBuf {
 
 fn self_host_bundle() -> SourceBundle {
     let root = repository_root().join("self-host/src");
+    let primary = Segment::new(
+        root.join("main.glorious").to_string_lossy(),
+        "mod frontend;\nmod probe;\n\nmain() { run_compiler_host(probe::lexer::application) }\n",
+    );
     let paths = [
-        root.join("main.glorious"),
         root.join("frontend/frontend.glorious"),
         root.join("frontend/lexer/lexer.glorious"),
+        root.join("probe/probe.glorious"),
+        root.join("probe/lexer/lexer.glorious"),
     ];
-    let mut segments = paths.into_iter().map(|path| {
-        let source = fs::read_to_string(&path)
-            .unwrap()
-            .replace("mod backend;\n", "")
-            .replace("pub mod scanner;\n", "")
-            .replace("pub mod headers;\n", "")
-            .replace("pub mod bodies;\n", "")
-            .replace("pub mod resolution;\n", "")
-            .replace("pub mod elaboration;\n", "");
-        Segment::new(path.to_string_lossy(), source)
-    });
-    let primary = segments.next().unwrap();
-    SourceBundle::distributed(primary, segments)
+    SourceBundle::distributed(
+        primary,
+        paths.into_iter().map(|path| {
+            let source = fs::read_to_string(&path)
+                .unwrap()
+                .replace("pub mod scanner;\n", "")
+                .replace("pub mod headers;\n", "")
+                .replace("pub mod bodies;\n", "")
+                .replace("pub mod resolution;\n", "")
+                .replace("pub mod elaboration;\n", "");
+            Segment::new(path.to_string_lossy(), source)
+        }),
+    )
 }
 
 fn push_u16(output: &mut Vec<u8>, value: u16) {

@@ -1,0 +1,1042 @@
+use super::super::frontend::elaboration::{
+    ConstructionFlavor,
+    ConstructionField,
+    CoreComputationId,
+    CoreComputationView,
+    CoreLocalId,
+    CoreMatchArm,
+    CoreValueId,
+    CoreValueView,
+    ElaborationError,
+    InterfaceCallableId,
+    TypedBody,
+    TypedInterfaces,
+    collect_interfaces,
+    elaborate_function_body
+};
+use super::super::frontend::lexer::TokenKind;
+use super::super::frontend::scanner::ShellId;
+
+u32_from_usize(value: usize) -> u32 { wrapping_convert_to_u32(value) }
+usize_from_u32(value: u32) -> usize { wrapping_convert_to_usize(value) }
+
+shell_parent_module(
+    shell: &super::super::frontend::scanner::DeclarationShell
+) -> Option<ShellId> {
+    *super::super::frontend::scanner::shell_parent(shell)
+}
+
+write_string(output: &mut ByteBuf, value: &String) {
+    let bytes = String::as_bytes(value);
+    ByteBuf::write_u32_le(&mut *output, u32_from_usize(Bytes::len(&bytes)));
+    ByteBuf::append_bytes( output, &bytes)
+}
+
+write_name_id(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    name: Id<String>
+) {
+    handle super::super::frontend::lexer::lexeme(source, name) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(text) => write_string( output, text)
+    }
+}
+
+write_name_token(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    token: usize
+) {
+    handle super::super::frontend::lexer::token_kind_at(source, token) {
+        TokenKind::Ident(name) => write_name_id( output, source, name),
+        _ => unreachable()
+    }
+}
+
+shell_name_id(shell: &super::super::frontend::scanner::DeclarationShell) -> Id<String> {
+    handle Option::as_ref(super::super::frontend::scanner::shell_name(shell)) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(name) => *name
+    }
+}
+
+module_depth(
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    module: Option<ShellId>
+) -> usize {
+    handle module {
+        Result::Err(_) => 0,
+        Result::Ok(index) => handle super::super::frontend::scanner::shell_at(
+            declarations,
+            index
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(shell) => 1 + module_depth(
+                declarations,
+                shell_parent_module(shell)
+            )
+        }
+    }
+}
+
+write_module_components(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    module: Option<ShellId>
+) {
+    handle module {
+        Result::Err(_) => (),
+        Result::Ok(index) => handle super::super::frontend::scanner::shell_at(
+            declarations,
+            index
+        ) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(shell) => {
+                let parent = shell_parent_module(shell);
+                let name = shell_name_id(shell);
+                write_module_components(
+                    &mut *output,
+                    source,
+                    declarations,
+                    parent
+                );
+                write_name_id( output, source, name)
+            }
+        }
+    }
+}
+
+write_function_identity(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    shell_id: ShellId
+) {
+    handle super::super::frontend::scanner::shell_at(declarations, shell_id) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(shell) => {
+            let parent = shell_parent_module(shell);
+            let name = shell_name_id(shell);
+            ByteBuf::write_u32_le(
+                &mut *output,
+                u32_from_usize(module_depth(declarations, parent))
+            );
+            write_module_components(
+                &mut *output,
+                source,
+                declarations,
+                parent
+            );
+            write_name_id( output, source, name)
+        }
+    }
+}
+
+find_callable<'a>(
+    headers: &'a super::super::frontend::headers::HeaderIndex,
+    shell: ShellId,
+    index: usize
+) -> Option<&'a super::super::frontend::headers::CallableHeader> {
+    if(index < super::super::frontend::headers::callable_count(headers)) {
+        let callable = try(
+            super::super::frontend::headers::callable_at(headers, index),
+            @find_callable
+        );
+        if(super::super::frontend::headers::callable_shell(callable) == shell) {
+            Result::Ok(callable)
+        } else {
+            find_callable(headers, shell, index + 1)
+        }
+    } else { Result::Err(()) }
+}
+
+value_uses_local(
+    body: &TypedBody,
+    value: CoreValueId,
+    local: CoreLocalId
+) -> Bool {
+    handle super::super::frontend::elaboration::typed_body_value_at(
+        body,
+        value
+    ) {
+        CoreValueView::Local(_, found, _) => found == local,
+        CoreValueView::Projection(_, subject, _) =>
+            value_uses_local(body, subject, local),
+        CoreValueView::Embedded(_, computation) =>
+            computation_uses_local(body, computation, local),
+        _ => false
+    }
+}
+
+values_use_local<'a>(
+    body: &TypedBody,
+    values: Slice<'a, CoreValueId>,
+    ordinal: usize,
+    local: CoreLocalId
+) -> Bool {
+    if(ordinal < Slice::len(values)) {
+        let value = handle Slice::get(values, ordinal) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => *found
+        };
+        if(value_uses_local(body, value, local)) {
+            true
+        } else {
+            values_use_local(body, values, ordinal + 1, local)
+        }
+    } else { false }
+}
+
+construction_fields_use_local<'a>(
+    body: &TypedBody,
+    fields: Slice<'a, ConstructionField>,
+    ordinal: usize,
+    local: CoreLocalId
+) -> Bool {
+    if(ordinal < Slice::len(fields)) {
+        let field = handle Slice::get(fields, ordinal) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        if(value_uses_local(
+            body,
+            super::super::frontend::elaboration::construction_field_value(field),
+            local
+        )) {
+            true
+        } else {
+            construction_fields_use_local(body, fields, ordinal + 1, local)
+        }
+    } else { false }
+}
+
+match_arms_use_local<'a>(
+    body: &TypedBody,
+    arms: Slice<'a, CoreMatchArm>,
+    ordinal: usize,
+    local: CoreLocalId
+) -> Bool {
+    if(ordinal < Slice::len(arms)) {
+        let arm = handle Slice::get(arms, ordinal) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        if(computation_uses_local(
+            body,
+            super::super::frontend::elaboration::core_match_arm_body(arm),
+            local
+        )) {
+            true
+        } else {
+            match_arms_use_local(body, arms, ordinal + 1, local)
+        }
+    } else { false }
+}
+
+computation_uses_local(
+    body: &TypedBody,
+    computation: CoreComputationId,
+    local: CoreLocalId
+) -> Bool {
+    handle super::super::frontend::elaboration::typed_body_computation_at(
+        body,
+        computation
+    ) {
+        CoreComputationView::Pure(_, value) =>
+            value_uses_local(body, value, local),
+        CoreComputationView::Let(_, _, initializer, remainder) =>
+            if(computation_uses_local(body, initializer, local)) {
+                true
+            } else {
+                computation_uses_local(body, remainder, local)
+            },
+        CoreComputationView::Call(_, _, operands) =>
+            values_use_local(body, operands, 0, local),
+        CoreComputationView::Construct(_, _, fields) =>
+            construction_fields_use_local(body, fields, 0, local),
+        CoreComputationView::VariantDispatch(_, subject, arms) =>
+            if(value_uses_local(body, subject, local)) {
+                true
+            } else {
+                match_arms_use_local(body, arms, 0, local)
+            }
+    }
+}
+
+serialized_type_id(ty: u32) -> u32 {
+    if(ty < 14) { ty } else { 2147483648 + (ty - 14) }
+}
+
+write_type_id(output: &mut ByteBuf, ty: u32) {
+    ByteBuf::write_u32_le(output, serialized_type_id(ty))
+}
+
+write_value_expression(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    body: &TypedBody,
+    value: CoreValueId,
+    source_local_limit: u32,
+    force_copy: Bool
+) -> Result<(), ElaborationError> {
+    handle super::super::frontend::elaboration::typed_body_value_at(
+        body,
+        value
+    ) {
+        CoreValueView::Unit(ty) => {
+            ByteBuf::push(output, 0);
+            write_type_id(output, Id::to_u32(ty));
+            Result::Ok(())
+        },
+        CoreValueView::Integer(ty, constant_id) => {
+            let constant =
+                super::super::frontend::elaboration::typed_body_integer_constant_at(
+                    body,
+                    constant_id
+                );
+            let low0 =
+                super::super::frontend::elaboration::integer_constant_view_word(
+                    &constant,
+                    0
+                );
+            let low1 =
+                super::super::frontend::elaboration::integer_constant_view_word(
+                    &constant,
+                    1
+                );
+            let high0 =
+                super::super::frontend::elaboration::integer_constant_view_word(
+                    &constant,
+                    2
+                );
+            let high1 =
+                super::super::frontend::elaboration::integer_constant_view_word(
+                    &constant,
+                    3
+                );
+            let ty_word = Id::to_u32(ty);
+            if(high0 != 0 or { high1 != 0 }) {
+                Result::Err(ElaborationError::IntegerEncodingOverflow(
+                    Id::to_usize(constant_id) * 4,
+                    ty_word
+                ))
+            } else {
+                ByteBuf::push(output, 1);
+                write_type_id(output, ty_word);
+                ByteBuf::write_u64_le(
+                    output,
+                    wrapping_convert_to_u64(low0)
+                        + shift_left(wrapping_convert_to_u64(low1), 32)
+                );
+                Result::Ok(())
+            }
+        },
+        CoreValueView::Local(ty, local_id, copy) => {
+            let local = Id::to_u32(local_id);
+            if(local < source_local_limit) {
+                ByteBuf::push(output, 2);
+                write_type_id(output, Id::to_u32(ty));
+                ByteBuf::write_u32_le(output, local);
+                ByteBuf::push(
+                    output,
+                    if(force_copy) { 1 } else {
+                        if(copy) { 1 } else { 0 }
+                    }
+                );
+                Result::Ok(())
+            } else {
+                Result::Err(ElaborationError::InvalidLocalReference(
+                    usize_from_u32(local),
+                    source_local_limit,
+                    local
+                ))
+            }
+        },
+        CoreValueView::Projection(ty, subject, field) => {
+            ByteBuf::push(output, 7);
+            write_type_id(output, Id::to_u32(ty));
+            ByteBuf::write_u32_le(output, field);
+            ByteBuf::push(output, 1);
+            ByteBuf::write_u32_le(output, 0);
+            write_value_expression(
+                output,
+                source,
+                declarations,
+                body,
+                subject,
+                source_local_limit,
+                true
+            )
+        },
+        CoreValueView::Embedded(_, _) => Result::Err(
+            ElaborationError::EmbeddedValueSerializationUnsupported(
+                Id::to_usize(value)
+            )
+        )
+    }
+}
+
+write_operand_expression(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    resolved: &super::super::frontend::resolution::ResolvedBody,
+    body: &TypedBody,
+    value: CoreValueId,
+    source_local_limit: u32,
+    force_copy: Bool
+) -> Result<(), ElaborationError> {
+    handle super::super::frontend::elaboration::typed_body_value_at(
+        body,
+        value
+    ) {
+        CoreValueView::Embedded(_, computation) => write_computation_expression(
+            output,
+            source,
+            declarations,
+            resolved,
+            body,
+            computation,
+            source_local_limit,
+            false
+        ),
+        _ => write_value_expression(
+            output,
+            source,
+            declarations,
+            body,
+            value,
+            source_local_limit,
+            force_copy
+        )
+    }
+}
+
+construction_local_occurrences<'a>(
+    body: &TypedBody,
+    fields: Slice<'a, ConstructionField>,
+    ordinal: usize,
+    local: CoreLocalId,
+    count: usize
+) -> usize {
+    if(ordinal < Slice::len(fields)) {
+        let field = handle Slice::get(fields, ordinal) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        construction_local_occurrences(
+            body,
+            fields,
+            ordinal + 1,
+            local,
+            if(value_uses_local(
+                body,
+                super::super::frontend::elaboration::construction_field_value(
+                    field
+                ),
+                local
+            )) { count + 1 } else { count }
+        )
+    } else { count }
+}
+
+write_construct_fields<'a>(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    resolved: &super::super::frontend::resolution::ResolvedBody,
+    body: &TypedBody,
+    source_local_limit: u32,
+    fields: Slice<'a, ConstructionField>
+) -> Result<(), ElaborationError> {
+    Slice::try_for_each(fields, { field => {
+        let field_value =
+            super::super::frontend::elaboration::construction_field_value(field);
+        let force_copy = handle
+            super::super::frontend::elaboration::typed_body_value_at(
+                body,
+                field_value
+            ) {
+            CoreValueView::Local(_, local, _) =>
+                1 < construction_local_occurrences(
+                    body,
+                    fields,
+                    0,
+                    local,
+                    0
+                ),
+            _ => false
+        };
+        ByteBuf::write_u32_le(
+            output,
+            super::super::frontend::elaboration::construction_field_ordinal(field)
+        );
+        write_operand_expression(
+            output,
+            source,
+            declarations,
+            resolved,
+            body,
+            field_value,
+            source_local_limit,
+            force_copy
+        )
+    }})
+}
+
+write_call_operands<'a>(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    resolved: &super::super::frontend::resolution::ResolvedBody,
+    body: &TypedBody,
+    source_local_limit: u32,
+    operands: Slice<'a, CoreValueId>
+) -> Result<(), ElaborationError> {
+    Slice::try_for_each(operands, { value =>
+        write_operand_expression(
+            output,
+            source,
+            declarations,
+            resolved,
+            body,
+            *value,
+            source_local_limit,
+            false
+        )
+    })
+}
+
+leading_let_count(
+    body: &TypedBody,
+    computation: CoreComputationId,
+    count: u32
+) -> u32 {
+    handle super::super::frontend::elaboration::typed_body_computation_at(
+        body,
+        computation
+    ) {
+        CoreComputationView::Let(_, _, _, remainder) =>
+            leading_let_count(body, remainder, count + 1),
+        _ => count
+    }
+}
+
+construction_flavor_word(value: ConstructionFlavor) -> u32 {
+    handle value {
+        ConstructionFlavor::Product => 0,
+        ConstructionFlavor::Variant(ordinal) => ordinal + 1
+    }
+}
+
+write_computation_expression(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    resolved: &super::super::frontend::resolution::ResolvedBody,
+    body: &TypedBody,
+    computation: CoreComputationId,
+    source_local_limit: u32,
+    tail_position: Bool
+) -> Result<(), ElaborationError> {
+    handle super::super::frontend::elaboration::typed_body_computation_at(
+        body,
+        computation
+    ) {
+        CoreComputationView::Pure(_, value) => write_value_expression(
+            output,
+            source,
+            declarations,
+            body,
+            value,
+            source_local_limit,
+            false
+        ),
+        CoreComputationView::Let(_, _, _, _) => write_block_expression(
+            output,
+            source,
+            declarations,
+            resolved,
+            body,
+            computation,
+            source_local_limit,
+            tail_position
+        ),
+        CoreComputationView::Call(ty, shell, operands) => {
+            ByteBuf::push(output, if(tail_position) { 4 } else { 3 });
+            write_type_id(output, Id::to_u32(ty));
+            write_function_identity(output, source, declarations, shell);
+            ByteBuf::write_u32_le(
+                output,
+                u32_from_usize(Slice::len(operands))
+            );
+            write_call_operands(
+                output,
+                source,
+                declarations,
+                resolved,
+                body,
+                source_local_limit,
+                operands
+            )
+        },
+        CoreComputationView::Construct(ty, flavor, fields) => {
+            ByteBuf::push(output, 6);
+            write_type_id(output, Id::to_u32(ty));
+            write_type_id(output, Id::to_u32(ty));
+            ByteBuf::write_u32_le(output, construction_flavor_word(flavor));
+            ByteBuf::write_u32_le(
+                output,
+                u32_from_usize(Slice::len(fields))
+            );
+            write_construct_fields(
+                output,
+                source,
+                declarations,
+                resolved,
+                body,
+                source_local_limit,
+                fields
+            )
+        },
+        CoreComputationView::VariantDispatch(_, _, _) => Result::Err(
+            ElaborationError::VariantDispatchSerializationUnsupported(
+                Id::to_usize(computation)
+            )
+        )
+    }
+}
+
+write_block_statements(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    resolved: &super::super::frontend::resolution::ResolvedBody,
+    body: &TypedBody,
+    computation: CoreComputationId,
+    source_local_limit: u32,
+    tail_position: Bool
+) -> Result<(), ElaborationError> {
+    handle super::super::frontend::elaboration::typed_body_computation_at(
+        body,
+        computation
+    ) {
+        CoreComputationView::Let(_, local_id, initializer, remainder) => {
+            let local = Id::to_u32(local_id);
+            if(local < source_local_limit) {
+                ByteBuf::push(output, 1);
+                ByteBuf::write_u32_le(output, local);
+                write_name_token(
+                    output,
+                    source,
+                    super::super::frontend::resolution::local_name_token_at(
+                        resolved,
+                        usize_from_u32(
+                            local - (
+                                source_local_limit - u32_from_usize(
+                                    super::super::frontend::resolution::local_count(
+                                        resolved
+                                    )
+                                )
+                            )
+                        )
+                    )
+                );
+                write_type_id(
+                    output,
+                    Id::to_u32(
+                        super::super::frontend::elaboration::typed_body_local_type(
+                            body,
+                            local_id
+                        )
+                    )
+                );
+                try(write_computation_expression(
+                    output,
+                    source,
+                    declarations,
+                    resolved,
+                    body,
+                    initializer,
+                    source_local_limit,
+                    false
+                ), @write_block_statements);
+                write_block_statements(
+                    output,
+                    source,
+                    declarations,
+                    resolved,
+                    body,
+                    remainder,
+                    source_local_limit,
+                    tail_position
+                )
+            } else {
+                if(computation_uses_local(body, remainder, local_id)) {
+                    Result::Err(ElaborationError::InvalidLocalReference(
+                        usize_from_u32(local),
+                        source_local_limit,
+                        local
+                    ))
+                } else {
+                    ByteBuf::push(output, 2);
+                    try(write_computation_expression(
+                        output,
+                        source,
+                        declarations,
+                        resolved,
+                        body,
+                        initializer,
+                        source_local_limit,
+                        false
+                    ), @write_block_statements);
+                    write_block_statements(
+                        output,
+                        source,
+                        declarations,
+                        resolved,
+                        body,
+                        remainder,
+                        source_local_limit,
+                        tail_position
+                    )
+                }
+            }
+        },
+        _ => write_computation_expression(
+            output,
+            source,
+            declarations,
+            resolved,
+            body,
+            computation,
+            source_local_limit,
+            tail_position
+        )
+    }
+}
+
+write_block_expression(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    resolved: &super::super::frontend::resolution::ResolvedBody,
+    body: &TypedBody,
+    computation: CoreComputationId,
+    source_local_limit: u32,
+    tail_position: Bool
+) -> Result<(), ElaborationError> {
+    ByteBuf::push(output, 5);
+    let ty = handle
+        super::super::frontend::elaboration::typed_body_computation_at(
+            body,
+            computation
+        ) {
+        CoreComputationView::Pure(found, _) => found,
+        CoreComputationView::Let(found, _, _, _) => found,
+        CoreComputationView::Call(found, _, _) => found,
+        CoreComputationView::Construct(found, _, _) => found,
+        CoreComputationView::VariantDispatch(found, _, _) => found
+    };
+    write_type_id(output, Id::to_u32(ty));
+    ByteBuf::write_u32_le(
+        output,
+        leading_let_count(body, computation, 0)
+    );
+    write_block_statements(
+        output,
+        source,
+        declarations,
+        resolved,
+        body,
+        computation,
+        source_local_limit,
+        tail_position
+    )
+}
+
+
+write_parameters(
+    output: &mut ByteBuf,
+    source: &super::super::frontend::lexer::LexedSource,
+    headers: &super::super::frontend::headers::HeaderIndex,
+    interfaces: &TypedInterfaces,
+    callable: &super::super::frontend::headers::CallableHeader,
+    interface_callable: InterfaceCallableId,
+    ordinal: u32
+) {
+    let parameters = super::super::frontend::headers::callable_parameters(callable);
+    if(ordinal < super::super::frontend::headers::range_count(parameters)) {
+        let at = super::super::frontend::headers::range_start(parameters) + ordinal;
+        handle super::super::frontend::headers::parameter_at(headers, usize_from_u32(at)) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(parameter) => {
+                ByteBuf::write_u32_le(&mut *output, ordinal);
+                write_name_token(
+                    &mut *output,
+                    source,
+                    super::super::frontend::headers::parameter_name_token(parameter)
+                );
+                write_type_id(
+                    &mut *output,
+                    Id::to_u32(
+                        super::super::frontend::elaboration::interface_callable_parameter_at(
+                        interfaces,
+                        interface_callable,
+                        usize_from_u32(ordinal)
+                    ))
+                );
+                write_parameters(
+                    output,
+                    source,
+                    headers,
+                    interfaces,
+                    callable,
+                    interface_callable,
+                    ordinal + 1
+                )
+            }
+        }
+    } else { () }
+}
+
+write_function(
+    output: &mut ByteBuf,
+    original: &String,
+    headers: &super::super::frontend::headers::ParsedHeaders,
+    resolution_index: &super::super::frontend::resolution::ResolutionIndex,
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces,
+    shell: ShellId
+) -> Result<(), u8> {
+    let index = super::super::frontend::headers::parsed_index(headers);
+    handle find_callable(index, shell, 0) {
+        Result::Err(_) => Result::Err(3),
+        Result::Ok(callable) => handle super::super::frontend::bodies::parse_function_body(
+            original,
+            headers,
+            declarations,
+            shell
+        ) {
+            Result::Err(_) => Result::Err(3),
+            Result::Ok(parsed) => handle
+                super::super::frontend::resolution::resolve_function_body_indexed(
+                    resolution_index,
+                    headers,
+                    declarations,
+                    &parsed
+                ) {
+                Result::Err(found) => handle found {
+                    super::super::frontend::resolution::ResolutionError::UnknownVariant(_) =>
+                        Result::Err(4),
+                    _ => Result::Err(3)
+                },
+                Result::Ok(resolved) => handle elaborate_function_body(
+                    original,
+                    headers,
+                    declarations,
+                    interfaces,
+                    &parsed,
+                    &resolved
+                ) {
+                    Result::Err(_) => Result::Err(4),
+                    Result::Ok(typed) => handle
+                        super::super::frontend::elaboration::interface_callable_for_shell(
+                            interfaces,
+                            shell
+                        ) {
+                        Result::Err(_) => Result::Err(4),
+                        Result::Ok(interface_callable) => {
+                            let source = super::super::frontend::headers::parsed_source(headers);
+                            write_function_identity(
+                                &mut *output,
+                                source,
+                                declarations,
+                                shell
+                            );
+                            let parameter_count =
+                                super::super::frontend::headers::range_count(
+                                    super::super::frontend::headers::callable_parameters(callable)
+                                );
+                            ByteBuf::write_u32_le(
+                                &mut *output,
+                                parameter_count
+                            );
+                            write_parameters(
+                                &mut *output,
+                                source,
+                                index,
+                                interfaces,
+                                callable,
+                                interface_callable,
+                                0
+                            );
+                            write_type_id(
+                                &mut *output,
+                                Id::to_u32(
+                                    super::super::frontend::elaboration::typed_body_result_type(
+                                        &typed
+                                    )
+                                )
+                            );
+                            let source_local_limit = parameter_count
+                                + u32_from_usize(
+                                    super::super::frontend::resolution::local_count(&resolved)
+                                );
+                            handle write_block_expression(
+                                output,
+                                source,
+                                declarations,
+                                &resolved,
+                                &typed,
+                                super::super::frontend::elaboration::typed_body_root(
+                                    &typed
+                                ),
+                                source_local_limit,
+                                true
+                            ) {
+                                Result::Err(_) => Result::Err(4),
+                                Result::Ok(_) => Result::Ok(())
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+function_count(
+    declarations: &super::super::frontend::scanner::DeclarationIndex
+) -> usize {
+    super::super::frontend::scanner::fold_shells(declarations, 0, { count, _, shell =>
+        if(super::super::frontend::scanner::shell_kind_code(shell) == 12) {
+            count + 1
+        } else {
+            count
+        }
+    })
+}
+
+write_functions(
+    output: &mut ByteBuf,
+    original: &String,
+    headers: &super::super::frontend::headers::ParsedHeaders,
+    resolution_index: &super::super::frontend::resolution::ResolutionIndex,
+    declarations: &super::super::frontend::scanner::DeclarationIndex,
+    interfaces: &mut TypedInterfaces
+) -> Result<(), u8> {
+    super::super::frontend::scanner::try_for_each_shell(declarations, { shell_id, shell => {
+        if(super::super::frontend::scanner::shell_kind_code(shell) == 12) {
+            try(
+                write_function(
+                    output,
+                    original,
+                    headers,
+                    resolution_index,
+                    declarations,
+                    interfaces,
+                    shell_id
+                ),
+                @write_functions
+            );
+        } else {
+            ()
+        };
+        Result::Ok(())
+    }})
+}
+
+encode_source(output: &mut ByteBuf, original: String) {
+    handle super::super::frontend::lexer::lex(&original) {
+        Result::Err(_) => ByteBuf::push( output, 1),
+        Result::Ok(source) => handle super::super::frontend::scanner::scan(&source) {
+            Result::Err(_) => ByteBuf::push( output, 2),
+            Result::Ok(declarations) => handle super::super::frontend::headers::parse(
+                &original,
+                 source,
+                &declarations
+            ) {
+                Result::Err(_) => ByteBuf::push( output, 3),
+                Result::Ok(headers) => handle collect_interfaces(
+                    &headers,
+                    &declarations
+                ) {
+                    Result::Err(_) => ByteBuf::push( output, 4),
+                    Result::Ok(interfaces) => handle
+                        super::super::frontend::resolution::build_resolution_index(
+                                &headers,
+                                &declarations
+                            ) {
+                        Result::Err(_) => ByteBuf::push(output, 3),
+                        Result::Ok(resolution_index) => {
+                        let encoded = ByteBuf::new();
+                        ByteBuf::write_u32_le(
+                            &mut encoded,
+                            u32_from_usize(function_count(&declarations))
+                        );
+                        handle write_functions(
+                            &mut encoded,
+                            &original,
+                            &headers,
+                            &resolution_index,
+                            &declarations,
+                            &mut interfaces
+                        ) {
+                            Result::Err(status) =>
+                                ByteBuf::push( output, status),
+                            Result::Ok(_) => {
+                                ByteBuf::push(&mut *output, 0);
+                                ByteBuf::append_bytes(
+                                     output,
+                                    &ByteBuf::finish( encoded)
+                                )
+                            }
+                        }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+process_inputs(
+    arguments: &Vec<String>,
+    index: usize,
+    output: &mut ByteBuf
+) / FileRead {
+    if(index < Vec::len(arguments)) {
+        let path = *Vec::index(arguments, index);
+        let bytes = read_file(path);
+        handle String::from_utf8(bytes) {
+            Result::Err(_) => ByteBuf::push(&mut *output, 1),
+            Result::Ok(source) => encode_source(&mut *output, source)
+        };
+        process_inputs(
+            arguments,
+            index + 1,
+             output
+        )
+    } else { () }
+}
+
+pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
+    let arguments = process_args();
+    let count = Vec::len(&arguments);
+    if(count < 2) { write_diagnostic(
+            "usage: grandiose-self-host-elaboration <output> <input>..."
+        ) } else {
+        let output_path = *Vec::index(&arguments, 0);
+        let encoded = ByteBuf::new();
+        ByteBuf::write_u32_le(
+            &mut encoded,
+            u32_from_usize(count - 1)
+        );
+        process_inputs(&arguments, 1, &mut encoded);
+        write_file(output_path, ByteBuf::finish( encoded))
+    }
+}

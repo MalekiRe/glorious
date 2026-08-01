@@ -7850,8 +7850,17 @@ impl<'a> Walker<'a> {
                     let saved_locals = self.locals.clone();
                     let saved_bindings = self.bindings.clone();
                     let saved_active_variants = self.active_variants.clone();
-                    let discovery_checkpoint = self.discovery.clone();
-                    let solver_checkpoint = self.solver_budget.clone();
+                    // Sibling-driven retry can add information only while the
+                    // branch result remains unresolved. A fully ground
+                    // expected result already supplies the complete context;
+                    // snapshotting the whole accumulated discovery graph for
+                    // every exhaustive enum arm is pure overhead.
+                    let may_retry_with_sibling =
+                        branch_expected.is_none_or(|expected| !ground(expected));
+                    let discovery_checkpoint =
+                        may_retry_with_sibling.then(|| self.discovery.clone());
+                    let solver_checkpoint =
+                        may_retry_with_sibling.then(|| self.solver_budget.clone());
                     if let PatternKind::Variant { path, .. } = &pattern.kind
                         && path.len() == 2
                         && let ExprKind::Unary {
@@ -7884,11 +7893,14 @@ impl<'a> Walker<'a> {
                     // generic result (for example `Some(&payload.1)` versus
                     // `None`). Retry the island with that context, discarding
                     // every speculative discovery edge and solver step first.
-                    if positive_ty.is_none()
+                    if may_retry_with_sibling
+                        && positive_ty.is_none()
                         && let Some(negative_result) = negative_ty.as_ref()
                     {
-                        *self.discovery = discovery_checkpoint;
-                        *self.solver_budget = solver_checkpoint;
+                        *self.discovery = discovery_checkpoint
+                            .expect("unresolved refinement keeps discovery checkpoint");
+                        *self.solver_budget = solver_checkpoint
+                            .expect("unresolved refinement keeps solver checkpoint");
                         self.locals = saved_locals.clone();
                         self.bindings = saved_bindings.clone();
                         self.active_variants = saved_active_variants.clone();
@@ -9942,9 +9954,27 @@ pub(crate) fn discover_with_traits_and_budgets_from(
     solver_budgets: &mut BTreeMap<DeclarationKey, SolverBudget>,
     roots: Option<&BTreeSet<DeclarationKey>>,
 ) -> Discovery {
+    let timing_enabled = std::env::var_os("G1_BOOTSTRAP_TIMINGS").is_some();
+    let timing_started = std::time::Instant::now();
     let (templates_by_name, errors) = discover_templates(program, trait_db);
     let nominal_templates = discover_nominal_templates(program);
     let operation_templates = discover_operation_templates(program);
+    let functions_by_declaration = program
+        .functions
+        .iter()
+        .map(|function| (DeclarationKey::Function(function.name.clone()), function))
+        .collect::<BTreeMap<_, _>>();
+    if timing_enabled {
+        eprintln!(
+            "g1-specialization prepare: total={:.3}s functions={}",
+            timing_started.elapsed().as_secs_f64(),
+            program.functions.len()
+        );
+    }
+    let function_expression_ordinals = functions_by_declaration
+        .iter()
+        .map(|(declaration, function)| (declaration.clone(), expression_ordinals(&function.body)))
+        .collect::<BTreeMap<_, _>>();
     let struct_fields = program
         .structs
         .iter()
@@ -10006,6 +10036,12 @@ pub(crate) fn discover_with_traits_and_budgets_from(
         };
         walker.expression(&global.value, None);
     }
+    if timing_enabled {
+        eprintln!(
+            "g1-specialization globals: total={:.3}s",
+            timing_started.elapsed().as_secs_f64()
+        );
+    }
     for function in &program.functions {
         let Some(template) = templates_by_name.get(&function.name) else {
             continue;
@@ -10049,7 +10085,7 @@ pub(crate) fn discover_with_traits_and_budgets_from(
                 ),
             });
         }
-        let expression_ordinals = expression_ordinals(&function.body);
+        let expression_ordinals = &function_expression_ordinals[&template.declaration];
         let mut walker = Walker {
             program,
             templates: &templates_by_name,
@@ -10076,7 +10112,7 @@ pub(crate) fn discover_with_traits_and_budgets_from(
                 &template.declaration,
                 template.result.clone(),
             ),
-            expression_ordinals: &expression_ordinals,
+            expression_ordinals,
             body_instance: BodyInstanceKey::Root(template.declaration.clone()),
             recording: !symbolic,
             trait_db,
@@ -10103,6 +10139,14 @@ pub(crate) fn discover_with_traits_and_budgets_from(
                 .validated_symbolic
                 .insert(template.declaration.clone());
         }
+    }
+    if timing_enabled {
+        eprintln!(
+            "g1-specialization roots: total={:.3}s requests={} closures={}",
+            timing_started.elapsed().as_secs_f64(),
+            discovery.graph.requests.len(),
+            discovery.graph.closure_bodies.len()
+        );
     }
     for declaration in program
         .drops
@@ -10149,20 +10193,20 @@ pub(crate) fn discover_with_traits_and_budgets_from(
     let mut processed = BTreeSet::new();
     let mut processed_closures = BTreeSet::new();
     loop {
-        while let Some(key) = discovery
+        let pending_requests = discovery
             .graph
             .requests
             .keys()
-            .find(|key| !processed.contains(*key))
+            .filter(|key| !processed.contains(*key))
             .cloned()
-        {
+            .collect::<Vec<_>>();
+        for key in pending_requests {
             processed.insert(key.clone());
             let Some(template) = discovery.graph.templates.get(&key.template).cloned() else {
                 continue;
             };
-            let Some(function) = program.functions.iter().find(|function| {
-                DeclarationKey::Function(function.name.clone()) == template.declaration
-            }) else {
+            let Some(function) = functions_by_declaration.get(&template.declaration).copied()
+            else {
                 continue;
             };
             let substitutions = substitutions_for_key(&template, &key);
@@ -10203,7 +10247,7 @@ pub(crate) fn discover_with_traits_and_budgets_from(
                         .map(|ty| (param.name.clone(), LocalBinding::Type(ty)))
                 })
                 .collect();
-            let expression_ordinals = expression_ordinals(&function.body);
+            let expression_ordinals = &function_expression_ordinals[&template.declaration];
             let solver_budget = solver_budgets
                 .entry(template.declaration.clone())
                 .or_default();
@@ -10229,7 +10273,7 @@ pub(crate) fn discover_with_traits_and_budgets_from(
                     substitute(&template.result, &substitutions)
                         .unwrap_or_else(|| template.result.clone()),
                 ),
-                expression_ordinals: &expression_ordinals,
+                expression_ordinals,
                 body_instance: BodyInstanceKey::Specialization(key.clone()),
                 recording: true,
                 trait_db,
@@ -10345,6 +10389,14 @@ pub(crate) fn discover_with_traits_and_budgets_from(
         {
             break;
         }
+    }
+    if timing_enabled {
+        eprintln!(
+            "g1-specialization fixed-point: total={:.3}s requests={} closures={}",
+            timing_started.elapsed().as_secs_f64(),
+            discovery.graph.requests.len(),
+            processed_closures.len()
+        );
     }
     for template in templates_by_name.values() {
         let has_deferred_projection = contains_projection_placeholder(&template.result)

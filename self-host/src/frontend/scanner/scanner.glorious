@@ -36,10 +36,47 @@ pub struct DeclarationShell {
     parent: Option<ShellId>
 }
 
-pub struct DeclarationIndex {
+pub struct DefTable {
     shells: IndexVec<ShellTag, DeclarationShell>,
-    delimiters: DelimiterMap
+    delimiters: DelimiterMap,
+    names: HashMap<(Option<ShellId>, Id<String>, Namespace), DefSearch>
 }
+
+pub type DeclarationIndex = DefTable;
+
+pub enum Namespace { Module, Type, Value, Fixity }
+
+impl Use<[0, *]> for Namespace {}
+
+impl Eq for Namespace {
+    eq(self: &Namespace, other: &Namespace) -> Bool {
+        handle (*self, *other) {
+            (Namespace::Module, Namespace::Module) => true,
+            (Namespace::Type, Namespace::Type) => true,
+            (Namespace::Value, Namespace::Value) => true,
+            (Namespace::Fixity, Namespace::Fixity) => true,
+            _ => false
+        }
+    }
+}
+
+impl Hash for Namespace {
+    hash(self: &Namespace, state: &mut Hasher) {
+        Hasher::write_u8(state, handle *self {
+            Namespace::Module => 1,
+            Namespace::Type => 2,
+            Namespace::Value => 3,
+            Namespace::Fixity => 4
+        })
+    }
+}
+
+pub struct DefSearch {
+    first: Option<ShellId>,
+    count: usize
+}
+
+impl Use<[0, *]> for DefSearch {}
 
 pub enum ScanError {
     UnexpectedClosingDelimiter(usize, usize),
@@ -121,6 +158,25 @@ pub delimiter_map(value: &DeclarationIndex) -> &DelimiterMap {
     &value.delimiters
 }
 
+pub def_search(
+    value: &DeclarationIndex,
+    module: Option<ShellId>,
+    name: Id<String>,
+    namespace: Namespace
+) -> DefSearch {
+    handle HashMap::get(&value.names, &(module, name, namespace)) {
+        Result::Err(_) => DefSearch { first: None, count: 0 },
+        Result::Ok(found) => DefSearch {
+            first: found.first,
+            count: found.count
+        }
+    }
+}
+
+pub def_search_first(value: &DefSearch) -> Option<ShellId> { value.first }
+
+pub def_search_count(value: &DefSearch) -> usize { value.count }
+
 pub for_each_shell<'a, F, e: EffectRow>(
     value: &'a DeclarationIndex,
     body: F
@@ -188,42 +244,6 @@ pub shell_body_span(value: &DeclarationShell) -> Option<TokenSpan> { value.body 
 pub shell_body_range(value: &DeclarationShell) -> Option<TokenRange> { value.body }
 pub shell_whole(value: &DeclarationShell) -> &TokenSpan { &value.whole }
 pub shell_parent(value: &DeclarationShell) -> &Option<ShellId> { &value.parent }
-
-pub scan_error_code(value: &ScanError) -> u8 {
-    handle *value {
-        ScanError::UnexpectedClosingDelimiter(_, _) => 1,
-        ScanError::MismatchedClosingDelimiter(_, _) => 2,
-        ScanError::UnclosedDelimiter(_, _) => 3,
-        ScanError::InvalidDeclarationStart(_, _) => 4,
-        ScanError::IncompleteDeclaration(_, _) => 5,
-        ScanError::ExpectedDeclarationName(_, _) => 6,
-        ScanError::DeclarationIdExhausted(_, _) => 7
-    }
-}
-
-pub scan_error_token(value: &ScanError) -> usize {
-    handle *value {
-        ScanError::UnexpectedClosingDelimiter(token, _) => token,
-        ScanError::MismatchedClosingDelimiter(token, _) => token,
-        ScanError::UnclosedDelimiter(token, _) => token,
-        ScanError::InvalidDeclarationStart(token, _) => token,
-        ScanError::IncompleteDeclaration(token, _) => token,
-        ScanError::ExpectedDeclarationName(token, _) => token,
-        ScanError::DeclarationIdExhausted(token, _) => token
-    }
-}
-
-pub scan_error_related(value: &ScanError) -> usize {
-    handle *value {
-        ScanError::UnexpectedClosingDelimiter(_, related) => related,
-        ScanError::MismatchedClosingDelimiter(_, related) => related,
-        ScanError::UnclosedDelimiter(_, related) => related,
-        ScanError::InvalidDeclarationStart(_, related) => related,
-        ScanError::IncompleteDeclaration(_, related) => related,
-        ScanError::ExpectedDeclarationName(_, related) => related,
-        ScanError::DeclarationIdExhausted(_, related) => related
-    }
-}
 
 token_kind_at(value: &super::lexer::LexedSource, index: usize) -> TokenKind {
     super::lexer::token_kind_at(value, index)
@@ -706,6 +726,62 @@ scan_one(
     }
 }
 
+declaration_namespace(kind: DeclarationKind) -> Option<Namespace> {
+    handle kind {
+        DeclarationKind::Module => Option::Some(Namespace::Module),
+        DeclarationKind::TypeAlias => Option::Some(Namespace::Type),
+        DeclarationKind::EffectRowAlias => Option::Some(Namespace::Type),
+        DeclarationKind::Effect => Option::Some(Namespace::Type),
+        DeclarationKind::Struct => Option::Some(Namespace::Type),
+        DeclarationKind::Enum => Option::Some(Namespace::Type),
+        DeclarationKind::Trait => Option::Some(Namespace::Type),
+        DeclarationKind::Global => Option::Some(Namespace::Value),
+        DeclarationKind::Function => Option::Some(Namespace::Value),
+        DeclarationKind::Fixity => Option::Some(Namespace::Fixity),
+        DeclarationKind::Import => None,
+        DeclarationKind::Impl => None
+    }
+}
+
+index_def_names(
+    shells: &IndexVec<ShellTag, DeclarationShell>,
+    ordinal: usize,
+    names: &mut HashMap<
+        (Option<ShellId>, Id<String>, Namespace),
+        DefSearch
+    >
+) {
+    if(ordinal < IndexVec::len(shells)) {
+        let shell_id = handle Id::from_usize(ordinal) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        let shell = IndexVec::index(shells, shell_id);
+        handle (shell.name, declaration_namespace(shell.kind)) {
+            (Option::Some(name), Option::Some(namespace)) => {
+                let key = (shell.parent, name, namespace);
+                let previous = handle HashMap::remove(names, &key) {
+                    Result::Err(_) => DefSearch { first: None, count: 0 },
+                    Result::Ok(found) => found
+                };
+                let first = handle previous.first {
+                    Result::Err(_) => Option::Some(shell_id),
+                    Result::Ok(found) => Option::Some(found)
+                };
+                handle HashMap::insert(names, key, DefSearch {
+                    first: first,
+                    count: previous.count + 1
+                }) {
+                    Result::Err(_) => (),
+                    Result::Ok(replaced) => { replaced; () }
+                }
+            },
+            _ => ()
+        };
+        index_def_names(shells, ordinal + 1, names)
+    } else { () }
+}
+
 scan_complete(
     value: &super::lexer::LexedSource,
     scopes: Vec<ScanScope>,
@@ -714,10 +790,15 @@ scan_complete(
 ) -> Result<DeclarationIndex, ScanError> {
     let remaining = scopes;
     handle Vec::pop(&mut remaining) {
-        Result::Err(_) => Result::Ok(DeclarationIndex {
-            shells: output,
-            delimiters: delimiters
-        }),
+        Result::Err(_) => {
+            let names = HashMap::new();
+            index_def_names(&output, 0, &mut names);
+            Result::Ok(DefTable {
+                shells: output,
+                delimiters: delimiters,
+                names: names
+            })
+        },
         Result::Ok(scope) => scan_loop(value, ScanState {
             cursor: scope.cursor,
             limit: scope.limit,
@@ -809,137 +890,4 @@ pub scan(
         output: IndexVec::new(),
         delimiters: delimiters
     })
-}
-
-bool_code(value: Bool) -> u8 {
-    if(value) { 1 } else { 0 }
-}
-
-write_string(output: &mut ByteBuf, value: &String) {
-    let bytes = String::as_bytes(value);
-    ByteBuf::write_u32_le(
-        output,
-        wrapping_convert_to_u32(Bytes::len(&bytes))
-    );
-    ByteBuf::append_bytes(output, &bytes)
-}
-
-write_optional_name(
-    output: &mut ByteBuf,
-    lexed: &super::lexer::LexedSource,
-    value: &Option<Id<String>>
-) {
-    handle *value {
-        None => ByteBuf::push(output, 0),
-        Option::Some(name) => {
-            ByteBuf::push(output, 1);
-            handle super::lexer::lexeme(lexed, name) {
-                Result::Err(_) => unreachable(),
-                Result::Ok(text) => write_string(output, text)
-            }
-        }
-    }
-}
-
-write_range(output: &mut ByteBuf, value: &TokenRange) {
-    ByteBuf::write_u32_le(output, wrapping_convert_to_u32(range_start(value)));
-    ByteBuf::write_u32_le(output, wrapping_convert_to_u32(range_end(value)))
-}
-
-write_optional_range(output: &mut ByteBuf, value: &Option<TokenRange>) {
-    handle *value {
-        None => ByteBuf::push(output, 0),
-        Option::Some(range) => {
-            ByteBuf::push(output, 1);
-            write_range(output, &range)
-        }
-    }
-}
-
-write_optional_parent(output: &mut ByteBuf, value: &Option<ShellId>) {
-    handle *value {
-        None => ByteBuf::push(output, 0),
-        Option::Some(parent) => {
-            ByteBuf::push(output, 1);
-            ByteBuf::write_u32_le(output, Id::to_u32(parent))
-        }
-    }
-}
-
-write_shells(
-    output: &mut ByteBuf,
-    lexed: &super::lexer::LexedSource,
-    value: &DeclarationIndex
-) {
-    for_each_shell(value, { _, shell => {
-        ByteBuf::push(output, shell_kind_code(shell));
-        ByteBuf::push(output, bool_code(shell.public));
-        write_optional_name(output, lexed, &shell.name);
-        write_range(output, &shell.header);
-        write_optional_range(output, &shell.body);
-        write_range(output, &shell.whole);
-        write_optional_parent(output, &shell.parent)
-    } })
-}
-
-encode_scan(output: &mut ByteBuf, lexed: super::lexer::LexedSource) {
-    handle scan(&lexed) {
-        Result::Err(error) => {
-            ByteBuf::push(output, 2);
-            ByteBuf::push(output, scan_error_code(&error));
-            ByteBuf::write_u32_le(
-                output,
-                wrapping_convert_to_u32(scan_error_token(&error))
-            );
-            ByteBuf::write_u32_le(
-                output,
-                wrapping_convert_to_u32(scan_error_related(&error))
-            )
-        },
-        Result::Ok(index) => {
-            ByteBuf::push(output, 0);
-            ByteBuf::write_u32_le(
-                output,
-                wrapping_convert_to_u32(shell_count(&index))
-            );
-            write_shells(output, &lexed, &index)
-        }
-    }
-}
-
-process_inputs(
-    arguments: &Vec<String>,
-    index: usize,
-    output: &mut ByteBuf
-) / FileRead {
-    for_range(Range::new(index, Vec::len(arguments)), { current => {
-        let path = *Vec::index(arguments, current);
-        let bytes = read_file(path);
-        handle String::from_utf8(bytes) {
-            Result::Err(_) => ByteBuf::push(output, 1),
-            Result::Ok(source) => handle super::lexer::lex(&source) {
-                Result::Err(_) => ByteBuf::push(output, 1),
-                Result::Ok(lexed) => encode_scan(output, lexed)
-            }
-        }
-    } })
-}
-
-pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
-    let arguments = process_args();
-    let count = Vec::len(&arguments);
-    if(count < 2) {
-        write_diagnostic(
-            "usage: grandiose-self-host-scanner <output> <input>..."
-        )
-    } else {
-        let output_path = *Vec::index(&arguments, 0);
-        let encoded = ByteBuf::new();
-        ByteBuf::write_u32_le(
-            &mut encoded,
-            wrapping_convert_to_u32(count - 1)
-        );
-        process_inputs(&arguments, 1, &mut encoded);
-        write_file(output_path, ByteBuf::finish(encoded))
-    }
 }

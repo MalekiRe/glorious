@@ -1,0 +1,609 @@
+use super::super::frontend::headers::{
+    CallableHeader,
+    EffectRow,
+    EnumHeader,
+    FixityHeader,
+    HeaderIndex,
+    HeaderRange,
+    HeaderTypeView,
+    NominalIndex,
+    ParsedHeaders,
+    StructHeader,
+    TypeAliasHeader,
+    TypeId
+};
+use super::super::frontend::lexer::{LexedSource, TokenKind};
+
+bool_code(value: Bool) -> u8 { if(value) { 1 } else { 0 } }
+
+write_string(output: &mut ByteBuf, value: &String) {
+    let bytes = String::as_bytes(value);
+    ByteBuf::write_u32_le(
+        output,
+        wrapping_convert_to_u32(Bytes::len(&bytes))
+    );
+    ByteBuf::append_bytes(output, &bytes)
+}
+
+write_name(output: &mut ByteBuf, source: &LexedSource, name: Id<String>) {
+    handle super::super::frontend::lexer::lexeme(source, name) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(text) => write_string(output, text)
+    }
+}
+
+write_optional_name(
+    output: &mut ByteBuf,
+    source: &LexedSource,
+    value: &Option<super::super::frontend::headers::NameUse>
+) {
+    handle Option::as_ref(value) {
+        Result::Err(_) => ByteBuf::push(output, 0),
+        Result::Ok(name) => {
+            ByteBuf::push(output, 1);
+            write_name(
+                output,
+                source,
+                super::super::frontend::headers::name_use_name(name)
+            )
+        }
+    }
+}
+
+write_optional_name_token(
+    output: &mut ByteBuf,
+    source: &LexedSource,
+    value: Option<usize>
+) {
+    handle value {
+        None => ByteBuf::push(output, 0),
+        Option::Some(token) => {
+            ByteBuf::push(output, 1);
+            handle super::super::frontend::lexer::token_kind_at(source, token) {
+                TokenKind::Lifetime(name) => write_name(output, source, name),
+                _ => unreachable()
+            }
+        }
+    }
+}
+
+write_type_edges<'a>(
+    output: &mut ByteBuf,
+    parsed: &ParsedHeaders,
+    edges: Slice<'a, super::super::frontend::headers::TypeEdge>
+) {
+    for_range(Range::new(0, Slice::len(edges)), { current => {
+        let edge = handle Slice::get(edges, current) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        write_type(
+            output,
+            parsed,
+            super::super::frontend::headers::type_edge_type(edge)
+        )
+    }})
+}
+
+write_type(output: &mut ByteBuf, parsed: &ParsedHeaders, id: TypeId) {
+    let index = super::super::frontend::headers::parsed_index(parsed);
+    handle super::super::frontend::headers::header_type_view(index, id) {
+        HeaderTypeView::Path(_, names) => {
+            ByteBuf::push(output, 1);
+            ByteBuf::write_u32_le(
+                output,
+                wrapping_convert_to_u32(Slice::len(names))
+            );
+            for_range(Range::new(0, Slice::len(names)), { current => {
+                let name = handle Slice::get(names, current) {
+                    Result::Err(_) => unreachable(),
+                    Result::Ok(found) => found
+                };
+                write_name(
+                    output,
+                    super::super::frontend::headers::parsed_source(parsed),
+                    super::super::frontend::headers::name_use_name(name)
+                )
+            }})
+        },
+        HeaderTypeView::SharedReference(_, lifetime, child) => {
+            ByteBuf::push(output, 2);
+            write_optional_name_token(
+                output,
+                super::super::frontend::headers::parsed_source(parsed),
+                lifetime
+            );
+            write_type(output, parsed, child)
+        },
+        HeaderTypeView::UniqueReference(_, lifetime, child) => {
+            ByteBuf::push(output, 3);
+            write_optional_name_token(
+                output,
+                super::super::frontend::headers::parsed_source(parsed),
+                lifetime
+            );
+            write_type(output, parsed, child)
+        },
+        HeaderTypeView::Tuple(_, children) => {
+            ByteBuf::push(output, 4);
+            ByteBuf::write_u32_le(
+                output,
+                wrapping_convert_to_u32(Slice::len(children))
+            );
+            write_type_edges(output, parsed, children)
+        },
+        HeaderTypeView::Application(_, constructor, arguments) => {
+            ByteBuf::push(output, 5);
+            write_type(output, parsed, constructor);
+            ByteBuf::write_u32_le(
+                output,
+                wrapping_convert_to_u32(Slice::len(arguments))
+            );
+            write_type_edges(output, parsed, arguments)
+        },
+        HeaderTypeView::Never(_) => ByteBuf::push(output, 6)
+    }
+}
+
+write_generics(
+    output: &mut ByteBuf,
+    parsed: &ParsedHeaders,
+    range: &HeaderRange
+) {
+    let index = super::super::frontend::headers::parsed_index(parsed);
+    for_range(Range::new(
+        0,
+        wrapping_convert_to_usize(
+            super::super::frontend::headers::range_count(range)
+        )
+    ), { current => {
+        let ordinal = wrapping_convert_to_usize(
+            super::super::frontend::headers::range_start(range)
+        ) + current;
+        let parameter = handle
+            super::super::frontend::headers::generic_param_at(index, ordinal) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        ByteBuf::push(
+            output,
+            super::super::frontend::headers::generic_param_kind_code(parameter)
+        );
+        write_name(
+            output,
+            super::super::frontend::headers::parsed_source(parsed),
+            super::super::frontend::headers::generic_param_name(parameter)
+        )
+    }})
+}
+
+write_parameters(
+    output: &mut ByteBuf,
+    parsed: &ParsedHeaders,
+    range: &HeaderRange
+) {
+    let index = super::super::frontend::headers::parsed_index(parsed);
+    for_range(Range::new(
+        0,
+        wrapping_convert_to_usize(
+            super::super::frontend::headers::range_count(range)
+        )
+    ), { current => {
+        let ordinal = wrapping_convert_to_usize(
+            super::super::frontend::headers::range_start(range)
+        ) + current;
+        let parameter = handle
+            super::super::frontend::headers::parameter_at(index, ordinal) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        write_name(
+            output,
+            super::super::frontend::headers::parsed_source(parsed),
+            super::super::frontend::headers::parameter_name(parameter)
+        );
+        write_type(
+            output,
+            parsed,
+            super::super::frontend::headers::parameter_type(parameter)
+        )
+    }})
+}
+
+write_effect_row(output: &mut ByteBuf, parsed: &ParsedHeaders, row: &EffectRow) {
+    let range = super::super::frontend::headers::effect_row_effects(row);
+    ByteBuf::write_u32_le(
+        output,
+        super::super::frontend::headers::range_count(range)
+    );
+    let index = super::super::frontend::headers::parsed_index(parsed);
+    let edges = super::super::frontend::headers::type_edge_range(index, range);
+    write_type_edges(output, parsed, edges);
+    write_optional_name(
+        output,
+        super::super::frontend::headers::parsed_source(parsed),
+        super::super::frontend::headers::effect_row_tail(row)
+    )
+}
+
+write_callable(
+    output: &mut ByteBuf,
+    parsed: &ParsedHeaders,
+    value: &CallableHeader
+) {
+    ByteBuf::push(
+        output,
+        bool_code(super::super::frontend::headers::callable_is_public(value))
+    );
+    write_name(
+        output,
+        super::super::frontend::headers::parsed_source(parsed),
+        super::super::frontend::headers::callable_name(value)
+    );
+    let generics = super::super::frontend::headers::callable_generics(value);
+    ByteBuf::write_u32_le(
+        output,
+        super::super::frontend::headers::range_count(generics)
+    );
+    write_generics(output, parsed, generics);
+    let parameters = super::super::frontend::headers::callable_parameters(value);
+    ByteBuf::write_u32_le(
+        output,
+        super::super::frontend::headers::range_count(parameters)
+    );
+    write_parameters(output, parsed, parameters);
+    handle super::super::frontend::headers::callable_result(value) {
+        None => ByteBuf::push(output, 0),
+        Option::Some(result) => {
+            ByteBuf::push(output, 1);
+            write_type(output, parsed, result)
+        }
+    };
+    handle Option::as_ref(
+        super::super::frontend::headers::callable_effects(value)
+    ) {
+        Result::Err(_) => ByteBuf::push(output, 0),
+        Result::Ok(row) => {
+            ByteBuf::push(output, 1);
+            write_effect_row(output, parsed, row)
+        }
+    }
+}
+
+write_callables(output: &mut ByteBuf, parsed: &ParsedHeaders) {
+    let index = super::super::frontend::headers::parsed_index(parsed);
+    for_range(Range::new(
+        0,
+        super::super::frontend::headers::callable_count(index)
+    ), { current => {
+        let value = handle
+            super::super::frontend::headers::callable_at(index, current) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        write_callable(output, parsed, value)
+    }})
+}
+
+write_common(
+    output: &mut ByteBuf,
+    parsed: &ParsedHeaders,
+    public: Bool,
+    name: Id<String>,
+    generics: &HeaderRange
+) {
+    ByteBuf::push(output, bool_code(public));
+    write_name(
+        output,
+        super::super::frontend::headers::parsed_source(parsed),
+        name
+    );
+    ByteBuf::write_u32_le(
+        output,
+        super::super::frontend::headers::range_count(generics)
+    );
+    write_generics(output, parsed, generics)
+}
+
+write_alias(
+    output: &mut ByteBuf,
+    parsed: &ParsedHeaders,
+    value: &TypeAliasHeader
+) {
+    write_common(
+        output,
+        parsed,
+        super::super::frontend::headers::alias_is_public(value),
+        super::super::frontend::headers::alias_name(value),
+        super::super::frontend::headers::alias_generics(value)
+    );
+    write_type(
+        output,
+        parsed,
+        *super::super::frontend::headers::alias_target(value)
+    )
+}
+
+write_struct(
+    output: &mut ByteBuf,
+    parsed: &ParsedHeaders,
+    value: &StructHeader
+) {
+    write_common(
+        output,
+        parsed,
+        super::super::frontend::headers::struct_is_public(value),
+        super::super::frontend::headers::struct_name(value),
+        super::super::frontend::headers::struct_generics(value)
+    );
+    let fields = super::super::frontend::headers::struct_fields(value);
+    ByteBuf::write_u32_le(
+        output,
+        super::super::frontend::headers::range_count(fields)
+    );
+    let nominal = super::super::frontend::headers::nominal_index(parsed);
+    for_range(Range::new(
+        0,
+        wrapping_convert_to_usize(
+            super::super::frontend::headers::range_count(fields)
+        )
+    ), { current => {
+        let ordinal = wrapping_convert_to_usize(
+            super::super::frontend::headers::range_start(fields)
+        ) + current;
+        let field = handle
+            super::super::frontend::headers::field_at(nominal, ordinal) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        ByteBuf::push(
+            output,
+            if(super::super::frontend::headers::field_is_private(field)) {
+                0
+            } else { 1 }
+        );
+        write_name(
+            output,
+            super::super::frontend::headers::parsed_source(parsed),
+            super::super::frontend::headers::field_name(field)
+        );
+        write_type(
+            output,
+            parsed,
+            *super::super::frontend::headers::field_type(field)
+        )
+    }})
+}
+
+write_enum(output: &mut ByteBuf, parsed: &ParsedHeaders, value: &EnumHeader) {
+    write_common(
+        output,
+        parsed,
+        super::super::frontend::headers::enum_is_public(value),
+        super::super::frontend::headers::enum_name(value),
+        super::super::frontend::headers::enum_generics(value)
+    );
+    let variants = super::super::frontend::headers::enum_variants(value);
+    ByteBuf::write_u32_le(
+        output,
+        super::super::frontend::headers::range_count(variants)
+    );
+    let nominal = super::super::frontend::headers::nominal_index(parsed);
+    let index = super::super::frontend::headers::parsed_index(parsed);
+    for_range(Range::new(
+        0,
+        wrapping_convert_to_usize(
+            super::super::frontend::headers::range_count(variants)
+        )
+    ), { current => {
+        let ordinal = wrapping_convert_to_usize(
+            super::super::frontend::headers::range_start(variants)
+        ) + current;
+        let variant = handle
+            super::super::frontend::headers::variant_at(nominal, ordinal) {
+            Result::Err(_) => unreachable(),
+            Result::Ok(found) => found
+        };
+        write_name(
+            output,
+            super::super::frontend::headers::parsed_source(parsed),
+            super::super::frontend::headers::variant_name(variant)
+        );
+        let fields = super::super::frontend::headers::variant_fields(variant);
+        ByteBuf::write_u32_le(
+            output,
+            super::super::frontend::headers::range_count(fields)
+        );
+        write_type_edges(
+            output,
+            parsed,
+            super::super::frontend::headers::type_edge_range(index, fields)
+        )
+    }})
+}
+
+write_fixity(
+    output: &mut ByteBuf,
+    original: &String,
+    parsed: &ParsedHeaders,
+    value: &FixityHeader
+) {
+    ByteBuf::push(
+        output,
+        bool_code(super::super::frontend::headers::fixity_is_public(value))
+    );
+    ByteBuf::push(
+        output,
+        super::super::frontend::headers::fixity_form_code(value)
+    );
+    ByteBuf::push(
+        output,
+        super::super::frontend::headers::fixity_precedence(value)
+    );
+    let source = super::super::frontend::headers::parsed_source(parsed);
+    let first_token = super::super::frontend::headers::fixity_operator_start(value);
+    let last_token =
+        super::super::frontend::headers::fixity_operator_end(value) - 1;
+    let first = handle super::super::frontend::lexer::token_at(source, first_token) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(token) => super::super::frontend::lexer::token_span(token)
+    };
+    let last = handle super::super::frontend::lexer::token_at(source, last_token) {
+        Result::Err(_) => unreachable(),
+        Result::Ok(token) => super::super::frontend::lexer::token_span(token)
+    };
+    let spelling = super::super::frontend::lexer::text_slice(
+        original,
+        super::super::frontend::lexer::span_start(&first),
+        super::super::frontend::lexer::span_end(&last)
+    );
+    write_string(output, &spelling)
+}
+
+write_interfaces(output: &mut ByteBuf, original: &String, parsed: &ParsedHeaders) {
+    let nominal = super::super::frontend::headers::nominal_index(parsed);
+    let index = super::super::frontend::headers::parsed_index(parsed);
+    for_range(Range::new(
+        0,
+        super::super::frontend::headers::header_count(nominal)
+    ), { current => {
+        let kind = super::super::frontend::headers::header_kind(nominal, current);
+        let declaration = wrapping_convert_to_usize(
+            super::super::frontend::headers::header_index(nominal, current)
+        );
+        ByteBuf::push(output, kind);
+        handle kind {
+            3 => write_alias(output, parsed, handle
+                super::super::frontend::headers::alias_at(nominal, declaration) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            }),
+            6 => write_fixity(output, original, parsed, handle
+                super::super::frontend::headers::fixity_at(nominal, declaration) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            }),
+            8 => write_struct(output, parsed, handle
+                super::super::frontend::headers::struct_at(nominal, declaration) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            }),
+            9 => write_enum(output, parsed, handle
+                super::super::frontend::headers::enum_at(nominal, declaration) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            }),
+            12 => write_callable(output, parsed, handle
+                super::super::frontend::headers::callable_at(index, declaration) {
+                Result::Err(_) => unreachable(),
+                Result::Ok(found) => found
+            }),
+            _ => unreachable()
+        }
+    }})
+}
+
+encode_source(output: &mut ByteBuf, source: String, interfaces: Bool) {
+    handle super::super::frontend::lexer::lex(&source) {
+        Result::Err(_) => ByteBuf::push(output, 1),
+        Result::Ok(lexed) =>
+            handle super::super::frontend::scanner::scan(&lexed) {
+            Result::Err(_) => ByteBuf::push(output, 2),
+            Result::Ok(declarations) =>
+                handle super::super::frontend::headers::parse(
+                    &source,
+                    lexed,
+                    &declarations
+                ) {
+                Result::Err(_) => ByteBuf::push(output, 3),
+                Result::Ok(parsed) => {
+                    ByteBuf::push(output, 0);
+                    if(interfaces) {
+                        ByteBuf::write_u32_le(
+                            output,
+                            wrapping_convert_to_u32(
+                                super::super::frontend::headers::header_count(
+                                    super::super::frontend::headers::nominal_index(
+                                        &parsed
+                                    )
+                                )
+                            )
+                        );
+                        write_interfaces(output, &source, &parsed)
+                    } else {
+                        ByteBuf::write_u32_le(
+                            output,
+                            wrapping_convert_to_u32(
+                                super::super::frontend::headers::callable_count(
+                                    super::super::frontend::headers::parsed_index(
+                                        &parsed
+                                    )
+                                )
+                            )
+                        );
+                        write_callables(output, &parsed)
+                    }
+                }
+            }
+        }
+    }
+}
+
+process_inputs(
+    arguments: &Vec<String>,
+    index: usize,
+    output: &mut ByteBuf,
+    interfaces: Bool
+) / FileRead {
+    for_range(Range::new(index, Vec::len(arguments)), { current => {
+        let path = *Vec::index(arguments, current);
+        let bytes = read_file(path);
+        handle String::from_utf8(bytes) {
+            Result::Err(_) => ByteBuf::push(output, 1),
+            Result::Ok(source) => encode_source(output, source, interfaces)
+        }
+    }})
+}
+
+run_application(interfaces: Bool) / {
+    ProcessArgs,
+    FileRead,
+    FileWrite,
+    Diagnostic
+} {
+    let arguments = process_args();
+    let count = Vec::len(&arguments);
+    if(count < 2) {
+        if(interfaces) {
+            write_diagnostic(
+                "usage: grandiose-self-host-interfaces <output> <input>..."
+            )
+        } else {
+            write_diagnostic(
+                "usage: grandiose-self-host-headers <output> <input>..."
+            )
+        }
+    } else {
+        let output_path = *Vec::index(&arguments, 0);
+        let encoded = ByteBuf::new();
+        ByteBuf::write_u32_le(
+            &mut encoded,
+            wrapping_convert_to_u32(count - 1)
+        );
+        process_inputs(&arguments, 1, &mut encoded, interfaces);
+        write_file(output_path, ByteBuf::finish(encoded))
+    }
+}
+
+pub application() / { ProcessArgs, FileRead, FileWrite, Diagnostic } {
+    run_application(false)
+}
+
+pub interface_application() / {
+    ProcessArgs,
+    FileRead,
+    FileWrite,
+    Diagnostic
+} {
+    run_application(true)
+}

@@ -946,9 +946,23 @@ pub fn verify(mut artifact: Artifact) -> Result<VerifiedArtifact, VerifyError> {
 /// in-memory artifact. This deliberately does not support `LEAVE`: nonlocal
 /// cleanup boundaries must be emitted explicitly by the compiler.
 pub fn with_generated_cleanup_plans(mut artifact: Artifact) -> Result<Artifact, VerifyError> {
+    artifact = with_generated_cleanup_plans_unverified(artifact)?;
+    verify_artifact(&artifact, true, false)?;
+    Ok(artifact)
+}
+
+/// Populate canonical per-PC cleanup metadata without performing the second,
+/// metadata-requiring verification pass.
+///
+/// This exists for compiler pipelines that must still rewrite representation-
+/// only details after cleanup generation and already perform final artifact
+/// verification afterward. Most callers should use
+/// [`with_generated_cleanup_plans`] instead.
+pub fn with_generated_cleanup_plans_unverified(
+    mut artifact: Artifact,
+) -> Result<Artifact, VerifyError> {
     artifact.cleanups.clear();
     artifact.cleanups = verify_artifact(&artifact, false, false)?;
-    verify_artifact(&artifact, true, false)?;
     Ok(artifact)
 }
 
@@ -962,6 +976,20 @@ pub fn with_generated_cleanup_plans(mut artifact: Artifact) -> Result<Artifact, 
 /// synthetic-block PCs. A final ordinary verification pass then requires the
 /// completed table to be exact everywhere.
 pub fn with_compiler_seeded_cleanup_plans(mut artifact: Artifact) -> Result<Artifact, VerifyError> {
+    artifact = with_compiler_seeded_cleanup_plans_unverified(artifact)?;
+    verify_artifact(&artifact, true, false)?;
+    Ok(artifact)
+}
+
+/// Complete compiler-seeded cleanup metadata without performing the final,
+/// metadata-requiring verification pass.
+///
+/// The caller must run ordinary artifact verification after any remaining
+/// representation-only rewrites. Most callers should use
+/// [`with_compiler_seeded_cleanup_plans`] instead.
+pub fn with_compiler_seeded_cleanup_plans_unverified(
+    mut artifact: Artifact,
+) -> Result<Artifact, VerifyError> {
     if artifact.cleanups.is_empty()
         || artifact
             .code
@@ -971,7 +999,6 @@ pub fn with_compiler_seeded_cleanup_plans(mut artifact: Artifact) -> Result<Arti
         return Err(VerifyError::InvalidFunction(u32::MAX));
     }
     artifact.cleanups = verify_artifact(&artifact, false, true)?;
-    verify_artifact(&artifact, true, false)?;
     Ok(artifact)
 }
 
@@ -980,6 +1007,8 @@ fn verify_artifact(
     require_cleanup_metadata: bool,
     allow_seeded_leave_generation: bool,
 ) -> Result<Vec<crate::bytecode::CleanupPlan>, VerifyError> {
+    let timing_enabled = std::env::var_os("G1_BOOTSTRAP_TIMINGS").is_some();
+    let verification_started = std::time::Instant::now();
     let used_features = crate::bytecode::used_features(
         &artifact.types,
         &artifact.code,
@@ -1020,6 +1049,13 @@ fn verify_artifact(
     // verifying each individual function repeats the same expensive analysis
     // once per function, so build them once at the artifact boundary.
     let quantity_cache = QuantityVerificationCache::new(artifact);
+    if timing_enabled {
+        eprintln!(
+            "g1-verifier prepare: {:.3}s",
+            verification_started.elapsed().as_secs_f64()
+        );
+    }
+    let functions_started = std::time::Instant::now();
     let mut cleanups = Vec::new();
     for (i, f) in artifact.functions.iter().enumerate() {
         cleanups.extend(verify_function(
@@ -1032,6 +1068,13 @@ fn verify_artifact(
         )?);
     }
     verify_handler_parameter_quantity_dispositions(artifact, &quantity_cache.owned)?;
+    if timing_enabled {
+        eprintln!(
+            "g1-verifier functions: {:.3}s total={:.3}s",
+            functions_started.elapsed().as_secs_f64(),
+            verification_started.elapsed().as_secs_f64()
+        );
+    }
     Ok(cleanups)
 }
 
@@ -1603,7 +1646,7 @@ fn verify_function(
         Type::RefShared { .. } | Type::RefUnique { .. }
     );
     let declared_contract = declared_carrier_contract(a, fid)?;
-    let has_contract_bearing_exit = function_may_return(a, fid)
+    let has_contract_bearing_exit = quantity_cache.may_return[fid as usize]
         && a.code[start..end].iter().any(|instruction| {
             matches!(
                 instruction,
@@ -1623,10 +1666,27 @@ fn verify_function(
         {
             aggregate_reference_return_origins(a, fid, &mut Vec::new())?;
         } else if single_result_leaf.is_some() {
-            reference_return_parameter(a, fid, &mut Vec::new())?;
+            reference_return_parameter_cached(
+                a,
+                fid,
+                &mut Vec::new(),
+                &quantity_cache.reference_returns,
+            )?;
         }
     }
-    let loan_states = verify_loans(a, fid, f, &enum_facts, &label_states, &loan_live)?;
+    let loan_states = verify_loans(
+        a,
+        fid,
+        f,
+        &enum_facts,
+        &label_states,
+        &loan_live,
+        &quantity_cache.reference_returns,
+        &quantity_cache.reference_types,
+        &quantity_cache.may_return,
+        &quantity_cache.array_writes,
+        &quantity_cache.carrier_returns,
+    )?;
     let mut entry = vec![false; f.register_types.len()];
     entry[0] = f.receiver_mode.is_some();
     entry[1..1 + f.params.len()].fill(true);
@@ -1718,14 +1778,17 @@ fn verify_function(
                 callable_targets: &callable_targets[pc as usize],
                 may_cancel: &quantity_cache.may_cancel,
                 may_multishot: &quantity_cache.may_multishot,
+                actual_outward_protocols: &quantity_cache.actual_outward_protocols,
             },
             ins,
             &mut state,
         )?;
         let nonreturning_call = match ins {
             Instruction::Call { function, .. }
-            | Instruction::CallKnownReceiver { function, .. } => !function_may_return(a, *function),
-            Instruction::CallSelf { .. } => !function_may_return(a, fid),
+            | Instruction::CallKnownReceiver { function, .. } => {
+                !quantity_cache.may_return[*function as usize]
+            }
+            Instruction::CallSelf { .. } => !quantity_cache.may_return[fid as usize],
             _ => false,
         };
         if nonreturning_call {
@@ -2796,6 +2859,12 @@ struct QuantityVerificationCache {
     terminal_effects: Vec<Option<TerminalEffectPayloadSummary>>,
     may_cancel: Vec<bool>,
     may_multishot: Vec<bool>,
+    actual_outward_protocols: Vec<std::collections::BTreeSet<u32>>,
+    reference_returns: ReferenceReturnCache,
+    reference_types: ReferenceTypeCache,
+    may_return: Vec<bool>,
+    array_writes: ArrayWriteEffectCache,
+    carrier_returns: CarrierReturnCache,
 }
 
 impl QuantityVerificationCache {
@@ -2824,6 +2893,12 @@ impl QuantityVerificationCache {
             terminal_effects,
             may_cancel,
             may_multishot,
+            actual_outward_protocols: actual_function_outward_protocols(artifact),
+            reference_returns: ReferenceReturnCache::new(artifact.functions.len()),
+            reference_types: ReferenceTypeCache::new(artifact.types.len()),
+            may_return: function_may_return_summaries(artifact),
+            array_writes: ArrayWriteEffectCache::new(artifact.functions.len()),
+            carrier_returns: CarrierReturnCache::new(artifact.functions.len()),
         }
     }
 }
@@ -7133,11 +7208,16 @@ struct LabelEntry {
 }
 
 fn cleanup_registers(a: &Artifact, fid: u32, pc: u32) -> &[u32] {
-    a.cleanups
-        .iter()
-        .find(|plan| {
-            plan.function == fid && plan.first_instruction <= pc && pc < plan.end_instruction
-        })
+    // Cleanup plans are canonicalized by `(function, first_instruction)` and
+    // ordinary verification validates their exact ordering and coverage before
+    // reaching this lookup. Looking up every instruction with a full table scan
+    // made verification quadratic in large bootstrap artifacts.
+    let at = a
+        .cleanups
+        .partition_point(|plan| (plan.function, plan.first_instruction) <= (fid, pc));
+    at.checked_sub(1)
+        .and_then(|index| a.cleanups.get(index))
+        .filter(|plan| plan.function == fid && pc < plan.end_instruction)
         .map_or(&[], |plan| plan.registers.as_slice())
 }
 
@@ -8520,14 +8600,15 @@ fn carrier_return_contract_with(
     Ok(vec![(result_path, source)].into())
 }
 
-fn canonical_callable_reference_contract(
+fn canonical_callable_reference_contract_cached(
     a: &Artifact,
     targets: &CallableTargets,
     visiting: &mut Vec<u32>,
+    cache: &ReferenceReturnCache,
 ) -> Result<Option<ReferenceOrigin>, VerifyError> {
     let mut contracts = targets
         .iter()
-        .map(|target| reference_return_parameter(a, *target, visiting));
+        .map(|target| reference_return_parameter_cached(a, *target, visiting, cache));
     let first = contracts
         .next()
         .ok_or(VerifyError::InvalidFunction(u32::MAX))??;
@@ -9541,6 +9622,97 @@ fn function_may_return(a: &Artifact, fid: u32) -> bool {
     )
 }
 
+fn function_may_return_summaries(a: &Artifact) -> Vec<bool> {
+    fn body_may_return(a: &Artifact, fid: u32, summaries: &[bool]) -> bool {
+        let Some(function) = a.functions.get(fid as usize) else {
+            return true;
+        };
+        let mut seen = vec![false; function.code_len as usize];
+        let mut work = VecDeque::from([0u32]);
+        while let Some(pc) = work.pop_front() {
+            let Some(seen_pc) = seen.get_mut(pc as usize) else {
+                continue;
+            };
+            if std::mem::replace(seen_pc, true) {
+                continue;
+            }
+            let Some(instruction) = a.code.get(function.code_start as usize + pc as usize) else {
+                continue;
+            };
+            let direct_returns =
+                |target: u32| summaries.get(target as usize).copied().unwrap_or(true);
+            match instruction {
+                Instruction::Return { .. }
+                | Instruction::TailResume { .. }
+                | Instruction::TailCallIndirect { .. }
+                | Instruction::Leave { .. } => return true,
+                Instruction::TailCall { function, .. }
+                | Instruction::TailCallKnownReceiver { function, .. } => {
+                    if direct_returns(*function) {
+                        return true;
+                    }
+                }
+                Instruction::TailCallSelf { .. } => {
+                    if summaries[fid as usize] {
+                        return true;
+                    }
+                }
+                Instruction::Call { function, .. }
+                | Instruction::CallKnownReceiver { function, .. } => {
+                    if direct_returns(*function) {
+                        work.push_back(pc + 1);
+                    }
+                }
+                Instruction::CallSelf { .. } => {
+                    if summaries[fid as usize] {
+                        work.push_back(pc + 1);
+                    }
+                }
+                Instruction::Jump { target } => work.push_back(*target),
+                Instruction::Switch {
+                    cases, otherwise, ..
+                } => {
+                    work.extend(cases.iter().map(|case| case.1));
+                    work.push_back(*otherwise);
+                }
+                Instruction::Perform { dst: None, .. }
+                | Instruction::Unreachable
+                | Instruction::Abort { .. } => {}
+                _ => work.push_back(pc + 1),
+            }
+        }
+        false
+    }
+
+    let mut summaries = vec![false; a.functions.len()];
+    loop {
+        let mut changed = false;
+        for fid in 0..a.functions.len() {
+            if !summaries[fid] && body_may_return(a, fid as u32, &summaries) {
+                summaries[fid] = true;
+                changed = true;
+            }
+        }
+        if !changed {
+            return summaries;
+        }
+    }
+}
+
+fn instruction_is_nonreturning_call_cached(
+    fid: u32,
+    instruction: &Instruction,
+    may_return: &[bool],
+) -> bool {
+    match instruction {
+        Instruction::Call { function, .. } | Instruction::CallKnownReceiver { function, .. } => {
+            !may_return.get(*function as usize).copied().unwrap_or(true)
+        }
+        Instruction::CallSelf { .. } => !may_return.get(fid as usize).copied().unwrap_or(true),
+        _ => false,
+    }
+}
+
 fn instruction_is_nonreturning_call(a: &Artifact, fid: u32, instruction: &Instruction) -> bool {
     match instruction {
         Instruction::Call { function, .. } | Instruction::CallKnownReceiver { function, .. } => {
@@ -9563,6 +9735,70 @@ struct ArrayWriteEffect {
     position: ArrayWritePosition,
     value_parameter: usize,
     value_path: Vec<u32>,
+}
+
+struct ArrayWriteEffectCache {
+    entries: std::cell::RefCell<Vec<Option<Result<Vec<ArrayWriteEffect>, VerifyError>>>>,
+}
+
+impl ArrayWriteEffectCache {
+    fn new(function_count: usize) -> Self {
+        Self {
+            entries: std::cell::RefCell::new(vec![None; function_count]),
+        }
+    }
+}
+
+struct CarrierReturnCache {
+    entries: std::cell::RefCell<Vec<Option<Result<CarrierOrigins, VerifyError>>>>,
+}
+
+impl CarrierReturnCache {
+    fn new(function_count: usize) -> Self {
+        Self {
+            entries: std::cell::RefCell::new(vec![None; function_count]),
+        }
+    }
+}
+
+fn array_write_effects_cached(
+    a: &Artifact,
+    fid: u32,
+    cache: &ArrayWriteEffectCache,
+) -> Result<Vec<ArrayWriteEffect>, VerifyError> {
+    if let Some(result) = cache
+        .entries
+        .borrow()
+        .get(fid as usize)
+        .and_then(Clone::clone)
+    {
+        return result;
+    }
+    let result = array_write_effects(a, fid);
+    if let Some(entry) = cache.entries.borrow_mut().get_mut(fid as usize) {
+        *entry = Some(result.clone());
+    }
+    result
+}
+
+fn aggregate_reference_return_origins_cached(
+    a: &Artifact,
+    fid: u32,
+    cache: &CarrierReturnCache,
+) -> Result<CarrierOrigins, VerifyError> {
+    if let Some(result) = cache
+        .entries
+        .borrow()
+        .get(fid as usize)
+        .and_then(Clone::clone)
+    {
+        return result;
+    }
+    let result = aggregate_reference_return_origins(a, fid, &mut Vec::new());
+    if let Some(entry) = cache.entries.borrow_mut().get_mut(fid as usize) {
+        *entry = Some(result.clone());
+    }
+    result
 }
 
 /// Infer the caller-visible reference loans installed by exact array writes.
@@ -10075,6 +10311,73 @@ fn reference_return_parameter(
     fid: u32,
     visiting: &mut Vec<u32>,
 ) -> Result<Option<ReferenceOrigin>, VerifyError> {
+    reference_return_parameter_cached(
+        a,
+        fid,
+        visiting,
+        &ReferenceReturnCache::new(a.functions.len()),
+    )
+}
+
+struct ReferenceReturnCache {
+    entries: std::cell::RefCell<Vec<Option<Result<Option<ReferenceOrigin>, VerifyError>>>>,
+}
+
+struct ReferenceTypeCache {
+    leaves: std::cell::RefCell<Vec<Option<Vec<(Vec<u32>, bool)>>>>,
+    single: std::cell::RefCell<Vec<Option<Option<bool>>>>,
+}
+
+impl ReferenceTypeCache {
+    fn new(type_count: usize) -> Self {
+        Self {
+            leaves: std::cell::RefCell::new(vec![None; type_count]),
+            single: std::cell::RefCell::new(vec![None; type_count]),
+        }
+    }
+
+    fn leaves(&self, artifact: &Artifact, ty: TypeId) -> Vec<(Vec<u32>, bool)> {
+        if let Some(leaves) = self.leaves.borrow().get(ty as usize).and_then(Clone::clone) {
+            return leaves;
+        }
+        let leaves = reference_leaves(artifact, ty);
+        if let Some(entry) = self.leaves.borrow_mut().get_mut(ty as usize) {
+            *entry = Some(leaves.clone());
+        }
+        leaves
+    }
+
+    fn single(&self, artifact: &Artifact, ty: TypeId) -> Option<bool> {
+        if let Some(single) = self
+            .single
+            .borrow()
+            .get(ty as usize)
+            .and_then(|entry| *entry)
+        {
+            return single;
+        }
+        let single = single_reference_leaf(artifact, ty);
+        if let Some(entry) = self.single.borrow_mut().get_mut(ty as usize) {
+            *entry = Some(single);
+        }
+        single
+    }
+}
+
+impl ReferenceReturnCache {
+    fn new(function_count: usize) -> Self {
+        Self {
+            entries: std::cell::RefCell::new(vec![None; function_count]),
+        }
+    }
+}
+
+fn reference_return_parameter_cached(
+    a: &Artifact,
+    fid: u32,
+    visiting: &mut Vec<u32>,
+    cache: &ReferenceReturnCache,
+) -> Result<Option<ReferenceOrigin>, VerifyError> {
     if visiting.contains(&fid) {
         // Break a recursive inference cycle only when the signature itself has
         // one unambiguous candidate. This is provisional: every non-cyclic
@@ -10101,9 +10404,20 @@ fn reference_return_parameter(
             .then(|| Some(candidates[0]))
             .ok_or(VerifyError::InvalidFunction(fid));
     }
+    if let Some(result) = cache
+        .entries
+        .borrow()
+        .get(fid as usize)
+        .and_then(Clone::clone)
+    {
+        return result;
+    }
     visiting.push(fid);
-    let result = reference_return_parameter_inner(a, fid, visiting);
+    let result = reference_return_parameter_inner(a, fid, visiting, cache);
     visiting.pop();
+    if let Some(entry) = cache.entries.borrow_mut().get_mut(fid as usize) {
+        *entry = Some(result.clone());
+    }
     result
 }
 
@@ -10122,6 +10436,7 @@ fn reference_return_parameter_inner(
     a: &Artifact,
     fid: u32,
     visiting: &mut Vec<u32>,
+    cache: &ReferenceReturnCache,
 ) -> Result<Option<ReferenceOrigin>, VerifyError> {
     let f = a
         .functions
@@ -10272,7 +10587,7 @@ fn reference_return_parameter_inner(
                 function,
                 args,
             } if carries_reference(*dst) => {
-                let parameter = reference_return_parameter(a, *function, visiting)?;
+                let parameter = reference_return_parameter_cached(a, *function, visiting, cache)?;
                 state[*dst as usize] = match parameter {
                     Some(ReferenceOrigin::Parameter(parameter)) => {
                         args.get(parameter).and_then(|arg| state[*arg as usize])
@@ -10287,16 +10602,17 @@ fn reference_return_parameter_inner(
                 dst: Some(dst),
                 args,
             } if carries_reference(*dst) => {
-                state[*dst as usize] = match reference_return_parameter(a, fid, visiting)? {
-                    Some(ReferenceOrigin::Parameter(parameter)) => {
-                        args.get(parameter).and_then(|arg| state[*arg as usize])
-                    }
-                    Some(ReferenceOrigin::Receiver) => state[0],
-                    Some(ReferenceOrigin::Local) => {
-                        return Err(VerifyError::InvalidFunction(fid));
-                    }
-                    None => None,
-                };
+                state[*dst as usize] =
+                    match reference_return_parameter_cached(a, fid, visiting, cache)? {
+                        Some(ReferenceOrigin::Parameter(parameter)) => {
+                            args.get(parameter).and_then(|arg| state[*arg as usize])
+                        }
+                        Some(ReferenceOrigin::Receiver) => state[0],
+                        Some(ReferenceOrigin::Local) => {
+                            return Err(VerifyError::InvalidFunction(fid));
+                        }
+                        None => None,
+                    };
             }
             Instruction::CallKnownReceiver {
                 dst: Some(dst),
@@ -10304,16 +10620,17 @@ fn reference_return_parameter_inner(
                 receiver,
                 args,
             } if carries_reference(*dst) => {
-                state[*dst as usize] = match reference_return_parameter(a, *function, visiting)? {
-                    Some(ReferenceOrigin::Parameter(parameter)) => {
-                        args.get(parameter).and_then(|arg| state[*arg as usize])
-                    }
-                    Some(ReferenceOrigin::Receiver) => state[*receiver as usize],
-                    Some(ReferenceOrigin::Local) => {
-                        return Err(VerifyError::InvalidFunction(*function));
-                    }
-                    None => None,
-                };
+                state[*dst as usize] =
+                    match reference_return_parameter_cached(a, *function, visiting, cache)? {
+                        Some(ReferenceOrigin::Parameter(parameter)) => {
+                            args.get(parameter).and_then(|arg| state[*arg as usize])
+                        }
+                        Some(ReferenceOrigin::Receiver) => state[*receiver as usize],
+                        Some(ReferenceOrigin::Local) => {
+                            return Err(VerifyError::InvalidFunction(*function));
+                        }
+                        None => None,
+                    };
             }
             Instruction::CallIndirect {
                 dst: Some(dst),
@@ -10330,7 +10647,7 @@ fn reference_return_parameter_inner(
                     };
                     indirect_reference_parameter(a, signature).map(ReferenceOrigin::Parameter)
                 } else {
-                    canonical_callable_reference_contract(a, targets, visiting)
+                    canonical_callable_reference_contract_cached(a, targets, visiting, cache)
                         .map_err(|_| VerifyError::InvalidFunction(fid))?
                 };
                 state[*dst as usize] = match contract {
@@ -10407,7 +10724,7 @@ fn reference_return_parameter_inner(
                 state[*dst as usize] = origins.into_iter().next();
             }
             Instruction::TailCall { function, args } => {
-                let parameter = reference_return_parameter(a, *function, visiting)?;
+                let parameter = reference_return_parameter_cached(a, *function, visiting, cache)?;
                 let origin = match parameter {
                     Some(ReferenceOrigin::Parameter(parameter)) => {
                         args.get(parameter).and_then(|arg| state[*arg as usize])
@@ -10424,7 +10741,8 @@ fn reference_return_parameter_inner(
                 receiver,
                 args,
             } => {
-                let origin = match reference_return_parameter(a, *function, visiting)? {
+                let origin = match reference_return_parameter_cached(a, *function, visiting, cache)?
+                {
                     Some(ReferenceOrigin::Parameter(parameter)) => {
                         args.get(parameter).and_then(|arg| state[*arg as usize])
                     }
@@ -10437,7 +10755,7 @@ fn reference_return_parameter_inner(
                 record_reference_return(fid, origin, &mut returned, &mut saw_return)?;
             }
             Instruction::TailCallSelf { args } => {
-                let origin = match reference_return_parameter(a, fid, visiting)? {
+                let origin = match reference_return_parameter_cached(a, fid, visiting, cache)? {
                     Some(ReferenceOrigin::Parameter(parameter)) => {
                         args.get(parameter).and_then(|arg| state[*arg as usize])
                     }
@@ -10459,7 +10777,7 @@ fn reference_return_parameter_inner(
                     };
                     indirect_reference_parameter(a, signature).map(ReferenceOrigin::Parameter)
                 } else {
-                    canonical_callable_reference_contract(a, targets, visiting)
+                    canonical_callable_reference_contract_cached(a, targets, visiting, cache)
                         .map_err(|_| VerifyError::InvalidFunction(fid))?
                 };
                 let origin = match contract {
@@ -10958,8 +11276,9 @@ fn remap_carrier_loans(
     destination: TypeId,
     mut carried: CarrierLoans,
     fid: u32,
+    reference_types: &ReferenceTypeCache,
 ) -> Result<CarrierLoans, VerifyError> {
-    let leaves = reference_leaves(a, destination);
+    let leaves = reference_types.leaves(a, destination);
     if leaves.len() != carried.len() {
         return Err(VerifyError::InvalidFunction(fid));
     }
@@ -11349,6 +11668,11 @@ fn verify_loans(
     enum_facts: &[Vec<Option<u32>>],
     label_states: &[Vec<LabelEntry>],
     live_registers: &[Vec<bool>],
+    reference_returns: &ReferenceReturnCache,
+    reference_types: &ReferenceTypeCache,
+    may_return: &[bool],
+    array_writes: &ArrayWriteEffectCache,
+    carrier_returns: &CarrierReturnCache,
 ) -> Result<Vec<Vec<CarrierLoans>>, VerifyError> {
     let start = f.code_start as usize;
     let callable_targets = callable_targets_at_pcs(a, fid, f, label_states)?;
@@ -11357,7 +11681,8 @@ fn verify_loans(
     let mut states: Vec<Option<Vec<CarrierLoans>>> = vec![None; f.code_len as usize];
     let mut entry = vec![Vec::new(); f.register_types.len()];
     for (register, slot) in entry.iter_mut().enumerate().take(f.params.len() + 1) {
-        *slot = reference_leaves(a, f.register_types[register])
+        *slot = reference_types
+            .leaves(a, f.register_types[register])
             .into_iter()
             .enumerate()
             .map(|(leaf, (path, unique))| CarrierLoan {
@@ -11715,8 +12040,13 @@ fn verify_loans(
                     consume_owner(&loans, register)?;
                     end_reference(&mut loans, register)?;
                 }
-                loans[*dst as usize] =
-                    remap_carrier_loans(a, f.register_types[*dst as usize], carried, fid)?;
+                loans[*dst as usize] = remap_carrier_loans(
+                    a,
+                    f.register_types[*dst as usize],
+                    carried,
+                    fid,
+                    reference_types,
+                )?;
             }
             Instruction::TailResume {
                 resumption,
@@ -11739,8 +12069,13 @@ fn verify_loans(
                     consume_owner(&loans, register)?;
                     end_reference(&mut loans, register)?;
                 }
-                loans[*dst as usize] =
-                    remap_carrier_loans(a, f.register_types[*dst as usize], carried, fid)?;
+                loans[*dst as usize] = remap_carrier_loans(
+                    a,
+                    f.register_types[*dst as usize],
+                    carried,
+                    fid,
+                    reference_types,
+                )?;
             }
             Instruction::MakeHandlerShared { dst, captures, .. } => {
                 // Preserve one carrier entry per structural reference leaf.
@@ -11784,8 +12119,9 @@ fn verify_loans(
                 args,
                 ..
             } => {
-                let result_has_references =
-                    !reference_leaves(a, f.register_types[*dst as usize]).is_empty();
+                let result_has_references = !reference_types
+                    .leaves(a, f.register_types[*dst as usize])
+                    .is_empty();
                 let carried = if result_has_references
                     && let Some(contract) = declared_carrier_contract(a, fid)?
                 {
@@ -11801,7 +12137,8 @@ fn verify_loans(
                                     return Err(VerifyError::InvalidFunction(fid));
                                 }
                             };
-                            let leaf = reference_leaves(a, f.register_types[register as usize])
+                            let leaf = reference_types
+                                .leaves(a, f.register_types[register as usize])
                                 .iter()
                                 .position(|(path, _)| path == &source_path)
                                 .ok_or(VerifyError::InvalidFunction(fid))?;
@@ -11843,8 +12180,13 @@ fn verify_loans(
                     consume_owner(&loans, *register)?;
                     end_reference(&mut loans, *register)?;
                 }
-                loans[*dst as usize] =
-                    remap_carrier_loans(a, f.register_types[*dst as usize], carried, fid)?;
+                loans[*dst as usize] = remap_carrier_loans(
+                    a,
+                    f.register_types[*dst as usize],
+                    carried,
+                    fid,
+                    reference_types,
+                )?;
             }
             Instruction::Perform {
                 dst,
@@ -11853,7 +12195,7 @@ fn verify_loans(
                 payloads,
             } => {
                 let result_leaves = dst.map_or_else(Vec::new, |dst| {
-                    reference_leaves(a, f.register_types[dst as usize])
+                    reference_types.leaves(a, f.register_types[dst as usize])
                 });
                 let mut carriers = payloads
                     .iter()
@@ -11907,8 +12249,13 @@ fn verify_loans(
                     end_reference(&mut loans, register)?;
                 }
                 if let Some(dst) = dst {
-                    loans[*dst as usize] =
-                        remap_carrier_loans(a, f.register_types[*dst as usize], carried, fid)?;
+                    loans[*dst as usize] = remap_carrier_loans(
+                        a,
+                        f.register_types[*dst as usize],
+                        carried,
+                        fid,
+                        reference_types,
+                    )?;
                 }
             }
             Instruction::HostCall { args, .. } => {
@@ -11991,7 +12338,8 @@ fn verify_loans(
                     // loan (which may be rooted somewhere entirely different);
                     // for external referents, retain the authenticated symbolic
                     // descendant path for the callee's return contract.
-                    projected = reference_leaves(a, f.register_types[*dst as usize])
+                    projected = reference_types
+                        .leaves(a, f.register_types[*dst as usize])
                         .into_iter()
                         .filter_map(|(path, unique)| {
                             let mut source_path = root.loan.place.projections.clone();
@@ -12153,7 +12501,10 @@ fn verify_loans(
                         }
                     }
                     Primitive::ArrayGetCopy | Primitive::ArrayGetMove => {
-                        if !reference_leaves(a, f.register_types[*dst as usize]).is_empty() {
+                        if !reference_types
+                            .leaves(a, f.register_types[*dst as usize])
+                            .is_empty()
+                        {
                             let index = exact_index().ok_or_else(|| conflict(args[0]))?;
                             let mut carried = Vec::new();
                             if let Some(owner) = array_owner() {
@@ -12174,7 +12525,8 @@ fn verify_loans(
                             } else if let Some(reference) = args.first()
                                 && let [array_loan] = loans[*reference as usize].as_slice()
                             {
-                                carried = reference_leaves(a, f.register_types[*dst as usize])
+                                carried = reference_types
+                                    .leaves(a, f.register_types[*dst as usize])
                                     .into_iter()
                                     .map(|(path, unique)| {
                                         let mut loan = array_loan.clone();
@@ -12199,11 +12551,15 @@ fn verify_loans(
                                 f.register_types[*dst as usize],
                                 carried,
                                 fid,
+                                reference_types,
                             )?);
                         }
                     }
                     Primitive::ArrayPopMove => {
-                        if !reference_leaves(a, f.register_types[*dst as usize]).is_empty() {
+                        if !reference_types
+                            .leaves(a, f.register_types[*dst as usize])
+                            .is_empty()
+                        {
                             let mut carried = Vec::new();
                             if let Some(owner) = array_owner() {
                                 let index = loans[owner as usize]
@@ -12230,7 +12586,8 @@ fn verify_loans(
                             } else if let Some(reference) = args.first()
                                 && let [array_loan] = loans[*reference as usize].as_slice()
                             {
-                                carried = reference_leaves(a, f.register_types[*dst as usize])
+                                carried = reference_types
+                                    .leaves(a, f.register_types[*dst as usize])
                                     .into_iter()
                                     .map(|(path, unique)| {
                                         let mut loan = array_loan.clone();
@@ -12249,6 +12606,7 @@ fn verify_loans(
                                 f.register_types[*dst as usize],
                                 carried,
                                 fid,
+                                reference_types,
                             )?);
                         }
                     }
@@ -12292,23 +12650,34 @@ fn verify_loans(
                 function,
                 args,
             } => {
-                let installed_writes = array_write_effects(a, *function)
-                    .and_then(|effects| {
-                        instantiate_array_write_loans(&effects, args, &loans, *function)
-                    })
-                    .unwrap_or_default();
-                let result_leaves = dst.map_or_else(Vec::new, |dst| {
-                    reference_leaves(a, f.register_types[dst as usize])
-                });
                 let callee = a
                     .functions
                     .get(*function as usize)
                     .ok_or(VerifyError::InvalidFunction(*function))?;
-                let call_returns = function_may_return(a, *function);
+                let may_install_reference = args
+                    .iter()
+                    .any(|argument| !loans[*argument as usize].is_empty())
+                    && callee
+                        .params
+                        .iter()
+                        .any(|ty| array_element_type(a, *ty).is_some());
+                let installed_writes = if may_install_reference {
+                    array_write_effects_cached(a, *function, array_writes)
+                        .and_then(|effects| {
+                            instantiate_array_write_loans(&effects, args, &loans, *function)
+                        })
+                        .unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+                let result_leaves = dst.map_or_else(Vec::new, |dst| {
+                    reference_types.leaves(a, f.register_types[dst as usize])
+                });
+                let call_returns = may_return[*function as usize];
                 let callee_has_multi_leaf_parameter = callee
                     .params
                     .iter()
-                    .any(|ty| reference_leaves(a, *ty).len() > 1);
+                    .any(|ty| reference_types.leaves(a, *ty).len() > 1);
                 let callee_has_aggregate_result_contract = !result_leaves.is_empty()
                     && (declared_carrier_contract(a, *function)?.is_some()
                         || !matches!(
@@ -12316,7 +12685,9 @@ fn verify_loans(
                             Type::RefShared { .. } | Type::RefUnique { .. }
                         ));
                 let array_contract = (!result_leaves.is_empty())
-                    .then(|| aggregate_reference_return_origins(a, *function, &mut Vec::new()))
+                    .then(|| {
+                        aggregate_reference_return_origins_cached(a, *function, carrier_returns)
+                    })
                     .and_then(Result::ok)
                     .filter(|contract| {
                         contract.iter().any(|(_, origin)| {
@@ -12419,7 +12790,11 @@ fn verify_loans(
                     // without its provisional context.
                     let contract = match declared_carrier_contract(a, *function)? {
                         Some(contract) => contract,
-                        None => aggregate_reference_return_origins(a, *function, &mut Vec::new())?,
+                        None => aggregate_reference_return_origins_cached(
+                            a,
+                            *function,
+                            carrier_returns,
+                        )?,
                     };
                     let mut returned = Vec::new();
                     for (result_path, origin) in contract {
@@ -12491,10 +12866,17 @@ fn verify_loans(
                     returned
                 } else if call_returns
                     && let Some(dst) = dst
-                    && single_reference_leaf(a, f.register_types[*dst as usize]).is_some()
+                    && reference_types
+                        .single(a, f.register_types[*dst as usize])
+                        .is_some()
                 {
                     let Some(ReferenceOrigin::Parameter(parameter)) =
-                        reference_return_parameter(a, *function, &mut Vec::new())?
+                        reference_return_parameter_cached(
+                            a,
+                            *function,
+                            &mut Vec::new(),
+                            reference_returns,
+                        )?
                     else {
                         return Err(VerifyError::InvalidFunction(*function));
                     };
@@ -12531,9 +12913,16 @@ fn verify_loans(
                     return Err(conflict(0));
                 }
                 let returned = if let Some(dst) = dst
-                    && single_reference_leaf(a, f.register_types[*dst as usize]).is_some()
+                    && reference_types
+                        .single(a, f.register_types[*dst as usize])
+                        .is_some()
                 {
-                    match reference_return_parameter(a, fid, &mut Vec::new())? {
+                    match reference_return_parameter_cached(
+                        a,
+                        fid,
+                        &mut Vec::new(),
+                        reference_returns,
+                    )? {
                         Some(ReferenceOrigin::Parameter(parameter)) => args
                             .get(parameter)
                             .and_then(|argument| loans[*argument as usize].first())
@@ -12564,9 +12953,16 @@ fn verify_loans(
                     return Err(conflict(*receiver));
                 }
                 let returned = if let Some(dst) = dst
-                    && single_reference_leaf(a, f.register_types[*dst as usize]).is_some()
+                    && reference_types
+                        .single(a, f.register_types[*dst as usize])
+                        .is_some()
                 {
-                    match reference_return_parameter(a, *function, &mut Vec::new())? {
+                    match reference_return_parameter_cached(
+                        a,
+                        *function,
+                        &mut Vec::new(),
+                        reference_returns,
+                    )? {
                         Some(ReferenceOrigin::Parameter(parameter)) => args
                             .get(parameter)
                             .and_then(|argument| loans[*argument as usize].first())
@@ -12594,7 +12990,7 @@ fn verify_loans(
                 args,
             } => {
                 let result_leaves = dst.map_or_else(Vec::new, |dst| {
-                    reference_leaves(a, f.register_types[dst as usize])
+                    reference_types.leaves(a, f.register_types[dst as usize])
                 });
                 let mut returned_loans = if result_leaves.len() > 1 {
                     let targets = &callable_targets[pc as usize][*callable as usize];
@@ -12625,7 +13021,9 @@ fn verify_loans(
                     returned.sort_by(|left, right| left.path.cmp(&right.path));
                     returned
                 } else if let Some(dst) = dst
-                    && single_reference_leaf(a, f.register_types[*dst as usize]).is_some()
+                    && reference_types
+                        .single(a, f.register_types[*dst as usize])
+                        .is_some()
                 {
                     let targets = &callable_targets[pc as usize][*callable as usize];
                     if targets.is_empty() {
@@ -12639,8 +13037,13 @@ fn verify_loans(
                             .ok_or(VerifyError::InvalidFunction(fid))
                             .map(|loan| vec![loan])?
                     } else {
-                        match canonical_callable_reference_contract(a, targets, &mut Vec::new())
-                            .map_err(|_| VerifyError::InvalidFunction(fid))?
+                        match canonical_callable_reference_contract_cached(
+                            a,
+                            targets,
+                            &mut Vec::new(),
+                            reference_returns,
+                        )
+                        .map_err(|_| VerifyError::InvalidFunction(fid))?
                         {
                             Some(ReferenceOrigin::Parameter(parameter)) => args
                                 .get(parameter)
@@ -12792,8 +13195,13 @@ fn verify_loans(
                 }
                 consume_owner(&loans, *value)?;
                 end_reference(&mut loans, *value)?;
-                loans[*dst as usize] =
-                    remap_carrier_loans(a, f.register_types[*dst as usize], carried, fid)?;
+                loans[*dst as usize] = remap_carrier_loans(
+                    a,
+                    f.register_types[*dst as usize],
+                    carried,
+                    fid,
+                    reference_types,
+                )?;
             }
             Instruction::Cancel { resumption, .. } => {
                 consume_owner(&loans, *resumption)?;
@@ -12821,37 +13229,38 @@ fn verify_loans(
             | Instruction::Unreachable
             | Instruction::Abort { .. } => {}
         }
-        let successors: Vec<u32> = if instruction_is_nonreturning_call(a, fid, instruction) {
-            vec![]
-        } else {
-            match instruction {
-                Instruction::Jump { target } => vec![*target],
-                Instruction::Leave { slot, .. } => vec![
-                    label_states[pc as usize]
+        let successors: Vec<u32> =
+            if instruction_is_nonreturning_call_cached(fid, instruction, may_return) {
+                vec![]
+            } else {
+                match instruction {
+                    Instruction::Jump { target } => vec![*target],
+                    Instruction::Leave { slot, .. } => vec![
+                        label_states[pc as usize]
+                            .iter()
+                            .rfind(|entry| entry.slot == *slot)
+                            .ok_or(VerifyError::InvalidFunction(fid))?
+                            .target,
+                    ],
+                    Instruction::Switch {
+                        cases, otherwise, ..
+                    } => cases
                         .iter()
-                        .rfind(|entry| entry.slot == *slot)
-                        .ok_or(VerifyError::InvalidFunction(fid))?
-                        .target,
-                ],
-                Instruction::Switch {
-                    cases, otherwise, ..
-                } => cases
-                    .iter()
-                    .map(|case| case.1)
-                    .chain(std::iter::once(*otherwise))
-                    .collect(),
-                Instruction::Return { .. }
-                | Instruction::TailCall { .. }
-                | Instruction::TailCallSelf { .. }
-                | Instruction::TailCallKnownReceiver { .. }
-                | Instruction::TailCallIndirect { .. }
-                | Instruction::TailResume { .. }
-                | Instruction::Perform { dst: None, .. }
-                | Instruction::Unreachable
-                | Instruction::Abort { .. } => vec![],
-                _ => vec![pc + 1],
-            }
-        };
+                        .map(|case| case.1)
+                        .chain(std::iter::once(*otherwise))
+                        .collect(),
+                    Instruction::Return { .. }
+                    | Instruction::TailCall { .. }
+                    | Instruction::TailCallSelf { .. }
+                    | Instruction::TailCallKnownReceiver { .. }
+                    | Instruction::TailCallIndirect { .. }
+                    | Instruction::TailResume { .. }
+                    | Instruction::Perform { dst: None, .. }
+                    | Instruction::Unreachable
+                    | Instruction::Abort { .. } => vec![],
+                    _ => vec![pc + 1],
+                }
+            };
         for successor in successors {
             match &mut states[successor as usize] {
                 Some(old) => {
@@ -13328,6 +13737,7 @@ struct TransferContext<'a> {
     callable_targets: &'a [CallableTargets],
     may_cancel: &'a [bool],
     may_multishot: &'a [bool],
+    actual_outward_protocols: &'a [std::collections::BTreeSet<u32>],
 }
 
 fn transfer(
@@ -13348,6 +13758,7 @@ fn transfer(
         callable_targets,
         may_cancel,
         may_multishot,
+        actual_outward_protocols,
     } = context;
     let cached_effect = |summaries: &[bool], function: u32| {
         summaries.get(function as usize).copied().unwrap_or(true)
@@ -13648,12 +14059,11 @@ fn transfer(
             args,
         } => {
             let callee = &a.functions[*function as usize];
-            let actual_outward = actual_function_outward_protocols(a);
             if callee.receiver_mode != Some(0)
                 || callee.register_types.first().copied()
                     != Some(f.register_types[*receiver as usize])
                 || args.len() != callee.params.len()
-                || !actual_outward[*function as usize]
+                || !actual_outward_protocols[*function as usize]
                     .iter()
                     .all(|protocol| f.outward_protocols.contains(protocol))
             {
@@ -13677,13 +14087,12 @@ fn transfer(
             args,
         } => {
             let callee = &a.functions[*function as usize];
-            let actual_outward = actual_function_outward_protocols(a);
             if callee.receiver_mode != Some(0)
                 || callee.register_types.first().copied()
                     != Some(f.register_types[*receiver as usize])
                 || args.len() != callee.params.len()
                 || f.return_type != callee.return_type
-                || !actual_outward[*function as usize]
+                || !actual_outward_protocols[*function as usize]
                     .iter()
                     .all(|protocol| f.outward_protocols.contains(protocol))
             {
@@ -14234,10 +14643,9 @@ fn transfer(
             args,
         } => {
             let callee = &a.functions[*function as usize];
-            let actual_outward = actual_function_outward_protocols(a);
             if callee.receiver_mode.is_some()
                 || args.len() != callee.params.len()
-                || !actual_outward[*function as usize]
+                || !actual_outward_protocols[*function as usize]
                     .iter()
                     .all(|protocol| f.outward_protocols.contains(protocol))
             {
@@ -14258,10 +14666,9 @@ fn transfer(
         }
         Instruction::TailCall { function, args } => {
             let callee = &a.functions[*function as usize];
-            let actual_outward = actual_function_outward_protocols(a);
             if callee.receiver_mode.is_some()
                 || args.len() != callee.params.len()
-                || !actual_outward[*function as usize]
+                || !actual_outward_protocols[*function as usize]
                     .iter()
                     .all(|protocol| f.outward_protocols.contains(protocol))
             {
