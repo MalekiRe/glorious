@@ -619,18 +619,15 @@ parse_path_tail(
     name_start: usize
 ) -> Result<TypeId, HeaderError> {
     if(eat_code(value, 19)) {
-        Vec::push(
-            &mut value.output.names,
-            try(ident(value, related), @parse_path_tail)
-        );
+        let name = try(ident(value, related), @parse_path_tail);
+        Vec::push(&mut value.output.names, name);
         parse_path_tail(value, related, start, name_start)
     } else {
+        let name_end = Vec::len(&value.output.names);
+        let names = super::syntax::id_range(name_start, name_end);
         let path = try(push_type(
             value,
-            HeaderTypeKind::Path(super::syntax::id_range(
-                name_start,
-                Vec::len(&value.output.names)
-            )),
+            HeaderTypeKind::Path(names),
             start,
             related
         ), @parse_path_tail);
@@ -653,15 +650,11 @@ parse_application(
             try(expect_code(value, 36, related, 3), @parse_application);
             let edge_start = Vec::len(&value.output.type_edges);
             append_edges(&mut value.output.type_edges, &arguments, 0, 0);
+            let edge_end = Vec::len(&value.output.type_edges);
+            let argument_range = super::syntax::id_range(edge_start, edge_end);
             push_type(
                 value,
-                HeaderTypeKind::Application(
-                    constructor,
-                    super::syntax::id_range(
-                        edge_start,
-                        Vec::len(&value.output.type_edges)
-                    )
-                ),
+                HeaderTypeKind::Application(constructor, argument_range),
                 start,
                 related
             )
@@ -711,12 +704,11 @@ finish_tuple(
 ) -> Result<TypeId, HeaderError> {
     let edge_start = Vec::len(&value.output.type_edges);
     append_edges(&mut value.output.type_edges, &elements, 0, 0);
+    let edge_end = Vec::len(&value.output.type_edges);
+    let element_range = super::syntax::id_range(edge_start, edge_end);
     push_type(
         value,
-        HeaderTypeKind::Tuple(super::syntax::id_range(
-            edge_start,
-            Vec::len(&value.output.type_edges)
-        )),
+        HeaderTypeKind::Tuple(element_range),
         start,
         related
     )
@@ -774,10 +766,11 @@ parse_generic_items(
     if(at_code(&*value, 36)) {
         Result::Err(HeaderError::EmptyGenericParameters(position(value), related))
     } else {
-        Vec::push(
-            &mut value.output.generic_params,
-            try(parse_one_generic(value, related), @parse_generic_items)
+        let parameter = try(
+            parse_one_generic(value, related),
+            @parse_generic_items
         );
+        Vec::push(&mut value.output.generic_params, parameter);
         if(eat_code(value, 17) and { not(at_code(&*value, 36)) }) {
             parse_generic_items(value, related, start)
         } else {
@@ -920,6 +913,8 @@ finish_callable(
     effects: Option<EffectRow>
 ) -> Result<(), HeaderError> {
     if(position(value) == limit(value)) {
+        let token_end = limit(&*value);
+        let tokens = super::syntax::token_span(start, token_end);
         Vec::push(&mut value.output.callables, CallableHeader {
             shell: shell,
             name: name.name,
@@ -928,7 +923,7 @@ finish_callable(
             parameters: parameters,
             result: result,
             effects: effects,
-            tokens: super::syntax::token_span(start, limit(value))
+            tokens: tokens
         });
         Result::Ok(())
     } else {
