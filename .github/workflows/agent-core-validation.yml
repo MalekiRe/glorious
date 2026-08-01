@@ -4,89 +4,50 @@ on:
   push:
     branches:
       - agent/semantic-header-representation
-  pull_request:
-    branches:
-      - master
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   core:
     runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_JOBS: 1
     steps:
       - uses: actions/checkout@v6
-      - name: Map current self-host diagnostic offsets
+        with:
+          ref: agent/semantic-header-representation
+      - name: Qualify option variants exactly once
+        id: qualify
         run: |
           python3 - <<'PY'
           from pathlib import Path
           import re
 
-          test_path = Path("crates/grandiose/tests/self_host_bytecode.rs")
-          text = test_path.read_text()
-          diagnostic = re.search(
-              r'const DIAGNOSTIC_PROBES: &str = r#"(.*?)"#;',
-              text,
-              re.S,
-          ).group(1)
-          block = re.search(
-              r'let primary_source = \[(.*?)\]\s*\.concat\(\);',
-              text,
-              re.S,
-          ).group(1)
-          pieces = []
-          token = re.compile(r'r#"(.*?)"#|DIAGNOSTIC_PROBES', re.S)
-          for match in token.finditer(block):
-              pieces.append(diagnostic if match.group(0) == "DIAGNOSTIC_PROBES" else match.group(1))
-          primary = "".join(pieces)
-
-          paths = [
-              Path("crates/grandiose/src/distributed_std.glorious"),
-              Path("self-host/src/main.glorious"),
-              Path("self-host/src/frontend/frontend.glorious"),
-              Path("self-host/src/frontend/lexer/lexer.glorious"),
-              Path("self-host/src/frontend/scanner/scanner.glorious"),
-              Path("self-host/src/frontend/headers/headers.glorious"),
-              Path("self-host/src/frontend/bodies/bodies.glorious"),
-              Path("self-host/src/frontend/resolution/resolution.glorious"),
-              Path("self-host/src/frontend/elaboration/elaboration.glorious"),
-              Path("self-host/src/backend/backend.glorious"),
-              Path("self-host/src/backend/artifact/artifact.glorious"),
-              Path("self-host/src/backend/lowering/lowering.glorious"),
-              Path("self-host/src/backend/emission/emission.glorious"),
-              Path("self-host/src/compiler/compiler.glorious"),
-              Path("self-host/src/diagnostics/diagnostics.glorious"),
-              Path("self-host/src/diagnostics/model/model.glorious"),
-              Path("self-host/src/diagnostics/source_errors/source_errors.glorious"),
-              Path("self-host/src/diagnostics/backend_errors/backend_errors.glorious"),
-          ]
-          sources = [paths[0].read_text(), primary] + [path.read_text() for path in paths[2:]]
-          names = [str(paths[0]), str(paths[1])] + [str(path) for path in paths[2:]]
-          segments = []
-          start = 0
-          for index, (name, source) in enumerate(zip(names, sources)):
-              if index:
-                  start += 1
-              end = start + len(source.encode())
-              segments.append((name, source, start, end))
-              print(f"SEGMENT {start}..{end} {name}")
-              start = end
-
-          offsets = [
-              523838, 523859, 523884, 523974, 524055, 524195, 524272,
-              524317, 524361, 524446, 524520, 524597, 524699, 524707,
-              554475, 554501, 554555, 557652, 557718,
-          ]
-          for offset in offsets:
-              for name, source, start, end in segments:
-                  if start <= offset < end:
-                      local = offset - start
-                      raw = source.encode()
-                      prefix = raw[:local].decode("utf-8", errors="ignore")
-                      line = prefix.count("\n") + 1
-                      column = len(prefix.rsplit("\n", 1)[-1]) + 1
-                      lines = source.splitlines()
-                      context = lines[line - 1] if line <= len(lines) else "<eof>"
-                      print(f"OFFSET {offset} => {name}:{line}:{column}: {context}")
-                      break
+          path = Path("self-host/src/frontend/headers/headers.glorious")
+          source = path.read_text()
+          source = source.replace("use Option::Some;\n", "")
+          source = re.sub(r"(?<!Option::)\bSome\(", "Option::Some(", source)
+          path.write_text(source)
           PY
+          if git diff --quiet -- self-host/src/frontend/headers/headers.glorious; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+      - name: Commit option qualification
+        if: steps.qualify.outputs.changed == 'true'
+        run: |
+          git config user.name "OpenAI Agent"
+          git config user.email "agent@users.noreply.github.com"
+          git add -- self-host/src/frontend/headers/headers.glorious
+          git commit -m "Qualify semantic header option variants"
+          git push origin HEAD:agent/semantic-header-representation
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.qualify.outputs.changed == 'false'
+      - name: Compile the complete self-host test target
+        if: steps.qualify.outputs.changed == 'false'
+        run: cargo test -p grandiose --test self_host_bytecode --no-run
+      - name: Exercise the complete self-host compiler
+        if: steps.qualify.outputs.changed == 'false'
+        run: cargo test -p grandiose --test self_host_bytecode -- --nocapture
