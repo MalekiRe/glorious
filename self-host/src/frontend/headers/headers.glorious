@@ -483,6 +483,11 @@ set_position(value: &mut Parser, at: usize) {
     super::syntax::cursor_set(&mut value.cursor, at)
 }
 
+advance(value: &mut Parser) {
+    let next = position(&*value) + 1;
+    set_position(value, next)
+}
+
 token_code(value: &Parser, index: usize) -> u16 {
     super::lexer::token_code_at(&value.source, index)
 }
@@ -682,7 +687,7 @@ parse_reference(
 ) -> Result<TypeId, HeaderError> {
     let lifetime = take_lifetime(value);
     let unique = at_ident(&*value, &"mut");
-    if(unique) { set_position(value, position(value) + 1) } else { () };
+    if(unique) { advance(value) } else { () };
     let referent = try(parse_type(value, related), @parse_reference);
     push_type(
         value,
@@ -798,7 +803,7 @@ parse_one_generic(value: &mut Parser, related: usize) -> Result<GenericParam, He
             let name = try(ident(value, related), @parse_one_generic);
             let kind = if(eat_code(value, 18)) {
                 if(at_ident(&*value, &"EffectRow")) {
-                    set_position(value, position(value) + 1);
+                    advance(value);
                     GenericParamKind::EffectRow
                 } else {
                     @parse_one_generic(Result::Err(
@@ -1058,12 +1063,12 @@ parse_fixity(
     whole_end: usize
 ) -> Result<(), HeaderError> {
     reset(value, start, whole_end);
-    if(public) { set_position(value, position(value) + 1) } else { () };
+    if(public) { advance(value) } else { () };
     let form = fixity_form(&*value);
     if(form == 0) {
         Result::Err(HeaderError::InvalidFixityForm(position(value), start))
     } else {
-        set_position(value, position(value) + 1);
+        advance(value);
         let precedence = try(parse_precedence(original, value, start), @parse_fixity);
         let operator = try(take_operator(value, start), @parse_fixity);
         try(expect_code(value, 22, start, 6), @parse_fixity);
@@ -1098,8 +1103,8 @@ parse_alias(
     whole_end: usize
 ) -> Result<(), HeaderError> {
     reset(value, start, whole_end - 1);
-    if(public) { set_position(value, position(value) + 1) } else { () };
-    set_position(value, position(value) + 1);
+    if(public) { advance(value) } else { () };
+    advance(value);
     let name = try(ident(value, start), @parse_alias);
     let generics = try(parse_generics(value, start), @parse_alias);
     try(expect_code(value, 31, start, 7), @parse_alias);
@@ -1132,7 +1137,7 @@ parse_fields(
 ) -> Result<(), HeaderError> {
     if(position(value) < limit(value)) {
         let private = at_ident(&*value, &"private") and { next_is_ident(&*value) };
-        if(private) { set_position(value, position(value) + 1) } else { () };
+        if(private) { advance(value) } else { () };
         let name = try(ident(value, related), @parse_fields);
         try(expect_code(value, 18, related, 4), @parse_fields);
         let ty = try(parse_type(value, related), @parse_fields);
@@ -1158,8 +1163,8 @@ parse_struct(
     whole_end: usize
 ) -> Result<(), HeaderError> {
     reset(value, start, header_end);
-    if(public) { set_position(value, position(value) + 1) } else { () };
-    set_position(value, position(value) + 1);
+    if(public) { advance(value) } else { () };
+    advance(value);
     let name = try(ident(value, start), @parse_struct);
     let generics = try(parse_generics(value, start), @parse_struct);
     if(position(value) == header_end) {
@@ -1227,8 +1232,8 @@ parse_enum(
     whole_end: usize
 ) -> Result<(), HeaderError> {
     reset(value, start, header_end);
-    if(public) { set_position(value, position(value) + 1) } else { () };
-    set_position(value, position(value) + 1);
+    if(public) { advance(value) } else { () };
+    advance(value);
     let name = try(ident(value, start), @parse_enum);
     let generics = try(parse_generics(value, start), @parse_enum);
     if(position(value) == header_end) {
