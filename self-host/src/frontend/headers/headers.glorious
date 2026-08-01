@@ -1234,7 +1234,7 @@ parse_enum(
     if(position(value) == header_end) {
         reset(value, header_end + 1, whole_end - 1);
         let variant_start = Vec::len(&nominal.variants.values);
-        try(parse_variants(value, &mut nominal.variants, start), @parse_enum);
+        try(parse_variants(&mut *value, &mut nominal.variants, start), @parse_enum);
         Vec::push(&mut nominal.enums.values, EnumHeader {
             shell: shell,
             name: name.name,
