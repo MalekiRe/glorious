@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - agent/semantic-header-representation
+  pull_request:
+    branches:
+      - master
 
 permissions:
   contents: write
@@ -36,7 +39,7 @@ jobs:
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
       - name: Commit option qualification
-        if: steps.qualify.outputs.changed == 'true'
+        if: steps.qualify.outputs.changed == 'true' && github.event_name == 'push'
         run: |
           git config user.name "OpenAI Agent"
           git config user.email "agent@users.noreply.github.com"
