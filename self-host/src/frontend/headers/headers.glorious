@@ -596,7 +596,8 @@ parse_type_values(
     if(at_code(&*value, closing_code)) {
         Result::Ok(())
     } else {
-        Vec::push(values, try(parse_type(value, related), @parse_type_values));
+        let found = try(parse_type(value, related), @parse_type_values);
+        Vec::push(values, found);
         if(eat_code(value, 17) and { not(at_code(&*value, closing_code)) }) {
             parse_type_values(value, closing_code, related, values)
         } else { Result::Ok(()) }
@@ -606,7 +607,8 @@ parse_type_values(
 parse_path(value: &mut Parser, related: usize) -> Result<TypeId, HeaderError> {
     let start = position(value);
     let name_start = Vec::len(&value.output.names);
-    Vec::push(&mut value.output.names, try(ident(value, related), @parse_path));
+    let name = try(ident(value, related), @parse_path);
+    Vec::push(&mut value.output.names, name);
     parse_path_tail(value, related, start, name_start)
 }
 
@@ -887,7 +889,8 @@ parse_effect_items(
         Result::Ok(finish_effects(value, start, effects, None))
     } else {
         let next = effects;
-        Vec::push(&mut next, try(parse_type(value, related), @parse_effect_items));
+        let effect = try(parse_type(value, related), @parse_effect_items);
+        Vec::push(&mut next, effect);
         eat_code(value, 17);
         parse_effect_items(value, related, start, next)
     }
@@ -899,7 +902,8 @@ parse_effect_row(value: &mut Parser, related: usize) -> Result<EffectRow, Header
         parse_effect_items(value, related, start, Vec::new())
     } else {
         let effects = Vec::new();
-        Vec::push(&mut effects, try(parse_type(value, related), @parse_effect_row));
+        let effect = try(parse_type(value, related), @parse_effect_row);
+        Vec::push(&mut effects, effect);
         Result::Ok(finish_effects(value, start, effects, None))
     }
 }
