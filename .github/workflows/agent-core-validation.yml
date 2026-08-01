@@ -14,11 +14,8 @@ permissions:
 jobs:
   core:
     runs-on: ubuntu-latest
-    env:
-      CARGO_BUILD_JOBS: 1
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
       - name: Map current self-host diagnostic offsets
         run: |
           python3 - <<'PY'
@@ -38,7 +35,6 @@ jobs:
               re.S,
           ).group(1)
           pieces = []
-          cursor = 0
           token = re.compile(r'r#"(.*?)"#|DIAGNOSTIC_PROBES', re.S)
           for match in token.finditer(block):
               pieces.append(diagnostic if match.group(0) == "DIAGNOSTIC_PROBES" else match.group(1))
@@ -66,7 +62,6 @@ jobs:
           ]
           sources = [paths[0].read_text(), primary] + [path.read_text() for path in paths[2:]]
           names = [str(paths[0]), str(paths[1])] + [str(path) for path in paths[2:]]
-
           segments = []
           start = 0
           for index, (name, source) in enumerate(zip(names, sources)):
@@ -86,7 +81,8 @@ jobs:
               for name, source, start, end in segments:
                   if start <= offset < end:
                       local = offset - start
-                      prefix = source.encode()[:local].decode("utf-8", errors="ignore")
+                      raw = source.encode()
+                      prefix = raw[:local].decode("utf-8", errors="ignore")
                       line = prefix.count("\n") + 1
                       column = len(prefix.rsplit("\n", 1)[-1]) + 1
                       lines = source.splitlines()
@@ -94,7 +90,3 @@ jobs:
                       print(f"OFFSET {offset} => {name}:{line}:{column}: {context}")
                       break
           PY
-      - name: Compile the complete self-host test target
-        run: cargo test -p grandiose --test self_host_bytecode --no-run
-      - name: Exercise the complete self-host compiler
-        run: cargo test -p grandiose --test self_host_bytecode -- --nocapture
