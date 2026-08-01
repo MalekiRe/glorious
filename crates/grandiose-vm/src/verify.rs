@@ -8589,6 +8589,16 @@ fn aggregate_reference_return_origins(
 }
 
 fn carrier_contract_covers(broad: &CarrierOrigins, exact: &CarrierOrigins) -> bool {
+    let path_covers = |broad: &[u32], exact: &[u32]| {
+        if broad.iter().any(|field| *field > u32::MAX / 2) {
+            return false;
+        }
+        let mut exact = exact.iter().copied().filter(|field| *field <= u32::MAX / 2);
+        broad
+            .iter()
+            .copied()
+            .all(|field| exact.next() == Some(field))
+    };
     broad.len() == exact.len()
         && broad.iter().zip(exact).all(
             |((broad_result, broad_origin), (exact_result, exact_origin))| {
@@ -8604,12 +8614,13 @@ fn carrier_contract_covers(broad: &CarrierOrigins, exact: &CarrierOrigins) -> bo
                                 path: exact_path,
                             },
                         ) => {
-                            broad_parameter == exact_parameter && exact_path.starts_with(broad_path)
+                            broad_parameter == exact_parameter
+                                && path_covers(broad_path, exact_path)
                         }
                         (
                             CarrierOrigin::Receiver { path: broad_path },
                             CarrierOrigin::Receiver { path: exact_path },
-                        ) => exact_path.starts_with(broad_path),
+                        ) => path_covers(broad_path, exact_path),
                         (CarrierOrigin::Local, CarrierOrigin::Local) => true,
                         _ => false,
                     }
@@ -10697,6 +10708,7 @@ fn merge_exclusive_enum_carrier_loans(
         .iter()
         .filter_map(&variant_of)
         .collect::<std::collections::BTreeSet<_>>();
+    let mut additional = Vec::new();
     for variant in existing_variants.intersection(&incoming_variants) {
         let old = existing
             .iter()
@@ -10707,11 +10719,31 @@ fn merge_exclusive_enum_carrier_loans(
             .filter(|loan| variant_of(loan) == Some(*variant))
             .collect::<Vec<_>>();
         if old != new {
-            return None;
+            let same_result_paths = old
+                .iter()
+                .all(|old| new.iter().any(|new| old.path == new.path))
+                && new
+                    .iter()
+                    .all(|new| old.iter().any(|old| old.path == new.path));
+            let disjoint_alternatives = same_result_paths
+                && new.iter().all(|new| {
+                    old.iter().filter(|old| old.path == new.path).all(|old| {
+                        old == new
+                            || (old.loan.unique == new.loan.unique
+                                && old.loan.suspended_parent == new.loan.suspended_parent
+                                && old.loan.referent_initialized == new.loan.referent_initialized
+                                && !places_overlap(&old.loan.place, &new.loan.place))
+                    })
+                });
+            if !disjoint_alternatives {
+                return None;
+            }
+            additional.extend(new.into_iter().filter(|new| !old.contains(new)).cloned());
         }
     }
 
-    let mut changed = false;
+    let mut changed = !additional.is_empty();
+    existing.extend(additional);
     for loan in incoming {
         if !existing_variants.contains(&variant_of(loan).unwrap()) {
             existing.push(loan.clone());
@@ -16239,6 +16271,31 @@ mod tests {
         assert!(!Arc::ptr_eq(&original.0, &changed.0));
         assert_eq!(original.len(), 1);
         assert_eq!(changed.len(), 2);
+    }
+
+    #[test]
+    fn declared_carrier_paths_cover_body_inferred_enum_refinements() {
+        let broad = [(
+            vec![],
+            CarrierOrigin::Parameter {
+                parameter: 0,
+                path: vec![0, 0, 0, 1],
+            },
+        )]
+        .into_iter()
+        .collect::<CarrierOrigins>();
+        let exact = [(
+            vec![],
+            CarrierOrigin::Parameter {
+                parameter: 0,
+                path: vec![0, 0, u32::MAX, 0, 1],
+            },
+        )]
+        .into_iter()
+        .collect::<CarrierOrigins>();
+
+        assert!(carrier_contract_covers(&broad, &exact));
+        assert!(!carrier_contract_covers(&exact, &broad));
     }
 
     #[test]

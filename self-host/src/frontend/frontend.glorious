@@ -134,7 +134,7 @@ pub mod syntax {
         *Vec::index_mut(&mut *value, token) = DelimiterEntry {
             partner: partner,
             opening: opening
-        }
+        };
     }
 
     finish_delimiters(
@@ -258,15 +258,15 @@ pub mod syntax {
 
     pub cursor_reset(value: &mut TokenCursor, start: usize, limit: usize) {
         value.position = start;
-        value.limit = limit
+        value.limit = limit;
     }
 
     pub cursor_set(value: &mut TokenCursor, position: usize) {
-        value.position = position
+        value.position = position;
     }
 
     pub cursor_advance(value: &mut TokenCursor) {
-        value.position = value.position + 1
+        value.position = value.position + 1;
     }
 
     pub cursor_at_code(
@@ -307,7 +307,7 @@ pub mod syntax {
             handle delimiter_partner(delimiters, token) {
                 None => false,
                 Option::Some(close) => {
-                    value.position = close + 1;
+                    value.position = close + wrapping_convert_to_usize(1);
                     true
                 }
             }

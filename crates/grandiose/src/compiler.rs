@@ -43875,10 +43875,12 @@ impl MirLowerer {
                         join_borrowed.push(self.borrowed.contains(source));
                         join_partial.push(self.partial_aggregates.get(source).cloned());
                     }
-                    joined_uninitialized = self
-                        .uninitialized_locals
-                        .iter()
-                        .filter(|local| baseline_locals.contains_key(local))
+                    joined_uninitialized = baseline_locals
+                        .keys()
+                        .filter(|local| {
+                            self.uninitialized_locals.contains(local)
+                                || !self.locals.contains_key(local)
+                        })
                         .copied()
                         .collect();
                     joined_uninitialized.extend(retire_at_join.iter().copied());
@@ -44148,10 +44150,12 @@ impl MirLowerer {
                             join_borrowed.push(self.borrowed.contains(source));
                             join_partial.push(self.partial_aggregates.get(source).cloned());
                         }
-                        joined_uninitialized = self
-                            .uninitialized_locals
-                            .iter()
-                            .filter(|local| baseline_locals.contains_key(local))
+                        joined_uninitialized = baseline_locals
+                            .keys()
+                            .filter(|local| {
+                                self.uninitialized_locals.contains(local)
+                                    || !self.locals.contains_key(local)
+                            })
                             .copied()
                             .collect();
                         joined_uninitialized.extend(retire_at_join.iter().copied());
@@ -44172,15 +44176,16 @@ impl MirLowerer {
                     }
                     self.retire_intermediate_borrow_parents(value, &survivors, negative.span);
                     debug_assert_eq!(join_registers.len(), sources.len());
-                    debug_assert_eq!(
-                        joined_uninitialized,
-                        self.uninitialized_locals
-                            .iter()
-                            .filter(|local| baseline_locals.contains_key(local))
-                            .copied()
-                            .chain(retire_at_join.iter().copied())
-                            .collect()
-                    );
+                    let expected_uninitialized = baseline_locals
+                        .keys()
+                        .filter(|local| {
+                            self.uninitialized_locals.contains(local)
+                                || !self.locals.contains_key(local)
+                        })
+                        .copied()
+                        .chain(retire_at_join.iter().copied())
+                        .collect();
+                    debug_assert_eq!(joined_uninitialized, expected_uninitialized);
                     if positive_reaches_join {
                         for (index, source) in sources.iter().enumerate() {
                             let incoming_partial = self.partial_aggregates.get(source).cloned();
