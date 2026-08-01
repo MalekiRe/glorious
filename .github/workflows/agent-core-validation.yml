@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: agent/semantic-header-representation
-      - name: Flatten confirmed ownership-sensitive expressions
+      - name: Finish ownership-safe builder normalization
         id: repair
         run: |
           python3 - <<'PY'
@@ -23,65 +23,246 @@ jobs:
 
           path = Path("self-host/src/frontend/headers/headers.glorious")
           source = path.read_text()
-          replacements = [
-              (
-                  "        Vec::push(values, try(parse_type(value, related), @parse_type_values));",
-                  "        let found = try(parse_type(value, related), @parse_type_values);\n        Vec::push(values, found);",
-              ),
-              (
-                  "    Vec::push(&mut value.output.names, try(ident(value, related), @parse_path));",
-                  "    let name = try(ident(value, related), @parse_path);\n    Vec::push(&mut value.output.names, name);",
-              ),
-              (
-                  """        Vec::push(
-              &mut value.output.names,
-              try(ident(value, related), @parse_path_tail)
-          );""",
-                  """        let name = try(ident(value, related), @parse_path_tail);
-          Vec::push(&mut value.output.names, name);""",
-              ),
-              (
-                  """        Vec::push(
-              &mut value.output.generic_params,
-              try(parse_one_generic(value, related), @parse_generic_items)
-          );""",
-                  """        let parameter = try(
-              parse_one_generic(value, related),
-              @parse_generic_items
-          );
-          Vec::push(&mut value.output.generic_params, parameter);""",
-              ),
-              (
-                  "        Vec::push(&mut next, try(parse_type(value, related), @parse_effect_items));",
-                  "        let effect = try(parse_type(value, related), @parse_effect_items);\n        Vec::push(&mut next, effect);",
-              ),
-              (
-                  "        Vec::push(&mut effects, try(parse_type(value, related), @parse_effect_row));",
-                  "        let effect = try(parse_type(value, related), @parse_effect_row);\n        Vec::push(&mut effects, effect);",
-              ),
-          ]
-          changed = 0
-          for index, (before, after) in enumerate(replacements, 1):
+
+          def replace_once(label, before, after):
+              global source
               count = source.count(before)
-              print(f"replacement {index}: {count}")
-              if count:
-                  source = source.replace(before, after)
-                  changed += count
-          if changed == 0:
-              raise SystemExit("no confirmed borrow patterns found")
+              print(f"{label}: {count}")
+              if count != 1:
+                  raise SystemExit(f"{label} expected once, found {count}")
+              source = source.replace(before, after, 1)
+
+          replace_once(
+              "path tail name",
+              "\n".join([
+                  "        Vec::push(",
+                  "            &mut value.output.names,",
+                  "            try(ident(value, related), @parse_path_tail)",
+                  "        );",
+              ]),
+              "\n".join([
+                  "        let name = try(ident(value, related), @parse_path_tail);",
+                  "        Vec::push(&mut value.output.names, name);",
+              ]),
+          )
+
+          replace_once(
+              "path range",
+              "\n".join([
+                  "        let path = try(push_type(",
+                  "            value,",
+                  "            HeaderTypeKind::Path(super::syntax::id_range(",
+                  "                name_start,",
+                  "                Vec::len(&value.output.names)",
+                  "            )),",
+                  "            start,",
+                  "            related",
+                  "        ), @parse_path_tail);",
+              ]),
+              "\n".join([
+                  "        let name_end = Vec::len(&value.output.names);",
+                  "        let names = super::syntax::id_range(name_start, name_end);",
+                  "        let path = try(push_type(",
+                  "            value,",
+                  "            HeaderTypeKind::Path(names),",
+                  "            start,",
+                  "            related",
+                  "        ), @parse_path_tail);",
+              ]),
+          )
+
+          replace_once(
+              "application range",
+              "\n".join([
+                  "            push_type(",
+                  "                value,",
+                  "                HeaderTypeKind::Application(",
+                  "                    constructor,",
+                  "                    super::syntax::id_range(",
+                  "                        edge_start,",
+                  "                        Vec::len(&value.output.type_edges)",
+                  "                    )",
+                  "                ),",
+                  "                start,",
+                  "                related",
+                  "            )",
+              ]),
+              "\n".join([
+                  "            let edge_end = Vec::len(&value.output.type_edges);",
+                  "            let argument_range = super::syntax::id_range(edge_start, edge_end);",
+                  "            push_type(",
+                  "                value,",
+                  "                HeaderTypeKind::Application(constructor, argument_range),",
+                  "                start,",
+                  "                related",
+                  "            )",
+              ]),
+          )
+
+          replace_once(
+              "tuple range",
+              "\n".join([
+                  "    push_type(",
+                  "        value,",
+                  "        HeaderTypeKind::Tuple(super::syntax::id_range(",
+                  "            edge_start,",
+                  "            Vec::len(&value.output.type_edges)",
+                  "        )),",
+                  "        start,",
+                  "        related",
+                  "    )",
+              ]),
+              "\n".join([
+                  "    let edge_end = Vec::len(&value.output.type_edges);",
+                  "    let element_range = super::syntax::id_range(edge_start, edge_end);",
+                  "    push_type(",
+                  "        value,",
+                  "        HeaderTypeKind::Tuple(element_range),",
+                  "        start,",
+                  "        related",
+                  "    )",
+              ]),
+          )
+
+          replace_once(
+              "generic item",
+              "\n".join([
+                  "        Vec::push(",
+                  "            &mut value.output.generic_params,",
+                  "            try(parse_one_generic(value, related), @parse_generic_items)",
+                  "        );",
+              ]),
+              "\n".join([
+                  "        let parameter = try(",
+                  "            parse_one_generic(value, related),",
+                  "            @parse_generic_items",
+                  "        );",
+                  "        Vec::push(&mut value.output.generic_params, parameter);",
+              ]),
+          )
+
+          replace_once(
+              "callable tokens",
+              "\n".join([
+                  "    if(position(value) == limit(value)) {",
+                  "        Vec::push(&mut value.output.callables, CallableHeader {",
+              ]),
+              "\n".join([
+                  "    if(position(value) == limit(value)) {",
+                  "        let token_end = limit(&*value);",
+                  "        let tokens = super::syntax::token_span(start, token_end);",
+                  "        Vec::push(&mut value.output.callables, CallableHeader {",
+              ]),
+          )
+          replace_once(
+              "callable token field",
+              "            tokens: super::syntax::token_span(start, limit(value))",
+              "            tokens: tokens",
+          )
+
+          for kind, arena in [
+              ("Fixity", "fixities"),
+              ("Alias", "aliases"),
+              ("Struct", "structs"),
+              ("Enum", "enums"),
+          ]:
+              before = "\n".join([
+                  f"        record_header(nominal, NominalHeader::{kind}(",
+                  f"            wrapping_convert_to_u32(Vec::len(&nominal.{arena}.values) - 1)",
+                  "        ));",
+              ])
+              after = "\n".join([
+                  "        let ordinal = wrapping_convert_to_u32(",
+                  f"            Vec::len(&nominal.{arena}.values) - 1",
+                  "        );",
+                  f"        record_header(nominal, NominalHeader::{kind}(ordinal));",
+              ])
+              replace_once(f"{kind.lower()} ordinal", before, after)
+
+          replace_once(
+              "struct range precompute",
+              "\n".join([
+                  "        try(parse_fields(value, &mut nominal.fields, start), @parse_struct);",
+                  "        Vec::push(&mut nominal.structs.values, StructHeader {",
+              ]),
+              "\n".join([
+                  "        try(parse_fields(value, &mut nominal.fields, start), @parse_struct);",
+                  "        let field_end = Vec::len(&nominal.fields.values);",
+                  "        let field_range = super::syntax::id_range(field_start, field_end);",
+                  "        Vec::push(&mut nominal.structs.values, StructHeader {",
+              ]),
+          )
+          replace_once(
+              "struct range field",
+              "\n".join([
+                  "            fields: super::syntax::id_range(",
+                  "                field_start,",
+                  "                Vec::len(&nominal.fields.values)",
+                  "            ),",
+              ]),
+              "            fields: field_range,",
+          )
+
+          replace_once(
+              "variant range precompute",
+              "\n".join([
+                  "        append_edges(&mut value.output.type_edges, &fields, 0, 0);",
+                  "        Vec::push(&mut variants.values, VariantHeader {",
+              ]),
+              "\n".join([
+                  "        append_edges(&mut value.output.type_edges, &fields, 0, 0);",
+                  "        let edge_end = Vec::len(&value.output.type_edges);",
+                  "        let field_range = super::syntax::id_range(edge_start, edge_end);",
+                  "        Vec::push(&mut variants.values, VariantHeader {",
+              ]),
+          )
+          replace_once(
+              "variant range field",
+              "\n".join([
+                  "            fields: super::syntax::id_range(",
+                  "                edge_start,",
+                  "                Vec::len(&value.output.type_edges)",
+                  "            )",
+              ]),
+              "            fields: field_range",
+          )
+
+          replace_once(
+              "enum range precompute",
+              "\n".join([
+                  "        try(parse_variants(&mut *value, &mut nominal.variants, start), @parse_enum);",
+                  "        Vec::push(&mut nominal.enums.values, EnumHeader {",
+              ]),
+              "\n".join([
+                  "        try(parse_variants(&mut *value, &mut nominal.variants, start), @parse_enum);",
+                  "        let variant_end = Vec::len(&nominal.variants.values);",
+                  "        let variant_range = super::syntax::id_range(variant_start, variant_end);",
+                  "        Vec::push(&mut nominal.enums.values, EnumHeader {",
+              ]),
+          )
+          replace_once(
+              "enum range field",
+              "\n".join([
+                  "            variants: super::syntax::id_range(",
+                  "                variant_start,",
+                  "                Vec::len(&nominal.variants.values)",
+                  "            ),",
+              ]),
+              "            variants: variant_range,",
+          )
+
           path.write_text(source)
-          print(f"flattened {changed} expressions")
           PY
           if git diff --quiet -- self-host/src/frontend/headers/headers.glorious; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
-      - name: Commit confirmed borrow flattening
+      - name: Commit ownership-safe builder normalization
         if: steps.repair.outputs.changed == 'true'
         run: |
           git config user.name "OpenAI Agent"
           git config user.email "agent@users.noreply.github.com"
           git add -- self-host/src/frontend/headers/headers.glorious
-          git commit -m "Flatten semantic header parser borrows"
+          git commit -m "Finish semantic header borrow normalization"
           git push origin HEAD:agent/semantic-header-representation
