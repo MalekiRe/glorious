@@ -4,9 +4,6 @@ on:
   push:
     branches:
       - agent/semantic-header-representation
-  pull_request:
-    branches:
-      - master
 
 permissions:
   contents: write
@@ -20,17 +17,17 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: agent/semantic-header-representation
-      - name: Qualify option variants exactly once
-        id: qualify
+      - name: Apply the exact semantic-header repair
+        id: repair
         run: |
           python3 - <<'PY'
           from pathlib import Path
-          import re
 
           path = Path("self-host/src/frontend/headers/headers.glorious")
           source = path.read_text()
-          source = source.replace("use Option::Some;\n", "")
-          source = re.sub(r"(?<!Option::)\bSome\(", "Option::Some(", source)
+          before = "try(parse_variants(value, &mut nominal.variants, start), @parse_enum);"
+          after = "try(parse_variants(&mut *value, &mut nominal.variants, start), @parse_enum);"
+          source = source.replace(before, after)
           path.write_text(source)
           PY
           if git diff --quiet -- self-host/src/frontend/headers/headers.glorious; then
@@ -38,20 +35,19 @@ jobs:
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
-      - name: Commit option qualification
-        if: steps.qualify.outputs.changed == 'true' && github.event_name == 'push'
+      - name: Commit the exact repair
+        if: steps.repair.outputs.changed == 'true'
         run: |
           git config user.name "OpenAI Agent"
           git config user.email "agent@users.noreply.github.com"
           git add -- self-host/src/frontend/headers/headers.glorious
-          git commit -m "Qualify semantic header option variants"
+          git commit -m "Reborrow the semantic header parser"
           git push origin HEAD:agent/semantic-header-representation
       - uses: dtolnay/rust-toolchain@stable
-        if: steps.qualify.outputs.changed == 'false'
+        if: steps.repair.outputs.changed == 'false'
       - name: Compile the complete self-host test target
-        if: steps.qualify.outputs.changed == 'false'
+        if: steps.repair.outputs.changed == 'false'
         run: cargo test -p grandiose --test self_host_bytecode --no-run
       - name: Exercise the complete self-host compiler
-        if: steps.qualify.outputs.changed == 'false'
+        if: steps.repair.outputs.changed == 'false'
         run: cargo test -p grandiose --test self_host_bytecode -- --nocapture
-      # This workflow is temporary and is removed after a passing run.
