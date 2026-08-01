@@ -4,60 +4,24 @@ on:
   push:
     branches:
       - agent/semantic-header-representation
+  pull_request:
+    branches:
+      - master
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   core:
     runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_JOBS: 1
     steps:
       - uses: actions/checkout@v6
         with:
           ref: agent/semantic-header-representation
-      - name: Replace nested cursor mutation with one helper
-        id: repair
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path("self-host/src/frontend/headers/headers.glorious")
-          source = path.read_text()
-          anchor = """set_position(value: &mut Parser, at: usize) {
-              super::syntax::cursor_set(&mut value.cursor, at)
-          }
-
-          token_code"""
-          replacement = """set_position(value: &mut Parser, at: usize) {
-              super::syntax::cursor_set(&mut value.cursor, at)
-          }
-
-          advance(value: &mut Parser) {
-              let next = position(&*value) + 1;
-              set_position(value, next)
-          }
-
-          token_code"""
-          if "advance(value: &mut Parser)" not in source:
-              if anchor not in source:
-                  raise SystemExit("cursor helper anchor not found")
-              source = source.replace(anchor, replacement, 1)
-          source = source.replace(
-              "set_position(value, position(value) + 1)",
-              "advance(value)",
-          )
-          path.write_text(source)
-          PY
-          if git diff --quiet -- self-host/src/frontend/headers/headers.glorious; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          else
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          fi
-      - name: Commit cursor normalization
-        if: steps.repair.outputs.changed == 'true'
-        run: |
-          git config user.name "OpenAI Agent"
-          git config user.email "agent@users.noreply.github.com"
-          git add -- self-host/src/frontend/headers/headers.glorious
-          git commit -m "Normalize semantic header cursor advancement"
-          git push origin HEAD:agent/semantic-header-representation
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compile the complete self-host test target
+        run: cargo test -p grandiose --test self_host_bytecode --no-run
+      - name: Exercise the complete self-host compiler
+        run: cargo test -p grandiose --test self_host_bytecode -- --nocapture
