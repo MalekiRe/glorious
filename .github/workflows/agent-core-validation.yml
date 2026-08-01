@@ -14,14 +14,52 @@ permissions:
 jobs:
   core:
     runs-on: ubuntu-latest
-    env:
-      CARGO_BUILD_JOBS: 1
     steps:
       - uses: actions/checkout@v6
         with:
           ref: agent/semantic-header-representation
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Compile the complete self-host test target
-        run: cargo test -p grandiose --test self_host_bytecode --no-run
-      - name: Exercise the complete self-host compiler
-        run: cargo test -p grandiose --test self_host_bytecode -- --nocapture
+      - name: Map the remaining self-host ownership diagnostic
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          test = Path("crates/grandiose/tests/self_host_bytecode.rs").read_text()
+          diagnostic = re.search(
+              r'const DIAGNOSTIC_PROBES: &str = r#"(.*?)"#;', test, re.S
+          ).group(1)
+          block = re.search(
+              r'let primary_source = \[(.*?)\]\s*\.concat\(\);', test, re.S
+          ).group(1)
+          pieces = []
+          for match in re.finditer(r'r#"(.*?)"#|DIAGNOSTIC_PROBES', block, re.S):
+              pieces.append(diagnostic if match.group(0) == "DIAGNOSTIC_PROBES" else match.group(1))
+          primary = "".join(pieces)
+          paths = [
+              Path("crates/grandiose/src/distributed_std.glorious"),
+              Path("self-host/src/main.glorious"),
+              Path("self-host/src/frontend/frontend.glorious"),
+              Path("self-host/src/frontend/lexer/lexer.glorious"),
+              Path("self-host/src/frontend/scanner/scanner.glorious"),
+              Path("self-host/src/frontend/headers/headers.glorious"),
+          ]
+          sources = [paths[0].read_text(), primary] + [path.read_text() for path in paths[2:]]
+          names = [str(paths[0]), str(paths[1])] + [str(path) for path in paths[2:]]
+          start = 0
+          offset = 553014
+          for index, (name, source) in enumerate(zip(names, sources)):
+              if index:
+                  start += 1
+              end = start + len(source.encode())
+              print(f"SEGMENT {start}..{end} {name}")
+              if start <= offset < end:
+                  local = offset - start
+                  prefix = source.encode()[:local].decode("utf-8", errors="ignore")
+                  line = prefix.count("\n") + 1
+                  column = len(prefix.rsplit("\n", 1)[-1]) + 1
+                  lines = source.splitlines()
+                  print(f"OFFSET {offset} => {name}:{line}:{column}")
+                  for current in range(max(1, line - 3), min(len(lines), line + 3) + 1):
+                      print(f"{current:04}: {lines[current - 1]}")
+              start = end
+          PY
