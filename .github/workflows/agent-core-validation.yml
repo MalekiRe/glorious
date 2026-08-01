@@ -1,0 +1,20 @@
+name: Agent core validation
+
+on:
+  push:
+    branches:
+      - agent/semantic-header-representation
+
+permissions:
+  contents: read
+
+jobs:
+  core:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Compile Rust workspace and tests
+        run: cargo test --workspace --all-targets --no-run
+      - name: Exercise the complete self-host compiler
+        run: cargo test -p grandiose --test self_host_bytecode -- --nocapture
