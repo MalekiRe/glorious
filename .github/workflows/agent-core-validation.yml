@@ -1,9 +1,9 @@
 name: Agent core validation
 
 on:
-  push:
+  pull_request:
     branches:
-      - agent/semantic-header-representation
+      - master
 
 permissions:
   contents: write
@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: agent/semantic-header-representation
-      - name: Flatten ownership-sensitive builder expressions
+      - name: Flatten confirmed ownership-sensitive expressions
         id: repair
         run: |
           python3 - <<'PY'
@@ -41,66 +41,6 @@ jobs:
           Vec::push(&mut value.output.names, name);""",
               ),
               (
-                  """        let path = try(push_type(
-              value,
-              HeaderTypeKind::Path(super::syntax::id_range(
-                  name_start,
-                  Vec::len(&value.output.names)
-              )),
-              start,
-              related
-          ), @parse_path_tail);""",
-                  """        let name_end = Vec::len(&value.output.names);
-          let names = super::syntax::id_range(name_start, name_end);
-          let path = try(push_type(
-              value,
-              HeaderTypeKind::Path(names),
-              start,
-              related
-          ), @parse_path_tail);""",
-              ),
-              (
-                  """            push_type(
-                  value,
-                  HeaderTypeKind::Application(
-                      constructor,
-                      super::syntax::id_range(
-                          edge_start,
-                          Vec::len(&value.output.type_edges)
-                      )
-                  ),
-                  start,
-                  related
-              )""",
-                  """            let edge_end = Vec::len(&value.output.type_edges);
-              let argument_range = super::syntax::id_range(edge_start, edge_end);
-              push_type(
-                  value,
-                  HeaderTypeKind::Application(constructor, argument_range),
-                  start,
-                  related
-              )""",
-              ),
-              (
-                  """    push_type(
-          value,
-          HeaderTypeKind::Tuple(super::syntax::id_range(
-              edge_start,
-              Vec::len(&value.output.type_edges)
-          )),
-          start,
-          related
-      )""",
-                  """    let edge_end = Vec::len(&value.output.type_edges);
-      let element_range = super::syntax::id_range(edge_start, edge_end);
-      push_type(
-          value,
-          HeaderTypeKind::Tuple(element_range),
-          start,
-          related
-      )""",
-              ),
-              (
                   """        Vec::push(
               &mut value.output.generic_params,
               try(parse_one_generic(value, related), @parse_generic_items)
@@ -119,146 +59,29 @@ jobs:
                   "        Vec::push(&mut effects, try(parse_type(value, related), @parse_effect_row));",
                   "        let effect = try(parse_type(value, related), @parse_effect_row);\n        Vec::push(&mut effects, effect);",
               ),
-              (
-                  """    if(position(value) == limit(value)) {
-          Vec::push(&mut value.output.callables, CallableHeader {
-              shell: shell,
-              name: name.name,
-              public: public,
-              generics: generics,
-              parameters: parameters,
-              result: result,
-              effects: effects,
-              tokens: super::syntax::token_span(start, limit(value))
-          });""",
-                  """    if(position(value) == limit(value)) {
-          let token_end = limit(&*value);
-          let tokens = super::syntax::token_span(start, token_end);
-          Vec::push(&mut value.output.callables, CallableHeader {
-              shell: shell,
-              name: name.name,
-              public: public,
-              generics: generics,
-              parameters: parameters,
-              result: result,
-              effects: effects,
-              tokens: tokens
-          });""",
-              ),
-              (
-                  """            record_header(nominal, NominalHeader::Fixity(
-                  wrapping_convert_to_u32(Vec::len(&nominal.fixities.values) - 1)
-              ));""",
-                  """            let ordinal = wrapping_convert_to_u32(
-                  Vec::len(&nominal.fixities.values) - 1
-              );
-              record_header(nominal, NominalHeader::Fixity(ordinal));""",
-              ),
-              (
-                  """        record_header(nominal, NominalHeader::Alias(
-              wrapping_convert_to_u32(Vec::len(&nominal.aliases.values) - 1)
-          ));""",
-                  """        let ordinal = wrapping_convert_to_u32(
-              Vec::len(&nominal.aliases.values) - 1
-          );
-          record_header(nominal, NominalHeader::Alias(ordinal));""",
-              ),
-              (
-                  """        Vec::push(&mut nominal.structs.values, StructHeader {
-              shell: shell,
-              name: name.name,
-              public: public,
-              generics: generics,
-              fields: super::syntax::id_range(
-                  field_start,
-                  Vec::len(&nominal.fields.values)
-              ),
-              tokens: super::syntax::token_span(start, whole_end)
-          });
-          record_header(nominal, NominalHeader::Struct(
-              wrapping_convert_to_u32(Vec::len(&nominal.structs.values) - 1)
-          ));""",
-                  """        let field_end = Vec::len(&nominal.fields.values);
-          let field_range = super::syntax::id_range(field_start, field_end);
-          Vec::push(&mut nominal.structs.values, StructHeader {
-              shell: shell,
-              name: name.name,
-              public: public,
-              generics: generics,
-              fields: field_range,
-              tokens: super::syntax::token_span(start, whole_end)
-          });
-          let ordinal = wrapping_convert_to_u32(
-              Vec::len(&nominal.structs.values) - 1
-          );
-          record_header(nominal, NominalHeader::Struct(ordinal));""",
-              ),
-              (
-                  """        Vec::push(&mut variants.values, VariantHeader {
-              name: name.name,
-              name_token: name.token,
-              fields: super::syntax::id_range(
-                  edge_start,
-                  Vec::len(&value.output.type_edges)
-              )
-          });""",
-                  """        let edge_end = Vec::len(&value.output.type_edges);
-          let field_range = super::syntax::id_range(edge_start, edge_end);
-          Vec::push(&mut variants.values, VariantHeader {
-              name: name.name,
-              name_token: name.token,
-              fields: field_range
-          });""",
-              ),
-              (
-                  """        Vec::push(&mut nominal.enums.values, EnumHeader {
-              shell: shell,
-              name: name.name,
-              public: public,
-              generics: generics,
-              variants: super::syntax::id_range(
-                  variant_start,
-                  Vec::len(&nominal.variants.values)
-              ),
-              tokens: super::syntax::token_span(start, whole_end)
-          });
-          record_header(nominal, NominalHeader::Enum(
-              wrapping_convert_to_u32(Vec::len(&nominal.enums.values) - 1)
-          ));""",
-                  """        let variant_end = Vec::len(&nominal.variants.values);
-          let variant_range = super::syntax::id_range(variant_start, variant_end);
-          Vec::push(&mut nominal.enums.values, EnumHeader {
-              shell: shell,
-              name: name.name,
-              public: public,
-              generics: generics,
-              variants: variant_range,
-              tokens: super::syntax::token_span(start, whole_end)
-          });
-          let ordinal = wrapping_convert_to_u32(
-              Vec::len(&nominal.enums.values) - 1
-          );
-          record_header(nominal, NominalHeader::Enum(ordinal));""",
-              ),
           ]
-
+          changed = 0
           for index, (before, after) in enumerate(replacements, 1):
               count = source.count(before)
-              if count != 1:
-                  raise SystemExit(f"replacement {index} expected once, found {count}")
-              source = source.replace(before, after, 1)
+              print(f"replacement {index}: {count}")
+              if count:
+                  source = source.replace(before, after)
+                  changed += count
+          if changed == 0:
+              raise SystemExit("no confirmed borrow patterns found")
           path.write_text(source)
+          print(f"flattened {changed} expressions")
           PY
           if git diff --quiet -- self-host/src/frontend/headers/headers.glorious; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
-      - name: Commit flattened builder mutations
+      - name: Commit confirmed borrow flattening
         if: steps.repair.outputs.changed == 'true'
         run: |
           git config user.name "OpenAI Agent"
           git config user.email "agent@users.noreply.github.com"
           git add -- self-host/src/frontend/headers/headers.glorious
-          git commit -m "Flatten semantic header builder mutations"
+          git commit -m "Flatten semantic header parser borrows"
           git push origin HEAD:agent/semantic-header-representation
