@@ -15,7 +15,7 @@ jobs:
       - uses: actions/checkout@v6
         with:
           ref: agent/semantic-header-representation
-      - name: Finish ownership-safe builder normalization
+      - name: Apply verified ownership-safe rewrites
         id: repair
         run: |
           python3 - <<'PY'
@@ -45,7 +45,6 @@ jobs:
                   "        Vec::push(&mut value.output.names, name);",
               ]),
           )
-
           replace_once(
               "path range",
               "\n".join([
@@ -70,7 +69,6 @@ jobs:
                   "        ), @parse_path_tail);",
               ]),
           )
-
           replace_once(
               "application range",
               "\n".join([
@@ -98,7 +96,6 @@ jobs:
                   "            )",
               ]),
           )
-
           replace_once(
               "tuple range",
               "\n".join([
@@ -123,7 +120,6 @@ jobs:
                   "    )",
               ]),
           )
-
           replace_once(
               "generic item",
               "\n".join([
@@ -140,7 +136,6 @@ jobs:
                   "        Vec::push(&mut value.output.generic_params, parameter);",
               ]),
           )
-
           replace_once(
               "callable tokens",
               "\n".join([
@@ -160,97 +155,6 @@ jobs:
               "            tokens: tokens",
           )
 
-          for kind, arena in [
-              ("Fixity", "fixities"),
-              ("Alias", "aliases"),
-              ("Struct", "structs"),
-              ("Enum", "enums"),
-          ]:
-              before = "\n".join([
-                  f"        record_header(nominal, NominalHeader::{kind}(",
-                  f"            wrapping_convert_to_u32(Vec::len(&nominal.{arena}.values) - 1)",
-                  "        ));",
-              ])
-              after = "\n".join([
-                  "        let ordinal = wrapping_convert_to_u32(",
-                  f"            Vec::len(&nominal.{arena}.values) - 1",
-                  "        );",
-                  f"        record_header(nominal, NominalHeader::{kind}(ordinal));",
-              ])
-              replace_once(f"{kind.lower()} ordinal", before, after)
-
-          replace_once(
-              "struct range precompute",
-              "\n".join([
-                  "        try(parse_fields(value, &mut nominal.fields, start), @parse_struct);",
-                  "        Vec::push(&mut nominal.structs.values, StructHeader {",
-              ]),
-              "\n".join([
-                  "        try(parse_fields(value, &mut nominal.fields, start), @parse_struct);",
-                  "        let field_end = Vec::len(&nominal.fields.values);",
-                  "        let field_range = super::syntax::id_range(field_start, field_end);",
-                  "        Vec::push(&mut nominal.structs.values, StructHeader {",
-              ]),
-          )
-          replace_once(
-              "struct range field",
-              "\n".join([
-                  "            fields: super::syntax::id_range(",
-                  "                field_start,",
-                  "                Vec::len(&nominal.fields.values)",
-                  "            ),",
-              ]),
-              "            fields: field_range,",
-          )
-
-          replace_once(
-              "variant range precompute",
-              "\n".join([
-                  "        append_edges(&mut value.output.type_edges, &fields, 0, 0);",
-                  "        Vec::push(&mut variants.values, VariantHeader {",
-              ]),
-              "\n".join([
-                  "        append_edges(&mut value.output.type_edges, &fields, 0, 0);",
-                  "        let edge_end = Vec::len(&value.output.type_edges);",
-                  "        let field_range = super::syntax::id_range(edge_start, edge_end);",
-                  "        Vec::push(&mut variants.values, VariantHeader {",
-              ]),
-          )
-          replace_once(
-              "variant range field",
-              "\n".join([
-                  "            fields: super::syntax::id_range(",
-                  "                edge_start,",
-                  "                Vec::len(&value.output.type_edges)",
-                  "            )",
-              ]),
-              "            fields: field_range",
-          )
-
-          replace_once(
-              "enum range precompute",
-              "\n".join([
-                  "        try(parse_variants(&mut *value, &mut nominal.variants, start), @parse_enum);",
-                  "        Vec::push(&mut nominal.enums.values, EnumHeader {",
-              ]),
-              "\n".join([
-                  "        try(parse_variants(&mut *value, &mut nominal.variants, start), @parse_enum);",
-                  "        let variant_end = Vec::len(&nominal.variants.values);",
-                  "        let variant_range = super::syntax::id_range(variant_start, variant_end);",
-                  "        Vec::push(&mut nominal.enums.values, EnumHeader {",
-              ]),
-          )
-          replace_once(
-              "enum range field",
-              "\n".join([
-                  "            variants: super::syntax::id_range(",
-                  "                variant_start,",
-                  "                Vec::len(&nominal.variants.values)",
-                  "            ),",
-              ]),
-              "            variants: variant_range,",
-          )
-
           path.write_text(source)
           PY
           if git diff --quiet -- self-host/src/frontend/headers/headers.glorious; then
@@ -258,11 +162,11 @@ jobs:
           else
             echo "changed=true" >> "$GITHUB_OUTPUT"
           fi
-      - name: Commit ownership-safe builder normalization
+      - name: Commit verified ownership-safe rewrites
         if: steps.repair.outputs.changed == 'true'
         run: |
           git config user.name "OpenAI Agent"
           git config user.email "agent@users.noreply.github.com"
           git add -- self-host/src/frontend/headers/headers.glorious
-          git commit -m "Finish semantic header borrow normalization"
+          git commit -m "Finish semantic header parser borrow flattening"
           git push origin HEAD:agent/semantic-header-representation
