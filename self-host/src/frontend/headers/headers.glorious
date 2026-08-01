@@ -2,7 +2,6 @@
 // Type syntax and nominal source order have one semantic representation each;
 // numeric codes are derived only at the remaining internal adapter boundary.
 
-use Option::Some;
 use super::lexer::TokenKind;
 use super::scanner::{DeclarationKind, ShellId};
 use super::syntax::{IdRange, TokenCursor, TokenSpan};
@@ -375,7 +374,7 @@ pub header_type_view<'a>(
                 token,
                 handle lifetime {
                     None => None,
-                    Some(found) => Some(found.token)
+                    Option::Some(found) => Option::Some(found.token)
                 },
                 referent
             ),
@@ -384,7 +383,7 @@ pub header_type_view<'a>(
                 token,
                 handle lifetime {
                     None => None,
-                    Some(found) => Some(found.token)
+                    Option::Some(found) => Option::Some(found.token)
                 },
                 referent
             ),
@@ -669,7 +668,7 @@ take_lifetime(value: &mut Parser) -> Option<NameUse> {
         handle super::lexer::token_kind_at(&value.source, token) {
             TokenKind::Lifetime(name) => {
                 set_position(value, token + 1);
-                Some(NameUse { name: name, token: token })
+                Option::Some(NameUse { name: name, token: token })
             },
             _ => None
         }
@@ -878,7 +877,7 @@ parse_effect_items(
     if(eat_code(value, 30)) {
         let row_tail = try(ident(value, related), @parse_effect_items);
         try(expect_code(value, 14, related, 5), @parse_effect_items);
-        Result::Ok(finish_effects(value, start, effects, Some(row_tail)))
+        Result::Ok(finish_effects(value, start, effects, Option::Some(row_tail)))
     } else if(eat_code(value, 14)) {
         Result::Ok(finish_effects(value, start, effects, None))
     } else {
@@ -944,10 +943,10 @@ parse_callable(
     let parameters = try(parse_parameters(value, start), @parse_callable);
     try(expect_code(value, 12, start, 2), @parse_callable);
     let result = if(eat_code(value, 23) and { not(at_code(&*value, 25)) }) {
-        Some(try(parse_type(value, start), @parse_callable))
+        Option::Some(try(parse_type(value, start), @parse_callable))
     } else { None };
     let effects = if(eat_code(value, 25)) {
-        Some(try(parse_effect_row(value, start), @parse_callable))
+        Option::Some(try(parse_effect_row(value, start), @parse_callable))
     } else { None };
     finish_callable(
         value,
@@ -1269,11 +1268,11 @@ parse_shells(
     if(index < super::scanner::shell_count(declarations)) {
         let shell_id = handle super::scanner::shell_id_at_ordinal(declarations, index) {
             None => @parse_shells(Result::Ok(finish_parser(parser, nominal))),
-            Some(found) => found
+            Option::Some(found) => found
         };
         handle super::scanner::shell_at(declarations, shell_id) {
             None => Result::Ok(finish_parser(parser, nominal)),
-            Some(shell) => {
+            Option::Some(shell) => {
                 let header = super::scanner::shell_header(shell);
                 let whole = super::scanner::shell_whole(shell);
                 let start = super::syntax::token_start(header);
