@@ -1080,9 +1080,10 @@ parse_fixity(
                 operator: operator,
                 tokens: super::syntax::token_span(start, whole_end)
             });
-            record_header(nominal, NominalHeader::Fixity(
-                wrapping_convert_to_u32(Vec::len(&nominal.fixities.values) - 1)
-            ));
+            let ordinal = wrapping_convert_to_u32(
+                Vec::len(&nominal.fixities.values) - 1
+            );
+            record_header(nominal, NominalHeader::Fixity(ordinal));
             Result::Ok(())
         } else {
             Result::Err(HeaderError::UnexpectedTrailingHeaderToken(
@@ -1117,9 +1118,10 @@ parse_alias(
             target: target,
             tokens: super::syntax::token_span(start, whole_end)
         });
-        record_header(nominal, NominalHeader::Alias(
-            wrapping_convert_to_u32(Vec::len(&nominal.aliases.values) - 1)
-        ));
+        let ordinal = wrapping_convert_to_u32(
+            Vec::len(&nominal.aliases.values) - 1
+        );
+        record_header(nominal, NominalHeader::Alias(ordinal));
         Result::Ok(())
     } else {
         Result::Err(HeaderError::UnexpectedTrailingHeaderToken(
@@ -1170,20 +1172,20 @@ parse_struct(
         reset(value, header_end + 1, whole_end - 1);
         let field_start = Vec::len(&nominal.fields.values);
         try(parse_fields(value, &mut nominal.fields, start), @parse_struct);
+        let field_end = Vec::len(&nominal.fields.values);
+        let field_range = super::syntax::id_range(field_start, field_end);
         Vec::push(&mut nominal.structs.values, StructHeader {
             shell: shell,
             name: name.name,
             public: public,
             generics: generics,
-            fields: super::syntax::id_range(
-                field_start,
-                Vec::len(&nominal.fields.values)
-            ),
+            fields: field_range,
             tokens: super::syntax::token_span(start, whole_end)
         });
-        record_header(nominal, NominalHeader::Struct(
-            wrapping_convert_to_u32(Vec::len(&nominal.structs.values) - 1)
-        ));
+        let ordinal = wrapping_convert_to_u32(
+            Vec::len(&nominal.structs.values) - 1
+        );
+        record_header(nominal, NominalHeader::Struct(ordinal));
         Result::Ok(())
     } else {
         Result::Err(HeaderError::UnexpectedTrailingHeaderToken(
@@ -1207,13 +1209,12 @@ parse_variants(
         } else { () };
         let edge_start = Vec::len(&value.output.type_edges);
         append_edges(&mut value.output.type_edges, &fields, 0, 0);
+        let edge_end = Vec::len(&value.output.type_edges);
+        let field_range = super::syntax::id_range(edge_start, edge_end);
         Vec::push(&mut variants.values, VariantHeader {
             name: name.name,
             name_token: name.token,
-            fields: super::syntax::id_range(
-                edge_start,
-                Vec::len(&value.output.type_edges)
-            )
+            fields: field_range
         });
         eat_code(value, 17);
         eat_code(value, 22);
@@ -1239,20 +1240,20 @@ parse_enum(
         reset(value, header_end + 1, whole_end - 1);
         let variant_start = Vec::len(&nominal.variants.values);
         try(parse_variants(&mut *value, &mut nominal.variants, start), @parse_enum);
+        let variant_end = Vec::len(&nominal.variants.values);
+        let variant_range = super::syntax::id_range(variant_start, variant_end);
         Vec::push(&mut nominal.enums.values, EnumHeader {
             shell: shell,
             name: name.name,
             public: public,
             generics: generics,
-            variants: super::syntax::id_range(
-                variant_start,
-                Vec::len(&nominal.variants.values)
-            ),
+            variants: variant_range,
             tokens: super::syntax::token_span(start, whole_end)
         });
-        record_header(nominal, NominalHeader::Enum(
-            wrapping_convert_to_u32(Vec::len(&nominal.enums.values) - 1)
-        ));
+        let ordinal = wrapping_convert_to_u32(
+            Vec::len(&nominal.enums.values) - 1
+        );
+        record_header(nominal, NominalHeader::Enum(ordinal));
         Result::Ok(())
     } else {
         Result::Err(HeaderError::UnexpectedTrailingHeaderToken(
