@@ -51,3 +51,4 @@ jobs:
       - name: Exercise the complete self-host compiler
         if: steps.qualify.outputs.changed == 'false'
         run: cargo test -p grandiose --test self_host_bytecode -- --nocapture
+      # This workflow is temporary and is removed after a passing run.
